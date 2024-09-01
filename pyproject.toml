@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
   { name="Richmond Alake", email="richmond.alake@gmail.com" },
 ]
@@ -22,4 +22,4 @@ package-dir = {"" = "src"}
 
 [project.urls]
 "Homepage" = "https://github.com/RichmondAlake/memorizz"
-"Bug Tracker" = "https://github.com/yourusername/memorizz/issues"
+"Bug Tracker" = "https://github.com/RichmondAlake/memorizz/issues"
