@@ -26,6 +26,30 @@ pip install memorizz
 ## Vector Database as A Toolbox
 Use a vector database as a storage solution for tools within AI agents and agentic systems.
 
+Function calling in AI models, while powerful, comes with several limitations:
+
+1. Token Usage: Functions count against the model's context limit and are billed as input tokens, potentially leading to high costs for complex applications.
+2. Accuracy with Multiple Functions: Model accuracy typically decreases when choosing between 10-20+ functions, limiting the scalability of function-based approaches.
+3. Context Limitations: Providing adequate context for function usage often relies heavily on carefully crafted system messages.
+
+Current Solutions
+To address these limitations, developers often resort to:
+
+- Carefully limiting the number of functions exposed to the model
+- Extensive prompt engineering to guide function selection
+- Model fine-tuning for specific function sets
+- Building complex multi-agent systems to manage large function libraries
+
+### How Memorizz Toolbox Functionality Helps
+Memorizz introduces a dynamic, scalable approach to function management that addresses these limitations:
+
+1. Efficient Token Usage: By storing function definitions in MongoDB and using vector search, memorizz reduces the need to send all function definitions with each API call, potentially saving on token usage.
+2. Improved Accuracy at Scale: The vector search capability allows memorizz to present only the most relevant functions to the model, maintaining accuracy even with large function libraries.
+3. Semantic Search: Vector-based search allows finding relevant functions even when queries don't exactly match function names or descriptions.
+4. Scalability: Database storage allows for managing thousands of functions efficiently, far beyond the practical limits of traditional function calling.
+
+
+
 ### Using MongoDB as a Toolbox
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_GITHUB_USERNAME/memorizz/blob/main/test.ipynb)
