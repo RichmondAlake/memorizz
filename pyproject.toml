@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memorizz"
+version = "0.0.1"
+authors = [
+  { name="Richmond Alake", email="richmond.alake@gmail.com" },
+]
+description = "A memory management library for Python"
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[project.urls]
+"Homepage" = "https://github.com/RichmondAlake/memorizz"
+"Bug Tracker" = "https://github.com/yourusername/memorizz/issues"
