@@ -28,6 +28,9 @@ Use a vector database as a storage solution for tools within AI agents and agent
 
 ### Using MongoDB as a Toolbox
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_GITHUB_USERNAME/memorizz/blob/main/test.ipynb)
+
+
 The `memorizz` library provides functionality to use MongoDB as a toolbox for storing and retrieving function definitions. Here's how to use this feature:
 
 ### Setup
