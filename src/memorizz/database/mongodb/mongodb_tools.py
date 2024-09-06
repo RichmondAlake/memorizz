@@ -51,7 +51,6 @@ class MongoDBTools:
 
         except Exception as e:
             logger.warning(f"Note during MongoDB connection: {str(e)}")
-            raise
 
     def mongodb_toolbox(self, collection: Optional[pymongo.collection.Collection] = None):
         if collection is None:
