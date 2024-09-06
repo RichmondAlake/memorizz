@@ -39,7 +39,7 @@ class MongoDBTools:
             self.mongo_client = pymongo.MongoClient(self.config.mongo_uri, appname="memorizz.python.package")
             self.db = self.mongo_client[self.config.db_name]
 
-             # Check if collection exists, create if it doesn't
+            # Check if collection exists, create if it doesn't
             if self.config.collection_name not in self.db.list_collection_names():
                 self.db.create_collection(self.config.collection_name)
                 logger.info(f"Collection '{self.config.collection_name}' created.")
@@ -266,7 +266,6 @@ class MongoDBTools:
                 logger.info(f"Vector search index '{self.config.vector_index_name}' already exists.")
         except Exception as e:
             logger.warning(f"Note on vector search index: {str(e)}")
-
 
 __all__ = ['MongoDBTools', 'MongoDBToolsConfig', 'get_embedding']
 
