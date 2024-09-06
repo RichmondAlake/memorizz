@@ -50,7 +50,7 @@ class MongoDBTools:
             self._ensure_vector_search_index()
 
         except Exception as e:
-            logger.error(f"Error connecting to MongoDB: {str(e)}")
+            logger.warning(f"Note during MongoDB connection: {str(e)}")
             raise
 
     def mongodb_toolbox(self, collection: Optional[pymongo.collection.Collection] = None):
