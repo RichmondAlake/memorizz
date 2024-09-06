@@ -51,6 +51,14 @@ class MongoDBTools:
 
         except Exception as e:
             logger.warning(f"Note during MongoDB connection: {str(e)}")
+            self.mongo_client = None
+            self.db = None
+            self.tools_collection = None
+        
+        if self.tools_collection is not None:
+            logger.info("MongoDBTools initialized successfully.")
+        else:
+            logger.warning("MongoDBTools initialization failed. Some features may not work.")
 
     def mongodb_toolbox(self, collection: Optional[pymongo.collection.Collection] = None):
         if collection is None:
