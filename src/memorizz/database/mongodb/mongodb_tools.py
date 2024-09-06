@@ -244,7 +244,7 @@ class MongoDBTools:
                         "dynamic": True,
                         "fields": {
                             "embedding": {
-                                "dimensions": 1536,  # Adjust this based on your embedding model
+                                "dimensions": self.config.embeding_dimensions_size,
                                 "similarity": "cosine",
                                 "type": "knnVector",
                             }
@@ -255,13 +255,18 @@ class MongoDBTools:
                     definition=vector_index_definition,
                     name=self.config.vector_index_name
                 )
-                self.tools_collection.create_search_index(model=search_index_model)
-                logger.info(f"Vector search index '{self.config.vector_index_name}' created.")
+                try:
+                    self.tools_collection.create_search_index(model=search_index_model)
+                    logger.info(f"Vector search index '{self.config.vector_index_name}' created.")
+                except pymongo.errors.OperationFailure as e:
+                    if e.code == 68 and "Duplicate Index" in str(e):
+                        logger.info(f"Vector search index '{self.config.vector_index_name}' already exists.")
+                    else:
+                        raise
             else:
                 logger.info(f"Vector search index '{self.config.vector_index_name}' already exists.")
         except Exception as e:
-            logger.error(f"Error ensuring vector search index: {str(e)}")
-            raise
+            logger.info(f"Note on vector search index: {str(e)}")
 
 
 __all__ = ['MongoDBTools', 'MongoDBToolsConfig', 'get_embedding']
