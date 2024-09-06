@@ -261,11 +261,11 @@ class MongoDBTools:
                     if e.code == 68 and "Duplicate Index" in str(e):
                         logger.info(f"Vector search index '{self.config.vector_index_name}' already exists.")
                     else:
-                        raise
+                        logger.warning(f"Unexpected error while creating index: {str(e)}")
             else:
                 logger.info(f"Vector search index '{self.config.vector_index_name}' already exists.")
         except Exception as e:
-            logger.info(f"Note on vector search index: {str(e)}")
+            logger.warning(f"Note on vector search index: {str(e)}")
 
 
 __all__ = ['MongoDBTools', 'MongoDBToolsConfig', 'get_embedding']
