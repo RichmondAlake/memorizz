@@ -59,17 +59,45 @@ The `memorizz` library provides functionality to use MongoDB as a toolbox for st
 
 ### Setup
 
+To use MongoDB as a toolbox, you will need to complete the following steps:
+
+1. Register for a MongoDB Account:
+   - Go to the MongoDB website (https://www.mongodb.com/cloud/atlas/register).
+   - Click on the "Try Free" or "Get Started Free" button.
+   - Fill out the registration form with your details and create an account.
+
+2. Create a [MongoDB Cluster](https://www.mongodb.com/docs/atlas/tutorial/deploy-free-tier-cluster/#procedure)
+
+3. Set Up [Database Access](https://www.mongodb.com/docs/atlas/security-add-mongodb-users/#add-database-users):
+   - In the left sidebar, click on "Database Access" under "Security".
+   - Click "Add New Database User".
+   - Create a username and a strong password. Save these credentials securely.
+   - Set the appropriate permissions for the user (e.g., "Read and write to any database").
+
+4. Configure Network Access:
+   - In the left sidebar, click on "Network Access" under "Security".
+   - Click "Add IP Address".
+   - To allow access from anywhere (not recommended for production), enter 0.0.0.0/0.
+   - For better security, whitelist only the specific IP addresses that need access.
+
+5. Obtain the [MongoDB URI](https://www.mongodb.com/docs/manual/reference/connection-string/#find-your-mongodb-atlas-connection-string):
+
+Now that you have your MongoDB URI, you can use it to connect to your cluster in the `memorizz` library.
+
+
 First, import the necessary components and set up your environment:
 
 ```python
-from memorizz.database.mongodb import mongodb_tools, MongoDBToolsConfig, MongoDBTools, get_mongodb_toolbox
+from memorizz.database.mongodb import MongoDBToolsConfig, MongoDBTools
 import os
 import getpass
 
-# Set up your OpenAI API key and MongoDB URI
+# Set up environment variables for API keys and MongoDB URI
+# This key is required for using OpenAI's services, such as generating embeddings
 OPENAI_API_KEY = getpass.getpass("OpenAI API Key: ")
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
+# This URI is needed to connect to the MongoDB database
 MONGO_URI = getpass.getpass("Enter MongoDB URI: ")
 os.environ["MONGO_URI"] = MONGO_URI
 ```
@@ -78,12 +106,22 @@ os.environ["MONGO_URI"] = MONGO_URI
 You can create a MongoDBTools instance in two ways:
 
 ```python
-# Option 1: Create MongoDBTools instance directly
-config = MongoDBToolsConfig(mongo_uri=MONGO_URI)
+# 1. Initialize the MongoDB configuration and create a MongoDB tools instance
+config = MongoDBToolsConfig(
+    mongo_uri=MONGO_URI,  # MongoDB connection string
+    db_name="function_calling_db",  # Name of the database to use
+    collection_name="tools",  # Name of the collection to store tools
+    embedding_model="text-embedding-3-small",  # OpenAI model for generating embeddings
+    embeding_dimensions_size=256,  # Dimension size for the embedding vectors
+    vector_search_candidates=150,  # Number of candidates to consider in vector search
+    vector_index_name="vector_index"  # Name of the vector index in MongoDB
+)
+
+# 2. Create an instance of MongoDBTools with the configured settings
 mongodb_tools = MongoDBTools(config)
 
-# Option 2: Use the get_mongodb_toolbox function
-mongodb_toolbox = get_mongodb_toolbox(config)
+# 3. Create a decorator function for registering tools
+mongodb_toolbox = mongodb_tools.mongodb_toolbox
 ```
 
 #### Registering Functions as Tools
@@ -102,6 +140,8 @@ The docstring should include:
 import random
 from datetime import datetime
 
+# 4. Define and register tool functions using the mongodb_toolbox decorator
+# These functions will be stored in the MongoDB database and can be retrieved for function calling
 @mongodb_toolbox()
 def shout(statement: str) -> str:
   """
@@ -159,11 +199,54 @@ def get_current_time(timezone: str = "UTC") -> str:
 You can retrieve relevant tools based on a user query:
 
 ```python
+# 5. Define the user query
+# This query will be used to search for relevant tools in the MongoDB database
 user_query = "Hi, can you shout the statement: We are there"
-tools = mongodb_tools.populate_tools(user_query)
+
+# 6. Populate tools based on the user query
+tools = mongodb_tools.populate_tools(
+    user_query,  # The query string to search for relevant tools
+    num_tools=2  # The maximum number of tools to return from the search
+    )
+```
+The populate_tools method performs a vector search in the MongoDB database to find the most relevant tools based on the user's query.
+
+```python
+import pprint
+
+pprint.pprint(tools)
 ```
 
-The populate_tools method performs a vector search in the MongoDB database to find the most relevant tools based on the user's query.
+```json
+[{'function': {'description': 'Convert a statement to uppercase letters to '
+                              'emulate shouting. Use this when a user wants to '
+                              'emphasize something strongly or when they '
+                              "explicitly ask to 'shout' something..",
+               'name': 'shout',
+               'parameters': {'additionalProperties': False,
+                              'properties': {'statement': {'description': 'Parameter '
+                                                                          'statement',
+                                                           'type': 'string'}},
+                              'required': ['statement'],
+                              'type': 'object'}},
+  'type': 'function'},
+ {'function': {'description': 'Get the current stock price for a given stock '
+                              'symbol.\n'
+                              'Use this when a user asks about the current '
+                              'price of a specific stock.\n'
+                              '\n'
+                              ':param symbol: The stock symbol to look up '
+                              "(e.g., 'AAPL' for Apple Inc.).\n"
+                              ':return: A string with the current stock price.',
+               'name': 'get_stock_price',
+               'parameters': {'additionalProperties': False,
+                              'properties': {'symbol': {'description': 'Parameter '
+                                                                       'symbol',
+                                                        'type': 'string'}},
+                              'required': ['symbol'],
+                              'type': 'object'}},
+  'type': 'function'}]
+```
 
 #### Using the Retrieved Tools
 
