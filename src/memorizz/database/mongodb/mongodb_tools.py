@@ -35,6 +35,11 @@ class MongoDBTools:
         self.config = config
         if self.config.mongo_uri is None:
             self.config.mongo_uri = os.getenv('MONGO_URI') or getpass.getpass("Enter MongoDB URI: ")
+        
+        self.mongo_client = None
+        self.db = None
+        self.tools_collection = None
+        
         try:
             self.mongo_client = pymongo.MongoClient(self.config.mongo_uri, appname="memorizz.python.package")
             self.db = self.mongo_client[self.config.db_name]
@@ -51,9 +56,6 @@ class MongoDBTools:
 
         except Exception as e:
             logger.warning(f"Note during MongoDB connection: {str(e)}")
-            self.mongo_client = None
-            self.db = None
-            self.tools_collection = None
         
         if self.tools_collection is not None:
             logger.info("MongoDBTools initialized successfully.")
@@ -263,10 +265,11 @@ class MongoDBTools:
                     name=self.config.vector_index_name
                 )
                 try:
-                    self.tools_collection.create_search_index(model=search_index_model)
+                    # Use create_indexes instead of create_search_index
+                    self.tools_collection.create_indexes([search_index_model])
                     logger.info(f"Vector search index '{self.config.vector_index_name}' created.")
                 except pymongo.errors.OperationFailure as e:
-                    if e.code == 68 and "Duplicate Index" in str(e):
+                    if e.code == 68 or "already exists" in str(e):
                         logger.info(f"Vector search index '{self.config.vector_index_name}' already exists.")
                     else:
                         logger.warning(f"Unexpected error while creating index: {str(e)}")
