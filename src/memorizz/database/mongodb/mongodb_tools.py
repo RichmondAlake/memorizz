@@ -111,7 +111,7 @@ class MongoDBTools:
             tool_def["parameters"]["additionalProperties"] = False
 
             try:
-                vector = get_embedding(tool_def["description"], self.config.embedding_model)
+                vector = get_embedding(tool_def["description"], self.config.embedding_model, self.config.embeding_dimensions_size)
                 tool_doc = {
                     **tool_def,
                     "embedding": vector
@@ -130,7 +130,7 @@ class MongoDBTools:
             collection = self.tools_collection
 
         try:
-            query_embedding = get_embedding(user_query, self.config.embedding_model)
+            query_embedding = get_embedding(user_query, self.config.embedding_model, self.config.embeding_dimensions_size)
         except Exception as e:
             logger.error(f"Error generating embedding for query: {str(e)}")
             raise
