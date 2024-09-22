@@ -54,12 +54,19 @@ class MongoDBTools:
             # Check if vector search index exists, create if it doesn't
             self._ensure_vector_search_index()
 
-        except Exception as e:
-            logger.warning(f"Note during MongoDB connection: {str(e)}")
-        
-        if self.tools_collection is not None:
             logger.info("MongoDBTools initialized successfully.")
-        else:
+
+        except pymongo.errors.ConnectionFailure:
+            logger.error("Failed to connect to MongoDB. Please check your connection string and network.")
+        except pymongo.errors.OperationFailure as e:
+            if e.code == 13:  # Authentication failed
+                logger.error("MongoDB authentication failed. Please check your credentials.")
+            else:
+                logger.error(f"MongoDB operation failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error during MongoDB initialization: {str(e)}")
+        
+        if self.tools_collection is None:
             logger.warning("MongoDBTools initialization failed. Some features may not work.")
 
     def mongodb_toolbox(self, collection: Optional[pymongo.collection.Collection] = None):
