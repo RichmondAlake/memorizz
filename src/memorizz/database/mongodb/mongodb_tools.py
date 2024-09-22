@@ -5,6 +5,8 @@ from functools import wraps
 from typing import get_type_hints, List, Dict, Any, Optional
 import openai
 import pymongo
+from pymongo.collection import Collection
+from pymongo.operations import SearchIndexModel
 import logging
 from dataclasses import dataclass
 
@@ -68,7 +70,7 @@ class MongoDBTools:
         if self.tools_collection is None:
             logger.warning("MongoDBTools initialization failed. Some features may not work.")
 
-    def mongodb_toolbox(self, collection: Optional[pymongo.collection.Collection] = None):
+    def mongodb_toolbox(self, collection: Optional[Collection] = None):
         if collection is None:
             collection = self.tools_collection
 
@@ -131,7 +133,7 @@ class MongoDBTools:
             return wrapper
         return decorator
 
-    def _vector_search(self, user_query: str, collection: Optional[pymongo.collection.Collection] = None, limit: int = 2) -> List[Dict[str, Any]]:
+    def _vector_search(self, user_query: str, collection: Optional[Collection] = None, limit: int = 2) -> List[Dict[str, Any]]:
         if collection is None:
             collection = self.tools_collection
 
@@ -203,7 +205,7 @@ class MongoDBTools:
             logger.info(f"Collection '{collection_name}' created successfully.")
 
             # Create the vector search index
-            search_index_model = pymongo.operations.SearchIndexModel(
+            search_index_model = SearchIndexModel(
                 definition=vector_index_definition,
                 name=index_name
             )
@@ -229,7 +231,7 @@ class MongoDBTools:
             
             if not index_exists:
                 # Create the index if it doesn't exist
-                search_index_model = pymongo.operations.SearchIndexModel(
+                search_index_model = SearchIndexModel(
                     definition=vector_index_definition,
                     name=index_name
                 )
@@ -266,13 +268,13 @@ class MongoDBTools:
                         }
                     }
                 }
-                search_index_model = pymongo.operations.SearchIndexModel(
-                    definition=vector_index_definition,
-                    name=self.config.vector_index_name
-                )
                 try:
-                    # Use create_indexes instead of create_search_index
-                    self.tools_collection.create_indexes([search_index_model])
+                    # Create SearchIndexModel and use it in create_search_index
+                    search_index_model = SearchIndexModel(
+                        definition=vector_index_definition,
+                        name=self.config.vector_index_name
+                    )
+                    self.tools_collection.create_search_index(search_index_model)
                     logger.info(f"Vector search index '{self.config.vector_index_name}' created.")
                 except pymongo.errors.OperationFailure as e:
                     if e.code == 68 or "already exists" in str(e):
@@ -283,7 +285,7 @@ class MongoDBTools:
                 logger.info(f"Vector search index '{self.config.vector_index_name}' already exists.")
         except Exception as e:
             logger.warning(f"Note on vector search index: {str(e)}")
-
+            
 __all__ = ['MongoDBTools', 'MongoDBToolsConfig', 'get_embedding']
 
 # You can create a function to get the mongodb_toolbox decorator:

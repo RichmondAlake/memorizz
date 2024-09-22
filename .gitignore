@@ -32,3 +32,6 @@ ENV/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Test Notebooks
+dev_test.ipynb
