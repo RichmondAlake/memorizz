@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.0.13"
+version = "0.0.14"
 authors = [
   { name="Richmond Alake", email="richmond.alake@gmail.com" },
 ]
@@ -16,7 +16,10 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-
+dependencies = [
+    "openai",
+    "pymongo",
+]
 [tool.setuptools]
 package-dir = {"" = "src"}
 
