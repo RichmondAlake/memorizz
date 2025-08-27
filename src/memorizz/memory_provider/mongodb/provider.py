@@ -1651,7 +1651,6 @@ class MongoDBProvider(MemoryProvider):
             self.toolbox_collection.delete_many({"memory_id": memory_id})
         elif memory_type == MemoryType.MEMAGENT:
             self.memagent_collection.delete_many({"memory_id": memory_id})
-                    
 
     def _setup_vector_search_index(self, collection, index_name="vector_index", memory_store: bool = False):
         """
