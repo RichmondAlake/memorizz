@@ -40,11 +40,15 @@ class MongoDBConfig():
             If False, vector indexes are created immediately during initialization (requires embedding configuration).
             Default: False (maintains backward compatibility)
         embedding_provider : str or EmbeddingManager, optional
-            Embedding provider to use.
+            Embedding provider to use. Can be:
+            - EmbeddingManager instance (explicit injection)
+            - String provider name ("openai", "ollama", "voyageai") 
+            - None (uses global embedding configuration)
         embedding_config : Dict[str, Any], optional
-            Configuration for the embedding provider.
+            Configuration for the embedding provider. Only used when embedding_provider is a string.
+            Example: {"model": "text-embedding-3-small", "dimensions": 512}
         encryption_config : Dict[str, Any], optional
-            Configuration for encryption settings.
+            Configuration for Client-Side Field Level Encryption (CSFLE) settings.
         """
         self.uri = uri
         self.db_name = db_name
@@ -58,7 +62,7 @@ class MongoDBConfig():
 class MongoDBProvider(MemoryProvider):
     """MongoDB implementation of the MemoryProvider interface."""
     
-    def __init__(self, config):
+    def __init__(self, config: MongoDBConfig):
         """
         Initialize the MongoDB provider with configuration settings.
 
@@ -71,7 +75,7 @@ class MongoDBProvider(MemoryProvider):
         self.client = MongoClient(config.uri)
         self.db = self.client[config.db_name]
 
-        # --- NEW: Initialize CSFLE with smart checks and dynamic keymap creation ---
+        # --- Initialize CSFLE with smart checks and dynamic keymap creation ---
         self._client_encryption = None
         self.keymap = {}  # Initialize the keymap as an empty dictionary
 
@@ -311,11 +315,23 @@ class MongoDBProvider(MemoryProvider):
                 index_name="vector_index",
                 memory_store=memory_store_present,
             )
-    def _is_encrypted_field(self, collection_name: str, field_name: str) -> bool:
+            
+    def _is_encrypted_field(self, collection_name: str, field_name: str) -> Optional[str]:
         """
         Checks if a field should be encrypted based on the encryption config.
+
+        Parameters:
+        -----------
+        collection_name : str
+            The name of the collection being checked.
+        field_name : str
+            The name of the field to check for encryption.
+
+        Returns:
+        --------
+        Optional[str]
+            The encryption algorithm as a string if the field should be encrypted, otherwise None.
         """
-        
         if not self.config.encryption_config:
             return None
         
@@ -332,7 +348,19 @@ class MongoDBProvider(MemoryProvider):
 
     def store(self, data: Dict[str, Any], memory_store_type: MemoryType) -> str:
         """
-        Store data in MongoDB, encrypting sensitive fields.
+        Store data in MongoDB, encrypting sensitive fields if CSFLE is configured.
+
+        Parameters:
+        -----------
+        data : Dict[str, Any]
+            The document to be stored.
+        memory_store_type : MemoryType
+            The type of memory store (e.g., "persona", "toolbox", etc.)
+
+        Returns:
+        --------
+        str
+            The ID of the inserted/updated document (MongoDB _id).
         """
         collection = None
         collection_name = memory_store_type.value
@@ -372,7 +400,7 @@ class MongoDBProvider(MemoryProvider):
         for field in custom_id_fields:
             data_copy.pop(field, None)
 
-        # Encryption Logic: check if CSFLE is configured
+        # Encryption Logic: check if CSFLE is configured and a keymap exists
         if self._client_encryption and self.keymap:
             for field_name, value in list(data_copy.items()):
                 algorithm = self._is_encrypted_field(collection_name, field_name)
@@ -391,7 +419,7 @@ class MongoDBProvider(MemoryProvider):
                     )
                     data_copy[field_name] = encrypted_value
 
-        # Update or insert logic
+        # If document has MongoDB _id, update it (upsert)
         if "_id" in data_copy:
             result = collection.update_one(
                 {"_id": data_copy["_id"]},
@@ -400,13 +428,14 @@ class MongoDBProvider(MemoryProvider):
             )
             return str(data_copy["_id"])
         else:
+            # For new documents, let MongoDB generate _id automatically
             result = collection.insert_one(data_copy)
             return str(result.inserted_id)
 
 
-    def retrieve_by_query(self, query: Dict[str, Any], memory_store_type: MemoryType, limit: int = 1, include_embedding: bool = False) -> Optional[Dict[str, Any]]:
+    def retrieve_by_query(self, query: Dict[str, Any], memory_store_type: MemoryType, limit: int = 1, include_embedding: bool = False) -> Optional[List[Dict[str, Any]]]:
         """
-        Retrieve a document from MongoDB.
+        Retrieve documents from MongoDB, decrypting fields if CSFLE is configured.
         
         Parameters:
         -----------
@@ -419,8 +448,8 @@ class MongoDBProvider(MemoryProvider):
         
         Returns:
         --------
-        Optional[Dict[str, Any]]
-            The retrieved document, or None if not found.
+        Optional[List[Dict[str, Any]]]
+            A list of retrieved and decrypted documents, or None if not found.
         """
         
         # Define projection to exclude embeddings by default
@@ -449,26 +478,28 @@ class MongoDBProvider(MemoryProvider):
             return None
         
         # --- New Decryption Logic ---
+        # Only attempt decryption if CSFLE is enabled
         if self._client_encryption:
             decrypted_documents = []
             for doc in documents:
                 decrypted_doc = doc.copy()
                 for field_name, value in doc.items():
-                    # Check if the value is a Binary object (which indicates encryption)
+                    # Encrypted fields are stored as BSON Binary subtype 6
                     if isinstance(value, Binary):
                         try:
+                            # Attempt to decrypt the value
                             decrypted_value = self._client_encryption.decrypt(value)
                             decrypted_doc[field_name] = decrypted_value
                         except PyMongoError as e:
                             logger.error(f"Failed to decrypt field '{field_name}' in document {doc.get('_id', '')}: {e}")
-                            # Keep the encrypted value if decryption fails
-                            decrypted_doc[field_name] = value 
+                            # Keep the encrypted value if decryption fails to avoid crashing
+                            decrypted_doc[field_name] = value  
                 decrypted_documents.append(decrypted_doc)
             return decrypted_documents
 
         # If CSFLE is not configured, just return the raw documents
         return documents
-       
+        
     def retrieve_by_id(self, id: str, memory_store_type: MemoryType) -> Optional[Dict[str, Any]]:
         """
         Retrieve a document from MongoDB by _id.
@@ -940,7 +971,7 @@ class MongoDBProvider(MemoryProvider):
     
     def list_all(self, memory_store_type: MemoryType, include_embedding: bool = False) -> List[Dict[str, Any]]:
         """
-        List all documents within a memory store type in MongoDB, decrypting encrypted fields.
+        List all documents within a memory store, decrypting fields if CSFLE is configured.
 
         Parameters:
         -----------
@@ -981,14 +1012,14 @@ class MongoDBProvider(MemoryProvider):
         # Retrieve all documents from the collection
         documents = list(collection.find({}, projection))
 
-        # --- NEW: Decryption Logic ---
+        # --- Decryption Logic ---
         # Only attempt to decrypt if CSFLE is configured and initialized
         if self._client_encryption:
             decrypted_documents = []
             for doc in documents:
                 decrypted_doc = doc.copy()
                 for field_name, value in doc.items():
-                    # Check if the value is a Binary object (which indicates encryption)
+                    # Check if the value is a BSON Binary object (which indicates encryption)
                     if isinstance(value, Binary):
                         try:
                             # Attempt to decrypt the field
@@ -997,12 +1028,13 @@ class MongoDBProvider(MemoryProvider):
                         except PyMongoError as e:
                             logger.error(f"Failed to decrypt field '{field_name}' in document {doc.get('_id', '')}: {e}")
                             # Keep the encrypted value if decryption fails
-                            decrypted_doc[field_name] = value 
+                            decrypted_doc[field_name] = value  
                 decrypted_documents.append(decrypted_doc)
             return decrypted_documents
 
-        # If CSFLE is not configured, just return the raw documents as they are
+        # If CSFLE is not configured, just return the raw documents
         return documents
+
     def update_by_id(self, id: str, data: Dict[str, Any], memory_store_type: MemoryType) -> bool:
         """
         Update a document in a memory store type in MongoDB by _id.
@@ -1565,7 +1597,7 @@ class MongoDBProvider(MemoryProvider):
             True if deletion was successful, False otherwise.
         """
         if cascade:
-            # Retrieve the memagent
+            # Retrieve the memagent
             memagent = self.retrieve_memagent(agent_id)
 
             if memagent is None:
@@ -1619,7 +1651,7 @@ class MongoDBProvider(MemoryProvider):
             self.toolbox_collection.delete_many({"memory_id": memory_id})
         elif memory_type == MemoryType.MEMAGENT:
             self.memagent_collection.delete_many({"memory_id": memory_id})
-                
+                    
 
     def _setup_vector_search_index(self, collection, index_name="vector_index", memory_store: bool = False):
         """
