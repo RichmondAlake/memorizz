@@ -79,6 +79,12 @@ class MongoDBProvider(MemoryProvider):
                 # Extract key vault details from the config
                 kms_providers = self.config.encryption_config.get("kms_providers")
                 key_vault_namespace = self.config.encryption_config.get("key_vault_namespace")
+
+                """
+                A separate keyvault client is a good idea for encryption because it enforces 
+                a crucial security practice: the separation of data and keys. 
+                """
+
                 key_vault_client = self.config.encryption_config.get("key_vault_client")
 
                 if not all([kms_providers, key_vault_namespace, key_vault_client]):
