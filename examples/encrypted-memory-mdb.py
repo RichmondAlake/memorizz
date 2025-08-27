@@ -7,10 +7,29 @@ from pymongo.encryption import ClientEncryption, Algorithm
 from bson.binary import Binary, STANDARD
 from bson.codec_options import CodecOptions
 
-local_master_key_string = os.urandom(96)
-os.environ["VOYAGE_API_KEY"] = ""
+# fresh key every run: local_master_key_string = os.urandom(96)
 
-# --- Step 2: Configure KMS and Key Vault ---
+# --- Manage the Master Key persistently ---
+# Define a path for the master key file
+MASTER_KEY_FILE = "master_key.bin"
+
+# Check if the master key file exists
+if os.path.exists(MASTER_KEY_FILE):
+    # Load the existing master key
+    with open(MASTER_KEY_FILE, "rb") as f:
+        local_master_key_string = f.read()
+    print("Loaded existing master key.")
+else:
+    # Generate a new master key and save it to a file
+    local_master_key_string = os.urandom(96)
+    with open(MASTER_KEY_FILE, "wb") as f:
+        f.write(local_master_key_string)
+    print("Generated and saved new master key.")
+
+os.environ["VOYAGE_API_KEY"] = ""
+os.environ["OPENAI_API_KEY"] = ""
+
+# --- Configure KMS and Key Vault ---
 # The master key is used to encrypt the data keys. For this local demo,
 # we use a randomly generated 96-byte key. In a production environment,
 # this key would be managed by a secure Key Management Service (KMS)
@@ -53,11 +72,6 @@ mongodb_config = MongoDBConfig(
                 "encrypted_fields": {
                     "function": Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Random,
                     "type": Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Random
-                }
-            },
-            "personas": {
-                "encrypted_fields": {
-                    "background": Algorithm.AEAD_AES_256_CBC_HMAC_SHA_512_Random
                 }
             }
         }
@@ -144,8 +158,6 @@ configure_embeddings(
         "input_type": "query"
     }
 )
-
-os.environ["OPENAI_API_KEY"] = ""
 
 toolbox = Toolbox(
     memory_provider=memory_provider,

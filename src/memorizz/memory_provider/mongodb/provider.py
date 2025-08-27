@@ -2,6 +2,7 @@ import time
 import logging
 from bson import ObjectId
 from pymongo import MongoClient
+from pymongo.errors import PyMongoError
 from pymongo.encryption import ClientEncryption, Algorithm
 from bson.binary import Binary, STANDARD
 from bson.codec_options import CodecOptions
@@ -79,13 +80,12 @@ class MongoDBProvider(MemoryProvider):
                 # Extract key vault details from the config
                 kms_providers = self.config.encryption_config.get("kms_providers")
                 key_vault_namespace = self.config.encryption_config.get("key_vault_namespace")
-
-                """
-                A separate keyvault client is a good idea for encryption because it enforces 
-                a crucial security practice: the separation of data and keys. 
-                """
-
                 key_vault_client = self.config.encryption_config.get("key_vault_client")
+
+                """
+                A separate keyvault client is a good idea for encryption because it enforces
+                a crucial security practice: the separation of data and keys.
+                """
 
                 if not all([kms_providers, key_vault_namespace, key_vault_client]):
                     raise ValueError("Incomplete encryption_config provided.")
@@ -132,8 +132,6 @@ class MongoDBProvider(MemoryProvider):
         # --- EXISTING CODE ---
         self.persona_collection = self.db[MemoryType.PERSONAS.value]
         self.toolbox_collection = self.db[MemoryType.TOOLBOX.value]
-        print("TOOLBOX"+MemoryType.TOOLBOX.value)
-        print("&^^^^^^^^")
         self.short_term_memory_collection = self.db[MemoryType.SHORT_TERM_MEMORY.value]
         self.long_term_memory_collection = self.db[MemoryType.LONG_TERM_MEMORY.value]
         self.conversation_memory_collection = self.db[MemoryType.CONVERSATION_MEMORY.value]
@@ -160,6 +158,7 @@ class MongoDBProvider(MemoryProvider):
                 logger.info("Vector indexes will be created lazily when needed")
                 # Set lazy mode if immediate creation fails
                 self.config.lazy_vector_indexes = True
+
 
     def _setup_embedding_provider(self, config: MongoDBConfig):
         """
@@ -362,7 +361,7 @@ class MongoDBProvider(MemoryProvider):
         
         # Clean custom ID fields
         custom_id_fields = [
-            "persona_id", "tool_id", "workflow_id", "short_term_memory_id", 
+            "persona_id", "tool_id", "workflow_id", "short_term_memory_id",
             "agent_id"
         ]
         if memory_store_type != MemoryType.CONVERSATION_MEMORY:
@@ -387,7 +386,7 @@ class MongoDBProvider(MemoryProvider):
                     # Explicitly encrypt the field's value
                     encrypted_value = self._client_encryption.encrypt(
                         value,
-                        algorithm,
+                        Algorithm(algorithm),
                         key_alt_name=key_alt_name
                     )
                     data_copy[field_name] = encrypted_value
@@ -1004,7 +1003,6 @@ class MongoDBProvider(MemoryProvider):
 
         # If CSFLE is not configured, just return the raw documents as they are
         return documents
-        
     def update_by_id(self, id: str, data: Dict[str, Any], memory_store_type: MemoryType) -> bool:
         """
         Update a document in a memory store type in MongoDB by _id.
