@@ -421,20 +421,48 @@ class MongoDBProvider(MemoryProvider):
         # Define projection to exclude embeddings by default
         projection = {} if include_embedding else {"embedding": 0}
         
+        documents = []
+
+        # Dispatch logic to call the correct specialized retrieval method
         if memory_store_type == MemoryType.PERSONAS:
-            return self.retrieve_persona_by_query(query, limit=limit)
+            documents = self.retrieve_persona_by_query(query, limit=limit)
         elif memory_store_type == MemoryType.TOOLBOX:
-            return self.retrieve_toolbox_item(query, limit)
+            documents = self.retrieve_toolbox_item(query, limit=limit)
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self.retrieve_workflow_by_query(query, limit)
+            documents = self.retrieve_workflow_by_query(query, limit=limit)
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            return self.short_term_memory_collection.find(query, projection).limit(limit)
+            documents = list(self.short_term_memory_collection.find(query, projection).limit(limit))
         elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            return self.long_term_memory_collection.find(query, projection).limit(limit)
+            documents = list(self.long_term_memory_collection.find(query, projection).limit(limit))
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            return self.conversation_memory_collection.find(query, projection).limit(limit)
+            documents = list(self.conversation_memory_collection.find(query, projection).limit(limit))
         elif memory_store_type == MemoryType.SUMMARIES:
-            return self.retrieve_summaries_by_query(query, limit)
+            documents = self.retrieve_summaries_by_query(query, limit=limit)
+        
+        # Return early if no documents are found by the dispatcher
+        if not documents:
+            return None
+        
+        # --- New Decryption Logic ---
+        if self._client_encryption:
+            decrypted_documents = []
+            for doc in documents:
+                decrypted_doc = doc.copy()
+                for field_name, value in doc.items():
+                    # Check if the value is a Binary object (which indicates encryption)
+                    if isinstance(value, Binary):
+                        try:
+                            decrypted_value = self._client_encryption.decrypt(value)
+                            decrypted_doc[field_name] = decrypted_value
+                        except PyMongoError as e:
+                            logger.error(f"Failed to decrypt field '{field_name}' in document {doc.get('_id', '')}: {e}")
+                            # Keep the encrypted value if decryption fails
+                            decrypted_doc[field_name] = value 
+                decrypted_documents.append(decrypted_doc)
+            return decrypted_documents
+
+        # If CSFLE is not configured, just return the raw documents
+        return documents
        
     def retrieve_by_id(self, id: str, memory_store_type: MemoryType) -> Optional[Dict[str, Any]]:
         """
@@ -907,7 +935,7 @@ class MongoDBProvider(MemoryProvider):
     
     def list_all(self, memory_store_type: MemoryType, include_embedding: bool = False) -> List[Dict[str, Any]]:
         """
-        List all documents within a memory store type in MongoDB.
+        List all documents within a memory store type in MongoDB, decrypting encrypted fields.
 
         Parameters:
         -----------
@@ -924,25 +952,52 @@ class MongoDBProvider(MemoryProvider):
         # Define projection to exclude embeddings by default
         projection = {} if include_embedding else {"embedding": 0}
 
+        collection = None
         if memory_store_type == MemoryType.PERSONAS:
-            return list(self.persona_collection.find({}, projection))
+            collection = self.persona_collection
         elif memory_store_type == MemoryType.TOOLBOX:
-            return list(self.toolbox_collection.find({}, projection))
+            collection = self.toolbox_collection
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            return list(self.short_term_memory_collection.find({}, projection))
+            collection = self.short_term_memory_collection
         elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            return list(self.long_term_memory_collection.find({}, projection))
+            collection = self.long_term_memory_collection
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            return list(self.conversation_memory_collection.find({}, projection))
+            collection = self.conversation_memory_collection
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return list(self.workflow_memory_collection.find({}, projection))
+            collection = self.workflow_memory_collection
         elif memory_store_type == MemoryType.SHARED_MEMORY:
-            return list(self.shared_memory_collection.find({}, projection))
+            collection = self.shared_memory_collection
         elif memory_store_type == MemoryType.SUMMARIES:
-            return list(self.summaries_collection.find({}, projection))
+            collection = self.summaries_collection
         else:
             logger.warning(f"Unsupported memory store type for list_all: {memory_store_type}")
             return []
+        
+        # Retrieve all documents from the collection
+        documents = list(collection.find({}, projection))
+
+        # --- NEW: Decryption Logic ---
+        # Only attempt to decrypt if CSFLE is configured and initialized
+        if self._client_encryption:
+            decrypted_documents = []
+            for doc in documents:
+                decrypted_doc = doc.copy()
+                for field_name, value in doc.items():
+                    # Check if the value is a Binary object (which indicates encryption)
+                    if isinstance(value, Binary):
+                        try:
+                            # Attempt to decrypt the field
+                            decrypted_value = self._client_encryption.decrypt(value)
+                            decrypted_doc[field_name] = decrypted_value
+                        except PyMongoError as e:
+                            logger.error(f"Failed to decrypt field '{field_name}' in document {doc.get('_id', '')}: {e}")
+                            # Keep the encrypted value if decryption fails
+                            decrypted_doc[field_name] = value 
+                decrypted_documents.append(decrypted_doc)
+            return decrypted_documents
+
+        # If CSFLE is not configured, just return the raw documents as they are
+        return documents
         
     def update_by_id(self, id: str, data: Dict[str, Any], memory_store_type: MemoryType) -> bool:
         """
