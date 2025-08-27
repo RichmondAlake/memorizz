@@ -2,6 +2,10 @@ import time
 import logging
 from bson import ObjectId
 from pymongo import MongoClient
+from pymongo.encryption import ClientEncryption, Algorithm
+from bson.binary import Binary, STANDARD
+from bson.codec_options import CodecOptions
+
 from ..base import MemoryProvider
 from dataclasses import dataclass
 from ...enums.memory_type import MemoryType
@@ -12,13 +16,15 @@ from typing import Dict, Any, Optional, List
 from pymongo.operations import SearchIndexModel
 from ...embeddings import get_embedding, get_embedding_dimensions
 
+import uuid
+
 logger = logging.getLogger(__name__)
 
 @dataclass
 class MongoDBConfig():
     """Configuration for the MongoDB provider."""
 
-    def __init__(self, uri: str, db_name: str = "memorizz", lazy_vector_indexes: bool = False, embedding_provider = None, embedding_config: Dict[str, Any] = None):
+    def __init__(self, uri: str, db_name: str = "memorizz", lazy_vector_indexes: bool = False, embedding_provider = None, embedding_config: Dict[str, Any] = None, encryption_config: Dict[str, Any] = None):
         """
         Initialize the MongoDB provider with configuration settings.
         
@@ -33,42 +39,95 @@ class MongoDBConfig():
             If False, vector indexes are created immediately during initialization (requires embedding configuration).
             Default: False (maintains backward compatibility)
         embedding_provider : str or EmbeddingManager, optional
-            Embedding provider to use. Can be:
-            - EmbeddingManager instance (explicit injection)
-            - String provider name ("openai", "ollama", "voyageai") 
-            - None (uses global embedding configuration)
+            Embedding provider to use.
         embedding_config : Dict[str, Any], optional
-            Configuration for the embedding provider. Only used when embedding_provider is a string.
-            Example: {"model": "text-embedding-3-small", "dimensions": 512}
+            Configuration for the embedding provider.
+        encryption_config : Dict[str, Any], optional
+            Configuration for encryption settings.
         """
         self.uri = uri
         self.db_name = db_name
         self.lazy_vector_indexes = lazy_vector_indexes
         self.embedding_provider = embedding_provider
         self.embedding_config = embedding_config or {}
+        # The encryption configuration is stored, but no actions are performed.
+        self.encryption_config = encryption_config or {}
 
 
 class MongoDBProvider(MemoryProvider):
     """MongoDB implementation of the MemoryProvider interface."""
     
-    def __init__(self, config: MongoDBConfig):
+    def __init__(self, config):
         """
         Initialize the MongoDB provider with configuration settings.
-        
+
         Parameters:
         -----------
         config : MongoDBConfig
-            Configuration dictionary containing:
-            - 'uri': MongoDB URI
-            - 'db_name': Database name
-            - 'lazy_vector_indexes': Whether to defer vector index creation
-            - 'embedding_provider': Optional explicit embedding provider
+            Configuration object containing database, embedding, and encryption settings.
         """
         self.config = config
         self.client = MongoClient(config.uri)
         self.db = self.client[config.db_name]
+
+        # --- NEW: Initialize CSFLE with smart checks and dynamic keymap creation ---
+        self._client_encryption = None
+        self.keymap = {}  # Initialize the keymap as an empty dictionary
+
+        if self.config.encryption_config:
+            try:
+                # Extract key vault details from the config
+                kms_providers = self.config.encryption_config.get("kms_providers")
+                key_vault_namespace = self.config.encryption_config.get("key_vault_namespace")
+                key_vault_client = self.config.encryption_config.get("key_vault_client")
+
+                if not all([kms_providers, key_vault_namespace, key_vault_client]):
+                    raise ValueError("Incomplete encryption_config provided.")
+
+                # Check if key vault collection exists before creating it
+                key_vault_db, key_vault_coll = key_vault_namespace.split(".", 1)
+                if key_vault_coll not in key_vault_client[key_vault_db].list_collection_names():
+                    print(f"Key vault collection '{key_vault_coll}' not found. Creating it now.")
+                    key_vault_client[key_vault_db].create_collection(key_vault_coll)
+                else:
+                    print(f"Key vault collection '{key_vault_coll}' already exists.")
+
+                # Initialize the ClientEncryption object
+                self._client_encryption = ClientEncryption(
+                    kms_providers=kms_providers,
+                    key_vault_namespace=key_vault_namespace,
+                    key_vault_client=key_vault_client,
+                    codec_options=CodecOptions(uuid_representation=STANDARD),
+                )
+
+                # Loop through field mappings to get or create data keys
+                field_mappings = self.config.encryption_config.get("field_mappings", {})
+                for collection_name, mapping in field_mappings.items():
+                    # Check if a data key with this alt name already exists
+                    data_key = self._client_encryption.get_key_by_alt_name(collection_name)
+                    if data_key is None:
+                        # If not, create a new one using a UUID as the alt name for uniqueness
+                        alt_name = str(uuid.uuid4())
+                        data_key_id = self._client_encryption.create_data_key("local", key_alt_names=[alt_name])
+                        print(f"Generated new data key with ID: {data_key_id} for collection '{collection_name}'")
+                        self.keymap[collection_name] = alt_name
+                    else:
+                        print(f"Using existing data key for collection '{collection_name}'")
+                        # You would need to retrieve the alt name from the data_key document
+                        # as it may not match the collection_name. For simplicity, we assume
+                        # it does or use the first one available.
+                        self.keymap[collection_name] = data_key['keyAltNames'][0]
+                        
+            except Exception as e:
+                logger.error(f"Error initializing CSFLE: {e}")
+                self._client_encryption = None
+                self.keymap = {}
+
+        # --- EXISTING CODE ---
         self.persona_collection = self.db[MemoryType.PERSONAS.value]
         self.toolbox_collection = self.db[MemoryType.TOOLBOX.value]
+        print("TOOLBOX"+MemoryType.TOOLBOX.value)
+        print("&^^^^^^^^")
         self.short_term_memory_collection = self.db[MemoryType.SHORT_TERM_MEMORY.value]
         self.long_term_memory_collection = self.db[MemoryType.LONG_TERM_MEMORY.value]
         self.conversation_memory_collection = self.db[MemoryType.CONVERSATION_MEMORY.value]
@@ -79,7 +138,7 @@ class MongoDBProvider(MemoryProvider):
 
         # Track which vector indexes have been created
         self._vector_indexes_created = set()
-        
+
         # Process embedding provider configuration
         self._embedding_provider = self._setup_embedding_provider(config)
 
@@ -247,25 +306,32 @@ class MongoDBProvider(MemoryProvider):
                 index_name="vector_index",
                 memory_store=memory_store_present,
             )
+    def _is_encrypted_field(self, collection_name: str, field_name: str) -> bool:
+        """
+        Checks if a field should be encrypted based on the encryption config.
+        """
+        
+        if not self.config.encryption_config:
+            return None
+        
+        field_mappings = self.config.encryption_config.get("field_mappings", {})
+        collection_config = field_mappings.get(collection_name)
+        
+        if not collection_config:
+            return None
             
+        encrypted_fields = collection_config.get("encrypted_fields", {})
+        
+        # This now returns the algorithm type from the config
+        return encrypted_fields.get(field_name)
+
     def store(self, data: Dict[str, Any], memory_store_type: MemoryType) -> str:
         """
-        Store data in MongoDB using only _id field as primary key.
-        
-        Parameters:
-        -----------
-        data : Dict[str, Any]
-            The document to be stored.
-        memory_store_type : MemoryType
-            The type of memory store (e.g., "persona", "toolbox", etc.)
-        
-        Returns:
-        --------
-        str
-            The ID of the inserted/updated document (MongoDB _id).
+        Store data in MongoDB, encrypting sensitive fields.
         """
-        # Get the appropriate collection based on memory type
         collection = None
+        collection_name = memory_store_type.value
+
         if memory_store_type == MemoryType.PERSONAS:
             collection = self.persona_collection
         elif memory_store_type == MemoryType.TOOLBOX:
@@ -286,28 +352,41 @@ class MongoDBProvider(MemoryProvider):
         if collection is None:
             raise ValueError(f"Invalid memory store type: {memory_store_type}")
 
-        # Clean data by removing custom ID fields - only use MongoDB _id
-        # Note: conversation_id is preserved for CONVERSATION_MEMORY as it serves a functional purpose
         data_copy = data.copy()
         
-        # Remove custom ID fields since we only want to use _id
+        # Clean custom ID fields
         custom_id_fields = [
             "persona_id", "tool_id", "workflow_id", "short_term_memory_id", 
             "agent_id"
         ]
-        
-        # Don't remove conversation_id for conversation memory
         if memory_store_type != MemoryType.CONVERSATION_MEMORY:
             custom_id_fields.append("conversation_id")
-            
-        # Don't remove long_term_memory_id for long-term memory as it's needed for knowledge linking
         if memory_store_type != MemoryType.LONG_TERM_MEMORY:
             custom_id_fields.append("long_term_memory_id")
             
         for field in custom_id_fields:
             data_copy.pop(field, None)
-        
-        # If document has MongoDB _id, update it
+
+        # Encryption Logic: check if CSFLE is configured
+        if self._client_encryption and self.keymap:
+            for field_name, value in list(data_copy.items()):
+                algorithm = self._is_encrypted_field(collection_name, field_name)
+                
+                # If encryption is required for this field...
+                if algorithm:
+                    key_alt_name = self.keymap.get(collection_name)
+                    if not key_alt_name:
+                        raise ValueError(f"Encryption key not found for collection: {collection_name}")
+                    
+                    # Explicitly encrypt the field's value
+                    encrypted_value = self._client_encryption.encrypt(
+                        value,
+                        algorithm,
+                        key_alt_name=key_alt_name
+                    )
+                    data_copy[field_name] = encrypted_value
+
+        # Update or insert logic
         if "_id" in data_copy:
             result = collection.update_one(
                 {"_id": data_copy["_id"]},
@@ -316,9 +395,9 @@ class MongoDBProvider(MemoryProvider):
             )
             return str(data_copy["_id"])
         else:
-            # For new documents, let MongoDB generate _id automatically
             result = collection.insert_one(data_copy)
             return str(result.inserted_id)
+
 
     def retrieve_by_query(self, query: Dict[str, Any], memory_store_type: MemoryType, limit: int = 1, include_embedding: bool = False) -> Optional[Dict[str, Any]]:
         """
