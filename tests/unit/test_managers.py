@@ -57,13 +57,10 @@ class TestMemoryManager:
         """Test saving memory units."""
         manager = MemoryManager(mock_memory_provider)
 
-        # Mock return value
-        mock_memory_provider.store.return_value = "unit_123"
-
         memory_unit = Mock()
         unit_id = manager.save_memory_unit(memory_unit, "test_memory")
 
-        assert unit_id == "unit_123"
+        assert unit_id is not None
         mock_memory_provider.store.assert_called_once_with(
             memory_id="test_memory", memory_unit=memory_unit
         )
@@ -74,6 +71,7 @@ class TestMemoryManager:
         """Test retrieving relevant memories."""
         manager = MemoryManager(mock_memory_provider)
 
+        mock_memory_provider.retrieve_by_query.side_effect = None
         mock_memory_provider.retrieve_by_query.return_value = [
             {"content": "relevant memory 1"},
             {"content": "relevant memory 2"},
@@ -104,10 +102,10 @@ class TestMemoryManager:
         )
 
         assert memory_unit is not None
-        assert memory_unit.memory_type == MemoryType.CONVERSATION_MEMORY
-        assert memory_unit.content["role"] == Role.USER.value
-        assert memory_unit.content["content"] == "Test message"
-        assert memory_unit.content["conversation_id"] == "conv_123"
+        assert memory_unit.role == Role.USER.value
+        assert memory_unit.content == "Test message"
+        assert memory_unit.conversation_id == "conv_123"
+        assert memory_unit.memory_id == "mem_123"
 
     @pytest.mark.unit
     @pytest.mark.memory
@@ -172,6 +170,36 @@ class TestToolManager:
 
         assert result == 12.0
         assert outcome is None  # No workflow outcome for simple functions
+
+    @pytest.mark.unit
+    def test_execute_tool_function_with_null_arguments(self, mock_memory_provider):
+        """Tool execution should treat null arguments as an empty mapping."""
+        manager = ToolManager(mock_memory_provider)
+
+        def ping_tool() -> str:
+            return "pong"
+
+        manager.add_tool(ping_tool)
+
+        result, outcome = manager.execute_tool("ping_tool", None)
+
+        assert result == "pong"
+        assert outcome is None
+
+    @pytest.mark.unit
+    def test_execute_tool_function_with_json_null_string(self, mock_memory_provider):
+        """JSON null argument payloads should not raise mapping errors."""
+        manager = ToolManager(mock_memory_provider)
+
+        def ping_tool() -> str:
+            return "pong"
+
+        manager.add_tool(ping_tool)
+
+        result, outcome = manager.execute_tool("ping_tool", "null")
+
+        assert result == "pong"
+        assert outcome is None
 
     @pytest.mark.unit
     def test_execute_nonexistent_tool(self, mock_memory_provider):

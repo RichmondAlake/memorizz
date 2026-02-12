@@ -32,6 +32,7 @@ class ApplicationModeConfig:
             MemoryType.TOOLBOX,
             MemoryType.LONG_TERM_MEMORY,  # Knowledge base
             MemoryType.SHORT_TERM_MEMORY,  # For intermediate results
+            MemoryType.SUMMARIES,  # For context compression
         ],
         ApplicationMode.DEEP_RESEARCH: [
             MemoryType.TOOLBOX,

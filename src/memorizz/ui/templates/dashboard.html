@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Dashboard</h1>
+    <p>Overview of your memory provider</p>
+</div>
+
+<div class="connection-info-card">
+    <h3>Connected to {{ provider_type|title }}</h3>
+    <div class="connection-details">
+        {% for key, value in connection_info.items() %}
+        <div class="detail-item">
+            <span class="detail-label">{{ key|title }}:</span>
+            <span class="detail-value">{{ value }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<div class="stats-grid">
+    <a href="/agents" class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="7" width="16" height="12" rx="3"/>
+                <path d="M12 3v4"/>
+                <path d="M9 12h.01"/>
+                <path d="M15 12h.01"/>
+                <path d="M8 16h8"/>
+            </svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ stats.get('agents', 0) }}</span>
+            <span class="stat-label">Agents</span>
+        </div>
+    </a>
+
+    <a href="/memory/personas" class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="8" r="4"/>
+                <path d="M4 20a8 8 0 0 1 16 0"/>
+            </svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ stats.get('personas', 0) }}</span>
+            <span class="stat-label">Personas</span>
+        </div>
+    </a>
+
+    <a href="/memory/toolbox" class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.2 2.2-1.8-1.8z"/>
+            </svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ stats.get('toolbox', 0) }}</span>
+            <span class="stat-label">Tools</span>
+        </div>
+    </a>
+
+    <a href="/memory/conversations" class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-7a8 8 0 1 1 18-4z"/>
+            </svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ stats.get('conversation_memory', 0) }}</span>
+            <span class="stat-label">Conversations</span>
+        </div>
+    </a>
+
+    <a href="/memory/workflows" class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 3h7v7"/>
+                <path d="M10 14 21 3"/>
+                <path d="M21 14v7h-7"/>
+                <path d="m3 10 11 11"/>
+            </svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ stats.get('workflow_memory', 0) }}</span>
+            <span class="stat-label">Workflows</span>
+        </div>
+    </a>
+
+    <a href="/memory/entity" class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 1 0-7.07-7.07L11 4"/>
+                <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 1 0 7.07 7.07L13 20"/>
+            </svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ stats.get('entity_memory', 0) }}</span>
+            <span class="stat-label">Entities</span>
+        </div>
+    </a>
+
+    <a href="/memory/summaries" class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19a2 2 0 0 1 2-2h14"/>
+                <path d="M6 17V5a2 2 0 0 1 2-2h12v16H8a2 2 0 0 1-2-2z"/>
+            </svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ stats.get('summaries', 0) }}</span>
+            <span class="stat-label">Summaries</span>
+        </div>
+    </a>
+
+    <a href="/memory/cache" class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 4h16v16H4z"/>
+                <path d="M8 4v6h8V4"/>
+                <path d="M9 16h6"/>
+            </svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ stats.get('semantic_cache', 0) }}</span>
+            <span class="stat-label">Cache Entries</span>
+        </div>
+    </a>
+</div>
+{% endblock %}

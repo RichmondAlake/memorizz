@@ -30,7 +30,7 @@ pip install oracledb
 ### 1. Configure Embeddings
 
 ```python
-from memorizz import configure_embeddings
+from memorizz.embeddings import configure_embeddings
 
 configure_embeddings('openai', {
     'model': 'text-embedding-3-small',
@@ -77,7 +77,7 @@ response = agent.run("Hello, how can you help me?")
 | `user` | str | Required | Oracle database username |
 | `password` | str | Required | Oracle database password |
 | `dsn` | str | Required | Data Source Name or connection string |
-| `schema` | str | `"memorizz"` | Schema name for all tables |
+| `schema` | str | `user` | Schema name for all tables |
 | `lazy_vector_indexes` | bool | `False` | Defer vector index creation until first use |
 | `embedding_provider` | str/object | `None` | Explicit embedding provider (overrides global) |
 | `embedding_config` | dict | `{}` | Embedding configuration when using string provider |
@@ -174,7 +174,7 @@ The provider creates HNSW (Hierarchical Navigable Small World) indexes:
 ```sql
 CREATE VECTOR INDEX idx_tablename_vec
 ON tablename (embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 ```
@@ -209,15 +209,15 @@ For better performance with large datasets:
 ```sql
 -- Increase target accuracy (slower indexing, better recall)
 ALTER INDEX idx_tablename_vec REBUILD
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 99;
 
--- Use more partitions for very large datasets
+-- Prefer faster indexing / lower recall
 ALTER INDEX idx_tablename_vec REBUILD
-ORGANIZATION NEIGHBOR PARTITIONS 8  -- More partitions
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
-WITH TARGET ACCURACY 95;
+WITH TARGET ACCURACY 90;
 ```
 
 ### Query Optimization
@@ -332,7 +332,7 @@ Ensure embedding dimensions match between configuration and stored vectors:
 
 ```python
 # Check current dimensions
-from memorizz.embeddings import get_embedding_dimensions
+from memorizz.embeddings import configure_embeddings, get_embedding_dimensions
 
 dims = get_embedding_dimensions()
 print(f"Current dimensions: {dims}")

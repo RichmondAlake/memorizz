@@ -14,6 +14,7 @@ Assistant mode is the default conversational setup for MemoRizz. It prioritizes 
 
 ```python
 from memorizz.enums import ApplicationMode
+from memorizz.memagent.builders import MemAgentBuilder
 
 agent = (MemAgentBuilder()
     .with_application_mode(ApplicationMode.ASSISTANT)

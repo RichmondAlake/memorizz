@@ -11,13 +11,17 @@ Procedural memory captures *how* an agent should act. It bundles tool registrati
 ## Registering Tools
 
 ```python
-from memorizz.long_term_memory.procedural.toolbox import register_tool
+from memorizz.memagent.builders import MemAgentBuilder
+from memorizz.long_term_memory.procedural.toolbox import Toolbox
 
-@register_tool(name="system_status", description="Return current system status")
+toolbox = Toolbox(memory_provider)
+
+@toolbox.register_tool
 def system_status():
-    ...
+    """Return current system status."""
+    return {"status": "ok"}
 
-agent.memory.toolbox.sync_registered_tools()
+agent = MemAgentBuilder().with_memory_provider(memory_provider).with_tool(system_status).build()
 ```
 
 Each tool is stored inside your configured provider with embedding metadata so agents can retrieve the right action based on the natural language plan they produce.

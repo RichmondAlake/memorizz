@@ -13,6 +13,7 @@ class MemAgentModel(BaseModel):
     model: Optional[Any] = None
     llm_config: Optional[Dict[str, Any]] = None  # Configuration for the LLM
     agent_id: Optional[str] = None
+    name: Optional[str] = None
     tools: Optional[Union[List, Any]] = None
     persona: Optional[Any] = None
     instruction: Optional[str] = Field(default=DEFAULT_INSTRUCTION)
@@ -31,8 +32,14 @@ class MemAgentModel(BaseModel):
         Union[Any, Dict[str, Any]]
     ] = None  # Semantic cache configuration
     context_window_tokens: Optional[int] = None
+    is_favorite: bool = False
     internet_access_provider: Optional[str] = None
     internet_access_config: Optional[Dict[str, Any]] = None
+    skills_marketplace_provider: Optional[str] = None
+    skills_marketplace_config: Optional[Dict[str, Any]] = None
+    sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    skill_paths: Optional[List[str]] = None
+    mcp_servers: Optional[List[Dict[str, Any]]] = None
 
     model_config = {
         "arbitrary_types_allowed": True  # Allow arbitrary types like Toolbox

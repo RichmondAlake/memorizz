@@ -4,12 +4,16 @@ site_url: https://richmondalake.github.io/memorizz
 repo_name: RichmondAlake/memorizz
 repo_url: https://github.com/RichmondAlake/memorizz
 edit_uri: edit/main/docs/
+exclude_docs: README.md
 
 nav:
+  - Home: index.md
   - Getting Started:
       - Overview: getting-started/overview.md
       - Concepts: getting-started/concepts.md
       - Python SDK Quickstart: getting-started/python-sdk-quickstart.md
+      - Local UI Guide: getting-started/local-ui.md
+  - Local UI: getting-started/local-ui.md
   - Memory Types:
       - Semantic Memory: memory-types/semantic.md
       - Episodic Memory: memory-types/episodic.md
@@ -26,6 +30,11 @@ nav:
       - Workflow Mode: use-cases/workflow-mode.md
       - Deep Research Mode: use-cases/deep-research-mode.md
   - Internet Access Providers: internet-access/providers.md
+  - Sandbox Providers:
+      - Overview: sandbox/index.md
+      - E2B Provider: sandbox/e2b.md
+      - Daytona Provider: sandbox/daytona.md
+      - GraalPy Provider: sandbox/graalpy.md
   - Utilities:
       - Context Window Stats: utilities/context_window_stats.md
 

@@ -1,0 +1,367 @@
+{% extends "base.html" %}
+
+{% block title %}Agents - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Agents</h1>
+    <p>{{ agents|length }} agent{% if agents|length != 1 %}s{% endif %} found</p>
+</div>
+
+<div class="page-actions page-actions--split">
+    <form method="get" action="/agents" class="agents-sort-controls">
+        <label for="agent-sort">Sort by</label>
+        <select id="agent-sort" name="sort_by" onchange="this.form.submit()">
+            <option value="last_run" {% if sort_by == 'last_run' %}selected{% endif %}>Last run</option>
+            <option value="last_created" {% if sort_by == 'last_created' %}selected{% endif %}>Last created</option>
+        </select>
+    </form>
+    <a href="/agents/new" class="btn btn-primary">Create Agent</a>
+</div>
+
+{% if agents %}
+<div class="agents-grid">
+    {% for agent in agents %}
+    {% set agent_id_value = agent.agent_id|string %}
+    {% set agent_display_name = agent.name if agent.name else (agent.persona.name if agent.persona and agent.persona.name else 'Agent') %}
+    {% set agent_is_favorite = agent.is_favorite if agent and agent.is_favorite is not none else false %}
+    {% set thread_rows = agent_threads.get(agent_id_value, []) %}
+    {% set selected_memory_id = agent_default_memory_ids.get(agent_id_value, '') %}
+    <div class="agent-card">
+        <div class="agent-header">
+            <div class="agent-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="4" y="7" width="16" height="12" rx="3"/>
+                    <path d="M12 3v4"/>
+                    <path d="M9 12h.01"/>
+                    <path d="M15 12h.01"/>
+                    <path d="M8 16h8"/>
+                </svg>
+            </div>
+            <div class="agent-title">
+                <h3>{{ agent_display_name }}</h3>
+                <span class="agent-id" title="{{ agent_id_value }}">{{ agent_id_value[:12] }}...</span>
+            </div>
+            <form method="post" action="/agents/{{ agent_id_value }}/favorite" class="agent-favorite-form">
+                <input type="hidden" name="redirect_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+                <input type="hidden" name="is_favorite" value="{% if agent_is_favorite %}0{% else %}1{% endif %}">
+                <button
+                    type="submit"
+                    class="favorite-toggle {% if agent_is_favorite %}is-active{% endif %}"
+                    title="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
+                    aria-label="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
+                >
+                    <span aria-hidden="true">★</span>
+                </button>
+            </form>
+        </div>
+
+        <div class="agent-body">
+            <div class="agent-meta">
+                <div class="meta-item">
+                    <span class="meta-label">Mode:</span>
+                    <span class="meta-value badge">{{ agent.application_mode or 'assistant' }}</span>
+                </div>
+
+                {% if agent.memory_ids %}
+                <div class="meta-item">
+                    <span class="meta-label">Memories:</span>
+                    <span class="meta-value">{{ agent.memory_ids|length }}</span>
+                </div>
+                {% endif %}
+
+                {% if agent.persona and agent.persona.role %}
+                <div class="meta-item">
+                    <span class="meta-label">Role:</span>
+                    <span class="meta-value">{{ agent.persona.role }}</span>
+                </div>
+                {% endif %}
+
+                {% if agent.max_steps %}
+                <div class="meta-item">
+                    <span class="meta-label">Max Tool Iterations:</span>
+                    <span class="meta-value">{{ agent.max_steps }}</span>
+                </div>
+                {% endif %}
+
+                <div class="meta-item">
+                    <span class="meta-label">Tools:</span>
+                    <span class="meta-value">{{ agent_tool_counts.get(agent_id_value, (agent.tools or [])|length) }}</span>
+                </div>
+            </div>
+
+            {% if agent.instruction %}
+            <div class="agent-instruction">
+                <p>{{ agent.instruction[:150] }}{% if agent.instruction|length > 150 %}...{% endif %}</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="agent-footer">
+            <a href="/agents/{{ agent_id_value }}/playground" class="btn btn-primary">Playground →</a>
+            <a href="/agents/{{ agent_id_value }}/edit" class="btn">Edit</a>
+        </div>
+
+        <!-- Inline mini-chat -->
+        <div class="agent-inline-chat" id="chat-{{ agent_id_value }}">
+            <div class="inline-chat-toolbar">
+                {% if thread_rows|length > 1 %}
+                <label class="inline-thread-label" for="thread-{{ agent_id_value }}">Thread</label>
+                <select
+                    id="thread-{{ agent_id_value }}"
+                    class="inline-thread-select"
+                    onchange="switchInlineThread('{{ agent_id_value }}', this.value)"
+                >
+                    {% for thread in thread_rows %}
+                    {% set option_memory_id = thread.memory_id|string %}
+                    <option value="{{ option_memory_id }}" {% if option_memory_id == selected_memory_id %}selected{% endif %}>
+                        {% if loop.first %}Latest{% else %}Thread {{ loop.index }}{% endif %} · {{ thread.message_count }} msg{% if thread.message_count != 1 %}s{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+                {% elif selected_memory_id %}
+                <span class="inline-thread-chip" title="{{ selected_memory_id }}">Latest thread</span>
+                {% endif %}
+            </div>
+
+            <div class="inline-chat-messages" id="messages-{{ agent_id_value }}" data-memory-id="{{ selected_memory_id }}">
+                {% set recent = agent_recent_messages.get(agent_id_value, []) %}
+                {% if recent %}
+                    {% for msg in recent %}
+                    <div class="inline-msg inline-msg--{{ msg.role }}">{{ msg.content or msg.get('text', '') }}</div>
+                    {% endfor %}
+                {% else %}
+                <div class="inline-chat-placeholder">Send a message to start chatting&hellip;</div>
+                {% endif %}
+            </div>
+            <form class="inline-chat-form" onsubmit="return sendInlineChat(event, '{{ agent_id_value }}')">
+                <input type="text" class="inline-chat-input" id="input-{{ agent_id_value }}"
+                       placeholder="Ask {{ agent_display_name }} something…"
+                       autocomplete="off">
+                <button type="submit" class="inline-chat-send" id="send-{{ agent_id_value }}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+            </form>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <div class="empty-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="7" width="16" height="12" rx="3"/>
+            <path d="M12 3v4"/>
+            <path d="M9 12h.01"/>
+            <path d="M15 12h.01"/>
+            <path d="M8 16h8"/>
+        </svg>
+    </div>
+    <h3>No Agents Found</h3>
+    <p>There are no agents stored in this memory provider.</p>
+</div>
+{% endif %}
+
+<script>
+const _activeStreams = {};
+
+function getSelectedInlineMemoryId(agentId) {
+    const selector = document.getElementById('thread-' + agentId);
+    if (selector && selector.value) {
+        return selector.value.trim();
+    }
+    const messagesEl = document.getElementById('messages-' + agentId);
+    if (messagesEl && messagesEl.dataset && messagesEl.dataset.memoryId) {
+        return messagesEl.dataset.memoryId.trim();
+    }
+    return '';
+}
+
+function renderInlineMessages(agentId, messages) {
+    const messagesEl = document.getElementById('messages-' + agentId);
+    if (!messagesEl) return;
+
+    messagesEl.innerHTML = '';
+    if (!Array.isArray(messages) || !messages.length) {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'inline-chat-placeholder';
+        placeholder.innerHTML = 'Send a message to start chatting&hellip;';
+        messagesEl.appendChild(placeholder);
+        return;
+    }
+
+    messages.forEach(function(msg) {
+        const role = (msg && msg.role ? String(msg.role) : '').toLowerCase();
+        if (role !== 'user' && role !== 'assistant') return;
+        const content = (msg && msg.content ? String(msg.content) : '').trim();
+        if (!content) return;
+        const bubble = document.createElement('div');
+        bubble.className = 'inline-msg inline-msg--' + role;
+        bubble.textContent = content;
+        messagesEl.appendChild(bubble);
+    });
+
+    if (!messagesEl.children.length) {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'inline-chat-placeholder';
+        placeholder.innerHTML = 'No user/assistant messages in this thread yet.';
+        messagesEl.appendChild(placeholder);
+    }
+}
+
+async function switchInlineThread(agentId, memoryId) {
+    const messagesEl = document.getElementById('messages-' + agentId);
+    if (!messagesEl) return;
+
+    const normalizedMemoryId = (memoryId || '').trim();
+    messagesEl.dataset.memoryId = normalizedMemoryId;
+    messagesEl.innerHTML = '<div class="inline-chat-placeholder">Loading thread&hellip;</div>';
+
+    if (!normalizedMemoryId) {
+        renderInlineMessages(agentId, []);
+        return;
+    }
+
+    try {
+        const response = await fetch(
+            '/agents/' + agentId + '/playground/thread?memory_id=' + encodeURIComponent(normalizedMemoryId)
+        );
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const payload = await response.json();
+        const previewMessages = (Array.isArray(payload.messages) ? payload.messages : [])
+            .filter(function(msg) {
+                const role = (msg && msg.role ? String(msg.role) : '').toLowerCase();
+                return role === 'user' || role === 'assistant';
+            })
+            .map(function(msg) {
+                const content = (msg && msg.content ? String(msg.content) : '').trim();
+                return {
+                    role: (msg && msg.role ? String(msg.role) : '').toLowerCase(),
+                    content: content.length > 280 ? (content.slice(0, 277) + '...') : content,
+                };
+            })
+            .filter(function(msg) {
+                return !!msg.content;
+            })
+            .slice(-5);
+        renderInlineMessages(agentId, previewMessages);
+    } catch (err) {
+        messagesEl.innerHTML = '';
+        const error = document.createElement('div');
+        error.className = 'inline-msg inline-msg--error';
+        error.textContent = 'Failed to load thread: ' + err.message;
+        messagesEl.appendChild(error);
+    }
+
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+async function sendInlineChat(e, agentId) {
+    e.preventDefault();
+    if (_activeStreams[agentId]) return false;
+
+    const input = document.getElementById('input-' + agentId);
+    const messagesEl = document.getElementById('messages-' + agentId);
+    const sendBtn = document.getElementById('send-' + agentId);
+    const query = input.value.trim();
+    if (!query) return false;
+
+    // Clear placeholder on first message
+    const placeholder = messagesEl.querySelector('.inline-chat-placeholder');
+    if (placeholder) placeholder.remove();
+
+    // Append user bubble
+    const userBubble = document.createElement('div');
+    userBubble.className = 'inline-msg inline-msg--user';
+    userBubble.textContent = query;
+    messagesEl.appendChild(userBubble);
+
+    input.value = '';
+    input.disabled = true;
+    sendBtn.disabled = true;
+    _activeStreams[agentId] = true;
+
+    // Create assistant bubble
+    const asstBubble = document.createElement('div');
+    asstBubble.className = 'inline-msg inline-msg--assistant';
+    asstBubble.innerHTML = '<span class="inline-cursor"></span>';
+    messagesEl.appendChild(asstBubble);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    let fullText = '';
+    try {
+        const formData = new FormData();
+        formData.append('query', query);
+        const selectedMemoryId = getSelectedInlineMemoryId(agentId);
+        if (selectedMemoryId) {
+            formData.append('memory_id', selectedMemoryId);
+        }
+
+        const response = await fetch('/agents/' + agentId + '/playground/stream', {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const payload = line.slice(6);
+                if (payload === '[DONE]') continue;
+
+                try {
+                    const data = JSON.parse(payload);
+                    if (typeof data === 'string') {
+                        // Error message
+                        fullText += data;
+                    } else if (data.type === 'content' && data.content) {
+                        fullText += data.content;
+                    } else if (data.type === 'done' && data.content) {
+                        fullText = data.content;
+                    } else if (data.type === 'tool_call') {
+                        // skip tool calls in mini-chat
+                    }
+                } catch (_) {}
+            }
+            asstBubble.textContent = fullText || '…';
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        if (!fullText.trim()) {
+            asstBubble.textContent = '(no response)';
+        } else {
+            asstBubble.textContent = fullText;
+        }
+    } catch (err) {
+        asstBubble.textContent = 'Error: ' + err.message;
+        asstBubble.classList.add('inline-msg--error');
+    } finally {
+        _activeStreams[agentId] = false;
+        input.disabled = false;
+        sendBtn.disabled = false;
+        input.focus();
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+    return false;
+}
+
+// Scroll pre-loaded message containers to the bottom on page load
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.inline-chat-messages').forEach(function(el) {
+        el.scrollTop = el.scrollHeight;
+    });
+});
+</script>
+{% endblock %}

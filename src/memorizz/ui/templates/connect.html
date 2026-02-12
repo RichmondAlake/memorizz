@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connect - Memorizz</title>
+    <link rel="stylesheet" href="/static/css/styles.css?v=4">
+    <style>
+        /* Ensure select dropdown matches dark theme */
+        select {
+            color: var(--text-primary) !important;
+        }
+
+        select option {
+            background-color: #000000 !important;
+            color: var(--text-primary) !important;
+        }
+
+        select option:checked {
+            background-color: #00d9ff !important;
+            color: #000000 !important;
+        }
+
+        /* CRITICAL: Force connect button to be black - override ALL possible rules */
+        button.connect-btn,
+        .connect-btn,
+        input[type="submit"].connect-btn,
+        button[type="submit"].connect-btn,
+        button[type="submit"],
+        form button[type="submit"],
+        .connect-form button,
+        .connect-form .connect-btn {
+            background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
+            background-color: #000000 !important;
+            background-image: none !important;
+            color: #00d9ff !important;
+            border: 1px solid rgba(0, 217, 255, 0.3) !important;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.7), 0 2px 4px rgba(0, 0, 0, 0.5) !important;
+            font-weight: 700 !important;
+        }
+
+        button.connect-btn:hover,
+        .connect-btn:hover,
+        input[type="submit"].connect-btn:hover,
+        button[type="submit"].connect-btn:hover,
+        button[type="submit"]:hover,
+        form button[type="submit"]:hover,
+        .connect-form button:hover,
+        .connect-form .connect-btn:hover {
+            background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
+            background-color: #000000 !important;
+            background-image: none !important;
+            color: #00e6ff !important;
+            border-color: rgba(0, 217, 255, 0.5) !important;
+            transform: translateY(-2px) !important;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.8), 0 4px 8px rgba(0, 0, 0, 0.6) !important;
+        }
+
+        button.connect-btn:active,
+        .connect-btn:active,
+        input[type="submit"].connect-btn:active,
+        button[type="submit"].connect-btn:active,
+        button[type="submit"]:active,
+        form button[type="submit"]:active,
+        .connect-form button:active,
+        .connect-form .connect-btn:active {
+            background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
+            background-color: #000000 !important;
+            background-image: none !important;
+            transform: translateY(0) !important;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.8) !important;
+        }
+
+        /* Additional connect page enhancements */
+        .connect-card {
+            backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body class="connect-page">
+    <div class="connect-container">
+        <div class="connect-card">
+            <div class="connect-header">
+                <h1>🧠 Memorizz</h1>
+                <p>Connect to your memory provider</p>
+            </div>
+
+            {% if error %}
+            <div class="error-message">
+                <span>⚠️</span> {{ error }}
+            </div>
+            {% endif %}
+
+            <form method="post" action="/connect" class="connect-form">
+                <div class="form-group">
+                    <label for="provider_type">Memory Provider</label>
+                    <select name="provider_type" id="provider_type" onchange="toggleProviderFields()">
+                        <option value="oracle" {% if provider_type == 'oracle' %}selected{% endif %}>Oracle Database</option>
+                        <option value="mongodb" {% if provider_type == 'mongodb' %}selected{% endif %}>MongoDB</option>
+                        <option value="filesystem" {% if provider_type == 'filesystem' %}selected{% endif %}>FileSystem</option>
+                    </select>
+                </div>
+
+                <!-- Oracle Fields -->
+                <div id="oracle-fields" class="provider-fields">
+                    <div class="form-group">
+                        <label for="oracle_user">Username</label>
+                        <input type="text" name="oracle_user" id="oracle_user" placeholder="memorizz_user">
+                    </div>
+                    <div class="form-group">
+                        <label for="oracle_password">Password</label>
+                        <div class="password-field">
+                            <input type="password" name="oracle_password" id="oracle_password" placeholder="••••••••">
+                            <button type="button" class="password-toggle" data-target="oracle_password" aria-label="Show password" aria-pressed="false">
+                                <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                    <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                                    <circle cx="12" cy="12" r="3"></circle>
+                                </svg>
+                                <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                    <path d="M3 3l18 18"></path>
+                                    <path d="M10.477 10.488a3 3 0 0 0 4.025 4.03"></path>
+                                    <path d="M9.88 4.24A9.77 9.77 0 0 1 12 4c4.477 0 8.268 2.943 9.542 7a9.96 9.96 0 0 1-1.194 2.43"></path>
+                                    <path d="M6.228 6.228A9.98 9.98 0 0 0 2.458 12C3.732 16.057 7.523 19 12 19a9.77 9.77 0 0 0 3.352-.57"></path>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="oracle_dsn">DSN</label>
+                        <input type="text" name="oracle_dsn" id="oracle_dsn" placeholder="localhost:1521/FREEPDB1">
+                    </div>
+                    <div class="form-group">
+                        <label for="oracle_schema">Schema <span class="optional">(optional)</span></label>
+                        <input type="text" name="oracle_schema" id="oracle_schema" placeholder="Leave empty to use username">
+                    </div>
+                </div>
+
+                <!-- MongoDB Fields -->
+                <div id="mongodb-fields" class="provider-fields" style="display: none;">
+                    <div class="form-group">
+                        <label for="mongodb_uri">Connection URI</label>
+                        <input type="text" name="mongodb_uri" id="mongodb_uri" placeholder="mongodb://localhost:27017">
+                    </div>
+                    <div class="form-group">
+                        <label for="mongodb_db_name">Database Name <span class="optional">(optional)</span></label>
+                        <input type="text" name="mongodb_db_name" id="mongodb_db_name" placeholder="memorizz">
+                    </div>
+                </div>
+
+                <!-- FileSystem Fields -->
+                <div id="filesystem-fields" class="provider-fields" style="display: none;">
+                    <div class="form-group">
+                        <label for="filesystem_path">Storage Path</label>
+                        <input type="text" name="filesystem_path" id="filesystem_path" placeholder="~/.memorizz/data">
+                    </div>
+                </div>
+
+                <button type="submit" class="connect-btn" id="connect-button" style="background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important; background-color: #000000 !important; background-image: none !important; color: #00d9ff !important; border: 1px solid rgba(0, 217, 255, 0.3) !important; box-shadow: 0 6px 12px rgba(0, 0, 0, 0.7), 0 2px 4px rgba(0, 0, 0, 0.5) !important; font-weight: 700 !important;">
+                    Connect →
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        function toggleProviderFields() {
+            const provider = document.getElementById('provider_type').value;
+
+            // Hide all provider fields
+            document.querySelectorAll('.provider-fields').forEach(el => {
+                el.style.display = 'none';
+            });
+
+            // Show selected provider fields
+            const fieldsId = provider + '-fields';
+            const fields = document.getElementById(fieldsId);
+            if (fields) {
+                fields.style.display = 'block';
+            }
+        }
+
+        // Initialize on page load
+        toggleProviderFields();
+
+        function setupPasswordToggles() {
+            document.querySelectorAll('.password-toggle').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const targetId = btn.getAttribute('data-target');
+                    const input = document.getElementById(targetId);
+                    if (!input) {
+                        return;
+                    }
+                    const isVisible = input.type === 'text';
+                    input.type = isVisible ? 'password' : 'text';
+                    btn.classList.toggle('is-visible', !isVisible);
+                    btn.setAttribute('aria-pressed', String(!isVisible));
+                    btn.setAttribute('aria-label', !isVisible ? 'Hide password' : 'Show password');
+                });
+            });
+        }
+
+        // Force button styling on load (override any cached styles)
+        window.addEventListener('DOMContentLoaded', function() {
+            const btn = document.getElementById('connect-button') || document.querySelector('.connect-btn');
+            if (btn) {
+                btn.style.setProperty('background', 'linear-gradient(135deg, #1a1a1a 0%, #000000 100%)', 'important');
+                btn.style.setProperty('background-color', '#000000', 'important');
+                btn.style.setProperty('background-image', 'none', 'important');
+                btn.style.setProperty('color', '#00d9ff', 'important');
+                btn.style.setProperty('border', '1px solid rgba(0, 217, 255, 0.3)', 'important');
+            }
+            setupPasswordToggles();
+        });
+    </script>
+</body>
+</html>

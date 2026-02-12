@@ -1,44 +1,44 @@
 # Concepts
 
-MemoRizz models agent cognition around a handful of composable building blocks. Understanding these types makes it easier to reason about what your application mode actually enables.
+Memorizz composes agent behavior from memory types, storage providers, and application modes.
 
 ## Memory Types
 
-| Enum | Purpose | Realization |
-|------|---------|-------------|
-| `MemoryType.LONG_TERM_MEMORY` | Semantic knowledge base | Namespaces, personas, entity memory |
-| `MemoryType.ENTITY_MEMORY` | Structured profile data tied to entities | Attribute/value store with provenance |
-| `MemoryType.TOOLBOX` + `MemoryType.WORKFLOW_MEMORY` | Toolbox and workflow behaviors | `long_term_memory/procedural/` |
-| `MemoryType.CONVERSATION_MEMORY` | Episodic timeline of interactions | `long_term_memory/episodic/`
-| `MemoryType.SUMMARIES` | Cached digests of long conversations | `long_term_memory/episodic/summaries.py`
-| `MemoryType.SHORT_TERM_MEMORY` | Working context window | `short_term_memory/working_memory/`
-| `MemoryType.SEMANTIC_CACHE` | Fast, short-lived fact lookups | `short_term_memory/semantic_cache/`
-| `MemoryType.SHARED_MEMORY` | Coordination between multiple agents | `coordination/shared_memory/`
+`MemoryType` is defined in `src/memorizz/enums/memory_type.py`.
 
-!!! note
-    The `MemoryType` enum lives in `src/memorizz/enums/memory_type.py`. Extending it is the first step when you want to introduce a new storage primitive.
+| Enum | Purpose | Main Implementation |
+|---|---|---|
+| `LONG_TERM_MEMORY` | Semantic facts and reusable knowledge | `src/memorizz/long_term_memory/semantic/` |
+| `ENTITY_MEMORY` | Structured entity profiles and attributes | `src/memorizz/long_term_memory/semantic/entity_memory/` |
+| `TOOLBOX` | Callable tools and tool metadata | `src/memorizz/long_term_memory/procedural/toolbox/` |
+| `WORKFLOW_MEMORY` | Process and task execution traces | `src/memorizz/long_term_memory/procedural/workflow/` |
+| `CONVERSATION_MEMORY` | User/assistant interaction history | `src/memorizz/long_term_memory/episodic/` |
+| `SUMMARIES` | Compressed conversation summaries | `src/memorizz/long_term_memory/episodic/summary_component.py` |
+| `SHORT_TERM_MEMORY` | Working session context | `src/memorizz/short_term_memory/working_memory/` |
+| `SEMANTIC_CACHE` | Similar-query response caching | `src/memorizz/short_term_memory/semantic_cache.py` |
+| `SHARED_MEMORY` | Multi-agent coordination state | `src/memorizz/coordination/shared_memory/` |
+| `MEMAGENT` | Persisted agent configuration | `src/memorizz/memagent/models.py` |
 
-## Memories vs. Providers
+## Providers vs Memory Types
 
-- **Memory types** describe *what* your agent can recall.
-- **Memory providers** describe *where* the data lives (Oracle, MongoDB, local experiment, etc.).
-- **Application modes** (see `src/memorizz/enums/application_mode.py`) simply select the right combination of memories for a task. For example `ASSISTANT` activates conversation history, long-term facts, personas, and summaries; `DEEP_RESEARCH` focuses on toolbox access and shared memory.
+- **Memory types** define what data is stored.
+- **Providers** define where data is stored (filesystem, Oracle, MongoDB, custom).
+- **Application modes** choose a default combination of memory types.
 
-## Lifecycle
+## Application Modes
 
-1. **Capture** – Agents persist facts by calling methods on the active memory types (e.g., saving a persona or upserting entity attributes).
-2. **Index** – Providers embed relevant fields using your configured embedding provider.
-3. **Retrieve** – During a run, the `MemAgent` orchestrator fetches relevant rows from each memory and mixes them into the prompt stack.
-4. **Summarize** – Episodic memory periodically compacts older interactions into summary memories that keep the context window manageable while preserving detail.
+Mode defaults come from `src/memorizz/enums/application_mode.py`.
 
-## How to Explore Further
+- `assistant`: conversation, long-term, personas, entity memory, short-term, summaries
+- `workflow`: workflow memory, toolbox, long-term, short-term, summaries
+- `deep_research`: toolbox, shared memory, long-term, short-term, summaries
 
-- Inspect `src/memorizz/MEMORY_ARCHITECTURE.md` for the full architecture notes that ship with the codebase.
-- Use `mkdocstrings` directives inside any doc page to render live API reference blocks, e.g.
+You can still override with explicit `memory_types` if your use case needs a custom stack.
 
-```markdown
-::: memorizz.memagent.builders.MemAgentBuilder
-    handler: python
-```
+## Typical Runtime Lifecycle
 
-That directive renders directly from the Python source, so your docs always match the SDK version in the repository.
+1. Agent receives a query.
+2. Relevant memory is retrieved from active memory types via the configured provider.
+3. LLM produces a response (and may call registered tools).
+4. Interaction is written back to memory stores.
+5. Optional semantic cache and summary logic optimize future turns.

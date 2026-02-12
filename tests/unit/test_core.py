@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from memorizz.enums.memory_type import MemoryType
 from memorizz.memagent.constants import DEFAULT_INSTRUCTION, DEFAULT_MAX_STEPS
 from memorizz.memagent.core import MemAgent
 from memorizz.memagent.models import MemAgentConfig, MemAgentModel
@@ -21,8 +22,20 @@ class TestMemAgentCore:
         assert_agent_state_valid(agent)
         assert agent.instruction == "Test instruction"
         assert agent.max_steps == DEFAULT_MAX_STEPS
+        assert MemoryType.SUMMARIES in agent.active_memory_types
         assert agent.agent_id is not None
         assert len(agent.agent_id) > 0
+
+    @pytest.mark.unit
+    def test_default_context_tools_include_autosummarize(self):
+        """Built-in context toolset should expose on-demand autosummarization."""
+        agent = MemAgent(instruction="Tool availability test")
+        assert "autosummarize_conversation" in agent.tool_manager.tools
+
+        result, _ = agent.tool_manager.execute_tool("autosummarize_conversation", {})
+        assert isinstance(result, dict)
+        assert result.get("ok") is False
+        assert "memory provider" in result.get("error", "").lower()
 
     @pytest.mark.unit
     def test_memagent_initialization_full(
@@ -51,6 +64,32 @@ class TestMemAgentCore:
         assert agent.memory_ids == ["test_memory_1", "test_memory_2"]
         assert agent.model == mock_llm_provider
         assert agent.memory_provider == mock_memory_provider
+
+    @pytest.mark.unit
+    def test_tool_iteration_limit_uses_agent_max_steps(self):
+        """Tool-calling loop limit should follow configured max_steps."""
+        agent = MemAgent(instruction="Tool iteration test", max_steps=20)
+        assert agent._get_tool_iteration_limit() == 20
+
+        agent.max_steps = 7
+        assert agent._get_tool_iteration_limit() == 7
+
+    @pytest.mark.unit
+    def test_tool_iteration_limit_has_safe_bounds(self):
+        """Tool-calling loop limit should enforce sane min/max defaults."""
+        agent = MemAgent(instruction="Tool iteration bounds test")
+
+        agent.max_steps = 0
+        assert agent._get_tool_iteration_limit() == 1
+
+        agent.max_steps = -9
+        assert agent._get_tool_iteration_limit() == 1
+
+        agent.max_steps = "not-a-number"
+        assert agent._get_tool_iteration_limit() == DEFAULT_MAX_STEPS
+
+        agent.max_steps = 5000
+        assert agent._get_tool_iteration_limit() == 1000
 
     @pytest.mark.unit
     def test_memagent_managers_initialization(self, mock_memory_provider):
@@ -172,6 +211,152 @@ class TestMemAgentCore:
 
         assert agent._entity_memory_enabled is True
 
+    @pytest.mark.unit
+    def test_memagent_loads_skill_paths_and_registers_skill_tools(self, tmp_path):
+        """Skill markdown files should load and expose skill tools."""
+        skill_file = tmp_path / "support.skills.md"
+        skill_file.write_text(
+            "# Support Skill\n\nHandle support flows.\n\n```python\nprint('ok')\n```\n",
+            encoding="utf-8",
+        )
+
+        agent = MemAgent(
+            instruction="Skill test",
+            skill_paths=[str(skill_file)],
+        )
+
+        assert len(agent.skills) == 1
+        assert agent.skills[0]["name"] == "Support Skill"
+
+        tool_names = set(agent.tool_manager.list_tools())
+        assert "list_skills" in tool_names
+        assert "read_skill" in tool_names
+        assert "run_skill_code" in tool_names
+        assert "run_skill_script" in tool_names
+
+    @pytest.mark.unit
+    def test_run_skill_code_requires_sandbox(self, tmp_path):
+        """Skill code execution should fail when sandbox is not configured."""
+        skill_file = tmp_path / "math.skills.md"
+        skill_file.write_text(
+            "# Math Skill\n\n```python\nprint(1 + 1)\n```\n",
+            encoding="utf-8",
+        )
+
+        agent = MemAgent(
+            instruction="Skill execution test",
+            skill_paths=[str(skill_file)],
+        )
+        result, _ = agent.tool_manager.execute_tool(
+            "run_skill_code", {"skill_name": "Math Skill"}
+        )
+        assert isinstance(result, dict)
+        assert "execution" in result
+        assert result["execution"].get("ok") is False
+        assert "Sandbox provider is required" in result["execution"].get("error", "")
+
+    @pytest.mark.unit
+    def test_memagent_registers_mcp_tools(self):
+        """MCP config should expose MCP helper tools."""
+        agent = MemAgent(
+            instruction="MCP test",
+            mcp_servers=[
+                {
+                    "name": "filesystem",
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+                }
+            ],
+        )
+
+        tool_names = set(agent.tool_manager.list_tools())
+        assert "list_mcp_servers" in tool_names
+        assert "mcp_list_tools" in tool_names
+        assert "mcp_call_tool" in tool_names
+
+        result, _ = agent.tool_manager.execute_tool("list_mcp_servers", {})
+        assert isinstance(result, dict)
+        assert result.get("servers")
+        assert result["servers"][0]["name"] == "filesystem"
+
+    @pytest.mark.unit
+    def test_memagent_registers_skills_marketplace_tool(self):
+        """Skills marketplace config should expose the marketplace search tool."""
+        agent = MemAgent(
+            instruction="Marketplace test",
+            skills_marketplace_provider="skillsmp",
+            skills_marketplace_config={"api_key": "sk_test_skillsmp"},
+        )
+
+        tool_names = set(agent.tool_manager.list_tools())
+        assert "skills_marketplace_search" in tool_names
+
+        with patch.object(
+            agent,
+            "_run_skills_marketplace_request",
+            return_value={
+                "ok": True,
+                "status_code": 200,
+                "response": {"data": {"skills": [{"name": "SEO Assistant"}]}},
+            },
+        ):
+            result, _ = agent.tool_manager.execute_tool(
+                "skills_marketplace_search",
+                {"q": "SEO"},
+            )
+        assert isinstance(result, dict)
+        assert result.get("ok") is True
+        assert result.get("count") == 1
+
+    @pytest.mark.unit
+    def test_skills_marketplace_cloudflare_error_is_normalized(self):
+        """Cloudflare HTML blocks should map to a concise actionable tool error."""
+        agent = MemAgent(
+            instruction="Marketplace Cloudflare test",
+            skills_marketplace_provider="skillsmp",
+            skills_marketplace_config={"api_key": "sk_test_skillsmp"},
+        )
+        with patch.object(
+            agent,
+            "_run_skills_marketplace_request",
+            return_value={
+                "ok": False,
+                "status_code": 403,
+                "error_code": None,
+                "error": "<!doctype html><title>Access denied | skillsmp.com used Cloudflare to restrict access</title><h1>Error 1010</h1>",
+                "response": None,
+            },
+        ):
+            result, _ = agent.tool_manager.execute_tool(
+                "skills_marketplace_search",
+                {"q": "spotify playlist url"},
+            )
+
+        assert isinstance(result, dict)
+        assert result.get("ok") is False
+        assert result.get("status_code") == 403
+        assert "CLOUDFLARE_ACCESS_DENIED" in str(result.get("error", ""))
+        assert "backend runtime" in str(result.get("error", "")).lower()
+
+    @pytest.mark.unit
+    def test_memagent_graalpy_missing_executable_fails_fast(self):
+        """Selecting GraalPy without executable should raise actionable error."""
+        missing_binary = f"/tmp/graalpy-missing-{uuid.uuid4().hex}"
+
+        with pytest.raises(ValueError) as exc_info:
+            MemAgent(
+                instruction="Sandbox validation test",
+                sandbox_provider={
+                    "provider": "graalpy",
+                    "graalpy_path": missing_binary,
+                },
+            )
+
+        assert "GraalPy sandbox requires a working `graalpy` executable" in str(
+            exc_info.value
+        )
+
 
 class TestMemAgentRun:
     """Test the MemAgent run method."""
@@ -253,6 +438,88 @@ class TestMemAgentRun:
         assert_agent_response_valid(response)
         # Verify memory manager was called for context
         assert agent.memory_manager.load_conversation_history.called
+
+    @pytest.mark.unit
+    def test_run_context_uses_extended_history_limit(self, memagent_with_mocks):
+        """Context builder should fetch more than a tiny fixed history window."""
+        agent = memagent_with_mocks
+
+        agent._build_context("Keep context", "memory_for_history_limit")
+
+        assert agent.memory_manager.load_conversation_history.called
+        _, kwargs = agent.memory_manager.load_conversation_history.call_args
+        assert int(kwargs.get("limit", 0)) > 10
+
+    @pytest.mark.unit
+    def test_build_prompt_messages_keeps_recent_history_beyond_five(
+        self, memagent_with_mocks
+    ):
+        """Prompt assembly should not truncate thread history to only five messages."""
+        agent = memagent_with_mocks
+        agent._context_window_tokens = None
+
+        history = [
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"history-message-{i}",
+            }
+            for i in range(12)
+        ]
+
+        prompt_messages = agent._build_prompt_messages(
+            "system prompt",
+            "current query",
+            {"conversation_history": history},
+        )
+
+        history_in_prompt = prompt_messages[1:-1]
+        assert len(history_in_prompt) == 12
+        assert history_in_prompt[0]["content"] == "history-message-0"
+        assert history_in_prompt[-1]["content"] == "history-message-11"
+
+    @pytest.mark.unit
+    def test_prepare_history_messages_respects_budget(self, memagent_with_mocks):
+        """History assembly should trim for tight context windows while keeping recency."""
+        agent = memagent_with_mocks
+        agent._context_window_tokens = 256
+
+        history = [
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"long-history-{i}-" + ("x" * 220),
+            }
+            for i in range(18)
+        ]
+
+        selected = agent._prepare_history_messages(
+            history, "system prompt for budget", "query"
+        )
+
+        assert 0 < len(selected) < len(history)
+        assert selected[-1]["content"] == history[-1]["content"]
+
+    @pytest.mark.unit
+    def test_run_isolates_conversation_state_per_thread(self, memagent_with_mocks):
+        """Switching memory_ids should keep per-thread conversation IDs isolated."""
+        agent = memagent_with_mocks
+
+        response_a = agent.run("Thread A message", memory_id="thread_a")
+        assert_agent_response_valid(response_a)
+        conv_a = agent.get_current_conversation_id()
+        assert conv_a
+
+        response_b = agent.run("Thread B message", memory_id="thread_b")
+        assert_agent_response_valid(response_b)
+        conv_b = agent.get_current_conversation_id()
+        assert conv_b
+        assert conv_b != conv_a
+
+        response_a_2 = agent.run("Thread A follow-up", memory_id="thread_a")
+        assert_agent_response_valid(response_a_2)
+        assert agent.get_current_conversation_id() == conv_a
+
+        assert agent._conversation_ids_by_memory.get("thread_a") == conv_a
+        assert agent._conversation_ids_by_memory.get("thread_b") == conv_b
 
 
 class TestMemAgentMethods:

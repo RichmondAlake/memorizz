@@ -7,11 +7,17 @@ Deep research mode equips agents to explore large corpora, call specialized tool
 Use `DeepResearchWorkflow` when you want a fully configured root/delegate/synthesis stack in a single call:
 
 ```python
-from memorizz.memory_provider import MemoryProvider
+from pathlib import Path
+
 from memorizz.memagent.orchestrators import DeepResearchWorkflow
+from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+
+memory_provider = FileSystemProvider(
+    FileSystemConfig(root_path=Path("~/.memorizz").expanduser())
+)
 
 workflow = DeepResearchWorkflow.from_config(
-    memory_provider=MemoryProvider(),
+    memory_provider=memory_provider,
     delegate_instructions=[
         "Financial researcher: gather revenue/profit/cash-flow trends.",
         "Market analyst: capture competitors, market share, and macro forces.",
@@ -92,12 +98,16 @@ The `SharedMemory` helper now exposes `post_command`, `post_status`, `post_repor
 ## Manual Wiring (Custom Agents)
 
 ```python
-from memorizz.memory_provider import MemoryProvider
+from pathlib import Path
+
 from memorizz.memagent.builders import create_deep_research_agent
 from memorizz.memagent.orchestrators import DeepResearchOrchestrator
 from memorizz.internet_access import get_default_internet_access_provider
+from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
 
-memory_provider = MemoryProvider()
+memory_provider = FileSystemProvider(
+    FileSystemConfig(root_path=Path("~/.memorizz").expanduser())
+)
 internet_provider = get_default_internet_access_provider()
 
 root_agent = (create_deep_research_agent(
@@ -139,7 +149,7 @@ print(response)
 
 Each delegate repeats the builder call with role-specific instructions (researcher, analyst, writer) but the same session. The synthesizer’s prompt stresses conflict resolution, citation hygiene, and final logging.
 
-> See `examples/deep_research/demo.py` for a runnable version that wires up a coordinator, two delegates, and a synthesis agent, demonstrating the new shared-memory message helpers.
+> See `examples/deep_research/deep_research_memagent.ipynb` for a runnable deep-research walkthrough.
 
 ## Prompt Templates
 

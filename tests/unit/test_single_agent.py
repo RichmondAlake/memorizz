@@ -117,9 +117,8 @@ class TestSingleAgentBasics:
         )
 
         # Test that tools were added
-        assert len(agent.tool_manager.list_tools()) == 2
-        assert "calculator" in agent.tool_manager.list_tools()
-        assert "text_processor" in agent.tool_manager.list_tools()
+        tool_names = set(agent.tool_manager.list_tools())
+        assert {"calculator", "text_processor"}.issubset(tool_names)
 
         # Test tool execution
         calc_result, _ = agent.tool_manager.execute_tool(

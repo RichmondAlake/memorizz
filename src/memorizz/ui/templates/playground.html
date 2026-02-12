@@ -1,0 +1,1706 @@
+{% extends "base.html" %}
+
+{% block title %}Playground - {{ agent.persona.name if agent and agent.persona and agent.persona.name else 'Agent' }} - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header page-header--agent">
+    {% set agent_is_favorite = agent.is_favorite if agent and agent.is_favorite is not none else false %}
+    <a href="/agents" class="back-link">← Back to Agents</a>
+    <h1>
+        Playground
+        <span class="playground-agent-name">
+            {% if agent and agent.persona and agent.persona.name %}
+                — {{ agent.persona.name }}
+            {% endif %}
+        </span>
+    </h1>
+    {% if agent %}
+    <form method="post" action="/agents/{{ agent.agent_id }}/favorite" class="playground-favorite-form">
+        <input type="hidden" name="redirect_to" value="/agents/{{ agent.agent_id }}/playground">
+        <input type="hidden" name="is_favorite" value="{% if agent_is_favorite %}0{% else %}1{% endif %}">
+        <button
+            type="submit"
+            class="favorite-toggle favorite-toggle--playground {% if agent_is_favorite %}is-active{% endif %}"
+            title="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
+            aria-label="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
+        >
+            <span aria-hidden="true">★</span>
+            <span>{% if agent_is_favorite %}Favorited{% else %}Favorite{% endif %}</span>
+        </button>
+    </form>
+    {% endif %}
+    {% if agent and agent.persona and agent.persona.role %}
+    <p>{{ agent.persona.role }}</p>
+    {% endif %}
+</div>
+
+{% if error %}
+<div class="error-message">
+    <span>!</span> {{ error }}
+</div>
+{% endif %}
+
+{% if agent %}
+<!-- Collapsible Agent Config Panel -->
+<details class="playground-config">
+    <summary class="playground-config-toggle">
+        <span class="config-icon">⚙️</span>
+        <span>Agent Configuration</span>
+        <span class="config-caret">▾</span>
+    </summary>
+    <form method="post" action="/agents/{{ agent.agent_id }}/playground/config" class="playground-config-form">
+        <div class="config-grid">
+            <div class="config-field">
+                <label for="cfg-llm-provider">LLM Provider</label>
+                <select id="cfg-llm-provider" name="llm_provider" onchange="onProviderChange()">
+                    <option value="openai" {% if llm_provider == 'openai' %}selected{% endif %}>OpenAI</option>
+                    <option value="azure" {% if llm_provider == 'azure' %}selected{% endif %}>Azure OpenAI</option>
+                    <option value="huggingface" {% if llm_provider == 'huggingface' %}selected{% endif %}>HuggingFace</option>
+                </select>
+            </div>
+            <div class="config-field">
+                <label for="cfg-llm-model">Model</label>
+                <select id="cfg-llm-model" name="llm_model" {% if llm_provider == 'azure' %}style="display:none"{% endif %}>
+                </select>
+                <input id="cfg-llm-model-custom" type="text" value="{{ llm_model }}"
+                       placeholder="Deployment name" {% if llm_provider != 'azure' %}style="display:none"{% endif %}>
+            </div>
+            <div class="config-field">
+                <label for="cfg-max-steps">Max Tool Iterations</label>
+                <input id="cfg-max-steps" name="max_steps" type="number" value="{{ max_steps }}" min="1" max="100">
+                <p class="form-hint">Maximum tool-calling rounds per run (default: 20).</p>
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-enable-entity-memory">Entity Memory</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-enable-entity-memory" name="enable_entity_memory" type="checkbox" value="1" {% if enable_entity_memory %}checked{% endif %}>
+                    <span>Enable structured entity memory tools</span>
+                </label>
+                {% if entity_memory_status_error %}
+                <p class="form-hint sandbox-error-hint">{{ entity_memory_status_error }}</p>
+                {% endif %}
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-enable-workflow-memory">Workflow Memory</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-enable-workflow-memory" name="enable_workflow_memory" type="checkbox" value="1" {% if enable_workflow_memory %}checked{% endif %}>
+                    <span>Enable workflow trace and step memory</span>
+                </label>
+            </div>
+            <div class="config-field">
+                <label for="cfg-sandbox-provider">Sandbox Provider</label>
+                <select id="cfg-sandbox-provider" name="sandbox_provider">
+                    <option value="" {% if not sandbox_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="e2b" {% if sandbox_provider == 'e2b' %}selected{% endif %}>E2B (Cloud)</option>
+                    <option value="daytona" {% if sandbox_provider == 'daytona' %}selected{% endif %}>Daytona (Cloud)</option>
+                    <option value="graalpy" {% if sandbox_provider == 'graalpy' %}selected{% endif %}>GraalPy (Local)</option>
+                </select>
+                {% if sandbox_status_error %}
+                <p class="form-hint sandbox-error-hint">{{ sandbox_status_error }}</p>
+                {% endif %}
+            </div>
+            <div class="config-field">
+                <label for="cfg-internet-provider">Internet Provider</label>
+                <select id="cfg-internet-provider" name="internet_provider">
+                    <option value="" {% if not internet_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="tavily" {% if internet_provider == 'tavily' %}selected{% endif %}>Tavily</option>
+                    <option value="firecrawl" {% if internet_provider == 'firecrawl' %}selected{% endif %}>Firecrawl</option>
+                    <option value="offline" {% if internet_provider == 'offline' %}selected{% endif %}>Offline</option>
+                </select>
+                {% if internet_status_error %}
+                <p class="form-hint sandbox-error-hint">{{ internet_status_error }}</p>
+                {% endif %}
+            </div>
+            <div class="config-field">
+                <label for="cfg-skills-marketplace-provider">Skills Marketplace</label>
+                <select id="cfg-skills-marketplace-provider" name="skills_marketplace_provider">
+                    <option value="" {% if not skills_marketplace_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="skillsmp" {% if skills_marketplace_provider == 'skillsmp' %}selected{% endif %}>SkillsMP (skillsmp.com)</option>
+                </select>
+                {% if skills_marketplace_status_error %}
+                <p class="form-hint sandbox-error-hint">{{ skills_marketplace_status_error }}</p>
+                {% endif %}
+            </div>
+            <div class="config-field">
+                <label for="cfg-persona-name">Persona Name</label>
+                <input id="cfg-persona-name" name="persona_name" type="text" value="{{ persona_name }}" placeholder="Agent name">
+            </div>
+            <div class="config-field">
+                <label for="cfg-persona-role">Persona Role</label>
+                <input id="cfg-persona-role" name="persona_role" type="text" value="{{ persona_role }}" placeholder="e.g. assistant, researcher">
+            </div>
+            <div class="config-field config-field--wide">
+                <label for="cfg-persona-goals">Persona Goals</label>
+                <textarea id="cfg-persona-goals" name="persona_goals" rows="2" placeholder="What should the agent aim to achieve?">{{ persona_goals }}</textarea>
+            </div>
+            <div class="config-field config-field--wide">
+                <label for="cfg-persona-background">Persona Background</label>
+                <textarea id="cfg-persona-background" name="persona_background" rows="2" placeholder="Relevant experience, expertise, context...">{{ persona_background }}</textarea>
+            </div>
+            <div class="config-field config-field--wide">
+                <label for="cfg-instruction">System Instruction</label>
+                <textarea id="cfg-instruction" name="instruction" rows="3" placeholder="System instruction...">{{ instruction }}</textarea>
+            </div>
+            <div class="config-field config-field--wide">
+                <label>Skills (.skills.md / SKILL.md)</label>
+                <input id="cfg-skill-paths-json" type="hidden" name="skill_paths_json" value="[]">
+                <div id="cfg-skill-path-rows" class="config-dynamic-list"></div>
+                <div class="config-dynamic-actions">
+                    <button type="button" class="btn btn-sm" onclick="addSkillPathRow()">Add Skill File</button>
+                </div>
+                <p class="form-hint">Use absolute or repo-relative paths. Skill code is executed only in sandbox via skill tools.</p>
+            </div>
+            <div class="config-field config-field--wide">
+                <label>MCP Servers</label>
+                <input id="cfg-mcp-servers-json" type="hidden" name="mcp_servers_json" value="[]">
+                <div id="cfg-mcp-server-rows" class="config-dynamic-list"></div>
+                <div class="config-dynamic-actions">
+                    <button type="button" class="btn btn-sm" onclick="addMcpServerRow()">Add MCP Server</button>
+                </div>
+                <p class="form-hint">Configure MCP servers for sandboxed stdio/http access. For stdio, provide command + args + env.</p>
+            </div>
+
+            {% if agent_tools %}
+            <div class="config-field config-field--wide">
+                <label>Registered Tools ({{ agent_tools|length }})</label>
+                <div class="config-tools-list">
+                    {% for tool in agent_tools %}
+                    <div class="config-tool-item">
+                        <span class="config-tool-name">{{ tool.name }}</span>
+                        {% if tool.description %}
+                        <span class="config-tool-desc">{{ tool.description }}</span>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        <div class="config-actions">
+            <button type="submit" class="btn btn-primary btn-sm">Save Config</button>
+        </div>
+    </form>
+</details>
+
+<section class="playground-threads">
+    <div class="playground-threads-header">
+        <h2>Threads</h2>
+        <div class="playground-threads-actions">
+            <button type="button" class="btn btn-sm" onclick="startNewThread()">Start New Thread</button>
+        </div>
+    </div>
+    {% if threads %}
+    <div class="playground-thread-tabs" id="playground-thread-tabs">
+        {% for thread in threads %}
+        <button
+            type="button"
+            class="playground-thread-tab {% if thread.memory_id == default_memory_id %}is-active{% endif %}"
+            data-memory-id="{{ thread.memory_id }}"
+            title="{{ thread.memory_id }} • {{ thread.message_count }} messages • {{ thread.last_activity }}"
+            onclick='useThreadMemoryId({{ thread.memory_id|tojson }})'
+        >
+            <span class="thread-tab-title">Thread {{ loop.index }}</span>
+            <span class="thread-tab-meta">{{ thread.message_count }} msg{% if thread.message_count != 1 %}s{% endif %}</span>
+            <code>{{ thread.memory_id }}</code>
+        </button>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="form-hint">No thread memory IDs yet. Use "Start New Thread" or send your first message.</p>
+    {% endif %}
+</section>
+
+<!-- Playground Workbench: Chat + Context Panel -->
+<div class="playground-workbench">
+    <!-- Chat Area (left) -->
+    <div class="playground-chat" id="playground-chat">
+        <input id="pg-memory-id" type="hidden" value="{{ default_memory_id }}">
+        <div class="playground-messages" id="playground-messages">
+            {% if context_window %}
+                {% for msg in context_window %}
+                <div class="pg-message pg-message--{{ msg.role or 'system' }}">
+                    <div class="pg-message-avatar">
+                        {% if msg.role == 'user' %}👤{% elif msg.role == 'assistant' %}🤖{% elif msg.role == 'tool' %}🔧{% else %}📝{% endif %}
+                    </div>
+                    <div class="pg-message-body">
+                        <div class="pg-message-role">{{ msg.role|default('Unknown')|title }}</div>
+                        <div class="pg-message-text">{{ msg.content or msg.get('text', '') }}</div>
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+            <div class="pg-empty">
+                <div class="pg-empty-icon">💬</div>
+                <p>Start a conversation with this agent</p>
+                <p class="pg-empty-hint">Messages will stream in real-time</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Composer -->
+        <div class="playground-composer" id="playground-composer">
+            <div class="composer-input">
+                <label for="pg-query" class="sr-only">Message</label>
+                <textarea id="pg-query" rows="2" placeholder="Type your message... (Enter to send, Shift+Enter for newline)" autofocus></textarea>
+            </div>
+            <div class="composer-row">
+                <button type="button" id="pg-send-btn" class="btn btn-primary" onclick="sendMessage()">
+                    <span id="pg-send-text">Send</span>
+                    <span id="pg-send-spinner" class="spinner" style="display:none;"></span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Context Panel (right) -->
+    <aside class="playground-context-panel" id="playground-context-panel">
+        <button class="context-panel-toggle" id="context-panel-toggle" onclick="toggleContextPanel()" title="Toggle context panel">◀</button>
+
+        <div class="context-panel-inner">
+            {% if token_stats %}
+            <div class="token-utilization" id="token-utilization-card">
+                <div class="token-header">
+                    <h3>Context Utilization</h3>
+                    <span class="token-summary" id="token-summary">{{ token_stats.total_tokens|default(0) }} / {{ token_stats.context_window_tokens|default(128000) }} tokens</span>
+                </div>
+                <div class="token-bar-wrapper" id="token-bar-wrapper" tabindex="0" role="button" aria-expanded="false" aria-label="Show token composition">
+                    <div class="token-bar-container">
+                        <div class="token-bar" id="token-bar-fill" style="width: {{ [token_stats.percentage_used|default(0), 100]|min }}%"></div>
+                    </div>
+                </div>
+                <div class="token-composition-tooltip" id="token-composition-tooltip">
+                    <div class="composition-title">Token Composition</div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot instruction"></span> System Instruction</span>
+                        <span class="composition-value" id="token-comp-instruction">{{ token_stats.composition.instruction|default(0) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot persona"></span> Persona</span>
+                        <span class="composition-value" id="token-comp-persona">{{ token_stats.composition.persona|default(0) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot tools"></span> Tools</span>
+                        <span class="composition-value" id="token-comp-tools">{{ token_stats.composition.tools|default(0) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot toolbox-memory"></span> Toolbox Memory</span>
+                        <span class="composition-value" id="token-comp-toolbox-memory">{{ token_stats.composition.toolbox_memory|default(0) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot workflow-memory"></span> Workflow Memory</span>
+                        <span class="composition-value" id="token-comp-workflow-memory">{{ token_stats.composition.workflow_memory|default(0) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot entity-memory"></span> Entity Memory</span>
+                        <span class="composition-value" id="token-comp-entity-memory">{{ token_stats.composition.entity_memory|default(0) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot summary-memory"></span> Summary Memory</span>
+                        <span class="composition-value" id="token-comp-summary-memory">{{ token_stats.composition.summary_memory|default(0) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot history"></span> Conversation History</span>
+                        <span class="composition-value" id="token-comp-history">{{ token_stats.composition.history|default(0) }} tokens</span>
+                    </div>
+                </div>
+                <div class="token-details">
+                    <span class="token-percentage" id="token-percentage">{{ token_stats.percentage_used|default(0) }}% used</span>
+                    <span class="token-messages" id="token-messages">{{ token_stats.message_count|default(0) }} messages</span>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="context-card">
+                <div class="context-card-header">
+                    <div class="context-card-title">
+                        <h3>Context Window</h3>
+                        <span class="context-card-subtitle" id="context-window-count">{{ context_window|length }} messages</span>
+                    </div>
+                </div>
+                <div class="context-card-body">
+                    {% if agent.instruction %}
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">System Instruction</summary>
+                        <div class="context-block-body">
+                            <pre class="instruction-text">{{ agent.instruction }}</pre>
+                        </div>
+                    </details>
+                    {% endif %}
+
+                    {% if agent.persona %}
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Persona</summary>
+                        <div class="context-block-body">
+                            {% if agent.persona.name %}
+                            <div class="context-item">
+                                <span class="item-label">Name:</span>
+                                <span class="item-value">{{ agent.persona.name }}</span>
+                            </div>
+                            {% endif %}
+                            {% if agent.persona.role %}
+                            <div class="context-item">
+                                <span class="item-label">Role:</span>
+                                <span class="item-value">{{ agent.persona.role }}</span>
+                            </div>
+                            {% endif %}
+                            {% if agent.persona.background %}
+                            <div class="context-item">
+                                <span class="item-label">Background:</span>
+                                <span class="item-value">{{ agent.persona.background }}</span>
+                            </div>
+                            {% endif %}
+                            {% if agent.persona.goals %}
+                            <div class="context-item">
+                                <span class="item-label">Goals:</span>
+                                <ul class="goals-list">
+                                {% if agent.persona.goals is iterable and agent.persona.goals is not string %}
+                                    {% for goal in agent.persona.goals %}
+                                    <li>{{ goal }}</li>
+                                    {% endfor %}
+                                {% else %}
+                                    <li>{{ agent.persona.goals }}</li>
+                                {% endif %}
+                                </ul>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </details>
+                    {% endif %}
+
+                    {% if agent.tools %}
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Tools ({{ agent.tools|length }})</summary>
+                        <div class="context-block-body">
+                            <div class="tools-list">
+                                {% for tool in agent.tools %}
+                                <div class="tool-item">
+                                    <span class="tool-name">{{ tool.name if tool.name else tool.get('function', {}).get('name', 'Unknown') }}</span>
+                                    <span class="tool-desc">{{ tool.description if tool.description else tool.get('function', {}).get('description', '') }}</span>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </details>
+                    {% endif %}
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Toolbox Memory</summary>
+                        <div id="context-toolbox-container">
+                        {% if toolbox_memory %}
+                        <div class="context-toolbox-list">
+                            {% for item in toolbox_memory %}
+                            <div class="context-toolbox-item">
+                                <div class="context-toolbox-header">
+                                    <span class="context-toolbox-name">{{ item.name }}</span>
+                                    <span class="context-toolbox-type">{{ item.tool_type }}</span>
+                                </div>
+                                {% if item.timestamp %}
+                                <div class="context-toolbox-time">{{ item.timestamp }}</div>
+                                {% endif %}
+                                {% if item.description %}
+                                <div class="context-toolbox-description">{{ item.description }}</div>
+                                {% endif %}
+                                {% if item.signature %}
+                                <code class="context-toolbox-signature">{{ item.signature }}</code>
+                                {% endif %}
+                                {% if item.value_preview %}
+                                <pre class="context-toolbox-value">{{ item.value_preview }}</pre>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No toolbox memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Workflow Memory</summary>
+                        <div id="context-workflow-container">
+                        {% if workflow_memory %}
+                        <div class="context-workflow-list">
+                            {% for item in workflow_memory %}
+                            <div class="context-workflow-item">
+                                <div class="context-workflow-header">
+                                    <span class="context-workflow-name">{{ item.name }}</span>
+                                    <span class="context-workflow-meta">{{ item.step_count }} steps</span>
+                                </div>
+                                {% if item.timestamp %}
+                                <div class="context-workflow-time">{{ item.timestamp }}</div>
+                                {% endif %}
+                                {% if item.status or item.outcome %}
+                                <div class="context-workflow-state">
+                                    {% if item.status %}<span>Status: {{ item.status }}</span>{% endif %}
+                                    {% if item.outcome %}<span>Outcome: {{ item.outcome }}</span>{% endif %}
+                                </div>
+                                {% endif %}
+                                {% if item.user_query %}
+                                <div class="context-workflow-query">{{ item.user_query }}</div>
+                                {% elif item.description %}
+                                <div class="context-workflow-query">{{ item.description }}</div>
+                                {% endif %}
+                                {% if item.step_names_preview %}
+                                <div class="context-workflow-steps">
+                                    {{ item.step_names_preview | join(', ') }}
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No workflow memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Entity Memory</summary>
+                        <div id="context-entity-container">
+                        {% if entity_memory %}
+                        <div class="context-entity-list">
+                            {% for item in entity_memory %}
+                            <div class="context-entity-item">
+                                <div class="context-entity-header">
+                                    <span class="context-entity-name">{{ item.name }}</span>
+                                    {% if item.entity_type %}
+                                    <span class="context-entity-type">{{ item.entity_type }}</span>
+                                    {% endif %}
+                                </div>
+                                {% if item.timestamp %}
+                                <div class="context-entity-time">{{ item.timestamp }}</div>
+                                {% endif %}
+                                {% if item.attributes_preview %}
+                                <div class="context-entity-attributes">{{ item.attributes_preview }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No entity memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Summary Memory</summary>
+                        <div id="context-summary-container">
+                        {% if summary_memory %}
+                        <div class="context-summary-list">
+                            {% for item in summary_memory %}
+                            <div class="context-summary-item">
+                                <div class="context-summary-header">
+                                    <span class="context-summary-type">{{ item.summary_type }}</span>
+                                    {% if item.timestamp %}
+                                    <span class="context-summary-time">{{ item.timestamp }}</span>
+                                    {% endif %}
+                                </div>
+                                {% if item.content %}
+                                <div class="context-summary-content">{{ item.content }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No summary memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Conversation</summary>
+                        <div id="context-conversation-container">
+                        {% if context_window %}
+                        <div class="context-log">
+                            {% for msg in context_window %}
+                            <div class="context-log-item">
+                                <div class="context-log-meta">
+                                    <span class="context-log-role">{{ msg.role|default('unknown')|upper }}</span>
+                                    {% if msg.timestamp %}
+                                    <span class="context-log-time">{{ msg.timestamp }}</span>
+                                    {% endif %}
+                                </div>
+                                <div class="context-log-text">{{ msg.content or msg.get('text', 'No content') }}</div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No conversation history.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+                </div>
+            </div>
+        </div>
+    </aside>
+</div>
+
+{% else %}
+<div class="empty-state">
+    <div class="empty-icon">❓</div>
+    <h3>Agent Not Found</h3>
+    <p>The requested agent could not be found.</p>
+    <a href="/agents" class="btn btn-primary">Back to Agents</a>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const AGENT_ID = "{{ agent.agent_id }}";
+const CURRENT_MODEL = "{{ llm_model }}";
+const INITIAL_SKILL_PATHS = {{ skill_paths|default([], true)|tojson }};
+const INITIAL_MCP_SERVERS = {{ mcp_servers|default([], true)|tojson }};
+let isStreaming = false;
+let threadLoadSequence = 0;
+
+// --- Provider / Model mapping ---
+const PROVIDER_MODELS = {{ llm_model_catalog|default({}, true)|tojson }};
+const DEFAULT_MODELS_BY_PROVIDER = {{ default_llm_model_by_provider|default({}, true)|tojson }};
+const CUSTOM_MODEL_VALUE = '__custom__';
+
+function syncPlaygroundModelInputMode() {
+    const select = document.getElementById('cfg-llm-model');
+    const customInput = document.getElementById('cfg-llm-model-custom');
+    if (!select || !customInput) return;
+
+    if (select.style.display === 'none') {
+        select.name = '';
+        customInput.style.display = '';
+        customInput.name = 'llm_model';
+        return;
+    }
+
+    const useCustom = select.value === CUSTOM_MODEL_VALUE;
+    customInput.style.display = useCustom ? '' : 'none';
+    customInput.name = useCustom ? 'llm_model' : '';
+    select.name = useCustom ? '' : 'llm_model';
+    if (!useCustom && select.value) {
+        customInput.value = select.value;
+    }
+}
+
+function populateModelSelect(provider) {
+    const select = document.getElementById('cfg-llm-model');
+    const customInput = document.getElementById('cfg-llm-model-custom');
+    const models = Array.isArray(PROVIDER_MODELS[provider]) ? PROVIDER_MODELS[provider] : [];
+    const currentModel = ((customInput.value || CURRENT_MODEL || '').trim());
+
+    if (models.length === 0) {
+        // No predefined catalog: use free-text model/deployment input.
+        select.style.display = 'none';
+        if (!customInput.value.trim()) {
+            customInput.value = (DEFAULT_MODELS_BY_PROVIDER[provider] || currentModel || '').trim();
+        }
+        syncPlaygroundModelInputMode();
+        return;
+    }
+
+    // Catalog available: show select with optional custom entry.
+    select.style.display = '';
+    select.innerHTML = '';
+
+    const groups = {};
+    models.forEach(function(m) {
+        const g = m.group || 'Models';
+        if (!groups[g]) groups[g] = [];
+        groups[g].push(m);
+    });
+
+    Object.keys(groups).forEach(function(groupName) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = groupName;
+        groups[groupName].forEach(function(m) {
+            const opt = document.createElement('option');
+            opt.value = m.value;
+            opt.textContent = m.label;
+            if (m.value === CURRENT_MODEL) opt.selected = true;
+            optgroup.appendChild(opt);
+        });
+        select.appendChild(optgroup);
+    });
+
+    const customOption = document.createElement('option');
+    customOption.value = CUSTOM_MODEL_VALUE;
+    customOption.textContent = 'Custom model / deployment';
+    select.appendChild(customOption);
+
+    const inList = models.some(function(model) {
+        return model.value === currentModel;
+    });
+
+    if (currentModel && inList) {
+        select.value = currentModel;
+        syncPlaygroundModelInputMode();
+        return;
+    }
+
+    if (currentModel) {
+        select.value = CUSTOM_MODEL_VALUE;
+        customInput.value = currentModel;
+        syncPlaygroundModelInputMode();
+        return;
+    }
+
+    const fallback = (DEFAULT_MODELS_BY_PROVIDER[provider] || '').trim();
+    if (fallback && models.some(function(model) { return model.value === fallback; })) {
+        select.value = fallback;
+        syncPlaygroundModelInputMode();
+        return;
+    }
+
+    select.selectedIndex = 0;
+    syncPlaygroundModelInputMode();
+}
+
+function onProviderChange() {
+    const provider = document.getElementById('cfg-llm-provider').value;
+    populateModelSelect(provider);
+}
+
+function removeDynamicRow(buttonEl) {
+    const row = buttonEl.closest('.config-dynamic-row');
+    if (row) {
+        row.remove();
+    }
+}
+
+function addSkillPathRow(pathValue = '') {
+    const container = document.getElementById('cfg-skill-path-rows');
+    if (!container) return;
+
+    const row = document.createElement('div');
+    row.className = 'config-dynamic-row';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'config-dynamic-input cfg-skill-path-input';
+    input.placeholder = 'skills/my-agent.skills.md';
+    input.value = pathValue || '';
+
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.className = 'btn btn-sm';
+    removeButton.textContent = 'Remove';
+    removeButton.addEventListener('click', function() {
+        removeDynamicRow(removeButton);
+    });
+
+    row.appendChild(input);
+    row.appendChild(removeButton);
+    container.appendChild(row);
+}
+
+function addMcpServerRow(server = {}) {
+    const container = document.getElementById('cfg-mcp-server-rows');
+    if (!container) return;
+
+    const row = document.createElement('div');
+    row.className = 'config-dynamic-row config-dynamic-row--stacked';
+
+    const topRow = document.createElement('div');
+    topRow.className = 'config-mcp-top-row';
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.placeholder = 'Server name';
+    nameInput.className = 'config-dynamic-input cfg-mcp-name';
+    nameInput.value = server.name || '';
+
+    const transportSelect = document.createElement('select');
+    transportSelect.className = 'config-dynamic-input cfg-mcp-transport';
+    const stdioOption = document.createElement('option');
+    stdioOption.value = 'stdio';
+    stdioOption.textContent = 'stdio';
+    const httpOption = document.createElement('option');
+    httpOption.value = 'http';
+    httpOption.textContent = 'http';
+    transportSelect.appendChild(stdioOption);
+    transportSelect.appendChild(httpOption);
+    transportSelect.value = server.transport || 'stdio';
+
+    const timeoutInput = document.createElement('input');
+    timeoutInput.type = 'number';
+    timeoutInput.min = '1';
+    timeoutInput.max = '300';
+    timeoutInput.className = 'config-dynamic-input cfg-mcp-timeout';
+    timeoutInput.placeholder = 'Timeout';
+    timeoutInput.value = String(server.timeout || 30);
+
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.className = 'btn btn-sm';
+    removeButton.textContent = 'Remove';
+    removeButton.addEventListener('click', function() {
+        removeDynamicRow(removeButton);
+    });
+
+    topRow.appendChild(nameInput);
+    topRow.appendChild(transportSelect);
+    topRow.appendChild(timeoutInput);
+    topRow.appendChild(removeButton);
+
+    const stdioRow = document.createElement('div');
+    stdioRow.className = 'config-mcp-stdio-row';
+
+    const commandInput = document.createElement('input');
+    commandInput.type = 'text';
+    commandInput.className = 'config-dynamic-input cfg-mcp-command';
+    commandInput.placeholder = 'Command (e.g. npx)';
+    commandInput.value = server.command || '';
+
+    const argsInput = document.createElement('input');
+    argsInput.type = 'text';
+    argsInput.className = 'config-dynamic-input cfg-mcp-args';
+    argsInput.placeholder = 'Args JSON (e.g. ["-y","@pkg/server"])';
+    argsInput.value = server.args && server.args.length ? JSON.stringify(server.args) : '';
+
+    const envInput = document.createElement('input');
+    envInput.type = 'text';
+    envInput.className = 'config-dynamic-input cfg-mcp-env';
+    envInput.placeholder = 'Env JSON (e.g. {"API_KEY":"..."} )';
+    envInput.value = server.env && Object.keys(server.env).length ? JSON.stringify(server.env) : '';
+
+    stdioRow.appendChild(commandInput);
+    stdioRow.appendChild(argsInput);
+    stdioRow.appendChild(envInput);
+
+    const httpRow = document.createElement('div');
+    httpRow.className = 'config-mcp-http-row';
+
+    const urlInput = document.createElement('input');
+    urlInput.type = 'text';
+    urlInput.className = 'config-dynamic-input cfg-mcp-url';
+    urlInput.placeholder = 'HTTP URL (e.g. https://host/mcp)';
+    urlInput.value = server.url || '';
+    httpRow.appendChild(urlInput);
+
+    function syncTransportVisibility() {
+        const isStdio = transportSelect.value === 'stdio';
+        stdioRow.style.display = isStdio ? '' : 'none';
+        httpRow.style.display = isStdio ? 'none' : '';
+    }
+    transportSelect.addEventListener('change', syncTransportVisibility);
+    syncTransportVisibility();
+
+    row.appendChild(topRow);
+    row.appendChild(stdioRow);
+    row.appendChild(httpRow);
+    container.appendChild(row);
+}
+
+function collectSkillPaths() {
+    const inputs = document.querySelectorAll('.cfg-skill-path-input');
+    const values = [];
+    inputs.forEach(function(input) {
+        const value = (input.value || '').trim();
+        if (value && !values.includes(value)) values.push(value);
+    });
+    return values;
+}
+
+function parseJsonField(raw, fallback, label) {
+    const text = (raw || '').trim();
+    if (!text) return fallback;
+    try {
+        return JSON.parse(text);
+    } catch (err) {
+        throw new Error(`Invalid ${label} JSON: ${err.message}`);
+    }
+}
+
+function collectMcpServers() {
+    const rows = document.querySelectorAll('#cfg-mcp-server-rows .config-dynamic-row');
+    const servers = [];
+    const seen = new Set();
+
+    rows.forEach(function(row) {
+        const name = ((row.querySelector('.cfg-mcp-name') || {}).value || '').trim();
+        if (!name || seen.has(name)) return;
+        const transport = ((row.querySelector('.cfg-mcp-transport') || {}).value || 'stdio').trim();
+        const timeoutRaw = ((row.querySelector('.cfg-mcp-timeout') || {}).value || '30').trim();
+        let timeout = parseInt(timeoutRaw, 10);
+        if (isNaN(timeout) || timeout <= 0) timeout = 30;
+
+        const entry = { name: name, transport: transport, timeout: timeout };
+        if (transport === 'stdio') {
+            entry.command = ((row.querySelector('.cfg-mcp-command') || {}).value || '').trim();
+            entry.args = parseJsonField((row.querySelector('.cfg-mcp-args') || {}).value, [], `${name} args`);
+            entry.env = parseJsonField((row.querySelector('.cfg-mcp-env') || {}).value, {}, `${name} env`);
+        } else {
+            entry.url = ((row.querySelector('.cfg-mcp-url') || {}).value || '').trim();
+        }
+        servers.push(entry);
+        seen.add(name);
+    });
+
+    return servers;
+}
+
+function serializeConfigCollections() {
+    const skillPathsHidden = document.getElementById('cfg-skill-paths-json');
+    const mcpServersHidden = document.getElementById('cfg-mcp-servers-json');
+    if (!skillPathsHidden || !mcpServersHidden) return true;
+
+    try {
+        skillPathsHidden.value = JSON.stringify(collectSkillPaths());
+        mcpServersHidden.value = JSON.stringify(collectMcpServers());
+        return true;
+    } catch (err) {
+        alert(err.message);
+        return false;
+    }
+}
+
+function initConfigCollections() {
+    if (Array.isArray(INITIAL_SKILL_PATHS) && INITIAL_SKILL_PATHS.length) {
+        INITIAL_SKILL_PATHS.forEach(function(pathValue) {
+            addSkillPathRow(pathValue);
+        });
+    }
+
+    if (Array.isArray(INITIAL_MCP_SERVERS) && INITIAL_MCP_SERVERS.length) {
+        INITIAL_MCP_SERVERS.forEach(function(server) {
+            addMcpServerRow(server || {});
+        });
+    }
+
+    const form = document.querySelector('.playground-config-form');
+    if (form) {
+        form.addEventListener('submit', function(event) {
+            if (!serializeConfigCollections()) {
+                event.preventDefault();
+            }
+        });
+    }
+
+    serializeConfigCollections();
+}
+
+// Initialise on page load
+populateModelSelect("{{ llm_provider }}");
+const playgroundModelSelect = document.getElementById('cfg-llm-model');
+const playgroundModelCustom = document.getElementById('cfg-llm-model-custom');
+if (playgroundModelSelect) {
+    playgroundModelSelect.addEventListener('change', function() {
+        syncPlaygroundModelInputMode();
+    });
+}
+if (playgroundModelCustom) {
+    playgroundModelCustom.addEventListener('input', function() {
+        if (playgroundModelSelect && playgroundModelSelect.value === CUSTOM_MODEL_VALUE) {
+            playgroundModelCustom.name = 'llm_model';
+        }
+    });
+}
+initConfigCollections();
+
+function toggleContextPanel() {
+    const panel = document.getElementById('playground-context-panel');
+    const btn = document.getElementById('context-panel-toggle');
+    panel.classList.toggle('collapsed');
+    btn.textContent = panel.classList.contains('collapsed') ? '▶' : '◀';
+}
+
+function generateThreadId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+    }
+    return 'thread-' + Math.random().toString(36).slice(2, 10) + '-' + Date.now();
+}
+
+function setActiveThreadTab(memoryId) {
+    const tabs = document.querySelectorAll('.playground-thread-tab');
+    tabs.forEach(function(tab) {
+        const isActive = (tab.dataset.memoryId || '') === (memoryId || '');
+        tab.classList.toggle('is-active', isActive);
+    });
+}
+
+function ensureThreadTabsContainer() {
+    let tabsContainer = document.getElementById('playground-thread-tabs');
+    if (tabsContainer) return tabsContainer;
+
+    const section = document.querySelector('.playground-threads');
+    if (!section) return null;
+
+    const hint = section.querySelector('.form-hint');
+    if (hint) hint.remove();
+
+    tabsContainer = document.createElement('div');
+    tabsContainer.id = 'playground-thread-tabs';
+    tabsContainer.className = 'playground-thread-tabs';
+
+    const header = section.querySelector('.playground-threads-header');
+    if (header && header.nextSibling) {
+        section.insertBefore(tabsContainer, header.nextSibling);
+    } else {
+        section.appendChild(tabsContainer);
+    }
+    return tabsContainer;
+}
+
+function createThreadTab(memoryId, messageCount = 0) {
+    const tabsContainer = ensureThreadTabsContainer();
+    if (!tabsContainer || !memoryId) return null;
+
+    const existing = Array.from(tabsContainer.querySelectorAll('.playground-thread-tab')).find(
+        function(tab) { return (tab.dataset.memoryId || '') === memoryId; }
+    );
+    if (existing) return existing;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'playground-thread-tab';
+    btn.dataset.memoryId = memoryId;
+    btn.title = `${memoryId} • ${messageCount} messages`;
+
+    const titleEl = document.createElement('span');
+    titleEl.className = 'thread-tab-title';
+    titleEl.textContent = 'New Thread';
+
+    const metaEl = document.createElement('span');
+    metaEl.className = 'thread-tab-meta';
+    metaEl.textContent = `${messageCount} msgs`;
+
+    const codeEl = document.createElement('code');
+    codeEl.textContent = memoryId;
+
+    btn.appendChild(titleEl);
+    btn.appendChild(metaEl);
+    btn.appendChild(codeEl);
+    btn.addEventListener('click', function() {
+        useThreadMemoryId(memoryId);
+    });
+
+    tabsContainer.prepend(btn);
+    return btn;
+}
+
+function renderThreadEmptyState(memoryId) {
+    const container = document.getElementById('playground-messages');
+    if (!container) return;
+    const safeThread = escapeHtml(memoryId || 'new');
+    container.innerHTML = `
+        <div class="pg-empty">
+            <div class="pg-empty-icon">💬</div>
+            <p>Start a conversation in this thread</p>
+            <p class="pg-empty-hint">Thread: ${safeThread}</p>
+        </div>
+    `;
+}
+
+function renderThreadMessages(messages, memoryId) {
+    const container = document.getElementById('playground-messages');
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+        renderThreadEmptyState(memoryId);
+        return;
+    }
+
+    const avatars = { user: '👤', assistant: '🤖', tool: '🔧', system: '📝' };
+    messages.forEach(function(msg) {
+        if (
+            msg
+            && msg.message_type === 'trace_bundle'
+            && Array.isArray(msg.trace_events)
+        ) {
+            const traceMessage = document.createElement('div');
+            traceMessage.className = 'pg-message pg-message--tool';
+
+            const traceRows = msg.trace_events.map(function(event) {
+                const traceKind = ((event && event.trace_kind) ? String(event.trace_kind) : 'trace').toLowerCase();
+                const traceKindClass = traceKind.replace(/[^a-z0-9_-]/g, '-');
+                const title = event && event.title ? String(event.title) : 'Trace';
+                const content = event && event.content ? String(event.content) : '';
+                return `
+                    <div class="pg-trace-item pg-trace-item--${traceKindClass}">
+                        <div class="pg-trace-title">${escapeHtml(title)}</div>
+                        <div class="pg-trace-content">${escapeHtml(content)}</div>
+                    </div>
+                `;
+            }).join('');
+
+            traceMessage.innerHTML = `
+                <div class="pg-message-avatar">${avatars.tool}</div>
+                <div class="pg-message-body">
+                    <div class="pg-message-role">Agent Trace</div>
+                    <div class="pg-trace-timeline">${traceRows}</div>
+                </div>
+            `;
+            container.appendChild(traceMessage);
+            return;
+        }
+
+        const role = ((msg && msg.role) ? String(msg.role) : 'system').toLowerCase();
+        const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+        const content = msg && (msg.content ?? msg.text) ? String(msg.content ?? msg.text) : '';
+        const div = document.createElement('div');
+        div.className = `pg-message pg-message--${role}`;
+        div.innerHTML = `
+            <div class="pg-message-avatar">${avatars[role] || '📝'}</div>
+            <div class="pg-message-body">
+                <div class="pg-message-role">${escapeHtml(roleLabel)}</div>
+                <div class="pg-message-text">${escapeHtml(content)}</div>
+            </div>
+        `;
+        container.appendChild(div);
+    });
+    scrollToBottom();
+}
+
+function renderContextConversation(messages) {
+    const container = document.getElementById('context-conversation-container');
+    if (!container) return;
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+        container.innerHTML = '<div class="context-log-empty">No conversation history.</div>';
+        return;
+    }
+
+    const rows = messages.map(function(msg) {
+        const role = ((msg && msg.role) ? String(msg.role) : 'unknown').toUpperCase();
+        const timestamp = msg && msg.timestamp ? String(msg.timestamp) : '';
+        const content = msg && (msg.content ?? msg.text) ? String(msg.content ?? msg.text) : 'No content';
+        return `
+            <div class="context-log-item">
+                <div class="context-log-meta">
+                    <span class="context-log-role">${escapeHtml(role)}</span>
+                    ${timestamp ? `<span class="context-log-time">${escapeHtml(timestamp)}</span>` : ''}
+                </div>
+                <div class="context-log-text">${escapeHtml(content)}</div>
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `<div class="context-log">${rows}</div>`;
+}
+
+function renderContextToolbox(entries) {
+    const container = document.getElementById('context-toolbox-container');
+    if (!container) return;
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+        container.innerHTML = '<div class="context-log-empty">No toolbox memory found for this thread.</div>';
+        return;
+    }
+
+    const rows = entries.map(function(entry) {
+        const name = entry && entry.name ? String(entry.name) : 'unnamed_toolbox_item';
+        const toolType = entry && entry.tool_type ? String(entry.tool_type) : 'toolbox_item';
+        const timestamp = entry && entry.timestamp ? String(entry.timestamp) : '';
+        const description = entry && entry.description ? String(entry.description) : '';
+        const signature = entry && entry.signature ? String(entry.signature) : '';
+        const valuePreview = entry && entry.value_preview ? String(entry.value_preview) : '';
+        return `
+            <div class="context-toolbox-item">
+                <div class="context-toolbox-header">
+                    <span class="context-toolbox-name">${escapeHtml(name)}</span>
+                    <span class="context-toolbox-type">${escapeHtml(toolType)}</span>
+                </div>
+                ${timestamp ? `<div class="context-toolbox-time">${escapeHtml(timestamp)}</div>` : ''}
+                ${description ? `<div class="context-toolbox-description">${escapeHtml(description)}</div>` : ''}
+                ${signature ? `<code class="context-toolbox-signature">${escapeHtml(signature)}</code>` : ''}
+                ${valuePreview ? `<pre class="context-toolbox-value">${escapeHtml(valuePreview)}</pre>` : ''}
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `<div class="context-toolbox-list">${rows}</div>`;
+}
+
+function renderContextWorkflows(entries) {
+    const container = document.getElementById('context-workflow-container');
+    if (!container) return;
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+        container.innerHTML = '<div class="context-log-empty">No workflow memory found for this thread.</div>';
+        return;
+    }
+
+    const rows = entries.map(function(entry) {
+        const name = entry && entry.name ? String(entry.name) : 'unnamed_workflow';
+        const timestamp = entry && entry.timestamp ? String(entry.timestamp) : '';
+        const status = entry && entry.status ? String(entry.status) : '';
+        const outcome = entry && entry.outcome ? String(entry.outcome) : '';
+        const stepCount = entry && Number.isFinite(Number(entry.step_count)) ? Number(entry.step_count) : 0;
+        const userQuery = entry && entry.user_query ? String(entry.user_query) : '';
+        const description = entry && entry.description ? String(entry.description) : '';
+        const stepNames = entry && Array.isArray(entry.step_names_preview)
+            ? entry.step_names_preview.map(function(item) { return String(item); }).filter(Boolean)
+            : [];
+        const stateParts = [];
+        if (status) stateParts.push(`Status: ${status}`);
+        if (outcome) stateParts.push(`Outcome: ${outcome}`);
+        const summaryText = userQuery || description;
+
+        return `
+            <div class="context-workflow-item">
+                <div class="context-workflow-header">
+                    <span class="context-workflow-name">${escapeHtml(name)}</span>
+                    <span class="context-workflow-meta">${stepCount} step${stepCount === 1 ? '' : 's'}</span>
+                </div>
+                ${timestamp ? `<div class="context-workflow-time">${escapeHtml(timestamp)}</div>` : ''}
+                ${stateParts.length ? `<div class="context-workflow-state">${escapeHtml(stateParts.join(' • '))}</div>` : ''}
+                ${summaryText ? `<div class="context-workflow-query">${escapeHtml(summaryText)}</div>` : ''}
+                ${stepNames.length ? `<div class="context-workflow-steps">${escapeHtml(stepNames.join(', '))}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `<div class="context-workflow-list">${rows}</div>`;
+}
+
+function renderContextEntities(entries) {
+    const container = document.getElementById('context-entity-container');
+    if (!container) return;
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+        container.innerHTML = '<div class="context-log-empty">No entity memory found for this thread.</div>';
+        return;
+    }
+
+    const rows = entries.map(function(entry) {
+        const name = entry && entry.name ? String(entry.name) : 'unnamed_entity';
+        const entityType = entry && entry.entity_type ? String(entry.entity_type) : '';
+        const timestamp = entry && entry.timestamp ? String(entry.timestamp) : '';
+        const attributesPreview = entry && entry.attributes_preview ? String(entry.attributes_preview) : '';
+        return `
+            <div class="context-entity-item">
+                <div class="context-entity-header">
+                    <span class="context-entity-name">${escapeHtml(name)}</span>
+                    ${entityType ? `<span class="context-entity-type">${escapeHtml(entityType)}</span>` : ''}
+                </div>
+                ${timestamp ? `<div class="context-entity-time">${escapeHtml(timestamp)}</div>` : ''}
+                ${attributesPreview ? `<div class="context-entity-attributes">${escapeHtml(attributesPreview)}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `<div class="context-entity-list">${rows}</div>`;
+}
+
+function renderContextSummaries(entries) {
+    const container = document.getElementById('context-summary-container');
+    if (!container) return;
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+        container.innerHTML = '<div class="context-log-empty">No summary memory found for this thread.</div>';
+        return;
+    }
+
+    const rows = entries.map(function(entry) {
+        const summaryType = entry && entry.summary_type ? String(entry.summary_type) : 'summary';
+        const timestamp = entry && entry.timestamp ? String(entry.timestamp) : '';
+        const content = entry && entry.content ? String(entry.content) : '';
+        return `
+            <div class="context-summary-item">
+                <div class="context-summary-header">
+                    <span class="context-summary-type">${escapeHtml(summaryType)}</span>
+                    ${timestamp ? `<span class="context-summary-time">${escapeHtml(timestamp)}</span>` : ''}
+                </div>
+                ${content ? `<div class="context-summary-content">${escapeHtml(content)}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `<div class="context-summary-list">${rows}</div>`;
+}
+
+function updateContextWindowCount(messageCount) {
+    const countEl = document.getElementById('context-window-count');
+    if (!countEl) return;
+    const count = Number(messageCount) || 0;
+    countEl.textContent = `${count} message${count === 1 ? '' : 's'}`;
+}
+
+function applyTokenStats(stats) {
+    if (!stats) return;
+
+    const totalTokens = Number(stats.total_tokens) || 0;
+    const contextWindowTokens = Number(stats.context_window_tokens) || 128000;
+    const percentageUsed = Math.max(0, Math.min(100, Number(stats.percentage_used) || 0));
+    const messageCount = Number(stats.message_count) || 0;
+    const composition = (stats && stats.composition) ? stats.composition : {};
+
+    const tokenSummary = document.getElementById('token-summary');
+    const tokenBarFill = document.getElementById('token-bar-fill');
+    const tokenPercentage = document.getElementById('token-percentage');
+    const tokenMessages = document.getElementById('token-messages');
+    const compInstruction = document.getElementById('token-comp-instruction');
+    const compPersona = document.getElementById('token-comp-persona');
+    const compTools = document.getElementById('token-comp-tools');
+    const compToolboxMemory = document.getElementById('token-comp-toolbox-memory');
+    const compWorkflowMemory = document.getElementById('token-comp-workflow-memory');
+    const compEntityMemory = document.getElementById('token-comp-entity-memory');
+    const compSummaryMemory = document.getElementById('token-comp-summary-memory');
+    const compHistory = document.getElementById('token-comp-history');
+
+    if (tokenSummary) tokenSummary.textContent = `${totalTokens} / ${contextWindowTokens} tokens`;
+    if (tokenBarFill) tokenBarFill.style.width = `${percentageUsed}%`;
+    if (tokenPercentage) tokenPercentage.textContent = `${percentageUsed.toFixed(2)}% used`;
+    if (tokenMessages) tokenMessages.textContent = `${messageCount} message${messageCount === 1 ? '' : 's'}`;
+    if (compInstruction) compInstruction.textContent = `${Number(composition.instruction) || 0} tokens`;
+    if (compPersona) compPersona.textContent = `${Number(composition.persona) || 0} tokens`;
+    if (compTools) compTools.textContent = `${Number(composition.tools) || 0} tokens`;
+    if (compToolboxMemory) compToolboxMemory.textContent = `${Number(composition.toolbox_memory) || 0} tokens`;
+    if (compWorkflowMemory) compWorkflowMemory.textContent = `${Number(composition.workflow_memory) || 0} tokens`;
+    if (compEntityMemory) compEntityMemory.textContent = `${Number(composition.entity_memory) || 0} tokens`;
+    if (compSummaryMemory) compSummaryMemory.textContent = `${Number(composition.summary_memory) || 0} tokens`;
+    if (compHistory) compHistory.textContent = `${Number(composition.history) || 0} tokens`;
+}
+
+function updateThreadTabMeta(memoryId, messageCount, lastActivity) {
+    const normalized = (memoryId || '').trim();
+    if (!normalized) return;
+    const tabs = document.querySelectorAll('.playground-thread-tab');
+    tabs.forEach(function(tab) {
+        if ((tab.dataset.memoryId || '') !== normalized) return;
+        const count = Number(messageCount) || 0;
+        const metaEl = tab.querySelector('.thread-tab-meta');
+        if (metaEl) {
+            metaEl.textContent = `${count} msg${count === 1 ? '' : 's'}`;
+        }
+        const titleParts = [normalized, `${count} messages`];
+        const activityText = (lastActivity || '').trim();
+        if (activityText && activityText !== '—') titleParts.push(activityText);
+        tab.title = titleParts.join(' • ');
+    });
+}
+
+async function loadThreadMessages(memoryId, options = {}) {
+    const normalized = (memoryId || '').trim();
+    const requestSeq = ++threadLoadSequence;
+    const renderChat = options.renderChat !== false;
+
+    if (!normalized) {
+        if (renderChat) {
+            renderThreadEmptyState('');
+        }
+        renderContextConversation([]);
+        renderContextToolbox([]);
+        renderContextWorkflows([]);
+        renderContextEntities([]);
+        renderContextSummaries([]);
+        updateContextWindowCount(0);
+        return;
+    }
+
+    try {
+        const response = await fetch(
+            `/agents/${AGENT_ID}/playground/thread?memory_id=${encodeURIComponent(normalized)}`
+        );
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        if (requestSeq !== threadLoadSequence) return;
+        const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        if (renderChat) {
+            renderThreadMessages(messages, normalized);
+        }
+        renderContextConversation(messages);
+        renderContextToolbox(Array.isArray(payload.toolbox_memory) ? payload.toolbox_memory : []);
+        renderContextWorkflows(Array.isArray(payload.workflow_memory) ? payload.workflow_memory : []);
+        renderContextEntities(Array.isArray(payload.entity_memory) ? payload.entity_memory : []);
+        renderContextSummaries(Array.isArray(payload.summary_memory) ? payload.summary_memory : []);
+        updateContextWindowCount(messages.length);
+        applyTokenStats(payload.token_stats || null);
+        updateThreadTabMeta(
+            normalized,
+            payload.message_count != null ? payload.message_count : messages.length,
+            payload.last_activity || ''
+        );
+    } catch (err) {
+        if (requestSeq !== threadLoadSequence) return;
+        if (!renderChat) return;
+        const container = document.getElementById('playground-messages');
+        if (!container) return;
+        container.innerHTML = `
+            <div class="pg-empty">
+                <div class="pg-empty-icon">⚠️</div>
+                <p>Could not load thread history</p>
+                <p class="pg-empty-hint">${escapeHtml(String(err.message || err))}</p>
+            </div>
+        `;
+    }
+}
+
+function useThreadMemoryId(memoryId, createIfMissing = false) {
+    const memoryEl = document.getElementById('pg-memory-id');
+    if (!memoryEl) return;
+    const normalized = (memoryId || '').trim();
+    memoryEl.value = normalized;
+    if (createIfMissing && normalized) {
+        createThreadTab(normalized, 0);
+    }
+    setActiveThreadTab(normalized);
+    renderThreadEmptyState(normalized);
+    void loadThreadMessages(normalized);
+    const queryEl = document.getElementById('pg-query');
+    if (queryEl) queryEl.focus();
+}
+
+function startNewThread() {
+    useThreadMemoryId(generateThreadId(), true);
+}
+
+function initThreadTabs() {
+    const memoryEl = document.getElementById('pg-memory-id');
+    if (!memoryEl) return;
+
+    const currentMemoryId = (memoryEl.value || '').trim();
+    setActiveThreadTab(currentMemoryId);
+    void loadThreadMessages(currentMemoryId);
+}
+
+function scrollToBottom() {
+    const container = document.getElementById('playground-messages');
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+}
+
+function appendMessage(role, content) {
+    const container = document.getElementById('playground-messages');
+    if (!container) return null;
+    const emptyState = container.querySelector('.pg-empty');
+    if (emptyState) emptyState.remove();
+
+    const avatars = { user: '👤', assistant: '🤖', tool: '🔧', system: '📝' };
+    const div = document.createElement('div');
+    div.className = `pg-message pg-message--${role}`;
+    div.innerHTML = `
+        <div class="pg-message-avatar">${avatars[role] || '📝'}</div>
+        <div class="pg-message-body">
+            <div class="pg-message-role">${role.charAt(0).toUpperCase() + role.slice(1)}</div>
+            <div class="pg-message-text">${escapeHtml(content)}</div>
+        </div>
+    `;
+    container.appendChild(div);
+    scrollToBottom();
+    return div;
+}
+
+function createStreamingMessage() {
+    const container = document.getElementById('playground-messages');
+    if (!container) return null;
+    const emptyState = container.querySelector('.pg-empty');
+    if (emptyState) emptyState.remove();
+
+    const div = document.createElement('div');
+    div.className = 'pg-message pg-message--assistant';
+    div.innerHTML = `
+        <div class="pg-message-avatar">🤖</div>
+        <div class="pg-message-body">
+            <div class="pg-message-role">Assistant</div>
+            <div class="pg-trace-timeline"></div>
+            <div class="pg-message-text"><span class="streaming-cursor"></span></div>
+        </div>
+    `;
+    container.appendChild(div);
+    scrollToBottom();
+    return {
+        textElement: div.querySelector('.pg-message-text'),
+        traceTimeline: div.querySelector('.pg-trace-timeline'),
+    };
+}
+
+function closeTokenTooltip() {
+    const tokenCard = document.getElementById('token-utilization-card');
+    const wrapper = document.getElementById('token-bar-wrapper');
+    if (!tokenCard || !wrapper) return;
+    tokenCard.dataset.tooltipPinned = '0';
+    tokenCard.classList.remove('tooltip-open');
+    tokenCard.classList.remove('tooltip-pinned');
+    wrapper.setAttribute('aria-expanded', 'false');
+}
+
+function openTokenTooltip(pinned = false) {
+    const tokenCard = document.getElementById('token-utilization-card');
+    const wrapper = document.getElementById('token-bar-wrapper');
+    if (!tokenCard || !wrapper) return;
+    tokenCard.dataset.tooltipPinned = pinned ? '1' : tokenCard.dataset.tooltipPinned || '0';
+    tokenCard.classList.add('tooltip-open');
+    tokenCard.classList.toggle('tooltip-pinned', tokenCard.dataset.tooltipPinned === '1');
+    wrapper.setAttribute('aria-expanded', 'true');
+}
+
+function initTokenTooltip() {
+    const tokenCard = document.getElementById('token-utilization-card');
+    const wrapper = document.getElementById('token-bar-wrapper');
+    if (!tokenCard || !wrapper) return;
+
+    tokenCard.dataset.tooltipPinned = '0';
+
+    wrapper.addEventListener('mouseenter', function() {
+        if (tokenCard.dataset.tooltipPinned !== '1') {
+            openTokenTooltip(false);
+        }
+    });
+    wrapper.addEventListener('mouseleave', function() {
+        if (tokenCard.dataset.tooltipPinned !== '1') {
+            closeTokenTooltip();
+        }
+    });
+    wrapper.addEventListener('focus', function() {
+        if (tokenCard.dataset.tooltipPinned !== '1') {
+            openTokenTooltip(false);
+        }
+    });
+    wrapper.addEventListener('blur', function() {
+        if (tokenCard.dataset.tooltipPinned !== '1') {
+            closeTokenTooltip();
+        }
+    });
+
+    wrapper.addEventListener('click', function(event) {
+        event.preventDefault();
+        if (tokenCard.dataset.tooltipPinned === '1') {
+            closeTokenTooltip();
+        } else {
+            openTokenTooltip(true);
+        }
+    });
+
+    document.addEventListener('click', function(event) {
+        if (!tokenCard.contains(event.target)) {
+            closeTokenTooltip();
+        }
+    });
+
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') closeTokenTooltip();
+    });
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function appendTraceBox(traceTimeline, traceEvent) {
+    if (!traceTimeline || !traceEvent || typeof traceEvent !== 'object') return;
+
+    const traceKind = String(traceEvent.trace_kind || traceEvent.kind || 'trace').toLowerCase();
+    const title = String(traceEvent.title || 'Trace');
+    const content = String(traceEvent.content || traceEvent.message || '').trim();
+    const traceId = String(traceEvent.trace_id || '').trim();
+    const appendMode = Boolean(traceEvent.append);
+
+    if (!content && !appendMode) return;
+
+    let item = null;
+    if (traceId) {
+        item = Array.from(traceTimeline.querySelectorAll('.pg-trace-item')).find(function(node) {
+            return (node.dataset.traceId || '') === traceId;
+        }) || null;
+    }
+
+    if (appendMode && item) {
+        const contentEl = item.querySelector('.pg-trace-content');
+        if (content && contentEl) {
+            contentEl.textContent += content;
+        }
+        if (traceEvent.complete) {
+            item.classList.add('is-complete');
+        }
+        scrollToBottom();
+        return;
+    }
+
+    item = document.createElement('div');
+    item.className = `pg-trace-item pg-trace-item--${traceKind}`;
+    if (traceId) item.dataset.traceId = traceId;
+    item.innerHTML = `
+        <div class="pg-trace-title">${escapeHtml(title)}</div>
+        <div class="pg-trace-content">${escapeHtml(content)}</div>
+    `;
+    traceTimeline.appendChild(item);
+    scrollToBottom();
+}
+
+function setLoading(loading) {
+    isStreaming = loading;
+    const btn = document.getElementById('pg-send-btn');
+    const text = document.getElementById('pg-send-text');
+    const spinner = document.getElementById('pg-send-spinner');
+    const textarea = document.getElementById('pg-query');
+
+    if (loading) {
+        btn.disabled = true;
+        text.textContent = 'Streaming...';
+        spinner.style.display = 'inline-block';
+        textarea.disabled = true;
+    } else {
+        btn.disabled = false;
+        text.textContent = 'Send';
+        spinner.style.display = 'none';
+        textarea.disabled = false;
+        textarea.focus();
+    }
+}
+
+async function sendMessage() {
+    if (isStreaming) return;
+
+    const queryEl = document.getElementById('pg-query');
+    const memoryEl = document.getElementById('pg-memory-id');
+    if (!queryEl || !memoryEl) return;
+    const query = queryEl.value.trim();
+
+    if (!query) return;
+
+    if (!memoryEl.value.trim()) {
+        const newMemoryId = generateThreadId();
+        memoryEl.value = newMemoryId;
+        createThreadTab(newMemoryId, 0);
+        setActiveThreadTab(newMemoryId);
+    }
+
+    appendMessage('user', query);
+    queryEl.value = '';
+    setLoading(true);
+
+    const streamMessage = createStreamingMessage();
+    if (!streamMessage || !streamMessage.textElement) {
+        setLoading(false);
+        return;
+    }
+    const streamTarget = streamMessage.textElement;
+    const streamTraceTimeline = streamMessage.traceTimeline;
+    let fullText = '';
+
+    try {
+        const modelSelect = document.getElementById('cfg-llm-model');
+        const modelCustom = document.getElementById('cfg-llm-model-custom');
+        const instructionInput = document.getElementById('cfg-instruction');
+
+        // Read model from whichever input is active.
+        let modelValue = '';
+        if (modelSelect.style.display !== 'none') {
+            modelValue = modelSelect.value === CUSTOM_MODEL_VALUE
+                ? modelCustom.value
+                : modelSelect.value;
+        } else {
+            modelValue = modelCustom.value;
+        }
+
+        const formData = new FormData();
+        formData.append('query', query);
+        if (memoryEl.value.trim()) {
+            formData.append('memory_id', memoryEl.value.trim());
+        }
+        if (modelValue.trim()) {
+            formData.append('llm_model', modelValue.trim());
+        }
+        if (instructionInput && instructionInput.value.trim()) {
+            formData.append('instruction', instructionInput.value.trim());
+        }
+
+        const response = await fetch(`/agents/${AGENT_ID}/playground/stream`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const payload = line.slice(6);
+
+                if (payload === '[DONE]') {
+                    const cursor = streamTarget.querySelector('.streaming-cursor');
+                    if (cursor) cursor.remove();
+                    continue;
+                }
+
+                try {
+                    const parsed = JSON.parse(payload);
+
+                    if (typeof parsed === 'string') {
+                        fullText += parsed;
+                        streamTarget.textContent = fullText;
+                        scrollToBottom();
+                        continue;
+                    }
+
+                    if (parsed && typeof parsed === 'object') {
+                        const eventType = String(parsed.type || '').toLowerCase();
+
+                        if (eventType === 'trace' || eventType === 'reasoning') {
+                            appendTraceBox(streamTraceTimeline, parsed);
+                            continue;
+                        }
+
+                        if (eventType === 'warning') {
+                            appendTraceBox(streamTraceTimeline, {
+                                trace_kind: parsed.scope || 'warning',
+                                title: 'Warning',
+                                content: parsed.message || parsed.content || '',
+                            });
+                            continue;
+                        }
+
+                        if (eventType === 'content') {
+                            const textChunk = String(parsed.content || parsed.text || '');
+                            if (textChunk) {
+                                fullText += textChunk;
+                                streamTarget.textContent = fullText;
+                                scrollToBottom();
+                            }
+                            continue;
+                        }
+                    }
+                } catch (e) {}
+            }
+        }
+
+        const cursor = streamTarget.querySelector('.streaming-cursor');
+        if (cursor) cursor.remove();
+        if (fullText) {
+            streamTarget.textContent = fullText;
+        }
+
+    } catch (err) {
+        streamTarget.textContent = `Error: ${err.message}`;
+        streamTarget.classList.add('pg-message-error');
+    } finally {
+        setLoading(false);
+        const activeMemoryId = (memoryEl.value || '').trim();
+        if (activeMemoryId) {
+            await loadThreadMessages(activeMemoryId, { renderChat: false });
+        }
+        scrollToBottom();
+    }
+}
+
+// Enter to send, Shift+Enter for newline
+document.getElementById('pg-query').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
+initThreadTabs();
+initTokenTooltip();
+scrollToBottom();
+</script>
+{% endblock %}

@@ -1,0 +1,328 @@
+{% extends "base.html" %}
+
+{% block title %}Traces - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Traces</h1>
+    <p>Search agents, inspect trace volume, then open full timeline logs per agent.</p>
+</div>
+
+{% if error %}
+<div class="error-message">
+    <span>!</span> {{ error }}
+</div>
+{% endif %}
+
+<div class="detail-section observability-section">
+    <div class="traces-toolbar">
+        <h2>Agents</h2>
+        <form class="traces-search-form" method="get" action="/traces">
+            {% if selected_agent_id %}
+            <input type="hidden" name="agent_id" value="{{ selected_agent_id }}">
+            {% endif %}
+            <input
+                type="text"
+                id="agent-search"
+                name="q"
+                class="traces-search-input"
+                value="{{ agent_query }}"
+                placeholder="Search by name, ID, or mode"
+            >
+            <button type="submit" class="btn">Search</button>
+        </form>
+    </div>
+
+    {% if agent_rows %}
+    <div class="traces-table-wrap">
+        <table class="traces-agents-table">
+            <thead>
+                <tr>
+                    <th>Agent</th>
+                    <th>ID</th>
+                    <th>Mode</th>
+                    <th>Memories</th>
+                    <th>Tools</th>
+                    <th>Trace Events</th>
+                    <th>Last Activity</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in agent_rows %}
+                {% set is_parent_expanded = (row.agent_id == selected_agent_id) %}
+                <tr
+                    class="traces-agent-row traces-agent-row--parent {% if row.agent_id == selected_agent_id and not selected_thread_id %}is-selected{% endif %} {% if is_parent_expanded %}is-expanded{% endif %}"
+                    data-agent-id="{{ row.agent_id }}"
+                    data-event-count="{{ row.event_count }}"
+                    tabindex="0"
+                >
+                    <td>
+                        <div class="traces-parent-cell">
+                            <span class="traces-parent-caret" aria-hidden="true"></span>
+                            <span>{{ row.name }}</span>
+                        </div>
+                    </td>
+                    <td><code>{{ row.agent_id[:10] }}...</code></td>
+                    <td>{{ row.mode }}</td>
+                    <td>{{ row.memory_count }}</td>
+                    <td>{{ row.tool_count }}</td>
+                    <td>{{ row.event_count }}</td>
+                    <td>{{ row.last_activity }}</td>
+                </tr>
+                {% for thread_row in row.thread_rows %}
+                <tr
+                    class="traces-agent-row traces-agent-row--thread {% if not is_parent_expanded %}is-collapsed{% endif %} {% if row.agent_id == selected_agent_id and selected_thread_id == thread_row.thread_id and (not selected_thread_memory_id or selected_thread_memory_id == thread_row.memory_id) %}is-selected{% endif %}"
+                    data-agent-id="{{ row.agent_id }}"
+                    data-thread-id="{{ thread_row.thread_id }}"
+                    data-thread-memory-id="{{ thread_row.memory_id }}"
+                    data-event-count="{{ thread_row.event_count }}"
+                    tabindex="0"
+                >
+                    <td class="traces-thread-cell">
+                        <div class="traces-thread-content">
+                            <span class="traces-thread-label">Thread {{ thread_row.thread_id|truncate(24) }}</span>
+                        </div>
+                    </td>
+                    <td><div class="traces-thread-content"><code>{{ thread_row.thread_id|truncate(18) }}</code></div></td>
+                    <td><div class="traces-thread-content">thread</div></td>
+                    <td><div class="traces-thread-content"><code>{{ thread_row.memory_id|truncate(16) }}</code></div></td>
+                    <td><div class="traces-thread-content">-</div></td>
+                    <td><div class="traces-thread-content">{{ thread_row.event_count }}</div></td>
+                    <td><div class="traces-thread-content">{{ thread_row.last_activity }}</div></td>
+                </tr>
+                {% endfor %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-pane">
+        <div class="empty-icon">TRACE</div>
+        <p>No matching agents</p>
+        <p class="empty-hint">Try a different search query.</p>
+    </div>
+    {% endif %}
+</div>
+
+{% if selected_agent %}
+<div class="agent-summary">
+    <div class="summary-item">
+        <span class="summary-label">Agent</span>
+        <span class="summary-value">
+            {% if selected_agent.persona and selected_agent.persona.name %}
+                {{ selected_agent.persona.name }}
+            {% else %}
+                Agent
+            {% endif %}
+        </span>
+    </div>
+    <div class="summary-item">
+        <span class="summary-label">Agent ID</span>
+        <code class="summary-value">{{ selected_agent.agent_id }}</code>
+    </div>
+    {% if selected_thread_row %}
+    <div class="summary-item">
+        <span class="summary-label">Thread ID</span>
+        <code class="summary-value">{{ selected_thread_row.thread_id }}</code>
+    </div>
+    <div class="summary-item">
+        <span class="summary-label">Thread Memory</span>
+        <code class="summary-value">{{ selected_thread_row.memory_id }}</code>
+    </div>
+    {% endif %}
+    {% if trace_summary %}
+    <div class="summary-item">
+        <span class="summary-label">Trace Events</span>
+        <span class="summary-value">{{ trace_summary.event_count }}</span>
+    </div>
+    <div class="summary-item">
+        <span class="summary-label">Latest</span>
+        <span class="summary-value">{{ trace_summary.latest_timestamp }}</span>
+    </div>
+    {% endif %}
+</div>
+
+<div class="detail-section observability-section" id="trace-timeline">
+    <h2>Trace Timeline</h2>
+    {% if trace_events %}
+    <div class="trace-timeline">
+        <div class="conversation-messages">
+            {% for event in trace_events %}
+            <div class="message {{ event.role or 'system' }}">
+                <div class="message-avatar">
+                    {% if event.role == 'user' %}U{% elif event.role == 'assistant' %}A{% elif event.role == 'tool' %}T{% else %}S{% endif %}
+                </div>
+                <div class="message-bubble">
+                    <div class="message-meta">
+                        <span class="message-role">{{ event.role|default('Event')|title }}</span>
+                        <div class="trace-meta">
+                            <span class="meta-tag">Memory {{ event.memory_id|truncate(12) }}</span>
+                            <span class="meta-tag">Thread {{ event.thread_id|default('—')|truncate(12) }}</span>
+                            <span class="message-time">{{ event.timestamp }}</span>
+                        </div>
+                    </div>
+                    <div class="message-text">{{ event.content or 'No content' }}</div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% else %}
+    <div class="empty-pane">
+        <div class="empty-icon">TRACE</div>
+        <p>No traces recorded yet</p>
+        <p class="empty-hint">Run the agent in Playground to generate trace logs.</p>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const parentRows = document.querySelectorAll('.traces-agent-row--parent[data-agent-id]');
+    const threadRows = document.querySelectorAll('.traces-agent-row--thread[data-agent-id]');
+    const threadRowsByAgent = new Map();
+    const timelineSection = document.getElementById('trace-timeline');
+
+    function smoothScrollToTimeline() {
+        if (!timelineSection) {
+            return;
+        }
+        requestAnimationFrame(function() {
+            timelineSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    }
+
+    const initialParams = new URLSearchParams(window.location.search);
+    if (
+        window.location.hash === '#trace-timeline' ||
+        initialParams.get('scroll') === 'timeline'
+    ) {
+        smoothScrollToTimeline();
+        if (initialParams.get('scroll') === 'timeline') {
+            initialParams.delete('scroll');
+            const cleaned = initialParams.toString();
+            const cleanedUrl = '/traces' + (cleaned ? '?' + cleaned : '');
+            window.history.replaceState(null, '', cleanedUrl);
+        }
+    }
+
+    threadRows.forEach(function(row) {
+        const agentId = row.dataset.agentId || '';
+        if (!threadRowsByAgent.has(agentId)) {
+            threadRowsByAgent.set(agentId, []);
+        }
+        threadRowsByAgent.get(agentId).push(row);
+    });
+
+    function setExpanded(agentId, expanded) {
+        parentRows.forEach(function(parentRow) {
+            if (parentRow.dataset.agentId !== agentId) {
+                return;
+            }
+            parentRow.classList.toggle('is-expanded', expanded);
+            parentRow.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+
+        const rows = threadRowsByAgent.get(agentId) || [];
+        rows.forEach(function(threadRow) {
+            threadRow.classList.toggle('is-collapsed', !expanded);
+        });
+    }
+
+    function navigateToTrace(row, forceTimelineScroll) {
+        const agentId = row.dataset.agentId || '';
+        const threadId = row.dataset.threadId || '';
+        const threadMemoryId = row.dataset.threadMemoryId || '';
+        const params = new URLSearchParams(window.location.search);
+        params.set('agent_id', agentId);
+        if (threadId) {
+            params.set('thread_id', threadId);
+        } else {
+            params.delete('thread_id');
+        }
+        if (threadMemoryId) {
+            params.set('thread_memory_id', threadMemoryId);
+        } else {
+            params.delete('thread_memory_id');
+        }
+        const queryInput = document.getElementById('agent-search');
+        const queryValue = queryInput ? queryInput.value.trim() : '';
+        if (queryValue) {
+            params.set('q', queryValue);
+        } else {
+            params.delete('q');
+        }
+
+        if (forceTimelineScroll) {
+            params.set('scroll', 'timeline');
+        } else {
+            params.delete('scroll');
+        }
+
+        const targetUrl = '/traces?' + params.toString();
+
+        const currentPath = window.location.pathname;
+        const currentSearch = window.location.search;
+        const targetSearch = '?' + params.toString();
+        const isSameRoute = currentPath === '/traces' && currentSearch === targetSearch;
+
+        if (isSameRoute && forceTimelineScroll) {
+            window.history.replaceState(null, '', targetUrl);
+            smoothScrollToTimeline();
+            return;
+        }
+
+        window.location.href = targetUrl;
+    }
+
+    parentRows.forEach(function(parentRow) {
+        const agentId = parentRow.dataset.agentId || '';
+        parentRow.setAttribute(
+            'aria-expanded',
+            parentRow.classList.contains('is-expanded') ? 'true' : 'false'
+        );
+
+        const toggleExpansion = function() {
+            const currentlyExpanded = parentRow.classList.contains('is-expanded');
+            setExpanded(agentId, !currentlyExpanded);
+        };
+
+        parentRow.addEventListener('click', function() {
+            const eventCount = Number(parentRow.dataset.eventCount || '0');
+            if (!Number.isNaN(eventCount) && eventCount === 0) {
+                navigateToTrace(parentRow, true);
+                return;
+            }
+            toggleExpansion();
+        });
+
+        parentRow.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                const eventCount = Number(parentRow.dataset.eventCount || '0');
+                if (!Number.isNaN(eventCount) && eventCount === 0) {
+                    navigateToTrace(parentRow, true);
+                    return;
+                }
+                toggleExpansion();
+            }
+        });
+    });
+
+    threadRows.forEach(function(row) {
+        const openTrace = function() {
+            navigateToTrace(row, true);
+        };
+
+        row.addEventListener('click', openTrace);
+        row.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                openTrace();
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

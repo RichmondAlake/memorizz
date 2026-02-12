@@ -316,7 +316,7 @@ class OracleProvider(MemoryProvider):
                         f"""
                         CREATE VECTOR INDEX {index_name}
                         ON {table_name} (embedding)
-                        ORGANIZATION NEIGHBOR PARTITIONS
+                        ORGANIZATION INMEMORY NEIGHBOR GRAPH
                         DISTANCE COSINE
                         WITH TARGET ACCURACY 95
                         """
@@ -1094,6 +1094,7 @@ class OracleProvider(MemoryProvider):
 
         for doc in documents:
             agent = MemAgentModel(
+                name=doc.get("name"),
                 instruction=doc.get("instruction"),
                 application_mode=doc.get("application_mode", "assistant"),
                 max_steps=doc.get("max_steps"),
@@ -1138,6 +1139,7 @@ class OracleProvider(MemoryProvider):
             return None
 
         memagent = MemAgentModel(
+            name=document.get("name"),
             instruction=document.get("instruction"),
             application_mode=document.get("application_mode", "assistant"),
             max_steps=document.get("max_steps"),

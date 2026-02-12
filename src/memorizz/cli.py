@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def install_oracle():
@@ -69,14 +70,33 @@ def setup_oracle():
         return False
 
 
+def run_local(host: str = "127.0.0.1", port: int = 8765):
+    """Run the Memorizz local web UI."""
+    try:
+        from memorizz.ui import run_server
+
+        run_server(host=host, port=port)
+        return True
+    except ImportError as e:
+        print(f"✗ Failed to import UI module: {e}")
+        print("\nPlease ensure memorizz[ui] is installed:")
+        print("  pip install memorizz[ui]")
+        return False
+    except Exception as e:
+        print(f"✗ Failed to start UI server: {e}")
+        return False
+
+
 def main():
     """Main CLI entry point."""
     if len(sys.argv) < 2:
         print("Memorizz CLI")
         print("\nAvailable commands:")
+        print("  run local       Start local web UI")
         print("  install-oracle  Install Oracle database container")
         print("  setup-oracle    Set up Oracle database schema")
         print("\nUsage:")
+        print("  memorizz run local [--port PORT] [--host HOST]")
         print("  memorizz install-oracle")
         print("  memorizz setup-oracle")
         print("  python -m memorizz.cli <command>")
@@ -84,7 +104,28 @@ def main():
 
     command = sys.argv[1]
 
-    if command == "install-oracle":
+    if command == "run" and len(sys.argv) > 2 and sys.argv[2] == "local":
+        # Parse optional --port and --host arguments
+        host = "127.0.0.1"
+        port = 8765
+        i = 3
+        while i < len(sys.argv):
+            if sys.argv[i] == "--port" and i + 1 < len(sys.argv):
+                try:
+                    port = int(sys.argv[i + 1])
+                except ValueError:
+                    print(f"✗ Invalid port: {sys.argv[i + 1]}")
+                    sys.exit(1)
+                i += 2
+            elif sys.argv[i] == "--host" and i + 1 < len(sys.argv):
+                host = sys.argv[i + 1]
+                i += 2
+            else:
+                print(f"✗ Unknown option: {sys.argv[i]}")
+                sys.exit(1)
+        success = run_local(host=host, port=port)
+        sys.exit(0 if success else 1)
+    elif command == "install-oracle":
         success = install_oracle()
         sys.exit(0 if success else 1)
     elif command == "setup-oracle":

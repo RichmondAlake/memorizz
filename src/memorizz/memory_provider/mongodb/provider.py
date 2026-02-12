@@ -1,7 +1,7 @@
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from bson import ObjectId
 from pymongo import MongoClient
@@ -343,6 +343,17 @@ class MongoDBProvider(MemoryProvider):
 
             memory_store_type = MemoryType(memory_store_type)
 
+        if memory_store_type == MemoryType.MEMAGENT:
+            memagent = (
+                data
+                if isinstance(data, (MemAgentModel, dict))
+                else MemAgentModel(**data)
+            )
+            stored = self.store_memagent(memagent)
+            if isinstance(stored, dict) and stored.get("_id"):
+                return str(stored["_id"])
+            return str(stored)
+
         # Get the appropriate collection based on memory type
         collection = None
         if memory_store_type == MemoryType.PERSONAS:
@@ -494,6 +505,12 @@ class MongoDBProvider(MemoryProvider):
             return self.conversation_memory_collection.find(query, projection).limit(
                 limit
             )
+        elif memory_store_type == MemoryType.SHARED_MEMORY:
+            if isinstance(query, dict):
+                return self.shared_memory_collection.find(query, projection).limit(
+                    limit
+                )
+            return []
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             return self.retrieve_entity_memory_records(
                 query, limit, include_embedding=include_embedding, **kwargs
@@ -512,6 +529,10 @@ class MongoDBProvider(MemoryProvider):
             else:
                 # This is a text query for semantic similarity search
                 return self.find_similar_cache_entries(query, limit=limit, **kwargs)
+        elif memory_store_type == MemoryType.MEMAGENT:
+            if isinstance(query, dict):
+                return self.memagent_collection.find(query, projection).limit(limit)
+            return []
 
     def retrieve_by_id(
         self, id: str, memory_store_type: MemoryType
@@ -543,6 +564,7 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.SUMMARIES: self.summaries_collection,
             MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
             MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
+            MemoryType.MEMAGENT: self.memagent_collection,
         }
 
         collection = collection_mapping.get(memory_store_type)
@@ -618,6 +640,16 @@ class MongoDBProvider(MemoryProvider):
             return self.summaries_collection.find_one({"name": name}, projection)
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             return self.entity_memory_collection.find_one({"name": name}, projection)
+        elif memory_store_type == MemoryType.SHARED_MEMORY:
+            return self.shared_memory_collection.find_one(
+                {"memory_id": name}, projection
+            )
+        elif memory_store_type == MemoryType.SEMANTIC_CACHE:
+            return self.semantic_cache_collection.find_one(
+                {"$or": [{"cache_key": name}, {"query_text": name}]}, projection
+            )
+        elif memory_store_type == MemoryType.MEMAGENT:
+            return self.memagent_collection.find_one({"name": name}, projection)
 
     def retrieve_persona_by_query(
         self, query: Dict[str, Any], limit: int = 1
@@ -1174,6 +1206,7 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.SUMMARIES: self.summaries_collection,
             MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
             MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
+            MemoryType.MEMAGENT: self.memagent_collection,
         }
 
         collection = collection_mapping.get(memory_store_type)
@@ -1222,6 +1255,14 @@ class MongoDBProvider(MemoryProvider):
             result = self.summaries_collection.delete_one({"name": name})
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             result = self.entity_memory_collection.delete_one({"name": name})
+        elif memory_store_type == MemoryType.SHARED_MEMORY:
+            result = self.shared_memory_collection.delete_one({"memory_id": name})
+        elif memory_store_type == MemoryType.SEMANTIC_CACHE:
+            result = self.semantic_cache_collection.delete_one(
+                {"$or": [{"cache_key": name}, {"query_text": name}]}
+            )
+        elif memory_store_type == MemoryType.MEMAGENT:
+            result = self.memagent_collection.delete_one({"name": name})
         else:
             return False
 
@@ -1257,6 +1298,12 @@ class MongoDBProvider(MemoryProvider):
             result = self.summaries_collection.delete_many({})
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             result = self.entity_memory_collection.delete_many({})
+        elif memory_store_type == MemoryType.SHARED_MEMORY:
+            result = self.shared_memory_collection.delete_many({})
+        elif memory_store_type == MemoryType.SEMANTIC_CACHE:
+            result = self.semantic_cache_collection.delete_many({})
+        elif memory_store_type == MemoryType.MEMAGENT:
+            result = self.memagent_collection.delete_many({})
         else:
             return False
 
@@ -1301,6 +1348,10 @@ class MongoDBProvider(MemoryProvider):
             return list(self.summaries_collection.find({}, projection))
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             return list(self.entity_memory_collection.find({}, projection))
+        elif memory_store_type == MemoryType.SEMANTIC_CACHE:
+            return list(self.semantic_cache_collection.find({}, projection))
+        elif memory_store_type == MemoryType.MEMAGENT:
+            return list(self.memagent_collection.find({}, projection))
         else:
             logger.warning(
                 f"Unsupported memory store type for list_all: {memory_store_type}"
@@ -1327,6 +1378,37 @@ class MongoDBProvider(MemoryProvider):
         bool
             True if update was successful, False otherwise.
         """
+        if memory_store_type == MemoryType.MEMAGENT:
+            payload, _ = self._prepare_memagent_payload(data)
+            payload.pop("_id", None)
+            try:
+                if ObjectId.is_valid(id):
+                    result = self.memagent_collection.update_one(
+                        {"_id": ObjectId(id)}, {"$set": payload}
+                    )
+                    success = result.modified_count > 0
+                    if not success:
+                        logger.warning(
+                            f"Update operation found no documents to modify for id: {id}"
+                        )
+                    return success
+                logger.error(f"Invalid ObjectId: {id}")
+                return False
+            except Exception as e:
+                logger.error(
+                    f"Error updating document with id {id}: {e}", exc_info=True
+                )
+                return False
+        if memory_store_type == MemoryType.SEMANTIC_CACHE and not ObjectId.is_valid(id):
+            try:
+                result = self.semantic_cache_collection.update_one(
+                    {"cache_key": id}, {"$set": data}
+                )
+                return result.modified_count > 0
+            except Exception as e:
+                logger.error(f"Error updating semantic cache with id {id}: {e}")
+                return False
+
         # Get the appropriate collection
         collection_mapping = {
             MemoryType.PERSONAS: self.persona_collection,
@@ -1339,6 +1421,7 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.SUMMARIES: self.summaries_collection,
             MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
             MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
+            MemoryType.MEMAGENT: self.memagent_collection,
         }
 
         collection = collection_mapping.get(memory_store_type)
@@ -1422,14 +1505,24 @@ class MongoDBProvider(MemoryProvider):
         # Default to conversation_memory_collection if not specified
         # (memory_type parameter is accepted for API compatibility but not currently used)
         projection = {} if include_embedding else {"embedding": 0}
-        query = self.conversation_memory_collection.find(
-            {"memory_id": memory_id}, projection
-        ).sort("timestamp", 1)
-
         if limit is not None:
-            query = query.limit(limit)
+            # Retrieve newest rows first, then reverse so callers still receive
+            # chronological order (oldest -> newest) for prompt construction.
+            query = (
+                self.conversation_memory_collection.find(
+                    {"memory_id": memory_id}, projection
+                )
+                .sort("timestamp", -1)
+                .limit(limit)
+            )
+            results = list(query)
+            results.reverse()
+        else:
+            query = self.conversation_memory_collection.find(
+                {"memory_id": memory_id}, projection
+            ).sort("timestamp", 1)
+            results = list(query)
 
-        results = list(query)
         logger.debug(
             f"Retrieved {len(results)} conversation items for memory_id: {memory_id}"
         )
@@ -1676,6 +1769,41 @@ class MongoDBProvider(MemoryProvider):
         # Return the results
         return results
 
+    def _prepare_memagent_payload(
+        self, memagent: Union["MemAgentModel", Dict[str, Any]]
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Normalize memagent payloads for storage and updates."""
+        if isinstance(memagent, dict):
+            memagent_dict = dict(memagent)
+            agent_id = memagent_dict.get("agent_id")
+            persona = memagent_dict.get("persona")
+        else:
+            memagent_dict = memagent.model_dump()
+            agent_id = getattr(memagent, "agent_id", None)
+            persona = getattr(memagent, "persona", None) or memagent_dict.get("persona")
+
+        memagent_dict.pop("agent_id", None)
+
+        if persona:
+            if hasattr(persona, "to_dict"):
+                memagent_dict["persona"] = persona.to_dict()
+            elif isinstance(persona, dict):
+                memagent_dict["persona"] = dict(persona)
+            else:
+                memagent_dict["persona"] = {"name": str(persona)}
+
+        tools = memagent_dict.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                if (
+                    isinstance(tool, dict)
+                    and "function" in tool
+                    and callable(tool["function"])
+                ):
+                    tool.pop("function")
+
+        return memagent_dict, agent_id
+
     def store_memagent(self, memagent: "MemAgentModel") -> "MemAgentModel":
         """
         Store a memagent in the MongoDB database using only _id field.
@@ -1690,22 +1818,7 @@ class MongoDBProvider(MemoryProvider):
         MemAgentModel
             The stored memagent.
         """
-        # Convert the MemAgentModel to a dictionary
-        memagent_dict = memagent.model_dump()
-
-        # Remove agent_id field since we only want to use _id
-        memagent_dict.pop("agent_id", None)
-
-        # Convert persona to a serializable format if it exists
-        if memagent.persona:
-            # Store the entire persona object as a serializable dictionary
-            memagent_dict["persona"] = memagent.persona.to_dict()
-
-        # Remove any function objects from tools that could cause serialization issues
-        if memagent_dict.get("tools") and isinstance(memagent_dict["tools"], list):
-            for tool in memagent_dict["tools"]:
-                if "function" in tool and callable(tool["function"]):
-                    del tool["function"]
+        memagent_dict, _ = self._prepare_memagent_payload(memagent)
 
         # Insert the document and let MongoDB generate _id automatically
         result = self.memagent_collection.insert_one(memagent_dict)
@@ -1719,26 +1832,19 @@ class MongoDBProvider(MemoryProvider):
         """
         Update a memagent in the MongoDB database using _id field.
         """
-        # Convert the MemAgentModel to a dictionary
-        memagent_dict = memagent.model_dump()
-
-        # Remove agent_id field since we only want to use _id
-        agent_id = memagent_dict.pop("agent_id", None)
-
-        # Convert persona to a serializable format if it exists
-        if memagent.persona:
-            memagent_dict["persona"] = memagent.persona.to_dict()
-
-        # Remove any function objects from tools that could cause serialization issues
-        if memagent_dict.get("tools") and isinstance(memagent_dict["tools"], list):
-            for tool in memagent_dict["tools"]:
-                if "function" in tool and callable(tool["function"]):
-                    del tool["function"]
+        memagent_dict, agent_id = self._prepare_memagent_payload(memagent)
+        doc_id = memagent_dict.pop("_id", None)
+        if agent_id is None:
+            agent_id = doc_id
 
         # Update the memagent in the MongoDB database using _id
-        if agent_id and ObjectId.is_valid(agent_id):
+        if isinstance(agent_id, ObjectId):
             self.memagent_collection.update_one(
-                {"_id": ObjectId(agent_id)}, {"$set": memagent_dict}
+                {"_id": agent_id}, {"$set": memagent_dict}
+            )
+        elif agent_id and ObjectId.is_valid(str(agent_id)):
+            self.memagent_collection.update_one(
+                {"_id": ObjectId(str(agent_id))}, {"$set": memagent_dict}
             )
 
         return memagent_dict
@@ -1774,13 +1880,23 @@ class MongoDBProvider(MemoryProvider):
         # Create a new MemAgent with data from the document
         # Use the MongoDB _id as agent_id since we no longer store agent_id field
         memagent = MemAgentModel(
+            name=document.get("name"),
             instruction=document.get("instruction"),
             application_mode=document.get("application_mode", "assistant"),
+            memory_types=document.get("memory_types"),
             max_steps=document.get("max_steps"),
             memory_ids=document.get("memory_ids") or [],
             agent_id=str(document.get("_id")),
+            is_favorite=bool(document.get("is_favorite", False)),
             tools=document.get("tools"),
             long_term_memory_ids=document.get("long_term_memory_ids"),
+            sandbox_provider=document.get("sandbox_provider"),
+            internet_access_provider=document.get("internet_access_provider"),
+            internet_access_config=document.get("internet_access_config"),
+            skills_marketplace_provider=document.get("skills_marketplace_provider"),
+            skills_marketplace_config=document.get("skills_marketplace_config"),
+            skill_paths=document.get("skill_paths"),
+            mcp_servers=document.get("mcp_servers"),
             memory_provider=self,
         )
 
@@ -1827,13 +1943,23 @@ class MongoDBProvider(MemoryProvider):
         for doc in documents:
             # Use the MongoDB _id as agent_id since we no longer store agent_id field
             agent = MemAgentModel(
+                name=doc.get("name"),
                 instruction=doc.get("instruction"),
                 application_mode=doc.get("application_mode", "assistant"),
+                memory_types=doc.get("memory_types"),
                 max_steps=doc.get("max_steps"),
                 memory_ids=doc.get("memory_ids") or [],
                 agent_id=str(doc.get("_id")),
+                is_favorite=bool(doc.get("is_favorite", False)),
                 tools=doc.get("tools"),  # Include tools from document
                 long_term_memory_ids=doc.get("long_term_memory_ids"),
+                sandbox_provider=doc.get("sandbox_provider"),
+                internet_access_provider=doc.get("internet_access_provider"),
+                internet_access_config=doc.get("internet_access_config"),
+                skills_marketplace_provider=doc.get("skills_marketplace_provider"),
+                skills_marketplace_config=doc.get("skills_marketplace_config"),
+                skill_paths=doc.get("skill_paths"),
+                mcp_servers=doc.get("mcp_servers"),
                 memory_provider=self,
             )
 

@@ -21,6 +21,7 @@ agents @insert @update @delete
     maxSteps   : max_steps,
     toolAccess : tool_access,
     semanticCache: semantic_cache,
+    isFavorite : is_favorite,
     verbose    : verbose,
     embedding  : embedding,
     createdAt  : created_at,

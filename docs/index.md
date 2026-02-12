@@ -1,28 +1,54 @@
-# MemoRizz Documentation
+# Memorizz Documentation
 
-MemoRizz helps you build memory-augmented agents that combine long-term knowledge, episodic context, procedural behaviors, and multi-agent coordination. This site keeps the narrative docs, quickstarts, and API references directly inside the repository so the docs never drift from the code that powers them.
+Memorizz is a memory-first framework for Python AI agents. The docs in this directory are versioned with the code so examples and API references stay in sync with each release.
 
-## What's Inside
+## Looking For The App UI?
 
-- **Getting Started** walks through the core concepts and SDK setup for your first agent.
-- **Memory Types** dives into each cognitive-inspired subsystem and how it maps to the source tree in `src/memorizz/`.
-- **Memory Providers** describes the persistence backends (Oracle, MongoDB, or custom) that store the memories.
-- **Use Cases** shows how the library stitches memory stacks together for common application modes like assistants or research bots.
+The docs website runs on `http://localhost:8000` (MkDocs).
+The Memorizz web app UI is separate and runs on `http://127.0.0.1:8765`.
 
-!!! info "Docs live with the code"
-    Every page in this site is rendered straight from the Markdown under `docs/`. Update a file, run `mkdocs serve`, and the change appears instantly. Merge to `main` and the GitHub Pages workflow publishes the refreshed site automatically.
+```bash
+pip install "memorizz[ui]"
+memorizz run local
+```
 
-## Quick Start
+Open `http://127.0.0.1:8765` after starting the command above.
+
+## What Memorizz Covers
+
+- **Memory architecture**: semantic, episodic, procedural, short-term, and shared memory systems.
+- **Application modes**: pre-configured memory stacks for assistant, workflow, and deep research agents.
+- **Provider abstraction**: Oracle, MongoDB, filesystem, or custom `MemoryProvider` implementations.
+- **Agent runtime features**: tool calling, semantic cache, context-window stats, and summary generation.
+- **Optional integrations**: internet access providers, sandbox code execution, and local web UI.
+
+## Docs Map
+
+- **Getting Started**: installation, first agent setup, and the [Local UI Guide](getting-started/local-ui.md).
+- **Memory Types**: detailed behavior of each memory subsystem.
+- **Memory Providers**: persistence backend setup and tradeoffs.
+- **Use Cases**: mode-specific patterns for assistants, workflows, and deep research.
+- **Internet Access + Sandbox**: optional runtime capabilities for web research and isolated code execution.
+
+## Local Preview
+
+From the project root:
 
 ```bash
 pip install -e ".[docs]"
 mkdocs serve
 ```
 
-Visit <http://localhost:8000> for a hot-reloading docs server. When you're ready to publish, run `mkdocs build --strict` or rely on the provided GitHub Action to deploy to the `gh-pages` branch.
+Visit <http://localhost:8000>.
 
-## Need More?
+Before publishing docs changes:
 
-- Check the Python API reference entries embedded throughout the docs via [`mkdocstrings`](https://mkdocstrings.github.io/).
-- Browse real workflows in `src/memorizz/examples/` and link them into the docs with snippets or code fences.
-- Open an issue or discussion on [GitHub](https://github.com/RichmondAlake/memorizz) if you spot a gap.
+```bash
+mkdocs build --strict
+```
+
+## Release Checklist (Docs)
+
+1. Ensure `README.md` and docs quickstarts reference existing files and valid API names.
+2. Verify new features are documented under the relevant provider/memory/use-case page.
+3. Run `mkdocs build --strict` to catch broken links/snippets.

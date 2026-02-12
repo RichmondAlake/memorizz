@@ -4,11 +4,18 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, Mock
 
+from memorizz.enums import MemoryType
+
 
 class MockLLMProvider:
     """Comprehensive mock LLM provider for testing."""
 
-    def __init__(self, responses: Optional[List[str]] = None):
+    def __init__(
+        self,
+        responses: Optional[List[str]] = None,
+        provider: str = "mock",
+        model: str = "mock-model",
+    ):
         """Initialize with optional predefined responses."""
         self.responses = responses or [
             "This is a mock response.",
@@ -17,14 +24,27 @@ class MockLLMProvider:
             "Here's the information you requested.",
             "I've completed the task successfully.",
         ]
+        self.provider = provider
+        self.model = model
         self.response_index = 0
         self.call_count = 0
         self.last_messages = None
+        self.last_tools = None
+        self.last_tool_choice = None
+        self.last_usage = None
+        self.context_window_tokens = None
 
-    def generate(self, messages: List[Dict[str, str]]) -> str:
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+    ) -> str:
         """Mock generate method."""
         self.call_count += 1
         self.last_messages = messages
+        self.last_tools = tools
+        self.last_tool_choice = tool_choice
 
         # Return next response in cycle
         response = self.responses[self.response_index % len(self.responses)]
@@ -32,11 +52,31 @@ class MockLLMProvider:
 
         return response
 
+    def generate_text(self, prompt: str, instructions: Optional[str] = None) -> str:
+        """Mock generate_text method."""
+        messages = [{"role": "user", "content": prompt}]
+        return self.generate(messages)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return mock configuration."""
+        return {"provider": self.provider, "model": self.model}
+
+    def get_last_usage(self) -> Optional[Dict[str, int]]:
+        """Return mock usage stats."""
+        return self.last_usage
+
+    def get_context_window_tokens(self) -> Optional[int]:
+        """Return mock context window size."""
+        return self.context_window_tokens
+
     def reset(self):
         """Reset mock state."""
         self.response_index = 0
         self.call_count = 0
         self.last_messages = None
+        self.last_tools = None
+        self.last_tool_choice = None
+        self.last_usage = None
 
 
 class MockMemoryProvider:
@@ -47,52 +87,218 @@ class MockMemoryProvider:
         self.storage = {}
         self.agents = {}
         self.call_history = []
+        self.semantic_retrieval_map = {}
+        self.episodic_retrieval_map = {}
+        self.procedural_retrieval_map = {}
+        self.capacity_limit = None
 
-    def store(self, memory_id: str, memory_unit: Any) -> str:
-        """Mock store method."""
-        self.call_history.append(("store", memory_id, memory_unit))
+    def _normalize_timestamp(self, value: Any) -> datetime:
+        if value is None:
+            return datetime.now()
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return datetime.now()
+        return datetime.now()
+
+    def _ensure_memory_unit(
+        self,
+        memory_unit: Any,
+        memory_id: str,
+        default_memory_type: Optional[Any] = None,
+    ):
+        if isinstance(memory_unit, MockMemoryUnit):
+            if memory_unit.memory_id is None:
+                memory_unit.memory_id = memory_id
+            return memory_unit
+
+        if hasattr(memory_unit, "role") and hasattr(memory_unit, "conversation_id"):
+            content = {
+                "role": getattr(memory_unit, "role"),
+                "content": getattr(memory_unit, "content"),
+                "conversation_id": getattr(memory_unit, "conversation_id"),
+                "timestamp": getattr(memory_unit, "timestamp", None),
+            }
+            return MockMemoryUnit(
+                memory_type=MemoryType.CONVERSATION_MEMORY,
+                content=content,
+                timestamp=self._normalize_timestamp(
+                    getattr(memory_unit, "timestamp", None)
+                ),
+                memory_id=memory_id,
+            )
+
+        if hasattr(memory_unit, "model_dump"):
+            payload = memory_unit.model_dump()
+        elif hasattr(memory_unit, "dict"):
+            payload = memory_unit.dict()
+        elif isinstance(memory_unit, dict):
+            payload = memory_unit
+        else:
+            payload = {"content": memory_unit}
+
+        memory_type = payload.get("memory_type") or payload.get("type")
+        if isinstance(memory_type, str):
+            try:
+                memory_type = MemoryType(memory_type)
+            except ValueError:
+                memory_type = MemoryType.CONVERSATION_MEMORY
+        if memory_type is None and default_memory_type is not None:
+            if isinstance(default_memory_type, str):
+                try:
+                    memory_type = MemoryType(default_memory_type)
+                except ValueError:
+                    memory_type = MemoryType.CONVERSATION_MEMORY
+            else:
+                memory_type = default_memory_type
+        if memory_type is None:
+            memory_type = MemoryType.CONVERSATION_MEMORY
+
+        timestamp = self._normalize_timestamp(payload.get("timestamp"))
+        content = payload.get("content", payload)
+
+        return MockMemoryUnit(
+            memory_type=memory_type,
+            content=content,
+            timestamp=timestamp,
+            memory_id=memory_id,
+        )
+
+    def _trim_to_capacity(self, memory_id: str) -> None:
+        if self.capacity_limit is None:
+            return
+        if memory_id not in self.storage:
+            return
+        units = self.storage[memory_id]
+        if len(units) <= self.capacity_limit:
+            return
+        units.sort(key=lambda unit: unit.timestamp)
+        self.storage[memory_id] = units[-self.capacity_limit :]
+
+    def store(
+        self,
+        data: Optional[Dict[str, Any]] = None,
+        memory_store_type: Optional[Any] = None,
+        memory_id: Optional[str] = None,
+        memory_unit: Any = None,
+        **kwargs,
+    ) -> str:
+        """Mock store method supporting legacy and new signatures."""
+        # Support positional legacy signature: store(memory_id, memory_unit)
+        if (
+            memory_unit is None
+            and memory_id is None
+            and data is not None
+            and memory_store_type is not None
+            and not isinstance(data, dict)
+        ):
+            memory_id = str(data)
+            memory_unit = memory_store_type
+            memory_store_type = None
+            data = None
+
+        if memory_unit is None:
+            memory_unit = data
+
+        if memory_id is None and isinstance(memory_unit, dict):
+            memory_id = memory_unit.get("memory_id")
+
+        if memory_id is None:
+            if isinstance(memory_store_type, MemoryType):
+                memory_id = memory_store_type.value
+            elif memory_store_type:
+                memory_id = str(memory_store_type)
+            else:
+                memory_id = "default"
+
+        self.call_history.append(("store", memory_id, memory_unit, memory_store_type))
 
         if memory_id not in self.storage:
             self.storage[memory_id] = []
 
-        unit_id = str(uuid.uuid4())
-        unit_data = {
-            "id": unit_id,
-            "memory_id": memory_id,
-            "data": memory_unit,
-            "timestamp": datetime.now().isoformat(),
-        }
+        unit = self._ensure_memory_unit(
+            memory_unit, memory_id, default_memory_type=memory_store_type
+        )
+        if unit.id is None:
+            unit.id = str(uuid.uuid4())
+        self.storage[memory_id].append(unit)
+        self._trim_to_capacity(memory_id)
+        return unit.id
 
-        self.storage[memory_id].append(unit_data)
-        return unit_id
-
-    def retrieve_by_id(self, unit_id: str) -> Optional[Dict[str, Any]]:
+    def retrieve_by_id(
+        self, unit_id: str, memory_store_type: Optional[Any] = None
+    ) -> Optional[Dict[str, Any]]:
         """Mock retrieve by ID method."""
-        self.call_history.append(("retrieve_by_id", unit_id))
+        self.call_history.append(("retrieve_by_id", unit_id, memory_store_type))
 
         for memory_id, units in self.storage.items():
             for unit in units:
-                if unit["id"] == unit_id:
-                    return unit
+                if unit.id == unit_id:
+                    return unit.to_dict()
         return None
 
     def retrieve_by_query(
-        self, query: str, memory_id: str, memory_type: Any, limit: int = 5
+        self,
+        query: str,
+        memory_id: Optional[str] = None,
+        memory_type: Optional[Any] = None,
+        limit: int = 5,
+        memory_store_type: Optional[Any] = None,
+        **kwargs,
     ) -> List[Dict[str, Any]]:
         """Mock retrieve by query method."""
+        if memory_type is None:
+            memory_type = memory_store_type
         self.call_history.append(
             ("retrieve_by_query", query, memory_id, memory_type, limit)
         )
 
-        units = self.storage.get(memory_id, [])
-        # Simple relevance simulation - return units that contain query words
-        query_words = query.lower().split()
+        units = self.storage.get(memory_id, []) if memory_id else []
+        query_text = str(query).lower()
+
+        type_key = ""
+        if memory_type is not None:
+            type_key = (
+                memory_type.name.lower()
+                if hasattr(memory_type, "name")
+                else str(memory_type).lower()
+            )
+
+        effective_type_key = type_key
+        if isinstance(memory_type, MemoryType):
+            if memory_type == MemoryType.LONG_TERM_MEMORY:
+                effective_type_key = "semantic_memory"
+            elif memory_type == MemoryType.CONVERSATION_MEMORY:
+                effective_type_key = "episodic_memory"
+            elif memory_type in (MemoryType.TOOLBOX, MemoryType.WORKFLOW_MEMORY):
+                effective_type_key = "procedural_memory"
+
+        if "semantic" in effective_type_key and query in self.semantic_retrieval_map:
+            return [unit.to_dict() for unit in self.semantic_retrieval_map[query]][
+                :limit
+            ]
+        if "episodic" in effective_type_key and query in self.episodic_retrieval_map:
+            return [unit.to_dict() for unit in self.episodic_retrieval_map[query]][
+                :limit
+            ]
+        if (
+            "procedural" in effective_type_key
+            and query in self.procedural_retrieval_map
+        ):
+            return [unit.to_dict() for unit in self.procedural_retrieval_map[query]][
+                :limit
+            ]
+
+        query_words = query_text.split()
         relevant_units = []
 
         for unit in units:
-            unit_text = str(unit["data"]).lower()
+            unit_text = str(unit.content).lower()
             if any(word in unit_text for word in query_words):
-                relevant_units.append(unit)
+                relevant_units.append(unit.to_dict())
 
         return relevant_units[:limit]
 
@@ -106,8 +312,9 @@ class MockMemoryProvider:
 
         units = self.storage.get(memory_id, [])
         # Sort by timestamp and return recent ones
-        sorted_units = sorted(units, key=lambda x: x["timestamp"], reverse=True)
-        return sorted_units[:limit]
+        sorted_units = sorted(units, key=lambda unit: unit.timestamp)
+        selected = sorted_units[-limit:] if limit else sorted_units
+        return [unit.to_dict() for unit in selected]
 
     def store_memagent(self, agent_data: Dict[str, Any]) -> str:
         """Mock store agent method."""
@@ -151,6 +358,55 @@ class MockMemoryProvider:
         self.storage.clear()
         self.agents.clear()
         self.call_history.clear()
+        self.semantic_retrieval_map = {}
+        self.episodic_retrieval_map = {}
+        self.procedural_retrieval_map = {}
+
+    def configure_semantic_retrieval(self, retrieval_map: Dict[str, List[Any]]) -> None:
+        self.semantic_retrieval_map = retrieval_map
+
+    def configure_episodic_retrieval(self, retrieval_map: Dict[str, List[Any]]) -> None:
+        self.episodic_retrieval_map = retrieval_map
+
+    def configure_procedural_retrieval(
+        self, retrieval_map: Dict[str, List[Any]]
+    ) -> None:
+        self.procedural_retrieval_map = retrieval_map
+
+    def set_capacity_limit(self, limit: int) -> None:
+        self.capacity_limit = limit
+
+
+class MockMemoryUnit:
+    """Mock memory unit for testing."""
+
+    def __init__(
+        self,
+        memory_type: Any,
+        content: Any,
+        timestamp: Optional[datetime] = None,
+        memory_id: Optional[str] = None,
+        embedding: Optional[List[float]] = None,
+        unit_id: Optional[str] = None,
+    ):
+        self.id = unit_id or str(uuid.uuid4())
+        self.memory_type = memory_type
+        self.content = content
+        self.timestamp = timestamp or datetime.now()
+        self.memory_id = memory_id
+        self.embedding = embedding
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "memory_type": self.memory_type,
+            "content": self.content,
+            "timestamp": self.timestamp.isoformat()
+            if hasattr(self.timestamp, "isoformat")
+            else self.timestamp,
+            "memory_id": self.memory_id,
+            "embedding": self.embedding,
+        }
 
 
 class MockToolbox:

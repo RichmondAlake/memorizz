@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src
 
 # Provide a deterministic embedding implementation for tests to avoid network calls.
 from memorizz import embeddings as _embeddings  # noqa: E402
+from memorizz.short_term_memory import semantic_cache as _semantic_cache  # noqa: E402
 
 
 def _test_embedding(_text: str, **kwargs):
@@ -39,6 +40,7 @@ class _TestEmbeddingManager:
 
 _embeddings.get_embedding = _test_embedding
 _embeddings.get_embedding_manager = lambda: _TestEmbeddingManager()  # type: ignore
+_semantic_cache.get_embedding_manager = lambda: _TestEmbeddingManager()  # type: ignore
 
 
 # =============================================================================
@@ -125,7 +127,9 @@ def sample_tools():
 @pytest.fixture
 def sample_persona():
     """Sample persona for testing."""
-    return Mock(
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
         name="TestBot",
         role="Assistant",
         personality_traits=["helpful", "friendly", "knowledgeable"],
@@ -242,9 +246,9 @@ def memory_types():
 
     return [
         MemoryType.CONVERSATION_MEMORY,
-        MemoryType.SEMANTIC_MEMORY,
-        MemoryType.EPISODIC_MEMORY,
-        MemoryType.PROCEDURAL_MEMORY,
+        MemoryType.LONG_TERM_MEMORY,
+        MemoryType.TOOLBOX,
+        MemoryType.WORKFLOW_MEMORY,
     ]
 
 

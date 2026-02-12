@@ -1,0 +1,356 @@
+{% extends "base.html" %}
+
+{% block title %}{{ form_title }} - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <a href="{% if is_edit %}/agents/{{ agent_id }}{% else %}/agents{% endif %}" class="back-link">← Back to Agents</a>
+    <h1>{{ form_title }}</h1>
+    <p>Configure how this agent behaves and runs.</p>
+</div>
+
+{% if error %}
+<div class="error-message">
+    <span>!</span> {{ error }}
+</div>
+{% endif %}
+
+<form method="post" action="{{ form_action }}" class="agent-form">
+    {% if is_edit %}
+    <div class="detail-section">
+        <h2>Agent ID</h2>
+        <div class="form-group">
+            <code class="agent-id-display">{{ agent_id }}</code>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Basics — always visible -->
+    <div class="detail-section">
+        <h2>Basics</h2>
+        <div class="form-group">
+            <label for="agent_name">Agent Name</label>
+            <input id="agent_name" name="agent_name" type="text" value="{{ agent_name }}" placeholder="Agent name shown in the UI">
+        </div>
+        <div class="form-group">
+            <label for="instruction">System Instruction</label>
+            <textarea id="instruction" name="instruction" rows="5">{{ instruction }}</textarea>
+        </div>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="application_mode">Application Mode</label>
+                <select id="application_mode" name="application_mode">
+                    <option value="assistant" {% if application_mode == 'assistant' %}selected{% endif %}>Assistant</option>
+                    <option value="workflow" {% if application_mode == 'workflow' %}selected{% endif %}>Workflow</option>
+                    <option value="deep_research" {% if application_mode == 'deep_research' %}selected{% endif %}>Deep Research</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="max_steps">Max Tool Iterations</label>
+                <input id="max_steps" name="max_steps" type="number" min="1" value="{{ max_steps }}">
+                <p class="form-hint">Maximum tool-calling rounds per run (default: 20).</p>
+            </div>
+            <div class="form-group">
+                <label for="tool_access">Tool Access</label>
+                <select id="tool_access" name="tool_access">
+                    <option value="private" {% if tool_access == 'private' %}selected{% endif %}>Private</option>
+                    <option value="public" {% if tool_access == 'public' %}selected{% endif %}>Public</option>
+                    <option value="global" {% if tool_access == 'global' %}selected{% endif %}>Global</option>
+                </select>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="semantic_cache" {% if semantic_cache %}checked{% endif %}>
+                    Enable semantic cache
+                </label>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="enable_entity_memory" {% if enable_entity_memory %}checked{% endif %}>
+                    Enable entity memory
+                </label>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="enable_workflow_memory" {% if enable_workflow_memory %}checked{% endif %}>
+                    Enable workflow memory
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- LLM Configuration — collapsible -->
+    <details class="detail-section collapsible-section" open>
+        <summary class="section-toggle">
+            <h2>LLM Configuration</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="llm_provider">Provider</label>
+                    <select id="llm_provider" name="llm_provider" onchange="syncAgentModelOptions()">
+                        <option value="openai" {% if llm_provider == 'openai' %}selected{% endif %}>OpenAI</option>
+                        <option value="azure" {% if llm_provider == 'azure' %}selected{% endif %}>Azure OpenAI</option>
+                        <option value="huggingface" {% if llm_provider == 'huggingface' %}selected{% endif %}>HuggingFace</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="llm_model_select">Model / Deployment</label>
+                    <select id="llm_model_select"></select>
+                    <input id="llm_model_custom" type="text" value="{{ llm_model }}" style="display:none; margin-top: 8px;">
+                    <input id="llm_model" name="llm_model" type="hidden" value="{{ llm_model }}">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="llm_config_json">Advanced LLM Config (JSON)</label>
+                <textarea id="llm_config_json" name="llm_config_json" rows="4">{{ llm_config_json }}</textarea>
+                <p class="form-hint">Optional provider-specific fields like azure_endpoint, api_version, or HuggingFace settings.</p>
+            </div>
+        </div>
+    </details>
+
+    <!-- Persona — collapsible -->
+    <details class="detail-section collapsible-section" {% if persona_name %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>Persona</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="persona_name">Name</label>
+                    <input id="persona_name" name="persona_name" type="text" value="{{ persona_name }}">
+                </div>
+                <div class="form-group">
+                    <label for="persona_role">Role</label>
+                    <input id="persona_role" name="persona_role" type="text" value="{{ persona_role }}">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="persona_goals">Goals</label>
+                <textarea id="persona_goals" name="persona_goals" rows="3">{{ persona_goals }}</textarea>
+            </div>
+            <div class="form-group">
+                <label for="persona_background">Background</label>
+                <textarea id="persona_background" name="persona_background" rows="3">{{ persona_background }}</textarea>
+            </div>
+        </div>
+    </details>
+
+    <!-- Memory — collapsible -->
+    <details class="detail-section collapsible-section" {% if memory_ids_raw %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>Memory</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-group">
+                <label for="memory_ids">Memory IDs</label>
+                <input id="memory_ids" name="memory_ids" type="text" value="{{ memory_ids_raw }}">
+                <p class="form-hint">Comma or newline separated memory IDs.</p>
+            </div>
+        </div>
+    </details>
+
+    <!-- Sandbox — collapsible -->
+    <details class="detail-section collapsible-section" {% if sandbox_provider %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>Sandbox</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-group">
+                <label for="sandbox_provider">Sandbox Provider</label>
+                <select id="sandbox_provider" name="sandbox_provider">
+                    <option value="" {% if not sandbox_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="e2b" {% if sandbox_provider == 'e2b' %}selected{% endif %}>E2B (Cloud — Firecracker microVMs)</option>
+                    <option value="daytona" {% if sandbox_provider == 'daytona' %}selected{% endif %}>Daytona (Cloud — Full dev environments)</option>
+                    <option value="graalpy" {% if sandbox_provider == 'graalpy' %}selected{% endif %}>GraalPy (Local — No cloud required)</option>
+                </select>
+                <p class="form-hint">Enable code execution in a secure sandbox. Requires the corresponding API key in Settings (E2B, Daytona) or GraalPy installed locally.</p>
+            </div>
+        </div>
+    </details>
+
+    <!-- Internet Access — collapsible -->
+    <details class="detail-section collapsible-section" {% if internet_provider %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>Internet Access</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-group">
+                <label for="internet_provider">Internet Provider</label>
+                <select id="internet_provider" name="internet_provider">
+                    <option value="" {% if not internet_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="tavily" {% if internet_provider == 'tavily' %}selected{% endif %}>Tavily (Search + extract)</option>
+                    <option value="firecrawl" {% if internet_provider == 'firecrawl' %}selected{% endif %}>Firecrawl (Search + crawl)</option>
+                    <option value="offline" {% if internet_provider == 'offline' %}selected{% endif %}>Offline (placeholder provider)</option>
+                </select>
+                <p class="form-hint">When enabled, the agent gets `internet_search` and `open_web_page` tools. Configure API keys in Settings.</p>
+            </div>
+        </div>
+    </details>
+
+    <!-- Skills Marketplace — collapsible -->
+    <details class="detail-section collapsible-section" {% if skills_marketplace_provider %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>Skills Marketplace</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-group">
+                <label for="skills_marketplace_provider">Marketplace Provider</label>
+                <select id="skills_marketplace_provider" name="skills_marketplace_provider">
+                    <option value="" {% if not skills_marketplace_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="skillsmp" {% if skills_marketplace_provider == 'skillsmp' %}selected{% endif %}>SkillsMP (skillsmp.com)</option>
+                </select>
+                <p class="form-hint">When enabled, the agent gets the `skills_marketplace_search` tool. Configure `SKILLSMP_API_KEY` in Settings.</p>
+            </div>
+        </div>
+    </details>
+
+    <!-- Tools — collapsible, read-only -->
+    {% if agent_tools %}
+    <details class="detail-section collapsible-section">
+        <summary class="section-toggle">
+            <h2>Tools ({{ agent_tools|length }})</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="config-tools-list">
+                {% for tool in agent_tools %}
+                <div class="config-tool-item">
+                    <span class="config-tool-name">{{ tool.name }}</span>
+                    {% if tool.description %}
+                    <span class="config-tool-desc">{{ tool.description }}</span>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <p class="form-hint">Tools are registered programmatically via the Python SDK. This list is read-only.</p>
+        </div>
+    </details>
+    {% endif %}
+
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Save Agent</button>
+        <a href="{% if is_edit %}/agents/{{ agent_id }}{% else %}/agents{% endif %}" class="btn">Cancel</a>
+    </div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const AGENT_FORM_MODEL_CATALOG = {{ llm_model_catalog|default({}, true)|tojson }};
+const AGENT_FORM_DEFAULT_MODELS = {{ default_llm_model_by_provider|default({}, true)|tojson }};
+const AGENT_FORM_CUSTOM = '__custom__';
+
+function syncAgentModelOptions() {
+    const providerSelect = document.getElementById('llm_provider');
+    const modelSelect = document.getElementById('llm_model_select');
+    const modelCustom = document.getElementById('llm_model_custom');
+    const modelHidden = document.getElementById('llm_model');
+    if (!providerSelect || !modelSelect || !modelCustom || !modelHidden) return;
+
+    const provider = (providerSelect.value || 'openai').trim().toLowerCase();
+    const models = Array.isArray(AGENT_FORM_MODEL_CATALOG[provider])
+        ? AGENT_FORM_MODEL_CATALOG[provider]
+        : [];
+    const currentValue = (modelHidden.value || modelCustom.value || '').trim();
+    const fallback = (AGENT_FORM_DEFAULT_MODELS[provider] || '').trim();
+
+    modelSelect.innerHTML = '';
+    const grouped = {};
+    models.forEach(function(model) {
+        const group = model.group || 'Models';
+        if (!grouped[group]) grouped[group] = [];
+        grouped[group].push(model);
+    });
+
+    Object.keys(grouped).forEach(function(group) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = group;
+        grouped[group].forEach(function(model) {
+            const option = document.createElement('option');
+            option.value = model.value;
+            option.textContent = model.label;
+            optgroup.appendChild(option);
+        });
+        modelSelect.appendChild(optgroup);
+    });
+
+    const customOption = document.createElement('option');
+    customOption.value = AGENT_FORM_CUSTOM;
+    customOption.textContent = 'Custom model / deployment';
+    modelSelect.appendChild(customOption);
+
+    const inCatalog = models.some(function(model) { return model.value === currentValue; });
+
+    if (currentValue && inCatalog) {
+        modelSelect.value = currentValue;
+        modelCustom.value = currentValue;
+        modelCustom.style.display = 'none';
+        modelHidden.value = currentValue;
+        return;
+    }
+
+    if (currentValue) {
+        modelSelect.value = AGENT_FORM_CUSTOM;
+        modelCustom.value = currentValue;
+        modelCustom.style.display = '';
+        modelHidden.value = currentValue;
+        return;
+    }
+
+    if (fallback && models.some(function(model) { return model.value === fallback; })) {
+        modelSelect.value = fallback;
+        modelCustom.value = fallback;
+        modelCustom.style.display = 'none';
+        modelHidden.value = fallback;
+        return;
+    }
+
+    if (models.length) {
+        modelSelect.value = models[0].value;
+        modelCustom.value = models[0].value;
+        modelCustom.style.display = 'none';
+        modelHidden.value = models[0].value;
+        return;
+    }
+
+    modelSelect.value = AGENT_FORM_CUSTOM;
+    modelCustom.value = fallback;
+    modelCustom.style.display = '';
+    modelHidden.value = fallback;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const modelSelect = document.getElementById('llm_model_select');
+    const modelCustom = document.getElementById('llm_model_custom');
+    const modelHidden = document.getElementById('llm_model');
+    if (!modelSelect || !modelCustom || !modelHidden) return;
+
+    modelSelect.addEventListener('change', function() {
+        if (modelSelect.value === AGENT_FORM_CUSTOM) {
+            modelCustom.style.display = '';
+            modelHidden.value = modelCustom.value.trim();
+            modelCustom.focus();
+            return;
+        }
+        modelCustom.style.display = 'none';
+        modelCustom.value = modelSelect.value;
+        modelHidden.value = modelSelect.value;
+    });
+
+    modelCustom.addEventListener('input', function() {
+        if (modelSelect.value === AGENT_FORM_CUSTOM) {
+            modelHidden.value = modelCustom.value.trim();
+        }
+    });
+
+    syncAgentModelOptions();
+});
+</script>
+{% endblock %}

@@ -28,6 +28,7 @@ class MemAgentBuilder:
         self._llm_config = None
         self._tools = []
         self._persona = None
+        self._name = None
         self._memory_provider = None
         self._memory_ids = []
         self._delegates = []
@@ -36,6 +37,9 @@ class MemAgentBuilder:
         self._semantic_cache_config = None
         self._entity_memory_enabled = None
         self._internet_access_provider = None
+        self._skill_paths = []
+        self._mcp_servers = []
+        self._is_favorite = False
 
     def with_instruction(self, instruction: str) -> "MemAgentBuilder":
         """Set the agent instruction."""
@@ -76,6 +80,16 @@ class MemAgentBuilder:
             self._persona = {"name": name or "Assistant", "expertise": expertise or []}
         return self
 
+    def with_name(self, name: str) -> "MemAgentBuilder":
+        """Set a display name for the agent."""
+        self._name = name
+        return self
+
+    def with_favorite(self, is_favorite: bool = True) -> "MemAgentBuilder":
+        """Mark the built agent as favorite or non-favorite."""
+        self._is_favorite = bool(is_favorite)
+        return self
+
     def with_memory_provider(self, provider: Any) -> "MemAgentBuilder":
         """Set the memory provider."""
         self._memory_provider = provider
@@ -92,6 +106,24 @@ class MemAgentBuilder:
     def with_internet_access_provider(self, provider: Any) -> "MemAgentBuilder":
         """Attach an internet access provider."""
         self._internet_access_provider = provider
+        return self
+
+    def with_skill_paths(self, skill_paths: Union[str, List[str]]) -> "MemAgentBuilder":
+        """Attach skill markdown file paths to the agent."""
+        if isinstance(skill_paths, str):
+            self._skill_paths.append(skill_paths)
+        elif isinstance(skill_paths, list):
+            self._skill_paths.extend(skill_paths)
+        return self
+
+    def with_mcp_servers(
+        self, mcp_servers: Union[Dict[str, Any], List[Dict[str, Any]]]
+    ) -> "MemAgentBuilder":
+        """Attach MCP server configurations to the agent."""
+        if isinstance(mcp_servers, dict):
+            self._mcp_servers.append(mcp_servers)
+        elif isinstance(mcp_servers, list):
+            self._mcp_servers.extend(mcp_servers)
         return self
 
     def with_semantic_cache(
@@ -167,6 +199,8 @@ class MemAgentBuilder:
                 memory_provider=self._memory_provider,
                 memory_ids=self._memory_ids if self._memory_ids else None,
                 tool_access=self.config.tool_access,
+                name=self._name,
+                is_favorite=self._is_favorite,
                 delegates=self._delegates if self._delegates else None,
                 verbose=getattr(self.config, "verbose", None),
                 embedding_provider=self._embedding_provider,
@@ -177,6 +211,8 @@ class MemAgentBuilder:
                     self.config, "context_window_tokens", None
                 ),
                 internet_access_provider=self._internet_access_provider,
+                skill_paths=self._skill_paths if self._skill_paths else None,
+                mcp_servers=self._mcp_servers if self._mcp_servers else None,
             )
 
             logger.info(f"MemAgent built successfully with {len(self._tools)} tools")
@@ -208,7 +244,9 @@ class MemAgentBuilder:
         new_builder._llm_config = self._llm_config.copy() if self._llm_config else None
         new_builder._tools = self._tools.copy()
         new_builder._internet_access_provider = self._internet_access_provider
+        new_builder._is_favorite = self._is_favorite
         new_builder._persona = self._persona
+        new_builder._name = self._name
         new_builder._memory_provider = self._memory_provider
         new_builder._memory_ids = self._memory_ids.copy()
         new_builder._delegates = self._delegates.copy()
@@ -219,6 +257,8 @@ class MemAgentBuilder:
         new_builder._semantic_cache_config = (
             self._semantic_cache_config.copy() if self._semantic_cache_config else None
         )
+        new_builder._skill_paths = self._skill_paths.copy()
+        new_builder._mcp_servers = self._mcp_servers.copy()
 
         return new_builder
 
@@ -230,6 +270,7 @@ def create_assistant(
     """Create a builder configured for a general assistant."""
     return (
         MemAgentBuilder()
+        .with_name(name)
         .with_instruction("You are a helpful AI assistant.")
         .with_persona(name=name, expertise=expertise or [])
         .with_application_mode("assistant")

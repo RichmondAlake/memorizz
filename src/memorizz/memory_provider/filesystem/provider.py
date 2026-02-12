@@ -258,7 +258,7 @@ class FileSystemProvider(MemoryProvider):
         sorted_docs = sorted(documents, key=lambda item: item[0])
         final_docs = [doc for _, doc in sorted_docs]
         if limit:
-            return final_docs[:limit]
+            return final_docs[-limit:]
         return final_docs
 
     def update_by_id(
@@ -337,13 +337,23 @@ class FileSystemProvider(MemoryProvider):
 
         for doc in documents:
             agent = MemAgentModel(
+                name=doc.get("name"),
                 instruction=doc.get("instruction"),
                 application_mode=doc.get("application_mode", "assistant"),
+                memory_types=doc.get("memory_types"),
                 max_steps=doc.get("max_steps"),
                 memory_ids=doc.get("memory_ids") or [],
                 agent_id=doc.get("agent_id") or doc.get("_id"),
+                is_favorite=bool(doc.get("is_favorite", False)),
                 tools=doc.get("tools"),
                 long_term_memory_ids=doc.get("long_term_memory_ids"),
+                sandbox_provider=doc.get("sandbox_provider"),
+                internet_access_provider=doc.get("internet_access_provider"),
+                internet_access_config=doc.get("internet_access_config"),
+                skills_marketplace_provider=doc.get("skills_marketplace_provider"),
+                skills_marketplace_config=doc.get("skills_marketplace_config"),
+                skill_paths=doc.get("skill_paths"),
+                mcp_servers=doc.get("mcp_servers"),
                 memory_provider=self,
             )
 
@@ -376,13 +386,23 @@ class FileSystemProvider(MemoryProvider):
         from ...memagent import MemAgentModel
 
         memagent = MemAgentModel(
+            name=document.get("name"),
             instruction=document.get("instruction"),
             application_mode=document.get("application_mode", "assistant"),
+            memory_types=document.get("memory_types"),
             max_steps=document.get("max_steps"),
             memory_ids=document.get("memory_ids") or [],
             agent_id=document.get("agent_id") or document.get("_id"),
+            is_favorite=bool(document.get("is_favorite", False)),
             tools=document.get("tools"),
             long_term_memory_ids=document.get("long_term_memory_ids"),
+            sandbox_provider=document.get("sandbox_provider"),
+            internet_access_provider=document.get("internet_access_provider"),
+            internet_access_config=document.get("internet_access_config"),
+            skills_marketplace_provider=document.get("skills_marketplace_provider"),
+            skills_marketplace_config=document.get("skills_marketplace_config"),
+            skill_paths=document.get("skill_paths"),
+            mcp_servers=document.get("mcp_servers"),
             memory_provider=self,
         )
 

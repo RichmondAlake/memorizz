@@ -1,7 +1,8 @@
 import inspect
+import json
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional
 
 import openai
 
@@ -25,6 +26,15 @@ class OpenAI(LLMProvider):
         api_key: Optional[str] = None,
         model: str = "gpt-4o",
         context_window_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        seed: Optional[int] = None,
+        response_format: Optional[Any] = None,
+        additional_config: Optional[Dict[str, Any]] = None,
+        **_ignored: Any,
     ):
         """
         Initialize the OpenAI client.
@@ -45,21 +55,60 @@ class OpenAI(LLMProvider):
             context_window_tokens or self._infer_context_window_tokens(model)
         )
         self._last_usage: Optional[Dict[str, int]] = None
+        self._request_options: Dict[str, Any] = {}
+        request_options = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": top_p,
+            "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
+            "seed": seed,
+            "response_format": response_format,
+        }
+        for key, value in request_options.items():
+            if value is not None:
+                self._request_options[key] = value
+
+        if additional_config:
+            allowed_keys = {
+                "temperature",
+                "max_tokens",
+                "top_p",
+                "frequency_penalty",
+                "presence_penalty",
+                "seed",
+                "response_format",
+                "logprobs",
+                "top_logprobs",
+            }
+            for key, value in additional_config.items():
+                if key in allowed_keys and value is not None:
+                    self._request_options[key] = value
 
     def _infer_context_window_tokens(self, model: str) -> int:
         """Best-effort mapping of well-known OpenAI models to their context window."""
         normalized = model.lower() if model else ""
         context_map = {
+            # GPT-5 family
+            "gpt-5.2": 1_047_576,
+            "gpt-5.2-pro": 1_047_576,
+            "gpt-5.1": 1_047_576,
+            "gpt-5": 128_000,
+            "gpt-5-mini": 1_047_576,
+            "gpt-5-nano": 1_047_576,
+            # GPT-4.1 family
+            "gpt-4.1": 1_047_576,
+            "gpt-4.1-mini": 1_047_576,
+            "gpt-4.1-nano": 1_047_576,
+            # Reasoning models
+            "o3": 200_000,
+            "o3-pro": 200_000,
+            "o4-mini": 200_000,
+            "o3-mini": 200_000,
+            # GPT-4o family
             "gpt-4o": 128_000,
             "gpt-4o-mini": 128_000,
-            "gpt-4.1": 128_000,
-            "gpt-4.1-mini": 128_000,
-            "gpt-4.1-turbo": 128_000,
             "gpt-4-turbo": 128_000,
-            "gpt-4.1-preview": 128_000,
-            "gpt-4o-mini-high": 128_000,
-            "gpt-4o-mini-low": 128_000,
-            "gpt-4o-mini-4096": 4_096,
             "gpt-4o-realtime-preview": 128_000,
         }
         return context_map.get(normalized, 128_000)
@@ -199,6 +248,8 @@ class OpenAI(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
+        if self._request_options:
+            kwargs.update(self._request_options)
 
         response = self.client.chat.completions.create(**kwargs)
         self._last_usage = self._extract_usage(response)
@@ -209,6 +260,191 @@ class OpenAI(LLMProvider):
 
         # Otherwise return just the text content
         return response.choices[0].message.content
+
+    def generate_stream(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+    ) -> Generator[Dict[str, Any], None, None]:
+        """
+        Stream a response using OpenAI's chat completions API.
+
+        Yields dictionaries:
+            - {"type": "content", "content": "..."} for text delta chunks
+            - {"type": "reasoning", "content": "..."} for reasoning/thinking traces (when exposed by model)
+            - {"type": "tool_calls", "response": <reconstructed response>} when tool calls are detected
+            - {"type": "done", "content": "<full accumulated text>"} at the end
+        """
+
+        def _flatten_reasoning_text(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value
+            if isinstance(value, list):
+                parts = [_flatten_reasoning_text(item).strip() for item in value]
+                return "\n".join([part for part in parts if part])
+            if isinstance(value, dict):
+                keys = (
+                    "text",
+                    "content",
+                    "summary",
+                    "reasoning",
+                    "reasoning_content",
+                    "value",
+                )
+                parts = []
+                for key in keys:
+                    if key in value:
+                        part = _flatten_reasoning_text(value.get(key)).strip()
+                        if part:
+                            parts.append(part)
+                if parts:
+                    return "\n".join(parts)
+                try:
+                    return json.dumps(value, ensure_ascii=False)
+                except Exception:
+                    return str(value)
+
+            text_attr = getattr(value, "text", None)
+            if isinstance(text_attr, str) and text_attr.strip():
+                return text_attr
+
+            content_attr = getattr(value, "content", None)
+            if content_attr is not None:
+                flattened = _flatten_reasoning_text(content_attr).strip()
+                if flattened:
+                    return flattened
+
+            model_dump = getattr(value, "model_dump", None)
+            if callable(model_dump):
+                try:
+                    dumped = model_dump(exclude_none=True)
+                    flattened = _flatten_reasoning_text(dumped).strip()
+                    if flattened:
+                        return flattened
+                except Exception:
+                    pass
+
+            return str(value)
+
+        def _extract_reasoning_delta(delta: Any) -> str:
+            candidates: List[Any] = []
+            for attr in (
+                "reasoning_content",
+                "reasoning",
+                "thinking",
+                "reasoning_summary",
+            ):
+                value = getattr(delta, attr, None)
+                if value:
+                    candidates.append(value)
+
+            model_dump = getattr(delta, "model_dump", None)
+            if callable(model_dump):
+                try:
+                    dumped = model_dump(exclude_none=True)
+                except Exception:
+                    dumped = {}
+                if isinstance(dumped, dict):
+                    for key in (
+                        "reasoning_content",
+                        "reasoning",
+                        "thinking",
+                        "reasoning_summary",
+                    ):
+                        value = dumped.get(key)
+                        if value:
+                            candidates.append(value)
+
+            for value in candidates:
+                text = _flatten_reasoning_text(value).strip()
+                if text:
+                    return text
+            return ""
+
+        kwargs = {"model": self.model, "messages": messages, "stream": True}
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
+        if self._request_options:
+            kwargs.update(self._request_options)
+
+        stream = self.client.chat.completions.create(**kwargs)
+
+        accumulated_content = ""
+        tool_calls_acc: Dict[int, Dict[str, Any]] = {}
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta
+
+            # Emit reasoning/thinking traces when provider exposes them.
+            reasoning_text = _extract_reasoning_delta(delta)
+            if reasoning_text:
+                yield {"type": "reasoning", "content": reasoning_text}
+
+            # Accumulate text content
+            if delta.content:
+                accumulated_content += delta.content
+                yield {"type": "content", "content": delta.content}
+
+            # Accumulate tool calls across chunks
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {
+                            "id": tc_delta.id or "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    entry = tool_calls_acc[idx]
+                    if tc_delta.id:
+                        entry["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            entry["function"]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            entry["function"][
+                                "arguments"
+                            ] += tc_delta.function.arguments
+
+            # Check for stream finish
+            if chunk.choices[0].finish_reason:
+                break
+
+        # If we accumulated tool calls, yield them as a reconstructed response-like object
+        if tool_calls_acc:
+            # Build a lightweight object that matches the structure _execute_llm_interaction expects
+            from types import SimpleNamespace
+
+            tool_calls_list = []
+            for idx in sorted(tool_calls_acc.keys()):
+                tc = tool_calls_acc[idx]
+                tool_calls_list.append(
+                    SimpleNamespace(
+                        id=tc["id"],
+                        type="function",
+                        function=SimpleNamespace(
+                            name=tc["function"]["name"],
+                            arguments=tc["function"]["arguments"],
+                        ),
+                    )
+                )
+
+            message_ns = SimpleNamespace(
+                content=accumulated_content or None,
+                tool_calls=tool_calls_list,
+            )
+            response_ns = SimpleNamespace(choices=[SimpleNamespace(message=message_ns)])
+            yield {"type": "tool_calls", "response": response_ns}
+        else:
+            yield {"type": "done", "content": accumulated_content}
 
     def _extract_usage(self, response: Any) -> Optional[Dict[str, int]]:
         usage = getattr(response, "usage", None)

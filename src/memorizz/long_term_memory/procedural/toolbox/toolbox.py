@@ -1,25 +1,12 @@
-# --- toolbox.py ---
-# This refactored code adds support for any LLM provider while maintaining
-# full backward compatibility with the original OpenAI implementation.
-
 import inspect
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
-
-# ------------------ Step 1: Define a Generic LLM Interface ------------------
-# This protocol defines the "contract" any compatible LLM provider must follow.
-# It's good practice to place this in a separate file (e.g., llm_provider_protocol.py)
-# but it's included here for a complete, single-file response.
 from ....llms.llm_provider import LLMProvider
 from ....memory_provider import MemoryProvider
 from .tool_schema import ToolSchemaType
-
-# ------------------ Step 2: Create the Default Fallback ------------------
-# This function provides the default OpenAI client if no other LLM is specified,
-# ensuring existing code continues to work without modification.
 
 
 def get_openai_default() -> LLMProvider:
@@ -27,9 +14,6 @@ def get_openai_default() -> LLMProvider:
     from ....llms.openai import OpenAI
 
     return OpenAI()
-
-
-# ------------------ Step 3: Refactor the Toolbox Class ------------------
 
 
 class Toolbox:

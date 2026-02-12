@@ -32,6 +32,18 @@ provider = OracleProvider(OracleConfig(
 
 Set `lazy_vector_indexes=True` if you want faster cold starts and are ok with indexes being created on demand.
 
+### Shared Embedding Defaults (UI + Notebook Alignment)
+
+If you connect from multiple clients (UI, notebooks, scripts), set common embedding defaults so Oracle VECTOR dimensions stay consistent:
+
+```bash
+export MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER=openai
+export MEMORIZZ_DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
+export MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS=1536
+```
+
+When `OracleConfig.embedding_provider` is omitted, the Oracle provider will use these env defaults automatically.
+
 ## Database Prep
 
 1. Create a dedicated user with `CREATE SESSION`, `CREATE TABLE`, `CREATE INDEX`, `UNLIMITED TABLESPACE`.
@@ -58,5 +70,6 @@ Every memory bucket gets its own table plus a VECTOR index:
 - **Vector datatype missing** – Ensure you're running 23ai+ and have `DBMS_VECTOR` privileges.
 - **Connection refused** – Use Easy Connect Plus (`host:port/service`) or TNS alias strings.
 - **Slow cold start** – Enable `lazy_vector_indexes` or pre-create indexes manually using the SQL files in the provider folder.
+- **Embedding dimension mismatch** – Align provider model/output dimensions with existing table VECTOR dimensions, or use a separate schema per embedding profile.
 
 For the full reference, open `src/memorizz/memory_provider/oracle/README.md`.

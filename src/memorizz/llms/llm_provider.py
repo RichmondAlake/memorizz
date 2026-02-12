@@ -5,6 +5,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Generator,
     List,
     Optional,
     Protocol,
@@ -78,4 +79,20 @@ class LLMProvider(Protocol):
 
     def get_context_window_tokens(self) -> Optional[int]:
         """Return the provider's context window size in tokens, when known."""
+        ...
+
+    def generate_stream(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+    ) -> Generator[Dict[str, Any], None, None]:
+        """
+        Stream a response from a list of messages (chat format), optionally with tool calling.
+
+        Yields dictionaries with one of these shapes:
+            - {"type": "content", "content": "..."} for text chunks
+            - {"type": "tool_calls", "response": <full response object>} when tool calls are detected
+            - {"type": "done", "content": "<full accumulated text>"} at the end of the stream
+        """
         ...

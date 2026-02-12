@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}{{ memory_type_display }} - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>{{ memory_type_display }}</h1>
+    <p>{{ items|length }} item{% if items|length != 1 %}s{% endif %} found</p>
+</div>
+
+{% if items %}
+<div class="memory-items">
+    {% for item in items %}
+    <div class="memory-item">
+        <div class="memory-item-header">
+            {% if item.name %}
+            <h3>{{ item.name }}</h3>
+            {% elif item.title %}
+            <h3>{{ item.title }}</h3>
+            {% elif item._id %}
+            <h3>Item {{ item._id|string|truncate(12) }}</h3>
+            {% else %}
+            <h3>Item {{ loop.index }}</h3>
+            {% endif %}
+
+            {% if item._id %}
+            <code class="item-id">{{ item._id|string|truncate(20) }}</code>
+            {% endif %}
+        </div>
+
+        <div class="memory-item-body">
+            {% if item.content %}
+            <p class="item-content">{{ item.content|truncate(200) }}</p>
+            {% elif item.description %}
+            <p class="item-content">{{ item.description|truncate(200) }}</p>
+            {% endif %}
+
+            <div class="item-meta">
+                {% if item.role %}
+                <span class="meta-tag">{{ item.role }}</span>
+                {% endif %}
+                {% if item.memory_id %}
+                <span class="meta-tag">Memory: {{ item.memory_id|truncate(12) }}</span>
+                {% endif %}
+                {% if item.timestamp %}
+                <span class="meta-tag">{{ item.timestamp }}</span>
+                {% endif %}
+                {% if item.created_at %}
+                <span class="meta-tag">Created: {{ item.created_at }}</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <div class="empty-icon">📭</div>
+    <h3>No {{ memory_type_display }} Found</h3>
+    <p>There are no items of this type stored in the memory provider.</p>
+</div>
+{% endif %}
+{% endblock %}

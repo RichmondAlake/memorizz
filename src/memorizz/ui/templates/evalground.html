@@ -1,0 +1,521 @@
+{% extends "base.html" %}
+
+{% block title %}Evalground - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Evalground</h1>
+    <p>Evaluate agents against the benchmarks in the library (LongMemEval).</p>
+</div>
+
+{% if warnings %}
+<div class="warning-message">
+    <strong>Heads up</strong>
+    <ul>
+        {% for warning in warnings %}
+        <li>{{ warning }}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% if error %}
+<div class="error-message">
+    <span>!</span> {{ error }}
+</div>
+{% endif %}
+
+<div class="detail-section evalground-section">
+    <h2>Dataset Library</h2>
+    <div class="dataset-status">
+        {% for item in dataset_status %}
+        <div class="dataset-row">
+            <div class="dataset-name">LongMemEval {{ item.variant|upper }}</div>
+            <div class="dataset-meta">
+                <span class="dataset-file">{{ item.filename }}</span>
+                {% if item.exists %}
+                <span class="badge badge-success">Ready</span>
+                {% else %}
+                <span class="badge badge-warning">Missing</span>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if download_message %}
+    <div class="success-message">{{ download_message }}</div>
+    {% endif %}
+
+    {% if download_error %}
+    <div class="error-message">
+        <span>!</span> {{ download_error }}
+    </div>
+    {% endif %}
+
+    {% if missing_variants %}
+    <form method="post" action="/evalground/datasets" class="dataset-actions">
+        <button type="submit" class="btn">Download datasets</button>
+        <p class="form-hint">Uses the bundled LongMemEval downloader to fetch dataset files.</p>
+    </form>
+    {% endif %}
+</div>
+
+<div class="detail-section evalground-section">
+    <h2>Benchmark Run</h2>
+    {% if agents %}
+    <form method="post" action="/evalground" class="evalground-form">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="agent_id">Agent</label>
+                <select name="agent_id" id="agent_id">
+                    <option value="">Select an agent</option>
+                    {% for agent in agents %}
+                    {% set agent_name = agent.persona.name if agent.persona and agent.persona.name else 'Agent' %}
+                    <option value="{{ agent.agent_id }}" {% if agent.agent_id == selected_agent_id %}selected{% endif %}>
+                        {{ agent_name }} ({{ agent.agent_id[:8] }}...)
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="benchmark">Benchmark</label>
+                <select name="benchmark" id="benchmark">
+                    <option value="longmemeval" {% if benchmark == 'longmemeval' %}selected{% endif %}>LongMemEval</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="dataset_variant">Dataset Variant</label>
+                <select name="dataset_variant" id="dataset_variant">
+                    <option value="oracle" {% if dataset_variant == 'oracle' %}selected{% endif %}>Oracle (full)</option>
+                    <option value="s" {% if dataset_variant == 's' %}selected{% endif %}>S (small)</option>
+                    <option value="m" {% if dataset_variant == 'm' %}selected{% endif %}>M (medium)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="num_samples">Samples</label>
+                <input id="num_samples" name="num_samples" type="number" min="1" value="{{ num_samples }}">
+            </div>
+        </div>
+        <div class="eval-run-actions">
+            <button type="submit" id="eval-run-start-btn" class="btn btn-primary" {% if not can_run %}disabled{% endif %}>Run Evaluation</button>
+            <button type="button" id="eval-run-stop-btn" class="btn btn-danger" hidden>Stop Run</button>
+        </div>
+        <p class="form-hint">Uses the connected Oracle provider and OpenAI for scoring. Results saved to <code>{{ eval_results_dir }}</code>.</p>
+        <p id="eval-run-status" class="form-hint eval-run-status"></p>
+    </form>
+    {% else %}
+    <div class="empty-pane">
+        <div class="empty-icon">EVAL</div>
+        <p>No agents available</p>
+        <p class="empty-hint">Create an agent to run benchmarks.</p>
+    </div>
+    {% endif %}
+</div>
+
+<div id="live-run-output-section" class="detail-section evalground-section" hidden>
+    <h2>Live Output</h2>
+    <pre id="live-run-output" class="eval-run-output"></pre>
+</div>
+
+<div class="detail-section evalground-section">
+    <h2>Run History</h2>
+    {% if runs_history %}
+    <div class="traces-table-wrap">
+        <table class="traces-agents-table evalground-runs-table">
+            <thead>
+                <tr>
+                    <th>Run ID</th>
+                    <th>Status</th>
+                    <th>Benchmark</th>
+                    <th>Agent</th>
+                    <th>Dataset</th>
+                    <th>Samples</th>
+                    <th>Accuracy</th>
+                    <th>Created</th>
+                    <th>Finished</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in runs_history %}
+                {% set run_status = run.status or 'unknown' %}
+                {% set badge_class = 'badge-warning' %}
+                {% if run_status == 'completed' %}
+                    {% set badge_class = 'badge-success' %}
+                {% elif run_status in ['failed', 'canceled'] %}
+                    {% set badge_class = 'badge-danger' %}
+                {% endif %}
+                <tr {% if selected_run_id and selected_run_id == run.run_id %}class="is-selected"{% endif %}>
+                    <td><code>{{ run.run_id[:8] }}...</code></td>
+                    <td><span class="badge {{ badge_class }}">{{ run_status }}</span></td>
+                    <td>{{ run.benchmark or 'longmemeval' }}</td>
+                    <td>{{ run.agent_name }}</td>
+                    <td>{{ run.dataset_variant or 'oracle' }}</td>
+                    <td>{{ run.num_samples }}</td>
+                    <td>
+                        {% if run.overall_accuracy is not none %}
+                            {{ run.overall_accuracy }}%
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{{ run.created_at or '-' }}</td>
+                    <td>{{ run.finished_at or '-' }}</td>
+                    <td>
+                        <a class="btn btn-sm" href="/evalground?run_id={{ run.run_id }}">View</a>
+                        {% if run_status in ['queued', 'running', 'canceling'] %}
+                        <button type="button" class="btn btn-sm btn-danger" data-eval-stop-run="{{ run.run_id }}">Stop</button>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty-hint">No benchmark runs yet.</p>
+    {% endif %}
+</div>
+
+{% if selected_agent %}
+<div class="agent-summary">
+    <div class="summary-item">
+        <span class="summary-label">Agent</span>
+        <span class="summary-value">
+            {% if selected_agent.persona and selected_agent.persona.name %}
+                {{ selected_agent.persona.name }}
+            {% else %}
+                Agent
+            {% endif %}
+        </span>
+    </div>
+    <div class="summary-item">
+        <span class="summary-label">Agent ID</span>
+        <code class="summary-value">{{ selected_agent.agent_id }}</code>
+    </div>
+    <div class="summary-item">
+        <span class="summary-label">Mode</span>
+        <span class="badge">{{ selected_agent.application_mode or 'assistant' }}</span>
+    </div>
+    {% if selected_agent.memory_ids %}
+    <div class="summary-item">
+        <span class="summary-label">Memory IDs</span>
+        <span class="summary-value">{{ selected_agent.memory_ids|length }}</span>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if eval_results %}
+<div class="detail-section evalground-section">
+    <h2>Results</h2>
+    <div class="eval-summary-grid">
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Overall Accuracy</div>
+            <div class="eval-summary-value">{{ (eval_results.overall_accuracy * 100)|round(2) }}%</div>
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Overall Score</div>
+            <div class="eval-summary-value">{{ eval_results.overall_score|round(3) }}</div>
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Samples</div>
+            <div class="eval-summary-value">{{ eval_results.metadata.num_samples }}</div>
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Processing Time</div>
+            <div class="eval-summary-value">{{ eval_results.metadata.total_processing_time|round(2) }}s</div>
+        </div>
+    </div>
+
+    <table class="info-table eval-metadata-table">
+        <tr>
+            <td class="info-label">Dataset</td>
+            <td class="info-value"><span class="badge">{{ eval_results.metadata.dataset_variant }}</span></td>
+        </tr>
+        <tr>
+            <td class="info-label">Mode</td>
+            <td class="info-value">{{ eval_results.metadata.application_mode|default('assistant') }}</td>
+        </tr>
+        <tr>
+            <td class="info-label">Timestamp</td>
+            <td class="info-value">{{ eval_results.metadata.timestamp }}</td>
+        </tr>
+        {% if eval_output_path %}
+        <tr>
+            <td class="info-label">Output</td>
+            <td class="info-value"><code>{{ eval_output_path }}</code></td>
+        </tr>
+        {% endif %}
+    </table>
+
+    <div class="eval-category-grid">
+        {% for category, metrics in eval_results.category_results.items() %}
+        <div class="eval-category-card">
+            <div class="eval-category-name">{{ category|replace('-', ' ')|title }}</div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Accuracy</span>
+                <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
+            </div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Avg Score</span>
+                <span class="metric-value">{{ metrics.average_score|round(2) }}</span>
+            </div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Samples</span>
+                <span class="metric-value">{{ metrics.num_samples }}</span>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% elif selected_agent %}
+<div class="empty-state">
+    <div class="empty-icon">EVAL</div>
+    <h3>No results yet</h3>
+    <p>Run a benchmark to see results.</p>
+</div>
+{% endif %}
+
+{% if run_output %}
+<div class="detail-section evalground-section">
+    <h2>Run Output</h2>
+    <pre class="eval-run-output">{{ run_output }}</pre>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const evalMonitor = window.memorizzEvalMonitor || null;
+    const selectedRunId = {{ (selected_run_id or '')|tojson }};
+    const selectedRunStatus = {{ (selected_run_status or '')|tojson }};
+    const activeRunStatuses = new Set(["queued", "running", "canceling"]);
+
+    if (evalMonitor && selectedRunId && activeRunStatuses.has(selectedRunStatus)) {
+        evalMonitor.trackRun(selectedRunId, {
+            status: selectedRunStatus,
+            keepLogs: true
+        });
+    }
+
+    const form = document.querySelector(".evalground-form");
+    const historyStopButtons = document.querySelectorAll("[data-eval-stop-run]");
+    historyStopButtons.forEach((button) => {
+        button.addEventListener("click", async () => {
+            const runId = button.getAttribute("data-eval-stop-run");
+            if (!runId) return;
+            button.disabled = true;
+            try {
+                const response = await fetch(`/evalground/runs/${encodeURIComponent(runId)}/stop`, {
+                    method: "POST",
+                    headers: { "Accept": "application/json" }
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload.error || payload.detail || "Unable to stop evaluation.");
+                }
+                if (evalMonitor) {
+                    evalMonitor.trackRun(runId, {
+                        status: "canceling",
+                        keepLogs: true
+                    });
+                }
+                window.location.href = `/evalground?run_id=${encodeURIComponent(runId)}`;
+            } catch (error) {
+                button.disabled = false;
+                window.alert(error?.message || String(error));
+            }
+        });
+    });
+
+    if (!form) return;
+    const startButton = document.getElementById("eval-run-start-btn");
+    const stopButton = document.getElementById("eval-run-stop-btn");
+    const status = document.getElementById("eval-run-status");
+    const liveSection = document.getElementById("live-run-output-section");
+    const liveOutput = document.getElementById("live-run-output");
+    let activeRunId = null;
+
+    function setIdleButtons() {
+        activeRunId = null;
+        if (startButton) {
+            startButton.disabled = false;
+            startButton.textContent = "Run Evaluation";
+        }
+        if (stopButton) {
+            stopButton.hidden = true;
+            stopButton.disabled = false;
+        }
+    }
+
+    function setRunningButtons(runId) {
+        activeRunId = runId;
+        if (startButton) {
+            startButton.disabled = true;
+            startButton.textContent = "Running...";
+        }
+        if (stopButton) {
+            stopButton.hidden = false;
+            stopButton.disabled = false;
+        }
+    }
+
+    function setStartingState() {
+        activeRunId = null;
+        if (startButton) {
+            startButton.disabled = true;
+            startButton.textContent = "Running...";
+        }
+        if (stopButton) {
+            stopButton.hidden = true;
+            stopButton.disabled = false;
+        }
+    }
+
+    async function pollRun(runId) {
+        let cursor = 0;
+        setRunningButtons(runId);
+        while (true) {
+            const response = await fetch(`/evalground/runs/${encodeURIComponent(runId)}?after=${cursor}`, {
+                headers: { "Accept": "application/json" }
+            });
+
+            if (!response.ok) {
+                throw new Error("Lost connection to the evaluation run.");
+            }
+
+            const payload = await response.json();
+            const lines = Array.isArray(payload.logs) ? payload.logs : [];
+
+            if (evalMonitor) {
+                evalMonitor.syncRunPayload(runId, payload);
+            }
+
+            if (lines.length && liveOutput) {
+                const chunk = lines.join("\n");
+                liveOutput.textContent += (liveOutput.textContent ? "\n" : "") + chunk;
+                liveOutput.scrollTop = liveOutput.scrollHeight;
+            }
+
+            cursor = typeof payload.next_index === "number"
+                ? payload.next_index
+                : cursor + lines.length;
+
+            if (payload.status === "queued" || payload.status === "running" || payload.status === "canceling") {
+                if (status) {
+                    status.textContent = payload.status === "canceling"
+                        ? "Stopping evaluation..."
+                        : "Evaluation running. Live logs are updating below.";
+                }
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                continue;
+            }
+
+            if (payload.status === "completed") {
+                if (status) {
+                    status.textContent = "Evaluation finished. Loading results...";
+                }
+                window.location.href = `/evalground?run_id=${encodeURIComponent(runId)}`;
+                return;
+            }
+
+            if (payload.status === "canceled") {
+                if (status) {
+                    status.textContent = "Evaluation canceled.";
+                }
+                setIdleButtons();
+                return;
+            }
+
+            const failure = payload.error || "Evaluation failed.";
+            if (status) {
+                status.textContent = failure;
+            }
+            setIdleButtons();
+            return;
+        }
+    }
+
+    if (stopButton) {
+        stopButton.addEventListener("click", async () => {
+            if (!activeRunId) return;
+            stopButton.disabled = true;
+            if (status) {
+                status.textContent = "Stopping evaluation...";
+            }
+            try {
+                const response = await fetch(`/evalground/runs/${encodeURIComponent(activeRunId)}/stop`, {
+                    method: "POST",
+                    headers: { "Accept": "application/json" }
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload.error || payload.detail || "Unable to stop evaluation.");
+                }
+                if (evalMonitor) {
+                    evalMonitor.trackRun(activeRunId, {
+                        status: "canceling",
+                        keepLogs: true
+                    });
+                }
+            } catch (error) {
+                if (status) {
+                    status.textContent = error?.message || String(error);
+                }
+                stopButton.disabled = false;
+            }
+        });
+    }
+
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        setStartingState();
+        if (liveSection) {
+            liveSection.hidden = false;
+        }
+        if (liveOutput) {
+            liveOutput.textContent = "";
+        }
+        if (status) {
+            status.textContent = "Starting evaluation...";
+        }
+
+        try {
+            const formData = new FormData(form);
+            const response = await fetch("/evalground/runs", {
+                method: "POST",
+                body: formData,
+                headers: { "Accept": "application/json" }
+            });
+
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(payload.error || payload.detail || "Unable to start evaluation.");
+            }
+
+            if (!payload.run_id) {
+                throw new Error("Missing evaluation run ID.");
+            }
+
+            setRunningButtons(payload.run_id);
+            if (evalMonitor) {
+                evalMonitor.trackRun(payload.run_id, {
+                    status: payload.status || "queued",
+                    keepLogs: false
+                });
+            }
+            await pollRun(payload.run_id);
+        } catch (error) {
+            if (status) {
+                status.textContent = error?.message || String(error);
+            }
+            setIdleButtons();
+        }
+    });
+});
+</script>
+{% endblock %}

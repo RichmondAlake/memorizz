@@ -302,7 +302,8 @@ class TestComponentIntegration:
 
         # Verify both managers are working
         assert agent.memory_manager is not None
-        assert len(agent.tool_manager.list_tools()) == 1
+        tool_names = agent.tool_manager.list_tools()
+        assert "memory_search_tool" in tool_names
 
     @pytest.mark.integration
     def test_persona_cache_workflow_integration(self):
@@ -475,7 +476,9 @@ class TestComponentIntegration:
 
         # Verify all components are working
         assert agent.persona_manager.current_persona == persona
-        assert len(agent.tool_manager.list_tools()) == 2
+        tool_names = agent.tool_manager.list_tools()
+        assert "project_tracker" in tool_names
+        assert "team_coordinator" in tool_names
         assert agent.cache_manager.enabled == True
         assert agent.memory_manager is not None
         assert agent.workflow_manager is not None

@@ -59,3 +59,6 @@ src/memorizz/examples/
 # Build artifacts
 site/
 *.map
+
+# Local runtime toolchains (e.g., downloaded GraalPy binaries)
+.local/

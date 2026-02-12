@@ -32,6 +32,38 @@ class MemoryManager:
         self.memory_provider = memory_provider
         self._conversation_memory_cache = {}
 
+    @staticmethod
+    def _history_timestamp(entry: Dict[str, Any]) -> float:
+        """Build a numeric timestamp key for stable conversation ordering."""
+        if not isinstance(entry, dict):
+            return 0.0
+
+        raw_value = (
+            entry.get("timestamp")
+            or entry.get("created_at")
+            or entry.get("createdAt")
+            or 0
+        )
+
+        if isinstance(raw_value, datetime):
+            return raw_value.timestamp()
+        if isinstance(raw_value, (int, float)):
+            return float(raw_value)
+
+        text = str(raw_value).strip()
+        if not text:
+            return 0.0
+
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+
     def load_conversation_history(
         self, memory_id: str, limit: int = 10
     ) -> List[Dict[str, Any]]:
@@ -50,16 +82,21 @@ class MemoryManager:
 
             # Check cache first
             if memory_id in self._conversation_memory_cache:
-                return self._conversation_memory_cache[memory_id][:limit]
+                cached = self._conversation_memory_cache[memory_id]
+                if not limit or limit <= 0:
+                    return list(cached)
+                return cached[-limit:]
 
             # Load from memory provider
             history = (
                 self.memory_provider.retrieve_conversation_history_ordered_by_timestamp(
                     memory_id=memory_id,
                     memory_type=MemoryType.CONVERSATION_MEMORY,
-                    limit=limit,
+                    limit=None,
                 )
             )
+            history = [row for row in (history or []) if isinstance(row, dict)]
+            history.sort(key=self._history_timestamp)
 
             # Cache the results
             self._conversation_memory_cache[memory_id] = history
@@ -67,7 +104,9 @@ class MemoryManager:
             logger.info(
                 f"Loaded {len(history)} conversation entries for memory_id: {memory_id}"
             )
-            return history
+            if not limit or limit <= 0:
+                return history
+            return history[-limit:]
 
         except Exception as e:
             logger.error(f"Failed to load conversation history: {e}")

@@ -254,7 +254,7 @@ class TestSemanticMemory:
             {
                 "machine learning": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.SEMANTIC_MEMORY,
+                        memory_type=MemoryType.LONG_TERM_MEMORY,
                         content={
                             "topic": "machine learning",
                             "information": "Machine learning is a subset of AI that learns patterns from data",
@@ -264,7 +264,7 @@ class TestSemanticMemory:
                 ],
                 "python programming": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.SEMANTIC_MEMORY,
+                        memory_type=MemoryType.LONG_TERM_MEMORY,
                         content={
                             "topic": "python programming",
                             "information": "Python is a versatile programming language great for beginners",
@@ -345,7 +345,7 @@ class TestSemanticMemory:
             {
                 "artificial intelligence": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.SEMANTIC_MEMORY,
+                        memory_type=MemoryType.LONG_TERM_MEMORY,
                         content={
                             "topic": "machine learning",
                             "information": "ML is a branch of AI focusing on learning from data",
@@ -353,7 +353,7 @@ class TestSemanticMemory:
                         },
                     ),
                     MockMemoryUnit(
-                        memory_type=MemoryType.SEMANTIC_MEMORY,
+                        memory_type=MemoryType.LONG_TERM_MEMORY,
                         content={
                             "topic": "neural networks",
                             "information": "Neural networks are AI models inspired by the brain",
@@ -361,7 +361,7 @@ class TestSemanticMemory:
                         },
                     ),
                     MockMemoryUnit(
-                        memory_type=MemoryType.SEMANTIC_MEMORY,
+                        memory_type=MemoryType.LONG_TERM_MEMORY,
                         content={
                             "topic": "expert systems",
                             "information": "Expert systems use rules to make decisions",
@@ -411,7 +411,7 @@ class TestEpisodicMemory:
             {
                 "meeting_events": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.EPISODIC_MEMORY,
+                        memory_type=MemoryType.CONVERSATION_MEMORY,
                         content={
                             "event_type": "meeting",
                             "participants": ["Alice", "Bob", "Charlie"],
@@ -481,7 +481,7 @@ class TestEpisodicMemory:
             {
                 "project_timeline": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.EPISODIC_MEMORY,
+                        memory_type=MemoryType.CONVERSATION_MEMORY,
                         content=event,
                         timestamp=event["timestamp"],
                     )
@@ -515,7 +515,7 @@ class TestEpisodicMemory:
         memory_provider = MockMemoryProvider()
 
         detailed_event = MockMemoryUnit(
-            memory_type=MemoryType.EPISODIC_MEMORY,
+            memory_type=MemoryType.CONVERSATION_MEMORY,
             content={
                 "event_type": "client_presentation",
                 "date": "2023-11-20",
@@ -569,7 +569,7 @@ class TestProceduralMemory:
             {
                 "code_review_process": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.PROCEDURAL_MEMORY,
+                        memory_type=MemoryType.TOOLBOX,
                         content={
                             "procedure_name": "code_review_workflow",
                             "steps": [
@@ -621,7 +621,7 @@ class TestProceduralMemory:
         # Configure skills-based procedural memory
         skills = [
             MockMemoryUnit(
-                memory_type=MemoryType.PROCEDURAL_MEMORY,
+                memory_type=MemoryType.TOOLBOX,
                 content={
                     "skill_name": "debug_python_error",
                     "procedure": [
@@ -642,7 +642,7 @@ class TestProceduralMemory:
                 },
             ),
             MockMemoryUnit(
-                memory_type=MemoryType.PROCEDURAL_MEMORY,
+                memory_type=MemoryType.TOOLBOX,
                 content={
                     "skill_name": "optimize_sql_query",
                     "procedure": [
@@ -699,7 +699,7 @@ class TestProceduralMemory:
 
         # Initial procedure
         original_procedure = MockMemoryUnit(
-            memory_type=MemoryType.PROCEDURAL_MEMORY,
+            memory_type=MemoryType.TOOLBOX,
             content={
                 "procedure_name": "deploy_application",
                 "version": 1,
@@ -753,7 +753,7 @@ class TestMemoryIntegration:
             {
                 "machine_learning": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.SEMANTIC_MEMORY,
+                        memory_type=MemoryType.LONG_TERM_MEMORY,
                         content={
                             "topic": "machine learning basics",
                             "information": "ML algorithms learn patterns from data to make predictions",
@@ -767,7 +767,7 @@ class TestMemoryIntegration:
             {
                 "ml_project": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.EPISODIC_MEMORY,
+                        memory_type=MemoryType.CONVERSATION_MEMORY,
                         content={
                             "event": "ML project completion",
                             "date": "2023-11-30",
@@ -782,7 +782,7 @@ class TestMemoryIntegration:
             {
                 "ml_workflow": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.PROCEDURAL_MEMORY,
+                        memory_type=MemoryType.TOOLBOX,
                         content={
                             "procedure": "train_ml_model",
                             "steps": [
@@ -843,7 +843,7 @@ class TestMemoryIntegration:
             {
                 "best_practices": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.SEMANTIC_MEMORY,
+                        memory_type=MemoryType.LONG_TERM_MEMORY,
                         content={
                             "topic": "testing best practices",
                             "information": "Unit tests should cover at least 80% of code for good quality",
@@ -857,7 +857,7 @@ class TestMemoryIntegration:
             {
                 "testing_experience": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.EPISODIC_MEMORY,
+                        memory_type=MemoryType.CONVERSATION_MEMORY,
                         content={
                             "event": "project_retrospective",
                             "date": "2023-12-01",
@@ -872,7 +872,7 @@ class TestMemoryIntegration:
             {
                 "testing_process": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.PROCEDURAL_MEMORY,
+                        memory_type=MemoryType.TOOLBOX,
                         content={
                             "procedure": "quality_testing",
                             "priority": "Focus on integration tests and user acceptance testing over raw coverage numbers",
@@ -913,7 +913,7 @@ class TestMemoryIntegration:
             {
                 "chatbot_development": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.SEMANTIC_MEMORY,
+                        memory_type=MemoryType.LONG_TERM_MEMORY,
                         content={
                             "topic": "chatbot architecture",
                             "information": "Modern chatbots use transformer models with attention mechanisms",
@@ -928,7 +928,7 @@ class TestMemoryIntegration:
             {
                 project_id: [
                     MockMemoryUnit(
-                        memory_type=MemoryType.EPISODIC_MEMORY,
+                        memory_type=MemoryType.CONVERSATION_MEMORY,
                         content={
                             "project_id": project_id,
                             "phase": "development",
@@ -944,7 +944,7 @@ class TestMemoryIntegration:
             {
                 "model_optimization": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.PROCEDURAL_MEMORY,
+                        memory_type=MemoryType.TOOLBOX,
                         content={
                             "procedure": "optimize_transformer_model",
                             "techniques": [
@@ -1037,7 +1037,7 @@ class TestMemoryManagementOperations:
 
         for i, topic in enumerate(topics):
             memory_unit = MockMemoryUnit(
-                memory_type=MemoryType.SEMANTIC_MEMORY,
+                memory_type=MemoryType.LONG_TERM_MEMORY,
                 content={
                     "topic": topic,
                     "information": f"Information about {topic}",

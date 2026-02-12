@@ -47,37 +47,30 @@ class TestMemAgentEnhancedTools(unittest.TestCase):
             return message * count
 
         # Add the function without persistence
-        result = self.agent.add_tool(func=sample_tool, persist=False)
+        result = self.agent.add_tool(sample_tool, persist=False)
 
         # Verify the function was added successfully
         self.assertTrue(result)
-        self.assertIsNotNone(self.agent.tools)
-        self.assertEqual(len(self.agent.tools), 1)
+        self.assertIn("sample_tool", self.agent.tool_manager.tools)
 
-        # Verify the tool schema is correctly generated
-        tool = self.agent.tools[0]
+        # Verify the tool metadata is correctly generated
+        tool = self.agent.tool_manager.get_tool_metadata("sample_tool")
         self.assertEqual(tool["type"], "function")
-        self.assertEqual(tool["function"]["name"], "sample_tool")
-        self.assertIn("Repeat a message", tool["function"]["description"])
+        self.assertEqual(tool["name"], "sample_tool")
+        self.assertIn("Repeat a message", tool["description"])
 
         # Verify parameters are correctly extracted
-        params = tool["function"]["parameters"]
+        params = tool["parameters"]
         self.assertEqual(len(params), 2)
 
-        # Check required parameter (message)
-        message_param = next(p for p in params if p["name"] == "message")
-        self.assertEqual(message_param["type"], "string")
-        self.assertTrue(message_param["required"])
+        # Check parameter types
+        self.assertEqual(params["message"]["type"], "string")
+        self.assertEqual(params["count"]["type"], "integer")
 
-        # Check optional parameter (count)
-        count_param = next(p for p in params if p["name"] == "count")
-        self.assertEqual(count_param["type"], "integer")
-        self.assertFalse(count_param["required"])
-
-        # Verify required list
-        required_params = tool["function"]["required"]
+        # Verify required list includes all function params
+        required_params = tool["required"]
         self.assertIn("message", required_params)
-        self.assertNotIn("count", required_params)
+        self.assertIn("count", required_params)
 
     def test_add_decorated_function_persistent(self):
         """Test adding a decorated function with persistence."""
@@ -90,18 +83,18 @@ class TestMemAgentEnhancedTools(unittest.TestCase):
         self.mock_memory_provider.store.return_value = "test-tool-id-123"
 
         # Add the function with persistence
-        result = self.agent.add_tool(func=persistent_tool, persist=True)
+        result = self.agent.add_tool(persistent_tool, persist=True)
 
         # Verify the function was added successfully
         self.assertTrue(result)
-        self.assertIsNotNone(self.agent.tools)
+        self.assertIn("persistent_tool", self.agent.tool_manager.tools)
 
         # Verify memory provider was called to store the tool
         self.mock_memory_provider.store.assert_called_once()
 
         # Verify the stored tool has the correct _id from memory provider
-        tool = self.agent.tools[0]
-        self.assertEqual(tool.get("function", {}).get("name"), "persistent_tool")
+        tool = self.agent.tool_manager.get_tool_metadata("persistent_tool")
+        self.assertEqual(tool.get("name"), "persistent_tool")
 
     def test_add_multiple_functions(self):
         """Test adding multiple functions at once."""
@@ -120,15 +113,19 @@ class TestMemAgentEnhancedTools(unittest.TestCase):
 
         functions = [tool_one, tool_two, tool_three]
 
+        initial_count = len(self.agent.tool_manager.tools)
+
         # Add all functions at once
-        result = self.agent.add_tools(funcs=functions, persist=False)
+        results = [self.agent.add_tool(func, persist=False) for func in functions]
 
         # Verify all functions were added successfully
-        self.assertTrue(result)
-        self.assertEqual(len(self.agent.tools), 3)
+        self.assertTrue(all(results))
+        self.assertEqual(
+            len(self.agent.tool_manager.tools), initial_count + len(functions)
+        )
 
         # Verify each tool was added correctly
-        tool_names = [tool["function"]["name"] for tool in self.agent.tools]
+        tool_names = self.agent.tool_manager.list_tools()
         self.assertIn("tool_one", tool_names)
         self.assertIn("tool_two", tool_names)
         self.assertIn("tool_three", tool_names)
@@ -144,17 +141,24 @@ class TestMemAgentEnhancedTools(unittest.TestCase):
             """Updated version with better functionality."""
             return f"Enhanced: {message}"
 
+        initial_count = len(self.agent.tool_manager.tools)
+
         # Add original function
-        self.agent.add_tool(func=original_tool, persist=False)
-        self.assertEqual(len(self.agent.tools), 1)
-        original_description = self.agent.tools[0]["function"]["description"]
+        self.agent.add_tool(original_tool, persist=False)
+        self.assertEqual(len(self.agent.tool_manager.tools), initial_count + 1)
+        original_description = self.agent.tool_manager.get_tool_metadata(
+            "original_tool"
+        )["description"]
 
         # Add updated function with same name
-        self.agent.add_tool(func=updated_tool, persist=False)
+        updated_tool.__name__ = "original_tool"
+        self.agent.add_tool(updated_tool, persist=False)
 
         # Verify only one tool exists (updated, not duplicated)
-        self.assertEqual(len(self.agent.tools), 1)
-        updated_description = self.agent.tools[0]["function"]["description"]
+        self.assertEqual(len(self.agent.tool_manager.tools), initial_count + 1)
+        updated_description = self.agent.tool_manager.get_tool_metadata(
+            "original_tool"
+        )["description"]
 
         # Verify the description was updated
         self.assertNotEqual(original_description, updated_description)
@@ -163,13 +167,14 @@ class TestMemAgentEnhancedTools(unittest.TestCase):
     def test_error_handling_invalid_function(self):
         """Test error handling for invalid function input."""
 
-        # Test with non-callable object
-        with self.assertRaises(ValueError):
-            self.agent.add_tool(func="not_a_function")
+        # Missing tool IDs should fail to load
+        self.mock_memory_provider.retrieve_by_id.return_value = None
+        result = self.agent.add_tool("missing_tool")
+        self.assertFalse(result)
 
-        # Test with None but no other parameters
-        with self.assertRaises(ValueError):
-            self.agent.add_tool()
+        # Unsupported types should return False
+        result = self.agent.add_tool(None)
+        self.assertFalse(result)
 
     def test_backward_compatibility(self):
         """Test that existing functionality still works."""
@@ -181,11 +186,12 @@ class TestMemAgentEnhancedTools(unittest.TestCase):
         mock_toolbox.list_tools.return_value = []
 
         # This should not raise an error
-        result = self.agent.add_tool(toolbox=mock_toolbox)
+        mock_toolbox.tools = {"example": {"metadata": {"name": "example"}}}
 
-        # The exact return value depends on toolbox content,
-        # but it should complete without error
-        self.assertIsInstance(result, bool)
+        tools_loaded = self.agent.tool_manager.initialize_from_toolbox(mock_toolbox)
+
+        self.assertEqual(tools_loaded, 1)
+        self.assertIn("example", self.agent.tool_manager.list_tools())
 
 
 class TestMultiAgentMemoryManagement(unittest.TestCase):

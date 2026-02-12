@@ -15,6 +15,7 @@ CREATE TABLE agents (
     max_steps NUMBER(10) DEFAULT 20,
     tool_access VARCHAR2(50) DEFAULT 'private',
     semantic_cache NUMBER(1) DEFAULT 0,  -- Boolean: 0=false, 1=true
+    is_favorite NUMBER(1) DEFAULT 0,     -- Boolean: 0=false, 1=true
     verbose NUMBER(1) DEFAULT 0,         -- Boolean: 0=false, 1=true
     embedding VECTOR,                     -- For semantic search on agents
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -22,6 +23,7 @@ CREATE TABLE agents (
 
     -- Constraints
     CONSTRAINT chk_agents_semantic_cache CHECK (semantic_cache IN (0, 1)),
+    CONSTRAINT chk_agents_is_favorite CHECK (is_favorite IN (0, 1)),
     CONSTRAINT chk_agents_verbose CHECK (verbose IN (0, 1))
 );
 
@@ -342,67 +344,67 @@ CREATE INDEX idx_entity_memory_agent_id ON entity_memory(agent_id);
 
 -- Agents vector index
 CREATE VECTOR INDEX idx_agents_vec ON agents(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Personas vector index
 CREATE VECTOR INDEX idx_personas_vec ON personas(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Toolbox vector index
 CREATE VECTOR INDEX idx_toolbox_vec ON toolbox(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Conversation memory vector index
 CREATE VECTOR INDEX idx_conv_vec ON conversation_memory(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Long-term memory vector index
 CREATE VECTOR INDEX idx_ltm_vec ON long_term_memory(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Short-term memory vector index
 CREATE VECTOR INDEX idx_stm_vec ON short_term_memory(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Workflow memory vector index
 CREATE VECTOR INDEX idx_workflow_vec ON workflow_memory(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Shared memory vector index
 CREATE VECTOR INDEX idx_shared_vec ON shared_memory(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Summaries vector index
 CREATE VECTOR INDEX idx_summaries_vec ON summaries(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Semantic cache vector index
 CREATE VECTOR INDEX idx_cache_vec ON semantic_cache(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
 -- Entity memory vector index
 CREATE VECTOR INDEX idx_entity_memory_vec ON entity_memory(embedding)
-ORGANIZATION NEIGHBOR PARTITIONS
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 

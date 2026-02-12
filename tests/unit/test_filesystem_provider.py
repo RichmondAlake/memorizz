@@ -66,12 +66,23 @@ def test_memagent_round_trip(tmp_path):
         instruction="test agent",
         memory_ids=["mem-1"],
         application_mode="assistant",
+        skill_paths=["skills/alpha.skills.md"],
+        mcp_servers=[
+            {
+                "name": "filesystem",
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+            }
+        ],
     )
     agent_id = provider.store_memagent(agent)
 
     loaded = provider.retrieve_memagent(agent_id)
     assert loaded is not None
     assert loaded.memory_ids == ["mem-1"]
+    assert loaded.skill_paths == ["skills/alpha.skills.md"]
+    assert loaded.mcp_servers[0]["name"] == "filesystem"
 
     provider.delete_memagent(agent_id)
     assert provider.retrieve_memagent(agent_id) is None

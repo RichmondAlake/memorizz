@@ -28,48 +28,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Add the project root to Python path
+# Add the project root to Python path for local execution
 project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
-
-# Place in environment variables
-os.environ["MEMORIZZ_LOG_LEVEL"] = "WARNING"
-os.environ["OPENAI_API_KEY"] = ""
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 try:
-    pass
-except ImportError:
-    pass
-
-try:
-    # Try importing from installed package first, then fall back to local development
+    from memorizz.llms.openai import OpenAI
+    from memorizz.memagent.builders import MemAgentBuilder
+    from memorizz.memory_provider.oracle import OracleConfig, OracleProvider
+except ImportError as e:
     try:
-        print("Importing from installed package")
-        from memorizz.llms.openai import OpenAI
-        from memorizz.memagent.builders import MemAgentBuilder
-        from memorizz.memory_provider.oracle import OracleConfig, OracleProvider
-    except ImportError:
-        print("Importing from local development")
-        # Fall back to local development imports
         from src.memorizz.llms.openai import OpenAI
         from src.memorizz.memagent.builders import MemAgentBuilder
         from src.memorizz.memory_provider.oracle import OracleConfig, OracleProvider
-except ImportError as e:
-    print(f"Error importing Memorizz: {e}")
-    print(
-        "Make sure you're running from the project root and Memorizz is properly installed."
-    )
-    sys.exit(1)
+    except ImportError as exc:
+        raise ImportError(
+            "Make sure you're running from the project root and Memorizz is properly installed."
+        ) from exc
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("longmemeval_evaluation.log"),
-        logging.StreamHandler(),
-    ],
-)
 logger = logging.getLogger(__name__)
 
 
@@ -79,9 +56,13 @@ class LongMemEvalEvaluator:
     def __init__(
         self,
         dataset_variant: str = "oracle",
-        application_mode: str = "assistant",
-        output_dir: str = "./results",
+        application_mode: Optional[str] = "assistant",
+        output_dir: Optional[str] = "./results",
         verbose: bool = False,
+        memory_provider: Optional[Any] = None,
+        agent_template: Optional[Any] = None,
+        dataset_dir: Optional[str] = None,
+        evaluation_model: Optional[Any] = None,
     ):
         """
         Initialize the evaluator with Oracle AI Database as the memory provider.
@@ -94,17 +75,21 @@ class LongMemEvalEvaluator:
         """
         self.dataset_variant = dataset_variant
         self.application_mode = application_mode
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir) if output_dir else Path("./results")
         self.verbose = verbose
+        self.agent_template = agent_template
+        self.dataset_dir = (
+            Path(dataset_dir) if dataset_dir else Path(__file__).parent / "data"
+        )
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize memory provider
-        self.memory_provider = self._init_memory_provider()
+        self.memory_provider = memory_provider or self._init_memory_provider()
 
         # Initialize evaluation model for scoring
-        self.eval_model = OpenAI(model="gpt-4")
+        self.eval_model = evaluation_model or OpenAI(model="gpt-4")
 
         # Load dataset
         self.dataset = self._load_dataset()
@@ -119,9 +104,63 @@ class LongMemEvalEvaluator:
             "knowledge-update": "KU",
         }
 
+        if not self.application_mode:
+            self.application_mode = (
+                self._get_template_value("application_mode") or "assistant"
+            )
+
         logger.info(
-            f"Initialized LongMemEval evaluator with variant: {dataset_variant}"
+            "Initialized LongMemEval evaluator with variant: %s", dataset_variant
         )
+
+    def _get_template_value(self, key: str) -> Any:
+        """Fetch a value from the agent template if available."""
+        if not self.agent_template:
+            return None
+        if isinstance(self.agent_template, dict):
+            return self.agent_template.get(key)
+        return getattr(self.agent_template, key, None)
+
+    def _sanitize_template_tools(self, tools: Any) -> List[Any]:
+        """Keep only executable tools from a template payload."""
+        if not tools:
+            return []
+
+        if isinstance(tools, list):
+            raw_tools = tools
+        else:
+            raw_tools = [tools]
+
+        sanitized: List[Any] = []
+        for tool in raw_tools:
+            if callable(tool):
+                sanitized.append(tool)
+                continue
+            if not isinstance(tool, dict):
+                continue
+
+            tool_type = (
+                str(
+                    tool.get("tool_type")
+                    or tool.get("toolType")
+                    or tool.get("type")
+                    or ""
+                )
+                .strip()
+                .lower()
+            )
+            name = str(
+                tool.get("name") or (tool.get("function", {}) or {}).get("name") or ""
+            ).strip()
+
+            if tool_type == "mcp_server_config":
+                continue
+            if not name or name.lower() in {"unknown", "unknown_tool"}:
+                continue
+
+            sanitized.append(tool)
+
+        return sanitized
 
     def _init_memory_provider(self):
         """Initialize Oracle memory provider."""
@@ -129,6 +168,7 @@ class LongMemEvalEvaluator:
         oracle_user = os.environ.get("ORACLE_USER", "memorizz_user")
         oracle_password = os.environ.get("ORACLE_PASSWORD", "SecurePass123!")
         oracle_dsn = os.environ.get("ORACLE_DSN", "localhost:1521/FREEPDB1")
+        oracle_schema = os.environ.get("ORACLE_SCHEMA", oracle_user)
         openai_api_key = os.environ.get("OPENAI_API_KEY")
 
         if not openai_api_key:
@@ -139,6 +179,7 @@ class LongMemEvalEvaluator:
                 user=oracle_user,
                 password=oracle_password,
                 dsn=oracle_dsn,
+                schema=oracle_schema,
                 lazy_vector_indexes=False,
                 embedding_provider="openai",
                 embedding_config={
@@ -155,7 +196,7 @@ class LongMemEvalEvaluator:
         """Load LongMemEval dataset from local files."""
         try:
             # First, try to load from local data directory
-            data_dir = Path(__file__).parent / "data"
+            data_dir = self.dataset_dir
 
             # Map dataset variants to filenames
             filename_map = {
@@ -198,26 +239,78 @@ class LongMemEvalEvaluator:
             "Creating fresh agent with specified memory provider and application mode"
         )
 
-        openai_api_key = os.environ.get("OPENAI_API_KEY")
-
-        agent = (
-            MemAgentBuilder()
-            .with_instruction(
-                "You are a helpful assistant with excellent memory. "
-                "Pay close attention to all conversations and remember important details "
-                "about users and their preferences."
-            )
-            .with_memory_provider(self.memory_provider)
-            .with_llm_config(
-                {
-                    "provider": "openai",
-                    "model": "gpt-4o-mini",
-                    "api_key": openai_api_key,
-                }
-            )
-            .with_application_mode(self.application_mode)
-            .build()
+        default_instruction = (
+            "You are a helpful assistant with excellent memory. "
+            "Pay close attention to all conversations and remember important details "
+            "about users and their preferences."
         )
+
+        instruction = self._get_template_value("instruction") or default_instruction
+        application_mode = self.application_mode or "assistant"
+
+        llm_config = self._get_template_value("llm_config")
+        if isinstance(llm_config, dict):
+            llm_config = dict(llm_config)
+            provider_name = llm_config.get("provider", "openai").lower()
+            if provider_name == "openai" and "api_key" not in llm_config:
+                api_key = os.environ.get("OPENAI_API_KEY")
+                if api_key:
+                    llm_config["api_key"] = api_key
+        else:
+            llm_config = None
+
+        if llm_config is None:
+            openai_api_key = os.environ.get("OPENAI_API_KEY")
+            if not openai_api_key:
+                raise ValueError("OPENAI_API_KEY environment variable is required")
+            llm_config = {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key": openai_api_key,
+            }
+
+        builder = (
+            MemAgentBuilder()
+            .with_instruction(instruction)
+            .with_memory_provider(self.memory_provider)
+            .with_llm_config(llm_config)
+            .with_application_mode(application_mode)
+        )
+
+        max_steps = self._get_template_value("max_steps")
+        if max_steps:
+            builder.with_max_steps(max_steps)
+
+        tool_access = self._get_template_value("tool_access")
+        if tool_access:
+            builder.with_tool_access(tool_access)
+
+        persona = self._get_template_value("persona")
+        if persona:
+            builder.with_persona(persona=persona)
+
+        tools = self._get_template_value("tools")
+        if tools:
+            sanitized_tools = self._sanitize_template_tools(tools)
+            if sanitized_tools:
+                builder.with_tools(sanitized_tools)
+            else:
+                logger.warning(
+                    "Template tools were present but none were executable; continuing without template tools."
+                )
+
+        semantic_cache = self._get_template_value("semantic_cache")
+        if semantic_cache:
+            cache_config = self._get_template_value("semantic_cache_config") or {}
+            threshold = cache_config.get("similarity_threshold", 0.85)
+            scope = cache_config.get("scope", "local")
+            builder.with_semantic_cache(enabled=True, threshold=threshold, scope=scope)
+
+        context_window_tokens = self._get_template_value("context_window_tokens")
+        if context_window_tokens:
+            builder.config.context_window_tokens = context_window_tokens
+
+        agent = builder.build()
 
         # Save the agent to Oracle
         agent.save()
@@ -324,6 +417,16 @@ Only respond with the JSON object.
                 "ground_truth": ground_truth,
             }
 
+    def _cleanup_agent(self, agent) -> None:
+        """Remove evaluation agent data from the memory provider."""
+        if not agent or not self.memory_provider:
+            return
+        if hasattr(self.memory_provider, "delete_memagent"):
+            try:
+                self.memory_provider.delete_memagent(agent.agent_id, cascade=True)
+            except Exception as e:
+                logger.warning(f"Error cleaning up agent {agent.agent_id}: {e}")
+
     def evaluate_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         """
         Evaluate a single sample from the dataset.
@@ -393,20 +496,14 @@ Only respond with the JSON object.
             }
 
             # Clean up agent
-            try:
-                agent.delete(cascade=True)
-            except Exception as e:
-                logger.warning(f"Error cleaning up agent: {e}")
+            self._cleanup_agent(agent)
 
             return result
 
         except Exception as e:
             logger.error(f"Error evaluating sample: {e}")
             # Clean up agent on error
-            try:
-                agent.delete(cascade=True)
-            except:
-                pass
+            self._cleanup_agent(agent)
 
             return {
                 "question": question,
@@ -515,6 +612,18 @@ Only respond with the JSON object.
 
 def main():
     """Main evaluation function."""
+    if "MEMORIZZ_LOG_LEVEL" not in os.environ:
+        os.environ["MEMORIZZ_LOG_LEVEL"] = "WARNING"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler("longmemeval_evaluation.log"),
+            logging.StreamHandler(),
+        ],
+    )
+
     parser = argparse.ArgumentParser(
         description="Evaluate Memorizz using LongMemEval benchmark with Oracle AI Database",
         epilog="""
@@ -538,11 +647,23 @@ Environment Variables:
     parser.add_argument(
         "--application_mode",
         type=str,
-        default="assistant",
-        help="Memorizz application mode to use",
+        default=None,
+        help="Memorizz application mode to use (defaults to selected agent mode, then assistant)",
     )
     parser.add_argument(
         "--output_dir", type=str, default="./results", help="Directory to save results"
+    )
+    parser.add_argument(
+        "--output_filename",
+        type=str,
+        default=None,
+        help="Optional explicit output filename for JSON results.",
+    )
+    parser.add_argument(
+        "--agent_id",
+        type=str,
+        default="",
+        help="Optional existing MemAgent ID to use as the evaluation template.",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
@@ -562,18 +683,35 @@ Environment Variables:
             verbose=args.verbose,
         )
 
+        selected_agent_id = (args.agent_id or "").strip()
+        if selected_agent_id:
+            selected_agent = evaluator.memory_provider.retrieve_memagent(
+                selected_agent_id
+            )
+            if not selected_agent:
+                raise ValueError(f"Agent not found: {selected_agent_id}")
+            evaluator.agent_template = selected_agent
+            if not args.application_mode:
+                template_mode = getattr(selected_agent, "application_mode", None)
+                if template_mode:
+                    evaluator.application_mode = template_mode
+            logger.info(
+                "Using agent template for evaluation: %s",
+                selected_agent_id,
+            )
+
         # Run evaluation
         results = evaluator.evaluate(num_samples=args.num_samples)
 
         # Save results
-        output_file = evaluator.save_results(results)
+        output_file = evaluator.save_results(results, filename=args.output_filename)
 
         # Print summary
         print("\n" + "=" * 50)
         print("EVALUATION SUMMARY - Memorizz with Oracle AI Database")
         print("=" * 50)
         print(f"Dataset Variant: {args.dataset_variant}")
-        print(f"Application Mode: {args.application_mode}")
+        print(f"Application Mode: {evaluator.application_mode}")
         print(f"Memory Provider: Oracle AI Database")
         print(f"Samples Evaluated: {results['metadata']['num_samples']}")
         print(f"Overall Accuracy: {results['overall_accuracy']:.3f}")

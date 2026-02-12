@@ -1,273 +1,139 @@
-# MemoRizz Memory Architecture
+# Memorizz Memory Architecture
 
-This document provides an overview of the complete memory architecture in MemoRizz, organized according to cognitive science principles and practical AI agent requirements.
+This document explains how Memorizz organizes memory for single-agent and multi-agent systems.
 
-## 🧠 Memory Type Classification
+## Design Goals
 
-The MemoRizz memory system is organized into **cognitively-inspired categories** that mirror human memory systems, plus a specialized **coordination layer** for multi-agent scenarios.
+- Separate memory concerns by cognitive role (semantic, episodic, procedural, short-term, shared)
+- Keep storage backend-agnostic through a `MemoryProvider` interface
+- Support mode-driven defaults (`assistant`, `workflow`, `deep_research`)
+- Allow optional runtime capabilities (internet access, sandbox execution, skills, MCP)
 
-```
+## Module Layout
+
+```text
 src/memorizz/
-├── long_term_memory/           # Persistent, learned information
-│   ├── semantic/              # Facts, concepts, knowledge
-│   │   └── entity_memory/     # Structured facts about specific entities
-│   ├── procedural/            # Skills, behaviors, processes
-│   └── episodic/              # Experiences, events, history
-├── short_term_memory/         # Temporary, active processing
-│   ├── semantic_cache/        # Temporary fact storage
-│   └── working_memory/        # Active workspace & context management
-└── coordination/              # Multi-agent communication (not cognitive)
-    └── shared_memory/         # Inter-agent coordination
+├── long_term_memory/
+│   ├── semantic/
+│   │   ├── knowledge_base.py
+│   │   ├── persona/
+│   │   └── entity_memory/
+│   ├── procedural/
+│   │   ├── toolbox/
+│   │   └── workflow/
+│   └── episodic/
+│       ├── conversational_memory_unit.py
+│       └── summary_component.py
+├── short_term_memory/
+│   ├── working_memory/
+│   └── semantic_cache.py
+├── coordination/
+│   └── shared_memory/
+├── memory_provider/
+│   ├── oracle/
+│   ├── mongodb/
+│   └── filesystem/
+└── memagent/
+    ├── core.py
+    └── managers/
 ```
 
-## 📚 Long-Term Memory Systems
+## Memory Types
 
-### 🔍 Semantic Memory (`long_term_memory/semantic/`)
-**"What I know"** - Factual and conceptual knowledge
+`MemoryType` is defined in `src/memorizz/enums/memory_type.py`.
 
-- **Purpose**: Store and retrieve objective facts, concepts, and structured entity information
-- **Components**: Knowledge Base, Persona (identity/behavior), Entity Memory
-- **Use Cases**: Question answering, fact retrieval, domain expertise
-- **Examples**: "Python is a programming language", "The capital of France is Paris"
+- `LONG_TERM_MEMORY`: semantic facts/knowledge
+- `ENTITY_MEMORY`: structured entity attributes and updates
+- `TOOLBOX`: executable tools and metadata
+- `WORKFLOW_MEMORY`: process/task state
+- `CONVERSATION_MEMORY`: chat timeline
+- `SUMMARIES`: compressed conversation summaries
+- `SHORT_TERM_MEMORY`: active context scratchpad
+- `SEMANTIC_CACHE`: similar-query response cache
+- `SHARED_MEMORY`: multi-agent blackboard/session coordination
+- `MEMAGENT`: persisted agent configuration/state
 
-**Key Features:**
-- Vector-based semantic search
-- Namespace organization by domain
-- Agent-scoped knowledge bases
-- Embedding-powered relevance matching
-- Entity memory for persistent attribute–value pairs tied to specific people, products, or organizations
-- **Persona**: Behavioral patterns and identity consistency
-- **Entity Memory**: Structured profiles with attributes, relations, and provenance that survive across sessions
+## Application Mode Defaults
 
-Entity memory enables personalization and consistent reasoning: every agent can recall
-stable facts (preferences, org metadata, device details, etc.), update them with new
-evidence, and expose the information to LLMs via dedicated lookup/upsert tools.
+`ApplicationModeConfig` in `src/memorizz/enums/application_mode.py` maps modes to default memory stacks:
 
-### ⚙️ Procedural Memory (`long_term_memory/procedural/`)
-**"How I act and what I can do"** - Behavioral patterns and executable skills
+- `assistant`
+  - `CONVERSATION_MEMORY`, `LONG_TERM_MEMORY`, `PERSONAS`, `ENTITY_MEMORY`, `SHORT_TERM_MEMORY`, `SUMMARIES`
+- `workflow`
+  - `WORKFLOW_MEMORY`, `TOOLBOX`, `LONG_TERM_MEMORY`, `SHORT_TERM_MEMORY`, `SUMMARIES`
+- `deep_research`
+  - `TOOLBOX`, `SHARED_MEMORY`, `LONG_TERM_MEMORY`, `SHORT_TERM_MEMORY`, `SUMMARIES`
 
-- **Purpose**: Store learned behaviors, tools, and complex processes
-- **Components**: Toolbox (skills), Workflow (processes)
-- **Use Cases**: Consistent personality, tool execution, process automation
-- **Examples**: "How to respond as a customer service agent", "How to debug code", "How to conduct research"
+These defaults can be overridden by passing explicit `memory_types` to `MemAgent`.
 
-**Key Features:**
-- **Toolbox**: Executable functions with semantic discovery
-- **Workflow**: Multi-step process orchestration
+## Runtime Orchestration (MemAgent)
 
-### 📖 Episodic Memory (`long_term_memory/episodic/`)
-**"What I've experienced"** - Personal experiences and temporal context
+`MemAgent` (`src/memorizz/memagent/core.py`) coordinates memory and tools through manager components:
 
-- **Purpose**: Store time-stamped experiences and interaction history
-- **Components**: Conversational Memory Units, Summary Components
-- **Use Cases**: Conversation continuity, relationship building, experience learning
-- **Examples**: "Yesterday's conversation about debugging", "User prefers email communication"
+- `MemoryManager`
+- `EntityMemoryManager`
+- `ToolManager`
+- `CacheManager`
+- `PersonaManager`
+- `WorkflowManager`
+- `InternetAccessManager`
+- `SandboxManager` (when configured)
 
-**Key Features:**
-- Time-stamped interaction records
-- Automatic memory summarization
-- Relationship and context tracking
-- Emotional and situational tagging
+Request lifecycle (high level):
 
-## ⚡ Short-Term Memory Systems
+1. Resolve `memory_id` and `conversation_id`
+2. Try semantic cache (if enabled)
+3. Build context from active memory types
+4. Execute LLM/tool loop
+5. Persist user + assistant interaction
+6. Update context-window stats and summary registry as needed
 
-### 💾 Semantic Cache (`short_term_memory/semantic_cache/`)
-**"Temporary facts I'm holding"** - Short-term fact storage
+## Short-Term Context Control
 
-- **Purpose**: Temporarily cache frequently accessed information
-- **Use Cases**: Performance optimization, session-specific data
-- **Integration**: Works with memory providers for persistence
+Memorizz includes built-in context-window observability and compression helpers:
 
-### 🧠 Working Memory (`short_term_memory/working_memory/`)
-**"My active thinking space"** - Context window management and active processing
+- `get_context_window_stats()` for latest token usage snapshot
+- summary generation (`generate_summaries`) for history compression
+- summary registry helpers for retrieving recent summary metadata
 
-- **Purpose**: Manage limited attention spans and integrate information from all memory systems
-- **Components**: Context Window Management (CWM)
-- **Use Cases**: Token optimization, memory integration, attention management
+## Multi-Agent Coordination
 
-**Key Features:**
-- Context window optimization for LLMs
-- Memory system integration and coordination
-- Dynamic prompt generation
-- Attention management and focus control
+`SharedMemory` (`src/memorizz/coordination/shared_memory/shared_memory.py`) stores a shared session payload and blackboard entries for orchestrated workflows.
 
-## 🤝 Coordination Memory
+Structured helpers include:
 
-### 🔗 Shared Memory (`coordination/shared_memory/`)
-**"How we communicate"** - Multi-agent coordination (not cognitive memory)
+- `post_command(...)`
+- `post_status(...)`
+- `post_report(...)`
 
-- **Purpose**: Enable communication and coordination between multiple agents
-- **Components**: Blackboard architecture for agent coordination
-- **Use Cases**: Multi-agent workflows, task delegation, collaborative problem-solving
+`MultiAgentOrchestrator` and `DeepResearchOrchestrator` use these messages to coordinate delegates and synthesis agents.
 
-**Key Features:**
-- Session-based multi-agent coordination
-- Message-based communication patterns
-- Hierarchical agent organization
-- Task delegation and result integration
+## Provider Abstraction
 
-## 🏗️ Integration Architecture
+All persistence backends implement the `MemoryProvider` interface.
 
-### Memory System Relationships
+Built-in providers:
 
-```mermaid
-graph TD
-    WM[Working Memory] --> SM[Semantic Memory]
-    WM --> EM[Episodic Memory]
-    WM --> PM[Procedural Memory]
-    WM --> SC[Semantic Cache]
+- Oracle (`src/memorizz/memory_provider/oracle/`)
+- MongoDB (`src/memorizz/memory_provider/mongodb/`)
+- Filesystem (`src/memorizz/memory_provider/filesystem/`)
 
-    SM --> KB[Knowledge Base]
-    SM --> P[Persona]
-    PM --> T[Toolbox]
-    PM --> W[Workflow]
-    EM --> CM[Conversational Memory]
-    EM --> SU[Summaries]
+Because memory logic is provider-agnostic, the same agent code can switch backends with minimal changes.
 
-    SHM[Shared Memory] --> WM
+## Optional Capability Layers
 
-    style WM fill:#ff9999
-    style SM fill:#99ccff
-    style PM fill:#99ff99
-    style EM fill:#ffcc99
-    style SHM fill:#cc99ff
-```
+Memorizz can attach runtime extensions on top of the memory architecture:
 
-### Application Mode Integration
+- Internet access providers (`internet_search`, `open_web_page` tools)
+- Sandbox providers (`execute_code`, `sandbox_write_file`, `sandbox_read_file` tools)
+- Skill path loading (`list_skills`, `read_skill`, `run_skill_code`, `run_skill_script`)
+- MCP server tooling (`list_mcp_servers`, `mcp_list_tools`, `mcp_call_tool`)
 
-Different application modes activate different memory combinations:
+These layers are additive and do not replace the core memory model.
 
-```python
-# ASSISTANT Mode - General conversational agent
-active_memory_types = [
-    MemoryType.CONVERSATION_MEMORY,    # Episodic
-    MemoryType.LONG_TERM_MEMORY,       # Semantic
-    MemoryType.PERSONAS,               # Procedural
-    MemoryType.SHORT_TERM_MEMORY,      # Working
-    MemoryType.SUMMARIES               # Episodic compression
-]
+## Practical Guidance
 
-# WORKFLOW Mode - Task-oriented agent
-active_memory_types = [
-    MemoryType.WORKFLOW_MEMORY,        # Procedural
-    MemoryType.TOOLBOX,                # Procedural
-    MemoryType.LONG_TERM_MEMORY,       # Semantic
-    MemoryType.SHORT_TERM_MEMORY       # Working
-]
-
-# DEEP_RESEARCH Mode - Research and analysis
-active_memory_types = [
-    MemoryType.TOOLBOX,                # Procedural
-    MemoryType.SHARED_MEMORY,          # Coordination
-    MemoryType.LONG_TERM_MEMORY,       # Semantic
-    MemoryType.SHORT_TERM_MEMORY       # Working
-]
-```
-
-## 🚀 Usage Patterns
-
-### Single Agent with Complete Memory
-
-```python
-from memorizz import MemAgent, MongoDBProvider
-
-# Agent with full memory systems
-agent = MemAgent(
-    application_mode="assistant",
-    memory_provider=MongoDBProvider(config),
-    instruction="Helpful assistant with complete memory"
-)
-
-# Memory systems work together automatically:
-response = agent.run("Remember our Python discussion from yesterday?")
-# Uses: episodic (yesterday's conversation) + semantic (Python knowledge) +
-#       procedural (how to help) + working (current context)
-```
-
-### Multi-Agent Coordination
-
-```python
-from memorizz.coordination import SharedMemory
-
-# Set up multi-agent coordination
-shared_memory = SharedMemory(memory_provider)
-session_id = shared_memory.create_shared_session(
-    root_agent_id="orchestrator",
-    delegate_agent_ids=["researcher", "analyst", "writer"]
-)
-
-# Each agent maintains individual memory + shared coordination
-orchestrator = MemAgent(shared_memory_session_id=session_id)
-researcher = MemAgent(shared_memory_session_id=session_id)
-```
-
-### Memory-Specific Operations
-
-```python
-# Semantic memory - Knowledge management
-from memorizz.long_term_memory.semantic import KnowledgeBase
-kb = KnowledgeBase(memory_provider)
-kb.ingest_knowledge("AI knowledge...", namespace="artificial_intelligence")
-
-# Procedural memory - Skill and behavior management
-from memorizz.long_term_memory.procedural import Persona, Toolbox
-persona = Persona("TechExpert", "Technical Support Specialist")
-toolbox = Toolbox(memory_provider)
-
-# Episodic memory - Experience tracking
-# (Handled automatically by MemAgent during conversations)
-
-# Working memory - Context optimization
-from memorizz.short_term_memory.working_memory import CWM
-context_prompt = CWM.get_prompt_from_memory_types(active_memory_types)
-```
-
-## 📖 Component Documentation
-
-Each memory component includes comprehensive documentation:
-
-- **`semantic/README.md`** - Knowledge base usage and semantic memory patterns
-- **`procedural/README.md`** - Behavioral patterns, tools, and workflows
-- **`episodic/README.md`** - Experience tracking and conversation memory
-- **`working_memory/README.md`** - Context management and memory integration
-- **`coordination/README.md`** - Multi-agent coordination and communication
-
-## 🔄 Migration Notes
-
-### Import Changes
-
-The reorganization updates import paths:
-
-```python
-# OLD imports
-from memorizz.persona import Persona
-from memorizz.toolbox import Toolbox
-from memorizz.shared_memory import SharedMemory
-
-# NEW imports
-from memorizz.long_term_memory.semantic.persona import Persona
-from memorizz.long_term_memory.procedural.toolbox import Toolbox
-from memorizz.coordination.shared_memory import SharedMemory
-
-# OR use the main module imports
-from memorizz import Persona, Toolbox, SharedMemory  # Still works!
-```
-
-### Backward Compatibility
-
-The main `memorizz` module maintains backward compatibility:
-
-```python
-# These imports still work
-from memorizz import MemAgent, Persona, Toolbox, KnowledgeBase
-```
-
-## 🎯 Benefits of This Architecture
-
-1. **Cognitive Clarity**: Maps to established cognitive science memory types
-2. **Modular Design**: Each memory type can be used independently or together
-3. **Scalable Coordination**: Supports both single and multi-agent scenarios
-4. **Performance Optimization**: Working memory manages context windows effectively
-5. **Developer Experience**: Clear separation of concerns and comprehensive documentation
-
-This architecture enables sophisticated AI agents that can learn facts, develop skills, remember experiences, optimize their thinking, and coordinate with other agents - providing a complete cognitive memory framework for AI systems.
+- Use `assistant` mode for persistent conversational agents.
+- Use `workflow` mode for deterministic task/tool pipelines.
+- Use `deep_research` mode for coordinated multi-agent exploration with shared memory.
+- Start with the filesystem provider for local development; move to Oracle/MongoDB for heavier workloads.

@@ -1,42 +1,40 @@
 # Overview
 
-MemoRizz is a composable memory framework for AI agents. It ships opinionated agent builders, configurable memory providers, and a cognitive-inspired architecture so that every memory you store is intentional.
+Memorizz helps you build AI agents that can remember, retrieve, and coordinate over time. It combines a configurable memory architecture with provider-backed persistence so agents can run beyond a single prompt window.
 
-## Architecture at a Glance
+## Core Building Blocks
 
-```
+```text
 src/memorizz/
-├── long_term_memory/      # semantic, procedural, episodic systems
-├── short_term_memory/     # semantic cache + working memory
-├── coordination/          # shared memory for multi-agent orchestration
-├── memory_provider/       # Oracle, MongoDB, custom backends
-└── memagent/              # builders + runtime orchestration
+├── memagent/                # Agent runtime + builder APIs
+├── long_term_memory/        # semantic, procedural, episodic memory systems
+├── short_term_memory/       # working memory + semantic cache
+├── coordination/            # shared memory for multi-agent workflows
+├── memory_provider/         # Oracle, MongoDB, filesystem, custom providers
+├── internet_access/         # Tavily / Firecrawl / offline web providers
+├── sandbox/                 # E2B / Daytona / GraalPy execution providers
+└── ui/                      # Local FastAPI-based web UI
 ```
-
-Each folder owns the implementation for a specific memory subsystem. Agent presets ("application modes") simply select the right combination of these subsystems.
 
 ## Key Capabilities
 
-| Capability | Description | Code Entry Point |
-|------------|-------------|------------------|
-| Long-term semantic memory | Fact + entity graph storage with embeddings | `long_term_memory/semantic/`
-| Procedural memory | Toolboxes and workflows for behavior execution | `long_term_memory/procedural/`
-| Episodic memory | Conversation history, summaries, and experiences | `long_term_memory/episodic/`
-| Short-term memory | Working context buffer + semantic cache | `short_term_memory/`
-| Memory providers | Database-specific persistence logic | `memory_provider/`
-| Application modes | Pre-bundled stacks per use case | `enums/application_mode.py`
-
-!!! tip "Map docs to code"
-    Every section in this site mirrors these modules. When you update a doc, link back to the concrete module (for example ``::: memorizz.memagent.builders.MemAgentBuilder``) so the rendered API reference always matches the running code.
+| Capability | What You Get |
+|---|---|
+| Persistent agent state | Conversations, summaries, tools, and agent config persisted in a provider |
+| Memory-mode presets | `assistant`, `workflow`, and `deep_research` mode defaults |
+| Semantic retrieval | Embedding-based similarity search for relevant memory recall |
+| Operational tooling | Semantic cache, context-window stats, and auto-summarization support |
+| Extensibility | Custom memory providers and custom internet/sandbox providers |
 
 ## Requirements
 
 - Python 3.7+
-- An embedding/LLM provider such as OpenAI or Hugging Face
-- A memory provider backend (Oracle 23ai/26ai, MongoDB, or your own `MemoryProvider` implementation)
+- At least one LLM provider (for example OpenAI)
+- A persistence backend (filesystem, Oracle, MongoDB, or custom `MemoryProvider`)
 
 ## Next Steps
 
-1. Read through the [Concepts](concepts.md) page to understand each memory type.
-2. Pick a provider under [Memory Providers](../memory-providers/oracle.md) and configure credentials.
-3. Follow the [Python SDK Quickstart](python-sdk-quickstart.md) to spin up your first `MemAgent`.
+1. Follow [Python SDK Quickstart](python-sdk-quickstart.md) to run your first agent.
+2. Use the [Local UI Guide](local-ui.md) if you prefer setting up and operating agents from the browser.
+3. Review [Concepts](concepts.md) for memory and mode mappings.
+4. Pick a backend under [Memory Providers](../memory-providers/filesystem.md).

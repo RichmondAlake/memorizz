@@ -1,7 +1,9 @@
 """Tool management functionality for MemAgent."""
 
 import inspect
+import json
 import logging
+from collections.abc import Mapping
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from ...long_term_memory.procedural.toolbox.toolbox import Toolbox
@@ -176,7 +178,7 @@ class ToolManager:
             }
 
     def execute_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
+        self, tool_name: str, arguments: Any
     ) -> tuple[Any, Optional[WorkflowOutcome]]:
         """
         Execute a registered tool.
@@ -189,6 +191,27 @@ class ToolManager:
             Tuple of (result, workflow_outcome).
         """
         try:
+            normalized_arguments: Dict[str, Any] = {}
+            if arguments is None:
+                normalized_arguments = {}
+            elif isinstance(arguments, str):
+                parsed_arguments = json.loads(arguments)
+                if parsed_arguments is None:
+                    normalized_arguments = {}
+                elif isinstance(parsed_arguments, dict):
+                    normalized_arguments = parsed_arguments
+                else:
+                    return (
+                        "Error: Tool arguments must decode to a JSON object.",
+                        None,
+                    )
+            elif isinstance(arguments, dict):
+                normalized_arguments = arguments
+            elif isinstance(arguments, Mapping):
+                normalized_arguments = dict(arguments)
+            else:
+                return "Error: Tool arguments must be a mapping.", None
+
             if tool_name not in self.tools:
                 logger.error(f"Tool not found: {tool_name}")
                 return f"Error: Tool '{tool_name}' not found", None
@@ -199,7 +222,7 @@ class ToolManager:
             if tool_type == "function":
                 func = tool_data.get("function")
                 if func:
-                    result = func(**arguments)
+                    result = func(**normalized_arguments)
                     return result, None
                 else:
                     return "Error: Tool function not available", None
@@ -207,7 +230,7 @@ class ToolManager:
             elif tool_type == "workflow":
                 workflow = tool_data.get("workflow")
                 if isinstance(workflow, Workflow):
-                    outcome = workflow.execute(arguments)
+                    outcome = workflow.execute(normalized_arguments)
                     return outcome.result, outcome
                 else:
                     return "Error: Workflow not available", None

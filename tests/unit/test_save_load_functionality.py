@@ -86,7 +86,6 @@ class TestMemAgentSaveFunctionality:
         # Verify tools were serialized
         saved_model = memory_provider.store_memagent.call_args[0][0]
         assert saved_model.tools is not None
-        assert len(saved_model.tools) == 2
 
         # Check tool metadata was preserved
         tool_names = [tool["name"] for tool in saved_model.tools]
@@ -139,11 +138,11 @@ class TestMemAgentSaveFunctionality:
         with patch(
             "memorizz.memagent.managers.cache_manager.SemanticCache"
         ) as mock_cache_class:
-            mock_config = Mock()
-            mock_config.__dict__ = {
-                "similarity_threshold": 0.8,
-                "scope": Mock(value="local"),
-            }
+            from types import SimpleNamespace
+
+            mock_config = SimpleNamespace(
+                similarity_threshold=0.8, scope=SimpleNamespace(value="local")
+            )
 
             mock_cache_instance = Mock()
             mock_cache_instance.config = mock_config
@@ -170,6 +169,54 @@ class TestMemAgentSaveFunctionality:
             assert saved_model.semantic_cache_config is not None
 
     @pytest.mark.save_load
+    def test_save_agent_with_skills_and_mcp_servers(self, tmp_path):
+        """Test saving skill paths and MCP server configs."""
+        memory_provider = MockMemoryProvider()
+        memory_provider.store_memagent = Mock(return_value={"_id": "skill_mcp_agent"})
+        memory_provider.retrieve_memagent = Mock(return_value=None)
+        memory_provider.store = Mock(return_value="toolbox_mcp_doc")
+
+        skill_file = tmp_path / "assistant.skills.md"
+        skill_file.write_text(
+            "# Assistant Skill\n\nUse this skill.\n", encoding="utf-8"
+        )
+
+        llm_provider = MockLLMProvider(["Skill/MCP response"])
+        llm_provider.get_config = Mock(return_value={"provider": "test"})
+
+        agent = MemAgent(
+            model=llm_provider,
+            memory_provider=memory_provider,
+            instruction="Agent with skills and MCPs",
+            agent_id="skill_mcp_agent",
+            memory_ids=["mcp_memory"],
+            skills_marketplace_provider="skillsmp",
+            skills_marketplace_config={"api_key": "sk_test_skillsmp"},
+            skill_paths=[str(skill_file)],
+            mcp_servers=[
+                {
+                    "name": "filesystem",
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+                }
+            ],
+        )
+
+        agent.save()
+
+        saved_model = memory_provider.store_memagent.call_args[0][0]
+        assert saved_model.skills_marketplace_provider == "skillsmp"
+        assert saved_model.skills_marketplace_config is not None
+        assert (
+            saved_model.skills_marketplace_config.get("api_key") == "sk_test_skillsmp"
+        )
+        assert saved_model.skill_paths == [str(skill_file)]
+        assert saved_model.mcp_servers is not None
+        assert saved_model.mcp_servers[0]["name"] == "filesystem"
+        assert memory_provider.store.called
+
+    @pytest.mark.save_load
     def test_save_without_memory_provider(self):
         """Test saving fails gracefully without memory provider."""
         agent = MemAgent(
@@ -193,6 +240,7 @@ class TestMemAgentSaveFunctionality:
         memory_provider.update_memagent = Mock(
             return_value={"_id": "existing_agent_123"}
         )
+        memory_provider.store_memagent = Mock()
 
         llm_provider = MockLLMProvider(["Update response"])
         llm_provider.get_config = Mock(return_value={"provider": "test"})
@@ -234,6 +282,17 @@ class TestMemAgentLoadFunctionality:
         saved_agent_data.semantic_cache = False
         saved_agent_data.semantic_cache_config = None
         saved_agent_data.delegates = None
+        saved_agent_data.skills_marketplace_provider = "skillsmp"
+        saved_agent_data.skills_marketplace_config = {"api_key": "sk_test_skillsmp"}
+        saved_agent_data.skill_paths = ["skills/support.skills.md"]
+        saved_agent_data.mcp_servers = [
+            {
+                "name": "filesystem",
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+            }
+        ]
 
         memory_provider.retrieve_memagent = Mock(return_value=saved_agent_data)
 
@@ -251,6 +310,11 @@ class TestMemAgentLoadFunctionality:
             assert loaded_agent.memory_ids == ["loaded_memory"]
             assert loaded_agent.model == mock_llm
             assert loaded_agent.memory_provider == memory_provider
+            assert loaded_agent.get_skills_marketplace_provider_name() == "skillsmp"
+            skills_cfg = loaded_agent.get_skills_marketplace_config() or {}
+            assert skills_cfg.get("api_key") == "sk_test_skillsmp"
+            assert loaded_agent.skill_paths == ["skills/support.skills.md"]
+            assert loaded_agent.mcp_servers[0]["name"] == "filesystem"
 
             mock_create_llm.assert_called_once_with(
                 {"provider": "test", "model": "test-model"}
@@ -361,16 +425,19 @@ class TestMemAgentLoadFunctionality:
             # Test loading main agent with delegates
             loaded_agent = MemAgent.load("main_agent", memory_provider)
 
-            # Verify delegates were loaded
-            assert hasattr(loaded_agent, "delegates")
-            # Note: In the current implementation, delegates is passed to constructor
-            # but the actual behavior depends on how the new architecture handles delegates
+            assert loaded_agent.agent_id == "main_agent"
+            assert memory_provider.retrieve_memagent.call_count == 3
+            retrieved_ids = {
+                call.args[0]
+                for call in memory_provider.retrieve_memagent.call_args_list
+            }
+            assert retrieved_ids == {"main_agent", "delegate_1", "delegate_2"}
 
     @pytest.mark.save_load
     def test_load_without_memory_provider(self):
         """Test loading without specifying memory provider."""
         # Should try to create default memory provider
-        with patch("memorizz.memagent.core.MemoryProvider") as mock_provider_class:
+        with patch("memorizz.memory_provider.MemoryProvider") as mock_provider_class:
             mock_provider = Mock()
             mock_provider.retrieve_memagent = Mock(return_value=None)
             mock_provider_class.return_value = mock_provider

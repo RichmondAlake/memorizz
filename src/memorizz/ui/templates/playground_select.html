@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Playground - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Playground</h1>
+    <p>Select an agent to start an interactive session</p>
+</div>
+
+{% if agents %}
+<div class="agents-grid">
+    {% for agent in agents %}
+    <div class="agent-card">
+        <div class="agent-header">
+            <div class="agent-icon">🤖</div>
+            <div class="agent-title">
+                {% if agent.persona and agent.persona.name %}
+                    <h3>{{ agent.persona.name }}</h3>
+                {% else %}
+                    <h3>Agent</h3>
+                {% endif %}
+                <span class="agent-id" title="{{ agent.agent_id }}">{{ agent.agent_id[:12] }}...</span>
+            </div>
+        </div>
+
+        <div class="agent-body">
+            <div class="agent-meta">
+                <div class="meta-item">
+                    <span class="meta-label">Mode:</span>
+                    <span class="meta-value badge">{{ agent.application_mode or 'assistant' }}</span>
+                </div>
+
+                {% if agent.persona and agent.persona.role %}
+                <div class="meta-item">
+                    <span class="meta-label">Role:</span>
+                    <span class="meta-value">{{ agent.persona.role }}</span>
+                </div>
+                {% endif %}
+            </div>
+
+            {% if agent.instruction %}
+            <div class="agent-instruction">
+                <p>{{ agent.instruction[:150] }}{% if agent.instruction|length > 150 %}...{% endif %}</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="agent-footer">
+            <a href="/agents/{{ agent.agent_id }}/playground" class="btn btn-primary">Open Playground →</a>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <div class="empty-icon">🎮</div>
+    <h3>No Agents Available</h3>
+    <p>Create an agent first to use the playground.</p>
+    <a href="/agents/new" class="btn btn-primary">Create Agent</a>
+</div>
+{% endif %}
+{% endblock %}

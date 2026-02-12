@@ -588,7 +588,7 @@ class TestMemoryPerformance:
         for i in range(1000):
             topic = topics[i % len(topics)]
             memory_unit = MockMemoryUnit(
-                memory_type=MemoryType.SEMANTIC_MEMORY,
+                memory_type=MemoryType.LONG_TERM_MEMORY,
                 content={
                     "topic": topic,
                     "information": f"Information about {topic} number {i}",
@@ -786,6 +786,13 @@ class TestCachingPerformance:
         baseline_time = scaling_results[cache_sizes[0]]
 
         for cache_size in cache_sizes[1:]:
+            # Avoid ratio checks when timings are too small to be stable.
+            if baseline_time < 0.005:
+                assert (
+                    scaling_results[cache_size] < 0.05
+                ), f"Cache query time too slow at size {cache_size}: {scaling_results[cache_size]:.4f}s"
+                continue
+
             degradation_ratio = scaling_results[cache_size] / baseline_time
             assert (
                 degradation_ratio < max_allowed_degradation

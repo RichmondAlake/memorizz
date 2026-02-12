@@ -1,0 +1,302 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Settings</h1>
+    <p>Manage API keys for providers and integrations.</p>
+</div>
+
+{% if message %}
+<div class="success-message">
+    <span>OK</span> {{ message }}
+</div>
+{% endif %}
+
+{% if error %}
+<div class="error-message">
+    <span>!</span> {{ error }}
+</div>
+{% endif %}
+
+<form method="post" action="/settings" class="agent-form">
+    <div class="detail-section">
+        <h2>Notes</h2>
+        <p class="form-hint">Leave a field blank to keep the current value. Keys apply immediately to this UI session and are written to the <code>.env</code> file for reuse.</p>
+    </div>
+
+    {% for section in settings_sections %}
+    <div class="detail-section">
+        <h2>{{ section.title }}</h2>
+        {% if section.description %}
+        <p class="form-hint">{{ section.description }}</p>
+        {% endif %}
+        {% if section.provider_checks %}
+        <div class="sandbox-status-list">
+            {% for check in section.provider_checks %}
+            <div class="sandbox-status-item {% if check.ready %}sandbox-status-item--ok{% else %}sandbox-status-item--error{% endif %}">
+                <div class="label-row">
+                    <strong>{{ check.label }}</strong>
+                    {% if check.ready %}
+                    <span class="badge badge-success">Ready</span>
+                    {% else %}
+                    <span class="badge badge-warning">Needs Setup</span>
+                    {% endif %}
+                </div>
+                <p class="form-hint">{{ check.message }}</p>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        <div class="form-grid settings-grid">
+            {% for field in section.fields %}
+            <div
+                class="form-group"
+                {% if field.visible_if_sandbox_provider %}
+                data-visible-if-sandbox-provider="{{ field.visible_if_sandbox_provider }}"
+                {% endif %}
+            >
+                <div class="label-row">
+                    <label for="{% if field.env == 'MEMORIZZ_DEFAULT_LLM_MODEL' %}{{ field.env }}_select{% elif field.field_type == 'checkbox' %}{{ field.env }}_checkbox{% else %}{{ field.env }}{% endif %}">{{ field.label }}</label>
+                    {% if field.is_set %}
+                    <span class="badge badge-success">Set</span>
+                    {% else %}
+                    <span class="badge badge-warning">Missing</span>
+                    {% endif %}
+                </div>
+                {% if field.field_type == 'select' %}
+                {% if field.env == 'MEMORIZZ_DEFAULT_LLM_MODEL' %}
+                <select id="{{ field.env }}_select" data-llm-model-select></select>
+                <input
+                    type="text"
+                    id="{{ field.env }}_custom"
+                    value="{{ field.current_value }}"
+                    placeholder="Custom model ID or deployment name"
+                    autocomplete="off"
+                    spellcheck="false"
+                    style="display: none; margin-top: 8px;"
+                >
+                <input type="hidden" id="{{ field.env }}" name="{{ field.env }}" value="{{ field.current_value }}">
+                {% else %}
+                <select id="{{ field.env }}" name="{{ field.env }}">
+                    {% for opt in field.options %}
+                    <option value="{{ opt.value }}" {% if opt.value == field.current_value %}selected{% endif %}>{{ opt.label }}</option>
+                    {% endfor %}
+                </select>
+                {% endif %}
+                {% elif field.field_type == 'text' %}
+                <input
+                    type="text"
+                    id="{{ field.env }}"
+                    name="{{ field.env }}"
+                    value="{{ field.current_value }}"
+                    placeholder="{{ field.placeholder }}"
+                    autocomplete="off"
+                    spellcheck="false"
+                >
+                {% elif field.field_type == 'checkbox' %}
+                <input type="hidden" id="{{ field.env }}" name="{{ field.env }}" value="{{ field.current_value }}" data-checkbox-hidden>
+                <div class="checkbox-group">
+                    <label for="{{ field.env }}_checkbox">
+                        <input
+                            type="checkbox"
+                            id="{{ field.env }}_checkbox"
+                            data-checkbox-for="{{ field.env }}"
+                            {% if field.checkbox_checked %}checked{% endif %}
+                        >
+                        {{ field.checkbox_label or "Enabled" }}
+                    </label>
+                </div>
+                {% else %}
+                <input
+                    type="password"
+                    id="{{ field.env }}"
+                    name="{{ field.env }}"
+                    placeholder="{{ field.placeholder }}"
+                    autocomplete="off"
+                    spellcheck="false"
+                >
+                {% endif %}
+                {% if field.hint %}
+                <p class="form-hint">{{ field.hint }}</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Save Keys</button>
+    </div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    function initializeLlmModelControls() {
+        const providerSelect = document.getElementById('MEMORIZZ_DEFAULT_LLM_PROVIDER');
+        const modelSelect = document.getElementById('MEMORIZZ_DEFAULT_LLM_MODEL_select');
+        const modelCustomInput = document.getElementById('MEMORIZZ_DEFAULT_LLM_MODEL_custom');
+        const modelHiddenInput = document.getElementById('MEMORIZZ_DEFAULT_LLM_MODEL');
+        if (!providerSelect || !modelSelect || !modelCustomInput || !modelHiddenInput) return;
+
+        const modelCatalog = {{ llm_model_catalog|default({}, true)|tojson }};
+        const defaultModelByProvider = {{ default_llm_model_by_provider|default({}, true)|tojson }};
+        const CUSTOM_VALUE = '__custom__';
+
+        function groupedModelsForProvider(provider) {
+            const rows = modelCatalog[provider];
+            return Array.isArray(rows) ? rows : [];
+        }
+
+        function setHiddenModelValue(value) {
+            modelHiddenInput.value = (value || '').trim();
+        }
+
+        function showCustomInput(show) {
+            modelCustomInput.style.display = show ? '' : 'none';
+        }
+
+        function renderModelOptions(provider, preferredValue) {
+            const models = groupedModelsForProvider(provider);
+            const currentValue = (preferredValue || '').trim();
+            const fallback = (defaultModelByProvider[provider] || '').trim();
+
+            modelSelect.innerHTML = '';
+            const grouped = {};
+            models.forEach(function(model) {
+                const groupName = model.group || 'Models';
+                if (!grouped[groupName]) grouped[groupName] = [];
+                grouped[groupName].push(model);
+            });
+
+            Object.keys(grouped).forEach(function(groupName) {
+                const optgroup = document.createElement('optgroup');
+                optgroup.label = groupName;
+                grouped[groupName].forEach(function(model) {
+                    const option = document.createElement('option');
+                    option.value = model.value;
+                    option.textContent = model.label;
+                    optgroup.appendChild(option);
+                });
+                modelSelect.appendChild(optgroup);
+            });
+
+            const customOption = document.createElement('option');
+            customOption.value = CUSTOM_VALUE;
+            customOption.textContent = 'Custom model / deployment';
+            modelSelect.appendChild(customOption);
+
+            const inCatalog = models.some(function(model) {
+                return model.value === currentValue;
+            });
+
+            if (currentValue && inCatalog) {
+                modelSelect.value = currentValue;
+                modelCustomInput.value = currentValue;
+                showCustomInput(false);
+                setHiddenModelValue(currentValue);
+                return;
+            }
+
+            if (currentValue) {
+                modelSelect.value = CUSTOM_VALUE;
+                modelCustomInput.value = currentValue;
+                showCustomInput(true);
+                setHiddenModelValue(currentValue);
+                return;
+            }
+
+            if (fallback && models.some(function(model) { return model.value === fallback; })) {
+                modelSelect.value = fallback;
+                modelCustomInput.value = fallback;
+                showCustomInput(false);
+                setHiddenModelValue(fallback);
+                return;
+            }
+
+            if (models.length) {
+                modelSelect.value = models[0].value;
+                modelCustomInput.value = models[0].value;
+                showCustomInput(false);
+                setHiddenModelValue(models[0].value);
+                return;
+            }
+
+            modelSelect.value = CUSTOM_VALUE;
+            modelCustomInput.value = fallback;
+            showCustomInput(true);
+            setHiddenModelValue(fallback);
+        }
+
+        providerSelect.addEventListener('change', function() {
+            renderModelOptions(providerSelect.value, modelHiddenInput.value);
+        });
+
+        modelSelect.addEventListener('change', function() {
+            if (modelSelect.value === CUSTOM_VALUE) {
+                showCustomInput(true);
+                setHiddenModelValue(modelCustomInput.value);
+                modelCustomInput.focus();
+                return;
+            }
+            showCustomInput(false);
+            modelCustomInput.value = modelSelect.value;
+            setHiddenModelValue(modelSelect.value);
+        });
+
+        modelCustomInput.addEventListener('input', function() {
+            if (modelSelect.value === CUSTOM_VALUE) {
+                setHiddenModelValue(modelCustomInput.value);
+            }
+        });
+
+        renderModelOptions(providerSelect.value, modelHiddenInput.value);
+    }
+
+    function initializeCheckboxFields() {
+        document.querySelectorAll('[data-checkbox-for]').forEach(function(checkbox) {
+            const hiddenId = checkbox.getAttribute('data-checkbox-for');
+            const hiddenInput = document.getElementById(hiddenId);
+            if (!hiddenInput) return;
+
+            function sync() {
+                hiddenInput.value = checkbox.checked ? '1' : '0';
+            }
+
+            checkbox.addEventListener('change', sync);
+            sync();
+        });
+    }
+
+    function initializeSandboxConditionalFields() {
+        const sandboxProviderSelect = document.getElementById('MEMORIZZ_DEFAULT_SANDBOX_PROVIDER');
+        if (!sandboxProviderSelect) return;
+
+        const conditionalGroups = document.querySelectorAll('[data-visible-if-sandbox-provider]');
+
+        function applyVisibility() {
+            const selectedProvider = (sandboxProviderSelect.value || '').trim().toLowerCase();
+            conditionalGroups.forEach(function(group) {
+                const requiredProvider = (group.getAttribute('data-visible-if-sandbox-provider') || '').trim().toLowerCase();
+                const visible = !requiredProvider || requiredProvider === selectedProvider;
+                group.style.display = visible ? '' : 'none';
+                group.querySelectorAll('input, select, textarea, button').forEach(function(control) {
+                    control.disabled = !visible;
+                });
+            });
+        }
+
+        sandboxProviderSelect.addEventListener('change', applyVisibility);
+        applyVisibility();
+    }
+
+    initializeLlmModelControls();
+    initializeCheckboxFields();
+    initializeSandboxConditionalFields();
+})();
+</script>
+{% endblock %}

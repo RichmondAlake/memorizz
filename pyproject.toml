@@ -4,17 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.0.38"
+version = "0.0.39"
 description = "A memory management library for Python"
 readme = "README.md"
 requires-python = ">=3.7"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 authors = [
     { name = "Richmond Alake", email = "richmond.alake@gmail.com" }
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -46,6 +46,15 @@ docs = [
     "mkdocs-git-revision-date-localized-plugin>=1.2.0",
     "pymdown-extensions>=10.0",
 ]
+sandbox-e2b = ["e2b-code-interpreter>=1.0"]
+sandbox-daytona = ["daytona>=1.0"]
+sandbox = ["e2b-code-interpreter>=1.0"]
+ui = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.6",
+]
 all = [
     "pymongo>=4.0.0",
     "oracledb>=2.0.0",
@@ -57,6 +66,12 @@ all = [
     "sentence-transformers>=2.5.0",
     "transformers>=4.36.0",
     "accelerate>=0.26.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.6",
+    "e2b-code-interpreter>=1.0",
+    "daytona>=1.0",
 ]
 
 [project.scripts]
@@ -67,6 +82,10 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
+
+[tool.hatch.build.targets.wheel.force-include]
+"eval/longmemeval/evaluate_memorizz.py" = "eval/longmemeval/evaluate_memorizz.py"
+"eval/longmemeval/download_dataset.py" = "eval/longmemeval/download_dataset.py"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["temp_unpack*"]
