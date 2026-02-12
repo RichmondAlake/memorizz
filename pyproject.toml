@@ -88,4 +88,12 @@ allow-direct-references = true
 "eval/longmemeval/download_dataset.py" = "eval/longmemeval/download_dataset.py"
 
 [tool.hatch.build.targets.sdist]
-exclude = ["temp_unpack*"]
+exclude = [
+    "temp_unpack*",
+    "eval/longmemeval/data/**",
+    "eval/longmemeval/results/**",
+    "longmemeval_evaluation.log",
+    "matrix_results*.txt",
+    "scenario/**",
+    "site/**",
+]
