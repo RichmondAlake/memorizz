@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """E2B sandbox provider — cloud-based code execution using Firecracker microVMs.
 
 E2B is the default sandbox provider for MemAgent. It offers:

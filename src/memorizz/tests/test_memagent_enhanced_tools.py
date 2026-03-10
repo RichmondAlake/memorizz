@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """
 Test the enhanced tool functionality for MemAgent.
 This test demonstrates the new ability to add decorated functions directly.
@@ -70,7 +74,8 @@ class TestMemAgentEnhancedTools(unittest.TestCase):
         # Verify required list includes all function params
         required_params = tool["required"]
         self.assertIn("message", required_params)
-        self.assertIn("count", required_params)
+        # Parameters with defaults are optional in tool schemas.
+        self.assertNotIn("count", required_params)
 
     def test_add_decorated_function_persistent(self):
         """Test adding a decorated function with persistence."""

@@ -17,7 +17,7 @@ CREATE TABLE agents (
     semantic_cache NUMBER(1) DEFAULT 0,  -- Boolean: 0=false, 1=true
     is_favorite NUMBER(1) DEFAULT 0,     -- Boolean: 0=false, 1=true
     verbose NUMBER(1) DEFAULT 0,         -- Boolean: 0=false, 1=true
-    embedding VECTOR,                     -- For semantic search on agents
+    embedding VECTOR(256, FLOAT32),       -- For semantic search on agents
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -105,7 +105,7 @@ CREATE TABLE personas (
     expertise CLOB CHECK (expertise IS JSON), -- JSON array of expertise areas
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -134,7 +134,7 @@ CREATE TABLE toolbox (
     parameters CLOB CHECK (parameters IS JSON),  -- JSON schema of parameters
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -161,7 +161,7 @@ CREATE TABLE conversation_memory (
     content CLOB NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
 
     -- Constraints
     CONSTRAINT chk_conv_role CHECK (role IN ('user', 'assistant', 'system', 'tool'))
@@ -185,7 +185,7 @@ CREATE TABLE long_term_memory (
     last_accessed TIMESTAMP,
     access_count NUMBER(10) DEFAULT 0,
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -206,7 +206,7 @@ CREATE TABLE short_term_memory (
     memory_type VARCHAR2(50),
     ttl NUMBER(10),                           -- Time-to-live in seconds
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP
 );
@@ -230,7 +230,7 @@ CREATE TABLE workflow_memory (
     outcome CLOB CHECK (outcome IS JSON),     -- JSON result of workflow
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -255,7 +255,7 @@ CREATE TABLE shared_memory (
     scope VARCHAR2(50) DEFAULT 'global',      -- 'global', 'team', 'private'
     owner_agent_id VARCHAR2(255),
     access_list CLOB CHECK (access_list IS JSON),  -- JSON array of agent IDs
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -279,7 +279,7 @@ CREATE TABLE summaries (
     summary_type VARCHAR2(50),
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -301,7 +301,7 @@ CREATE TABLE semantic_cache (
     similarity_threshold NUMBER(3,2) DEFAULT 0.85,
     hit_count NUMBER(10) DEFAULT 0,
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP,
 
@@ -328,7 +328,7 @@ CREATE TABLE entity_memory (
     metadata CLOB,
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
-    embedding VECTOR,
+    embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -337,6 +337,74 @@ CREATE TABLE entity_memory (
 CREATE INDEX idx_entity_memory_entity_id ON entity_memory(entity_id);
 CREATE INDEX idx_entity_memory_memory_id ON entity_memory(memory_id);
 CREATE INDEX idx_entity_memory_agent_id ON entity_memory(agent_id);
+
+-- ==============================================================================
+-- AUTOMATIONS TABLES (Durable scheduling + run history)
+-- ==============================================================================
+CREATE TABLE automation_jobs (
+    id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    job_id VARCHAR2(255) UNIQUE NOT NULL,
+    agent_id VARCHAR2(255) NOT NULL,
+    name VARCHAR2(255) NOT NULL,
+    enabled NUMBER(1) DEFAULT 1,
+    schedule_type VARCHAR2(20) NOT NULL,     -- 'cron', 'interval', 'one_shot'
+    cron_expr VARCHAR2(255),
+    interval_seconds NUMBER(10),
+    timezone VARCHAR2(64) NOT NULL,
+    start_at TIMESTAMP WITH TIME ZONE,
+    next_run_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    last_run_at TIMESTAMP WITH TIME ZONE,
+    misfire_policy VARCHAR2(20) DEFAULT 'skip',
+    max_run_seconds NUMBER(10) DEFAULT 900,
+    retry_max_attempts NUMBER(3) DEFAULT 1,
+    retry_backoff_seconds NUMBER(10) DEFAULT 60,
+    action_type VARCHAR2(32) NOT NULL,
+    action_config CLOB CHECK (action_config IS JSON),
+    delivery_type VARCHAR2(32),
+    delivery_config CLOB CHECK (delivery_config IS JSON),
+    locked_by VARCHAR2(255),
+    lock_expires_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_automation_jobs_enabled CHECK (enabled IN (0, 1))
+);
+
+CREATE INDEX idx_automation_jobs_due ON automation_jobs(enabled, next_run_at);
+CREATE INDEX idx_automation_jobs_agent ON automation_jobs(agent_id);
+
+CREATE TABLE automation_runs (
+    id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    run_id VARCHAR2(255) UNIQUE NOT NULL,
+    job_id VARCHAR2(255) NOT NULL,
+    scheduled_for TIMESTAMP WITH TIME ZONE NOT NULL,
+    started_at TIMESTAMP WITH TIME ZONE,
+    finished_at TIMESTAMP WITH TIME ZONE,
+    status VARCHAR2(32) NOT NULL,            -- 'running', 'succeeded', 'failed', 'canceled'
+    attempt NUMBER(3) DEFAULT 1,
+    error CLOB,
+    result_summary CLOB,
+    result_payload CLOB CHECK (result_payload IS JSON),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_automation_runs_job ON automation_runs(job_id, created_at);
+
+CREATE TABLE automation_deliveries (
+    id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    delivery_id VARCHAR2(255) UNIQUE NOT NULL,
+    run_id VARCHAR2(255) NOT NULL,
+    channel VARCHAR2(32) NOT NULL,           -- 'whatsapp'
+    provider VARCHAR2(32) NOT NULL,          -- 'twilio'
+    recipient VARCHAR2(255) NOT NULL,
+    status VARCHAR2(32) NOT NULL,            -- 'queued', 'sent', 'failed'
+    provider_message_id VARCHAR2(255),
+    error CLOB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_automation_deliveries_run ON automation_deliveries(run_id);
 
 -- ==============================================================================
 -- VECTOR INDEXES (For similarity search - Oracle 23ai+)
@@ -425,3 +493,7 @@ COMMENT ON TABLE workflow_memory IS 'Workflow states and execution history';
 COMMENT ON TABLE shared_memory IS 'Multi-agent shared memory space';
 COMMENT ON TABLE summaries IS 'Memory summaries for compression';
 COMMENT ON TABLE semantic_cache IS 'Query-response semantic cache';
+COMMENT ON TABLE entity_memory IS 'Structured entity facts and profiles';
+COMMENT ON TABLE automation_jobs IS 'Durable scheduled automation jobs';
+COMMENT ON TABLE automation_runs IS 'Execution history for automation jobs';
+COMMENT ON TABLE automation_deliveries IS 'Delivery attempts for automation runs';

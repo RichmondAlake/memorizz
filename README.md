@@ -17,6 +17,7 @@ It provides:
 - multiple memory systems (episodic, semantic, procedural, short-term, shared)
 - pluggable storage providers (Oracle, MongoDB, filesystem)
 - agent builders and application modes (`assistant`, `workflow`, `deep_research`)
+- scheduled automations (cron, interval, one-shot) with optional WhatsApp delivery
 - optional internet access, sandbox code execution, and local web UI
 
 ## Key Capabilities
@@ -28,6 +29,7 @@ It provides:
 - **Semantic cache** to reduce repeat LLM calls
 - **Multi-agent orchestration** with shared blackboard memory
 - **Context-window telemetry** via `get_context_window_stats()`
+- **Scheduled automations** via SDK, web UI, or agent conversation (see `src/memorizz/automation/README.md`)
 
 ## Installation
 
@@ -227,6 +229,11 @@ memorizz setup-oracle               # initialize Oracle schema/user
 - `examples/sandbox/memagent_e2b_sandbox.ipynb`
 - `examples/sandbox/memagent_daytona_sandbox.ipynb`
 - `examples/sandbox/memagent_graalpy_sandbox.ipynb`
+- `examples/automations/automations_guide.ipynb`
+- `examples/model_providers/openai_provider.ipynb`
+- `examples/model_providers/anthropic_provider.ipynb`
+- `examples/model_providers/ollama_provider.ipynb`
+- `examples/model_providers/compare_providers.ipynb`
 
 ## Documentation
 

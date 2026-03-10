@@ -212,6 +212,57 @@ class TestMemAgentCore:
         assert agent._entity_memory_enabled is True
 
     @pytest.mark.unit
+    def test_self_awareness_disabled_by_default(self):
+        """Self-awareness should remain opt-in by default."""
+        agent = MemAgent(instruction="Self-aware default test")
+
+        assert agent.has_self_awareness() is False
+        tool_names = set(agent.tool_manager.list_tools())
+        assert "self_aware_list_files" not in tool_names
+
+    @pytest.mark.unit
+    def test_self_awareness_tools_register_when_enabled(self):
+        """Self-aware toolset should register when enabled in config."""
+        agent = MemAgent(
+            instruction="Self-aware tools test",
+            self_aware=True,
+            self_aware_config={"root_paths": ["."], "allow_writes": False},
+        )
+
+        assert agent.has_self_awareness() is True
+        tool_names = set(agent.tool_manager.list_tools())
+        assert "self_aware_list_roots" in tool_names
+        assert "self_aware_list_files" in tool_names
+        assert "self_aware_read_file" in tool_names
+        assert "self_aware_search_files" in tool_names
+        assert "self_aware_write_file" in tool_names
+        assert "self_aware_delete_path" in tool_names
+        assert "self_aware_run_command" in tool_names
+
+    @pytest.mark.unit
+    def test_self_awareness_toggle_registers_and_unregisters_tools(self):
+        """Runtime toggle should add/remove self-aware tools."""
+        agent = MemAgent(instruction="Self-aware toggle test")
+        assert "self_aware_list_files" not in set(agent.tool_manager.list_tools())
+
+        agent.with_self_aware(True, {"root_paths": ["."]})
+        assert "self_aware_list_files" in set(agent.tool_manager.list_tools())
+
+        agent.with_self_aware(False)
+        assert "self_aware_list_files" not in set(agent.tool_manager.list_tools())
+
+    @pytest.mark.unit
+    def test_system_prompt_includes_self_awareness_section_only_when_enabled(self):
+        """Prompt should describe self-aware policy only when enabled."""
+        agent = MemAgent(instruction="Prompt section test")
+        prompt_without = agent._build_system_prompt()
+        assert "Self-awareness host codebase tools" not in prompt_without
+
+        agent.with_self_aware(True, {"root_paths": ["."]})
+        prompt_with = agent._build_system_prompt()
+        assert "Self-awareness host codebase tools" in prompt_with
+
+    @pytest.mark.unit
     def test_memagent_loads_skill_paths_and_registers_skill_tools(self, tmp_path):
         """Skill markdown files should load and expose skill tools."""
         skill_file = tmp_path / "support.skills.md"
@@ -340,22 +391,21 @@ class TestMemAgentCore:
         assert "backend runtime" in str(result.get("error", "")).lower()
 
     @pytest.mark.unit
-    def test_memagent_graalpy_missing_executable_fails_fast(self):
-        """Selecting GraalPy without executable should raise actionable error."""
+    def test_memagent_graalpy_missing_executable_degrades_gracefully(self):
+        """Selecting GraalPy without executable should degrade gracefully."""
         missing_binary = f"/tmp/graalpy-missing-{uuid.uuid4().hex}"
 
-        with pytest.raises(ValueError) as exc_info:
-            MemAgent(
-                instruction="Sandbox validation test",
-                sandbox_provider={
-                    "provider": "graalpy",
-                    "graalpy_path": missing_binary,
-                },
-            )
-
-        assert "GraalPy sandbox requires a working `graalpy` executable" in str(
-            exc_info.value
+        agent = MemAgent(
+            instruction="Sandbox validation test",
+            sandbox_provider={
+                "provider": "graalpy",
+                "graalpy_path": missing_binary,
+            },
         )
+
+        # Agent should initialize successfully but without sandbox
+        assert agent.sandbox_manager is None
+        assert not agent.has_sandbox()
 
 
 class TestMemAgentRun:
@@ -613,6 +663,8 @@ class TestMemAgentModel:
         assert model.tool_access == "private"
         assert model.semantic_cache == False
         assert model.application_mode == "assistant"
+        assert model.self_aware is False
+        assert model.self_aware_config is None
 
     @pytest.mark.unit
     def test_model_initialization_custom(self):

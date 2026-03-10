@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """Configuration constants for MemAgent."""
 
 import os
@@ -5,6 +9,7 @@ import os
 # Configuration constants
 DEFAULT_INSTRUCTION = "You are a helpful assistant."
 DEFAULT_MAX_STEPS = 20
+CONTINUOUS_MAX_STEPS = 0  # Sentinel: 0 means continuous (unlimited tool iterations)
 DEFAULT_TOOL_ACCESS = "private"
 
 # Logging configuration

@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """Memory management functionality for MemAgent."""
 
 import logging
@@ -31,6 +35,8 @@ class MemoryManager:
         """
         self.memory_provider = memory_provider
         self._conversation_memory_cache = {}
+        # Prevent unbounded growth when conversation memory is updated in-place.
+        self._conversation_memory_cache_max_entries = 5000
 
     @staticmethod
     def _history_timestamp(entry: Dict[str, Any]) -> float:
@@ -83,16 +89,23 @@ class MemoryManager:
             # Check cache first
             if memory_id in self._conversation_memory_cache:
                 cached = self._conversation_memory_cache[memory_id]
-                if not limit or limit <= 0:
-                    return list(cached)
-                return cached[-limit:]
+                if limit and limit > 0 and len(cached) < limit:
+                    # Cache does not satisfy requested limit; fall through to reload.
+                    pass
+                else:
+                    if not limit or limit <= 0:
+                        return list(cached)
+                    return cached[-limit:]
 
             # Load from memory provider
+            fetch_limit = None
+            if limit and limit > 0:
+                fetch_limit = int(limit)
             history = (
                 self.memory_provider.retrieve_conversation_history_ordered_by_timestamp(
                     memory_id=memory_id,
                     memory_type=MemoryType.CONVERSATION_MEMORY,
-                    limit=None,
+                    limit=fetch_limit,
                 )
             )
             history = [row for row in (history or []) if isinstance(row, dict)]
@@ -131,9 +144,44 @@ class MemoryManager:
                 memory_id=memory_id, memory_unit=memory_unit
             )
 
-            # Invalidate cache for this memory_id
-            if memory_id in self._conversation_memory_cache:
-                del self._conversation_memory_cache[memory_id]
+            # Update conversation cache in-place when we can, so hot paths don't
+            # re-load and re-sort large histories on every message.
+            cached = self._conversation_memory_cache.get(memory_id)
+            if (
+                cached is not None
+                and hasattr(memory_unit, "role")
+                and hasattr(memory_unit, "conversation_id")
+            ):
+                try:
+                    timestamp = getattr(memory_unit, "timestamp", None)
+                    entry = {
+                        "id": unit_id,
+                        "memory_type": MemoryType.CONVERSATION_MEMORY,
+                        "timestamp": timestamp,
+                        "memory_id": memory_id,
+                        "content": {
+                            "role": getattr(memory_unit, "role", None),
+                            "content": getattr(memory_unit, "content", None),
+                            "conversation_id": getattr(
+                                memory_unit, "conversation_id", None
+                            ),
+                            "timestamp": timestamp,
+                        },
+                    }
+                    cached.append(entry)
+                    if (
+                        self._conversation_memory_cache_max_entries
+                        and len(cached) > self._conversation_memory_cache_max_entries
+                    ):
+                        self._conversation_memory_cache[memory_id] = cached[
+                            -self._conversation_memory_cache_max_entries :
+                        ]
+                except Exception:
+                    # Fall back to invalidation if cache update fails.
+                    self._conversation_memory_cache.pop(memory_id, None)
+            elif memory_id in self._conversation_memory_cache:
+                # Unknown memory unit shape; safest to invalidate.
+                self._conversation_memory_cache.pop(memory_id, None)
 
             logger.debug(f"Saved memory unit {unit_id} for memory_id: {memory_id}")
             return unit_id

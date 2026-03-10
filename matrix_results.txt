@@ -1,0 +1,2 @@
+Trace: 12
+Determinant: 32

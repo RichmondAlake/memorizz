@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.0.39"
+version = "0.0.40"
 description = "A memory management library for Python"
 readme = "README.md"
 requires-python = ">=3.7"
@@ -31,6 +31,7 @@ dependencies = [
 mongodb = ["pymongo>=4.0.0"]
 oracle = ["oracledb>=2.0.0"]
 filesystem = ["faiss-cpu>=1.7.4"]
+anthropic = ["anthropic>=0.26.0"]
 ollama = ["langchain_ollama", "ollama"]
 voyageai = ["voyageai"]
 huggingface = [
@@ -56,6 +57,7 @@ ui = [
     "python-multipart>=0.0.6",
 ]
 all = [
+    "anthropic>=0.26.0",
     "pymongo>=4.0.0",
     "oracledb>=2.0.0",
     "langchain_ollama",

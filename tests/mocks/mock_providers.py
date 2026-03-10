@@ -1,4 +1,5 @@
 """Mock providers for comprehensive testing."""
+import heapq
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -85,12 +86,37 @@ class MockMemoryProvider:
     def __init__(self):
         """Initialize mock memory provider."""
         self.storage = {}
+        # Secondary index for faster retrievals in tests/perf suites:
+        # memory_id -> {MemoryType: [MockMemoryUnit, ...]}
+        self._storage_by_type: Dict[str, Dict[MemoryType, List["MockMemoryUnit"]]] = {}
         self.agents = {}
         self.call_history = []
         self.semantic_retrieval_map = {}
         self.episodic_retrieval_map = {}
         self.procedural_retrieval_map = {}
         self.capacity_limit = None
+
+    def _normalize_memory_type_key(self, value: Any) -> Optional[MemoryType]:
+        if value is None:
+            return None
+        if isinstance(value, MemoryType):
+            return value
+        if isinstance(value, str):
+            try:
+                return MemoryType(value)
+            except ValueError:
+                return None
+        return None
+
+    def _reindex_memory_id(self, memory_id: str) -> None:
+        """Rebuild the per-type index for a bucket (used after capacity trimming)."""
+        by_type: Dict[MemoryType, List["MockMemoryUnit"]] = {}
+        for unit in self.storage.get(memory_id, []) or []:
+            key = self._normalize_memory_type_key(getattr(unit, "memory_type", None))
+            if key is None:
+                continue
+            by_type.setdefault(key, []).append(unit)
+        self._storage_by_type[memory_id] = by_type
 
     def _normalize_timestamp(self, value: Any) -> datetime:
         if value is None:
@@ -177,6 +203,7 @@ class MockMemoryProvider:
             return
         units.sort(key=lambda unit: unit.timestamp)
         self.storage[memory_id] = units[-self.capacity_limit :]
+        self._reindex_memory_id(memory_id)
 
     def store(
         self,
@@ -203,8 +230,17 @@ class MockMemoryProvider:
         if memory_unit is None:
             memory_unit = data
 
+        # For semantic cache entries, avoid using the entry's scoped memory_id as
+        # the storage bucket key. Tests expect conversation history buckets to
+        # contain only conversation messages.
         if memory_id is None and isinstance(memory_unit, dict):
-            memory_id = memory_unit.get("memory_id")
+            if (
+                isinstance(memory_store_type, MemoryType)
+                and memory_store_type == MemoryType.SEMANTIC_CACHE
+            ):
+                memory_id = None
+            else:
+                memory_id = memory_unit.get("memory_id")
 
         if memory_id is None:
             if isinstance(memory_store_type, MemoryType):
@@ -225,6 +261,11 @@ class MockMemoryProvider:
         if unit.id is None:
             unit.id = str(uuid.uuid4())
         self.storage[memory_id].append(unit)
+        key = self._normalize_memory_type_key(getattr(unit, "memory_type", None))
+        if key is not None:
+            self._storage_by_type.setdefault(memory_id, {}).setdefault(key, []).append(
+                unit
+            )
         self._trim_to_capacity(memory_id)
         return unit.id
 
@@ -250,42 +291,98 @@ class MockMemoryProvider:
         **kwargs,
     ) -> List[Dict[str, Any]]:
         """Mock retrieve by query method."""
+        if limit is not None and isinstance(limit, int) and limit <= 0:
+            self.call_history.append(
+                (
+                    "retrieve_by_query",
+                    query,
+                    memory_id,
+                    memory_type or memory_store_type,
+                    limit,
+                )
+            )
+            return []
         if memory_type is None:
             memory_type = memory_store_type
         self.call_history.append(
             ("retrieve_by_query", query, memory_id, memory_type, limit)
         )
 
-        units = self.storage.get(memory_id, []) if memory_id else []
+        type_key = self._normalize_memory_type_key(memory_type)
+
+        # Resolve which bucket(s) to search. Most callsites pass memory_id, but
+        # semantic cache lookups rely on memory_store_type only.
+        if memory_id:
+            if type_key is not None:
+                units = self._storage_by_type.get(memory_id, {}).get(type_key, [])
+            else:
+                units = self.storage.get(memory_id, [])
+        elif (
+            isinstance(memory_type, MemoryType)
+            and memory_type == MemoryType.SEMANTIC_CACHE
+        ):
+            cache_bucket = MemoryType.SEMANTIC_CACHE.value
+            if type_key is not None:
+                units = self._storage_by_type.get(cache_bucket, {}).get(type_key, [])
+            else:
+                units = self.storage.get(cache_bucket, [])
+        else:
+            units = []
+
+        # Support dict-based filter queries (e.g. SemanticCache loading).
+        if isinstance(query, dict):
+            relevant_units: List[Dict[str, Any]] = []
+            for unit in units:
+                unit_dict = unit.to_dict()
+                content = unit.content if isinstance(unit.content, dict) else {}
+                matches = True
+                for key, value in query.items():
+                    # Prefer matching against the stored payload content when present.
+                    if key in content:
+                        if content.get(key) != value:
+                            matches = False
+                            break
+                    else:
+                        if unit_dict.get(key) != value:
+                            matches = False
+                            break
+                if matches:
+                    relevant_units.append(unit_dict)
+                    if limit and len(relevant_units) >= limit:
+                        break
+            return relevant_units[:limit]
+
         query_text = str(query).lower()
 
-        type_key = ""
-        if memory_type is not None:
-            type_key = (
-                memory_type.name.lower()
-                if hasattr(memory_type, "name")
-                else str(memory_type).lower()
-            )
-
-        effective_type_key = type_key
-        if isinstance(memory_type, MemoryType):
-            if memory_type == MemoryType.LONG_TERM_MEMORY:
+        effective_type_key = ""
+        if type_key is not None:
+            effective_type_key = type_key.name.lower()
+            if type_key == MemoryType.LONG_TERM_MEMORY:
                 effective_type_key = "semantic_memory"
-            elif memory_type == MemoryType.CONVERSATION_MEMORY:
+            elif type_key == MemoryType.CONVERSATION_MEMORY:
                 effective_type_key = "episodic_memory"
-            elif memory_type in (MemoryType.TOOLBOX, MemoryType.WORKFLOW_MEMORY):
+            elif type_key in (MemoryType.TOOLBOX, MemoryType.WORKFLOW_MEMORY):
                 effective_type_key = "procedural_memory"
 
-        if "semantic" in effective_type_key and query in self.semantic_retrieval_map:
+        if (
+            isinstance(query, str)
+            and "semantic" in effective_type_key
+            and query in self.semantic_retrieval_map
+        ):
             return [unit.to_dict() for unit in self.semantic_retrieval_map[query]][
                 :limit
             ]
-        if "episodic" in effective_type_key and query in self.episodic_retrieval_map:
+        if (
+            isinstance(query, str)
+            and "episodic" in effective_type_key
+            and query in self.episodic_retrieval_map
+        ):
             return [unit.to_dict() for unit in self.episodic_retrieval_map[query]][
                 :limit
             ]
         if (
-            "procedural" in effective_type_key
+            isinstance(query, str)
+            and "procedural" in effective_type_key
             and query in self.procedural_retrieval_map
         ):
             return [unit.to_dict() for unit in self.procedural_retrieval_map[query]][
@@ -299,6 +396,8 @@ class MockMemoryProvider:
             unit_text = str(unit.content).lower()
             if any(word in unit_text for word in query_words):
                 relevant_units.append(unit.to_dict())
+                if limit and len(relevant_units) >= limit:
+                    break
 
         return relevant_units[:limit]
 
@@ -310,11 +409,23 @@ class MockMemoryProvider:
             ("retrieve_conversation_history", memory_id, memory_type, limit)
         )
 
-        units = self.storage.get(memory_id, [])
-        # Sort by timestamp and return recent ones
-        sorted_units = sorted(units, key=lambda unit: unit.timestamp)
-        selected = sorted_units[-limit:] if limit else sorted_units
-        return [unit.to_dict() for unit in selected]
+        type_key = self._normalize_memory_type_key(memory_type)
+        if type_key is not None:
+            units = self._storage_by_type.get(memory_id, {}).get(type_key, [])
+        else:
+            units = self.storage.get(memory_id, [])
+
+        if not units:
+            return []
+
+        if not limit:
+            sorted_units = sorted(units, key=lambda unit: unit.timestamp)
+            return [unit.to_dict() for unit in sorted_units]
+
+        # Fast path: select most recent N without sorting the full list.
+        recent = heapq.nlargest(int(limit), units, key=lambda unit: unit.timestamp)
+        recent.sort(key=lambda unit: unit.timestamp)
+        return [unit.to_dict() for unit in recent]
 
     def store_memagent(self, agent_data: Dict[str, Any]) -> str:
         """Mock store agent method."""
@@ -338,6 +449,7 @@ class MockMemoryProvider:
         self.call_history.append(("delete_by_id", memory_id))
         if memory_id in self.storage:
             del self.storage[memory_id]
+            self._storage_by_type.pop(memory_id, None)
             return True
         return False
 
@@ -356,6 +468,7 @@ class MockMemoryProvider:
     def reset(self):
         """Reset mock state."""
         self.storage.clear()
+        self._storage_by_type.clear()
         self.agents.clear()
         self.call_history.clear()
         self.semantic_retrieval_map = {}

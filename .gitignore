@@ -62,3 +62,9 @@ site/
 
 # Local runtime toolchains (e.g., downloaded GraalPy binaries)
 .local/
+
+# Evaluation data (large JSON files)
+eval/longmemeval/data/
+eval/longmemeval/results/
+longmemeval_evaluation.log
+matrix_results*.txt

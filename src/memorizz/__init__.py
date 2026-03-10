@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 from .coordination import SharedMemory
 from .internet_access import (
     FirecrawlProvider,
@@ -23,6 +27,15 @@ def __getattr__(name):
         from .memory_provider.filesystem import FileSystemConfig, FileSystemProvider
 
         return FileSystemProvider if name == "FileSystemProvider" else FileSystemConfig
+    if name in ("AutomationJob", "AutomationRun", "AutomationDelivery"):
+        from .automation import AutomationDelivery, AutomationJob, AutomationRun
+
+        _map = {
+            "AutomationJob": AutomationJob,
+            "AutomationRun": AutomationRun,
+            "AutomationDelivery": AutomationDelivery,
+        }
+        return _map[name]
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
@@ -43,4 +56,7 @@ __all__ = [
     "FirecrawlProvider",
     "TavilyProvider",
     "create_internet_access_provider",
+    "AutomationJob",
+    "AutomationRun",
+    "AutomationDelivery",
 ]

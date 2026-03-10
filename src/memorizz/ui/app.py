@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """FastAPI application for Memorizz Local UI."""
 
 import importlib.util
@@ -34,6 +38,8 @@ _state: Dict[str, Any] = {
     "provider_type": None,
     "connection_info": {},
     "provider_secrets": {},
+    "whatsapp_worker_thread": None,
+    "whatsapp_worker_stop_event": None,
 }
 
 _eval_runs_lock = threading.Lock()
@@ -85,6 +91,46 @@ LLM_MODEL_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"value": "gpt-4o", "label": "GPT-4o deployment", "group": "Previous"},
     ],
     "huggingface": [],
+    # Anthropic Claude models
+    "anthropic": [
+        {"value": "claude-opus-4-6", "label": "Claude Opus 4.6", "group": "Latest"},
+        {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "group": "Latest"},
+        {
+            "value": "claude-haiku-4-5-20251001",
+            "label": "Claude Haiku 4.5",
+            "group": "Latest",
+        },
+        {
+            "value": "claude-sonnet-4-5-20250929",
+            "label": "Claude Sonnet 4.5",
+            "group": "Previous",
+        },
+        {"value": "claude-opus-4-5", "label": "Claude Opus 4.5", "group": "Previous"},
+        {"value": "claude-sonnet-4-0", "label": "Claude Sonnet 4", "group": "Previous"},
+        {"value": "claude-opus-4-0", "label": "Claude Opus 4", "group": "Previous"},
+        {
+            "value": "claude-3-5-sonnet-20241022",
+            "label": "Claude 3.5 Sonnet",
+            "group": "Legacy",
+        },
+        {
+            "value": "claude-3-haiku-20240307",
+            "label": "Claude 3 Haiku",
+            "group": "Legacy",
+        },
+    ],
+    # Ollama local models (empty catalog — models are user-installed)
+    "ollama": [
+        {"value": "llama3.1", "label": "Llama 3.1 (8B)", "group": "Meta"},
+        {"value": "llama3.2", "label": "Llama 3.2 (3B)", "group": "Meta"},
+        {"value": "llama3.3", "label": "Llama 3.3 (70B)", "group": "Meta"},
+        {"value": "mistral", "label": "Mistral (7B)", "group": "Mistral AI"},
+        {"value": "gemma3", "label": "Gemma 3", "group": "Google"},
+        {"value": "qwen3", "label": "Qwen 3", "group": "Alibaba"},
+        {"value": "deepseek-r1", "label": "DeepSeek R1", "group": "DeepSeek"},
+        {"value": "phi4", "label": "Phi-4 (14B)", "group": "Microsoft"},
+        {"value": "codellama", "label": "Code Llama", "group": "Code"},
+    ],
 }
 
 DEFAULT_LLM_PROVIDER = "openai"
@@ -92,13 +138,15 @@ DEFAULT_LLM_MODEL_BY_PROVIDER = {
     "openai": "gpt-5.2",
     "azure": "gpt-5",
     "huggingface": "meta-llama/Meta-Llama-3-8B-Instruct",
+    "anthropic": "claude-sonnet-4-5-20250929",
+    "ollama": "llama3.1",
 }
 DEFAULT_GRAALPY_INTERNET_ACCESS = "1"
 
 SETTINGS_SECTIONS = [
     {
         "title": "LLM & Embeddings",
-        "description": "Keys used by OpenAI, Azure OpenAI, Voyage AI, and Hugging Face integrations.",
+        "description": "Keys used by OpenAI, Anthropic, Azure OpenAI, Ollama, Voyage AI, and Hugging Face integrations.",
         "fields": [
             {
                 "env": "OPENAI_API_KEY",
@@ -107,10 +155,22 @@ SETTINGS_SECTIONS = [
                 "hint": "Required for OpenAI LLM and embedding providers.",
             },
             {
+                "env": "ANTHROPIC_API_KEY",
+                "label": "Anthropic API Key",
+                "placeholder": "sk-ant-...",
+                "hint": "Required for Anthropic Claude LLM provider.",
+            },
+            {
                 "env": "AZURE_OPENAI_API_KEY",
                 "label": "Azure OpenAI API Key",
                 "placeholder": "azure-...",
                 "hint": "Used by Azure OpenAI LLM and embedding providers.",
+            },
+            {
+                "env": "OLLAMA_HOST",
+                "label": "Ollama Host URL",
+                "placeholder": "http://localhost:11434",
+                "hint": "Ollama server URL. Defaults to http://localhost:11434.",
             },
             {
                 "env": "VOYAGE_API_KEY",
@@ -164,7 +224,9 @@ SETTINGS_SECTIONS = [
                 "default_value": DEFAULT_LLM_PROVIDER,
                 "options": [
                     {"value": "openai", "label": "OpenAI"},
+                    {"value": "anthropic", "label": "Anthropic"},
                     {"value": "azure", "label": "Azure OpenAI"},
+                    {"value": "ollama", "label": "Ollama (Local)"},
                     {"value": "huggingface", "label": "HuggingFace"},
                 ],
             },
@@ -278,6 +340,63 @@ SETTINGS_SECTIONS = [
             },
         ],
     },
+    {
+        "title": "Automations",
+        "description": "Settings for scheduled automations and message delivery.",
+        "fields": [
+            {
+                "env": "MEMORIZZ_DEFAULT_TIMEZONE",
+                "label": "Default Timezone",
+                "placeholder": "America/New_York",
+                "hint": "Default IANA timezone used by automation tools/UI when timezone is omitted.",
+                "field_type": "timezone",
+            },
+            {
+                "env": "MEMORIZZ_AUTOMATIONS_UI_WORKER",
+                "label": "UI Automations Worker",
+                "hint": "When enabled, the UI process also runs an automations worker loop.",
+                "field_type": "checkbox",
+                "default_value": "0",
+                "checkbox_label": "Run automations worker inside UI process",
+            },
+            {
+                "env": "MEMORIZZ_AUTOMATIONS_POLL_INTERVAL_S",
+                "label": "Automations Poll Interval (s)",
+                "placeholder": "5",
+                "hint": "Worker poll interval in seconds.",
+            },
+            {
+                "env": "MEMORIZZ_AUTOMATIONS_LEASE_SECONDS",
+                "label": "Automations Lease Seconds",
+                "placeholder": "120",
+                "hint": "Job lease duration in seconds to prevent duplicate runs across workers.",
+            },
+            {
+                "env": "MEMORIZZ_AUTOMATIONS_CONCURRENCY",
+                "label": "Automations Concurrency",
+                "placeholder": "2",
+                "hint": "Max concurrent job executions per worker.",
+            },
+            {
+                "env": "TWILIO_ACCOUNT_SID",
+                "label": "Twilio Account SID",
+                "placeholder": "AC...",
+                "hint": "Required for WhatsApp delivery via Twilio.",
+            },
+            {
+                "env": "TWILIO_AUTH_TOKEN",
+                "label": "Twilio Auth Token",
+                "placeholder": "••••••••",
+                "hint": "Required for WhatsApp delivery via Twilio.",
+            },
+            {
+                "env": "TWILIO_WHATSAPP_FROM",
+                "label": "Twilio WhatsApp From",
+                "placeholder": "whatsapp:+1415...",
+                "hint": "WhatsApp-enabled Twilio sender. Format: whatsapp:+E164.",
+            },
+        ],
+    },
 ]
 SETTINGS_FIELDS = [
     field for section in SETTINGS_SECTIONS for field in section["fields"]
@@ -293,7 +412,117 @@ RECENT_NAV_AGENT_LIMIT = 6
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
     logger.info("Memorizz UI starting...")
+    automations_stop_event = threading.Event()
+    automations_thread: Optional[threading.Thread] = None
+
+    if str(os.environ.get("MEMORIZZ_AUTOMATIONS_UI_WORKER", "")).strip() == "1":
+        # Run a background worker in the UI process (off by default).
+        def _automations_worker_loop() -> None:
+            import time
+
+            try:
+                from ..automation.store.factory import get_automation_store
+                from ..automation.worker import run_worker
+            except Exception as exc:
+                logger.error("Automations UI worker imports failed: %s", exc)
+                return
+
+            poll_interval = int(
+                str(os.environ.get("MEMORIZZ_AUTOMATIONS_POLL_INTERVAL_S", "5") or "5")
+            )
+            lease_seconds = int(
+                str(
+                    os.environ.get("MEMORIZZ_AUTOMATIONS_LEASE_SECONDS", "120") or "120"
+                )
+            )
+            concurrency = int(
+                str(os.environ.get("MEMORIZZ_AUTOMATIONS_CONCURRENCY", "2") or "2")
+            )
+
+            while not automations_stop_event.is_set():
+                provider = _state.get("provider")
+                if not provider:
+                    time.sleep(1)
+                    continue
+
+                store = None
+                try:
+                    store = get_automation_store(provider)
+                except Exception:
+                    store = None
+
+                if store is None:
+                    time.sleep(5)
+                    continue
+
+                try:
+                    run_worker(
+                        store=store,
+                        memory_provider=provider,
+                        poll_interval_s=poll_interval,
+                        lease_seconds=lease_seconds,
+                        max_concurrency=concurrency,
+                        stop_event=automations_stop_event,
+                    )
+                except Exception as exc:
+                    # If provider disconnects or the worker errors, retry after a pause.
+                    logger.error("Automations UI worker crashed: %s", exc)
+                    time.sleep(5)
+
+        automations_thread = threading.Thread(
+            target=_automations_worker_loop,
+            name="memorizz-automations-ui-worker",
+            daemon=True,
+        )
+        automations_thread.start()
+
+    # Start WhatsApp worker if Twilio is configured
+    if all(
+        [
+            os.environ.get("TWILIO_ACCOUNT_SID"),
+            os.environ.get("TWILIO_AUTH_TOKEN"),
+            os.environ.get("TWILIO_WHATSAPP_FROM"),
+        ]
+    ):
+        try:
+            from ..channels.whatsapp.worker import run_whatsapp_worker
+
+            stop_event = threading.Event()
+            worker_thread = threading.Thread(
+                target=run_whatsapp_worker,
+                kwargs={
+                    "memory_provider": _state["provider"],
+                    "stop_event": stop_event,
+                },
+                daemon=True,
+                name="whatsapp-worker",
+            )
+            worker_thread.start()
+            _state["whatsapp_worker_thread"] = worker_thread
+            _state["whatsapp_worker_stop_event"] = stop_event
+            logger.info("WhatsApp worker started")
+        except Exception as e:
+            logger.error(f"Failed to start WhatsApp worker: {e}", exc_info=True)
+
     yield
+
+    # Stop WhatsApp worker on shutdown
+    if _state.get("whatsapp_worker_stop_event"):
+        _state["whatsapp_worker_stop_event"].set()
+        if _state.get("whatsapp_worker_thread"):
+            try:
+                _state["whatsapp_worker_thread"].join(timeout=5)
+                logger.info("WhatsApp worker stopped")
+            except Exception as e:
+                logger.error(f"Error stopping WhatsApp worker: {e}")
+
+    if automations_thread is not None:
+        automations_stop_event.set()
+        try:
+            automations_thread.join(timeout=8)
+        except Exception:
+            pass
+
     # Cleanup: stop any active Evalground benchmark subprocesses
     with _eval_runs_lock:
         active_processes = list(_eval_run_processes.items())
@@ -548,6 +777,16 @@ def create_app() -> FastAPI:
     templates.env.globals[
         "default_llm_model_by_provider"
     ] = DEFAULT_LLM_MODEL_BY_PROVIDER
+    try:
+        from zoneinfo import available_timezones
+
+        timezone_options = sorted(
+            tz for tz in available_timezones() if tz and "build/" not in tz
+        )
+    except Exception:
+        timezone_options = []
+
+    templates.env.globals["timezone_options"] = timezone_options
 
     # -------------------------------------------------------------------------
     # Page Routes
@@ -835,6 +1074,16 @@ def create_app() -> FastAPI:
         )
         agent_tool_counts = _build_agent_tool_count_map(agents)
 
+        # Get active WhatsApp agent
+        active_whatsapp_agent_id = None
+        try:
+            from memorizz.channels.whatsapp.settings import WhatsAppSettings
+
+            settings = WhatsAppSettings(_state["provider"])
+            active_whatsapp_agent_id = settings.get_active_agent_id()
+        except Exception:
+            pass
+
         return templates.TemplateResponse(
             "agents.html",
             {
@@ -853,6 +1102,7 @@ def create_app() -> FastAPI:
                     last_run_by_agent=last_run_by_agent,
                 ),
                 "active_page": "agents",
+                "active_whatsapp_agent_id": active_whatsapp_agent_id,
             },
         )
 
@@ -908,6 +1158,10 @@ def create_app() -> FastAPI:
             sandbox_provider=getattr(existing, "sandbox_provider", None),
             skill_paths=getattr(existing, "skill_paths", None),
             mcp_servers=getattr(existing, "mcp_servers", None),
+            self_aware=bool(getattr(existing, "self_aware", False)),
+            self_aware_config=getattr(existing, "self_aware_config", None),
+            automations_enabled=bool(getattr(existing, "automations_enabled", True)),
+            default_timezone=getattr(existing, "default_timezone", None),
         )
 
         try:
@@ -973,6 +1227,14 @@ def create_app() -> FastAPI:
                 "skills_marketplace_provider": default_skills_marketplace_provider,
                 "enable_entity_memory": True,
                 "enable_workflow_memory": False,
+                "self_aware": False,
+                "self_aware_root_paths": "",
+                "self_aware_allow_writes": False,
+                "self_aware_allow_deletes": False,
+                "automations_enabled": True,
+                "default_timezone": _to_text(
+                    os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "")
+                ).strip(),
                 "agent_tools": [],
             },
         )
@@ -999,6 +1261,14 @@ def create_app() -> FastAPI:
         sandbox_provider: str = Form(""),
         internet_provider: str = Form(""),
         skills_marketplace_provider: str = Form(""),
+        self_aware: Optional[str] = Form(None),
+        self_aware_root_paths: str = Form(""),
+        self_aware_allow_writes: Optional[str] = Form(None),
+        self_aware_allow_deletes: Optional[str] = Form(None),
+        automations_enabled: Optional[str] = Form(None),
+        default_timezone: str = Form(""),
+        whatsapp_enabled: Optional[str] = Form(None),
+        whatsapp_welcome_message: str = Form(""),
     ):
         """Create a new agent using the configured memory provider."""
         if not _state["provider"]:
@@ -1022,6 +1292,37 @@ def create_app() -> FastAPI:
         semantic_cache_enabled = _parse_bool(semantic_cache)
         enable_entity_memory_value = _parse_bool(enable_entity_memory)
         enable_workflow_memory_value = _parse_bool(enable_workflow_memory)
+        self_aware_enabled = _parse_bool(self_aware)
+        self_aware_allow_writes_value = _parse_bool(self_aware_allow_writes)
+        self_aware_allow_deletes_value = _parse_bool(self_aware_allow_deletes)
+        self_aware_root_paths_value = _parse_self_aware_root_paths(
+            self_aware_root_paths
+        )
+        self_aware_config_value = _build_self_aware_config(
+            root_paths=self_aware_root_paths_value,
+            allow_writes=self_aware_allow_writes_value,
+            allow_deletes=self_aware_allow_deletes_value,
+        )
+        automations_enabled_value = _parse_bool(automations_enabled)
+        default_timezone_value = _to_text(default_timezone).strip() or None
+        if not error and default_timezone_value:
+            try:
+                from ..automation.schedule import validate_timezone_name
+
+                validate_timezone_name(default_timezone_value)
+            except Exception as exc:
+                error = str(exc)
+
+        # WhatsApp configuration
+        whatsapp_enabled_value = _parse_bool(whatsapp_enabled)
+        whatsapp_config_value = None
+        if whatsapp_enabled_value:
+            whatsapp_config_value = {
+                "welcome_message": _to_text(whatsapp_welcome_message).strip() or None,
+                "auto_reply_enabled": True,
+                "timeout_seconds": 60,
+            }
+
         memory_types_value = _build_memory_types_for_agent(
             application_mode=application_mode or "assistant",
             enable_entity_memory=enable_entity_memory_value,
@@ -1064,6 +1365,12 @@ def create_app() -> FastAPI:
                     "skills_marketplace_provider": skills_marketplace_provider_value,
                     "enable_entity_memory": enable_entity_memory_value,
                     "enable_workflow_memory": enable_workflow_memory_value,
+                    "self_aware": self_aware_enabled,
+                    "self_aware_root_paths": self_aware_root_paths,
+                    "self_aware_allow_writes": self_aware_allow_writes_value,
+                    "self_aware_allow_deletes": self_aware_allow_deletes_value,
+                    "automations_enabled": automations_enabled_value,
+                    "default_timezone": default_timezone,
                     "agent_tools": [],
                 },
             )
@@ -1075,6 +1382,9 @@ def create_app() -> FastAPI:
         skills_marketplace_value = skills_marketplace_provider_value or None
         skills_marketplace_config = _build_skills_marketplace_provider_config(
             skills_marketplace_value
+        )
+        self_aware_validation_error = _validate_self_aware_config(
+            self_aware_config_value
         )
         sandbox_validation_error = _validate_sandbox_provider_choice(sandbox_value)
         internet_validation_error = _validate_internet_provider_choice(
@@ -1090,6 +1400,7 @@ def create_app() -> FastAPI:
             sandbox_validation_error
             or internet_validation_error
             or skills_marketplace_validation_error
+            or self_aware_validation_error
         ):
             return templates.TemplateResponse(
                 "agent_form.html",
@@ -1105,6 +1416,7 @@ def create_app() -> FastAPI:
                         sandbox_validation_error
                         or internet_validation_error
                         or skills_marketplace_validation_error
+                        or self_aware_validation_error
                     ),
                     "agent_id": "",
                     "agent_name": agent_name,
@@ -1126,6 +1438,12 @@ def create_app() -> FastAPI:
                     "skills_marketplace_provider": skills_marketplace_provider_value,
                     "enable_entity_memory": enable_entity_memory_value,
                     "enable_workflow_memory": enable_workflow_memory_value,
+                    "self_aware": self_aware_enabled,
+                    "self_aware_root_paths": self_aware_root_paths,
+                    "self_aware_allow_writes": self_aware_allow_writes_value,
+                    "self_aware_allow_deletes": self_aware_allow_deletes_value,
+                    "automations_enabled": automations_enabled_value,
+                    "default_timezone": default_timezone,
                     "agent_tools": [],
                 },
             )
@@ -1135,7 +1453,7 @@ def create_app() -> FastAPI:
             instruction=instruction_value or DEFAULT_INSTRUCTION,
             application_mode=application_mode or "assistant",
             memory_types=memory_types_value,
-            max_steps=max_steps or 20,
+            max_steps=max_steps if max_steps is not None else 20,
             tool_access=tool_access or "private",
             semantic_cache=semantic_cache_enabled,
             is_favorite=False,
@@ -1147,6 +1465,12 @@ def create_app() -> FastAPI:
             internet_access_config=internet_config,
             skills_marketplace_provider=skills_marketplace_value,
             skills_marketplace_config=skills_marketplace_config,
+            self_aware=self_aware_enabled,
+            self_aware_config=self_aware_config_value,
+            automations_enabled=automations_enabled_value,
+            default_timezone=default_timezone_value,
+            whatsapp_enabled=whatsapp_enabled_value,
+            whatsapp_config=whatsapp_config_value,
         )
 
         try:
@@ -1189,6 +1513,12 @@ def create_app() -> FastAPI:
                     "skills_marketplace_provider": skills_marketplace_provider_value,
                     "enable_entity_memory": enable_entity_memory_value,
                     "enable_workflow_memory": enable_workflow_memory_value,
+                    "self_aware": self_aware_enabled,
+                    "self_aware_root_paths": self_aware_root_paths,
+                    "self_aware_allow_writes": self_aware_allow_writes_value,
+                    "self_aware_allow_deletes": self_aware_allow_deletes_value,
+                    "automations_enabled": automations_enabled_value,
+                    "default_timezone": default_timezone,
                     "agent_tools": [],
                 },
             )
@@ -1247,6 +1577,14 @@ def create_app() -> FastAPI:
         sandbox_provider: str = Form(""),
         internet_provider: str = Form(""),
         skills_marketplace_provider: Optional[str] = Form(None),
+        self_aware: Optional[str] = Form(None),
+        self_aware_root_paths: str = Form(""),
+        self_aware_allow_writes: Optional[str] = Form(None),
+        self_aware_allow_deletes: Optional[str] = Form(None),
+        automations_enabled: Optional[str] = Form(None),
+        default_timezone: str = Form(""),
+        whatsapp_enabled: Optional[str] = Form(None),
+        whatsapp_welcome_message: str = Form(""),
     ):
         """Update an existing agent."""
         if not _state["provider"]:
@@ -1274,12 +1612,50 @@ def create_app() -> FastAPI:
         semantic_cache_enabled = _parse_bool(semantic_cache)
         enable_entity_memory_value = _parse_bool(enable_entity_memory)
         enable_workflow_memory_value = _parse_bool(enable_workflow_memory)
+        self_aware_enabled_value = _parse_bool(self_aware)
+        self_aware_allow_writes_value = _parse_bool(self_aware_allow_writes)
+        self_aware_allow_deletes_value = _parse_bool(self_aware_allow_deletes)
+        self_aware_root_paths_value = _parse_self_aware_root_paths(
+            self_aware_root_paths
+        )
+        existing_self_aware_config = getattr(existing, "self_aware_config", None)
+        if not isinstance(existing_self_aware_config, dict):
+            existing_self_aware_config = None
+        self_aware_config_value = _build_self_aware_config(
+            root_paths=self_aware_root_paths_value,
+            allow_writes=self_aware_allow_writes_value,
+            allow_deletes=self_aware_allow_deletes_value,
+            base_config=existing_self_aware_config,
+        )
+        automations_enabled_value = _parse_bool(automations_enabled)
+        default_timezone_value = _to_text(default_timezone).strip() or None
+        if not error and default_timezone_value:
+            try:
+                from ..automation.schedule import validate_timezone_name
+
+                validate_timezone_name(default_timezone_value)
+            except Exception as exc:
+                error = str(exc)
+
+        # WhatsApp configuration
+        whatsapp_enabled_value = _parse_bool(whatsapp_enabled)
+        whatsapp_config_value = None
+        if whatsapp_enabled_value:
+            whatsapp_config_value = {
+                "welcome_message": _to_text(whatsapp_welcome_message).strip() or None,
+                "auto_reply_enabled": True,
+                "timeout_seconds": 60,
+            }
+
         memory_types_value = _build_memory_types_for_agent(
             application_mode=application_mode
             or getattr(existing, "application_mode", "assistant"),
             enable_entity_memory=enable_entity_memory_value,
             enable_workflow_memory=enable_workflow_memory_value,
             existing_memory_types=getattr(existing, "memory_types", None),
+        )
+        self_aware_validation_error = _validate_self_aware_config(
+            self_aware_config_value
         )
         if skills_marketplace_provider is None:
             skills_marketplace_provider_value = (
@@ -1308,31 +1684,37 @@ def create_app() -> FastAPI:
             skills_marketplace_value,
             skills_marketplace_base_config,
         )
+        form_override_data = {
+            "instruction": instruction,
+            "application_mode": application_mode,
+            "max_steps": max_steps,
+            "tool_access": tool_access,
+            "semantic_cache": semantic_cache_enabled,
+            "memory_ids_raw": memory_ids,
+            "agent_name": agent_name,
+            "persona_name": persona_name,
+            "persona_role": persona_role,
+            "persona_goals": persona_goals,
+            "persona_background": persona_background,
+            "llm_provider": llm_provider,
+            "llm_model": llm_model,
+            "llm_config_json": llm_config_json,
+            "sandbox_provider": sandbox_provider,
+            "internet_provider": internet_provider,
+            "skills_marketplace_provider": skills_marketplace_provider_value,
+            "enable_entity_memory": enable_entity_memory_value,
+            "enable_workflow_memory": enable_workflow_memory_value,
+            "self_aware": self_aware_enabled_value,
+            "self_aware_root_paths": self_aware_root_paths,
+            "self_aware_allow_writes": self_aware_allow_writes_value,
+            "self_aware_allow_deletes": self_aware_allow_deletes_value,
+            "automations_enabled": automations_enabled_value,
+            "default_timezone": default_timezone,
+        }
 
         if error:
             form_data = _build_agent_form_data(existing)
-            form_data.update(
-                {
-                    "instruction": instruction,
-                    "application_mode": application_mode,
-                    "max_steps": max_steps,
-                    "tool_access": tool_access,
-                    "semantic_cache": semantic_cache_enabled,
-                    "memory_ids_raw": memory_ids,
-                    "agent_name": agent_name,
-                    "persona_name": persona_name,
-                    "persona_role": persona_role,
-                    "persona_goals": persona_goals,
-                    "persona_background": persona_background,
-                    "llm_provider": llm_provider,
-                    "llm_model": llm_model,
-                    "llm_config_json": llm_config_json,
-                    "internet_provider": internet_provider,
-                    "skills_marketplace_provider": skills_marketplace_provider_value,
-                    "enable_entity_memory": enable_entity_memory_value,
-                    "enable_workflow_memory": enable_workflow_memory_value,
-                }
-            )
+            form_data.update(form_override_data)
             return templates.TemplateResponse(
                 "agent_form.html",
                 {
@@ -1358,29 +1740,7 @@ def create_app() -> FastAPI:
         )
         if internet_validation_error:
             form_data = _build_agent_form_data(existing)
-            form_data.update(
-                {
-                    "instruction": instruction,
-                    "application_mode": application_mode,
-                    "max_steps": max_steps,
-                    "tool_access": tool_access,
-                    "semantic_cache": semantic_cache_enabled,
-                    "memory_ids_raw": memory_ids,
-                    "agent_name": agent_name,
-                    "persona_name": persona_name,
-                    "persona_role": persona_role,
-                    "persona_goals": persona_goals,
-                    "persona_background": persona_background,
-                    "llm_provider": llm_provider,
-                    "llm_model": llm_model,
-                    "llm_config_json": llm_config_json,
-                    "sandbox_provider": sandbox_provider,
-                    "internet_provider": internet_provider,
-                    "skills_marketplace_provider": skills_marketplace_provider_value,
-                    "enable_entity_memory": enable_entity_memory_value,
-                    "enable_workflow_memory": enable_workflow_memory_value,
-                }
-            )
+            form_data.update(form_override_data)
             return templates.TemplateResponse(
                 "agent_form.html",
                 {
@@ -1406,29 +1766,7 @@ def create_app() -> FastAPI:
         )
         if skills_marketplace_validation_error:
             form_data = _build_agent_form_data(existing)
-            form_data.update(
-                {
-                    "instruction": instruction,
-                    "application_mode": application_mode,
-                    "max_steps": max_steps,
-                    "tool_access": tool_access,
-                    "semantic_cache": semantic_cache_enabled,
-                    "memory_ids_raw": memory_ids,
-                    "agent_name": agent_name,
-                    "persona_name": persona_name,
-                    "persona_role": persona_role,
-                    "persona_goals": persona_goals,
-                    "persona_background": persona_background,
-                    "llm_provider": llm_provider,
-                    "llm_model": llm_model,
-                    "llm_config_json": llm_config_json,
-                    "sandbox_provider": sandbox_provider,
-                    "internet_provider": internet_provider,
-                    "skills_marketplace_provider": skills_marketplace_provider_value,
-                    "enable_entity_memory": enable_entity_memory_value,
-                    "enable_workflow_memory": enable_workflow_memory_value,
-                }
-            )
+            form_data.update(form_override_data)
             return templates.TemplateResponse(
                 "agent_form.html",
                 {
@@ -1446,35 +1784,9 @@ def create_app() -> FastAPI:
                 },
             )
 
-        sandbox_value = sandbox_provider.strip() if sandbox_provider else None
-        if sandbox_value is None:
-            sandbox_value = getattr(existing, "sandbox_provider", None)
-        sandbox_validation_error = _validate_sandbox_provider_choice(sandbox_value)
-        if sandbox_validation_error:
+        if self_aware_validation_error:
             form_data = _build_agent_form_data(existing)
-            form_data.update(
-                {
-                    "instruction": instruction,
-                    "application_mode": application_mode,
-                    "max_steps": max_steps,
-                    "tool_access": tool_access,
-                    "semantic_cache": semantic_cache_enabled,
-                    "memory_ids_raw": memory_ids,
-                    "agent_name": agent_name,
-                    "persona_name": persona_name,
-                    "persona_role": persona_role,
-                    "persona_goals": persona_goals,
-                    "persona_background": persona_background,
-                    "llm_provider": llm_provider,
-                    "llm_model": llm_model,
-                    "llm_config_json": llm_config_json,
-                    "sandbox_provider": sandbox_provider,
-                    "internet_provider": internet_provider,
-                    "skills_marketplace_provider": skills_marketplace_provider_value,
-                    "enable_entity_memory": enable_entity_memory_value,
-                    "enable_workflow_memory": enable_workflow_memory_value,
-                }
-            )
+            form_data.update(form_override_data)
             return templates.TemplateResponse(
                 "agent_form.html",
                 {
@@ -1487,10 +1799,42 @@ def create_app() -> FastAPI:
                     "form_title": "Edit Agent",
                     "form_action": f"/agents/{agent_id}/edit",
                     "is_edit": True,
-                    "error": sandbox_validation_error,
+                    "error": self_aware_validation_error,
                     **form_data,
                 },
             )
+
+        sandbox_value = sandbox_provider.strip() if sandbox_provider else None
+        if sandbox_value is None:
+            sandbox_value = getattr(existing, "sandbox_provider", None)
+        # Only validate sandbox when the user explicitly changed it;
+        # carry forward the existing value without blocking unrelated edits.
+        sandbox_changed = (
+            sandbox_value
+            and sandbox_value
+            != _to_text(getattr(existing, "sandbox_provider", "") or "").strip()
+        )
+        if sandbox_changed:
+            sandbox_validation_error = _validate_sandbox_provider_choice(sandbox_value)
+            if sandbox_validation_error:
+                form_data = _build_agent_form_data(existing)
+                form_data.update(form_override_data)
+                return templates.TemplateResponse(
+                    "agent_form.html",
+                    {
+                        "request": request,
+                        "provider_type": _state["provider_type"],
+                        "connection_info": _state["connection_info"],
+                        "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
+                        "active_agent_id": agent_id,
+                        "active_page": "agents",
+                        "form_title": "Edit Agent",
+                        "form_action": f"/agents/{agent_id}/edit",
+                        "is_edit": True,
+                        "error": sandbox_validation_error,
+                        **form_data,
+                    },
+                )
 
         updated = MemAgentModel(
             agent_id=agent_id,
@@ -1501,7 +1845,9 @@ def create_app() -> FastAPI:
             application_mode=application_mode
             or getattr(existing, "application_mode", "assistant"),
             memory_types=memory_types_value,
-            max_steps=max_steps or getattr(existing, "max_steps", 20),
+            max_steps=max_steps
+            if max_steps is not None
+            else getattr(existing, "max_steps", 20),
             tool_access=tool_access or getattr(existing, "tool_access", "private"),
             semantic_cache=semantic_cache_enabled,
             is_favorite=bool(getattr(existing, "is_favorite", False)),
@@ -1520,6 +1866,10 @@ def create_app() -> FastAPI:
             sandbox_provider=sandbox_value,
             skill_paths=getattr(existing, "skill_paths", None),
             mcp_servers=getattr(existing, "mcp_servers", None),
+            self_aware=self_aware_enabled_value,
+            self_aware_config=self_aware_config_value,
+            automations_enabled=automations_enabled_value,
+            default_timezone=default_timezone_value,
         )
 
         try:
@@ -1763,6 +2113,21 @@ def create_app() -> FastAPI:
         if not isinstance(mcp_servers, list):
             mcp_servers = []
 
+        self_aware_enabled = (
+            bool(getattr(agent, "self_aware", False)) if agent else False
+        )
+        self_aware_config = getattr(agent, "self_aware_config", None) if agent else None
+        if not isinstance(self_aware_config, dict):
+            self_aware_config = {}
+        self_aware_root_paths = self_aware_config.get("root_paths")
+        if not isinstance(self_aware_root_paths, list):
+            self_aware_root_paths = []
+        self_aware_root_paths_text = "\n".join(
+            _to_text(path).strip()
+            for path in self_aware_root_paths
+            if _to_text(path).strip()
+        )
+
         return templates.TemplateResponse(
             "playground.html",
             {
@@ -1801,6 +2166,20 @@ def create_app() -> FastAPI:
                 "entity_memory_status_error": entity_memory_status_error,
                 "skill_paths": skill_paths,
                 "mcp_servers": mcp_servers,
+                "self_aware": self_aware_enabled,
+                "self_aware_root_paths": self_aware_root_paths_text,
+                "self_aware_allow_writes": bool(
+                    self_aware_config.get("allow_writes", False)
+                ),
+                "self_aware_allow_deletes": bool(
+                    self_aware_config.get("allow_deletes", False)
+                ),
+                "automations_enabled": bool(getattr(agent, "automations_enabled", True))
+                if agent
+                else True,
+                "default_timezone": _to_text(
+                    getattr(agent, "default_timezone", "") if agent else ""
+                ).strip(),
                 "threads": threads,
                 "default_memory_id": default_memory_id,
             },
@@ -1874,42 +2253,38 @@ def create_app() -> FastAPI:
                     except Exception as exc:
                         logger.warning(f"Could not apply model override: {exc}")
 
-                # Apply sandbox provider from agent config or global default
-                stored_agent = _state["provider"].retrieve_memagent(agent_id)
-                sandbox_cfg = (
-                    getattr(stored_agent, "sandbox_provider", None)
-                    if stored_agent
-                    else None
-                )
-                if not sandbox_cfg:
-                    sandbox_cfg = os.environ.get(
-                        "MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", ""
+                # Apply sandbox provider from agent config or global default.
+                # Skip if the agent already attempted sandbox init during load()
+                # — no need to retry and log the same warning twice.
+                if not agent_instance.has_sandbox():
+                    stored_agent = _state["provider"].retrieve_memagent(agent_id)
+                    sandbox_cfg = (
+                        getattr(stored_agent, "sandbox_provider", None)
+                        if stored_agent
+                        else None
                     )
-                resolved_sandbox_cfg = _resolve_sandbox_provider_config(sandbox_cfg)
-                sandbox_apply_error = None
-                if resolved_sandbox_cfg and not agent_instance.has_sandbox():
-                    try:
-                        validation_error = _validate_sandbox_provider_choice(
-                            resolved_sandbox_cfg
+                    if not sandbox_cfg:
+                        sandbox_cfg = os.environ.get(
+                            "MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", ""
                         )
-                        if validation_error:
-                            raise ValueError(validation_error)
-                        agent_instance.with_sandbox_provider(resolved_sandbox_cfg)
-                    except Exception as exc:
-                        sandbox_apply_error = (
-                            "Sandbox unavailable: " + _to_text(exc).strip()
-                        )
-                        logger.warning(f"Could not apply sandbox provider: {exc}")
-
-                if sandbox_apply_error:
-                    escaped_warning = json.dumps(
-                        {
-                            "type": "warning",
-                            "message": sandbox_apply_error,
-                            "scope": "sandbox",
-                        }
+                    resolved_sandbox_cfg = _resolve_sandbox_provider_config(sandbox_cfg)
+                    # Only attempt if no sandbox config was already tried during load
+                    stored_sandbox = (
+                        getattr(stored_agent, "sandbox_provider", None)
+                        if stored_agent
+                        else None
                     )
-                    yield f"data: {escaped_warning}\n\n"
+                    sandbox_already_attempted = bool(stored_sandbox)
+                    if resolved_sandbox_cfg and not sandbox_already_attempted:
+                        try:
+                            validation_error = _validate_sandbox_provider_choice(
+                                resolved_sandbox_cfg
+                            )
+                            if validation_error:
+                                raise ValueError(validation_error)
+                            agent_instance.with_sandbox_provider(resolved_sandbox_cfg)
+                        except Exception as exc:
+                            logger.debug(f"Sandbox provider not available: {exc}")
 
                 # Apply internet provider from agent config or global default.
                 internet_apply_error = None
@@ -2196,6 +2571,12 @@ def create_app() -> FastAPI:
         raw_mcp_servers = form.get("mcp_servers_json")
         raw_enable_entity_memory = form.get("enable_entity_memory")
         raw_enable_workflow_memory = form.get("enable_workflow_memory")
+        raw_self_aware = form.get("self_aware")
+        raw_self_aware_root_paths = form.get("self_aware_root_paths")
+        raw_self_aware_allow_writes = form.get("self_aware_allow_writes")
+        raw_self_aware_allow_deletes = form.get("self_aware_allow_deletes")
+        raw_automations_enabled = form.get("automations_enabled")
+        raw_default_timezone = form.get("default_timezone")
 
         parsed_skill_paths = None
         parsed_mcp_servers = None
@@ -2258,6 +2639,60 @@ def create_app() -> FastAPI:
 
         enable_entity_memory_value = _parse_bool(raw_enable_entity_memory)
         enable_workflow_memory_value = _parse_bool(raw_enable_workflow_memory)
+        self_aware_enabled_value = _parse_bool(raw_self_aware)
+        self_aware_allow_writes_value = _parse_bool(raw_self_aware_allow_writes)
+        self_aware_allow_deletes_value = _parse_bool(raw_self_aware_allow_deletes)
+        self_aware_root_paths_value = _parse_self_aware_root_paths(
+            _to_text(raw_self_aware_root_paths)
+        )
+        existing_self_aware_config = getattr(existing, "self_aware_config", None)
+        if not isinstance(existing_self_aware_config, dict):
+            existing_self_aware_config = None
+        self_aware_config_value = _build_self_aware_config(
+            root_paths=self_aware_root_paths_value,
+            allow_writes=self_aware_allow_writes_value,
+            allow_deletes=self_aware_allow_deletes_value,
+            base_config=existing_self_aware_config,
+        )
+        self_aware_validation_error = _validate_self_aware_config(
+            self_aware_config_value
+        )
+        if self_aware_validation_error:
+            from urllib.parse import quote
+
+            return RedirectResponse(
+                url=(
+                    f"/agents/{agent_id}/playground?config_error="
+                    f"{quote(self_aware_validation_error[:220])}"
+                ),
+                status_code=302,
+            )
+
+        if raw_automations_enabled is None:
+            automations_enabled_value = bool(
+                getattr(existing, "automations_enabled", True)
+            )
+        else:
+            automations_enabled_value = _parse_bool(raw_automations_enabled)
+
+        default_timezone_value = getattr(existing, "default_timezone", None)
+        if raw_default_timezone is not None:
+            default_timezone_value = _to_text(raw_default_timezone).strip() or None
+        if default_timezone_value:
+            try:
+                from ..automation.schedule import validate_timezone_name
+
+                validate_timezone_name(default_timezone_value)
+            except Exception as exc:
+                from urllib.parse import quote
+
+                return RedirectResponse(
+                    url=(
+                        f"/agents/{agent_id}/playground?config_error="
+                        f"{quote(str(exc)[:220])}"
+                    ),
+                    status_code=302,
+                )
         memory_types_value = _build_memory_types_for_agent(
             application_mode=getattr(existing, "application_mode", "assistant"),
             enable_entity_memory=enable_entity_memory_value,
@@ -2269,17 +2704,25 @@ def create_app() -> FastAPI:
         sandbox_value = new_sandbox_provider if new_sandbox_provider else None
         if sandbox_value is None:
             sandbox_value = getattr(existing, "sandbox_provider", None)
-        sandbox_validation_error = _validate_sandbox_provider_choice(sandbox_value)
-        if sandbox_validation_error:
-            from urllib.parse import quote
+        # Only validate sandbox when the user explicitly changed it;
+        # carry forward the existing value without blocking unrelated edits.
+        sandbox_changed = (
+            new_sandbox_provider
+            and new_sandbox_provider
+            != _to_text(getattr(existing, "sandbox_provider", "") or "").strip()
+        )
+        if sandbox_changed:
+            sandbox_validation_error = _validate_sandbox_provider_choice(sandbox_value)
+            if sandbox_validation_error:
+                from urllib.parse import quote
 
-            return RedirectResponse(
-                url=(
-                    f"/agents/{agent_id}/playground?config_error="
-                    f"{quote(sandbox_validation_error[:220])}"
-                ),
-                status_code=302,
-            )
+                return RedirectResponse(
+                    url=(
+                        f"/agents/{agent_id}/playground?config_error="
+                        f"{quote(sandbox_validation_error[:220])}"
+                    ),
+                    status_code=302,
+                )
 
         internet_value = new_internet_provider or None
         internet_config_value = _build_internet_provider_config(internet_value)
@@ -2361,6 +2804,10 @@ def create_app() -> FastAPI:
                 if parsed_mcp_servers is not None
                 else getattr(existing, "mcp_servers", None)
             ),
+            self_aware=self_aware_enabled_value,
+            self_aware_config=self_aware_config_value,
+            automations_enabled=automations_enabled_value,
+            default_timezone=default_timezone_value,
         )
 
         try:
@@ -2390,6 +2837,17 @@ def create_app() -> FastAPI:
 
         agent_detail = _load_agent_detail(agent_id)
 
+        # Check if this agent is the active WhatsApp agent
+        is_whatsapp_active = False
+        if getattr(agent_detail["agent"], "whatsapp_enabled", False):
+            try:
+                from memorizz.channels.whatsapp.settings import WhatsAppSettings
+
+                settings = WhatsAppSettings(_state["provider"])
+                is_whatsapp_active = settings.get_active_agent_id() == agent_id
+            except Exception:
+                pass
+
         return templates.TemplateResponse(
             "agent_detail.html",
             {
@@ -2406,8 +2864,842 @@ def create_app() -> FastAPI:
                 "run_response": None,
                 "run_error": None,
                 "active_page": "agents",
+                "is_whatsapp_active": is_whatsapp_active,
             },
         )
+
+    @app.post("/agents/{agent_id}/whatsapp/activate")
+    async def whatsapp_activate_agent(agent_id: str):
+        """Set this agent as the active WhatsApp agent."""
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+
+        try:
+            # 1. Verify agent exists
+            agent = _state["provider"].retrieve_memagent(agent_id)
+            if not agent:
+                raise HTTPException(status_code=404, detail="Agent not found")
+
+            # 2. Verify WhatsApp is enabled for this agent
+            if not getattr(agent, "whatsapp_enabled", False):
+                raise HTTPException(
+                    status_code=400, detail="WhatsApp is not enabled for this agent"
+                )
+
+            # 3. Set as active
+            from memorizz.channels.whatsapp.settings import WhatsAppSettings
+
+            settings = WhatsAppSettings(_state["provider"])
+            settings.set_active_agent_id(agent_id)
+
+            logger.info(f"Set agent {agent_id} as active WhatsApp agent")
+
+            # 4. Redirect back to agent detail
+            return RedirectResponse(url=f"/agents/{agent_id}", status_code=303)
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error activating WhatsApp agent: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/agents/{agent_id}/whatsapp/deactivate")
+    async def whatsapp_deactivate_agent(agent_id: str):
+        """Remove this agent as the active WhatsApp agent."""
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+
+        try:
+            from memorizz.channels.whatsapp.settings import WhatsAppSettings
+
+            settings = WhatsAppSettings(_state["provider"])
+
+            # Only deactivate if this agent is currently active
+            current_active = settings.get_active_agent_id()
+            if current_active == agent_id:
+                settings.clear_active_agent()
+                logger.info(f"Deactivated WhatsApp agent {agent_id}")
+
+            return RedirectResponse(url=f"/agents/{agent_id}", status_code=303)
+
+        except Exception as e:
+            logger.error(f"Error deactivating WhatsApp agent: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ------------------------------------------------------------------
+    # Automations UI (Oracle-backed)
+    # ------------------------------------------------------------------
+
+    def _get_automation_store_for_ui():
+        if not _state["provider"]:
+            return None
+        try:
+            from ..automation.store.factory import get_automation_store
+
+            return get_automation_store(_state["provider"])
+        except Exception:
+            return None
+
+    def _parse_whatsapp_recipients(value: Any) -> List[str]:
+        text = _to_text(value)
+        if not text.strip():
+            return []
+        import re
+
+        raw_lines = text.replace(",", "\n").splitlines()
+        recipients: List[str] = []
+        seen = set()
+        for raw in raw_lines:
+            token = _to_text(raw).strip()
+            if not token:
+                continue
+            if token.lower().startswith("whatsapp:"):
+                token = token.split(":", 1)[1].strip()
+            token = re.sub(r"[\s\-()]", "", token)
+            if token and not token.startswith("+") and token.isdigit():
+                token = f"+{token}"
+            if not (token.startswith("+") and token[1:].isdigit()):
+                continue
+            normalized = f"whatsapp:{token}"
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            recipients.append(normalized)
+        return recipients
+
+    @app.get("/automations", response_class=HTMLResponse)
+    async def automations_page(request: Request, agent_id: Optional[str] = None):
+        """List automations jobs (Oracle-only)."""
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+
+        selected_agent_id = _to_text(agent_id).strip() or None
+        store = _get_automation_store_for_ui()
+        jobs: List[Dict[str, Any]] = []
+        error: Optional[str] = None
+
+        if store is None:
+            error = "Automations are unavailable for the current provider (Oracle required)."
+        else:
+            try:
+                rows = store.list_jobs(agent_id=selected_agent_id, enabled=None)
+                jobs = [job.model_dump() for job in rows]
+            except Exception as exc:
+                message = str(exc)
+                if "ORA-00942" in message and "AUTOMATION_JOBS" in message:
+                    message = (
+                        message
+                        + " Hint: run `PYTHONPATH=./src memorizz setup-oracle-schema` "
+                        + "to apply schema updates without dropping your user."
+                    )
+                error = message
+
+        agents: List[Any] = []
+        try:
+            agents = _state["provider"].list_memagents()
+        except Exception:
+            agents = []
+
+        agent_options = []
+        for agent in agents:
+            aid = _extract_agent_identifier(agent)
+            if not aid:
+                continue
+            agent_options.append(
+                {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
+            )
+
+        return templates.TemplateResponse(
+            "automations.html",
+            {
+                "request": request,
+                "provider_type": _state["provider_type"],
+                "connection_info": _state["connection_info"],
+                "agents_nav": _build_agent_nav_items(active_agent_id=selected_agent_id),
+                "active_agent_id": selected_agent_id,
+                "active_page": "automations",
+                "error": error,
+                "jobs": jobs,
+                "selected_agent_id": selected_agent_id or "",
+                "agent_options": agent_options,
+            },
+        )
+
+    @app.get("/automations/new", response_class=HTMLResponse)
+    async def automations_create_page(request: Request, agent_id: Optional[str] = None):
+        """Render create automation form."""
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+
+        agents: List[Any] = []
+        try:
+            agents = _state["provider"].list_memagents()
+        except Exception:
+            agents = []
+
+        agent_options = []
+        for agent in agents:
+            aid = _extract_agent_identifier(agent)
+            if not aid:
+                continue
+            agent_options.append(
+                {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
+            )
+
+        default_agent_id = _to_text(agent_id).strip() if agent_id else ""
+        if default_agent_id and not any(
+            opt["agent_id"] == default_agent_id for opt in agent_options
+        ):
+            default_agent_id = ""
+
+        default_timezone = _to_text(
+            os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "")
+        ).strip()
+
+        return templates.TemplateResponse(
+            "automation_form.html",
+            {
+                "request": request,
+                "provider_type": _state["provider_type"],
+                "connection_info": _state["connection_info"],
+                "agents_nav": _build_agent_nav_items(
+                    active_agent_id=default_agent_id or None
+                ),
+                "active_agent_id": default_agent_id or None,
+                "active_page": "automations",
+                "form_title": "Create Automation",
+                "form_action": "/automations",
+                "is_edit": False,
+                "error": None,
+                "job_id": "",
+                "agent_options": agent_options,
+                "agent_id": default_agent_id,
+                "name": "",
+                "enabled": True,
+                "schedule_type": "cron",
+                "cron_expr": "",
+                "interval_seconds": "",
+                "timezone": default_timezone,
+                "query_template": "",
+                "memory_id": "",
+                "whatsapp_to": "",
+                "delivery_channel": "in_chat",
+            },
+        )
+
+    @app.post("/automations", response_class=HTMLResponse)
+    async def automations_create_submit(request: Request):
+        """Create an automation job."""
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+
+        from ..automation.models import AutomationJob
+        from ..automation.schedule import (
+            compute_next_run_at,
+            utcnow,
+            validate_timezone_name,
+        )
+
+        form = await request.form()
+        agent_id_value = _to_text(form.get("agent_id")).strip()
+        name_value = _to_text(form.get("name")).strip()
+        enabled_value = _parse_bool(form.get("enabled"))
+        schedule_type_value = _to_text(form.get("schedule_type")).strip().lower()
+        cron_expr_value = _to_text(form.get("cron_expr")).strip()
+        interval_seconds_raw = _to_text(form.get("interval_seconds")).strip()
+        timezone_value = _to_text(form.get("timezone")).strip()
+        query_template_value = _to_text(form.get("query_template"))
+        memory_id_value = _to_text(form.get("memory_id")).strip()
+        whatsapp_to_value = _parse_whatsapp_recipients(form.get("whatsapp_to"))
+        delivery_channel_value = (
+            _to_text(form.get("delivery_channel")).strip() or "in_chat"
+        )
+
+        error: Optional[str] = None
+        if not agent_id_value:
+            error = "agent_id is required."
+        elif not name_value:
+            error = "name is required."
+        elif not timezone_value:
+            error = "timezone is required."
+        else:
+            try:
+                validate_timezone_name(timezone_value)
+            except Exception as exc:
+                error = str(exc)
+
+        interval_seconds_value: Optional[int] = None
+        if not error and schedule_type_value == "interval":
+            try:
+                interval_seconds_value = int(interval_seconds_raw or "0")
+            except Exception:
+                interval_seconds_value = 0
+            if not interval_seconds_value or interval_seconds_value <= 0:
+                error = "interval_seconds must be a positive integer."
+
+        if not error and schedule_type_value == "cron" and not cron_expr_value:
+            error = "cron_expr is required for cron schedules."
+
+        if not error and not _to_text(query_template_value).strip():
+            error = "query_template is required."
+
+        now_utc = utcnow()
+        next_run_at = None
+        if not error:
+            try:
+                next_run_at = compute_next_run_at(
+                    schedule_type=schedule_type_value,
+                    cron_expr=cron_expr_value or None,
+                    interval_seconds=interval_seconds_value,
+                    tz_name=timezone_value,
+                    after_utc=now_utc,
+                )
+            except Exception as exc:
+                error = str(exc)
+
+        if not memory_id_value:
+            memory_id_value = str(uuid.uuid4())
+
+        if error:
+            # Re-render form with error.
+            agents: List[Any] = []
+            try:
+                agents = _state["provider"].list_memagents()
+            except Exception:
+                agents = []
+            agent_options = []
+            for agent in agents:
+                aid = _extract_agent_identifier(agent)
+                if not aid:
+                    continue
+                agent_options.append(
+                    {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
+                )
+            return templates.TemplateResponse(
+                "automation_form.html",
+                {
+                    "request": request,
+                    "provider_type": _state["provider_type"],
+                    "connection_info": _state["connection_info"],
+                    "agents_nav": _build_agent_nav_items(
+                        active_agent_id=agent_id_value or None
+                    ),
+                    "active_agent_id": agent_id_value or None,
+                    "active_page": "automations",
+                    "form_title": "Create Automation",
+                    "form_action": "/automations",
+                    "is_edit": False,
+                    "error": error,
+                    "job_id": "",
+                    "agent_options": agent_options,
+                    "agent_id": agent_id_value,
+                    "name": name_value,
+                    "enabled": enabled_value,
+                    "schedule_type": schedule_type_value,
+                    "cron_expr": cron_expr_value,
+                    "interval_seconds": interval_seconds_raw,
+                    "timezone": timezone_value,
+                    "query_template": query_template_value,
+                    "memory_id": memory_id_value,
+                    "whatsapp_to": "\n".join(whatsapp_to_value),
+                },
+            )
+
+        job = AutomationJob(
+            job_id=str(uuid.uuid4()),
+            agent_id=agent_id_value,
+            name=name_value,
+            enabled=enabled_value,
+            schedule_type=schedule_type_value,  # type: ignore[arg-type]
+            cron_expr=cron_expr_value or None,
+            interval_seconds=interval_seconds_value,
+            timezone=timezone_value,
+            start_at=now_utc,
+            next_run_at=next_run_at,  # type: ignore[arg-type]
+            action_type="agent_query",
+            action_config={
+                "query_template": _to_text(query_template_value),
+                "memory_id": memory_id_value,
+            },
+            delivery_type=(
+                "whatsapp_twilio"
+                if delivery_channel_value == "whatsapp_twilio" and whatsapp_to_value
+                else "in_chat"
+                if delivery_channel_value == "in_chat"
+                else None
+            ),
+            delivery_config={"whatsapp_to": whatsapp_to_value}
+            if delivery_channel_value == "whatsapp_twilio" and whatsapp_to_value
+            else {},
+        )
+
+        created = store.create_job(job)
+        return RedirectResponse(url=f"/automations/{created.job_id}", status_code=302)
+
+    @app.get("/automations/{job_id}/edit", response_class=HTMLResponse)
+    async def automations_edit_page(request: Request, job_id: str):
+        """Render edit automation form."""
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+
+        job = store.get_job(_to_text(job_id).strip())
+        if not job:
+            raise HTTPException(status_code=404, detail="Automation job not found")
+
+        agents: List[Any] = []
+        try:
+            agents = _state["provider"].list_memagents()
+        except Exception:
+            agents = []
+
+        agent_options = []
+        for agent in agents:
+            aid = _extract_agent_identifier(agent)
+            if not aid:
+                continue
+            agent_options.append(
+                {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
+            )
+
+        query_template_value = _to_text(job.action_config.get("query_template"))
+        memory_id_value = _to_text(job.action_config.get("memory_id")).strip()
+        whatsapp_list = job.delivery_config.get("whatsapp_to") or []
+        if isinstance(whatsapp_list, str):
+            whatsapp_lines = whatsapp_list
+        elif isinstance(whatsapp_list, list):
+            whatsapp_lines = "\n".join(
+                _to_text(item).strip()
+                for item in whatsapp_list
+                if _to_text(item).strip()
+            )
+        else:
+            whatsapp_lines = ""
+
+        return templates.TemplateResponse(
+            "automation_form.html",
+            {
+                "request": request,
+                "provider_type": _state["provider_type"],
+                "connection_info": _state["connection_info"],
+                "agents_nav": _build_agent_nav_items(active_agent_id=job.agent_id),
+                "active_agent_id": job.agent_id,
+                "active_page": "automations",
+                "form_title": "Edit Automation",
+                "form_action": f"/automations/{job.job_id}/edit",
+                "is_edit": True,
+                "error": None,
+                "job_id": job.job_id,
+                "agent_options": agent_options,
+                "agent_id": job.agent_id,
+                "name": job.name,
+                "enabled": bool(job.enabled),
+                "schedule_type": job.schedule_type,
+                "cron_expr": _to_text(job.cron_expr).strip(),
+                "interval_seconds": _to_text(job.interval_seconds).strip(),
+                "timezone": job.timezone,
+                "query_template": query_template_value,
+                "memory_id": memory_id_value,
+                "whatsapp_to": whatsapp_lines,
+                "delivery_channel": job.delivery_type
+                if job.delivery_type in ("in_chat", "whatsapp_twilio")
+                else "in_chat",
+            },
+        )
+
+    @app.post("/automations/{job_id}/edit", response_class=HTMLResponse)
+    async def automations_edit_submit(request: Request, job_id: str):
+        """Update an automation job."""
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+
+        existing = store.get_job(_to_text(job_id).strip())
+        if not existing:
+            raise HTTPException(status_code=404, detail="Automation job not found")
+
+        from ..automation.schedule import (
+            compute_next_run_at,
+            utcnow,
+            validate_timezone_name,
+        )
+
+        form = await request.form()
+        name_value = _to_text(form.get("name")).strip()
+        enabled_value = _parse_bool(form.get("enabled"))
+        schedule_type_value = _to_text(form.get("schedule_type")).strip().lower()
+        cron_expr_value = _to_text(form.get("cron_expr")).strip()
+        interval_seconds_raw = _to_text(form.get("interval_seconds")).strip()
+        timezone_value = _to_text(form.get("timezone")).strip()
+        query_template_value = _to_text(form.get("query_template"))
+        memory_id_value = _to_text(form.get("memory_id")).strip()
+        whatsapp_to_value = _parse_whatsapp_recipients(form.get("whatsapp_to"))
+        delivery_channel_value = (
+            _to_text(form.get("delivery_channel")).strip() or "in_chat"
+        )
+
+        error: Optional[str] = None
+        if not name_value:
+            error = "name is required."
+        elif not timezone_value:
+            error = "timezone is required."
+        else:
+            try:
+                validate_timezone_name(timezone_value)
+            except Exception as exc:
+                error = str(exc)
+
+        interval_seconds_value: Optional[int] = None
+        if not error and schedule_type_value == "interval":
+            try:
+                interval_seconds_value = int(interval_seconds_raw or "0")
+            except Exception:
+                interval_seconds_value = 0
+            if not interval_seconds_value or interval_seconds_value <= 0:
+                error = "interval_seconds must be a positive integer."
+
+        if not error and schedule_type_value == "cron" and not cron_expr_value:
+            error = "cron_expr is required for cron schedules."
+
+        if not error and not _to_text(query_template_value).strip():
+            error = "query_template is required."
+
+        if not memory_id_value:
+            memory_id_value = str(uuid.uuid4())
+
+        now_utc = utcnow()
+        next_run_at = None
+        if not error:
+            try:
+                next_run_at = compute_next_run_at(
+                    schedule_type=schedule_type_value,
+                    cron_expr=cron_expr_value or None,
+                    interval_seconds=interval_seconds_value,
+                    tz_name=timezone_value,
+                    after_utc=now_utc,
+                )
+            except Exception as exc:
+                error = str(exc)
+
+        if error:
+            agents: List[Any] = []
+            try:
+                agents = _state["provider"].list_memagents()
+            except Exception:
+                agents = []
+
+            agent_options = []
+            for agent in agents:
+                aid = _extract_agent_identifier(agent)
+                if not aid:
+                    continue
+                agent_options.append(
+                    {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
+                )
+
+            return templates.TemplateResponse(
+                "automation_form.html",
+                {
+                    "request": request,
+                    "provider_type": _state["provider_type"],
+                    "connection_info": _state["connection_info"],
+                    "agents_nav": _build_agent_nav_items(
+                        active_agent_id=existing.agent_id
+                    ),
+                    "active_agent_id": existing.agent_id,
+                    "active_page": "automations",
+                    "form_title": "Edit Automation",
+                    "form_action": f"/automations/{existing.job_id}/edit",
+                    "is_edit": True,
+                    "error": error,
+                    "job_id": existing.job_id,
+                    "agent_options": agent_options,
+                    "agent_id": existing.agent_id,
+                    "name": name_value,
+                    "enabled": enabled_value,
+                    "schedule_type": schedule_type_value,
+                    "cron_expr": cron_expr_value,
+                    "interval_seconds": interval_seconds_raw,
+                    "timezone": timezone_value,
+                    "query_template": query_template_value,
+                    "memory_id": memory_id_value,
+                    "whatsapp_to": "\n".join(whatsapp_to_value),
+                },
+            )
+
+        patch = {
+            "name": name_value,
+            "enabled": enabled_value,
+            "schedule_type": schedule_type_value,
+            "cron_expr": cron_expr_value or None,
+            "interval_seconds": interval_seconds_value,
+            "timezone": timezone_value,
+            "next_run_at": next_run_at,
+            "action_type": "agent_query",
+            "action_config": {
+                "query_template": _to_text(query_template_value),
+                "memory_id": memory_id_value,
+            },
+            "delivery_type": (
+                "whatsapp_twilio"
+                if delivery_channel_value == "whatsapp_twilio" and whatsapp_to_value
+                else "in_chat"
+                if delivery_channel_value == "in_chat"
+                else None
+            ),
+            "delivery_config": {"whatsapp_to": whatsapp_to_value}
+            if delivery_channel_value == "whatsapp_twilio" and whatsapp_to_value
+            else {},
+            "locked_by": None,
+            "lock_expires_at": None,
+        }
+        store.update_job(existing.job_id, patch)
+        return RedirectResponse(url=f"/automations/{existing.job_id}", status_code=302)
+
+    @app.get("/automations/{job_id}", response_class=HTMLResponse)
+    async def automations_detail_page(request: Request, job_id: str):
+        """Show automation job detail + run history."""
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+
+        job = store.get_job(_to_text(job_id).strip())
+        if not job:
+            raise HTTPException(status_code=404, detail="Automation job not found")
+
+        runs = []
+        error = None
+        try:
+            runs = store.list_runs(job.job_id, limit=50)
+        except Exception as exc:
+            error = str(exc)
+            runs = []
+
+        error_param = _to_text(request.query_params.get("error")).strip().lower()
+        if error_param == "confirm_required":
+            error = error or "Confirmation is required to delete this automation."
+        elif error_param == "job_locked":
+            error = error or (
+                "This automation is currently locked by another worker. "
+                "If it's actively running, wait a moment and try Run now again."
+            )
+
+        return templates.TemplateResponse(
+            "automation_detail.html",
+            {
+                "request": request,
+                "provider_type": _state["provider_type"],
+                "connection_info": _state["connection_info"],
+                "agents_nav": _build_agent_nav_items(active_agent_id=job.agent_id),
+                "active_agent_id": job.agent_id,
+                "active_page": "automations",
+                "error": error,
+                "job": job.model_dump(),
+                "runs": [run.model_dump() for run in runs],
+            },
+        )
+
+    @app.post("/automations/{job_id}/pause")
+    async def automations_pause(job_id: str):
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+        store.pause_job(_to_text(job_id).strip())
+        return RedirectResponse(url=f"/automations/{job_id}", status_code=302)
+
+    @app.post("/automations/{job_id}/resume")
+    async def automations_resume(job_id: str):
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+        store.resume_job(_to_text(job_id).strip())
+        return RedirectResponse(url=f"/automations/{job_id}", status_code=302)
+
+    @app.post("/automations/{job_id}/run-now")
+    async def automations_run_now(job_id: str):
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+        from ..automation.runner import run_job_once
+        from ..automation.schedule import compute_next_run_at, utcnow
+
+        safe_job_id = _to_text(job_id).strip()
+        now_utc = utcnow()
+        lease_seconds = int(
+            str(os.environ.get("MEMORIZZ_AUTOMATIONS_LEASE_SECONDS", "120") or "120")
+        )
+        worker_id = f"ui-run-now:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+        if not hasattr(store, "claim_job"):
+            # Fallback behavior: enqueue immediate execution for an external worker.
+            store.update_job(
+                safe_job_id,
+                {
+                    "next_run_at": now_utc,
+                    "enabled": True,
+                    "locked_by": None,
+                    "lock_expires_at": None,
+                },
+            )
+            return RedirectResponse(url=f"/automations/{safe_job_id}", status_code=302)
+
+        job = store.claim_job(
+            safe_job_id,
+            worker_id=worker_id,
+            now_utc=now_utc,
+            lease_seconds=lease_seconds,
+            force_enable=True,
+        )
+        if job is None:
+            return RedirectResponse(
+                url=f"/automations/{safe_job_id}?error=job_locked", status_code=302
+            )
+
+        run = store.start_run(job, now_utc, worker_id)
+
+        def _run_in_background() -> None:
+            import time
+
+            attempt = 1
+            last_error = None
+            result_payload = None
+            status = "failed"
+
+            try:
+                for attempt in range(1, int(job.retry_max_attempts or 1) + 1):
+                    try:
+                        result_payload = run_job_once(
+                            job,
+                            run_id=run.run_id,
+                            scheduled_for_utc=now_utc,
+                            memory_provider=_state["provider"],
+                            store=store,
+                        )
+                        delivery_summary = (
+                            result_payload.get("delivery_summary")
+                            if isinstance(result_payload, dict)
+                            else None
+                        )
+                        if (
+                            isinstance(delivery_summary, dict)
+                            and int(delivery_summary.get("total") or 0) > 0
+                            and int(delivery_summary.get("sent") or 0) == 0
+                            and int(delivery_summary.get("failed") or 0) > 0
+                        ):
+                            status = "failed"
+                            last_error = str(
+                                result_payload.get("delivery_error")
+                                or "All deliveries failed."
+                            )
+                        else:
+                            status = "succeeded"
+                            last_error = None
+                        break
+                    except Exception as exc:
+                        last_error = str(exc)
+                        status = "failed"
+                        if attempt < int(job.retry_max_attempts or 1):
+                            time.sleep(max(1, int(job.retry_backoff_seconds or 60)))
+
+                # Reschedule / disable, always unlock.
+                finished_at = utcnow()
+                patch = {
+                    "last_run_at": finished_at,
+                    "locked_by": None,
+                    "lock_expires_at": None,
+                }
+
+                try:
+                    if str(job.schedule_type) == "one_shot":
+                        patch["enabled"] = False
+                        patch["next_run_at"] = finished_at
+                    else:
+                        patch["enabled"] = True
+                        patch["next_run_at"] = compute_next_run_at(
+                            schedule_type=job.schedule_type,
+                            cron_expr=job.cron_expr,
+                            interval_seconds=job.interval_seconds,
+                            tz_name=job.timezone,
+                            after_utc=finished_at,
+                        )
+                except Exception as exc:
+                    # Avoid a tight retry loop if the schedule config is invalid.
+                    patch["enabled"] = False
+                    patch["next_run_at"] = finished_at
+                    last_error = last_error or f"Reschedule failed: {exc}"
+                    status = "failed"
+
+                try:
+                    store.update_job(job.job_id, patch)
+                except Exception:
+                    # Best-effort unlock.
+                    try:
+                        store.update_job(
+                            job.job_id, {"locked_by": None, "lock_expires_at": None}
+                        )
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    store.finish_run(
+                        run.run_id,
+                        status=status,
+                        error=last_error,
+                        result_summary=None,
+                        result_payload=(
+                            result_payload if isinstance(result_payload, dict) else {}
+                        ),
+                        attempt=attempt,
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(
+            target=_run_in_background,
+            name=f"memorizz-automation-run-now:{safe_job_id[:8]}",
+            daemon=True,
+        ).start()
+
+        return RedirectResponse(url=f"/automations/{safe_job_id}", status_code=302)
+
+    @app.post("/automations/{job_id}/delete")
+    async def automations_delete(request: Request, job_id: str):
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return RedirectResponse(url="/automations", status_code=302)
+        form = await request.form()
+        confirm = _parse_bool(form.get("confirm"))
+        if not confirm:
+            return RedirectResponse(
+                url=f"/automations/{job_id}?error=confirm_required", status_code=302
+            )
+        store.delete_job(_to_text(job_id).strip())
+        return RedirectResponse(url="/automations", status_code=302)
 
     @app.get("/observability")
     async def observability_redirect(request: Request):
@@ -3302,6 +4594,56 @@ def create_app() -> FastAPI:
 
         return RedirectResponse(url="/agents", status_code=302)
 
+    @app.post("/webhook/whatsapp/incoming")
+    async def whatsapp_webhook_incoming(request: Request):
+        """
+        Twilio WhatsApp webhook receiver.
+        Validates signature and queues message for processing.
+        """
+        try:
+            # 1. Get Twilio signature from header
+            signature = request.headers.get("X-Twilio-Signature", "")
+
+            # 2. Parse form data
+            form_data = await request.form()
+            params = {k: v for k, v in form_data.items()}
+
+            # 3. Validate signature
+            auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+            url = str(request.url)
+
+            from memorizz.channels.whatsapp.webhook_validator import (
+                validate_twilio_signature,
+            )
+
+            if not validate_twilio_signature(auth_token, url, params, signature):
+                logger.warning("Invalid Twilio webhook signature")
+                raise HTTPException(status_code=403, detail="Invalid signature")
+
+            # 4. Extract message data
+            message_data = {
+                "from": params.get("From", ""),
+                "body": params.get("Body", ""),
+                "message_sid": params.get("MessageSid", ""),
+            }
+
+            # 5. Queue for processing
+            from memorizz.channels.whatsapp.queue import enqueue_message
+
+            enqueue_message(message_data)
+
+            logger.info(f"Queued WhatsApp message from {message_data['from']}")
+
+            # 6. Return 200 OK immediately (Twilio requires fast response)
+            return JSONResponse({"status": "queued"}, status_code=200)
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Webhook error: {e}", exc_info=True)
+            # Still return 200 to avoid Twilio retries
+            return JSONResponse({"status": "error"}, status_code=200)
+
     @app.get("/memory/{memory_type}", response_class=HTMLResponse)
     async def memory_list(request: Request, memory_type: str):
         """Show list of items for a memory type."""
@@ -3393,6 +4735,64 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.error(f"Failed to get agent {agent_id}: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/automations/{job_id}/runs")
+    async def api_automation_runs(job_id: str, limit: int = 50):
+        """JSON endpoint for polling automation run history."""
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+        store = _get_automation_store_for_ui()
+        if store is None:
+            raise HTTPException(status_code=400, detail="Automation store unavailable")
+        job = store.get_job(_to_text(job_id).strip())
+        if not job:
+            raise HTTPException(status_code=404, detail="Automation job not found")
+        runs = store.list_runs(job.job_id, limit=min(limit, 50))
+        return {
+            "job": job.model_dump(mode="json"),
+            "runs": [r.model_dump(mode="json") for r in runs],
+        }
+
+    @app.get("/api/agents/{agent_id}/automation-runs")
+    async def api_agent_automation_runs(agent_id: str):
+        """JSON endpoint returning recent automation runs for an agent."""
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+        store = _get_automation_store_for_ui()
+        if store is None:
+            return {"runs": []}
+        try:
+            jobs = store.list_jobs(agent_id=_to_text(agent_id).strip(), enabled=None)
+        except Exception:
+            return {"runs": []}
+        result = []
+        for job in jobs[:10]:
+            try:
+                runs = store.list_runs(job.job_id, limit=5)
+            except Exception:
+                continue
+            for run in runs:
+                payload = run.result_payload or {}
+                result.append(
+                    {
+                        "job_id": job.job_id,
+                        "job_name": job.name,
+                        "run_id": run.run_id,
+                        "status": run.status,
+                        "scheduled_for": run.scheduled_for.isoformat()
+                        if run.scheduled_for
+                        else None,
+                        "finished_at": run.finished_at.isoformat()
+                        if run.finished_at
+                        else None,
+                        "memory_id": payload.get("memory_id", ""),
+                        "response_snippet": (str(payload.get("response", ""))[:120])
+                        if payload.get("response")
+                        else "",
+                    }
+                )
+        result.sort(key=lambda r: r.get("scheduled_for") or "", reverse=True)
+        return {"runs": result[:20]}
 
     return app
 
@@ -5939,6 +7339,85 @@ def _parse_bool(value: Optional[str]) -> bool:
     return str(value).strip().lower() in {"1", "true", "on", "yes"}
 
 
+def _parse_self_aware_root_paths(value: Optional[str]) -> List[str]:
+    """Parse newline/comma-delimited self-aware root paths."""
+    if not value:
+        return []
+    raw_parts = str(value).replace("\n", ",").split(",")
+    roots: List[str] = []
+    seen = set()
+    for raw in raw_parts:
+        path = _to_text(raw).strip()
+        if not path or path in seen:
+            continue
+        roots.append(path)
+        seen.add(path)
+    return roots
+
+
+def _build_self_aware_config(
+    root_paths: Optional[List[str]],
+    allow_writes: bool = False,
+    allow_deletes: bool = False,
+    base_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build normalized self-aware config payload."""
+    config = dict(base_config) if isinstance(base_config, dict) else {}
+    normalized_roots = []
+    seen = set()
+    for root in root_paths or []:
+        text = _to_text(root).strip()
+        if not text or text in seen:
+            continue
+        normalized_roots.append(text)
+        seen.add(text)
+
+    config["root_paths"] = normalized_roots
+    config["allow_writes"] = bool(allow_writes)
+    config["allow_deletes"] = bool(allow_deletes) if allow_writes else False
+    config["policy_version"] = _to_text(config.get("policy_version")).strip() or "v1"
+
+    def _coerce_limit(key: str, default: int, min_value: int, max_value: int) -> int:
+        try:
+            value = int(config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(min_value, min(max_value, value))
+
+    config["timeout_seconds"] = _coerce_limit("timeout_seconds", 30, 1, 300)
+    config["max_output_chars"] = _coerce_limit("max_output_chars", 50000, 1024, 1000000)
+    config["max_file_read_bytes"] = _coerce_limit(
+        "max_file_read_bytes", 250000, 1024, 5000000
+    )
+    config["max_file_write_bytes"] = _coerce_limit(
+        "max_file_write_bytes", 250000, 1, 5000000
+    )
+    return config
+
+
+def _validate_self_aware_config(config: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Validate self-aware config payload."""
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        return "Self-aware config must be an object."
+
+    root_paths = config.get("root_paths")
+    if root_paths is None:
+        root_paths = []
+    if not isinstance(root_paths, list):
+        return "Self-aware root paths must be an array."
+    for idx, root in enumerate(root_paths):
+        if not isinstance(root, str) or not root.strip():
+            return f"Self-aware root path #{idx + 1} must be a non-empty string."
+
+    allow_writes = bool(config.get("allow_writes", False))
+    allow_deletes = bool(config.get("allow_deletes", False))
+    if allow_deletes and not allow_writes:
+        return "Self-aware deletes require writes to be enabled."
+    return None
+
+
 def _parse_memory_ids(value: Optional[str]) -> List[str]:
     """Parse a comma- or newline-delimited memory ID list."""
     if not value:
@@ -6208,6 +7687,18 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         getattr(agent, "skills_marketplace_provider", None)
     )
     memory_types = _normalize_memory_type_values(getattr(agent, "memory_types", None))
+    self_aware_enabled = bool(getattr(agent, "self_aware", False))
+    self_aware_config = getattr(agent, "self_aware_config", None)
+    if not isinstance(self_aware_config, dict):
+        self_aware_config = {}
+    self_aware_root_paths = self_aware_config.get("root_paths")
+    if not isinstance(self_aware_root_paths, list):
+        self_aware_root_paths = []
+    self_aware_root_paths_text = "\n".join(
+        _to_text(path).strip()
+        for path in self_aware_root_paths
+        if _to_text(path).strip()
+    )
 
     return {
         "agent_id": getattr(agent, "agent_id", ""),
@@ -6217,7 +7708,9 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "memory_types": memory_types,
         "enable_entity_memory": _agent_entity_memory_enabled(agent),
         "enable_workflow_memory": _agent_workflow_memory_enabled(agent),
-        "max_steps": getattr(agent, "max_steps", None) or DEFAULT_MAX_STEPS,
+        "max_steps": getattr(agent, "max_steps", None)
+        if getattr(agent, "max_steps", None) is not None
+        else DEFAULT_MAX_STEPS,
         "tool_access": getattr(agent, "tool_access", None) or "private",
         "semantic_cache": bool(getattr(agent, "semantic_cache", False)),
         "is_favorite": bool(getattr(agent, "is_favorite", False)),
@@ -6234,6 +7727,16 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "skills_marketplace_provider": skills_marketplace_val,
         "skill_paths": getattr(agent, "skill_paths", None) or [],
         "mcp_servers": getattr(agent, "mcp_servers", None) or [],
+        "self_aware": self_aware_enabled,
+        "self_aware_root_paths": self_aware_root_paths_text,
+        "self_aware_allow_writes": bool(self_aware_config.get("allow_writes", False)),
+        "self_aware_allow_deletes": bool(self_aware_config.get("allow_deletes", False)),
+        "automations_enabled": bool(getattr(agent, "automations_enabled", True)),
+        "default_timezone": _to_text(getattr(agent, "default_timezone", "")).strip(),
+        "whatsapp_enabled": bool(getattr(agent, "whatsapp_enabled", False)),
+        "whatsapp_welcome_message": (getattr(agent, "whatsapp_config", None) or {}).get(
+            "welcome_message", ""
+        ),
         "agent_tools": _extract_agent_tools(agent),
     }
 

@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """Data models for MemAgent configuration and state."""
 
 from typing import Any, Dict, List, Optional, Union
@@ -40,6 +44,12 @@ class MemAgentModel(BaseModel):
     sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
     skill_paths: Optional[List[str]] = None
     mcp_servers: Optional[List[Dict[str, Any]]] = None
+    self_aware: bool = False
+    self_aware_config: Optional[Dict[str, Any]] = None
+    automations_enabled: bool = True
+    default_timezone: Optional[str] = None
+    whatsapp_enabled: bool = False
+    whatsapp_config: Optional[Dict[str, Any]] = None
 
     model_config = {
         "arbitrary_types_allowed": True  # Allow arbitrary types like Toolbox

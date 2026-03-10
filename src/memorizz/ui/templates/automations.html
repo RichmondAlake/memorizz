@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}Automations - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Automations</h1>
+    <p>Durable scheduled jobs with run history (Oracle-backed).</p>
+</div>
+
+{% if error %}
+<div class="error-message">
+    <span>!</span> {{ error }}
+</div>
+{% endif %}
+
+<div class="page-actions page-actions--split">
+    <form method="get" action="/automations" class="agents-sort-controls">
+        <label for="automation-agent-filter">Agent</label>
+        <select id="automation-agent-filter" name="agent_id" onchange="this.form.submit()">
+            <option value="" {% if not selected_agent_id %}selected{% endif %}>All agents</option>
+            {% for opt in agent_options %}
+            <option value="{{ opt.agent_id }}" {% if selected_agent_id == opt.agent_id %}selected{% endif %}>{{ opt.label }} ({{ opt.agent_id[:8] }})</option>
+            {% endfor %}
+        </select>
+    </form>
+    <a href="/automations/new{% if selected_agent_id %}?agent_id={{ selected_agent_id }}{% endif %}" class="btn btn-primary">Create Automation</a>
+</div>
+
+<div class="detail-section observability-section">
+    <div class="traces-toolbar">
+        <h2>Jobs</h2>
+        <p class="form-hint">{{ jobs|length }} job{% if jobs|length != 1 %}s{% endif %}</p>
+    </div>
+
+    {% if jobs %}
+    <div class="traces-table-wrap">
+        <table class="traces-agents-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Agent</th>
+                    <th>Schedule</th>
+                    <th>Timezone</th>
+                    <th>Next Run</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in jobs %}
+                <tr>
+                    <td><a href="/automations/{{ job.job_id }}">{{ job.name }}</a></td>
+                    <td><code>{{ job.agent_id|truncate(18) }}</code></td>
+                    <td>
+                        <span class="badge">{{ job.schedule_type }}</span>
+                        {% if job.schedule_type == 'cron' and job.cron_expr %}
+                        <code>{{ job.cron_expr }}</code>
+                        {% elif job.schedule_type == 'interval' and job.interval_seconds %}
+                        <code>{{ job.interval_seconds }}s</code>
+                        {% endif %}
+                    </td>
+                    <td><code>{{ job.timezone }}</code></td>
+                    <td><code>{{ job.next_run_at }}</code></td>
+                    <td>
+                        {% if job.enabled %}
+                        <span class="badge">enabled</span>
+                        {% else %}
+                        <span class="badge">paused</span>
+                        {% endif %}
+                    </td>
+                    <td style="white-space: nowrap;">
+                        <a class="btn btn-sm" href="/automations/{{ job.job_id }}">View</a>
+                        <a class="btn btn-sm" href="/automations/{{ job.job_id }}/edit">Edit</a>
+                        <form method="post" action="/automations/{{ job.job_id }}/run-now" style="display:inline;">
+                            <button type="submit" class="btn btn-sm">Run now</button>
+                        </form>
+                        {% if job.enabled %}
+                        <form method="post" action="/automations/{{ job.job_id }}/pause" style="display:inline;">
+                            <button type="submit" class="btn btn-sm">Pause</button>
+                        </form>
+                        {% else %}
+                        <form method="post" action="/automations/{{ job.job_id }}/resume" style="display:inline;">
+                            <button type="submit" class="btn btn-sm">Resume</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-pane">
+        <div class="empty-icon">AUTO</div>
+        <p>No automations found.</p>
+        <p class="empty-hint">Create one from this page or from an agent chat using the automation tools.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

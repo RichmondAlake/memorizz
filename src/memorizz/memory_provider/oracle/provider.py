@@ -1,7 +1,12 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 import array
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -131,6 +136,9 @@ class OracleProvider(MemoryProvider):
         self._apply_embedding_defaults_from_env_if_needed(self.config)
         self._embedding_dimension_mismatch_detected = False
         self._embedding_mismatch_warning_emitted = False
+        # Disable vector search per memory type once Oracle reports a vector dimension mismatch.
+        self._vector_search_disabled_for = set()
+        self._vector_dimension_mismatch_warning_emitted_for = set()
 
         # Initialize connection pool
         try:
@@ -316,6 +324,27 @@ class OracleProvider(MemoryProvider):
     def _is_embedding_dimension_mismatch_error(error_text: str) -> bool:
         """Return True when Oracle reports VECTOR dimension mismatch."""
         return "ORA-51932" in error_text or "ORA-42692" in error_text
+
+    @staticmethod
+    def _is_vector_distance_dimension_mismatch_error(error_text: str) -> bool:
+        """Return True when Oracle reports VECTOR_DISTANCE dimension mismatch."""
+        return "ORA-51808" in error_text
+
+    @staticmethod
+    def _extract_dimension_pair_from_oracle_vector_error(
+        error_text: str,
+    ) -> Optional[tuple[int, int]]:
+        """
+        Extract the dimension pair from Oracle VECTOR errors like:
+        "... different dimension counts (2050, 256)."
+        """
+        match = re.search(r"\((\d+)\s*,\s*(\d+)\)", str(error_text))
+        if not match:
+            return None
+        try:
+            return int(match.group(1)), int(match.group(2))
+        except (TypeError, ValueError):
+            return None
 
     def _handle_embedding_dimension_mismatch(
         self, store_name: str, exc: Exception
@@ -657,11 +686,24 @@ class OracleProvider(MemoryProvider):
         return json.dumps(sanitized)
 
     def _ensure_json_text(self, payload: Any) -> Optional[str]:
-        """Convert dict/list payloads to JSON strings for storage."""
+        """Convert payloads to JSON strings for storage in ``IS JSON`` columns.
+
+        Notes:
+        - If payload is already a JSON string, it is returned as-is.
+        - If payload is a non-JSON string (e.g. ``success``), it is JSON-encoded
+          as a string (e.g. ``\"success\"``) so it passes ``IS JSON`` checks.
+        """
         if payload is None:
             return None
         if isinstance(payload, str):
-            return payload
+            text = payload.strip()
+            if not text:
+                return None
+            try:
+                json.loads(text)
+                return text
+            except Exception:
+                return json.dumps(text)
         # Sanitize payload to handle JsonId objects before JSON serialization
         sanitized = self._sanitize_for_json(payload)
         return json.dumps(sanitized)
@@ -1199,13 +1241,9 @@ class OracleProvider(MemoryProvider):
             "memoryId": data.get("memory_id"),
             "agentId": data.get("agent_id"),
         }
-        # Auto-generate embedding if needed (use description as content)
-        embedding = self._generate_embedding_if_needed(
-            content=data.get("description", "") or data.get("name", ""),
-            existing_embedding=data.get("embedding"),
-        )
-        if embedding is not None:
-            workflow_data["embedding"] = embedding
+        # Intentionally skip embeddings for workflows. Workflow payloads often include
+        # arbitrary tool outputs and are not critical for semantic search; skipping
+        # avoids Oracle VECTOR index dimension mismatches from breaking runs.
 
         self._store_with_embedding_fallback(
             view_name="workflow_memory_dv",
@@ -1223,11 +1261,11 @@ class OracleProvider(MemoryProvider):
 
                 if data.get("steps"):
                     update_parts.append("steps = :steps")
-                    params["steps"] = json.dumps(data["steps"])
+                    params["steps"] = self._ensure_json_text(data["steps"])
 
                 if data.get("outcome"):
                     update_parts.append("outcome = :outcome")
-                    params["outcome"] = json.dumps(data["outcome"])
+                    params["outcome"] = self._ensure_json_text(data["outcome"])
 
                 if update_parts:
                     cursor.execute(
@@ -3043,6 +3081,9 @@ class OracleProvider(MemoryProvider):
         List[Dict[str, Any]]
             List of similar documents with scores
         """
+        if memory_type in self._vector_search_disabled_for:
+            return []
+
         # Ensure vector index exists (lazy creation)
         if self.config.lazy_vector_indexes:
             self._ensure_vector_index(memory_type)
@@ -3430,6 +3471,40 @@ class OracleProvider(MemoryProvider):
                 logger.warning("Vector search not supported for %s", memory_type)
                 return []
             except Exception as e:
+                error_str = str(e)
+                if self._is_vector_distance_dimension_mismatch_error(error_str):
+                    self._vector_search_disabled_for.add(memory_type)
+                    if (
+                        memory_type
+                        not in self._vector_dimension_mismatch_warning_emitted_for
+                    ):
+                        self._vector_dimension_mismatch_warning_emitted_for.add(
+                            memory_type
+                        )
+                        dims = self._extract_dimension_pair_from_oracle_vector_error(
+                            error_str
+                        )
+                        if dims:
+                            # Our SQL calls VECTOR_DISTANCE(embedding, :query_vec, COSINE)
+                            # so Oracle typically reports (stored_embedding_dim, query_dim).
+                            stored_dim, query_dim = dims
+                            logger.warning(
+                                "Vector search dimension mismatch for %s: stored embeddings=%s dims, query vector=%s dims. "
+                                "This usually means your embedding model/dimensions changed after the Oracle VECTOR columns were created, "
+                                "or the table contains mixed-dimension embeddings. Align your embedding configuration with the schema (or rebuild/re-embed). Error: %s",
+                                memory_type.value,
+                                stored_dim,
+                                query_dim,
+                                e,
+                            )
+                        else:
+                            logger.warning(
+                                "Vector search dimension mismatch for %s. Align embedding dimensions with the Oracle schema (or rebuild/re-embed). Error: %s",
+                                memory_type.value,
+                                e,
+                            )
+                    return []
+
                 logger.error(f"Vector search failed: {e}")
                 return []
 
@@ -3709,6 +3784,30 @@ class OracleProvider(MemoryProvider):
                     additional_cfg["skills_marketplace_config"] = skills_config_val
                 else:
                     additional_cfg.pop("skills_marketplace_config", None)
+
+            if "self_aware" in memagent_dict:
+                additional_cfg["self_aware"] = bool(
+                    memagent_dict.get("self_aware", False)
+                )
+
+            if "self_aware_config" in memagent_dict:
+                self_aware_cfg_val = memagent_dict.get("self_aware_config")
+                if isinstance(self_aware_cfg_val, dict):
+                    additional_cfg["self_aware_config"] = self_aware_cfg_val
+                else:
+                    additional_cfg.pop("self_aware_config", None)
+
+            if "automations_enabled" in memagent_dict:
+                additional_cfg["automations_enabled"] = bool(
+                    memagent_dict.get("automations_enabled", True)
+                )
+
+            if "default_timezone" in memagent_dict:
+                tz_val = memagent_dict.get("default_timezone")
+                if isinstance(tz_val, str) and tz_val.strip():
+                    additional_cfg["default_timezone"] = tz_val.strip()
+                else:
+                    additional_cfg.pop("default_timezone", None)
 
             if has_is_favorite_column:
                 additional_cfg.pop("is_favorite", None)
@@ -4324,6 +4423,7 @@ class OracleProvider(MemoryProvider):
         documents = self.list_all(MemoryType.MEMAGENT)
         agents = []
         fallback_favorites: Dict[str, bool] = {}
+        additional_cfg_by_agent: Dict[str, Dict[str, Any]] = {}
 
         if documents:
             try:
@@ -4332,23 +4432,25 @@ class OracleProvider(MemoryProvider):
                     has_is_favorite_column = self._table_has_column(
                         cursor, "agents", "is_favorite"
                     )
-                    if not has_is_favorite_column:
-                        cursor.execute(
-                            """
-                            SELECT a.agent_id, c.additional_config
-                            FROM agents a
-                            LEFT JOIN agent_llm_configs c ON c.agent_id = a.id
-                            """
-                        )
-                        for row in cursor.fetchall():
-                            agent_key = row[0]
-                            cfg = self._deserialize_json_field(row[1]) or {}
-                            if isinstance(cfg, dict):
+                    cursor.execute(
+                        """
+                        SELECT a.agent_id, c.additional_config
+                        FROM agents a
+                        LEFT JOIN agent_llm_configs c ON c.agent_id = a.id
+                        """
+                    )
+                    for row in cursor.fetchall():
+                        agent_key = row[0]
+                        cfg = self._deserialize_json_field(row[1]) or {}
+                        if isinstance(cfg, dict):
+                            additional_cfg_by_agent[agent_key] = cfg
+                            if not has_is_favorite_column:
                                 fallback_favorites[agent_key] = bool(
                                     cfg.get("is_favorite", False)
                                 )
             except Exception:
                 fallback_favorites = {}
+                additional_cfg_by_agent = {}
 
         for doc in documents:
             # Use agent_id from the document, fall back to _id if not present
@@ -4356,6 +4458,20 @@ class OracleProvider(MemoryProvider):
             favorite_value = doc.get("is_favorite")
             if favorite_value is None:
                 favorite_value = fallback_favorites.get(agent_id, False)
+            cfg = additional_cfg_by_agent.get(agent_id, {})
+            self_aware_value = bool(cfg.get("self_aware", False))
+            self_aware_cfg_value = cfg.get("self_aware_config")
+            if not isinstance(self_aware_cfg_value, dict):
+                self_aware_cfg_value = None
+            automations_enabled_value = cfg.get("automations_enabled", True)
+            if automations_enabled_value is None:
+                automations_enabled_value = True
+            automations_enabled_value = bool(automations_enabled_value)
+            default_timezone_value = cfg.get("default_timezone")
+            if not isinstance(default_timezone_value, str):
+                default_timezone_value = None
+            else:
+                default_timezone_value = default_timezone_value.strip() or None
             agent = MemAgentModel(
                 name=doc.get("name"),
                 instruction=doc.get("instruction"),
@@ -4367,6 +4483,10 @@ class OracleProvider(MemoryProvider):
                 is_favorite=bool(favorite_value),
                 tools=doc.get("tools"),
                 long_term_memory_ids=doc.get("long_term_memory_ids"),
+                self_aware=self_aware_value,
+                self_aware_config=self_aware_cfg_value,
+                automations_enabled=automations_enabled_value,
+                default_timezone=default_timezone_value,
                 memory_provider=self,
             )
 
@@ -4597,6 +4717,10 @@ class OracleProvider(MemoryProvider):
             skills_marketplace_provider = None
             skills_marketplace_config = None
             memory_types = None
+            self_aware = False
+            self_aware_config = None
+            automations_enabled = True
+            default_timezone = None
             favorite_from_cfg = None
             if llm_config:
                 additional_cfg = llm_config.get("additional_config") or {}
@@ -4616,6 +4740,19 @@ class OracleProvider(MemoryProvider):
                     "skills_marketplace_config", None
                 )
                 memory_types = additional_cfg.pop("memory_types", None)
+                self_aware = bool(additional_cfg.pop("self_aware", False))
+                self_aware_config = additional_cfg.pop("self_aware_config", None)
+                if not isinstance(self_aware_config, dict):
+                    self_aware_config = None
+                automations_enabled = additional_cfg.pop("automations_enabled", True)
+                if automations_enabled is None:
+                    automations_enabled = True
+                automations_enabled = bool(automations_enabled)
+                default_timezone = additional_cfg.pop("default_timezone", None)
+                if not isinstance(default_timezone, str):
+                    default_timezone = None
+                else:
+                    default_timezone = default_timezone.strip() or None
                 favorite_from_cfg = additional_cfg.pop("is_favorite", None)
 
             # Create MemAgentModel from JSON
@@ -4645,6 +4782,10 @@ class OracleProvider(MemoryProvider):
                 internet_access_config=internet_access_config,
                 skills_marketplace_provider=skills_marketplace_provider,
                 skills_marketplace_config=skills_marketplace_config,
+                self_aware=self_aware,
+                self_aware_config=self_aware_config,
+                automations_enabled=automations_enabled,
+                default_timezone=default_timezone,
                 memory_provider=self,
             )
 

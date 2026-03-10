@@ -66,6 +66,17 @@ def test_memagent_round_trip(tmp_path):
         instruction="test agent",
         memory_ids=["mem-1"],
         application_mode="assistant",
+        self_aware=True,
+        self_aware_config={
+            "root_paths": ["."],
+            "allow_writes": True,
+            "allow_deletes": False,
+            "policy_version": "v1",
+            "timeout_seconds": 30,
+            "max_output_chars": 50000,
+            "max_file_read_bytes": 250000,
+            "max_file_write_bytes": 250000,
+        },
         skill_paths=["skills/alpha.skills.md"],
         mcp_servers=[
             {
@@ -83,6 +94,13 @@ def test_memagent_round_trip(tmp_path):
     assert loaded.memory_ids == ["mem-1"]
     assert loaded.skill_paths == ["skills/alpha.skills.md"]
     assert loaded.mcp_servers[0]["name"] == "filesystem"
+    assert loaded.self_aware is True
+    assert loaded.self_aware_config["allow_writes"] is True
+
+    listed_agents = provider.list_memagents()
+    assert len(listed_agents) == 1
+    assert listed_agents[0].self_aware is True
+    assert listed_agents[0].self_aware_config["allow_writes"] is True
 
     provider.delete_memagent(agent_id)
     assert provider.retrieve_memagent(agent_id) is None

@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 # src/memorizz/llms/llm_factory.py
 
 from typing import Any, Dict
@@ -18,6 +22,8 @@ def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
         A dictionary containing the provider name and its specific parameters.
         Example for OpenAI: {"provider": "openai", "model": "gpt-4o"}
         Example for Azure: {"provider": "azure", "deployment_name": "my-gpt4"}
+        Example for Anthropic: {"provider": "anthropic", "model": "claude-sonnet-4-5-20250929"}
+        Example for Ollama: {"provider": "ollama", "model": "llama3.1"}
 
     Returns:
     --------
@@ -50,6 +56,20 @@ def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
         huggingface_config = config.copy()
         huggingface_config.pop("provider", None)
         return HuggingFaceLLM(**huggingface_config)
+
+    elif provider_name == "anthropic":
+        from .anthropic import Anthropic
+
+        anthropic_config = config.copy()
+        anthropic_config.pop("provider", None)
+        return Anthropic(**anthropic_config)
+
+    elif provider_name == "ollama":
+        from .ollama import OllamaLLM
+
+        ollama_config = config.copy()
+        ollama_config.pop("provider", None)
+        return OllamaLLM(**ollama_config)
 
     else:
         raise ValueError(f"Unknown LLM provider: '{provider_name}'")

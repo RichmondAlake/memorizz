@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """Tool management functionality for MemAgent."""
 
 import inspect
@@ -160,7 +164,19 @@ class ToolManager:
                 "signature": str(sig),  # Add function signature
                 "docstring": doc,  # Add docstring explicitly
                 "parameters": parameters,
-                "required": [p for p in sig.parameters if p != "self"],
+                # Only parameters without defaults are required. This keeps tool
+                # schemas sane for LLM tool calling.
+                "required": [
+                    param_name
+                    for param_name, param in sig.parameters.items()
+                    if param_name != "self"
+                    and param.default == inspect.Parameter.empty
+                    and param.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                ],
                 "type": "function",
             }
 
@@ -266,7 +282,14 @@ class ToolManager:
             # Return all tool metadata
             all_metadata = []
             for tool_id, tool_data in self.tools.items():
-                metadata = tool_data.get("metadata", {})
+                # Only expose metadata that can be used for tool calling.
+                metadata = (
+                    tool_data.get("metadata") if isinstance(tool_data, dict) else None
+                )
+                if not isinstance(metadata, dict):
+                    continue
+                if not str(metadata.get("name", "")).strip():
+                    continue
                 all_metadata.append(metadata)
             return all_metadata
 

@@ -232,6 +232,16 @@
                     <span>Playground</span>
                 </a>
 
+                <a href="/automations" class="nav-item {% if active_page == 'automations' %}active{% endif %}">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="8"/>
+                            <path d="M12 8v5l3 2"/>
+                        </svg>
+                    </span>
+                    <span>Automations</span>
+                </a>
+
                 <a href="/traces" class="nav-item {% if active_page == 'traces' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -343,6 +353,14 @@
             </div>
         </div>
     </section>
+
+    {% if timezone_options %}
+    <datalist id="memorizz-timezones">
+        {% for tz in timezone_options %}
+        <option value="{{ tz }}"></option>
+        {% endfor %}
+    </datalist>
+    {% endif %}
     {% endblock %}
 
     <script src="/static/js/app.js?v=17" defer></script>

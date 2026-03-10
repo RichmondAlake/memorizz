@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+
+{% block title %}Automation - {{ job.name }} - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <a href="/automations{% if job.agent_id %}?agent_id={{ job.agent_id }}{% endif %}" class="back-link">← Back to Automations</a>
+    <h1>{{ job.name }}</h1>
+    <p><code>{{ job.job_id }}</code></p>
+</div>
+
+{% if error %}
+<div class="error-message">
+    <span>!</span> {{ error }}
+</div>
+{% endif %}
+
+<div class="detail-section">
+    <h2>Job</h2>
+    <div class="form-grid">
+        <div class="form-group">
+            <label>Status</label>
+            <div id="job-status-badge">
+                {% if job.enabled %}
+                <span class="badge">enabled</span>
+                {% else %}
+                <span class="badge">paused</span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Agent</label>
+            <div><code>{{ job.agent_id }}</code></div>
+        </div>
+        <div class="form-group">
+            <label>Schedule</label>
+            <div>
+                <span class="badge">{{ job.schedule_type }}</span>
+                {% if job.schedule_type == 'cron' and job.cron_expr %}
+                <code>{{ job.cron_expr }}</code>
+                {% elif job.schedule_type == 'interval' and job.interval_seconds %}
+                <code>{{ job.interval_seconds }}s</code>
+                {% endif %}
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Timezone</label>
+            <div><code>{{ job.timezone }}</code></div>
+        </div>
+        <div class="form-group">
+            <label>Next Run</label>
+            <div><code id="job-next-run">{{ job.next_run_at }}</code></div>
+        </div>
+        <div class="form-group">
+            <label>Last Run</label>
+            <div><code id="job-last-run">{{ job.last_run_at or '-' }}</code></div>
+        </div>
+    </div>
+
+    <div class="page-actions page-actions--split" style="margin-top: 14px;">
+        <div>
+            <a class="btn" href="/automations/{{ job.job_id }}/edit">Edit</a>
+            <form method="post" action="/automations/{{ job.job_id }}/run-now" style="display:inline;">
+                <button type="submit" class="btn">Run now</button>
+            </form>
+            {% if job.enabled %}
+            <form method="post" action="/automations/{{ job.job_id }}/pause" style="display:inline;">
+                <button type="submit" class="btn">Pause</button>
+            </form>
+            {% else %}
+            <form method="post" action="/automations/{{ job.job_id }}/resume" style="display:inline;">
+                <button type="submit" class="btn">Resume</button>
+            </form>
+            {% endif %}
+        </div>
+        <form method="post" action="/automations/{{ job.job_id }}/delete" style="display:flex; gap: 8px; align-items: center;">
+            <label class="config-toggle-option" style="margin:0;">
+                <input type="checkbox" name="confirm" value="1">
+                <span>Confirm delete</span>
+            </label>
+            <button type="submit" class="btn">Delete</button>
+        </form>
+    </div>
+</div>
+
+<div class="detail-section observability-section">
+    <div class="traces-toolbar">
+        <h2>Run History</h2>
+        <p class="form-hint">Most recent runs (max 50)</p>
+    </div>
+
+    {% if runs %}
+    <div class="traces-table-wrap">
+        <table class="traces-agents-table">
+            <thead>
+                <tr>
+                    <th>Scheduled For</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th>Finished</th>
+                    <th>Deliveries</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in runs %}
+                {% set payload = run.result_payload or {} %}
+                {% set deliveries = payload.get('deliveries', []) if payload else [] %}
+                {% set delivery_summary = payload.get('delivery_summary', {}) if payload else {} %}
+                {% set delivery_sent = delivery_summary.get('sent', 0) if delivery_summary else 0 %}
+                {% set delivery_failed = delivery_summary.get('failed', 0) if delivery_summary else 0 %}
+                {% set run_memory_id = payload.get('memory_id', '') if payload else '' %}
+                {% set trace_url = '/traces?agent_id=' + job.agent_id + ('&thread_memory_id=' + run_memory_id if run_memory_id else '') + '&scroll=timeline' %}
+                <tr class="automation-run-row" data-trace-url="{{ trace_url }}" style="cursor: pointer;">
+                    <td><code>{{ run.scheduled_for }}</code></td>
+                    <td><span class="badge">{{ run.status }}</span></td>
+                    <td><code>{{ run.started_at or '-' }}</code></td>
+                    <td><code>{{ run.finished_at or '-' }}</code></td>
+                    <td>
+                        {% if deliveries %}
+                        <span class="badge">{{ deliveries|length }}</span>
+                        {% if delivery_failed %}
+                        <span class="badge badge-warning">{{ delivery_failed }} failed</span>
+                        {% elif delivery_sent %}
+                        <span class="badge badge-success">{{ delivery_sent }} sent</span>
+                        {% endif %}
+                        {% else %}
+                        <span class="badge">0</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if run.error %}
+                        <span title="{{ run.error }}">{{ run.error|truncate(120) }}</span>
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-pane">
+        <div class="empty-icon">RUN</div>
+        <p>No runs yet.</p>
+        <p class="empty-hint">Start a worker (CLI or UI embedded) and wait for the next run time, or click Run now.</p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+var AUTOMATION_JOB_ID = {{ job.job_id|tojson }};
+var AUTOMATION_AGENT_ID = {{ job.agent_id|tojson }};
+var _pollTimer = null;
+var _pollInterval = 3000;
+
+function _fmtTs(v) {
+    if (!v) return '-';
+    var s = String(v);
+    // Trim fractional seconds beyond 0 and timezone suffix for readability
+    return s.replace(/\.\d+/, '').replace('T', ' ');
+}
+
+function _escHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+function _buildStatusBadge(status) {
+    return '<span class="badge">' + _escHtml(status) + '</span>';
+}
+
+function _buildDeliveriesCell(payload) {
+    if (!payload) return '<span class="badge">0</span>';
+    var deliveries = payload.deliveries || [];
+    var summary = payload.delivery_summary || {};
+    if (!deliveries.length) return '<span class="badge">0</span>';
+    var html = '<span class="badge">' + deliveries.length + '</span> ';
+    if (summary.failed) {
+        html += '<span class="badge badge-warning">' + summary.failed + ' failed</span>';
+    } else if (summary.sent) {
+        html += '<span class="badge badge-success">' + summary.sent + ' sent</span>';
+    }
+    return html;
+}
+
+function _buildRunRow(run, agentId) {
+    var payload = run.result_payload || {};
+    var memId = payload.memory_id || '';
+    var traceUrl = '/traces?agent_id=' + encodeURIComponent(agentId) +
+        (memId ? '&thread_memory_id=' + encodeURIComponent(memId) : '') + '&scroll=timeline';
+
+    var errorCell = run.error
+        ? '<span title="' + _escHtml(run.error) + '">' + _escHtml(run.error.substring(0, 120)) + '</span>'
+        : '-';
+
+    return '<tr class="automation-run-row" data-trace-url="' + _escHtml(traceUrl) + '" style="cursor:pointer;">'
+        + '<td><code>' + _escHtml(_fmtTs(run.scheduled_for)) + '</code></td>'
+        + '<td>' + _buildStatusBadge(run.status) + '</td>'
+        + '<td><code>' + _escHtml(_fmtTs(run.started_at)) + '</code></td>'
+        + '<td><code>' + _escHtml(_fmtTs(run.finished_at)) + '</code></td>'
+        + '<td>' + _buildDeliveriesCell(payload) + '</td>'
+        + '<td>' + errorCell + '</td>'
+        + '</tr>';
+}
+
+function _bindRowClicks() {
+    document.querySelectorAll('.automation-run-row[data-trace-url]').forEach(function(row) {
+        row.onclick = function() {
+            if (row.dataset.traceUrl) window.location.href = row.dataset.traceUrl;
+        };
+        row.onmouseenter = function() { row.style.backgroundColor = 'rgba(255, 255, 255, 0.05)'; };
+        row.onmouseleave = function() { row.style.backgroundColor = ''; };
+    });
+}
+
+function _updateJobMeta(job) {
+    // Update status badge
+    var statusEl = document.getElementById('job-status-badge');
+    if (statusEl) {
+        statusEl.innerHTML = job.enabled
+            ? '<span class="badge">enabled</span>'
+            : '<span class="badge">paused</span>';
+    }
+    // Update next/last run
+    var nextEl = document.getElementById('job-next-run');
+    if (nextEl) nextEl.textContent = _fmtTs(job.next_run_at);
+    var lastEl = document.getElementById('job-last-run');
+    if (lastEl) lastEl.textContent = _fmtTs(job.last_run_at) || '-';
+}
+
+function pollRuns() {
+    fetch('/api/automations/' + encodeURIComponent(AUTOMATION_JOB_ID) + '/runs')
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(data) {
+            if (!data) return;
+
+            _updateJobMeta(data.job);
+
+            var tbody = document.querySelector('.traces-agents-table tbody');
+            var emptyPane = document.querySelector('.observability-section .empty-pane');
+            var tableWrap = document.querySelector('.traces-table-wrap');
+
+            if (data.runs.length === 0) return;
+
+            // If there was an empty pane, replace with table
+            if (emptyPane && !tableWrap) {
+                var section = document.querySelector('.observability-section');
+                emptyPane.remove();
+                section.insertAdjacentHTML('beforeend',
+                    '<div class="traces-table-wrap"><table class="traces-agents-table">'
+                    + '<thead><tr><th>Scheduled For</th><th>Status</th><th>Started</th>'
+                    + '<th>Finished</th><th>Deliveries</th><th>Error</th></tr></thead>'
+                    + '<tbody></tbody></table></div>');
+                tbody = section.querySelector('tbody');
+            }
+
+            if (!tbody) return;
+
+            // Rebuild rows
+            var html = '';
+            for (var i = 0; i < data.runs.length; i++) {
+                html += _buildRunRow(data.runs[i], AUTOMATION_AGENT_ID);
+            }
+            tbody.innerHTML = html;
+            _bindRowClicks();
+
+            // If any run is still "running", poll faster
+            var hasRunning = data.runs.some(function(r) { return r.status === 'running'; });
+            _pollInterval = hasRunning ? 2000 : 5000;
+        })
+        .catch(function() {})
+        .finally(function() {
+            _pollTimer = setTimeout(pollRuns, _pollInterval);
+        });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    _bindRowClicks();
+    // Start polling
+    _pollTimer = setTimeout(pollRuns, _pollInterval);
+});
+</script>
+{% endblock %}

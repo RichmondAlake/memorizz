@@ -1,0 +1,290 @@
+{% extends "base.html" %}
+
+{% block title %}{{ form_title }} - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <a href="/automations{% if agent_id %}?agent_id={{ agent_id }}{% endif %}" class="back-link">← Back to Automations</a>
+    <h1>{{ form_title }}</h1>
+    <p>Create durable scheduled jobs that run via the automations worker.</p>
+</div>
+
+{% if error %}
+<div class="error-message">
+    <span>!</span> {{ error }}
+</div>
+{% endif %}
+
+<form method="post" action="{{ form_action }}" class="agent-form">
+    {% if is_edit %}
+    <div class="detail-section">
+        <h2>Job ID</h2>
+        <div class="form-group">
+            <code class="agent-id-display">{{ job_id }}</code>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="detail-section">
+        <h2>Basics</h2>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="automation-agent-id">Agent</label>
+                <select id="automation-agent-id" name="agent_id" {% if is_edit %}disabled{% endif %}>
+                    <option value="">Select agent…</option>
+                    {% for opt in agent_options %}
+                    <option value="{{ opt.agent_id }}" {% if agent_id == opt.agent_id %}selected{% endif %}>{{ opt.label }} ({{ opt.agent_id[:8] }})</option>
+                    {% endfor %}
+                </select>
+                {% if is_edit %}
+                <p class="form-hint">Agent cannot be changed after creation.</p>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="automation-name">Name</label>
+                <input id="automation-name" name="name" type="text" value="{{ name }}" placeholder="Daily market brief">
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="enabled" value="1" {% if enabled %}checked{% endif %}>
+                    Enabled
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <details class="detail-section collapsible-section" open>
+        <summary class="section-toggle">
+            <h2>Schedule</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="automation-schedule-preset">Quick Schedule</label>
+                    <select id="automation-schedule-preset" onchange="applySchedulePreset(this.value)">
+                        <option value="">Custom...</option>
+                        <option value="every_30_min">Every 30 minutes</option>
+                        <option value="every_hour">Every hour</option>
+                        <option value="every_day">Every day at...</option>
+                        <option value="every_weekday">Every weekday (Mon-Fri) at...</option>
+                        <option value="every_monday">Every Monday at...</option>
+                        <option value="once_now">Run once (now)</option>
+                    </select>
+                    <p class="form-hint">Pick a common schedule or choose "Custom..." to configure manually below.</p>
+                </div>
+                <div id="schedule-time-picker" class="form-group" style="display: none;">
+                    <label>Time</label>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <select id="schedule-hour" onchange="updateCronFromPicker()" style="width: auto;">
+                            {% for h in range(24) %}
+                            <option value="{{ h }}" {% if h == 9 %}selected{% endif %}>{{ '%02d'|format(h) }}</option>
+                            {% endfor %}
+                        </select>
+                        <span>:</span>
+                        <select id="schedule-minute" onchange="updateCronFromPicker()" style="width: auto;">
+                            <option value="0" selected>00</option>
+                            <option value="15">15</option>
+                            <option value="30">30</option>
+                            <option value="45">45</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div id="schedule-details" class="form-grid">
+                <div class="form-group">
+                    <label for="automation-schedule-type">Type</label>
+                    <select id="automation-schedule-type" name="schedule_type">
+                        <option value="cron" {% if schedule_type == 'cron' %}selected{% endif %}>cron</option>
+                        <option value="interval" {% if schedule_type == 'interval' %}selected{% endif %}>interval</option>
+                        <option value="one_shot" {% if schedule_type == 'one_shot' %}selected{% endif %}>one_shot</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="automation-cron-expr">Cron Expr (5-field)</label>
+                    <input id="automation-cron-expr" name="cron_expr" type="text" value="{{ cron_expr }}" placeholder="0 9 * * *">
+                    <p class="form-hint">Format: minute hour day month dow (e.g. 0 9 * * *).</p>
+                </div>
+                <div class="form-group">
+                    <label for="automation-interval-seconds">Interval Seconds</label>
+                    <input id="automation-interval-seconds" name="interval_seconds" type="number" min="1" value="{{ interval_seconds }}" placeholder="3600">
+                    <p class="form-hint">Used when schedule type is interval.</p>
+                </div>
+                <div class="form-group">
+                    <label for="automation-timezone">Timezone</label>
+                    <input id="automation-timezone" name="timezone" type="text" value="{{ timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
+                    <p class="form-hint">IANA timezone name. Used for cron evaluation and template variables.</p>
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <script>
+    // Presets now store a day_pattern instead of a full cron string.
+    // The cron is built dynamically: {minute} {hour} {day_pattern}
+    var SCHEDULE_PRESETS = {
+        'every_30_min':    { type: 'interval', interval: '1800',  hasCron: false },
+        'every_hour':      { type: 'interval', interval: '3600',  hasCron: false },
+        'every_day':       { type: 'cron',     interval: '',      hasCron: true, dayPattern: '* * *' },
+        'every_weekday':   { type: 'cron',     interval: '',      hasCron: true, dayPattern: '* * 1-5' },
+        'every_monday':    { type: 'cron',     interval: '',      hasCron: true, dayPattern: '* * 1' },
+        'once_now':        { type: 'one_shot', interval: '',      hasCron: false }
+    };
+
+    var _activePresetKey = '';
+
+    function _showTimePicker(show) {
+        var el = document.getElementById('schedule-time-picker');
+        if (el) el.style.display = show ? '' : 'none';
+    }
+
+    function _buildCronFromPicker(dayPattern) {
+        var h = document.getElementById('schedule-hour').value;
+        var m = document.getElementById('schedule-minute').value;
+        return m + ' ' + h + ' ' + dayPattern;
+    }
+
+    function updateCronFromPicker() {
+        if (!_activePresetKey) return;
+        var preset = SCHEDULE_PRESETS[_activePresetKey];
+        if (!preset || !preset.hasCron) return;
+        document.getElementById('automation-cron-expr').value = _buildCronFromPicker(preset.dayPattern);
+    }
+
+    function applySchedulePreset(value) {
+        _activePresetKey = value;
+        var preset = SCHEDULE_PRESETS[value];
+        var typeSelect = document.getElementById('automation-schedule-type');
+        var cronInput = document.getElementById('automation-cron-expr');
+        var intervalInput = document.getElementById('automation-interval-seconds');
+
+        if (!preset) {
+            _showTimePicker(false);
+            return;
+        }
+
+        typeSelect.value = preset.type;
+        intervalInput.value = preset.interval;
+
+        if (preset.hasCron) {
+            cronInput.value = _buildCronFromPicker(preset.dayPattern);
+            _showTimePicker(true);
+        } else {
+            cronInput.value = '';
+            _showTimePicker(false);
+        }
+    }
+
+    // DAY_PATTERNS for reverse-matching presets on edit
+    var DAY_PATTERNS = {
+        '* * *':   'every_day',
+        '* * 1-5': 'every_weekday',
+        '* * 1':   'every_monday'
+    };
+
+    document.addEventListener('DOMContentLoaded', function() {
+        var typeSelect = document.getElementById('automation-schedule-type');
+        var cronInput = document.getElementById('automation-cron-expr');
+        var intervalInput = document.getElementById('automation-interval-seconds');
+        var presetSelect = document.getElementById('automation-schedule-preset');
+        var hourSelect = document.getElementById('schedule-hour');
+        var minuteSelect = document.getElementById('schedule-minute');
+        if (!typeSelect || !presetSelect) return;
+
+        var currentType = typeSelect.value;
+        var currentCron = (cronInput ? cronInput.value : '').trim();
+        var currentInterval = (intervalInput ? intervalInput.value : '').trim();
+        var matched = '';
+
+        if (currentType === 'interval') {
+            if (currentInterval === '1800') matched = 'every_30_min';
+            else if (currentInterval === '3600') matched = 'every_hour';
+        } else if (currentType === 'one_shot') {
+            matched = 'once_now';
+        } else if (currentType === 'cron' && currentCron) {
+            // Parse: "minute hour day_of_month month dow"
+            var parts = currentCron.split(/\s+/);
+            if (parts.length === 5) {
+                var minute = parts[0];
+                var hour = parts[1];
+                var dayPart = parts[2] + ' ' + parts[3] + ' ' + parts[4];
+                if (DAY_PATTERNS[dayPart]) {
+                    matched = DAY_PATTERNS[dayPart];
+                    // Set the time picker to the parsed values
+                    if (hourSelect && /^\d+$/.test(hour)) hourSelect.value = parseInt(hour, 10);
+                    if (minuteSelect && /^\d+$/.test(minute)) minuteSelect.value = parseInt(minute, 10);
+                }
+            }
+        }
+
+        presetSelect.value = matched;
+        _activePresetKey = matched;
+        if (matched && SCHEDULE_PRESETS[matched] && SCHEDULE_PRESETS[matched].hasCron) {
+            _showTimePicker(true);
+        }
+    });
+    </script>
+
+    <details class="detail-section collapsible-section" open>
+        <summary class="section-toggle">
+            <h2>Action</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-group">
+                <label for="automation-query-template">Agent Query Template</label>
+                <textarea id="automation-query-template" name="query_template" rows="5" placeholder="Send me today's top 10 stocks...">{{ query_template }}</textarea>
+                <p class="form-hint">Variables: {today_iso}, {scheduled_for_iso}, {now_utc_iso}, {timezone}.</p>
+            </div>
+            <div class="form-group">
+                <label for="automation-memory-id">Memory ID (optional)</label>
+                <input id="automation-memory-id" name="memory_id" type="text" value="{{ memory_id }}" placeholder="Leave blank to auto-generate">
+            </div>
+        </div>
+    </details>
+
+    <details class="detail-section collapsible-section">
+        <summary class="section-toggle">
+            <h2>Delivery</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-group">
+                <label for="automation-delivery-channel">Channel</label>
+                <select id="automation-delivery-channel" name="delivery_channel" onchange="toggleDeliveryFields(this.value)">
+                    <option value="in_chat" {% if not delivery_channel or delivery_channel == 'in_chat' %}selected{% endif %}>In Chat (default)</option>
+                    <option value="whatsapp_twilio" {% if delivery_channel == 'whatsapp_twilio' %}selected{% endif %}>WhatsApp (Twilio)</option>
+                </select>
+                <p id="delivery-hint-in-chat" class="form-hint" {% if delivery_channel == 'whatsapp_twilio' %}style="display:none;"{% endif %}>
+                    Results appear in the agent's Automations tab in the playground.
+                </p>
+            </div>
+            <div id="delivery-whatsapp-fields" {% if not delivery_channel or delivery_channel != 'whatsapp_twilio' %}style="display:none;"{% endif %}>
+                <div class="form-group">
+                    <label for="automation-whatsapp-to">WhatsApp Recipients (Twilio)</label>
+                    <textarea id="automation-whatsapp-to" name="whatsapp_to" rows="4" placeholder="whatsapp:+15551234567&#10;whatsapp:+15557654321">{{ whatsapp_to }}</textarea>
+                    <p class="form-hint">One per line or comma-separated. The worker uses TWILIO_* env vars for delivery.</p>
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <script>
+    function toggleDeliveryFields(channel) {
+        var whatsappFields = document.getElementById('delivery-whatsapp-fields');
+        var inChatHint = document.getElementById('delivery-hint-in-chat');
+        if (channel === 'whatsapp_twilio') {
+            whatsappFields.style.display = '';
+            inChatHint.style.display = 'none';
+        } else {
+            whatsappFields.style.display = 'none';
+            inChatHint.style.display = '';
+        }
+    }
+    </script>
+
+    <div class="config-actions">
+        <button type="submit" class="btn btn-primary">{% if is_edit %}Save Changes{% else %}Create Automation{% endif %}</button>
+    </div>
+</form>
+{% endblock %}

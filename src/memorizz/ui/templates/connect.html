@@ -155,6 +155,13 @@
                     </div>
                 </div>
 
+                <div class="form-group" style="margin-top: 0.5rem;">
+                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.85rem;">
+                        <input type="checkbox" id="remember_me" style="accent-color: #00d9ff; width: 16px; height: 16px; cursor: pointer;">
+                        Remember me
+                    </label>
+                </div>
+
                 <button type="submit" class="connect-btn" id="connect-button" style="background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important; background-color: #000000 !important; background-image: none !important; color: #00d9ff !important; border: 1px solid rgba(0, 217, 255, 0.3) !important; box-shadow: 0 6px 12px rgba(0, 0, 0, 0.7), 0 2px 4px rgba(0, 0, 0, 0.5) !important; font-weight: 700 !important;">
                     Connect →
                 </button>
@@ -199,6 +206,49 @@
             });
         }
 
+        // --- Remember Me ---
+        const STORAGE_KEY = 'memorizz_connect_credentials';
+
+        function saveCredentials() {
+            const data = {
+                provider_type: document.getElementById('provider_type').value,
+                oracle_user: document.getElementById('oracle_user').value,
+                oracle_password: document.getElementById('oracle_password').value,
+                oracle_dsn: document.getElementById('oracle_dsn').value,
+                oracle_schema: document.getElementById('oracle_schema').value,
+                mongodb_uri: document.getElementById('mongodb_uri').value,
+                mongodb_db_name: document.getElementById('mongodb_db_name').value,
+                filesystem_path: document.getElementById('filesystem_path').value,
+            };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        }
+
+        function loadCredentials() {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return false;
+            try {
+                const data = JSON.parse(raw);
+                const fields = [
+                    ['provider_type', 'provider_type'],
+                    ['oracle_user', 'oracle_user'],
+                    ['oracle_password', 'oracle_password'],
+                    ['oracle_dsn', 'oracle_dsn'],
+                    ['oracle_schema', 'oracle_schema'],
+                    ['mongodb_uri', 'mongodb_uri'],
+                    ['mongodb_db_name', 'mongodb_db_name'],
+                    ['filesystem_path', 'filesystem_path'],
+                ];
+                for (const [key, id] of fields) {
+                    const el = document.getElementById(id);
+                    if (el && data[key]) el.value = data[key];
+                }
+                toggleProviderFields();
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
         // Force button styling on load (override any cached styles)
         window.addEventListener('DOMContentLoaded', function() {
             const btn = document.getElementById('connect-button') || document.querySelector('.connect-btn');
@@ -210,6 +260,20 @@
                 btn.style.setProperty('border', '1px solid rgba(0, 217, 255, 0.3)', 'important');
             }
             setupPasswordToggles();
+
+            // Restore saved credentials
+            const rememberBox = document.getElementById('remember_me');
+            const hasSaved = loadCredentials();
+            if (hasSaved) rememberBox.checked = true;
+
+            // Save or clear on form submit
+            document.querySelector('.connect-form').addEventListener('submit', function() {
+                if (rememberBox.checked) {
+                    saveCredentials();
+                } else {
+                    localStorage.removeItem(STORAGE_KEY);
+                }
+            });
         });
     </script>
 </body>

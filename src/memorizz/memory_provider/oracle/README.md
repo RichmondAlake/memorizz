@@ -27,18 +27,33 @@ pip install oracledb
 
 ## Quick Start
 
-### 1. Configure Embeddings
+### 1. Set Up Oracle Schema with Embedding Dimensions
+
+**Before initializing the provider**, set your desired embedding dimension:
+
+```bash
+# Set embedding dimension (default: 256)
+export ORACLE_EMBEDDING_DIM=256
+
+# Run Oracle setup
+python -m memorizz.memory_provider.oracle.setup
+```
+
+### 2. Configure Embeddings to Match Schema
 
 ```python
 from memorizz.embeddings import configure_embeddings
 
+# IMPORTANT: Dimensions must match ORACLE_EMBEDDING_DIM used during setup
 configure_embeddings('openai', {
     'model': 'text-embedding-3-small',
-    'dimensions': 1536
+    'dimensions': 256  # Must match the schema dimension
 })
 ```
 
-### 2. Initialize Oracle Provider
+> **Note**: See [Configuring Embedding Dimensions](#configuring-embedding-dimensions) for detailed dimension configuration options.
+
+### 3. Initialize Oracle Provider
 
 ```python
 from memorizz.memory_provider.oracle import OracleProvider, OracleConfig
@@ -54,7 +69,7 @@ config = OracleConfig(
 provider = OracleProvider(config)
 ```
 
-### 3. Create Agent with Oracle Backend
+### 4. Create Agent with Oracle Backend
 
 ```python
 from memorizz.memagent.builders import MemAgentBuilder
@@ -326,23 +341,105 @@ export ORACLE_TABLESPACE_AUTOEXTEND_MB="25"
 
 Rerun `memorizz setup-oracle` (or `python -m memorizz.memory_provider.oracle.setup`) after setting these variables.
 
-### Dimension Mismatch
+### Configuring Embedding Dimensions
 
-Ensure embedding dimensions match between configuration and stored vectors:
+**IMPORTANT**: The embedding dimensions in your Oracle schema must match the dimensions produced by your embedding model.
 
+#### Setting Dimensions During Setup
+
+Use the `ORACLE_EMBEDDING_DIM` environment variable to configure embedding dimensions when running the setup script:
+
+```bash
+# For 256-dimensional embeddings (e.g., OpenAI text-embedding-3-small with dimensions=256)
+export ORACLE_EMBEDDING_DIM=256
+
+# For 512-dimensional embeddings (e.g., Voyage AI voyage-3-lite)
+export ORACLE_EMBEDDING_DIM=512
+
+# For 1536-dimensional embeddings (e.g., OpenAI text-embedding-3-small default)
+export ORACLE_EMBEDDING_DIM=1536
+
+# Run setup with the configured dimension
+python -m memorizz.memory_provider.oracle.setup
+```
+
+**Default**: If `ORACLE_EMBEDDING_DIM` is not set, the schema defaults to **256 dimensions**.
+
+#### Supported Embedding Models by Dimension
+
+**256 dimensions:**
 ```python
-# Check current dimensions
-from memorizz.embeddings import configure_embeddings, get_embedding_dimensions
-
-dims = get_embedding_dimensions()
-print(f"Current dimensions: {dims}")
-
-# Reconfigure if needed
 configure_embeddings('openai', {
     'model': 'text-embedding-3-small',
-    'dimensions': 1536
+    'dimensions': 256  # Must match ORACLE_EMBEDDING_DIM
 })
 ```
+
+**512 dimensions:**
+```python
+configure_embeddings('voyageai', {
+    'model': 'voyage-3-lite',  # Native 512 dimensions
+})
+```
+
+**1536 dimensions (OpenAI default):**
+```python
+configure_embeddings('openai', {
+    'model': 'text-embedding-3-small',
+    'dimensions': 1536  # OpenAI's default
+})
+```
+
+**3072 dimensions (OpenAI max):**
+```python
+configure_embeddings('openai', {
+    'model': 'text-embedding-3-large',
+    'dimensions': 3072
+})
+```
+
+#### Checking Current Dimensions
+
+```python
+# Check your current embedding configuration
+from memorizz.embeddings import get_embedding_dimensions
+
+dims = get_embedding_dimensions()
+print(f"Current embedding dimensions: {dims}")
+```
+
+```sql
+-- Check Oracle schema VECTOR column dimensions
+SELECT table_name, column_name, data_type
+FROM user_tab_columns
+WHERE data_type LIKE 'VECTOR%'
+ORDER BY table_name;
+```
+
+#### Dimension Mismatch Errors
+
+If you see errors like:
+```
+ORA-51814: Vector of dimension [X] cannot be inserted into a vector column of dimension [Y]
+```
+
+This means your embedding dimension doesn't match the Oracle schema. To fix:
+
+1. **Option 1: Recreate schema with correct dimensions**
+   ```bash
+   export ORACLE_EMBEDDING_DIM=256  # or your desired dimension
+   python -m memorizz.memory_provider.oracle.setup
+   ```
+   ⚠️ This will drop existing data
+
+2. **Option 2: Change your embedding configuration to match existing schema**
+   ```python
+   # If schema uses 256, configure embeddings to produce 256
+   configure_embeddings('openai', {
+       'model': 'text-embedding-3-small',
+       'dimensions': 256
+   })
+   ```
 
 ### Performance Issues
 

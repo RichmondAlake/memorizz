@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 import json
 import logging
 import os
@@ -26,23 +30,27 @@ from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
 from .constants import (
     BASE_SYSTEM_PROMPT,
+    CONTINUOUS_MAX_STEPS,
     DEFAULT_INSTRUCTION,
     DEFAULT_MAX_STEPS,
     DEFAULT_TOOL_ACCESS,
     SANDBOX_SYSTEM_PROMPT,
 )
 from .managers import (
+    AutomationManager,
     CacheManager,
     EntityMemoryManager,
     InternetAccessManager,
     MemoryManager,
     PersonaManager,
     SandboxManager,
+    SelfAwarenessManager,
     ToolManager,
     WorkflowManager,
 )
 
 if TYPE_CHECKING:
+    from ..automation.models import AutomationJob, AutomationRun
     from ..internet_access import InternetAccessProvider
     from ..sandbox.base import SandboxProvider
 
@@ -92,6 +100,10 @@ class MemAgent:
         ] = None,
         skill_paths: Optional[List[str]] = None,
         mcp_servers: Optional[List[Dict[str, Any]]] = None,
+        automations_enabled: bool = True,
+        default_timezone: Optional[str] = None,
+        self_aware: bool = False,
+        self_aware_config: Optional[Dict[str, Any]] = None,
         name: Optional[str] = None,
         is_favorite: bool = False,
         streaming: bool = False,
@@ -116,6 +128,16 @@ class MemAgent:
         self.skill_paths = self._normalize_skill_paths(skill_paths)
         self.skills: List[Dict[str, Any]] = []
         self.mcp_servers = self._normalize_mcp_servers(mcp_servers)
+        self.automations_enabled = bool(automations_enabled)
+        self.default_timezone = (
+            default_timezone.strip()
+            if isinstance(default_timezone, str) and default_timezone.strip()
+            else None
+        )
+        self.self_aware = bool(self_aware)
+        self.self_aware_config = (
+            dict(self_aware_config) if isinstance(self_aware_config, dict) else None
+        )
 
         (
             self.application_mode,
@@ -187,6 +209,16 @@ class MemAgent:
             "mcp_list_tools",
             "mcp_call_tool",
         )
+        self._self_aware_tools_registered = False
+        self._self_aware_tool_names = (
+            "self_aware_list_roots",
+            "self_aware_list_files",
+            "self_aware_read_file",
+            "self_aware_search_files",
+            "self_aware_write_file",
+            "self_aware_delete_path",
+            "self_aware_run_command",
+        )
         self._stream_event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
         self._stream_trace_events: Optional[List[Dict[str, Any]]] = None
 
@@ -199,6 +231,7 @@ class MemAgent:
             embedding_config=embedding_config,
             internet_access_provider=internet_access_provider,
             sandbox_provider=sandbox_provider,
+            self_aware_config=self_aware_config,
         )
         self._register_context_monitor_tools()
 
@@ -216,7 +249,10 @@ class MemAgent:
                 provider_to_attach = None
 
         if provider_to_attach:
-            self.with_internet_access_provider(provider_to_attach)
+            try:
+                self.with_internet_access_provider(provider_to_attach)
+            except Exception as exc:
+                logger.warning("Internet access provider failed to initialize: %s", exc)
 
         skills_provider_to_attach = skills_marketplace_provider
         skills_provider_config = (
@@ -233,29 +269,55 @@ class MemAgent:
             if default_skills_provider:
                 skills_provider_to_attach = default_skills_provider
         if skills_provider_to_attach:
-            self.with_skills_marketplace_provider(
-                skills_provider_to_attach,
-                config=skills_provider_config,
-            )
+            try:
+                self.with_skills_marketplace_provider(
+                    skills_provider_to_attach,
+                    config=skills_provider_config,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Skills marketplace provider failed to initialize: %s", exc
+                )
 
         # Enable entity memory automatically if configured via application mode
         if MemoryType.ENTITY_MEMORY in self.active_memory_types:
-            self.with_entity_memory(True)
+            try:
+                self.with_entity_memory(True)
+            except Exception as exc:
+                logger.warning("Entity memory failed to initialize: %s", exc)
 
         # Initialize tools if provided
         if tools:
-            self._initialize_tools(tools)
+            try:
+                self._initialize_tools(tools)
+            except Exception as exc:
+                logger.warning("Tool initialization failed: %s", exc)
 
         # Initialize persona if provided
         if persona:
-            self.persona_manager.set_persona(persona, self.agent_id, save=False)
+            try:
+                self.persona_manager.set_persona(persona, self.agent_id, save=False)
+            except Exception as exc:
+                logger.warning("Persona initialization failed: %s", exc)
 
         self.skills = self._load_skills()
         if self.skills:
-            self._register_skill_tools()
+            try:
+                self._register_skill_tools()
+            except Exception as exc:
+                logger.warning("Skill tools registration failed: %s", exc)
 
         if self.mcp_servers:
-            self._register_mcp_tools()
+            try:
+                self._register_mcp_tools()
+            except Exception as exc:
+                logger.warning("MCP tools registration failed: %s", exc)
+
+        # Configure self-awareness after base tools/managers are initialized.
+        try:
+            self.with_self_aware(self.self_aware, config=self.self_aware_config)
+        except Exception as exc:
+            logger.warning("Self-awareness initialization failed: %s", exc)
 
         logger.info(
             f"MemAgent {self.agent_id} initialized with memory types: {self.active_memory_types}"
@@ -330,6 +392,7 @@ class MemAgent:
         embedding_config=None,
         internet_access_provider=None,
         sandbox_provider=None,
+        self_aware_config=None,
     ):
         """Initialize all manager components."""
         # Memory Manager
@@ -347,6 +410,21 @@ class MemAgent:
 
         # Tool Manager
         self.tool_manager = ToolManager(memory_provider)
+
+        # Automation Manager (durable scheduling + run history) when supported by provider.
+        self.automation_manager = AutomationManager(
+            memory_provider,
+            enabled=bool(getattr(self, "automations_enabled", True)),
+        )
+        if self.automation_manager and self.automation_manager.is_enabled():
+            try:
+                self.automation_manager.register_tools(
+                    self.tool_manager,
+                    agent_id=self.agent_id,
+                    default_timezone=getattr(self, "default_timezone", None),
+                )
+            except Exception as exc:
+                logger.warning("Failed to register automation tools: %s", exc)
 
         # Cache Manager
         self.cache_manager = CacheManager(
@@ -368,10 +446,18 @@ class MemAgent:
 
         # Sandbox Manager
         if sandbox_provider:
-            self.sandbox_manager = SandboxManager.from_config(sandbox_provider)
-            self._register_sandbox_tools()
+            try:
+                self.sandbox_manager = SandboxManager.from_config(sandbox_provider)
+                self._register_sandbox_tools()
+            except Exception as exc:
+                logger.warning("Sandbox provider failed to initialize: %s", exc)
+                self.sandbox_manager = None
         else:
             self.sandbox_manager = None
+
+        # Self-awareness manager (host codebase awareness and guarded file/CLI ops)
+        self.self_awareness_manager = SelfAwarenessManager(config=self_aware_config)
+        self.self_aware_config = self.self_awareness_manager.get_config()
 
     def _initialize_context_window_tokens(
         self, explicit_value: Optional[int], llm_config: Optional[Dict[str, Any]]
@@ -392,6 +478,8 @@ class MemAgent:
             configured_limit = int(self.max_steps)
         except (TypeError, ValueError):
             configured_limit = DEFAULT_MAX_STEPS
+        if configured_limit == CONTINUOUS_MAX_STEPS:
+            return 10_000_000  # Effectively unlimited
         if configured_limit < 1:
             return 1
         return min(configured_limit, 1000)
@@ -1538,6 +1626,262 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             raise ValueError(reason)
         return self.internet_access_manager.fetch_url(url=url, **kwargs)
 
+    # --- Automations (durable scheduling) ---
+
+    def has_automations(self) -> bool:
+        """Return True when automation storage + tools are available for this agent."""
+        return bool(
+            getattr(self, "automation_manager", None)
+            and self.automation_manager.is_enabled()
+        )
+
+    def _require_automations(self) -> "AutomationManager":
+        """Internal: raise ValueError if automations unavailable, else return manager."""
+        if not self.has_automations():
+            raise ValueError(
+                "Automations are not available. Requires an Oracle memory provider "
+                "with automations_enabled=True."
+            )
+        return self.automation_manager
+
+    def create_automation(
+        self,
+        name: str,
+        schedule_type: str,
+        *,
+        query_template: str,
+        cron_expr: Optional[str] = None,
+        interval_seconds: Optional[int] = None,
+        timezone: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        whatsapp_to: Optional[List[str]] = None,
+        max_run_seconds: int = 900,
+        retry_max_attempts: int = 1,
+        retry_backoff_seconds: int = 60,
+        misfire_policy: str = "skip",
+    ) -> "AutomationJob":
+        """Create a scheduled automation job for this agent.
+
+        Args:
+            name: Human-readable job name (e.g. "Daily briefing").
+            schedule_type: One of "cron", "interval", or "one_shot".
+            query_template: The prompt template to run. Supports placeholders:
+                {today_iso}, {scheduled_for_iso}, {now_utc_iso}, {timezone}.
+            cron_expr: 5-field cron expression (required when schedule_type="cron").
+            interval_seconds: Seconds between runs (required when schedule_type="interval").
+            timezone: IANA timezone name. Falls back to agent's default_timezone
+                or MEMORIZZ_DEFAULT_TIMEZONE env var.
+            memory_id: Memory ID for the automation's conversation thread.
+                Auto-generated if not provided.
+            whatsapp_to: List of WhatsApp recipient numbers. When provided,
+                results are delivered via WhatsApp/Twilio.
+            max_run_seconds: Maximum execution time per run (default 900).
+            retry_max_attempts: Number of retry attempts on failure (default 1).
+            retry_backoff_seconds: Backoff between retries (default 60).
+            misfire_policy: What to do on missed runs: "skip" or "run".
+
+        Returns:
+            The created AutomationJob instance.
+
+        Raises:
+            ValueError: If automations are unavailable, timezone is invalid,
+                or required parameters are missing.
+
+        Example::
+
+            job = agent.create_automation(
+                name="Morning News Digest",
+                schedule_type="cron",
+                cron_expr="0 8 * * *",
+                timezone="America/New_York",
+                query_template="Give me today's top 5 tech news for {today_iso}",
+            )
+            print(f"Created job {job.job_id}, next run: {job.next_run_at}")
+        """
+        mgr = self._require_automations()
+        store = mgr.store
+
+        from ..automation.models import AutomationJob as _AutomationJob
+        from ..automation.schedule import (
+            compute_next_run_at,
+            utcnow,
+            validate_timezone_name,
+        )
+
+        # Resolve timezone: explicit > agent default > env var
+        tz_name = (timezone or "").strip()
+        if not tz_name:
+            tz_name = (getattr(self, "default_timezone", None) or "").strip()
+        if not tz_name:
+            tz_name = os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "").strip()
+        if not tz_name:
+            raise ValueError(
+                "timezone is required. Pass it explicitly, set default_timezone "
+                "on the agent, or set the MEMORIZZ_DEFAULT_TIMEZONE env var."
+            )
+        validate_timezone_name(tz_name)
+
+        if not name or not name.strip():
+            raise ValueError("name is required")
+        if not query_template or not query_template.strip():
+            raise ValueError("query_template is required")
+
+        now_utc = utcnow()
+        next_run = compute_next_run_at(
+            schedule_type=schedule_type,
+            cron_expr=cron_expr,
+            interval_seconds=interval_seconds,
+            tz_name=tz_name,
+            after_utc=now_utc,
+        )
+
+        resolved_memory_id = (memory_id or "").strip() or str(uuid.uuid4())
+
+        # Normalize WhatsApp recipients
+        to_list: List[str] = []
+        if whatsapp_to:
+            seen: Set[str] = set()
+            items = whatsapp_to if isinstance(whatsapp_to, list) else [whatsapp_to]
+            for item in items:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                val = (
+                    text if text.lower().startswith("whatsapp:") else f"whatsapp:{text}"
+                )
+                if val not in seen:
+                    seen.add(val)
+                    to_list.append(val)
+
+        job = _AutomationJob(
+            job_id=str(uuid.uuid4()),
+            agent_id=self.agent_id,
+            name=name.strip(),
+            enabled=True,
+            schedule_type=schedule_type,
+            cron_expr=cron_expr,
+            interval_seconds=interval_seconds,
+            timezone=tz_name,
+            start_at=now_utc,
+            next_run_at=next_run,
+            misfire_policy=misfire_policy,
+            max_run_seconds=max_run_seconds,
+            retry_max_attempts=retry_max_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
+            action_type="agent_query",
+            action_config={
+                "query_template": query_template.strip(),
+                "memory_id": resolved_memory_id,
+            },
+            delivery_type="whatsapp_twilio" if to_list else "in_chat",
+            delivery_config={"whatsapp_to": to_list} if to_list else {},
+        )
+
+        return store.create_job(job)
+
+    def list_automations(
+        self, *, enabled: Optional[bool] = None
+    ) -> List["AutomationJob"]:
+        """List automation jobs belonging to this agent.
+
+        Args:
+            enabled: Filter by enabled state. None returns all jobs.
+
+        Returns:
+            List of AutomationJob instances.
+        """
+        mgr = self._require_automations()
+        return mgr.store.list_jobs(agent_id=self.agent_id, enabled=enabled)
+
+    def get_automation(self, job_id: str) -> Optional["AutomationJob"]:
+        """Get a single automation job by ID.
+
+        Args:
+            job_id: The job identifier.
+
+        Returns:
+            AutomationJob if found, None otherwise.
+        """
+        mgr = self._require_automations()
+        return mgr.store.get_job(job_id)
+
+    def pause_automation(self, job_id: str) -> "AutomationJob":
+        """Pause a running automation job.
+
+        Args:
+            job_id: The job identifier to pause.
+
+        Returns:
+            The updated AutomationJob with enabled=False.
+        """
+        mgr = self._require_automations()
+        return mgr.store.pause_job(job_id)
+
+    def resume_automation(self, job_id: str) -> "AutomationJob":
+        """Resume a paused automation job.
+
+        Args:
+            job_id: The job identifier to resume.
+
+        Returns:
+            The updated AutomationJob with enabled=True.
+        """
+        mgr = self._require_automations()
+        return mgr.store.resume_job(job_id)
+
+    def delete_automation(self, job_id: str) -> bool:
+        """Permanently delete an automation job.
+
+        Args:
+            job_id: The job identifier to delete.
+
+        Returns:
+            True if the job was deleted, False if not found.
+        """
+        mgr = self._require_automations()
+        return mgr.store.delete_job(job_id)
+
+    def trigger_automation(self, job_id: str) -> "AutomationJob":
+        """Trigger an immediate run of an automation job.
+
+        Sets next_run_at to now and enables the job so the worker picks
+        it up on its next poll cycle.
+
+        Args:
+            job_id: The job identifier to trigger.
+
+        Returns:
+            The updated AutomationJob.
+        """
+        mgr = self._require_automations()
+        from ..automation.schedule import utcnow
+
+        now = utcnow()
+        return mgr.store.update_job(
+            job_id,
+            {
+                "next_run_at": now,
+                "enabled": True,
+                "locked_by": None,
+                "lock_expires_at": None,
+            },
+        )
+
+    def list_automation_runs(
+        self, job_id: str, *, limit: int = 50
+    ) -> List["AutomationRun"]:
+        """List execution history for a specific automation job.
+
+        Args:
+            job_id: The job identifier.
+            limit: Maximum number of runs to return (default 50).
+
+        Returns:
+            List of AutomationRun instances, most recent first.
+        """
+        mgr = self._require_automations()
+        return mgr.store.list_runs(job_id, limit=limit)
+
     # --- Sandbox access ---
 
     def with_sandbox_provider(
@@ -1621,6 +1965,183 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
         self._sandbox_tools_registered = False
         logger.info("Unregistered sandbox tools")
+
+    # --- Self-awareness access ---
+
+    def with_self_aware(
+        self, enabled: bool = True, config: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Enable or disable self-awareness host codebase tools.
+
+        Args:
+            enabled: Whether self-aware tools should be exposed to the agent.
+            config: Optional self-aware policy/config override.
+
+        Returns:
+            Self for chaining.
+        """
+        if (
+            not hasattr(self, "self_awareness_manager")
+            or not self.self_awareness_manager
+        ):
+            self.self_awareness_manager = SelfAwarenessManager(config=config)
+        elif isinstance(config, dict):
+            self.self_awareness_manager.configure(config)
+        elif config is not None:
+            logger.warning(
+                "Ignoring non-dict self_aware_config payload: %s",
+                type(config).__name__,
+            )
+
+        self.self_aware = bool(enabled)
+        self.self_aware_config = self.self_awareness_manager.get_config()
+
+        if self.self_aware:
+            self._register_self_aware_tools()
+        else:
+            self._unregister_self_aware_tools()
+
+        return self
+
+    def has_self_awareness(self) -> bool:
+        """Return True when self-aware tooling is enabled."""
+        return bool(
+            self.self_aware
+            and hasattr(self, "self_awareness_manager")
+            and self.self_awareness_manager
+        )
+
+    def get_self_aware_config(self) -> Dict[str, Any]:
+        """Return normalized self-aware configuration."""
+        if (
+            not hasattr(self, "self_awareness_manager")
+            or not self.self_awareness_manager
+        ):
+            return {}
+        return self.self_awareness_manager.get_config()
+
+    def _register_self_aware_tools(self):
+        """Register self-aware host codebase tools."""
+        if not self.tool_manager or not self.self_awareness_manager:
+            return
+        if self._self_aware_tools_registered:
+            return
+
+        def self_aware_list_roots() -> Dict[str, Any]:
+            """List configured root paths and policy flags for self-awareness."""
+            try:
+                return self.self_awareness_manager.list_roots()
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def self_aware_list_files(
+            path: str = ".",
+            recursive: bool = False,
+            include_hidden: bool = False,
+            max_entries: int = 500,
+        ) -> Dict[str, Any]:
+            """List files/directories under allowed self-aware roots."""
+            try:
+                return self.self_awareness_manager.list_files(
+                    path=path,
+                    recursive=recursive,
+                    include_hidden=include_hidden,
+                    max_entries=max_entries,
+                )
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def self_aware_read_file(
+            path: str,
+            start_line: int = 1,
+            end_line: int = 400,
+            max_chars: int = 30000,
+        ) -> Dict[str, Any]:
+            """Read a file under allowed roots with bounds."""
+            try:
+                return self.self_awareness_manager.read_file(
+                    path=path,
+                    start_line=start_line,
+                    end_line=end_line,
+                    max_chars=max_chars,
+                )
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def self_aware_search_files(
+            pattern: str,
+            path: str = ".",
+            glob: str = "",
+            max_results: int = 200,
+        ) -> Dict[str, Any]:
+            """Search files under allowed roots for a text pattern."""
+            try:
+                return self.self_awareness_manager.search_files(
+                    pattern=pattern,
+                    path=path,
+                    glob=glob,
+                    max_results=max_results,
+                )
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def self_aware_write_file(
+            path: str, content: str, mode: str = "overwrite"
+        ) -> Dict[str, Any]:
+            """Write a file under allowed roots when write policy is enabled."""
+            try:
+                return self.self_awareness_manager.write_file(
+                    path=path, content=content, mode=mode
+                )
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def self_aware_delete_path(
+            path: str, recursive: bool = False, force: bool = False
+        ) -> Dict[str, Any]:
+            """Delete a file/path under allowed roots when delete policy is enabled."""
+            try:
+                return self.self_awareness_manager.delete_path(
+                    path=path, recursive=recursive, force=force
+                )
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def self_aware_run_command(command: str, cwd: str = ".") -> Dict[str, Any]:
+            """Run a guarded allowlisted host command under allowed roots."""
+            try:
+                return self.self_awareness_manager.run_command(command=command, cwd=cwd)
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        self_aware_list_roots.__name__ = "self_aware_list_roots"
+        self_aware_list_files.__name__ = "self_aware_list_files"
+        self_aware_read_file.__name__ = "self_aware_read_file"
+        self_aware_search_files.__name__ = "self_aware_search_files"
+        self_aware_write_file.__name__ = "self_aware_write_file"
+        self_aware_delete_path.__name__ = "self_aware_delete_path"
+        self_aware_run_command.__name__ = "self_aware_run_command"
+
+        self.tool_manager.add_tool(self_aware_list_roots)
+        self.tool_manager.add_tool(self_aware_list_files)
+        self.tool_manager.add_tool(self_aware_read_file)
+        self.tool_manager.add_tool(self_aware_search_files)
+        self.tool_manager.add_tool(self_aware_write_file)
+        self.tool_manager.add_tool(self_aware_delete_path)
+        self.tool_manager.add_tool(self_aware_run_command)
+        self._self_aware_tools_registered = True
+        logger.info("Registered self-awareness tools")
+
+    def _unregister_self_aware_tools(self):
+        """Remove self-aware tools from the tool manager."""
+        if not self._self_aware_tools_registered or not self.tool_manager:
+            return
+
+        for tool_name in self._self_aware_tool_names:
+            self.tool_manager.remove_tool(tool_name)
+        self._self_aware_tools_registered = False
+        logger.info("Unregistered self-awareness tools")
 
     def _resolve_execution_state(
         self, memory_id: Optional[str], conversation_id: Optional[str]
@@ -2295,17 +2816,30 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 ]
                 context["conversation_history"] = history
 
-                # Get relevant memories
-                relevant_memories = self.memory_manager.retrieve_relevant_memories(
-                    query=query,
-                    memory_type=MemoryType.CONVERSATION_MEMORY,
-                    memory_id=memory_id,
-                    limit=5,
-                )
-                context["relevant_memories"] = relevant_memories
-
             except Exception as e:
                 logger.warning(f"Failed to build memory context: {e}")
+
+            # Retrieve relevant memory snippets across core memory systems.
+            try:
+                relevant: Dict[str, Any] = {}
+                for memory_type, bucket in (
+                    (MemoryType.LONG_TERM_MEMORY, "semantic_memories"),
+                    (MemoryType.CONVERSATION_MEMORY, "episodic_memories"),
+                    (MemoryType.TOOLBOX, "procedural_memories"),
+                ):
+                    snippets = self.memory_manager.retrieve_relevant_memories(
+                        query=query,
+                        memory_type=memory_type,
+                        memory_id=memory_id,
+                        limit=3,
+                    )
+                    if snippets:
+                        relevant[bucket] = snippets
+
+                if relevant:
+                    context["relevant_memories"] = relevant
+            except Exception as e:
+                logger.warning(f"Failed to retrieve relevant memories: {e}")
 
         if (
             self._entity_memory_enabled
@@ -2339,9 +2873,11 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         6. Entity memory instructions (if enabled)
         7. Internet access instructions (if enabled)
         8. Skills marketplace instructions (if enabled)
-        9. Sandbox instructions (if enabled)
-        10. Loaded skills (if configured)
-        11. Configured MCP servers (if configured)
+        9. Automations instructions (if enabled)
+        10. Sandbox instructions (if enabled)
+        11. Self-awareness instructions (if enabled)
+        12. Loaded skills (if configured)
+        13. Configured MCP servers (if configured)
         """
         prompt_parts = []
 
@@ -2431,14 +2967,47 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 "- Any skill code/script execution must still run via sandbox tools."
             )
 
-        # 9. Sandbox code execution instructions
+        # 9. Automations instructions (durable scheduling)
+        if self.has_automations():
+            prompt_parts.append(
+                "Automations (scheduling/reminders):\n"
+                "- If the user asks to schedule a reminder, recurring message, or timed task, "
+                "ask clarifying questions: time/frequency, timezone, recipients, and content.\n"
+                "- Use 'automation_create_job' with confirm=false to draft a proposed job and show a concise summary.\n"
+                "- Only create or delete jobs after the user explicitly confirms.\n"
+                "- For WhatsApp delivery, require recipients; accept E.164 numbers with or without the 'whatsapp:' prefix.\n"
+                "- If required capabilities/data are missing, suggest enabling internet access or using "
+                "'skills_marketplace_search' to discover a skill."
+            )
+
+        # 10. Sandbox code execution instructions
         if self.has_sandbox():
             provider_name = self.get_sandbox_provider_name() or "sandbox"
             prompt_parts.append(
                 f"{SANDBOX_SYSTEM_PROMPT}\n" f"Sandbox provider: {provider_name}"
             )
 
-        # 10. Loaded skills (local files)
+        # 11. Self-awareness instructions (host codebase tools)
+        if self.has_self_awareness():
+            cfg = self.get_self_aware_config()
+            roots = cfg.get("root_paths") or []
+            if roots:
+                root_lines = "\n".join(f"- {root_path}" for root_path in roots[:20])
+            else:
+                root_lines = "- (no roots configured)"
+            prompt_parts.append(
+                "Self-awareness host codebase tools:\n"
+                f"Allowed roots:\n{root_lines}\n"
+                f"- Writes enabled: {bool(cfg.get('allow_writes', False))}\n"
+                f"- Deletes enabled: {bool(cfg.get('allow_deletes', False))}\n"
+                "- Use 'self_aware_list_files', 'self_aware_read_file', and "
+                "'self_aware_search_files' for inspection.\n"
+                "- Use 'self_aware_write_file' for file mutation when writes are enabled.\n"
+                "- Use 'self_aware_run_command' only for allowlisted host commands.\n"
+                "- Keep operations bounded and within allowed roots."
+            )
+
+        # 12. Loaded skills (local files)
         if self.skills:
             skill_lines = []
             for skill in self.skills[:12]:
@@ -2458,7 +3027,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 "'run_skill_script' (sandboxed execution)."
             )
 
-        # 11. Configured MCP servers
+        # 13. Configured MCP servers
         if self.mcp_servers:
             mcp_lines = []
             for server in self.mcp_servers[:12]:
@@ -3444,6 +4013,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 ),
                 skill_paths=self.skill_paths or None,
                 mcp_servers=self.mcp_servers or None,
+                self_aware=bool(self.self_aware),
+                self_aware_config=self.get_self_aware_config() or None,
+                automations_enabled=bool(getattr(self, "automations_enabled", True)),
+                default_timezone=getattr(self, "default_timezone", None),
             )
 
             # Save or update the agent
@@ -3787,6 +4360,22 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         if not isinstance(saved_mcp_servers, list):
             saved_mcp_servers = None
 
+        saved_self_aware = bool(getattr(saved_memagent, "self_aware", False))
+        saved_self_aware_config = getattr(saved_memagent, "self_aware_config", None)
+        if not isinstance(saved_self_aware_config, dict):
+            saved_self_aware_config = None
+
+        saved_automations_enabled = getattr(saved_memagent, "automations_enabled", True)
+        if saved_automations_enabled is None:
+            saved_automations_enabled = True
+        saved_automations_enabled = bool(saved_automations_enabled)
+
+        saved_default_timezone = getattr(saved_memagent, "default_timezone", None)
+        if not isinstance(saved_default_timezone, str):
+            saved_default_timezone = None
+        else:
+            saved_default_timezone = saved_default_timezone.strip() or None
+
         # Create new agent instance with loaded configuration
         agent_instance = cls(
             model=overrides.get("model", model_to_load),
@@ -3827,6 +4416,14 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             sandbox_provider=overrides.get("sandbox_provider", saved_sandbox_provider),
             skill_paths=overrides.get("skill_paths", saved_skill_paths),
             mcp_servers=overrides.get("mcp_servers", saved_mcp_servers),
+            automations_enabled=overrides.get(
+                "automations_enabled", saved_automations_enabled
+            ),
+            default_timezone=overrides.get("default_timezone", saved_default_timezone),
+            self_aware=overrides.get("self_aware", saved_self_aware),
+            self_aware_config=overrides.get(
+                "self_aware_config", saved_self_aware_config
+            ),
             is_favorite=overrides.get(
                 "is_favorite", getattr(saved_memagent, "is_favorite", False)
             ),
@@ -3870,6 +4467,11 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                         self.name = saved_memagent.name
                     if hasattr(saved_memagent, "is_favorite"):
                         self.is_favorite = bool(saved_memagent.is_favorite)
+                    if hasattr(saved_memagent, "self_aware"):
+                        self.with_self_aware(
+                            bool(getattr(saved_memagent, "self_aware", False)),
+                            config=getattr(saved_memagent, "self_aware_config", None),
+                        )
 
                     # Update persona if changed
                     if hasattr(saved_memagent, "persona") and self.persona_manager:

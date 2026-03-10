@@ -217,6 +217,35 @@ class TestMemAgentSaveFunctionality:
         assert memory_provider.store.called
 
     @pytest.mark.save_load
+    def test_save_includes_self_aware_configuration(self):
+        """Save should persist self-aware flags and normalized config."""
+        memory_provider = MockMemoryProvider()
+        memory_provider.store_memagent = Mock(return_value={"_id": "self_aware_agent"})
+        memory_provider.retrieve_memagent = Mock(return_value=None)
+
+        llm_provider = MockLLMProvider(["Self-aware response"])
+        llm_provider.get_config = Mock(return_value={"provider": "test"})
+
+        agent = MemAgent(
+            model=llm_provider,
+            memory_provider=memory_provider,
+            instruction="Self-aware save",
+            agent_id="self_aware_agent",
+            self_aware=True,
+            self_aware_config={
+                "root_paths": ["."],
+                "allow_writes": True,
+                "allow_deletes": False,
+            },
+        )
+
+        agent.save()
+        saved_model = memory_provider.store_memagent.call_args[0][0]
+        assert saved_model.self_aware is True
+        assert isinstance(saved_model.self_aware_config, dict)
+        assert saved_model.self_aware_config.get("allow_writes") is True
+
+    @pytest.mark.save_load
     def test_save_without_memory_provider(self):
         """Test saving fails gracefully without memory provider."""
         agent = MemAgent(
@@ -354,6 +383,74 @@ class TestMemAgentLoadFunctionality:
             assert loaded_agent.model == override_llm
             assert loaded_agent.instruction == "Override instruction"
             assert loaded_agent.max_steps == 50
+
+    @pytest.mark.save_load
+    def test_load_legacy_agent_defaults_self_awareness_safely(self):
+        """Legacy payloads without self-aware fields should load with safe defaults."""
+        from types import SimpleNamespace
+
+        memory_provider = MockMemoryProvider()
+
+        saved_agent_data = SimpleNamespace(
+            llm_config={"provider": "test"},
+            instruction="Legacy instruction",
+            max_steps=20,
+            memory_ids=["legacy_memory"],
+            persona=None,
+            tools=None,
+            semantic_cache=False,
+            semantic_cache_config=None,
+            delegates=None,
+        )
+
+        memory_provider.retrieve_memagent = Mock(return_value=saved_agent_data)
+
+        with patch("memorizz.memagent.core.create_llm_provider") as mock_create_llm:
+            mock_create_llm.return_value = Mock()
+            loaded_agent = MemAgent.load("legacy_agent", memory_provider)
+
+        assert loaded_agent.has_self_awareness() is False
+        cfg = loaded_agent.get_self_aware_config()
+        assert cfg.get("allow_writes") is False
+        assert cfg.get("allow_deletes") is False
+
+    @pytest.mark.save_load
+    def test_load_self_awareness_overrides_are_applied(self):
+        """Load overrides should replace stored self-aware settings."""
+        memory_provider = MockMemoryProvider()
+
+        saved_agent_data = Mock()
+        saved_agent_data.llm_config = {"provider": "test"}
+        saved_agent_data.instruction = "Original instruction"
+        saved_agent_data.max_steps = 20
+        saved_agent_data.memory_ids = ["original_memory"]
+        saved_agent_data.persona = None
+        saved_agent_data.tools = None
+        saved_agent_data.semantic_cache = False
+        saved_agent_data.semantic_cache_config = None
+        saved_agent_data.delegates = None
+        saved_agent_data.self_aware = False
+        saved_agent_data.self_aware_config = {"root_paths": ["."]}
+
+        memory_provider.retrieve_memagent = Mock(return_value=saved_agent_data)
+
+        with patch("memorizz.memagent.core.create_llm_provider") as mock_create_llm:
+            mock_create_llm.return_value = Mock()
+            loaded_agent = MemAgent.load(
+                "override_agent",
+                memory_provider,
+                self_aware=True,
+                self_aware_config={
+                    "root_paths": ["."],
+                    "allow_writes": True,
+                    "allow_deletes": False,
+                },
+            )
+
+        assert loaded_agent.has_self_awareness() is True
+        cfg = loaded_agent.get_self_aware_config()
+        assert cfg.get("allow_writes") is True
+        assert cfg.get("allow_deletes") is False
 
     @pytest.mark.save_load
     def test_load_nonexistent_agent(self):

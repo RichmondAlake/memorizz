@@ -29,6 +29,12 @@
         </button>
     </form>
     {% endif %}
+    {% if agent %}
+    <div class="page-actions" style="margin-top: 12px;">
+        <a href="/automations?agent_id={{ agent.agent_id }}" class="btn btn-sm">View Automations</a>
+        <a href="/automations/new?agent_id={{ agent.agent_id }}" class="btn btn-sm">Create Automation</a>
+    </div>
+    {% endif %}
     {% if agent and agent.persona and agent.persona.role %}
     <p>{{ agent.persona.role }}</p>
     {% endif %}
@@ -54,7 +60,9 @@
                 <label for="cfg-llm-provider">LLM Provider</label>
                 <select id="cfg-llm-provider" name="llm_provider" onchange="onProviderChange()">
                     <option value="openai" {% if llm_provider == 'openai' %}selected{% endif %}>OpenAI</option>
+                    <option value="anthropic" {% if llm_provider == 'anthropic' %}selected{% endif %}>Anthropic</option>
                     <option value="azure" {% if llm_provider == 'azure' %}selected{% endif %}>Azure OpenAI</option>
+                    <option value="ollama" {% if llm_provider == 'ollama' %}selected{% endif %}>Ollama (Local)</option>
                     <option value="huggingface" {% if llm_provider == 'huggingface' %}selected{% endif %}>HuggingFace</option>
                 </select>
             </div>
@@ -86,6 +94,44 @@
                     <input id="cfg-enable-workflow-memory" name="enable_workflow_memory" type="checkbox" value="1" {% if enable_workflow_memory %}checked{% endif %}>
                     <span>Enable workflow trace and step memory</span>
                 </label>
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-self-aware">Self-Awareness</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-self-aware" name="self_aware" type="checkbox" value="1" {% if self_aware %}checked{% endif %}>
+                    <span>Enable host codebase inspection tools</span>
+                </label>
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-self-aware-writes">Self-Aware Writes</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-self-aware-writes" name="self_aware_allow_writes" type="checkbox" value="1" {% if self_aware_allow_writes %}checked{% endif %}>
+                    <span>Allow write operations</span>
+                </label>
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-self-aware-deletes">Self-Aware Deletes</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-self-aware-deletes" name="self_aware_allow_deletes" type="checkbox" value="1" {% if self_aware_allow_deletes %}checked{% endif %}>
+                    <span>Allow delete operations (requires writes)</span>
+                </label>
+            </div>
+            <div class="config-field config-field--wide">
+                <label for="cfg-self-aware-roots">Self-Aware Root Paths</label>
+                <textarea id="cfg-self-aware-roots" name="self_aware_root_paths" rows="3" placeholder="/path/to/project&#10;./relative/path">{{ self_aware_root_paths }}</textarea>
+                <p class="form-hint">One path per line (or comma-separated). Empty uses current working directory.</p>
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-automations-enabled">Automations</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-automations-enabled" name="automations_enabled" type="checkbox" value="1" {% if automations_enabled %}checked{% endif %}>
+                    <span>Enable automation scheduling tools</span>
+                </label>
+            </div>
+            <div class="config-field">
+                <label for="cfg-default-timezone">Default Timezone</label>
+                <input id="cfg-default-timezone" name="default_timezone" type="text" value="{{ default_timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
+                <p class="form-hint">Optional IANA timezone name used when an automation does not specify timezone.</p>
             </div>
             <div class="config-field">
                 <label for="cfg-sandbox-provider">Sandbox Provider</label>
@@ -208,7 +254,97 @@
     {% else %}
     <p class="form-hint">No thread memory IDs yet. Use "Start New Thread" or send your first message.</p>
     {% endif %}
+
+    <div class="playground-threads-header" style="margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06);">
+        <h2>Automations</h2>
+        <div class="playground-threads-actions">
+            {% if agent %}
+            <a href="/automations/new?agent_id={{ agent.agent_id }}" class="btn btn-sm">Create</a>
+            <a href="/automations?agent_id={{ agent.agent_id }}" class="btn btn-sm">View All</a>
+            {% endif %}
+        </div>
+    </div>
+    <div class="playground-thread-tabs" id="playground-automation-tabs">
+        <p class="form-hint" id="automation-tabs-empty">Loading automation runs...</p>
+    </div>
 </section>
+
+<script>
+(function() {
+    var AGENT_ID = {{ (agent.agent_id if agent else '')|tojson }};
+    if (!AGENT_ID) return;
+
+    function fmtTs(v) {
+        if (!v) return '';
+        return String(v).replace('T', ' ').replace(/\.\d+.*$/, '').substring(0, 16);
+    }
+
+    function escHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s || '';
+        return d.innerHTML;
+    }
+
+    function loadAutomationRuns() {
+        fetch('/api/agents/' + encodeURIComponent(AGENT_ID) + '/automation-runs')
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) {
+                if (!data || !data.runs) return;
+                var container = document.getElementById('playground-automation-tabs');
+                var emptyMsg = document.getElementById('automation-tabs-empty');
+                if (!container) return;
+
+                if (data.runs.length === 0) {
+                    if (emptyMsg) emptyMsg.textContent = 'No automation runs yet.';
+                    return;
+                }
+
+                container.innerHTML = '';
+                for (var i = 0; i < data.runs.length; i++) {
+                    var run = data.runs[i];
+                    var memId = run.memory_id || '';
+                    var statusClass = run.status === 'succeeded' ? 'badge-success'
+                        : run.status === 'failed' ? 'badge-warning' : '';
+
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'playground-thread-tab';
+                    btn.title = run.response_snippet || '';
+                    if (memId) {
+                        btn.dataset.memoryId = memId;
+                        btn.addEventListener('click', (function(mid) {
+                            return function() { useThreadMemoryId(mid); };
+                        })(memId));
+                    }
+
+                    var titleSpan = document.createElement('span');
+                    titleSpan.className = 'thread-tab-title';
+                    titleSpan.textContent = run.job_name;
+
+                    var metaSpan = document.createElement('span');
+                    metaSpan.className = 'thread-tab-meta';
+                    metaSpan.innerHTML = '<span class="badge ' + statusClass + '" style="font-size:0.65rem;padding:1px 5px;">'
+                        + escHtml(run.status) + '</span> ' + escHtml(fmtTs(run.scheduled_for));
+
+                    btn.appendChild(titleSpan);
+                    btn.appendChild(metaSpan);
+                    if (memId) {
+                        var codeEl = document.createElement('code');
+                        codeEl.textContent = memId;
+                        btn.appendChild(codeEl);
+                    }
+                    container.appendChild(btn);
+                }
+            })
+            .catch(function() {
+                var emptyMsg = document.getElementById('automation-tabs-empty');
+                if (emptyMsg) emptyMsg.textContent = 'Could not load automation runs.';
+            });
+    }
+
+    document.addEventListener('DOMContentLoaded', loadAutomationRuns);
+})();
+</script>
 
 <!-- Playground Workbench: Chat + Context Panel -->
 <div class="playground-workbench">
@@ -247,6 +383,9 @@
                 <button type="button" id="pg-send-btn" class="btn btn-primary" onclick="sendMessage()">
                     <span id="pg-send-text">Send</span>
                     <span id="pg-send-spinner" class="spinner" style="display:none;"></span>
+                </button>
+                <button type="button" id="pg-stop-btn" class="btn" onclick="stopStreaming()" style="display:none;">
+                    <span>⏹ Stop</span>
                 </button>
             </div>
         </div>
@@ -552,6 +691,7 @@ const CURRENT_MODEL = "{{ llm_model }}";
 const INITIAL_SKILL_PATHS = {{ skill_paths|default([], true)|tojson }};
 const INITIAL_MCP_SERVERS = {{ mcp_servers|default([], true)|tojson }};
 let isStreaming = false;
+let currentAbortController = null;
 let threadLoadSequence = 0;
 
 // --- Provider / Model mapping ---
@@ -1527,20 +1667,31 @@ function setLoading(loading) {
     const btn = document.getElementById('pg-send-btn');
     const text = document.getElementById('pg-send-text');
     const spinner = document.getElementById('pg-send-spinner');
+    const stopBtn = document.getElementById('pg-stop-btn');
     const textarea = document.getElementById('pg-query');
 
     if (loading) {
         btn.disabled = true;
         text.textContent = 'Streaming...';
         spinner.style.display = 'inline-block';
+        stopBtn.style.display = 'inline-block';
         textarea.disabled = true;
     } else {
         btn.disabled = false;
         text.textContent = 'Send';
         spinner.style.display = 'none';
+        stopBtn.style.display = 'none';
         textarea.disabled = false;
         textarea.focus();
     }
+}
+
+function stopStreaming() {
+    if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+    }
+    setLoading(false);
 }
 
 async function sendMessage() {
@@ -1600,9 +1751,13 @@ async function sendMessage() {
             formData.append('instruction', instructionInput.value.trim());
         }
 
+        // Create AbortController for this request
+        currentAbortController = new AbortController();
+
         const response = await fetch(`/agents/${AGENT_ID}/playground/stream`, {
             method: 'POST',
             body: formData,
+            signal: currentAbortController.signal,
         });
 
         if (!response.ok) {
@@ -1679,9 +1834,15 @@ async function sendMessage() {
         }
 
     } catch (err) {
-        streamTarget.textContent = `Error: ${err.message}`;
-        streamTarget.classList.add('pg-message-error');
+        if (err.name === 'AbortError') {
+            streamTarget.textContent = '[Streaming stopped by user]';
+            streamTarget.classList.add('pg-message-system');
+        } else {
+            streamTarget.textContent = `Error: ${err.message}`;
+            streamTarget.classList.add('pg-message-error');
+        }
     } finally {
+        currentAbortController = null;
         setLoading(false);
         const activeMemoryId = (memoryEl.value || '').trim();
         if (activeMemoryId) {

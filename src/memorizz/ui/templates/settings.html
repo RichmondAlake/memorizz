@@ -95,6 +95,17 @@
                     autocomplete="off"
                     spellcheck="false"
                 >
+                {% elif field.field_type == 'timezone' %}
+                <input
+                    type="text"
+                    id="{{ field.env }}"
+                    name="{{ field.env }}"
+                    value="{{ field.current_value }}"
+                    placeholder="{{ field.placeholder }}"
+                    list="memorizz-timezones"
+                    autocomplete="off"
+                    spellcheck="false"
+                >
                 {% elif field.field_type == 'checkbox' %}
                 <input type="hidden" id="{{ field.env }}" name="{{ field.env }}" value="{{ field.current_value }}" data-checkbox-hidden>
                 <div class="checkbox-group">

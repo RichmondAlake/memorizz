@@ -4,17 +4,34 @@
 
 {% block content %}
 <div class="page-header page-header--agent">
-    <a href="/agents" class="back-link">← Back to Agents</a>
-    <h1>
-        {% if agent and agent.persona and agent.persona.name %}
-            {{ agent.persona.name }}
-        {% else %}
-            Agent
+    <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+        <div>
+            <a href="/agents" class="back-link">← Back to Agents</a>
+            <h1>
+                {% if agent and agent.persona and agent.persona.name %}
+                    {{ agent.persona.name }}
+                {% else %}
+                    Agent
+                {% endif %}
+            </h1>
+            {% if agent and agent.persona and agent.persona.role %}
+            <p>{{ agent.persona.role }}</p>
+            {% endif %}
+        </div>
+        {% if agent and agent.whatsapp_enabled %}
+        <div style="display: flex; gap: 8px;">
+            {% if is_whatsapp_active %}
+            <form method="post" action="/agents/{{ agent.agent_id }}/whatsapp/deactivate" style="display:inline;">
+                <button type="submit" class="btn">Deactivate WhatsApp</button>
+            </form>
+            {% else %}
+            <form method="post" action="/agents/{{ agent.agent_id }}/whatsapp/activate" style="display:inline;">
+                <button type="submit" class="btn btn-primary">Set as WhatsApp Agent</button>
+            </form>
+            {% endif %}
+        </div>
         {% endif %}
-    </h1>
-    {% if agent and agent.persona and agent.persona.role %}
-    <p>{{ agent.persona.role }}</p>
-    {% endif %}
+    </div>
 </div>
 
 {% if error %}
@@ -40,9 +57,18 @@
                 </div>
                 <div class="chat-meta">
                     <span class="badge">{{ agent.application_mode or 'assistant' }}</span>
-                    <span class="meta-chip">Max tool iterations: {{ agent.max_steps or 20 }}</span>
+                    <span class="meta-chip">Max tool iterations: {% if agent.max_steps == 0 %}Continuous{% else %}{{ agent.max_steps or 20 }}{% endif %}</span>
                     {% if agent.persona and agent.persona.role %}
                     <span class="meta-chip">Role: {{ agent.persona.role }}</span>
+                    {% endif %}
+                    {% if agent.whatsapp_enabled %}
+                    <span class="meta-chip">
+                        {% if is_whatsapp_active %}
+                        WhatsApp: <span class="badge badge-success" style="display:inline;">Active</span>
+                        {% else %}
+                        WhatsApp: <span class="badge" style="display:inline;">Enabled</span>
+                        {% endif %}
+                    </span>
                     {% endif %}
                     <code class="meta-chip meta-chip--code">{{ agent.agent_id }}</code>
                 </div>

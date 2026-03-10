@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 import logging
 import time
 from dataclasses import dataclass
@@ -1897,6 +1901,10 @@ class MongoDBProvider(MemoryProvider):
             skills_marketplace_config=document.get("skills_marketplace_config"),
             skill_paths=document.get("skill_paths"),
             mcp_servers=document.get("mcp_servers"),
+            self_aware=bool(document.get("self_aware", False)),
+            self_aware_config=document.get("self_aware_config"),
+            automations_enabled=bool(document.get("automations_enabled", True)),
+            default_timezone=document.get("default_timezone"),
             memory_provider=self,
         )
 
@@ -1960,6 +1968,10 @@ class MongoDBProvider(MemoryProvider):
                 skills_marketplace_config=doc.get("skills_marketplace_config"),
                 skill_paths=doc.get("skill_paths"),
                 mcp_servers=doc.get("mcp_servers"),
+                self_aware=bool(doc.get("self_aware", False)),
+                self_aware_config=doc.get("self_aware_config"),
+                automations_enabled=bool(doc.get("automations_enabled", True)),
+                default_timezone=doc.get("default_timezone"),
                 memory_provider=self,
             )
 

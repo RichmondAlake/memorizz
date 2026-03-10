@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """
 Oracle Database Setup Module for Memorizz
 
@@ -39,10 +43,68 @@ def _safe_close_connection(conn):
         pass
 
 
-def parse_sql_file(filepath):
-    """Parse SQL file into individual executable statements."""
+def _get_embedding_dimension() -> int:
+    """
+    Get the embedding dimension to use for VECTOR columns.
+
+    Reads from ORACLE_EMBEDDING_DIM environment variable.
+    Falls back to 256 if not set or invalid.
+
+    Returns:
+        int: Embedding dimension (validated to be positive)
+    """
+    default_dim = 256
+    env_dim = os.environ.get("ORACLE_EMBEDDING_DIM")
+
+    if env_dim is None:
+        return default_dim
+
+    try:
+        dim = int(env_dim)
+        if dim <= 0:
+            print(
+                f"  ⚠ Invalid ORACLE_EMBEDDING_DIM={env_dim} (must be positive), using default {default_dim}"
+            )
+            return default_dim
+        if dim > 65535:
+            print(
+                f"  ⚠ ORACLE_EMBEDDING_DIM={dim} is very large, using anyway (max 65535)"
+            )
+            return min(dim, 65535)
+        return dim
+    except ValueError:
+        print(
+            f"  ⚠ Invalid ORACLE_EMBEDDING_DIM='{env_dim}' (not a number), using default {default_dim}"
+        )
+        return default_dim
+
+
+def parse_sql_file(filepath, embedding_dim: Optional[int] = None):
+    """
+    Parse SQL file into individual executable statements.
+
+    Args:
+        filepath: Path to the SQL file
+        embedding_dim: Optional embedding dimension to use for VECTOR columns.
+                      If provided, replaces VECTOR(256, FLOAT32) with VECTOR({embedding_dim}, FLOAT32)
+
+    Returns:
+        List of SQL statements
+    """
     with open(filepath, "r") as f:
         content = f.read()
+
+    # Apply embedding dimension replacement if specified
+    if embedding_dim is not None:
+        # Replace VECTOR(256, FLOAT32) with VECTOR({embedding_dim}, FLOAT32)
+        # This allows flexible embedding dimensions via environment variable
+        import re
+
+        content = re.sub(
+            r"VECTOR\(\s*\d+\s*,\s*FLOAT32\s*\)",
+            f"VECTOR({embedding_dim}, FLOAT32)",
+            content,
+        )
 
     # Remove single-line comments
     lines = []
@@ -793,7 +855,17 @@ def _create_schema(user_conn, schema_file: Path) -> Tuple[int, int, int]:
         Tuple of (success_count, skip_count, fail_count)
     """
     print("\nExecuting schema SQL...")
-    statements = parse_sql_file(schema_file)
+
+    # Get embedding dimension from environment variable
+    embedding_dim = _get_embedding_dimension()
+    if embedding_dim != 256:
+        print(
+            f"  ℹ Using custom embedding dimension: {embedding_dim} (from ORACLE_EMBEDDING_DIM)"
+        )
+    else:
+        print(f"  ℹ Using default embedding dimension: {embedding_dim}")
+
+    statements = parse_sql_file(schema_file, embedding_dim=embedding_dim)
     print(f"Found {len(statements)} SQL statements")
 
     user_cursor = user_conn.cursor()
@@ -838,7 +910,12 @@ def _create_duality_views(user_conn, views_file: Path) -> Tuple[int, int]:
         Tuple of (success_count, fail_count)
     """
     print("\nExecuting Duality Views SQL...")
-    statements = parse_sql_file(views_file)
+
+    # Get embedding dimension for consistency (views typically don't have VECTOR columns,
+    # but we pass it for consistency and future-proofing)
+    embedding_dim = _get_embedding_dimension()
+
+    statements = parse_sql_file(views_file, embedding_dim=embedding_dim)
     print(f"Found {len(statements)} view statements")
 
     user_cursor = user_conn.cursor()
@@ -882,7 +959,8 @@ def _verify_setup(user_conn) -> Tuple[list, list, list]:
         WHERE table_name IN ('AGENTS', 'AGENT_LLM_CONFIGS', 'AGENT_MEMORIES', 'PERSONAS',
                              'TOOLBOX', 'CONVERSATION_MEMORY', 'LONG_TERM_MEMORY',
                              'SHORT_TERM_MEMORY', 'WORKFLOW_MEMORY', 'SHARED_MEMORY',
-                             'SUMMARIES', 'SEMANTIC_CACHE')
+                             'SUMMARIES', 'SEMANTIC_CACHE', 'ENTITY_MEMORY',
+                             'AUTOMATION_JOBS', 'AUTOMATION_RUNS', 'AUTOMATION_DELIVERIES')
         ORDER BY table_name
     """
     )
@@ -1229,3 +1307,72 @@ def setup_oracle_user():
     print()
 
     return True
+
+
+def apply_schema_updates() -> bool:
+    """
+    Apply schema changes in-place for an existing Oracle user/schema.
+
+    This is the safe/non-destructive counterpart to setup_oracle_user(). It:
+    - Connects as ORACLE_USER (no admin / no user drop)
+    - Executes schema_relational.sql (skipping existing objects)
+    - Executes duality_views.sql (best-effort; existing views may fail)
+    - Verifies the resulting objects
+    """
+    if oracledb is None:
+        print("✗ oracledb package not found. Install with: pip install oracledb")
+        return False
+
+    user = str(os.environ.get("ORACLE_USER", "memorizz_user") or "").strip()
+    password = str(os.environ.get("ORACLE_PASSWORD", "SecurePass123!") or "").strip()
+    dsn = str(os.environ.get("ORACLE_DSN", "localhost:1521/FREEPDB1") or "").strip()
+    if not user or not password or not dsn:
+        print("✗ Missing Oracle env vars")
+        print("  Required: ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN")
+        return False
+
+    package_dir = Path(__file__).parent
+    schema_file = package_dir / "schema_relational.sql"
+    views_file = package_dir / "duality_views.sql"
+
+    if not schema_file.exists():
+        print(f"✗ Schema file not found: {schema_file}")
+        return False
+    if not views_file.exists():
+        print(f"✗ Views file not found: {views_file}")
+        return False
+
+    print("=" * 70)
+    print("Oracle Schema Update (In-Place)")
+    print("=" * 70)
+    print(f"User: {user}")
+    print(f"DSN:  {dsn}")
+    print()
+
+    try:
+        conn = oracledb.connect(user=user, password=password, dsn=dsn)
+    except Exception as e:
+        print(f"✗ Connection failed: {e}")
+        if _is_connection_refused_error(e):
+            _print_connection_refused_help(dsn)
+        return False
+
+    try:
+        print("STEP 1: Applying relational schema updates")
+        print("-" * 70)
+        _create_schema(conn, schema_file)
+        print()
+
+        print("STEP 2: Applying JSON duality views (best-effort)")
+        print("-" * 70)
+        _create_duality_views(conn, views_file)
+        print()
+
+        print("STEP 3: Verifying")
+        print("-" * 70)
+        _verify_setup(conn)
+        print()
+        print("✅ Schema update complete.")
+        return True
+    finally:
+        _safe_close_connection(conn)

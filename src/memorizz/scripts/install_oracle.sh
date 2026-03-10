@@ -15,20 +15,21 @@
 #   export PLATFORM_FLAG="--platform linux/amd64"
 #   ./install_oracle.sh
 #
-#   For Oracle image version:
-#   export ORACLE_IMAGE_TAG="latest-lite"  # Lite version (1.78GB, default)
-#   export ORACLE_IMAGE_TAG="latest"        # Full version (9.93GB)
-#   export ORACLE_IMAGE_TAG="custom-tag"   # Any custom tag
+#   For non-interactive mode (skip image selection):
+#   export ORACLE_IMAGE_CHOICE="1"  # Official Oracle 23ai Free Lite
+#   export ORACLE_IMAGE_CHOICE="2"  # Official Oracle 23ai Free Full
+#   export ORACLE_IMAGE_CHOICE="3"  # Community gvenzl/oracle-free
 #   ./install_oracle.sh
 #
 # Environment Variables:
 #   ORACLE_ADMIN_PASSWORD  - Admin password (default: MyPassword123!)
-#   ORACLE_IMAGE_TAG       - Oracle image tag (default: latest-lite)
-#                            Options: latest-lite (1.78GB), latest (9.93GB), or custom tag
+#   ORACLE_IMAGE_CHOICE    - Image selection (1, 2, or 3; default: interactive)
+#   ORACLE_IMAGE_TAG       - Oracle image tag (legacy, use ORACLE_IMAGE_CHOICE instead)
 #   PLATFORM_FLAG          - Docker platform flag (default: empty, auto-detect)
 #                            Use "--platform linux/amd64" for Apple Silicon
 #
 # Features:
+#   - Interactive Docker image selection
 #   - Persistent data storage via Docker volume (oracle-memorizz-data)
 #   - Idempotent: safe to run multiple times
 #   - Waits for database readiness before completing
@@ -41,11 +42,6 @@ set -e  # Exit immediately on error
 CONTAINER_NAME="oracle-memorizz"
 VOLUME_NAME="oracle-memorizz-data"
 
-# Oracle image tag - defaults to latest-lite (smaller, faster download)
-# Options: latest-lite (1.78GB, default), latest (9.93GB), or any custom tag
-ORACLE_IMAGE_TAG="${ORACLE_IMAGE_TAG:-latest-lite}"
-IMAGE_NAME="container-registry.oracle.com/database/free:${ORACLE_IMAGE_TAG}"
-
 # Use environment variable if set, otherwise use default
 # Set ORACLE_ADMIN_PASSWORD to customize the admin password
 PASSWORD="${ORACLE_ADMIN_PASSWORD:-MyPassword123!}"
@@ -54,13 +50,82 @@ PASSWORD="${ORACLE_ADMIN_PASSWORD:-MyPassword123!}"
 # Oracle Free may require emulation on ARM64
 PLATFORM_FLAG="${PLATFORM_FLAG:-}"
 
-# --- Helper function ---
+# --- Helper functions ---
 function log() {
   echo -e "\033[1;36m$1\033[0m" >&2
 }
 
 function error() {
   echo -e "\033[1;31m$1\033[0m" >&2
+}
+
+function success() {
+  echo -e "\033[1;32m$1\033[0m" >&2
+}
+
+function prompt() {
+  echo -e "\033[1;33m$1\033[0m" >&2
+}
+
+# --- Interactive Image Selection ---
+function select_oracle_image() {
+  # If ORACLE_IMAGE_CHOICE is already set, use it (non-interactive mode)
+  if [ -n "${ORACLE_IMAGE_CHOICE}" ]; then
+    choice="${ORACLE_IMAGE_CHOICE}"
+  else
+    # Interactive mode
+    echo "" >&2
+    prompt "╔═══════════════════════════════════════════════════════════════════════╗"
+    prompt "║           Select Oracle Database Docker Image                        ║"
+    prompt "╚═══════════════════════════════════════════════════════════════════════╝"
+    echo "" >&2
+    echo "  1) Official Oracle 23ai Free - Lite Edition (Recommended)" >&2
+    echo "     Image: container-registry.oracle.com/database/free:latest-lite" >&2
+    echo "     Size: ~1.78GB" >&2
+    echo "     Features: AI Vector Search, Full Oracle 23ai capabilities" >&2
+    echo "" >&2
+    echo "  2) Official Oracle 23ai Free - Full Edition" >&2
+    echo "     Image: container-registry.oracle.com/database/free:latest" >&2
+    echo "     Size: ~9.93GB" >&2
+    echo "     Features: AI Vector Search, All Oracle 23ai features + extras" >&2
+    echo "" >&2
+    echo "  3) Community gvenzl/oracle-free (Faster startup)" >&2
+    echo "     Image: gvenzl/oracle-free:latest" >&2
+    echo "     Size: ~3GB" >&2
+    echo "     Features: Oracle 23ai Free, Optimized for development" >&2
+    echo "     Note: Community-maintained, faster initialization" >&2
+    echo "" >&2
+    prompt "Enter your choice (1-3) [1]: "
+    read -r choice
+    choice="${choice:-1}"  # Default to 1 if empty
+  fi
+
+  # Set IMAGE_NAME and IMAGE_TAG based on choice
+  case $choice in
+    1)
+      IMAGE_NAME="container-registry.oracle.com/database/free:latest-lite"
+      IMAGE_DISPLAY_NAME="Official Oracle 23ai Free Lite"
+      IMAGE_SIZE="~1.78GB"
+      ;;
+    2)
+      IMAGE_NAME="container-registry.oracle.com/database/free:latest"
+      IMAGE_DISPLAY_NAME="Official Oracle 23ai Free Full"
+      IMAGE_SIZE="~9.93GB"
+      ;;
+    3)
+      IMAGE_NAME="gvenzl/oracle-free:latest"
+      IMAGE_DISPLAY_NAME="Community gvenzl/oracle-free"
+      IMAGE_SIZE="~3GB"
+      ;;
+    *)
+      error "Invalid choice: $choice (must be 1, 2, or 3)"
+      exit 1
+      ;;
+  esac
+
+  success "✓ Selected: $IMAGE_DISPLAY_NAME ($IMAGE_SIZE)"
+  export SELECTED_IMAGE_NAME="$IMAGE_NAME"
+  export SELECTED_IMAGE_DISPLAY_NAME="$IMAGE_DISPLAY_NAME"
 }
 
 # Check if Docker is running
@@ -78,7 +143,11 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 log "✅ Docker is running"
-log "📦 Using Oracle image tag: ${ORACLE_IMAGE_TAG}"
+
+# Select Oracle image (interactive or from environment variable)
+select_oracle_image
+IMAGE_NAME="$SELECTED_IMAGE_NAME"
+
 log "🔍 Checking if Oracle container '$CONTAINER_NAME' exists..."
 
 # Check if container exists
@@ -98,13 +167,7 @@ else
   if [ -n "$IMAGE_EXISTS" ]; then
     log "✅ Oracle image found locally, skipping download"
   else
-    if [ "$ORACLE_IMAGE_TAG" = "latest-lite" ]; then
-      log "🐳 Pulling Oracle Database 23ai Free Lite (1.78GB, with AI Vector Search)..."
-    elif [ "$ORACLE_IMAGE_TAG" = "latest" ]; then
-      log "🐳 Pulling Oracle Database 23ai Free Full (9.93GB, with AI Vector Search)..."
-    else
-      log "🐳 Pulling Oracle Database 23ai Free (tag: ${ORACLE_IMAGE_TAG})..."
-    fi
+    log "🐳 Pulling $SELECTED_IMAGE_DISPLAY_NAME..."
     if [ -n "$PLATFORM_FLAG" ]; then
       log "   Using platform flag: $PLATFORM_FLAG (for Apple Silicon compatibility)"
       docker pull $PLATFORM_FLAG $IMAGE_NAME

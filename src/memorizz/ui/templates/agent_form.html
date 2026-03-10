@@ -47,8 +47,23 @@
             </div>
             <div class="form-group">
                 <label for="max_steps">Max Tool Iterations</label>
-                <input id="max_steps" name="max_steps" type="number" min="1" value="{{ max_steps }}">
+                <div class="form-group checkbox-group" style="margin-bottom: 8px;">
+                    <label>
+                        <input type="checkbox" id="continuous_mode" value="1"
+                            {% if max_steps == 0 %}checked{% endif %}
+                            onchange="toggleContinuousMode(this)">
+                        Continuous mode (unlimited)
+                    </label>
+                </div>
+                <input id="max_steps" name="max_steps" type="number" min="1"
+                    value="{{ max_steps if max_steps != 0 else 20 }}"
+                    {% if max_steps == 0 %}disabled{% endif %}>
                 <p class="form-hint">Maximum tool-calling rounds per run (default: 20).</p>
+                <p id="continuous-warning" class="form-hint"
+                    style="color: #e67e22; display: {% if max_steps == 0 %}block{% else %}none{% endif %};">
+                    Continuous mode may consume a very large number of tokens.
+                    The agent will keep running tool loops until the task is complete.
+                </p>
             </div>
             <div class="form-group">
                 <label for="tool_access">Tool Access</label>
@@ -91,7 +106,9 @@
                     <label for="llm_provider">Provider</label>
                     <select id="llm_provider" name="llm_provider" onchange="syncAgentModelOptions()">
                         <option value="openai" {% if llm_provider == 'openai' %}selected{% endif %}>OpenAI</option>
+                        <option value="anthropic" {% if llm_provider == 'anthropic' %}selected{% endif %}>Anthropic</option>
                         <option value="azure" {% if llm_provider == 'azure' %}selected{% endif %}>Azure OpenAI</option>
+                        <option value="ollama" {% if llm_provider == 'ollama' %}selected{% endif %}>Ollama (Local)</option>
                         <option value="huggingface" {% if llm_provider == 'huggingface' %}selected{% endif %}>HuggingFace</option>
                     </select>
                 </div>
@@ -105,7 +122,7 @@
             <div class="form-group">
                 <label for="llm_config_json">Advanced LLM Config (JSON)</label>
                 <textarea id="llm_config_json" name="llm_config_json" rows="4">{{ llm_config_json }}</textarea>
-                <p class="form-hint">Optional provider-specific fields like azure_endpoint, api_version, or HuggingFace settings.</p>
+                <p class="form-hint">Optional provider-specific fields (e.g. azure_endpoint, api_version, ollama host, HuggingFace settings, temperature).</p>
             </div>
         </div>
     </details>
@@ -189,6 +206,99 @@
                     <option value="offline" {% if internet_provider == 'offline' %}selected{% endif %}>Offline (placeholder provider)</option>
                 </select>
                 <p class="form-hint">When enabled, the agent gets `internet_search` and `open_web_page` tools. Configure API keys in Settings.</p>
+            </div>
+        </div>
+    </details>
+
+    <!-- Automations — collapsible -->
+    <details class="detail-section collapsible-section" {% if default_timezone or not automations_enabled %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>Automations</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="automations_enabled" value="1" {% if automations_enabled %}checked{% endif %}>
+                        Enable automations tools
+                    </label>
+                    <p class="form-hint">When enabled (and Oracle is connected), the agent can create durable scheduled jobs from chat.</p>
+                </div>
+                <div class="form-group">
+                    <label for="default_timezone">Default Timezone</label>
+                    <input id="default_timezone" name="default_timezone" type="text" value="{{ default_timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
+                    <p class="form-hint">IANA timezone name used when timezone is omitted for automations.</p>
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <!-- WhatsApp Chat — collapsible -->
+    <details class="detail-section collapsible-section" {% if whatsapp_enabled %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>WhatsApp Chat</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="whatsapp_enabled" value="1" {% if whatsapp_enabled %}checked{% endif %}>
+                        Enable WhatsApp chat for this agent
+                    </label>
+                    <p class="form-hint">When enabled, this agent can be set as the active WhatsApp communicator. Users can then chat with this agent via WhatsApp.</p>
+                </div>
+                <div class="form-group">
+                    <label for="whatsapp_welcome_message">Welcome Message (Optional)</label>
+                    <textarea
+                        id="whatsapp_welcome_message"
+                        name="whatsapp_welcome_message"
+                        rows="3"
+                        placeholder="Hi! I'm your AI assistant. How can I help you today?">{{ whatsapp_welcome_message }}</textarea>
+                    <p class="form-hint">This message will be sent when a user first contacts the agent via WhatsApp (feature coming soon).</p>
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <!-- Self-Awareness — collapsible -->
+    <details
+        class="detail-section collapsible-section"
+        {% if self_aware or self_aware_root_paths or self_aware_allow_writes or self_aware_allow_deletes %}open{% endif %}
+    >
+        <summary class="section-toggle">
+            <h2>Self-Awareness</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="self_aware" value="1" {% if self_aware %}checked{% endif %}>
+                        Enable host codebase awareness tools
+                    </label>
+                    <p class="form-hint">When enabled, the agent can inspect files and run allowlisted commands within configured roots.</p>
+                </div>
+                <div class="form-group">
+                    <label for="self_aware_root_paths">Allowed Root Paths</label>
+                    <textarea id="self_aware_root_paths" name="self_aware_root_paths" rows="4" placeholder="/path/to/project&#10;./relative/path">{{ self_aware_root_paths }}</textarea>
+                    <p class="form-hint">One path per line (or comma-separated). Empty uses the current working directory.</p>
+                </div>
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="self_aware_allow_writes" value="1" {% if self_aware_allow_writes %}checked{% endif %}>
+                        Allow writes
+                    </label>
+                    <p class="form-hint">Disabled by default. Enables file creation and edits under allowed roots.</p>
+                </div>
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="self_aware_allow_deletes" value="1" {% if self_aware_allow_deletes %}checked{% endif %}>
+                        Allow deletes
+                    </label>
+                    <p class="form-hint">Deletes require writes and remain guarded by root and wildcard protections.</p>
+                </div>
             </div>
         </div>
     </details>
@@ -351,6 +461,32 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     syncAgentModelOptions();
+
+    // Continuous mode: on form submit, send max_steps=0
+    var agentForm = document.querySelector('.agent-form');
+    if (agentForm) {
+        agentForm.addEventListener('submit', function() {
+            var checkbox = document.getElementById('continuous_mode');
+            var maxStepsInput = document.getElementById('max_steps');
+            if (checkbox && checkbox.checked && maxStepsInput) {
+                maxStepsInput.disabled = false;
+                maxStepsInput.value = '0';
+            }
+        });
+    }
 });
+
+function toggleContinuousMode(checkbox) {
+    var maxStepsInput = document.getElementById('max_steps');
+    var warning = document.getElementById('continuous-warning');
+    if (checkbox.checked) {
+        maxStepsInput.disabled = true;
+        maxStepsInput.value = '20';
+        warning.style.display = 'block';
+    } else {
+        maxStepsInput.disabled = false;
+        warning.style.display = 'none';
+    }
+}
 </script>
 {% endblock %}

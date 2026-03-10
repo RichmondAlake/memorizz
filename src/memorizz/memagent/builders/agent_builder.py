@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 """Builder pattern for MemAgent construction."""
 
 import logging
@@ -39,6 +43,10 @@ class MemAgentBuilder:
         self._internet_access_provider = None
         self._skill_paths = []
         self._mcp_servers = []
+        self._self_aware_enabled = False
+        self._self_aware_config = None
+        self._automations_enabled = True
+        self._default_timezone = None
         self._is_favorite = False
 
     def with_instruction(self, instruction: str) -> "MemAgentBuilder":
@@ -124,6 +132,28 @@ class MemAgentBuilder:
             self._mcp_servers.append(mcp_servers)
         elif isinstance(mcp_servers, list):
             self._mcp_servers.extend(mcp_servers)
+        return self
+
+    def with_self_aware(
+        self, enabled: bool = True, config: Dict[str, Any] = None
+    ) -> "MemAgentBuilder":
+        """Enable/disable self-awareness host codebase tooling."""
+        self._self_aware_enabled = bool(enabled)
+        if isinstance(config, dict):
+            self._self_aware_config = dict(config)
+        elif config is None:
+            self._self_aware_config = None
+        return self
+
+    def with_automations_enabled(self, enabled: bool = True) -> "MemAgentBuilder":
+        """Enable/disable durable automations tooling (when supported by provider)."""
+        self._automations_enabled = bool(enabled)
+        return self
+
+    def with_default_timezone(self, tz: str) -> "MemAgentBuilder":
+        """Set a default IANA timezone used by automation tools when omitted."""
+        tz_value = str(tz or "").strip()
+        self._default_timezone = tz_value or None
         return self
 
     def with_semantic_cache(
@@ -213,6 +243,10 @@ class MemAgentBuilder:
                 internet_access_provider=self._internet_access_provider,
                 skill_paths=self._skill_paths if self._skill_paths else None,
                 mcp_servers=self._mcp_servers if self._mcp_servers else None,
+                automations_enabled=self._automations_enabled,
+                default_timezone=self._default_timezone,
+                self_aware=self._self_aware_enabled,
+                self_aware_config=self._self_aware_config,
             )
 
             logger.info(f"MemAgent built successfully with {len(self._tools)} tools")
@@ -259,6 +293,12 @@ class MemAgentBuilder:
         )
         new_builder._skill_paths = self._skill_paths.copy()
         new_builder._mcp_servers = self._mcp_servers.copy()
+        new_builder._self_aware_enabled = self._self_aware_enabled
+        new_builder._self_aware_config = (
+            self._self_aware_config.copy() if self._self_aware_config else None
+        )
+        new_builder._automations_enabled = self._automations_enabled
+        new_builder._default_timezone = self._default_timezone
 
         return new_builder
 

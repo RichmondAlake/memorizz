@@ -88,6 +88,17 @@
                     <span class="meta-label">Tools:</span>
                     <span class="meta-value">{{ agent_tool_counts.get(agent_id_value, (agent.tools or [])|length) }}</span>
                 </div>
+
+                {% if agent.whatsapp_enabled %}
+                <div class="meta-item">
+                    <span class="meta-label">WhatsApp:</span>
+                    {% if agent_id_value == active_whatsapp_agent_id %}
+                    <span class="badge badge-success">Active</span>
+                    {% else %}
+                    <span class="badge">Enabled</span>
+                    {% endif %}
+                </div>
+                {% endif %}
             </div>
 
             {% if agent.instruction %}

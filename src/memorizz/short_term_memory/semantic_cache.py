@@ -1,3 +1,7 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
 import logging
 import time
 import uuid
@@ -131,31 +135,37 @@ class SemanticCache:
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """Calculate cosine similarity between two vectors."""
         try:
-            if np is not None:
-                # Use numpy if available
-                vec1_np = np.array(vec1)
-                vec2_np = np.array(vec2)
+            if len(vec1) != len(vec2) or not vec1:
+                return 0.0
 
-                # Handle zero vectors
-                norm1 = np.linalg.norm(vec1_np)
-                norm2 = np.linalg.norm(vec2_np)
-                if norm1 == 0 or norm2 == 0:
+            # Numpy is fast for large vectors, but the per-call overhead dominates for
+            # tiny vectors (which are common in tests). Prefer a pure-Python path for
+            # small dimensions to keep cache lookups predictable.
+            if np is not None and len(vec1) > 64:
+                vec1_np = np.asarray(vec1, dtype=float)
+                vec2_np = np.asarray(vec2, dtype=float)
+
+                norm1 = float(np.linalg.norm(vec1_np))
+                norm2 = float(np.linalg.norm(vec2_np))
+                if norm1 == 0.0 or norm2 == 0.0:
                     return 0.0
 
                 return float(np.dot(vec1_np, vec2_np) / (norm1 * norm2))
-            else:
-                # Fallback to pure Python implementation
-                if len(vec1) != len(vec2):
-                    return 0.0
 
-                dot_product = sum(a * b for a, b in zip(vec1, vec2))
-                norm1 = math.sqrt(sum(a * a for a in vec1))
-                norm2 = math.sqrt(sum(b * b for b in vec2))
+            import math  # noqa: F811
 
-                if norm1 == 0 or norm2 == 0:
-                    return 0.0
+            dot_product = 0.0
+            norm1 = 0.0
+            norm2 = 0.0
+            for a, b in zip(vec1, vec2):
+                dot_product += float(a) * float(b)
+                norm1 += float(a) * float(a)
+                norm2 += float(b) * float(b)
 
-                return dot_product / (norm1 * norm2)
+            if norm1 == 0.0 or norm2 == 0.0:
+                return 0.0
+
+            return dot_product / (math.sqrt(norm1) * math.sqrt(norm2))
 
         except Exception as e:
             logger.warning(f"Error calculating cosine similarity: {e}")
