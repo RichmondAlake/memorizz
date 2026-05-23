@@ -852,10 +852,41 @@ class MemAgent:
         return list(reversed(selected_reversed))
 
     def _build_prompt_messages(
-        self, system_prompt: str, query: str, context: Dict[str, Any]
+        self,
+        system_prompt: str,
+        query: str,
+        context: Dict[str, Any],
+        request_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Build model input messages with bounded conversation history."""
+        """Build model input messages with bounded conversation history.
+
+        ``request_context`` is the M2 per-call ephemeral context: when
+        provided, it's rendered as a system-role message between the main
+        system prompt and the conversation history. It is intentionally
+        NOT persisted by ``_record_interaction`` (which only stores the
+        original ``query`` string), so it does not pollute
+        ``conversation_memory``.
+        """
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+
+        if request_context:
+            try:
+                rendered_context = json.dumps(
+                    request_context, ensure_ascii=False, indent=2, default=str
+                )
+            except Exception:
+                rendered_context = str(request_context)
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "REQUEST CONTEXT (ephemeral, this turn only — do not "
+                        "reference unless directly relevant to the user's "
+                        "current query):\n" + rendered_context
+                    ),
+                }
+            )
+
         history = context.get("conversation_history", [])
         messages.extend(self._prepare_history_messages(history, system_prompt, query))
         messages.append({"role": "user", "content": query})
@@ -2538,6 +2569,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         memory_id: str = None,
         thread_id: str = None,
         user_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Run the agent with the given query using the new manager architecture.
@@ -2551,6 +2583,25 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 with ``user_id`` and every read is restricted to rows matching
                 the same scope. ``None`` means anonymous/legacy scope — reads
                 return only rows with no ``user_id`` set.
+            context: Optional per-call ephemeral context (M2). When provided,
+                the dict is rendered as a structured system-role message
+                between the main system prompt and conversation history, so
+                the agent sees it for *this turn only*. It is intentionally
+                NOT persisted to ``conversation_memory`` (only the original
+                ``query`` is recorded). Recommended shape for SDK consumers::
+
+                    {
+                      "current_page": {"type": "analysis"|"group"|...,
+                                       "id": "<id>", "title": "<title>"},
+                      "quoted_text": "<optional highlighted snippet>",
+                      "highlights": [...],          # optional
+                      "notes": [...],               # optional
+                      "internet_search_allowed": True|False,
+                      "open_threads": [...],        # optional
+                    }
+
+                Callers may pass any JSON-serialisable dict; unknown keys
+                are included verbatim.
 
         Returns:
             The agent's response
@@ -2579,12 +2630,16 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                     return cached_response
 
             # 3. Build context and prompt
-            context = self._build_context(query, memory_id, user_id=user_id)
+            built_context = self._build_context(query, memory_id, user_id=user_id)
             system_prompt = self._build_system_prompt()
 
             # 4. Execute with LLM
             response = self._execute_llm_interaction(
-                system_prompt, query, context, user_id=user_id
+                system_prompt,
+                query,
+                built_context,
+                user_id=user_id,
+                request_context=context,
             )
 
             # 5. Cache the response
@@ -2612,6 +2667,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         memory_id: str = None,
         thread_id: str = None,
         user_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> Generator[str, None, None]:
         """
         Run the agent with streaming output, yielding text chunks as they arrive.
@@ -2626,6 +2682,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             thread_id: Optional thread ID
             user_id: Optional end-user identifier for multi-tenant scoping. See
                 ``run()`` for the full semantics.
+            context: Optional per-call ephemeral context (M2). See ``run()``
+                for the full semantics and recommended schema. Not persisted
+                to ``conversation_memory``.
 
         Yields:
             str: Partial text chunks of the agent's response
@@ -2639,8 +2698,22 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 memory_id=memory_id,
                 thread_id=thread_id,
                 user_id=user_id,
+                context=context,
             )
             return
+
+        # M3: lifecycle event so the consumer (e.g. an SSE translator) can
+        # render "thinking…" indicators immediately, before any text chunk.
+        self._emit_stream_event(
+            "stream_start",
+            {
+                "agent_id": self.agent_id,
+                "memory_id": memory_id,
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "has_request_context": bool(context),
+            },
+        )
 
         self._stream_trace_events = []
         try:
@@ -2656,17 +2729,25 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                     self._record_interaction(
                         query, cached, memory_id, thread_id, user_id=user_id
                     )
+                    self._emit_stream_event(
+                        "stream_end",
+                        {"reason": "cache_hit", "agent_id": self.agent_id},
+                    )
                     yield cached
                     return
 
             # 3. Build context and prompt
-            context = self._build_context(query, memory_id, user_id=user_id)
+            built_context = self._build_context(query, memory_id, user_id=user_id)
             system_prompt = self._build_system_prompt()
 
             # 4. Stream the LLM interaction
             full_response = ""
             for chunk in self._execute_llm_interaction_stream(
-                system_prompt, query, context, user_id=user_id
+                system_prompt,
+                query,
+                built_context,
+                user_id=user_id,
+                request_context=context,
             ):
                 full_response += chunk
                 yield chunk
@@ -2682,12 +2763,35 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 query, full_response, memory_id, thread_id, user_id=user_id
             )
             self._record_stream_trace_bundle(memory_id, thread_id, user_id=user_id)
+            self._emit_stream_event(
+                "stream_end",
+                {
+                    "reason": "completed",
+                    "agent_id": self.agent_id,
+                    "response_length": len(full_response),
+                },
+            )
 
         except Exception as e:
             # Include full traceback so we can pinpoint which step in the
             # streaming pipeline failed (LOB-serialization bugs surface here
             # without a locator, which is useless for debugging).
             logger.exception("MemAgent streaming failed: %s", e)
+            # M3: structured error event so SSE translators / UIs can render
+            # an inline error banner instead of treating the error as text.
+            self._emit_stream_event(
+                "error",
+                {
+                    "message": str(e),
+                    "exception_type": type(e).__name__,
+                    "recoverable": False,
+                    "agent_id": self.agent_id,
+                },
+            )
+            self._emit_stream_event(
+                "stream_end",
+                {"reason": "error", "agent_id": self.agent_id},
+            )
             yield f"I apologize, but I encountered an error: {str(e)}"
         finally:
             self._stream_trace_events = None
@@ -2695,14 +2799,45 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
     def set_stream_event_callback(
         self, callback: Optional[Callable[[Dict[str, Any]], None]]
     ):
-        """Attach or clear a callback for structured streaming events."""
+        """Attach or clear a callback for structured streaming events.
+
+        The callback receives a single ``dict`` per event with at minimum a
+        ``type`` key. The full taxonomy of events emitted during a
+        ``run_stream()`` invocation is:
+
+        ============  =================================================================
+        type          payload (additional keys)
+        ============  =================================================================
+        stream_start  ``agent_id``, ``memory_id``, ``thread_id``, ``user_id``,
+                      ``has_request_context``. Fired once at the very top of
+                      run_stream so consumers can render "thinking…" UX before
+                      any text arrives.
+        trace         ``trace_kind`` discriminator with values: ``reasoning``,
+                      ``tool_call``, ``tool_result``. Plus ``title``, ``content``,
+                      ``trace_id``, ``tool_name`` etc. depending on kind.
+        error         ``message``, ``exception_type``, ``recoverable``,
+                      ``agent_id``. Fired when run_stream catches an exception
+                      mid-stream — UIs should render an error banner.
+        stream_end    ``reason`` (``completed``/``cache_hit``/``error``),
+                      ``agent_id``, optional ``response_length``. Fired once
+                      when the stream terminates.
+        ============  =================================================================
+
+        Text chunks themselves are yielded by the generator, not surfaced via
+        this callback. Translators that need a unified event stream (e.g. an
+        SSE bridge) should combine the yielded chunks (as ``content`` events)
+        with the callback events.
+        """
         self._stream_event_callback = callback
         return self
 
     def _emit_stream_event(
         self, event_type: str, payload: Optional[Dict[str, Any]] = None
     ) -> None:
-        """Emit a structured stream event to the UI callback when configured."""
+        """Emit a structured stream event to the UI callback when configured.
+
+        See :meth:`set_stream_event_callback` for the full event taxonomy.
+        """
         if event_type == "trace" and self._stream_trace_events is not None:
             if isinstance(payload, dict):
                 self._stream_trace_events.append(dict(payload))
@@ -2951,8 +3086,13 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         query: str,
         context: Dict[str, Any],
         user_id: Optional[str] = None,
+        request_context: Optional[Dict[str, Any]] = None,
     ) -> Generator[str, None, None]:
-        """Execute the LLM interaction with streaming and tool-calling support."""
+        """Execute the LLM interaction with streaming and tool-calling support.
+
+        ``request_context`` is forwarded to :meth:`_build_prompt_messages`
+        and is *not* persisted to ``conversation_memory``.
+        """
         if not self.model:
             yield self._no_llm_message()
             return
@@ -3001,7 +3141,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                     logger.error("Error storing streaming workflow: %s", exc)
 
         # Build messages (same as _execute_llm_interaction)
-        messages = self._build_prompt_messages(system_prompt, query, context)
+        messages = self._build_prompt_messages(
+            system_prompt, query, context, request_context=request_context
+        )
 
         # Build tools
         tools = None
@@ -3676,8 +3818,13 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         query: str,
         context: Dict[str, Any],
         user_id: Optional[str] = None,
+        request_context: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Execute the LLM interaction with tool calling support."""
+        """Execute the LLM interaction with tool calling support.
+
+        ``request_context`` is forwarded to :meth:`_build_prompt_messages`
+        and is *not* persisted to ``conversation_memory``.
+        """
         if not self.model:
             return self._no_llm_message()
 
@@ -3706,7 +3853,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 logger.debug(f"Created workflow for tracking: {workflow.workflow_id}")
 
             # Build initial messages
-            messages = self._build_prompt_messages(system_prompt, query, context)
+            messages = self._build_prompt_messages(
+                system_prompt, query, context, request_context=request_context
+            )
 
             # Get tool metadata if available and convert to OpenAI format
             tools = None
