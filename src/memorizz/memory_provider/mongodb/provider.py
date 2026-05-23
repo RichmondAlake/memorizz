@@ -388,8 +388,6 @@ class MongoDBProvider(MemoryProvider):
             elif "memory_type" in data:
                 memory_store_type = data["memory_type"]
             else:
-                from ...enums.memory_type import MemoryType
-
                 memory_store_type = MemoryType.CONVERSATION_MEMORY
 
         # Validate we have required parameters
@@ -400,8 +398,6 @@ class MongoDBProvider(MemoryProvider):
 
         # Ensure memory_store_type is MemoryType enum
         if isinstance(memory_store_type, str):
-            from ...enums.memory_type import MemoryType
-
             memory_store_type = MemoryType(memory_store_type)
 
         if memory_store_type == MemoryType.MEMAGENT:
@@ -543,8 +539,6 @@ class MongoDBProvider(MemoryProvider):
         # Handle new calling style: memory_type takes precedence over memory_store_type
         if memory_type is not None:
             if isinstance(memory_type, str):
-                from ...enums.memory_type import MemoryType
-
                 memory_store_type = MemoryType(memory_type)
             else:
                 memory_store_type = memory_type
