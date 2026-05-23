@@ -239,6 +239,7 @@ class KnowledgeBase:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         breakpoint_percentile: float = DEFAULT_SEMANTIC_BREAKPOINT_PERCENTILE,
+        user_id: Optional[str] = None,
     ) -> str:
         """
         Embed and save text content to the memory provider under the given namespace.
@@ -272,6 +273,12 @@ class KnowledgeBase:
             Only used by "semantic". Cut between sentences whose cosine
             distance is in the top ``(100 - breakpoint_percentile)`` percent.
             Lower values produce more chunks; higher values produce fewer.
+        user_id : Optional[str], default None
+            Tenant identifier written into every chunk so that downstream
+            ``retrieve_*`` calls on a user-scoped provider (e.g. MongoDB /
+            Oracle with KNOWLEDGE_BASE in their user-scoped set) only return
+            chunks belonging to ``user_id``. ``None`` preserves the legacy
+            anonymous-bucket behaviour, so existing callers are unaffected.
 
         Returns:
         --------
@@ -315,6 +322,7 @@ class KnowledgeBase:
                 "chunking_strategy": strategy_label,
                 "created_at": now,
                 "updated_at": now,
+                "user_id": user_id,
             }
             self.memory_provider.store(
                 entry, memory_store_type=MemoryType.KNOWLEDGE_BASE
@@ -509,6 +517,7 @@ class KnowledgeBase:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         breakpoint_percentile: float = DEFAULT_SEMANTIC_BREAKPOINT_PERCENTILE,
+        user_id: Optional[str] = None,
     ) -> str:
         """Ingest a single file from disk, raw bytes, or a file-like object.
 
@@ -532,6 +541,9 @@ class KnowledgeBase:
             an extractor.
         chunking_strategy, chunk_size, chunk_overlap, breakpoint_percentile:
             Forwarded to :meth:`ingest_knowledge`.
+        user_id:
+            Tenant identifier forwarded to :meth:`ingest_knowledge`; see its
+            docstring for behaviour. ``None`` preserves legacy semantics.
 
         Returns
         -------
@@ -562,6 +574,7 @@ class KnowledgeBase:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             breakpoint_percentile=breakpoint_percentile,
+            user_id=user_id,
         )
 
     def ingest_directory(
@@ -576,6 +589,7 @@ class KnowledgeBase:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         breakpoint_percentile: float = DEFAULT_SEMANTIC_BREAKPOINT_PERCENTILE,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Ingest every supported file under ``root``.
 
@@ -600,6 +614,9 @@ class KnowledgeBase:
             extractor — pass e.g. ``[".pdf"]`` to restrict the scan.
         chunking_strategy, chunk_size, chunk_overlap, breakpoint_percentile:
             Forwarded to :meth:`ingest_knowledge` for every file.
+        user_id:
+            Tenant identifier forwarded to every :meth:`ingest_file` call.
+            ``None`` preserves legacy semantics.
 
         Returns
         -------
@@ -635,6 +652,7 @@ class KnowledgeBase:
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
                     breakpoint_percentile=breakpoint_percentile,
+                    user_id=user_id,
                 )
             except ExtractorError as exc:
                 entry["error"] = str(exc)
