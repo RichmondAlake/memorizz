@@ -11,8 +11,14 @@ from pathlib import Path
 from typing import Optional
 
 
-def install_oracle():
-    """Install Oracle database using install_oracle.sh script."""
+def install_oracle(image: Optional[str] = None):
+    """Install Oracle database using install_oracle.sh script.
+
+    Args:
+        image: Oracle image to use without prompting. Accepted values:
+               'lite' (default Lite Edition), 'full' (Full Edition),
+               'community' (gvenzl community image), or '1'/'2'/'3'.
+    """
     # Try to find install_oracle.sh script
     # Check multiple possible locations
     possible_paths = [
@@ -48,12 +54,24 @@ def install_oracle():
     # Make script executable
     os.chmod(script_path, 0o755)
 
+    # Set up environment for non-interactive mode if image is specified
+    env = os.environ.copy()
+    if image:
+        image_map = {"lite": "1", "full": "2", "community": "3"}
+        choice = image_map.get(image.lower(), image)
+        if choice not in ("1", "2", "3"):
+            print(f"✗ Invalid image: {image}")
+            print("  Valid options: lite, full, community (or 1, 2, 3)")
+            return False
+        env["ORACLE_IMAGE_CHOICE"] = choice
+
     # Execute the script
     try:
         result = subprocess.run(
             ["bash", str(script_path.resolve())],
             check=False,  # Don't raise exception on non-zero exit
             capture_output=False,  # Show output in real-time
+            env=env,
         )
         return result.returncode == 0
     except Exception as e:
@@ -227,8 +245,22 @@ def run_automations(
     return True
 
 
+def _load_dotenv():
+    """Load .env file from current directory if python-dotenv is available."""
+    try:
+        from dotenv import load_dotenv
+
+        env_path = Path.cwd() / ".env"
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+    except ImportError:
+        pass
+
+
 def main():
     """Main CLI entry point."""
+    _load_dotenv()
+
     if len(sys.argv) < 2:
         print("Memorizz CLI")
         print("\nAvailable commands:")
@@ -243,7 +275,7 @@ def main():
         print(
             "  memorizz run automations [--poll-interval N] [--lease-seconds N] [--concurrency N]"
         )
-        print("  memorizz install-oracle")
+        print("  memorizz install-oracle [--image lite|full|community]")
         print("  memorizz setup-oracle")
         print("  memorizz setup-oracle-schema")
         print("  memorizz teardown-oracle [--mode MODE] [--force]")
@@ -318,7 +350,16 @@ def main():
         )
         sys.exit(0 if success else 1)
     elif command == "install-oracle":
-        success = install_oracle()
+        image = None
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] in ("--image", "-i") and i + 1 < len(sys.argv):
+                image = sys.argv[i + 1]
+                i += 2
+            else:
+                print(f"✗ Unknown option: {sys.argv[i]}")
+                sys.exit(1)
+        success = install_oracle(image=image)
         sys.exit(0 if success else 1)
     elif command == "setup-oracle":
         success = setup_oracle()

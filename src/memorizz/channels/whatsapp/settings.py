@@ -7,10 +7,8 @@
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ...long_term_memory.episodic.conversational_memory_unit import (
-    ConversationMemoryUnit,
-)
-from ...memory_provider.models import MemoryType
+from ...enums import MemoryType
+from ...long_term.episodic.conversational_memory_unit import ConversationMemoryUnit
 
 
 class WhatsAppSettings:
@@ -50,7 +48,7 @@ class WhatsAppSettings:
             content=agent_id,  # Store agent_id as content
             timestamp=datetime.now(timezone.utc).isoformat(),
             memory_id=self.settings_memory_id,
-            conversation_id="whatsapp_settings",
+            thread_id="whatsapp_settings",
         )
 
         # Store the setting
@@ -64,7 +62,7 @@ class WhatsAppSettings:
             content="",  # Empty content means no active agent
             timestamp=datetime.now(timezone.utc).isoformat(),
             memory_id=self.settings_memory_id,
-            conversation_id="whatsapp_settings",
+            thread_id="whatsapp_settings",
         )
 
         self.provider.store(setting_unit.model_dump())

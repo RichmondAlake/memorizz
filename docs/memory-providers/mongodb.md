@@ -20,7 +20,7 @@ provider = MongoDBProvider(MongoDBConfig(
 ))
 ```
 
-Collections are created lazily (e.g., `agents_personas`, `agents_long_term_memory`). Each document stores:
+Collections are created lazily (e.g., `agents_personas`, `agents_knowledge_base`). Each document stores:
 
 - Serialized payload (`data`)
 - Embedding vectors (array fields you can index with MongoDB Atlas Vector Search)

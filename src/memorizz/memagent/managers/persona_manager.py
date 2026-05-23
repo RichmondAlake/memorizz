@@ -2,12 +2,25 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-"""Persona management functionality for MemAgent."""
+"""Persona management for MemAgent.
+
+Wraps the :class:`~memorizz.long_term.semantic.persona.Persona` lifecycle for
+a single agent, including:
+
+- Accepting either a ``Persona`` instance or a stored dict via
+  :meth:`PersonaManager.set_persona` (dicts are rehydrated through
+  ``Persona.from_dict`` so legacy documents load cleanly).
+- Rendering the persona block for the agent system prompt, with optional
+  evolution-history context so the agent can reason about continuity when
+  calling ``update_persona``.
+- Applying traceable updates through :meth:`PersonaManager.apply_update`,
+  which persists to the PERSONAS collection and returns the history entry.
+"""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional, Union
 
-from ...long_term_memory.semantic.persona.persona import Persona
+from ...long_term.semantic.persona.persona import Persona
 
 logger = logging.getLogger(__name__)
 
@@ -15,9 +28,6 @@ logger = logging.getLogger(__name__)
 class PersonaManager:
     """
     Manages persona configuration and updates for MemAgent.
-
-    This class encapsulates persona-related functionality that was
-    previously embedded in the main MemAgent class.
     """
 
     def __init__(self, memory_provider=None):
@@ -28,236 +38,182 @@ class PersonaManager:
             memory_provider: Optional memory provider for persona storage.
         """
         self.memory_provider = memory_provider
-        self.current_persona = None
-        self._persona_cache = {}
+        self.current_persona: Optional[Persona] = None
+        self._persona_cache: Dict[str, Persona] = {}
 
-    def set_persona(self, persona: Persona, agent_id: str, save: bool = True) -> bool:
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def set_persona(
+        self,
+        persona: Union[Persona, Dict[str, Any], None],
+        agent_id: str,
+        save: bool = True,
+    ) -> bool:
         """
-        Set the agent's persona.
+        Set the agent's active persona.
 
-        Args:
-            persona: The Persona instance to set.
-            agent_id: The agent ID.
-            save: Whether to persist the persona.
+        ``persona`` may be a :class:`Persona` instance or a stored dict. Dicts
+        are rehydrated via :meth:`Persona.from_dict` (no default-merging, no
+        re-embedding) so round-tripped state is preserved.
 
-        Returns:
-            True if successful, False otherwise.
+        When ``save=True`` and a memory_provider is configured, the persona is
+        also stored in the PERSONAS collection so it becomes discoverable via
+        the saved-personas picker in the UI.
         """
         try:
-            self.current_persona = persona
+            if persona is None:
+                self.current_persona = None
+                if agent_id in self._persona_cache:
+                    del self._persona_cache[agent_id]
+                return True
 
-            # Cache the persona
-            self._persona_cache[agent_id] = persona
+            if isinstance(persona, Persona):
+                instance = persona
+            elif isinstance(persona, dict):
+                instance = Persona.from_dict(persona)
+            else:
+                logger.error(
+                    "set_persona received unsupported type %s; ignoring.",
+                    type(persona).__name__,
+                )
+                return False
 
-            # Persist if requested
-            if save and self.memory_provider:
-                self._persist_persona(agent_id, persona)
+            self.current_persona = instance
+            if agent_id:
+                self._persona_cache[agent_id] = instance
 
-            logger.info(f"Set persona for agent {agent_id}")
+            if save and self.memory_provider is not None:
+                try:
+                    instance.store_persona(self.memory_provider)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist persona to PERSONAS collection: %s", exc
+                    )
+
+            logger.info("Set persona for agent %s", agent_id)
             return True
 
-        except Exception as e:
-            logger.error(f"Failed to set persona: {e}")
+        except Exception as exc:
+            logger.error("Failed to set persona: %s", exc, exc_info=True)
             return False
 
     def load_persona(self, persona_id: str) -> Optional[Persona]:
         """
-        Load a persona from storage.
+        Load a persona from the PERSONAS collection by storage id.
 
-        Args:
-            persona_id: The persona ID to load.
-
-        Returns:
-            The loaded Persona instance, or None if not found.
+        Returns a :class:`Persona` instance or None if not found.
         """
-        try:
-            # Check cache first
-            if persona_id in self._persona_cache:
-                return self._persona_cache[persona_id]
-
-            # Load from storage
-            if self.memory_provider:
-                persona_data = self.memory_provider.retrieve_by_id(persona_id)
-                if persona_data:
-                    persona = self._deserialize_persona(persona_data)
-                    self._persona_cache[persona_id] = persona
-                    return persona
-
-            logger.warning(f"Persona not found: {persona_id}")
+        if not persona_id:
             return None
+        if persona_id in self._persona_cache:
+            return self._persona_cache[persona_id]
 
-        except Exception as e:
-            logger.error(f"Failed to load persona: {e}")
-            return None
-
-    def update_persona_from_summaries(
-        self, summaries: List[str], llm_provider=None
-    ) -> Dict[str, str]:
-        """
-        Update persona based on memory summaries.
-
-        Args:
-            summaries: List of memory summaries.
-            llm_provider: LLM provider for generating updates.
-
-        Returns:
-            Dictionary with updated persona attributes.
-        """
-        try:
-            if not self.current_persona:
-                logger.warning("No current persona to update")
-                return {}
-
-            # Generate persona updates using LLM
-            updates = self._generate_persona_updates(summaries, llm_provider)
-
-            # Apply updates to current persona
-            if updates:
-                self._apply_persona_updates(updates)
-
-            return updates
-
-        except Exception as e:
-            logger.error(f"Failed to update persona from summaries: {e}")
-            return {}
-
-    def export_persona(self) -> Optional[Dict[str, Any]]:
-        """
-        Export the current persona as a dictionary.
-
-        Returns:
-            Dictionary representation of the persona.
-        """
-        if not self.current_persona:
+        if self.memory_provider is None:
             return None
 
         try:
-            return {
-                "name": getattr(self.current_persona, "name", "Unknown"),
-                "role": getattr(self.current_persona, "role", "Assistant"),
-                "personality_traits": getattr(
-                    self.current_persona, "personality_traits", []
-                ),
-                "expertise": getattr(self.current_persona, "expertise", []),
-                "background": getattr(self.current_persona, "background", ""),
-                "goals": getattr(self.current_persona, "goals", []),
-                "constraints": getattr(self.current_persona, "constraints", []),
-            }
-        except Exception as e:
-            logger.error(f"Failed to export persona: {e}")
+            persona_data = Persona.retrieve_persona(persona_id, self.memory_provider)
+            if not persona_data:
+                logger.warning("Persona not found: %s", persona_id)
+                return None
+            persona = Persona.from_dict(persona_data)
+            self._persona_cache[persona_id] = persona
+            return persona
+        except Exception as exc:
+            logger.error("Failed to load persona %s: %s", persona_id, exc)
             return None
 
-    def delete_persona(self, agent_id: str, save: bool = True) -> bool:
-        """
-        Delete the agent's persona.
-
-        Args:
-            agent_id: The agent ID.
-            save: Whether to persist the deletion.
-
-        Returns:
-            True if successful, False otherwise.
-        """
+    def delete_persona(self, agent_id: str) -> bool:
+        """Clear the agent's active persona (does not delete from storage)."""
         try:
-            # Clear current persona
             self.current_persona = None
-
-            # Remove from cache
             if agent_id in self._persona_cache:
                 del self._persona_cache[agent_id]
-
-            # Persist deletion if requested
-            if save and self.memory_provider:
-                # Update agent to remove persona reference
-                pass  # Implementation depends on memory provider interface
-
-            logger.info(f"Deleted persona for agent {agent_id}")
             return True
-
-        except Exception as e:
-            logger.error(f"Failed to delete persona: {e}")
+        except Exception as exc:
+            logger.error("Failed to clear persona: %s", exc)
             return False
 
-    def get_persona_prompt(self) -> str:
+    # ------------------------------------------------------------------
+    # Evolution
+    # ------------------------------------------------------------------
+
+    def apply_update(
+        self,
+        updates: Dict[str, Any],
+        change_trigger: Dict[str, Any],
+    ) -> Dict[str, Any]:
         """
-        Generate a prompt string from the current persona.
+        Apply a traceable update to the active persona.
 
-        Returns:
-            Formatted persona prompt string.
+        Delegates to :meth:`Persona.update`. The persona document in the
+        PERSONAS collection is updated in place (or re-stored if the storage
+        id is unknown); the caller is responsible for refreshing any
+        downstream snapshot (e.g. MemAgentModel.persona) via
+        :attr:`current_persona` afterwards.
         """
-        if not self.current_persona:
-            return ""
-
+        if self.current_persona is None:
+            return {
+                "updated": False,
+                "error": (
+                    "No active persona set on this agent. Attach a persona via "
+                    "MemAgentBuilder().with_persona(...) or agent.set_persona(...)."
+                ),
+            }
+        if self.memory_provider is None:
+            return {
+                "updated": False,
+                "error": (
+                    "No memory_provider configured; persona updates cannot be persisted."
+                ),
+            }
         try:
-            prompt_parts = []
-
-            if hasattr(self.current_persona, "name"):
-                prompt_parts.append(f"You are {self.current_persona.name}")
-
-            if hasattr(self.current_persona, "role"):
-                prompt_parts.append(f"Your role is: {self.current_persona.role}")
-
-            if hasattr(self.current_persona, "personality_traits"):
-                traits = self.current_persona.personality_traits
-                if traits:
-                    prompt_parts.append(f"Personality traits: {', '.join(traits)}")
-
-            if hasattr(self.current_persona, "expertise"):
-                expertise = self.current_persona.expertise
-                if expertise:
-                    prompt_parts.append(f"Areas of expertise: {', '.join(expertise)}")
-
-            if hasattr(self.current_persona, "background"):
-                if self.current_persona.background:
-                    prompt_parts.append(
-                        f"Background: {self.current_persona.background}"
-                    )
-
-            return "\n".join(prompt_parts)
-
-        except Exception as e:
-            logger.error(f"Failed to generate persona prompt: {e}")
-            return ""
-
-    def _persist_persona(self, agent_id: str, persona: Persona) -> bool:
-        """Persist persona to storage."""
-        try:
-            if not self.memory_provider:
-                return False
-
-            # Serialize and store persona
-            persona_data = self._serialize_persona(persona)
-            self.memory_provider.store(
-                memory_id=f"persona_{agent_id}", memory_unit=persona_data
+            return self.current_persona.update(
+                updates=updates,
+                change_trigger=change_trigger,
+                provider=self.memory_provider,
             )
+        except ValueError as exc:
+            return {"updated": False, "error": str(exc)}
+        except Exception as exc:
+            logger.error("persona.update failed: %s", exc, exc_info=True)
+            return {"updated": False, "error": f"Internal error: {exc}"}
 
-            return True
+    # ------------------------------------------------------------------
+    # Export / prompt
+    # ------------------------------------------------------------------
 
-        except Exception as e:
-            logger.error(f"Failed to persist persona: {e}")
-            return False
+    def export_persona(self) -> Optional[Dict[str, Any]]:
+        """Return the current persona as a dict, including history."""
+        if self.current_persona is None:
+            return None
+        try:
+            return self.current_persona.to_dict()
+        except Exception as exc:
+            logger.error("Failed to export persona: %s", exc)
+            return None
 
-    def _serialize_persona(self, persona: Persona) -> Dict[str, Any]:
-        """Serialize a Persona instance to dictionary."""
-        return self.export_persona() or {}
+    def get_persona_prompt(
+        self,
+        include_history: bool = True,
+        history_limit: int = 5,
+    ) -> str:
+        """
+        Render the persona block for the agent system prompt.
 
-    def _deserialize_persona(self, data: Dict[str, Any]) -> Persona:
-        """Deserialize dictionary to Persona instance."""
-        # This would need proper implementation based on Persona class
-        return Persona(**data)
-
-    def _generate_persona_updates(
-        self, summaries: List[str], llm_provider
-    ) -> Dict[str, str]:
-        """Generate persona updates using LLM."""
-        # Placeholder for LLM-based persona update generation
-        return {}
-
-    def _apply_persona_updates(self, updates: Dict[str, str]):
-        """Apply updates to the current persona."""
-        if not self.current_persona:
-            return
-
-        for key, value in updates.items():
-            if hasattr(self.current_persona, key):
-                setattr(self.current_persona, key, value)
+        When ``include_history=True`` and evolution_history is non-empty, the
+        block also summarizes recent changes so the agent can preserve
+        continuity when deciding whether to call ``update_persona``.
+        """
+        if self.current_persona is None:
+            return ""
+        try:
+            return self.current_persona.generate_system_prompt_input(
+                include_history=include_history,
+                history_limit=history_limit,
+            )
+        except Exception as exc:
+            logger.error("Failed to generate persona prompt: %s", exc)
+            return ""

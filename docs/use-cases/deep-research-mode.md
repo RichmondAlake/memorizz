@@ -43,7 +43,7 @@ Use this path for most workflows. Drop down to manual wiring when you need per-a
 
 - `MemoryType.TOOLBOX` — dynamic research tools (web search, document loaders, code runners).
 - `MemoryType.SHARED_MEMORY` — blackboard coordination layer so agents can exchange directives, progress, and research artifacts.
-- `MemoryType.LONG_TERM_MEMORY` — research knowledge base for source documents, citations, and reusable findings.
+- `MemoryType.KNOWLEDGE_BASE` — research knowledge base for source documents, citations, and reusable findings.
 - `MemoryType.SHORT_TERM_MEMORY` — rolling scratchpad for intra-session reasoning plus summary references.
 
 ## Agent Topology
@@ -59,7 +59,7 @@ Use this path for most workflows. Drop down to manual wiring when you need per-a
 
 3. **Synthesis Agent**
    - Subscribes to the shared session but only acts once `REPORT` entries exist for every sub-task.
-   - Consolidates delegate reports, resolves conflicts using long-term memory lookups, and produces the final narrative plus confidence notes before sending it back to the root (and optionally the user).
+   - Consolidates delegate reports, resolves conflicts using knowledge base lookups, and produces the final narrative plus confidence notes before sending it back to the root (and optionally the user).
 
 This mirrors MemoRizz’s existing multi-agent pattern (see `docs/memory-types/shared.md`): root + delegates coordinated through `SharedMemory`.
 
@@ -69,7 +69,7 @@ This mirrors MemoRizz’s existing multi-agent pattern (see `docs/memory-types/s
 - **Progress signaling**: Delegates log compact `STATUS` payloads (progress %, blockers, immediate next step) so the root can adjust directions mid-flight.
 - **Report routing**: On completion, delegates post a structured `REPORT` (summary, evidence pointers, unresolved gaps) addressed to the synthesis agent while CC’ing the root.
 - **Root directives**: The root agent processes every `STATUS`, updates the dependency map, and either issues new `COMMAND` instructions or requests clarifications via targeted `QUESTION`s.
-- **Synthesis hand-off**: Once all reports are in, the root emits a `COMMAND:assemble` to the synthesis agent. The synthesizer compiles the master report, stores it in long-term memory, and posts the final response/log bundle.
+- **Synthesis hand-off**: Once all reports are in, the root emits a `COMMAND:assemble` to the synthesis agent. The synthesizer compiles the master report, stores it in the knowledge base, and posts the final response/log bundle.
 
 ## Internet Access Defaults
 
@@ -155,7 +155,7 @@ Each delegate repeats the builder call with role-specific instructions (research
 
 - **Root coordinator prompt** – Mission statement (“decompose, assign, guardrails”), explicit communication grammar (`COMMAND/STATUS/REPORT/QUESTION`), rules for dependency tracking, escalation policy, and reminder that only the root can spawn new agents.
 - **Delegate prompt** – Sub-question definition, deliverable schema, progress-report cadence, summary-ID policy, context-window check reminder, and the prohibition on spawning additional delegates (must escalate to root).
-- **Synthesis prompt** – Input report checklist, gap-analysis instructions, reference validation steps against long-term memory, expectation to archive the final response plus logs in shared memory and to output the user-facing deliverable.
+- **Synthesis prompt** – Input report checklist, gap-analysis instructions, reference validation steps against the knowledge base, expectation to archive the final response plus logs in shared memory and to output the user-facing deliverable.
 
 ## When to Use
 

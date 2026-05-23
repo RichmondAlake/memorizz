@@ -51,12 +51,12 @@ class TestSingleAgentBasics:
         )
 
         # Simulate a conversation
-        conversation_id = "conv_single_agent_123"
+        thread_id = "conv_single_agent_123"
         memory_id = "mem_single_agent_123"
 
         # Turn 1
         response1 = agent.run(
-            "Hello, how are you?", memory_id=memory_id, conversation_id=conversation_id
+            "Hello, how are you?", memory_id=memory_id, thread_id=thread_id
         )
         assert_agent_response_valid(response1)
 
@@ -64,13 +64,13 @@ class TestSingleAgentBasics:
         response2 = agent.run(
             "What can you help me with?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response2)
 
         # Turn 3
         response3 = agent.run(
-            "What is 2 + 2?", memory_id=memory_id, conversation_id=conversation_id
+            "What is 2 + 2?", memory_id=memory_id, thread_id=thread_id
         )
         assert_agent_response_valid(response3)
 
@@ -217,19 +217,15 @@ class TestSingleAgentSemanticCache:
             semantic_cache_config={"similarity_threshold": 0.8},
         )
 
-        conversation_id = "cache_test_conv"
+        thread_id = "cache_test_conv"
 
         # First query - should hit LLM and cache result
-        response1 = agent.run(
-            "What is the capital of France?", conversation_id=conversation_id
-        )
+        response1 = agent.run("What is the capital of France?", thread_id=thread_id)
         assert_agent_response_valid(response1)
         assert llm_provider.call_count == 1
 
         # Similar query - might hit cache depending on implementation
-        response2 = agent.run(
-            "What's the capital city of France?", conversation_id=conversation_id
-        )
+        response2 = agent.run("What's the capital city of France?", thread_id=thread_id)
         assert_agent_response_valid(response2)
 
         # Cache behavior depends on semantic similarity implementation
@@ -254,18 +250,12 @@ class TestSingleAgentSemanticCache:
             semantic_cache=True,
         )
 
-        conversation_id = "cache_miss_conv"
+        thread_id = "cache_miss_conv"
 
         # Three different queries - should all miss cache
-        response1 = agent.run(
-            "What is the capital of France?", conversation_id=conversation_id
-        )
-        response2 = agent.run(
-            "What is the capital of Germany?", conversation_id=conversation_id
-        )
-        response3 = agent.run(
-            "What is the capital of Italy?", conversation_id=conversation_id
-        )
+        response1 = agent.run("What is the capital of France?", thread_id=thread_id)
+        response2 = agent.run("What is the capital of Germany?", thread_id=thread_id)
+        response3 = agent.run("What is the capital of Italy?", thread_id=thread_id)
 
         assert_agent_response_valid(response1)
         assert_agent_response_valid(response2)

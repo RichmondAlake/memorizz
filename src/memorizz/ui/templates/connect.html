@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connect - Memorizz</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=4">
+    <link rel="stylesheet" href="/static/css/styles.css?v=8">
     <style>
         /* Ensure select dropdown matches dark theme */
         select {
@@ -86,10 +86,141 @@
             </div>
 
             {% if error %}
-            <div class="error-message">
+            <div class="error-message" id="connect-error">
                 <span>⚠️</span> {{ error }}
             </div>
             {% endif %}
+
+            <!-- Oracle Docker recovery (hidden by default, revealed by JS when the
+                 error looks like connection-refused and Docker is available) -->
+            <div id="docker-recovery" style="display:none; margin-top: 0.75rem; padding: 0.85rem 1rem; border: 1px solid rgba(0, 217, 255, 0.25); border-radius: 8px; background: rgba(0, 217, 255, 0.04);">
+                <div id="docker-recovery-title" style="font-weight: 600; color: #00d9ff; margin-bottom: 0.35rem;">Oracle container check</div>
+                <div id="docker-recovery-body" style="font-size: 0.85rem; color: var(--text-secondary, #aaa); margin-bottom: 0.6rem;">
+                    Checking local Docker for a Memorizz Oracle container…
+                </div>
+                <button type="button" id="docker-recovery-action" style="display:none; background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%); color: #00d9ff; border: 1px solid rgba(0, 217, 255, 0.4); padding: 0.5rem 1rem; border-radius: 6px; font-weight: 600; cursor: pointer;"></button>
+            </div>
+
+            <!-- Confirmation + progress modal -->
+            <div id="docker-modal-overlay" style="display:none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); z-index: 1000; align-items: center; justify-content: center;">
+                <div class="docker-modal-dialog" style="background: #0a0a0a; border: 1px solid rgba(0, 217, 255, 0.3); border-radius: 10px; padding: 1.5rem; max-width: 640px; width: 92%; max-height: 86vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);">
+                    <h3 id="docker-modal-title" style="color: #00d9ff; margin: 0 0 0.75rem 0; font-size: 1.1rem;">Confirm</h3>
+                    <p id="docker-modal-body" style="color: var(--text-secondary, #bbb); font-size: 0.9rem; line-height: 1.5; margin: 0 0 1rem 0;"></p>
+                    <div id="docker-modal-progress" style="display:none; font-size: 0.85rem; color: #00d9ff; margin-bottom: 1rem;">
+                        <div style="display:flex; align-items:center; gap:0.5rem;">
+                            <div class="docker-spinner" style="width:14px; height:14px; border: 2px solid rgba(0, 217, 255, 0.3); border-top-color: #00d9ff; border-radius: 50%; animation: docker-spin 0.9s linear infinite;"></div>
+                            <span id="docker-progress-text">Working…</span>
+                        </div>
+                        <div id="docker-progress-elapsed" style="font-size: 0.75rem; color: #888; margin-top: 0.35rem;"></div>
+                    </div>
+
+                    <!-- Phase checklist (Option 3: structured progress above the raw log) -->
+                    <ol id="docker-phase-list" class="docker-phase-list" style="display:none;">
+                        <li data-phase="container_ready"><span class="phase-icon">○</span><span class="phase-label">Container created</span></li>
+                        <li data-phase="db_initializing"><span class="phase-icon">○</span><span class="phase-label">Initializing database</span></li>
+                        <li data-phase="healthy"><span class="phase-icon">○</span><span class="phase-label">Healthy and accepting connections</span></li>
+                    </ol>
+
+                    <!-- Collapsible live-log panel — SSE stream of `docker logs -f` -->
+                    <details id="docker-log-details" class="docker-log-details" style="display:none;">
+                        <summary>Show startup logs <span id="docker-log-count" class="docker-log-count"></span></summary>
+                        <pre id="docker-log-panel" class="docker-log-panel" aria-live="polite"></pre>
+                    </details>
+
+                    <div id="docker-modal-buttons" style="display:flex; justify-content:flex-end; gap: 0.5rem; margin-top: 0.75rem;">
+                        <button type="button" id="docker-modal-cancel" style="background: transparent; color: #aaa; border: 1px solid #333; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer;">Cancel</button>
+                        <button type="button" id="docker-modal-confirm" style="background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%); color: #00d9ff; border: 1px solid rgba(0, 217, 255, 0.4); padding: 0.5rem 1rem; border-radius: 6px; font-weight: 600; cursor: pointer;">Confirm</button>
+                    </div>
+                </div>
+            </div>
+
+            <style>
+                @keyframes docker-spin { to { transform: rotate(360deg); } }
+
+                /* Phase checklist */
+                .docker-phase-list {
+                    list-style: none;
+                    padding: 0;
+                    margin: 0 0 1rem 0;
+                    border: 1px solid rgba(0, 217, 255, 0.15);
+                    border-radius: 8px;
+                    overflow: hidden;
+                }
+                .docker-phase-list li {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.6rem;
+                    padding: 0.55rem 0.8rem;
+                    font-size: 0.85rem;
+                    color: #888;
+                    border-top: 1px solid rgba(255, 255, 255, 0.05);
+                }
+                .docker-phase-list li:first-child { border-top: none; }
+                .docker-phase-list li .phase-icon {
+                    display: inline-block;
+                    width: 1.2em;
+                    text-align: center;
+                    font-weight: 700;
+                }
+                .docker-phase-list li.is-active {
+                    color: #00d9ff;
+                    background: rgba(0, 217, 255, 0.04);
+                }
+                .docker-phase-list li.is-active .phase-icon {
+                    animation: docker-phase-pulse 1.1s ease-in-out infinite;
+                }
+                .docker-phase-list li.is-done {
+                    color: #77ffaa;
+                }
+                @keyframes docker-phase-pulse {
+                    0%, 100% { opacity: 1; }
+                    50%      { opacity: 0.35; }
+                }
+
+                /* Collapsible log panel */
+                .docker-log-details {
+                    margin-top: 0.5rem;
+                    border: 1px solid rgba(255, 255, 255, 0.08);
+                    border-radius: 8px;
+                    background: #050505;
+                }
+                .docker-log-details > summary {
+                    cursor: pointer;
+                    padding: 0.5rem 0.8rem;
+                    font-size: 0.82rem;
+                    color: #aaa;
+                    list-style: none;
+                    user-select: none;
+                }
+                .docker-log-details > summary::-webkit-details-marker { display: none; }
+                .docker-log-details > summary::before {
+                    content: '▸ ';
+                    display: inline-block;
+                    transition: transform 0.15s ease;
+                }
+                .docker-log-details[open] > summary::before {
+                    transform: rotate(90deg);
+                }
+                .docker-log-count {
+                    color: #666;
+                    font-size: 0.75rem;
+                    margin-left: 0.35rem;
+                }
+                .docker-log-panel {
+                    margin: 0;
+                    padding: 0.6rem 0.8rem;
+                    max-height: 280px;
+                    overflow-y: auto;
+                    background: #000;
+                    color: #b8d4e3;
+                    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                    font-size: 0.74rem;
+                    line-height: 1.4;
+                    white-space: pre-wrap;
+                    word-break: break-word;
+                    border-top: 1px solid rgba(255, 255, 255, 0.06);
+                }
+            </style>
 
             <form method="post" action="/connect" class="connect-form">
                 <div class="form-group">
@@ -105,12 +236,12 @@
                 <div id="oracle-fields" class="provider-fields">
                     <div class="form-group">
                         <label for="oracle_user">Username</label>
-                        <input type="text" name="oracle_user" id="oracle_user" placeholder="memorizz_user">
+                        <input type="text" name="oracle_user" id="oracle_user" value="{{ env_oracle_user }}" placeholder="memorizz_user">
                     </div>
                     <div class="form-group">
                         <label for="oracle_password">Password</label>
                         <div class="password-field">
-                            <input type="password" name="oracle_password" id="oracle_password" placeholder="••••••••">
+                            <input type="password" name="oracle_password" id="oracle_password" value="{{ env_oracle_password }}" placeholder="••••••••">
                             <button type="button" class="password-toggle" data-target="oracle_password" aria-label="Show password" aria-pressed="false">
                                 <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
@@ -127,11 +258,11 @@
                     </div>
                     <div class="form-group">
                         <label for="oracle_dsn">DSN</label>
-                        <input type="text" name="oracle_dsn" id="oracle_dsn" placeholder="localhost:1521/FREEPDB1">
+                        <input type="text" name="oracle_dsn" id="oracle_dsn" value="{{ env_oracle_dsn }}" placeholder="localhost:1521/FREEPDB1">
                     </div>
                     <div class="form-group">
                         <label for="oracle_schema">Schema <span class="optional">(optional)</span></label>
-                        <input type="text" name="oracle_schema" id="oracle_schema" placeholder="Leave empty to use username">
+                        <input type="text" name="oracle_schema" id="oracle_schema" value="{{ env_oracle_schema }}" placeholder="Leave empty to use username">
                     </div>
                 </div>
 
@@ -139,11 +270,11 @@
                 <div id="mongodb-fields" class="provider-fields" style="display: none;">
                     <div class="form-group">
                         <label for="mongodb_uri">Connection URI</label>
-                        <input type="text" name="mongodb_uri" id="mongodb_uri" placeholder="mongodb://localhost:27017">
+                        <input type="text" name="mongodb_uri" id="mongodb_uri" value="{{ env_mongodb_uri }}" placeholder="mongodb://localhost:27017">
                     </div>
                     <div class="form-group">
                         <label for="mongodb_db_name">Database Name <span class="optional">(optional)</span></label>
-                        <input type="text" name="mongodb_db_name" id="mongodb_db_name" placeholder="memorizz">
+                        <input type="text" name="mongodb_db_name" id="mongodb_db_name" value="{{ env_mongodb_db_name }}" placeholder="memorizz">
                     </div>
                 </div>
 
@@ -274,7 +405,476 @@
                     localStorage.removeItem(STORAGE_KEY);
                 }
             });
+
+            // --- Oracle Docker recovery ---
+            maybeInitDockerRecovery();
         });
+
+        // Detect connection-refused style errors and offer a one-click start/create.
+        function maybeInitDockerRecovery() {
+            const errorEl = document.getElementById('connect-error');
+            if (!errorEl) return;
+            const providerSel = document.getElementById('provider_type');
+            if (!providerSel || providerSel.value !== 'oracle') return;
+
+            const msg = errorEl.textContent.toLowerCase();
+            const refusedMarkers = [
+                'cannot reach oracle',
+                'connection refused',
+                'errno 61',
+                'dpy-6005',
+                'ora-12541',
+                'ora-12170',
+                'no listener',
+                'timed out',
+                'econnrefused',
+            ];
+            const looksRefused = refusedMarkers.some(m => msg.includes(m));
+            if (!looksRefused) return;
+
+            const recovery = document.getElementById('docker-recovery');
+            recovery.style.display = 'block';
+            fetchOracleStatus();
+        }
+
+        async function fetchOracleStatus() {
+            const bodyEl = document.getElementById('docker-recovery-body');
+            const btnEl = document.getElementById('docker-recovery-action');
+            btnEl.style.display = 'none';
+            try {
+                const res = await fetch('/api/docker/oracle/status', { cache: 'no-store' });
+                const data = await res.json();
+                renderOracleStatus(data);
+            } catch (e) {
+                bodyEl.textContent = 'Could not reach the UI server to check Docker state.';
+            }
+        }
+
+        function renderOracleStatus(data) {
+            const bodyEl = document.getElementById('docker-recovery-body');
+            const btnEl = document.getElementById('docker-recovery-action');
+
+            if (data.state === 'docker-unavailable') {
+                renderDockerUnavailable();
+                return;
+            }
+
+            const existing = Array.isArray(data.existing) ? data.existing : [];
+            if (existing.length > 0) {
+                // Build a per-container list with Start (stopped) or status (running).
+                const lines = existing.map(c => {
+                    const portInfo = c.ports ? ` <span style="color:#888; font-size:0.8rem;">${escapeHtml(c.ports)}</span>` : '';
+                    if (c.state === 'running') {
+                        return `<div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem; padding:0.4rem 0; border-top:1px solid rgba(255,255,255,0.05);">
+                            <span><code>${escapeHtml(c.name)}</code>${portInfo} <span style="color:#77ffaa; font-size:0.75rem;">● running</span></span>
+                            <span style="font-size:0.75rem; color:#888;">check DSN/creds</span>
+                        </div>`;
+                    }
+                    return `<div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem; padding:0.4rem 0; border-top:1px solid rgba(255,255,255,0.05);">
+                        <span><code>${escapeHtml(c.name)}</code>${portInfo} <span style="color:#aaa; font-size:0.75rem;">● stopped</span></span>
+                        <button type="button" data-container="${escapeHtml(c.name)}" class="docker-start-btn" style="background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%); color: #00d9ff; border: 1px solid rgba(0, 217, 255, 0.4); padding: 0.3rem 0.75rem; border-radius: 5px; font-size: 0.8rem; font-weight: 600; cursor: pointer;">Start</button>
+                    </div>`;
+                }).join('');
+                bodyEl.innerHTML = `Found existing Oracle container(s):${lines}`;
+                btnEl.textContent = 'Or create a new one';
+                btnEl.onclick = () => confirmAndCreate();
+                btnEl.style.display = 'inline-block';
+                btnEl.style.marginTop = '0.6rem';
+                // Wire the per-row Start buttons.
+                bodyEl.querySelectorAll('.docker-start-btn').forEach(b => {
+                    b.addEventListener('click', () => confirmAndStart(b.dataset.container));
+                });
+                return;
+            }
+
+            // Nothing found — offer create.
+            bodyEl.innerHTML = `No existing Oracle container found. We can create one named <code>${escapeHtml(data.container_name)}</code> using <code>${escapeHtml(data.image)}</code> and the credentials/port you entered above.`;
+            btnEl.textContent = 'Create container';
+            btnEl.onclick = () => confirmAndCreate();
+            btnEl.style.display = 'inline-block';
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[c]);
+        }
+
+        // --- Modal helpers ---
+        const modalOverlay = () => document.getElementById('docker-modal-overlay');
+        const modalTitle = () => document.getElementById('docker-modal-title');
+        const modalBody = () => document.getElementById('docker-modal-body');
+        const modalProgress = () => document.getElementById('docker-modal-progress');
+        const modalButtons = () => document.getElementById('docker-modal-buttons');
+        const modalConfirm = () => document.getElementById('docker-modal-confirm');
+        const modalCancel = () => document.getElementById('docker-modal-cancel');
+        const progressText = () => document.getElementById('docker-progress-text');
+        const progressElapsed = () => document.getElementById('docker-progress-elapsed');
+
+        function openModal({ title, body, confirmLabel, onConfirm }) {
+            modalTitle().textContent = title;
+            modalBody().textContent = body;
+            modalBody().style.color = '';
+            modalProgress().style.display = 'none';
+            modalButtons().style.display = 'flex';
+            modalCancel().style.display = 'inline-block';
+            modalCancel().textContent = 'Cancel';
+            modalConfirm().textContent = confirmLabel;
+            modalConfirm().disabled = false;
+            modalCancel().disabled = false;
+            modalConfirm().onclick = onConfirm;
+            modalCancel().onclick = closeModal;
+            // Hide phase list + log panel until we explicitly attach them.
+            resetPhaseAndLogUI();
+            modalOverlay().style.display = 'flex';
+        }
+
+        function closeModal() {
+            modalOverlay().style.display = 'none';
+            detachLogStream();
+        }
+
+        function setModalWorking(text) {
+            modalButtons().style.display = 'none';
+            modalProgress().style.display = 'block';
+            progressText().textContent = text;
+            progressElapsed().textContent = '';
+        }
+
+        // --- Phase checklist + log streaming ---------------------------------
+        // Uses SSE (/api/docker/oracle/logs/stream) so the user sees real
+        // Oracle output during the 5-minute first boot instead of a blank
+        // spinner. Phase detection runs client-side against known gvenzl
+        // startup banners — easy to extend if the image changes banners.
+
+        const PHASE_ORDER = ['container_ready', 'db_initializing', 'healthy'];
+        const PHASE_PATTERNS = [
+            // Once Oracle's main init scripts fire we know the DB is initializing.
+            { phase: 'db_initializing', pattern: /DATABASE|ORACLE EDITION|Oracle Net Listener|Completed:/i },
+            // gvenzl's final banner before the healthcheck flips green.
+            { phase: 'healthy', pattern: /DATABASE IS READY TO USE/i },
+        ];
+        let _logStream = null;           // EventSource
+        let _logLineCount = 0;
+        let _currentPhase = null;        // last phase we advanced to
+
+        function resetPhaseAndLogUI() {
+            _logLineCount = 0;
+            _currentPhase = null;
+            const list = document.getElementById('docker-phase-list');
+            if (list) {
+                list.style.display = 'none';
+                list.querySelectorAll('li').forEach(li => {
+                    li.classList.remove('is-active', 'is-done');
+                    const icon = li.querySelector('.phase-icon');
+                    if (icon) icon.textContent = '○';
+                });
+            }
+            const details = document.getElementById('docker-log-details');
+            if (details) {
+                details.style.display = 'none';
+                details.open = false;
+            }
+            const panel = document.getElementById('docker-log-panel');
+            if (panel) panel.textContent = '';
+            const count = document.getElementById('docker-log-count');
+            if (count) count.textContent = '';
+        }
+
+        function showPhaseAndLogUI() {
+            const list = document.getElementById('docker-phase-list');
+            if (list) list.style.display = 'block';
+            const details = document.getElementById('docker-log-details');
+            if (details) details.style.display = 'block';
+            advancePhase('container_ready');
+        }
+
+        function advancePhase(target) {
+            const targetIdx = PHASE_ORDER.indexOf(target);
+            if (targetIdx < 0) return;
+            const currentIdx = _currentPhase ? PHASE_ORDER.indexOf(_currentPhase) : -1;
+            if (targetIdx <= currentIdx) return;  // only move forward
+            _currentPhase = target;
+            const list = document.getElementById('docker-phase-list');
+            if (!list) return;
+            list.querySelectorAll('li').forEach(li => {
+                const p = li.dataset.phase;
+                const idx = PHASE_ORDER.indexOf(p);
+                const icon = li.querySelector('.phase-icon');
+                li.classList.remove('is-active', 'is-done');
+                if (idx < targetIdx) {
+                    li.classList.add('is-done');
+                    if (icon) icon.textContent = '✓';
+                } else if (idx === targetIdx) {
+                    li.classList.add('is-active');
+                    if (icon) icon.textContent = '●';
+                } else {
+                    if (icon) icon.textContent = '○';
+                }
+            });
+        }
+
+        function detectPhaseFromLine(line) {
+            for (const { phase, pattern } of PHASE_PATTERNS) {
+                if (pattern.test(line)) advancePhase(phase);
+            }
+        }
+
+        function appendLogLine(line) {
+            const panel = document.getElementById('docker-log-panel');
+            if (!panel) return;
+            // Strip common Oracle ANSI noise (best-effort).
+            const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
+            const autoscroll = (panel.scrollTop + panel.clientHeight) >= (panel.scrollHeight - 4);
+            panel.appendChild(document.createTextNode(clean + '\n'));
+            if (autoscroll) panel.scrollTop = panel.scrollHeight;
+            _logLineCount += 1;
+            const count = document.getElementById('docker-log-count');
+            if (count) count.textContent = `(${_logLineCount} line${_logLineCount === 1 ? '' : 's'})`;
+            detectPhaseFromLine(clean);
+        }
+
+        function attachLogStream(containerName) {
+            detachLogStream();
+            showPhaseAndLogUI();
+            const url = `/api/docker/oracle/logs/stream?name=${encodeURIComponent(containerName)}`;
+            try {
+                _logStream = new EventSource(url);
+            } catch (e) {
+                appendLogLine(`[log-stream] could not open: ${e}`);
+                return;
+            }
+            _logStream.addEventListener('log', (ev) => {
+                try {
+                    const { line } = JSON.parse(ev.data);
+                    if (line) appendLogLine(line);
+                } catch (_) { /* ignore malformed frames */ }
+            });
+            _logStream.addEventListener('error', (ev) => {
+                // EventSource auto-reconnects on transient errors; only log
+                // if the stream has closed for good.
+                if (_logStream && _logStream.readyState === EventSource.CLOSED) {
+                    appendLogLine('[log-stream] disconnected');
+                }
+            });
+            _logStream.addEventListener('close', () => {
+                appendLogLine('[log-stream] closed by server');
+                detachLogStream();
+            });
+        }
+
+        function detachLogStream() {
+            if (_logStream) {
+                try { _logStream.close(); } catch (_) {}
+                _logStream = null;
+            }
+        }
+
+        function setModalDone({ title, body, isError }) {
+            modalTitle().textContent = title;
+            modalBody().textContent = body;
+            modalBody().style.color = isError ? '#ff7777' : '#77ffaa';
+            modalProgress().style.display = 'none';
+            modalButtons().style.display = 'flex';
+            // Always keep a dismiss button — user might want to inspect the
+            // form or the recovery card before retrying.
+            modalCancel().style.display = 'inline-block';
+            modalCancel().textContent = 'Close';
+            modalCancel().onclick = closeModal;
+            if (isError) {
+                modalConfirm().textContent = 'Close';
+                modalConfirm().onclick = closeModal;
+            } else {
+                modalConfirm().textContent = 'Retry connection';
+                modalConfirm().onclick = () => document.querySelector('.connect-form').submit();
+            }
+        }
+
+        // Click outside the dialog content to dismiss, and ESC to dismiss.
+        document.getElementById('docker-modal-overlay').addEventListener('click', (ev) => {
+            if (ev.target.id === 'docker-modal-overlay') closeModal();
+        });
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape' && modalOverlay().style.display === 'flex') {
+                closeModal();
+            }
+        });
+
+        function tickElapsed(startMs) {
+            if (modalProgress().style.display === 'none') return;
+            const secs = Math.floor((Date.now() - startMs) / 1000);
+            const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+            const ss = String(secs % 60).padStart(2, '0');
+            progressElapsed().textContent = `Elapsed ${mm}:${ss}`;
+            setTimeout(() => tickElapsed(startMs), 1000);
+        }
+
+        // --- Container runtime (Docker Desktop / OrbStack) ---
+        // Replaces the previous "Install Docker Desktop and try again"
+        // dead-end. We split the docker-unavailable state into three
+        // actionable cases based on /api/docker/oracle/runtime.
+        async function renderDockerUnavailable() {
+            const bodyEl = document.getElementById('docker-recovery-body');
+            const btnEl = document.getElementById('docker-recovery-action');
+            bodyEl.textContent = 'Checking host for an installed container runtime…';
+            btnEl.style.display = 'none';
+
+            let info;
+            try {
+                const res = await fetch('/api/docker/oracle/runtime', { cache: 'no-store' });
+                info = await res.json();
+            } catch (_) {
+                bodyEl.textContent = 'Docker is not installed or the daemon is not running. Install Docker Desktop and try again.';
+                return;
+            }
+
+            if (info.daemon_running) {
+                // Daemon came up between the two probes — just rerun status.
+                fetchOracleStatus();
+                return;
+            }
+
+            if (info.installed_app) {
+                bodyEl.innerHTML = `<strong>${escapeHtml(info.installed_app)}</strong> is installed but the Docker daemon isn't running yet.`;
+                btnEl.textContent = `Start ${info.installed_app}`;
+                btnEl.onclick = () => confirmAndStartRuntime(info.installed_app);
+                btnEl.style.display = 'inline-block';
+                return;
+            }
+
+            bodyEl.innerHTML = 'Memorizz needs Docker Desktop or OrbStack to run Oracle locally. Once installed and started, return here and we’ll create the container for you.';
+            const url = info.download_url || 'https://www.docker.com/products/docker-desktop/';
+            btnEl.textContent = 'Download Docker Desktop';
+            btnEl.onclick = () => window.open(url, '_blank', 'noopener');
+            btnEl.style.display = 'inline-block';
+        }
+
+        function confirmAndStartRuntime(label) {
+            openModal({
+                title: `Start ${label}?`,
+                body: `This launches ${label}.app and waits up to 90 seconds for the Docker daemon to come online. No admin password required.`,
+                confirmLabel: `Start ${label}`,
+                onConfirm: () => doStartRuntime(label),
+            });
+        }
+
+        async function doStartRuntime(label) {
+            setModalWorking(`Launching ${label} and waiting for the Docker daemon…`);
+            tickElapsed(Date.now());
+            try {
+                const res = await fetch('/api/docker/oracle/runtime/start', { method: 'POST' });
+                const data = await res.json();
+                setModalDone({
+                    title: data.ok ? `${label} ready` : `Couldn't start ${label}`,
+                    body: data.message || 'Unknown error.',
+                    isError: !data.ok,
+                });
+                if (data.ok) {
+                    // Daemon is up but no container yet — let the recovery
+                    // panel re-render so the user picks Create from there.
+                    modalConfirm().textContent = 'Continue';
+                    modalConfirm().onclick = closeModal;
+                    fetchOracleStatus();
+                }
+            } catch (e) {
+                setModalDone({ title: 'Start failed', body: String(e), isError: true });
+            }
+        }
+
+        // --- Start existing stopped container ---
+        function confirmAndStart(containerName) {
+            openModal({
+                title: `Start container "${containerName}"?`,
+                body: `This will run docker start ${containerName} and wait for the database to become healthy (usually under a minute).`,
+                confirmLabel: 'Start it',
+                onConfirm: () => doStart(containerName),
+            });
+        }
+
+        async function doStart(containerName) {
+            setModalWorking(`Starting "${containerName}" and waiting for health…`);
+            tickElapsed(Date.now());
+            attachLogStream(containerName);
+            try {
+                const fd = new FormData();
+                fd.append('container_name', containerName);
+                const res = await fetch('/api/docker/oracle/start', {
+                    method: 'POST',
+                    body: fd,
+                });
+                const data = await res.json();
+                if (data.ok) advancePhase('healthy');
+                setModalDone({
+                    title: data.ok ? 'Container ready' : 'Start failed',
+                    body: data.message || (data.ok ? 'Container is healthy.' : 'Unknown error.'),
+                    isError: !data.ok,
+                });
+            } catch (e) {
+                setModalDone({
+                    title: 'Start failed',
+                    body: String(e),
+                    isError: true,
+                });
+            } finally {
+                detachLogStream();
+            }
+        }
+
+        // --- Create new container from scratch ---
+        function confirmAndCreate() {
+            const user = document.getElementById('oracle_user').value;
+            const password = document.getElementById('oracle_password').value;
+            const dsn = document.getElementById('oracle_dsn').value;
+            if (!user || !password || !dsn) {
+                openModal({
+                    title: 'Missing fields',
+                    body: 'Please fill in username, password, and DSN before creating the container.',
+                    confirmLabel: 'OK',
+                    onConfirm: closeModal,
+                });
+                return;
+            }
+            openModal({
+                title: 'Create Oracle container?',
+                body: 'This pulls gvenzl/oracle-free:23-slim-faststart (first time ~200MB), creates a container named memorizz_oracle with your credentials, and waits for first-boot initialization. This can take 5+ minutes the first time.',
+                confirmLabel: 'Create it',
+                onConfirm: () => doCreate(user, password, dsn),
+            });
+        }
+
+        async function doCreate(user, password, dsn) {
+            setModalWorking('Pulling image and creating container (first boot can take several minutes)…');
+            tickElapsed(Date.now());
+            // Attach the log stream *before* POST so the user sees startup
+            // output as soon as `docker run` has fired. The stream helper
+            // waits up to 15s for the container to appear.
+            attachLogStream('memorizz_oracle');
+            try {
+                const fd = new FormData();
+                fd.append('oracle_user', user);
+                fd.append('oracle_password', password);
+                fd.append('oracle_dsn', dsn);
+                const res = await fetch('/api/docker/oracle/create', {
+                    method: 'POST',
+                    body: fd,
+                });
+                const data = await res.json();
+                if (data.ok) advancePhase('healthy');
+                setModalDone({
+                    title: data.ok ? 'Container ready' : 'Create failed',
+                    body: data.message || (data.ok ? 'Container is healthy.' : 'Unknown error.'),
+                    isError: !data.ok,
+                });
+            } catch (e) {
+                setModalDone({
+                    title: 'Create failed',
+                    body: String(e),
+                    isError: true,
+                });
+            } finally {
+                detachLogStream();
+            }
+        }
     </script>
 </body>
 </html>

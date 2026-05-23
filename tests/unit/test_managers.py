@@ -97,14 +97,14 @@ class TestMemoryManager:
         memory_unit = manager.create_conversation_memory_unit(
             role=Role.USER,
             content="Test message",
-            conversation_id="conv_123",
+            thread_id="conv_123",
             memory_id="mem_123",
         )
 
         assert memory_unit is not None
         assert memory_unit.role == Role.USER.value
         assert memory_unit.content == "Test message"
-        assert memory_unit.conversation_id == "conv_123"
+        assert memory_unit.thread_id == "conv_123"
         assert memory_unit.memory_id == "mem_123"
 
     @pytest.mark.unit
@@ -340,8 +340,9 @@ class TestCacheManager:
             response = manager.get_cached_response("test query", "session_123")
 
             assert response == "cached response"
+            # ``user_id`` is threaded through by default (None == legacy scope).
             mock_cache_instance.get.assert_called_once_with(
-                query="test query", session_id="session_123"
+                query="test query", session_id="session_123", user_id=None
             )
 
     @pytest.mark.unit
@@ -361,7 +362,10 @@ class TestCacheManager:
 
             assert success is True
             mock_cache_instance.set.assert_called_once_with(
-                query="test query", response="test response", session_id="session_123"
+                query="test query",
+                response="test response",
+                session_id="session_123",
+                user_id=None,
             )
 
     @pytest.mark.unit
@@ -379,9 +383,13 @@ class TestCacheManager:
             manager.clear_cache()
             mock_cache_instance.clear.assert_called_once()
 
-            # Clear session-specific cache
+            # Clear session-specific cache — the cache manager now delegates
+            # to ``clear(session_id=..., user_id=...)`` rather than a
+            # non-existent ``clear_session`` helper.
             manager.clear_cache("session_123")
-            mock_cache_instance.clear_session.assert_called_with("session_123")
+            mock_cache_instance.clear.assert_called_with(
+                session_id="session_123", user_id=None
+            )
 
 
 class TestPersonaManager:

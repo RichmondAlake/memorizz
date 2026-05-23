@@ -34,7 +34,7 @@ class ConversationHandler:
 
     def start_conversation(
         self,
-        conversation_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
         memory_id: Optional[str] = None,
         initial_context: Optional[Dict[str, Any]] = None,
     ) -> str:
@@ -42,7 +42,7 @@ class ConversationHandler:
         Start a new conversation.
 
         Args:
-            conversation_id: Optional conversation ID
+            thread_id: Optional conversation ID
             memory_id: Optional memory ID for persistence
             initial_context: Optional initial context
 
@@ -52,7 +52,7 @@ class ConversationHandler:
         try:
             import uuid
 
-            conv_id = conversation_id or str(uuid.uuid4())
+            conv_id = thread_id or str(uuid.uuid4())
 
             # Initialize conversation state
             self.active_conversations[conv_id] = {
@@ -80,28 +80,30 @@ class ConversationHandler:
     def process_turn(
         self,
         query: str,
-        conversation_id: str,
+        thread_id: str,
         memory_id: Optional[str] = None,
         additional_context: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a conversation turn.
 
         Args:
             query: User's query
-            conversation_id: Conversation ID
+            thread_id: Conversation ID
             memory_id: Optional memory ID
             additional_context: Optional additional context
+            user_id: Optional end-user identifier for multi-tenant scoping.
 
         Returns:
             Dictionary containing turn processing results
         """
         try:
             # Ensure conversation exists
-            if conversation_id not in self.active_conversations:
-                self.start_conversation(conversation_id, memory_id)
+            if thread_id not in self.active_conversations:
+                self.start_conversation(thread_id, memory_id)
 
-            conv_state = self.active_conversations[conversation_id]
+            conv_state = self.active_conversations[thread_id]
 
             # Update conversation state
             conv_state["turn_count"] += 1
@@ -110,43 +112,44 @@ class ConversationHandler:
             # Build context for this turn
             context = self._build_turn_context(
                 query=query,
-                conversation_id=conversation_id,
+                thread_id=thread_id,
                 memory_id=memory_id or conv_state.get("memory_id"),
                 additional_context=additional_context,
+                user_id=user_id,
             )
 
             # Update conversation metadata
-            self._update_conversation_metadata(conversation_id, query, context)
+            self._update_conversation_metadata(thread_id, query, context)
 
             # Return processing results
             return {
                 "context": context,
                 "turn_count": conv_state["turn_count"],
                 "conversation_state": conv_state.copy(),
-                "metadata": self.conversation_metadata.get(conversation_id, {}),
+                "metadata": self.conversation_metadata.get(thread_id, {}),
             }
 
         except Exception as e:
             logger.error(f"Failed to process conversation turn: {e}")
             raise
 
-    def end_conversation(self, conversation_id: str) -> Dict[str, Any]:
+    def end_conversation(self, thread_id: str) -> Dict[str, Any]:
         """
         End a conversation and return summary.
 
         Args:
-            conversation_id: Conversation ID to end
+            thread_id: Conversation ID to end
 
         Returns:
             Conversation summary
         """
         try:
-            if conversation_id not in self.active_conversations:
-                logger.warning(f"Conversation {conversation_id} not found")
+            if thread_id not in self.active_conversations:
+                logger.warning(f"Conversation {thread_id} not found")
                 return {}
 
-            conv_state = self.active_conversations[conversation_id]
-            metadata = self.conversation_metadata.get(conversation_id, {})
+            conv_state = self.active_conversations[thread_id]
+            metadata = self.conversation_metadata.get(thread_id, {})
 
             # Calculate conversation duration
             start_time = conv_state.get("start_time", datetime.now())
@@ -155,7 +158,7 @@ class ConversationHandler:
 
             # Build summary
             summary = {
-                "conversation_id": conversation_id,
+                "thread_id": thread_id,
                 "turn_count": conv_state.get("turn_count", 0),
                 "duration_seconds": duration,
                 "start_time": start_time.isoformat(),
@@ -164,12 +167,12 @@ class ConversationHandler:
             }
 
             # Clean up
-            del self.active_conversations[conversation_id]
-            if conversation_id in self.conversation_metadata:
-                del self.conversation_metadata[conversation_id]
+            del self.active_conversations[thread_id]
+            if thread_id in self.conversation_metadata:
+                del self.conversation_metadata[thread_id]
 
             logger.info(
-                f"Ended conversation {conversation_id} after {summary['turn_count']} turns"
+                f"Ended conversation {thread_id} after {summary['turn_count']} turns"
             )
             return summary
 
@@ -178,14 +181,18 @@ class ConversationHandler:
             return {}
 
     def get_conversation_history(
-        self, conversation_id: str, limit: int = 20
+        self,
+        thread_id: str,
+        limit: int = 20,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get conversation history.
 
         Args:
-            conversation_id: Conversation ID
+            thread_id: Conversation ID
             limit: Maximum number of entries to return
+            user_id: Optional user scope for multi-tenant apps.
 
         Returns:
             List of conversation history entries
@@ -195,12 +202,12 @@ class ConversationHandler:
                 logger.warning("No memory manager available for conversation history")
                 return []
 
-            conv_state = self.active_conversations.get(conversation_id, {})
+            conv_state = self.active_conversations.get(thread_id, {})
             memory_id = conv_state.get("memory_id")
 
             if memory_id:
                 history = self.memory_manager.load_conversation_history(
-                    memory_id, limit
+                    memory_id, limit, user_id=user_id
                 )
                 return self.prompt_handler.format_conversation_history(history, limit)
 
@@ -213,9 +220,10 @@ class ConversationHandler:
     def _build_turn_context(
         self,
         query: str,
-        conversation_id: str,
+        thread_id: str,
         memory_id: Optional[str] = None,
         additional_context: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build context for the current turn."""
         try:
@@ -225,7 +233,7 @@ class ConversationHandler:
             if memory_id and self.memory_manager:
                 try:
                     history = self.memory_manager.load_conversation_history(
-                        memory_id, limit=10
+                        memory_id, limit=10, user_id=user_id
                     )
                     context["conversation_history"] = history
 
@@ -237,6 +245,7 @@ class ConversationHandler:
                         memory_type=MemoryType.CONVERSATION_MEMORY,
                         memory_id=memory_id,
                         limit=5,
+                        user_id=user_id,
                     )
                     context["relevant_memories"] = relevant_memories
 
@@ -244,14 +253,14 @@ class ConversationHandler:
                     logger.warning(f"Failed to load memory context: {e}")
 
             # Add conversation state
-            conv_state = self.active_conversations.get(conversation_id, {})
+            conv_state = self.active_conversations.get(thread_id, {})
             context["turn_count"] = conv_state.get("turn_count", 0)
             context["conversation_duration"] = self._get_conversation_duration(
-                conversation_id
+                thread_id
             )
 
             # Add conversation metadata
-            metadata = self.conversation_metadata.get(conversation_id, {})
+            metadata = self.conversation_metadata.get(thread_id, {})
             context["conversation_metadata"] = metadata
 
             # Merge additional context
@@ -265,14 +274,14 @@ class ConversationHandler:
             return {"query": query}  # Minimal fallback
 
     def _update_conversation_metadata(
-        self, conversation_id: str, query: str, context: Dict[str, Any]
+        self, thread_id: str, query: str, context: Dict[str, Any]
     ):
         """Update conversation metadata based on the current turn."""
         try:
-            if conversation_id not in self.conversation_metadata:
+            if thread_id not in self.conversation_metadata:
                 return
 
-            metadata = self.conversation_metadata[conversation_id]
+            metadata = self.conversation_metadata[thread_id]
 
             # Extract and update topic keywords
             query_words = [word.lower() for word in query.split() if len(word) > 3]
@@ -304,10 +313,10 @@ class ConversationHandler:
         except Exception as e:
             logger.warning(f"Failed to update conversation metadata: {e}")
 
-    def _get_conversation_duration(self, conversation_id: str) -> float:
+    def _get_conversation_duration(self, thread_id: str) -> float:
         """Get conversation duration in seconds."""
         try:
-            conv_state = self.active_conversations.get(conversation_id, {})
+            conv_state = self.active_conversations.get(thread_id, {})
             start_time = conv_state.get("start_time")
 
             if start_time:

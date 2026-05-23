@@ -17,7 +17,7 @@ from memorizz.short_term_memory.working_memory.cwm import CWM
 prompt = CWM.get_prompt_from_memory_types(
     [
         MemoryType.CONVERSATION_MEMORY,
-        MemoryType.LONG_TERM_MEMORY,
+        MemoryType.KNOWLEDGE_BASE,
         MemoryType.SUMMARIES,
     ]
 )

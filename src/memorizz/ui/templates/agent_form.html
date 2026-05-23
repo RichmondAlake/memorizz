@@ -4,7 +4,7 @@
 
 {% block content %}
 <div class="page-header">
-    <a href="{% if is_edit %}/agents/{{ agent_id }}{% else %}/agents{% endif %}" class="back-link">← Back to Agents</a>
+    <a href="{% if is_edit %}/agents/{{ agent_id }}/playground{% else %}/agents{% endif %}" class="back-link">← Back to Agents</a>
     <h1>{{ form_title }}</h1>
     <p>Configure how this agent behaves and runs.</p>
 </div>
@@ -110,6 +110,8 @@
                         <option value="azure" {% if llm_provider == 'azure' %}selected{% endif %}>Azure OpenAI</option>
                         <option value="ollama" {% if llm_provider == 'ollama' %}selected{% endif %}>Ollama (Local)</option>
                         <option value="huggingface" {% if llm_provider == 'huggingface' %}selected{% endif %}>HuggingFace</option>
+                        <option value="mlx" {% if llm_provider == 'mlx' %}selected{% endif %}>MLX (Apple Silicon)</option>
+                        <option value="local-openai" {% if llm_provider == 'local-openai' %}selected{% endif %}>Local OpenAI-compatible (llama.cpp / LM Studio)</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -117,15 +119,352 @@
                     <select id="llm_model_select"></select>
                     <input id="llm_model_custom" type="text" value="{{ llm_model }}" style="display:none; margin-top: 8px;">
                     <input id="llm_model" name="llm_model" type="hidden" value="{{ llm_model }}">
+                    <!-- Pre-flight: warns when the chosen Ollama / HuggingFace model
+                         isn't actually cached locally, so users discover the issue
+                         at agent-creation time, not as a 404 on first chat. -->
+                    <div id="llm_model_status" style="display:none; margin-top:10px;"></div>
                 </div>
+            </div>
+            <p id="llm_provider_hint" class="form-hint" style="margin-top:8px"></p>
+            <div class="form-group" id="local_openai_row" style="display:none">
+                <label for="llm_base_url">Local server base URL</label>
+                <input id="llm_base_url" type="text" placeholder="http://127.0.0.1:8080/v1">
+                <p class="form-hint">Default <code>http://127.0.0.1:8080/v1</code> for <code>llama-server</code>. LM Studio uses <code>http://127.0.0.1:1234/v1</code>. The API key is ignored by these servers.</p>
+            </div>
+            <!-- Ollama-only: opt into the daemon's chain-of-thought stream.
+                 Off by default because Gemma 4 (Ollama 0.22.1+) ships with
+                 thinking on, and on CPU-only inference that means 30–60s of
+                 silence before the reply ever starts. See OllamaLLM(think=).
+                 Wired into llm_config_json on submit so the backend persists
+                 it as additional_config.think. -->
+            <div class="form-group" id="ollama_thinking_row" style="display:none">
+                <label class="checkbox-group">
+                    <input type="checkbox" id="ollama_thinking" name="ollama_thinking" value="1">
+                    Enable thinking / chain-of-thought
+                </label>
+                <p class="form-hint">When on, Gemma 4 / DeepSeek-R1 / Qwen3-thinking emit a separate reasoning trace before the final answer (shown in the playground's trace timeline). Off by default for snappier replies — thinking can take 30–60 s before any visible content on CPU-only setups.</p>
             </div>
             <div class="form-group">
                 <label for="llm_config_json">Advanced LLM Config (JSON)</label>
                 <textarea id="llm_config_json" name="llm_config_json" rows="4">{{ llm_config_json }}</textarea>
-                <p class="form-hint">Optional provider-specific fields (e.g. azure_endpoint, api_version, ollama host, HuggingFace settings, temperature).</p>
+                <p class="form-hint">Optional provider-specific fields (e.g. azure_endpoint, api_version, ollama host, HuggingFace settings, temperature, base_url for local-openai).</p>
             </div>
         </div>
     </details>
+    <script>
+    // Show contextual hints + the base_url field when the provider needs them.
+    (function () {
+        const GATED_HF_PREFIXES = ['google/gemma', 'meta-llama/', 'mistralai/'];
+        function refreshLLMHint() {
+            const provEl = document.getElementById('llm_provider');
+            const modelEl = document.getElementById('llm_model');
+            const hintEl = document.getElementById('llm_provider_hint');
+            const baseUrlRow = document.getElementById('local_openai_row');
+            if (!provEl || !hintEl) return;
+            const provider = (provEl.value || '').toLowerCase();
+            const model = (modelEl ? modelEl.value : '') || '';
+
+            baseUrlRow.style.display = provider === 'local-openai' ? '' : 'none';
+            const thinkingRow = document.getElementById('ollama_thinking_row');
+            if (thinkingRow) thinkingRow.style.display = provider === 'ollama' ? '' : 'none';
+
+            let hint = '';
+            if (provider === 'huggingface') {
+                const isGated = GATED_HF_PREFIXES.some(p => model.toLowerCase().startsWith(p));
+                if (isGated) {
+                    const url = 'https://huggingface.co/' + model;
+                    hint = '⚠️ This is a gated repo. Accept the license once at '
+                        + '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>'
+                        + ' and set <code>HF_TOKEN</code> in Settings before pulling.';
+                } else {
+                    hint = 'Models download to <code>~/.cache/huggingface/hub</code>. '
+                        + 'Set <code>HF_TOKEN</code> in Settings for private/gated repos.';
+                }
+            } else if (provider === 'mlx') {
+                hint = 'In-process MLX requires memorizz to run on a native arm64 '
+                    + 'Apple Silicon Python — <code>pip install memorizz[mlx]</code> '
+                    + 'will fail under Rosetta. If your memorizz env is x86_64, use '
+                    + '<strong>Local OpenAI-compatible</strong> with an '
+                    + '<code>mlx-community/*</code> model instead — it runs MLX in a '
+                    + 'sidecar arm64 process and memorizz talks to it over HTTP.';
+            } else if (provider === 'local-openai') {
+                // Adapt the startup command to the chosen repo. mlx-community
+                // models need mlx_lm.server in a native arm64 venv; GGUF
+                // models need llama-server. LM Studio is a third path that
+                // doesn't need a CLI command at all.
+                const isMLX = model.toLowerCase().startsWith('mlx-community/');
+                const isGGUF = model.toLowerCase().endsWith('-gguf')
+                    || model.toLowerCase().includes('-gguf/');
+                if (isMLX) {
+                    hint = 'Start an MLX sidecar server in a native arm64 venv:<br>'
+                        + '<code>pip install mlx-lm</code><br>'
+                        + '<code>python -m mlx_lm.server --model ' + model + ' --port 8080</code><br>'
+                        + 'Then leave the base URL as <code>http://127.0.0.1:8080/v1</code>.';
+                } else if (isGGUF) {
+                    hint = 'Start <code>llama-server</code> first:<br>'
+                        + '<code>brew install llama.cpp</code><br>'
+                        + '<code>llama-server -hf ' + model + ' --port 8080 --jinja</code><br>'
+                        + 'Or load the model in LM Studio (default port <code>1234</code>).';
+                } else {
+                    hint = 'Start a local OpenAI-compatible server (llama.cpp '
+                        + '<code>llama-server</code>, <code>mlx_lm.server</code>, '
+                        + 'LM Studio, vLLM) and point the base URL at it.';
+                }
+            } else if (provider === 'ollama') {
+                hint = 'Pull the model in Settings → Local models, or run <code>ollama pull '
+                    + (model || 'llama3.1:8b') + '</code>.';
+            }
+            hintEl.innerHTML = hint;
+        }
+        // Wrap syncAgentModelOptions so the hint updates whenever the model
+        // dropdown re-renders.
+        const _origSync = window.syncAgentModelOptions;
+        window.syncAgentModelOptions = function () {
+            if (typeof _origSync === 'function') _origSync.apply(this, arguments);
+            refreshLLMHint();
+        };
+        document.addEventListener('change', function (e) {
+            if (e.target && (e.target.id === 'llm_model_select'
+                || e.target.id === 'llm_model_custom'
+                || e.target.id === 'llm_provider')) {
+                refreshLLMHint();
+            }
+        });
+        // Mirror the base_url field into llm_config_json on submit so the
+        // backend `_parse_llm_config` picks it up without a new form field.
+        const baseUrlEl = document.getElementById('llm_base_url');
+        const cfgEl = document.getElementById('llm_config_json');
+        const formEl = (baseUrlEl && baseUrlEl.form) || (cfgEl && cfgEl.form) || null;
+        if (formEl && cfgEl) {
+            formEl.addEventListener('submit', function () {
+                let obj = {};
+                try { obj = cfgEl.value.trim() ? JSON.parse(cfgEl.value) : {}; }
+                catch (_) { obj = {}; }
+                if (typeof obj !== 'object' || obj === null) obj = {};
+
+                if (baseUrlEl) {
+                    const url = (baseUrlEl.value || '').trim();
+                    if (url) obj.base_url = url;
+                }
+
+                // Mirror the Ollama thinking checkbox into additional_config.think.
+                // Only persist when the chosen provider is ollama — otherwise an
+                // accidental tick on a non-ollama agent leaks `think` into a
+                // config that doesn't understand it.
+                const provEl = document.getElementById('llm_provider');
+                const thinkEl = document.getElementById('ollama_thinking');
+                if (provEl && thinkEl && (provEl.value || '').toLowerCase() === 'ollama') {
+                    const inner = (typeof obj.additional_config === 'object'
+                        && obj.additional_config !== null) ? obj.additional_config : {};
+                    if (thinkEl.checked) {
+                        inner.think = true;
+                    } else {
+                        delete inner.think;
+                    }
+                    if (Object.keys(inner).length > 0) {
+                        obj.additional_config = inner;
+                    } else {
+                        delete obj.additional_config;
+                    }
+                }
+
+                if (Object.keys(obj).length > 0) {
+                    cfgEl.value = JSON.stringify(obj);
+                }
+            });
+        }
+
+        // Initialize the thinking checkbox from the saved llm_config JSON so
+        // the form reflects the agent's persisted choice on edit.
+        (function initThinkingCheckbox() {
+            const thinkEl = document.getElementById('ollama_thinking');
+            if (!thinkEl || !cfgEl) return;
+            try {
+                const parsed = cfgEl.value.trim() ? JSON.parse(cfgEl.value) : {};
+                const inner = (parsed && typeof parsed.additional_config === 'object'
+                    && parsed.additional_config !== null) ? parsed.additional_config : {};
+                if (inner.think === true || parsed.think === true) {
+                    thinkEl.checked = true;
+                }
+            } catch (_) { /* malformed JSON — leave default */ }
+        })();
+        document.addEventListener('DOMContentLoaded', refreshLLMHint);
+        // Run once on initial render too — DOMContentLoaded may have already fired
+        refreshLLMHint();
+    })();
+
+    // Pre-flight check for local-model providers. Mirrors playground.html's
+    // playgroundCheckLocalModel() but banner-only — pull/delete UI stays in
+    // Settings → Local models. The point here is just so users don't save an
+    // agent pointing at an Ollama tag they never pulled (which 404s mid-chat).
+    (function () {
+        const REQUIRES_LOCAL = new Set(['ollama', 'huggingface', 'mlx']);
+        let _seq = 0;
+        let _debounce = null;
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, function (c) {
+                return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+            });
+        }
+
+        function currentProvider() {
+            const el = document.getElementById('llm_provider');
+            return ((el && el.value) || '').trim().toLowerCase();
+        }
+
+        function currentModel() {
+            // The hidden #llm_model is the source of truth; fall back through
+            // the visible inputs in case a change handler hasn't synced yet.
+            const hidden = document.getElementById('llm_model');
+            const custom = document.getElementById('llm_model_custom');
+            const select = document.getElementById('llm_model_select');
+            const fromHidden = ((hidden && hidden.value) || '').trim();
+            if (fromHidden) return fromHidden;
+            const fromCustom = ((custom && custom.value) || '').trim();
+            if (fromCustom) return fromCustom;
+            if (select && select.value && select.value !== '__custom__') return select.value.trim();
+            return '';
+        }
+
+        async function refresh() {
+            const statusEl = document.getElementById('llm_model_status');
+            if (!statusEl) return;
+            const provider = currentProvider();
+            const model = currentModel();
+            if (!REQUIRES_LOCAL.has(provider) || !model) {
+                statusEl.style.display = 'none';
+                statusEl.innerHTML = '';
+                return;
+            }
+            const seq = ++_seq;
+            statusEl.style.display = 'block';
+            let label = 'local Ollama';
+            if (provider === 'huggingface') label = 'HuggingFace cache';
+            if (provider === 'mlx') label = 'MLX cache (HuggingFace)';
+            statusEl.innerHTML = '<p class="form-hint">Checking ' + label + '…</p>';
+
+            const url = provider === 'ollama'
+                ? '/api/ollama/installed'
+                : '/api/huggingface/installed';
+            let info;
+            try {
+                const res = await fetch(url, { cache: 'no-store' });
+                info = await res.json();
+            } catch (err) {
+                if (seq !== _seq) return;
+                statusEl.innerHTML = '<div class="warning-message"><strong>Could not reach the UI server</strong>: '
+                    + escapeHtml(String(err)) + '</div>';
+                return;
+            }
+            if (seq !== _seq) return;
+
+            if (provider === 'ollama') {
+                renderOllama(statusEl, model, info);
+            } else {
+                renderHF(statusEl, model, info);
+            }
+        }
+
+        function renderOllama(statusEl, model, info) {
+            if (!info.reachable) {
+                statusEl.innerHTML = '<div class="warning-message">'
+                    + '<strong>Ollama is not running</strong> at <code>'
+                    + escapeHtml(info.host || 'localhost:11434') + '</code>'
+                    + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
+                    + '.<br>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a> and start it, then '
+                    + '<a href="#" data-preflight-refresh>refresh</a>.'
+                    + '</div>';
+                wireRefreshLink(statusEl);
+                return;
+            }
+            // `gemma4` and `gemma4:latest` reference the same blob on disk —
+            // treat them as equivalent so the banner doesn't whine about a
+            // tag the user technically does have.
+            const installed = (info.models || []).some(function (m) {
+                return m === model || m === model + ':latest' || m + ':latest' === model;
+            });
+            const base = model.split(':')[0];
+            const libUrl = 'https://ollama.com/library/' + encodeURIComponent(base);
+            statusEl.innerHTML = installed
+                ? '<div class="success-message">'
+                    + '<strong><code>' + escapeHtml(model) + '</code> is available offline</strong>'
+                    + ' on Ollama at <code>' + escapeHtml(info.host || 'localhost:11434') + '</code>.'
+                    + '</div>'
+                : '<div class="warning-message">'
+                    + '<strong>Pre-flight: <code>' + escapeHtml(model) + '</code> is not installed locally.</strong><br>'
+                    + 'Saving this agent is fine, but the first chat will fail with a 404. '
+                    + 'Run <code>ollama pull ' + escapeHtml(model) + '</code>, '
+                    + 'pull from <a href="/settings#local-models">Settings → Local models</a>, or '
+                    + '<a href="' + libUrl + '" target="_blank" rel="noopener">browse <code>'
+                    + escapeHtml(base) + '</code> on ollama.com</a>. Then '
+                    + '<a href="#" data-preflight-refresh>refresh</a>.'
+                    + '</div>';
+            wireRefreshLink(statusEl);
+        }
+
+        function renderHF(statusEl, model, info) {
+            if (!info.available) {
+                statusEl.innerHTML = '<div class="warning-message">'
+                    + '<strong>HuggingFace cache unavailable</strong>'
+                    + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
+                    + '.<br>Install it with <code>pip install memorizz[huggingface]</code>, then '
+                    + '<a href="#" data-preflight-refresh>refresh</a>.'
+                    + '</div>';
+                wireRefreshLink(statusEl);
+                return;
+            }
+            const cached = (info.models || []).indexOf(model) !== -1;
+            const repoUrl = 'https://huggingface.co/'
+                + model.split('/').map(encodeURIComponent).join('/');
+            const cacheLoc = info.cache_dir || 'local HF cache';
+            statusEl.innerHTML = cached
+                ? '<div class="success-message">'
+                    + '<strong><code>' + escapeHtml(model) + '</code> is cached locally</strong> at '
+                    + '<code>' + escapeHtml(cacheLoc) + '</code>.'
+                    + '</div>'
+                : '<div class="warning-message">'
+                    + '<strong>Pre-flight: <code>' + escapeHtml(model) + '</code> is not cached locally.</strong><br>'
+                    + 'First chat will trigger a multi-GB download and may stall. '
+                    + 'Pre-download with <code>huggingface-cli download ' + escapeHtml(model) + '</code>, '
+                    + 'pull from <a href="/settings#local-models">Settings → Local models</a>, '
+                    + 'or <a href="' + repoUrl + '" target="_blank" rel="noopener">view the model card</a>. Then '
+                    + '<a href="#" data-preflight-refresh>refresh</a>.'
+                    + '</div>';
+            wireRefreshLink(statusEl);
+        }
+
+        function wireRefreshLink(scope) {
+            const link = scope.querySelector('[data-preflight-refresh]');
+            if (!link) return;
+            link.addEventListener('click', function (ev) {
+                ev.preventDefault();
+                refresh();
+            });
+        }
+
+        function schedule() {
+            if (_debounce) clearTimeout(_debounce);
+            _debounce = setTimeout(refresh, 350);
+        }
+
+        document.addEventListener('change', function (e) {
+            if (e.target && (e.target.id === 'llm_model_select'
+                || e.target.id === 'llm_model_custom'
+                || e.target.id === 'llm_provider')) {
+                refresh();
+            }
+        });
+        document.addEventListener('input', function (e) {
+            if (e.target && e.target.id === 'llm_model_custom') {
+                schedule();
+            }
+        });
+        document.addEventListener('DOMContentLoaded', refresh);
+        // DOMContentLoaded may have already fired by the time this script runs.
+        refresh();
+    })();
+    </script>
 
     <!-- Persona — collapsible -->
     <details class="detail-section collapsible-section" {% if persona_name %}open{% endif %}>
@@ -134,6 +473,23 @@
             <span class="toggle-caret">▾</span>
         </summary>
         <div class="section-body">
+            <input id="persona_id" name="persona_id" type="hidden" value="{{ persona_id|default('', true) }}">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="persona_preset_select">Load built-in preset</label>
+                    <select id="persona_preset_select">
+                        <option value="">— Choose a preset to pre-fill the fields —</option>
+                    </select>
+                    <p class="form-hint">Presets apply the role's default goals and background. Edit the fields below afterwards to customize.</p>
+                </div>
+                <div class="form-group">
+                    <label for="persona_saved_select">Load saved persona</label>
+                    <select id="persona_saved_select">
+                        <option value="">— Reuse a persona from your library —</option>
+                    </select>
+                    <p class="form-hint">Selecting a saved persona links this agent to its evolution history. Edits become a new version when saved.</p>
+                </div>
+            </div>
             <div class="form-grid">
                 <div class="form-group">
                     <label for="persona_name">Name</label>
@@ -152,6 +508,113 @@
                 <label for="persona_background">Background</label>
                 <textarea id="persona_background" name="persona_background" rows="3">{{ persona_background }}</textarea>
             </div>
+            <p class="form-hint" id="persona_version_hint" style="display: none;"></p>
+            <script>
+                (function() {
+                    var presetSelect = document.getElementById('persona_preset_select');
+                    var savedSelect = document.getElementById('persona_saved_select');
+                    var personaIdInput = document.getElementById('persona_id');
+                    var nameInput = document.getElementById('persona_name');
+                    var roleInput = document.getElementById('persona_role');
+                    var goalsInput = document.getElementById('persona_goals');
+                    var backgroundInput = document.getElementById('persona_background');
+                    var versionHint = document.getElementById('persona_version_hint');
+
+                    function setField(el, value) {
+                        if (!el) return;
+                        el.value = value == null ? '' : value;
+                    }
+
+                    function resetVersionHint() {
+                        if (!versionHint) return;
+                        versionHint.style.display = 'none';
+                        versionHint.textContent = '';
+                    }
+
+                    function showVersionHint(text) {
+                        if (!versionHint) return;
+                        versionHint.textContent = text;
+                        versionHint.style.display = 'block';
+                    }
+
+                    fetch('/api/persona-presets')
+                        .then(function(r) { return r.ok ? r.json() : {presets: []}; })
+                        .then(function(data) {
+                            (data.presets || []).forEach(function(preset) {
+                                var opt = document.createElement('option');
+                                opt.value = preset.key;
+                                opt.textContent = preset.role;
+                                opt.dataset.role = preset.role || '';
+                                opt.dataset.goals = preset.goals || '';
+                                opt.dataset.background = preset.background || '';
+                                presetSelect.appendChild(opt);
+                            });
+                        })
+                        .catch(function() { /* presets endpoint optional */ });
+
+                    fetch('/api/personas')
+                        .then(function(r) { return r.ok ? r.json() : {personas: []}; })
+                        .then(function(data) {
+                            (data.personas || []).forEach(function(persona) {
+                                if (!persona.id) return;
+                                var opt = document.createElement('option');
+                                opt.value = persona.id;
+                                var suffix = persona.role ? ' — ' + persona.role : '';
+                                var version = persona.version ? ' (v' + persona.version + ')' : '';
+                                opt.textContent = (persona.name || '(unnamed)') + suffix + version;
+                                opt.dataset.name = persona.name || '';
+                                opt.dataset.role = persona.role || '';
+                                opt.dataset.goals = persona.goals || '';
+                                opt.dataset.background = persona.background || '';
+                                opt.dataset.version = persona.version || 1;
+                                opt.dataset.historyCount = persona.history_count || 0;
+                                if (personaIdInput && personaIdInput.value && personaIdInput.value === persona.id) {
+                                    opt.selected = true;
+                                    showVersionHint(
+                                        'Linked to saved persona v' + persona.version +
+                                        ' (' + persona.history_count + ' evolution entries). ' +
+                                        'Editing any field will create a new version when saved.'
+                                    );
+                                }
+                                savedSelect.appendChild(opt);
+                            });
+                        })
+                        .catch(function() { /* personas endpoint optional */ });
+
+                    presetSelect.addEventListener('change', function() {
+                        var opt = presetSelect.options[presetSelect.selectedIndex];
+                        if (!opt || !opt.value) return;
+                        // Applying a preset severs the link to any saved persona — this will
+                        // create a new persona on save rather than a new version of the old one.
+                        setField(personaIdInput, '');
+                        if (savedSelect) savedSelect.value = '';
+                        setField(roleInput, opt.dataset.role || '');
+                        setField(goalsInput, opt.dataset.goals || '');
+                        setField(backgroundInput, opt.dataset.background || '');
+                        resetVersionHint();
+                    });
+
+                    savedSelect.addEventListener('change', function() {
+                        var opt = savedSelect.options[savedSelect.selectedIndex];
+                        if (!opt || !opt.value) {
+                            setField(personaIdInput, '');
+                            resetVersionHint();
+                            return;
+                        }
+                        setField(personaIdInput, opt.value);
+                        setField(nameInput, opt.dataset.name || '');
+                        setField(roleInput, opt.dataset.role || '');
+                        setField(goalsInput, opt.dataset.goals || '');
+                        setField(backgroundInput, opt.dataset.background || '');
+                        if (presetSelect) presetSelect.value = '';
+                        showVersionHint(
+                            'Linked to saved persona v' + (opt.dataset.version || '1') +
+                            ' (' + (opt.dataset.historyCount || 0) + ' evolution entries). ' +
+                            'Editing any field will create a new version when saved.'
+                        );
+                    });
+                })();
+            </script>
         </div>
     </details>
 
@@ -315,8 +778,68 @@
                 <select id="skills_marketplace_provider" name="skills_marketplace_provider">
                     <option value="" {% if not skills_marketplace_provider %}selected{% endif %}>None (disabled)</option>
                     <option value="skillsmp" {% if skills_marketplace_provider == 'skillsmp' %}selected{% endif %}>SkillsMP (skillsmp.com)</option>
+                    <option value="vercel" {% if skills_marketplace_provider == 'vercel' %}selected{% endif %}>Vercel Agent Skills (skills.sh)</option>
                 </select>
-                <p class="form-hint">When enabled, the agent gets the `skills_marketplace_search` tool. Configure `SKILLSMP_API_KEY` in Settings.</p>
+                <p class="form-hint" id="skills-marketplace-hint">
+                    {% if skills_marketplace_provider == 'vercel' %}
+                    Agent gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code> tools to search and use skills from the open Vercel ecosystem. A <code>GITHUB_TOKEN</code> is required for search (raises rate limits from 60 to 5,000/hr).
+                    {% elif skills_marketplace_provider == 'skillsmp' %}
+                    Agent gets the <code>skills_marketplace_search</code> tool. Configure <code>SKILLSMP_API_KEY</code> in Settings.
+                    {% else %}
+                    When enabled, the agent gets marketplace search tools. SkillsMP requires <code>SKILLSMP_API_KEY</code>. Vercel Skills requires <code>GITHUB_TOKEN</code> for search.
+                    {% endif %}
+                </p>
+                <p class="form-hint sandbox-error-hint" id="skills-marketplace-token-warning" style="display:none;">
+                    Vercel Agent Skills is selected but <code>GITHUB_TOKEN</code> is not set. Skill search will fail (HTTP 401) until you add a token in
+                    <a href="/settings#GITHUB_TOKEN">Settings</a>, or create one at
+                    <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>
+                    (no scopes required) — see the
+                    <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noopener noreferrer">GitHub docs</a>.
+                </p>
+                <script>
+                    (function() {
+                        var select = document.getElementById('skills_marketplace_provider');
+                        var hint = document.getElementById('skills-marketplace-hint');
+                        var warning = document.getElementById('skills-marketplace-token-warning');
+                        var githubTokenPresent = null;
+
+                        function renderHint() {
+                            if (select.value === 'vercel') {
+                                hint.innerHTML = 'Agent gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code> tools to search and use skills from the open Vercel ecosystem. A <code>GITHUB_TOKEN</code> is required for search (raises rate limits from 60 to 5,000/hr).';
+                            } else if (select.value === 'skillsmp') {
+                                hint.innerHTML = 'Agent gets the <code>skills_marketplace_search</code> tool. Configure <code>SKILLSMP_API_KEY</code> in Settings.';
+                            } else {
+                                hint.innerHTML = 'When enabled, the agent gets marketplace search tools. SkillsMP requires <code>SKILLSMP_API_KEY</code>. Vercel Skills requires <code>GITHUB_TOKEN</code> for search.';
+                            }
+                        }
+
+                        function renderWarning() {
+                            if (select.value === 'vercel' && githubTokenPresent === false) {
+                                warning.style.display = '';
+                            } else {
+                                warning.style.display = 'none';
+                            }
+                        }
+
+                        function refreshTokenStatus() {
+                            fetch('/vercel-skills/api/token-status')
+                                .then(function(r) { return r.json(); })
+                                .then(function(data) {
+                                    githubTokenPresent = !!(data && data.github_token_present);
+                                    renderWarning();
+                                })
+                                .catch(function() { /* ignore — warning stays hidden */ });
+                        }
+
+                        select.addEventListener('change', function() {
+                            renderHint();
+                            renderWarning();
+                        });
+
+                        renderHint();
+                        refreshTokenStatus();
+                    })();
+                </script>
             </div>
         </div>
     </details>
@@ -346,7 +869,7 @@
 
     <div class="form-actions">
         <button type="submit" class="btn btn-primary">Save Agent</button>
-        <a href="{% if is_edit %}/agents/{{ agent_id }}{% else %}/agents{% endif %}" class="btn">Cancel</a>
+        <a href="{% if is_edit %}/agents/{{ agent_id }}/playground{% else %}/agents{% endif %}" class="btn">Cancel</a>
     </div>
 </form>
 {% endblock %}

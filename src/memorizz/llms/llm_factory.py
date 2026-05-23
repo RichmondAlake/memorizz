@@ -4,12 +4,60 @@
 
 # src/memorizz/llms/llm_factory.py
 
+import inspect
+import logging
 from typing import Any, Dict
 
 from .azure import AzureOpenAI
 from .huggingface import HuggingFaceLLM
 from .llm_provider import LLMProvider
 from .openai import OpenAI
+
+logger = logging.getLogger(__name__)
+
+
+def _filter_kwargs_for_class(config: Dict[str, Any], cls: type) -> Dict[str, Any]:
+    """Drop keys the target provider's __init__ doesn't accept.
+
+    Saved llm_configs accumulate keys when users switch providers — e.g.
+    ``max_tokens`` from a previous OpenAI run still rides along when the
+    agent later switches to HuggingFace. Splatting the full dict into a
+    constructor that doesn't accept those keys raises TypeError, which
+    used to surface as the generic "No LLM model configured" error. We
+    inspect the target class signature and silently drop keys that aren't
+    in its parameter list — unless the class accepts **kwargs, in which
+    case we trust the constructor to handle them.
+    """
+    sig = inspect.signature(cls.__init__)
+    accepts_var_keyword = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if accepts_var_keyword:
+        return {k: v for k, v in config.items() if k != "provider"}
+
+    accepted = {
+        name
+        for name, p in sig.parameters.items()
+        if name != "self"
+        and p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    filtered = {}
+    dropped = []
+    for key, value in config.items():
+        if key == "provider":
+            continue
+        if key in accepted:
+            filtered[key] = value
+        else:
+            dropped.append(key)
+    if dropped:
+        logger.info(
+            "Dropped unsupported kwargs for %s: %s",
+            cls.__name__,
+            ", ".join(sorted(dropped)),
+        )
+    return filtered
 
 
 def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
@@ -37,39 +85,30 @@ def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
     """
     provider_name = config.get("provider", "openai").lower()
     if provider_name == "openai":
-        # Create a copy of the config and remove the 'provider' key
-        openai_config = config.copy()
-        openai_config.pop("provider", None)
-        return OpenAI(**openai_config)
+        return OpenAI(**_filter_kwargs_for_class(config, OpenAI))
 
     elif provider_name == "azure":
-        # Create a copy of the config and remove the 'provider' key
-        azure_config = config.copy()
-        azure_config.pop("provider", None)
-        return AzureOpenAI(
-            azure_endpoint=azure_config.get("azure_endpoint"),
-            api_version=azure_config.get("api_version"),
-            deployment_name=azure_config.get("deployment_name"),
-        )
+        # AzureOpenAI requires a specific subset; the filter handles it
+        # but we keep this branch for future per-provider tweaks.
+        return AzureOpenAI(**_filter_kwargs_for_class(config, AzureOpenAI))
 
     elif provider_name == "huggingface":
-        huggingface_config = config.copy()
-        huggingface_config.pop("provider", None)
-        return HuggingFaceLLM(**huggingface_config)
+        return HuggingFaceLLM(**_filter_kwargs_for_class(config, HuggingFaceLLM))
 
     elif provider_name == "anthropic":
         from .anthropic import Anthropic
 
-        anthropic_config = config.copy()
-        anthropic_config.pop("provider", None)
-        return Anthropic(**anthropic_config)
+        return Anthropic(**_filter_kwargs_for_class(config, Anthropic))
 
     elif provider_name == "ollama":
         from .ollama import OllamaLLM
 
-        ollama_config = config.copy()
-        ollama_config.pop("provider", None)
-        return OllamaLLM(**ollama_config)
+        return OllamaLLM(**_filter_kwargs_for_class(config, OllamaLLM))
+
+    elif provider_name == "mlx":
+        from .mlx import MLXLLM
+
+        return MLXLLM(**_filter_kwargs_for_class(config, MLXLLM))
 
     else:
         raise ValueError(f"Unknown LLM provider: '{provider_name}'")

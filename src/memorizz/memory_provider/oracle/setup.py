@@ -635,13 +635,13 @@ def _create_user_and_grant_privileges(
         print("  ✓ CREATE TABLE (required for memory storage tables and indexes)")
 
         admin_cursor.execute(f"GRANT CREATE VIEW TO {memorizz_user}")
-        print("  ✓ CREATE VIEW (required for JSON Duality Views)")
+        print("  ✓ CREATE VIEW (required for Memorizz views)")
 
         admin_cursor.execute(f"GRANT CREATE SEQUENCE TO {memorizz_user}")
         print("  ✓ CREATE SEQUENCE (required for ID generation)")
 
         admin_cursor.execute(f"GRANT CREATE TRIGGER TO {memorizz_user}")
-        print("  ✓ CREATE TRIGGER (required for Duality View triggers)")
+        print("  ✓ CREATE TRIGGER (required for view triggers)")
 
         admin_cursor.execute(f"GRANT UNLIMITED TABLESPACE TO {memorizz_user}")
         print("  ✓ UNLIMITED TABLESPACE (required for data storage)")
@@ -819,16 +819,16 @@ def _create_user_and_grant_privileges(
             print(f"  ⚠ Vector privileges not available: {e}")
             print("    This is OK if not using Oracle 23ai+")
 
-        # Grant JSON Duality View privileges
-        print("\nGranting JSON Duality View privileges...")
+        # Grant JSON view privileges
+        print("\nGranting JSON view privileges...")
         try:
             admin_cursor.execute(f"GRANT SODA_APP TO {memorizz_user}")
-            print("  ✓ SODA_APP (required for JSON Duality Views)")
+            print("  ✓ SODA_APP (required for Memorizz views)")
             print(
                 "  ℹ SELECT ANY TABLE removed (not required, follows least-privilege)"
             )
         except Exception as e:
-            print(f"  ⚠ Failed to grant Duality View privileges: {e}")
+            print(f"  ⚠ Failed to grant view privileges: {e}")
             print("    Some features may not be available")
 
         admin_conn.commit()
@@ -898,47 +898,6 @@ def _create_schema(user_conn, schema_file: Path) -> Tuple[int, int, int]:
     return success_count, skip_count, fail_count
 
 
-def _create_duality_views(user_conn, views_file: Path) -> Tuple[int, int]:
-    """
-    Create JSON Duality Views.
-
-    Args:
-        user_conn: User database connection
-        views_file: Path to views SQL file
-
-    Returns:
-        Tuple of (success_count, fail_count)
-    """
-    print("\nExecuting Duality Views SQL...")
-
-    # Get embedding dimension for consistency (views typically don't have VECTOR columns,
-    # but we pass it for consistency and future-proofing)
-    embedding_dim = _get_embedding_dimension()
-
-    statements = parse_sql_file(views_file, embedding_dim=embedding_dim)
-    print(f"Found {len(statements)} view statements")
-
-    user_cursor = user_conn.cursor()
-    success_count = 0
-    fail_count = 0
-
-    for i, stmt in enumerate(statements, 1):
-        try:
-            user_cursor.execute(stmt)
-            success_count += 1
-            print(f"  ✓ Created view {i}/{len(statements)}")
-        except Exception as e:
-            fail_count += 1
-            print(f"  ✗ View {i} failed: {e}")
-
-    user_conn.commit()
-    user_cursor.close()
-
-    print(f"\n📊 Views Summary: ✓ {success_count} success, ✗ {fail_count} failed")
-
-    return success_count, fail_count
-
-
 def _verify_setup(user_conn) -> Tuple[list, list, list]:
     """
     Verify that setup completed successfully.
@@ -957,7 +916,7 @@ def _verify_setup(user_conn) -> Tuple[list, list, list]:
         """
         SELECT table_name FROM user_tables
         WHERE table_name IN ('AGENTS', 'AGENT_LLM_CONFIGS', 'AGENT_MEMORIES', 'PERSONAS',
-                             'TOOLBOX', 'CONVERSATION_MEMORY', 'LONG_TERM_MEMORY',
+                             'TOOLBOX', 'CONVERSATION_MEMORY', 'KNOWLEDGE_BASE',
                              'SHORT_TERM_MEMORY', 'WORKFLOW_MEMORY', 'SHARED_MEMORY',
                              'SUMMARIES', 'SEMANTIC_CACHE', 'ENTITY_MEMORY',
                              'AUTOMATION_JOBS', 'AUTOMATION_RUNS', 'AUTOMATION_DELIVERIES')
@@ -970,7 +929,7 @@ def _verify_setup(user_conn) -> Tuple[list, list, list]:
     print(f"  Total: {len(tables)} tables")
 
     # Check views
-    print("\n📄 JSON Duality Views:")
+    print("\n📄 Memorizz views:")
     user_cursor.execute(
         "SELECT view_name FROM user_views WHERE view_name LIKE '%_DV' ORDER BY view_name"
     )
@@ -1018,7 +977,6 @@ def setup_oracle_user():
     # SQL files - resolve paths relative to this package
     PACKAGE_DIR = Path(__file__).parent
     SCHEMA_FILE = PACKAGE_DIR / "schema_relational.sql"
-    VIEWS_FILE = PACKAGE_DIR / "duality_views.sql"
 
     print("=" * 70)
     print("Oracle Database Complete Setup for Memorizz")
@@ -1031,13 +989,7 @@ def setup_oracle_user():
         print("  Please verify the package installation is correct")
         return False
 
-    if not VIEWS_FILE.exists():
-        print(f"✗ Views file not found: {VIEWS_FILE}")
-        print("  Please verify the package installation is correct")
-        return False
-
     print(f"✓ Found schema file: {SCHEMA_FILE.name}")
-    print(f"✓ Found views file: {VIEWS_FILE.name}")
     print()
 
     # ========== DETECT SETUP MODE ==========
@@ -1228,16 +1180,8 @@ def setup_oracle_user():
     success_count, skip_count, fail_count = _create_schema(user_conn, SCHEMA_FILE)
     print()
 
-    # ========== STEP 3: Create Duality Views ==========
-    print("STEP 3: Creating JSON Duality Views")
-    print("-" * 70)
-
-    print(f"Executing {VIEWS_FILE.name}...")
-    view_success, view_fail = _create_duality_views(user_conn, VIEWS_FILE)
-    print()
-
-    # ========== STEP 4: Verify Setup ==========
-    print("STEP 4: Verifying Setup")
+    # ========== STEP 3: Verify Setup ==========
+    print("STEP 3: Verifying Setup")
     print("-" * 70)
 
     tables, views, indexes = _verify_setup(user_conn)
@@ -1259,7 +1203,7 @@ def setup_oracle_user():
         print("  Some admin-granted privileges may not be available.")
         print("  Contact your database administrator if you need:")
         print("    - DBMS_VECTOR execute privileges (for vector search)")
-        print("    - SODA_APP role (for JSON Duality Views)")
+        print("    - SODA_APP role (for Memorizz views)")
     else:
         print("ℹ Setup Mode: Admin (full setup)")
 
@@ -1295,7 +1239,7 @@ def setup_oracle_user():
     print()
     print("Summary counts:")
     print(f"  - Tables: {len(tables)}/12 expected")
-    print(f"  - Duality Views: {len(views)}/10 expected")
+    print(f"  - views: {len(views)}/10 expected")
     print(f"  - Vector Indexes: {len(indexes)}/10 expected")
 
     if len(tables) >= 12 and len(views) >= 10:
@@ -1316,7 +1260,6 @@ def apply_schema_updates() -> bool:
     This is the safe/non-destructive counterpart to setup_oracle_user(). It:
     - Connects as ORACLE_USER (no admin / no user drop)
     - Executes schema_relational.sql (skipping existing objects)
-    - Executes duality_views.sql (best-effort; existing views may fail)
     - Verifies the resulting objects
     """
     if oracledb is None:
@@ -1333,13 +1276,9 @@ def apply_schema_updates() -> bool:
 
     package_dir = Path(__file__).parent
     schema_file = package_dir / "schema_relational.sql"
-    views_file = package_dir / "duality_views.sql"
 
     if not schema_file.exists():
         print(f"✗ Schema file not found: {schema_file}")
-        return False
-    if not views_file.exists():
-        print(f"✗ Views file not found: {views_file}")
         return False
 
     print("=" * 70)
@@ -1363,12 +1302,7 @@ def apply_schema_updates() -> bool:
         _create_schema(conn, schema_file)
         print()
 
-        print("STEP 2: Applying JSON duality views (best-effort)")
-        print("-" * 70)
-        _create_duality_views(conn, views_file)
-        print()
-
-        print("STEP 3: Verifying")
+        print("STEP 2: Verifying")
         print("-" * 70)
         _verify_setup(conn)
         print()

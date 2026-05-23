@@ -68,3 +68,15 @@ eval/longmemeval/data/
 eval/longmemeval/results/
 longmemeval_evaluation.log
 matrix_results*.txt
+
+# Node / Tauri build artifacts under apps/
+apps/**/node_modules/
+apps/**/dist/
+apps/**/src-tauri/target/
+
+# Local Claude Code settings (per-user overrides only; team settings.json may be committed)
+.claude/settings.local.json
+.claude/.cache/
+.claude/scheduled_tasks.lock
+**/.claude/scheduled_tasks.lock
+**/.claude/settings.local.json

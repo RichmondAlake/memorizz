@@ -7,7 +7,7 @@ Memorizz helps you build AI agents that can remember, retrieve, and coordinate o
 ```text
 src/memorizz/
 ├── memagent/                # Agent runtime + builder APIs
-├── long_term_memory/        # semantic, procedural, episodic memory systems
+├── long_term/        # semantic, procedural, episodic memory systems
 ├── short_term_memory/       # working memory + semantic cache
 ├── coordination/            # shared memory for multi-agent workflows
 ├── memory_provider/         # Oracle, MongoDB, filesystem, custom providers

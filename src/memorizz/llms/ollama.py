@@ -23,7 +23,8 @@ class OllamaLLM(LLMProvider):
     Parameters
     ----------
     model : str
-        Ollama model name (e.g. ``"llama3.1"``, ``"mistral"``, ``"gemma3"``).
+        Ollama model name (e.g. ``"llama3.1"``, ``"mistral"``, ``"gemma4:e4b"``).
+        Gemma 4 tags require the Ollama daemon at v0.22.1+ (April 28 2026).
     host : str, optional
         Ollama server URL. Falls back to ``OLLAMA_HOST`` env var, then
         ``http://localhost:11434``.
@@ -41,8 +42,17 @@ class OllamaLLM(LLMProvider):
         Override context-window size (default 128 000).
     timeout : float, optional
         Request timeout in seconds.
+    think : bool, optional
+        Whether to ask the daemon to emit a separate ``thinking`` chain-of-thought
+        trace before the final ``content``. Defaults to ``False`` because models
+        like Gemma 4 (Ollama 0.22.1+) ship with thinking on by default and can
+        spend 30–60s on the trace before any visible reply, which makes the
+        playground appear stuck. Pass ``True`` (or ``additional_config={"think":
+        True}``) when you actually want the reasoning trace surfaced.
     additional_config : dict, optional
         Extra options forwarded to the ``options`` dict in Ollama requests.
+        A top-level ``think`` key is special-cased and overrides the ``think``
+        constructor arg.
     """
 
     def __init__(
@@ -56,6 +66,7 @@ class OllamaLLM(LLMProvider):
         seed: Optional[int] = None,
         context_window_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        think: Optional[bool] = False,
         additional_config: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ):
@@ -94,17 +105,107 @@ class OllamaLLM(LLMProvider):
             if value is not None:
                 self._options[key] = value
 
+        # `think` is a top-level chat parameter, not an option. Pull it out of
+        # additional_config (if present) and let it override the constructor
+        # arg, so existing UI configs that surface it via additional_config
+        # keep working.
+        self.think: Optional[bool] = think
         if additional_config:
-            for key, value in additional_config.items():
+            cfg = dict(additional_config)
+            if "think" in cfg:
+                think_override = cfg.pop("think")
+                if think_override is not None:
+                    self.think = bool(think_override)
+            for key, value in cfg.items():
                 if value is not None:
                     self._options[key] = value
+
+    def _chat_kwargs(self, **extra: Any) -> Dict[str, Any]:
+        """Build the kwarg dict for ``ollama.Client.chat`` calls.
+
+        Centralized so options / think / model fields stay consistent between
+        ``generate_text``, ``generate``, and ``generate_stream``.
+        """
+        kwargs: Dict[str, Any] = {"model": self.model, **extra}
+        if "messages" in kwargs:
+            kwargs["messages"] = self._normalize_messages(kwargs["messages"])
+        if self._options:
+            kwargs["options"] = self._options
+        if self.think is not None:
+            kwargs["think"] = self.think
+        return kwargs
+
+    @staticmethod
+    def _normalize_messages(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Make MemAgent's OpenAI-shaped messages valid for the Ollama SDK.
+
+        MemAgent stores assistant tool calls with ``function.arguments`` as a
+        JSON *string* (OpenAI's wire shape). The ``ollama`` Python SDK's
+        ``Message`` model validates ``arguments`` as a dict and rejects the
+        string with a Pydantic error:
+
+            tool_calls.0.function.arguments
+              Input should be a valid dictionary [type=dict_type, ...]
+
+        We walk the messages once and parse any string-shaped arguments to
+        dict before they hit the SDK. We don't mutate the caller's list —
+        the upstream MemAgent loop still expects the OpenAI shape next time
+        around.
+        """
+        out: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                out.append(msg)
+                continue
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                out.append(msg)
+                continue
+            new_calls = []
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    new_calls.append(tc)
+                    continue
+                fn = tc.get("function")
+                if not isinstance(fn, dict):
+                    new_calls.append(tc)
+                    continue
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        parsed = json.loads(args) if args.strip() else {}
+                    except json.JSONDecodeError:
+                        # Ollama can't use unparseable args; an empty dict at
+                        # least lets the conversation continue instead of
+                        # crashing the whole stream.
+                        logger.warning(
+                            "Tool call arguments not valid JSON; sending "
+                            "empty dict to Ollama. raw=%r",
+                            args,
+                        )
+                        parsed = {}
+                    new_fn = {**fn, "arguments": parsed}
+                    new_calls.append({**tc, "function": new_fn})
+                else:
+                    new_calls.append(tc)
+            out.append({**msg, "tool_calls": new_calls})
+        return out
 
     # ------------------------------------------------------------------
     # Config persistence
     # ------------------------------------------------------------------
 
     def get_config(self) -> Dict[str, Any]:
-        return {"provider": "ollama", "model": self.model, "host": self._host}
+        cfg: Dict[str, Any] = {
+            "provider": "ollama",
+            "model": self.model,
+            "host": self._host,
+        }
+        if self.think is not None:
+            cfg["think"] = self.think
+        return cfg
 
     # ------------------------------------------------------------------
     # Tool metadata helpers
@@ -153,13 +254,17 @@ class OllamaLLM(LLMProvider):
             messages.append({"role": "system", "content": instructions})
         messages.append({"role": "user", "content": prompt})
 
-        kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
-        if self._options:
-            kwargs["options"] = self._options
-
+        kwargs = self._chat_kwargs(messages=messages)
         response = self.client.chat(**kwargs)
         self._last_usage = self._extract_usage(response)
-        return response.message.content or ""
+        # Thinking models (Gemma 4, deepseek-r1, …) leave ``content`` empty
+        # and put the answer-prefix in ``thinking`` when generation truncates
+        # mid-trace. Fall back so callers don't get an empty string.
+        msg = response.message
+        text = (getattr(msg, "content", None) or "").strip()
+        if not text:
+            text = (getattr(msg, "thinking", None) or "").strip()
+        return text
 
     # ------------------------------------------------------------------
     # Core generate (chat-completions style)
@@ -176,10 +281,7 @@ class OllamaLLM(LLMProvider):
         Returns either a plain string (no tool calls) or a response-like
         ``SimpleNamespace`` object that matches the shape MemAgent expects.
         """
-        kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
-        if self._options:
-            kwargs["options"] = self._options
-
+        kwargs = self._chat_kwargs(messages=messages)
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
 
@@ -207,13 +309,7 @@ class OllamaLLM(LLMProvider):
 
         Yields the same dict shapes as the OpenAI provider.
         """
-        kwargs: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-        }
-        if self._options:
-            kwargs["options"] = self._options
+        kwargs = self._chat_kwargs(messages=messages, stream=True)
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
 

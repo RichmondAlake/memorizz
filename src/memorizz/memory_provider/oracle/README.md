@@ -163,7 +163,7 @@ The provider automatically creates all required tables on first initialization:
 - `personas` - Persona definitions with embeddings
 - `toolbox` - Tool definitions
 - `short_term_memory` - Working memory
-- `long_term_memory` - Knowledge base
+- `knowledge_base` - Knowledge base
 - `conversation_memory` - Chat history
 - `workflow_memory` - Process workflows
 - `agents` - Agent configurations

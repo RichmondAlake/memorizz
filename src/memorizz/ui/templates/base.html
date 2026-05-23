@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Memorizz{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=20">
+    <link rel="stylesheet" href="/static/css/styles.css?v=25">
     <style>
         /* Background accents */
         body::before {
@@ -57,7 +57,7 @@
             </div>
 
             <nav class="sidebar-nav">
-                {% set memory_pages = ['personas', 'toolbox', 'conversations', 'workflows', 'long-term', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
+                {% set memory_pages = ['personas', 'toolbox', 'conversations', 'workflows', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
                 <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -160,7 +160,7 @@
                             </span>
                             <span>Workflows</span>
                         </a>
-                        <a href="/memory/long-term" class="nav-item nav-item--sub {% if active_page == 'long-term' %}active{% endif %}">
+                        <a href="/memory/knowledge-base" class="nav-item nav-item--sub {% if active_page == 'knowledge-base' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                                     <path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H8l-5 3z"/>
@@ -168,7 +168,7 @@
                                     <path d="M8 14h5"/>
                                 </svg>
                             </span>
-                            <span>Long-term</span>
+                            <span>Knowledge Base</span>
                         </a>
                         <a href="/memory/short-term" class="nav-item nav-item--sub {% if active_page == 'short-term' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">
@@ -230,6 +230,15 @@
                         </svg>
                     </span>
                     <span>Playground</span>
+                </a>
+
+                <a href="/vercel-skills" class="nav-item {% if active_page == 'vercel-skills' %}active{% endif %}">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 2L2 19.5h20L12 2z"/>
+                        </svg>
+                    </span>
+                    <span>Vercel Skills</span>
                 </a>
 
                 <a href="/automations" class="nav-item {% if active_page == 'automations' %}active{% endif %}">

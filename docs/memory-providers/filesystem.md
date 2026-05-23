@@ -44,7 +44,7 @@ provider = FileSystemProvider(config)
 │   ├── index.json                # Lightweight metadata for quick lookups
 │   ├── 4c1d9a2f.json             # Individual memory documents
 │   └── vector.index (optional)   # Saved FAISS index when embeddings are enabled
-├── long_term_memory/
+├── long_term/
 │   └── …
 └── agents/                       # Stored MemAgent configurations
 ```

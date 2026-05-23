@@ -34,20 +34,20 @@ class ApplicationModeConfig:
         ApplicationMode.WORKFLOW: [
             MemoryType.WORKFLOW_MEMORY,
             MemoryType.TOOLBOX,
-            MemoryType.LONG_TERM_MEMORY,  # Knowledge base
+            MemoryType.KNOWLEDGE_BASE,  # Knowledge base
             MemoryType.SHORT_TERM_MEMORY,  # For intermediate results
             MemoryType.SUMMARIES,  # For context compression
         ],
         ApplicationMode.DEEP_RESEARCH: [
             MemoryType.TOOLBOX,
             MemoryType.SHARED_MEMORY,
-            MemoryType.LONG_TERM_MEMORY,  # Research knowledge base
+            MemoryType.KNOWLEDGE_BASE,  # Research knowledge base
             MemoryType.SHORT_TERM_MEMORY,  # For research sessions
             MemoryType.SUMMARIES,  # For context compression
         ],
         ApplicationMode.ASSISTANT: [
             MemoryType.CONVERSATION_MEMORY,
-            MemoryType.LONG_TERM_MEMORY,  # Knowledge base
+            MemoryType.KNOWLEDGE_BASE,  # Knowledge base
             MemoryType.PERSONAS,  # For personalization
             MemoryType.ENTITY_MEMORY,  # Structured entity facts
             MemoryType.SHORT_TERM_MEMORY,  # For context

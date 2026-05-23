@@ -66,14 +66,24 @@ class MemoryProvider(ABC):
         limit : int
             Maximum number of results to return
         **kwargs
-            Additional provider-specific parameters
+            Additional provider-specific parameters. Includes ``user_id`` for
+            multi-tenant scoping — when provided, results are restricted to
+            rows whose stored ``user_id`` equals that value; when ``None``
+            (the default), results are restricted to rows whose ``user_id`` is
+            also ``None`` (legacy/anonymous scope).
         """
 
     @abstractmethod
     def retrieve_by_id(
         self, id: str, memory_store_type: str
     ) -> Optional[Dict[str, Any]]:
-        """Retrieve a document from the memory provider by id."""
+        """Retrieve a document from the memory provider by id.
+
+        When a provider supports multi-tenant scoping via ``user_id`` it may
+        accept a ``user_id`` keyword argument; callers that need strict
+        isolation should check the returned row's ``user_id`` against their
+        expected scope before acting on it.
+        """
 
     @abstractmethod
     def retrieve_by_name(
@@ -95,7 +105,13 @@ class MemoryProvider(ABC):
 
     @abstractmethod
     def list_all(self, memory_store_type: str) -> List[Dict[str, Any]]:
-        """List all documents within a memory store type in the memory provider."""
+        """List all documents within a memory store type in the memory provider.
+
+        Providers should accept an optional ``user_id`` keyword argument for
+        tenant scoping. When provided, only rows matching that scope are
+        returned; when ``None`` (the default), only rows with no ``user_id``
+        are returned.
+        """
 
     @abstractmethod
     def retrieve_conversation_history_ordered_by_timestamp(
@@ -112,6 +128,10 @@ class MemoryProvider(ABC):
             Type of memory (typically CONVERSATION_MEMORY)
         limit : int, optional
             Maximum number of entries to return
+        user_id : str, optional (keyword)
+            Multi-tenant scope. When provided, results are restricted to rows
+            whose stored ``user_id`` equals that value; when omitted/``None``,
+            results are restricted to rows whose ``user_id`` is also ``None``.
         """
 
     @abstractmethod

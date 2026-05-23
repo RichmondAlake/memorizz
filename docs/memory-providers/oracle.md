@@ -56,7 +56,7 @@ Every memory bucket gets its own table plus a VECTOR index:
 
 - `personas`
 - `toolbox`
-- `long_term_memory`
+- `knowledge_base`
 - `entity_memory`
 - `short_term_memory`
 - `conversation_memory`

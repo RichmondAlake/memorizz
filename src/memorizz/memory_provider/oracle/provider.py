@@ -21,8 +21,8 @@ except ImportError:
     )
 
 from ...enums.memory_type import MemoryType
-from ...long_term_memory.semantic.persona.persona import Persona
-from ...long_term_memory.semantic.persona.role_type import RoleType
+from ...long_term.semantic.persona.persona import Persona
+from ...long_term.semantic.persona.role_type import RoleType
 from ...memagent import MemAgentModel
 from ..base import MemoryProvider
 
@@ -30,6 +30,44 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+# Sentinel used to distinguish "user_id filter not supplied" from
+# "user_id explicitly set to None" (which means anonymous/legacy scope).
+class _UserIdUnset:
+    """Unique sentinel so ``user_id=None`` is not conflated with "no filter"."""
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "<user_id unset>"
+
+
+_UNSET = _UserIdUnset()
+
+
+# Memory types that are per-user data. Shared app-level config (agents,
+# personas, toolbox, shared_memory) is intentionally NOT user-scoped.
+_USER_SCOPED_MEMORY_TYPES = frozenset(
+    {
+        MemoryType.CONVERSATION_MEMORY,
+        MemoryType.KNOWLEDGE_BASE,
+        MemoryType.SHORT_TERM_MEMORY,
+        MemoryType.WORKFLOW_MEMORY,
+        MemoryType.SUMMARIES,
+        MemoryType.SEMANTIC_CACHE,
+        MemoryType.ENTITY_MEMORY,
+        MemoryType.TOOL_LOG,
+    }
+)
+
+
+def _memory_type_supports_user_id(memory_type: Any) -> bool:
+    """Return True when rows of this memory type carry a user_id column."""
+    try:
+        if isinstance(memory_type, str):
+            memory_type = MemoryType(memory_type)
+    except Exception:
+        return False
+    return memory_type in _USER_SCOPED_MEMORY_TYPES
 
 
 @dataclass
@@ -110,7 +148,7 @@ class OracleProvider(MemoryProvider):
 
     VECTOR_INDEX_NAME_OVERRIDES = {
         MemoryType.CONVERSATION_MEMORY: "idx_conv_vec",
-        MemoryType.LONG_TERM_MEMORY: "idx_ltm_vec",
+        MemoryType.KNOWLEDGE_BASE: "idx_kb_vec",
         MemoryType.SHORT_TERM_MEMORY: "idx_stm_vec",
         MemoryType.SEMANTIC_CACHE: "idx_cache_vec",
         MemoryType.ENTITY_MEMORY: "idx_entity_memory_vec",
@@ -139,6 +177,10 @@ class OracleProvider(MemoryProvider):
         # Disable vector search per memory type once Oracle reports a vector dimension mismatch.
         self._vector_search_disabled_for = set()
         self._vector_dimension_mismatch_warning_emitted_for = set()
+        # Cache of ``{table_name: {column, ...}}`` populated on first use.  We
+        # consult this to skip ``user_id`` on schemas where the 001 migration
+        # has not been run yet — see ``_table_has_column``.
+        self._table_columns_cache: Dict[str, set] = {}
 
         # Initialize connection pool
         try:
@@ -458,96 +500,266 @@ class OracleProvider(MemoryProvider):
             )
             return False
 
-    def _get_duality_view_name(self, memory_type: MemoryType) -> str:
-        """Get the Duality View name for a memory type."""
-        view_mapping = {
-            MemoryType.MEMAGENT: "agents_dv",
-            MemoryType.PERSONAS: "personas_dv",
-            MemoryType.TOOLBOX: "toolbox_dv",
-            MemoryType.CONVERSATION_MEMORY: "conversation_memory_dv",
-            MemoryType.LONG_TERM_MEMORY: "long_term_memory_dv",
-            MemoryType.SHORT_TERM_MEMORY: "short_term_memory_dv",
-            MemoryType.WORKFLOW_MEMORY: "workflow_memory_dv",
-            MemoryType.SHARED_MEMORY: "shared_memory_dv",
-            MemoryType.SUMMARIES: "summaries_dv",
-            MemoryType.SEMANTIC_CACHE: "semantic_cache_dv",
-        }
-        return view_mapping.get(memory_type)
-
     def _get_table_name(self, memory_type: MemoryType) -> str:
         """Get the table name for a memory type."""
         return f"{self.config.schema}.{memory_type.value}"
 
+    def _memory_type_has_column(
+        self, memory_type: MemoryType, column_name: str
+    ) -> bool:
+        """Return True when the base table exposes ``column_name``.
+
+        Used to safely skip optional columns (``user_id`` in particular) on
+        schemas where the 001 migration has not been applied yet.
+        """
+        table_key = memory_type.value.upper()
+        column_key = column_name.upper()
+        if table_key in self._table_columns_cache:
+            return column_key in self._table_columns_cache[table_key]
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT column_name FROM user_tab_columns
+                    WHERE table_name = :table_name
+                    """,
+                    {"table_name": table_key},
+                )
+                columns = {row[0].upper() for row in cursor.fetchall()}
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not introspect columns for %s: %s", table_key, exc)
+            columns = set()
+
+        self._table_columns_cache[table_key] = columns
+        return column_key in columns
+
     def _create_memory_stores(self) -> None:
-        """Create all memory store tables in Oracle."""
+        """Create all memory store tables from the bundled relational schema.
+
+        Historically this method built each table from an inline CREATE
+        fallback that used a generic ``(id, data CLOB, embedding, ...)``
+        shape. That shape didn't match the code — ``agents`` needs
+        ``semantic_cache``, ``instruction``, ``application_mode``, etc. and
+        ``knowledge_base`` needs the chunking columns — which surfaced as
+        ``ORA-00904: "SEMANTIC_CACHE": invalid identifier`` on agent create
+        and a missing Knowledge Base panel in the UI.
+
+        The fix: drive table creation from ``schema_relational.sql`` — the
+        same file ``memorizz setup-oracle`` uses. One source of truth.
+
+        Existing tables are preserved; Oracle returns ``ORA-00955`` for
+        "already exists" which we swallow. Missing objects on a partially-
+        initialized schema get filled in on the next connect.
+        """
+        # Reuse the SQL parser from setup.py so we apply the same embedding-
+        # dimension substitution and comment-stripping logic everywhere.
+        from pathlib import Path
+
+        from .setup import parse_sql_file
+
+        try:
+            dimensions = self._get_embedding_dimensions_safe()
+        except Exception:
+            # Fallbacks in order: explicit env var → OpenAI 3-small default (256)
+            # → legacy 1536. Picking 1536 blindly (what we used to do) causes
+            # ORA-51803 whenever the runtime embedder actually produces
+            # fewer dims, because Oracle VECTOR columns pin the dim count
+            # at CREATE time.
+            import os as _os
+
+            env_dim = _os.environ.get("MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS")
+            if env_dim and env_dim.isdigit():
+                dimensions = int(env_dim)
+            else:
+                dimensions = 256
+            logger.warning(
+                "Using default dimensions %d for table creation (set "
+                "MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS to override)",
+                dimensions,
+            )
+
+        schema_path = Path(__file__).parent / "schema_relational.sql"
+        if not schema_path.exists():
+            logger.error(
+                "schema_relational.sql not found at %s — cannot bootstrap tables",
+                schema_path,
+            )
+            return
+
+        statements = parse_sql_file(schema_path, embedding_dim=dimensions)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            created = skipped = failed = 0
+            for stmt in statements:
+                try:
+                    cursor.execute(stmt)
+                    created += 1
+                except Exception as exc:
+                    msg = str(exc).upper()
+                    # ORA-00955: object already exists. ORA-01408: index
+                    # already on those columns. ORA-02275: dupe fk
+                    # constraint. All three are benign on re-connect.
+                    if any(
+                        code in msg for code in ("ORA-00955", "ORA-01408", "ORA-02275")
+                    ):
+                        skipped += 1
+                    else:
+                        failed += 1
+                        if failed <= 3:
+                            # Verbose for the first few so operators can
+                            # diagnose a genuinely broken schema file.
+                            logger.warning("Schema statement failed: %s", exc)
+            conn.commit()
+
+            logger.info(
+                "Memory stores bootstrapped from schema_relational.sql "
+                "(created=%d, skipped=%d, failed=%d)",
+                created,
+                skipped,
+                failed,
+            )
+
+            # Keep the supplemental index helper — it handles vector indexes
+            # and any cross-cutting indexes not expressed in the schema file.
+            self._create_standard_indexes(cursor, conn)
+
+        # Ensure existing tables have all the columns the provider expects.
+        self._migrate_table_schemas()
+
+    # Column definitions that the vector-search, store, and retrieve code
+    # paths rely on.  Only columns beyond the generic set (id, data,
+    # embedding, name, memory_id, agent_id, created_at, updated_at) are
+    # listed — those already exist on every table created by
+    # _create_memory_stores().
+    _REQUIRED_COLUMNS: Dict[MemoryType, List[tuple]] = {
+        MemoryType.ENTITY_MEMORY: [
+            ("entity_id", "VARCHAR2(255)"),
+            ("entity_type", "VARCHAR2(255)"),
+            ("attributes", "CLOB"),
+            ("relations", "CLOB"),
+            ("metadata", "CLOB"),
+        ],
+        MemoryType.CONVERSATION_MEMORY: [
+            ("memory_id", "VARCHAR2(255)"),
+            ("thread_id", "VARCHAR2(255)"),
+            ("role", "VARCHAR2(50)"),
+            ("content", "CLOB"),
+            ("timestamp", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ],
+        MemoryType.KNOWLEDGE_BASE: [
+            ("memory_id", "VARCHAR2(255)"),
+            ("content", "CLOB"),
+            ("memory_type", "VARCHAR2(50)"),
+            ("importance", "NUMBER(3,2)"),
+            ("last_accessed", "TIMESTAMP"),
+            ("access_count", "NUMBER(10) DEFAULT 0"),
+        ],
+        MemoryType.SHORT_TERM_MEMORY: [
+            ("memory_id", "VARCHAR2(255)"),
+            ("content", "CLOB"),
+            ("memory_type", "VARCHAR2(50)"),
+            ("ttl", "NUMBER(10)"),
+            ("expires_at", "TIMESTAMP"),
+        ],
+        MemoryType.PERSONAS: [
+            ("persona_id", "VARCHAR2(255)"),
+            ("role_type", "VARCHAR2(50)"),
+            ("background", "CLOB"),
+            ("traits", "CLOB"),
+            ("expertise", "CLOB"),
+        ],
+        MemoryType.TOOLBOX: [
+            ("tool_id", "VARCHAR2(255)"),
+            ("description", "CLOB"),
+            ("signature", "VARCHAR2(4000)"),
+            ("docstring", "CLOB"),
+            ("tool_type", "VARCHAR2(50)"),
+            ("parameters", "CLOB"),
+        ],
+        MemoryType.WORKFLOW_MEMORY: [
+            ("workflow_id", "VARCHAR2(255)"),
+            ("description", "CLOB"),
+            ("steps", "CLOB"),
+            ("current_step", "VARCHAR2(255)"),
+            ("status", "VARCHAR2(50)"),
+            ("outcome", "CLOB"),
+        ],
+        MemoryType.SHARED_MEMORY: [
+            ("content", "CLOB"),
+            ("memory_type", "VARCHAR2(50)"),
+            ("scope", "VARCHAR2(50)"),
+            ("owner_agent_id", "VARCHAR2(255)"),
+            ("access_list", "CLOB"),
+        ],
+        MemoryType.SUMMARIES: [
+            ("summary_id", "VARCHAR2(255)"),
+            ("content", "CLOB"),
+            ("original_memory_ids", "CLOB"),
+            ("summary_type", "VARCHAR2(50)"),
+        ],
+        MemoryType.TOOL_LOG: [
+            ("tool_log_id", "VARCHAR2(255)"),
+            ("tool_name", "VARCHAR2(255)"),
+            ("arguments", "CLOB"),
+            ("result", "CLOB"),
+            ("success", "NUMBER(1) DEFAULT 1"),
+            ("error", "CLOB"),
+            ("timestamp", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("tool_call_id", "VARCHAR2(255)"),
+            ("thread_id", "VARCHAR2(255)"),
+        ],
+    }
+
+    def _migrate_table_schemas(self) -> None:
+        """Add any missing columns to existing tables.
+
+        Tables originally created with the generic schema (id, data,
+        embedding, …) lack the specific columns that vector search and
+        store methods expect.  This method inspects each table once at
+        startup and issues ALTER TABLE ADD for any missing columns.
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # Get embedding dimensions for vector columns
-            try:
-                dimensions = self._get_embedding_dimensions_safe()
-            except Exception:
-                # If dimensions not available yet, use placeholder
-                dimensions = 1536  # Common default
-                logger.warning(
-                    f"Using default dimensions {dimensions} for table creation"
-                )
+            for memory_type, columns in self._REQUIRED_COLUMNS.items():
+                table_bare = memory_type.value  # e.g. "entity_memory"
+                table_full = self._get_table_name(memory_type)
 
-            for memory_type in MemoryType:
-                table_name = self._get_table_name(memory_type)
-
-                # Check if table exists
+                # Only migrate tables that already exist.
                 cursor.execute(
                     """
                     SELECT COUNT(*) FROM user_tables
                     WHERE table_name = UPPER(:1)
                     """,
-                    (memory_type.value,),
+                    (table_bare,),
                 )
-                exists = cursor.fetchone()[0] > 0
+                if cursor.fetchone()[0] == 0:
+                    continue
 
-                if not exists:
-                    # Create table with appropriate schema
-                    if memory_type == MemoryType.ENTITY_MEMORY:
-                        create_sql = f"""
-                        CREATE TABLE {table_name} (
-                            id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-                            entity_id VARCHAR2(255) UNIQUE NOT NULL,
-                            name VARCHAR2(255),
-                            entity_type VARCHAR2(255),
-                            attributes CLOB CHECK (attributes IS JSON),
-                            relations CLOB CHECK (relations IS JSON),
-                            metadata CLOB CHECK (metadata IS JSON),
-                            memory_id VARCHAR2(255),
-                            agent_id VARCHAR2(255),
-                            embedding VECTOR({dimensions}, FLOAT32),
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                        """
-                    else:
-                        create_sql = f"""
-                        CREATE TABLE {table_name} (
-                            id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-                            data CLOB CHECK (data IS JSON),
-                            embedding VECTOR({dimensions}, FLOAT32),
-                            name VARCHAR2(255),
-                            memory_id VARCHAR2(255),
-                            agent_id VARCHAR2(255),
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                        """
+                for col_name, col_type in columns:
+                    if self._table_has_column(cursor, table_bare, col_name):
+                        continue
                     try:
-                        cursor.execute(create_sql)
+                        cursor.execute(
+                            f"ALTER TABLE {table_full} ADD ({col_name} {col_type})"
+                        )
                         conn.commit()
-                        logger.info(f"Created table: {table_name}")
-                    except Exception as e:
-                        logger.warning(f"Error creating table {table_name}: {e}")
+                        logger.info(
+                            "Migrated %s: added column %s", table_bare, col_name
+                        )
+                    except Exception as exc:
                         conn.rollback()
-
-            # Create indexes on commonly queried fields
-            self._create_standard_indexes(cursor, conn)
+                        # ORA-01430 = column already exists (race / concurrent start)
+                        if "ORA-01430" not in str(exc):
+                            logger.warning(
+                                "Could not add column %s to %s: %s",
+                                col_name,
+                                table_bare,
+                                exc,
+                            )
 
     def _create_standard_indexes(self, cursor, conn):
         """Create standard B-tree indexes on commonly queried fields."""
@@ -718,7 +930,7 @@ class OracleProvider(MemoryProvider):
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
 
-        # Handle Oracle JsonId objects (from oracledb Duality Views)
+        # Handle oracledb JsonId objects
         # Check both by isinstance and by type name for robustness
         try:
             from oracledb import JsonId
@@ -921,113 +1133,40 @@ class OracleProvider(MemoryProvider):
         if isinstance(memory_store_type, str):
             memory_store_type = MemoryType(memory_store_type)
 
-        # Dispatch to Duality View-based storage methods
         if memory_store_type == MemoryType.MEMAGENT:
             from ...memagent import MemAgentModel
 
             agent = MemAgentModel(**data)
             return self.store_memagent(agent)
         elif memory_store_type == MemoryType.PERSONAS:
-            return self._store_persona_dv(data)
+            return self._store_persona(data)
         elif memory_store_type == MemoryType.TOOLBOX:
-            return self._store_toolbox_dv(data)
+            return self._store_toolbox(data)
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            return self._store_conversation_memory_dv(data)
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            return self._store_long_term_memory_dv(data)
+            return self._store_conversation_memory(data)
+        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+            return self._store_knowledge_base(data)
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            return self._store_short_term_memory_dv(data)
+            return self._store_short_term_memory(data)
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self._store_workflow_memory_dv(data)
+            return self._store_workflow_memory(data)
         elif memory_store_type == MemoryType.SHARED_MEMORY:
-            return self._store_shared_memory_dv(data)
+            return self._store_shared_memory(data)
         elif memory_store_type == MemoryType.SUMMARIES:
-            return self._store_summary_dv(data)
+            return self._store_summary(data)
         elif memory_store_type == MemoryType.SEMANTIC_CACHE:
-            return self._store_semantic_cache_dv(data)
+            return self._store_semantic_cache(data)
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             return self._store_entity_memory(data)
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            return self._store_tool_log(data)
         else:
             raise ValueError(f"Unsupported memory type: {memory_store_type}")
 
-    # ===== DUALITY VIEW-BASED STORAGE METHODS =====
+    # ===== BASE-TABLE STORAGE METHODS =====
 
-    def _store_with_duality_view(
-        self, view_name: str, data: Dict[str, Any], id_field: str = "memoryId"
-    ) -> str:
-        """Generic method to store data using a Duality View."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-
-            # Generate ID if not present
-            if not data.get(id_field):
-                data[id_field] = str(uuid.uuid4())
-
-            # Sanitize data to handle JsonId objects before JSON serialization
-            sanitized_data = self._sanitize_for_json(data)
-            if not isinstance(sanitized_data, dict):
-                raise TypeError(
-                    f"Data must be a dict after sanitization, got {type(sanitized_data)}"
-                )
-
-            # Convert to JSON
-            json_doc = json.dumps(sanitized_data)
-
-            try:
-                # Insert into Duality View
-                cursor.execute(
-                    f"INSERT INTO {view_name} VALUES (:json_doc)",
-                    {"json_doc": json_doc},
-                )
-            except Exception as e:
-                error_str = str(e)
-                if "ORA-00001" in error_str:  # Unique constraint violation
-                    # Update existing document.
-                    # Duality view JSON keys are not SQL columns; use
-                    # JSON_VALUE to query by key path (consistent with
-                    # retrieve_by_id / update_by_id elsewhere).
-                    cursor.execute(
-                        f"""
-                        UPDATE {view_name}
-                        SET data = :json_doc
-                        WHERE JSON_VALUE(data, '$."{id_field}"') = :id
-                    """,
-                        {"json_doc": json_doc, "id": data[id_field]},
-                    )
-                elif "ORA-00942" in error_str:  # View doesn't exist
-                    # Fallback to base table - this will be handled by the caller
-                    raise
-                else:
-                    raise
-
-            conn.commit()
-            return data[id_field]
-
-    def _store_with_embedding_fallback(
-        self,
-        *,
-        view_name: str,
-        data: Dict[str, Any],
-        id_field: str,
-        store_name: str,
-    ) -> str:
-        """
-        Store via Duality View and retry without embedding when VECTOR dims mismatch.
-        """
-        try:
-            return self._store_with_duality_view(view_name, data, id_field)
-        except Exception as exc:
-            error_text = str(exc)
-            if data.get(
-                "embedding"
-            ) is not None and self._is_embedding_dimension_mismatch_error(error_text):
-                data.pop("embedding", None)
-                self._handle_embedding_dimension_mismatch(store_name, exc)
-                return self._store_with_duality_view(view_name, data, id_field)
-            raise
-
-    def _store_persona_dv(self, data: Dict[str, Any]) -> str:
-        """Store persona data using Duality View and update JSON columns if present."""
+    def _store_persona(self, data: Dict[str, Any]) -> str:
+        """Store persona directly in its base table."""
         persona_id = (
             data.get("persona_id")
             or data.get("personaId")
@@ -1038,60 +1177,102 @@ class OracleProvider(MemoryProvider):
         if hasattr(role_value, "value"):
             role_value = role_value.value
 
-        persona_data = {
-            "personaId": persona_id,
-            "name": data.get("name", "Unnamed Persona"),
-            "roleType": role_value,
-            "background": data.get("background", ""),
-            "memoryId": data.get("memory_id") or data.get("memoryId"),
-            "agentId": data.get("agent_id") or data.get("agentId"),
-        }
-
+        name = data.get("name", "Unnamed Persona")
+        background = data.get("background", "")
         goals = data.get("goals", "")
-        persona_text = (
-            f"{persona_data['name']}: {persona_data.get('background', '')} {goals}"
-        )
+        persona_text = f"{name}: {background} {goals}".strip()
         embedding = self._generate_embedding_if_needed(
-            persona_text.strip(), existing_embedding=data.get("embedding")
-        )
-        if embedding is not None:
-            persona_data["embedding"] = embedding
-
-        stored_id = self._store_with_embedding_fallback(
-            view_name="personas_dv",
-            data=persona_data,
-            id_field="personaId",
-            store_name="Persona",
+            persona_text, existing_embedding=data.get("embedding")
         )
 
+        table_name = self._get_table_name(MemoryType.PERSONAS)
         traits = data.get("traits")
         expertise = data.get("expertise")
-        if traits or expertise:
-            table_name = self._get_table_name(MemoryType.PERSONAS)
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
+        memory_id = data.get("memory_id") or data.get("memoryId")
+        agent_id = data.get("agent_id") or data.get("agentId")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT id FROM {table_name} WHERE persona_id = :persona_id",
+                {"persona_id": persona_id},
+            )
+            existing = cursor.fetchone()
+
+            common_params = {
+                "persona_id": persona_id,
+                "name": name,
+                "role_type": role_value,
+                "background": background,
+                "memory_id": memory_id,
+                "agent_id": agent_id,
+                "traits": json.dumps(self._sanitize_for_json(traits))
+                if traits is not None
+                else None,
+                "expertise": json.dumps(self._sanitize_for_json(expertise))
+                if expertise is not None
+                else None,
+            }
+            if embedding is not None:
+                common_params["embedding"] = embedding
+
+            if existing:
+                set_parts = [
+                    "name = :name",
+                    "role_type = :role_type",
+                    "background = :background",
+                    "memory_id = :memory_id",
+                    "agent_id = :agent_id",
+                    "traits = :traits",
+                    "expertise = :expertise",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                if embedding is not None:
+                    set_parts.append("embedding = :embedding")
                 cursor.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET traits = :traits, expertise = :expertise
-                    WHERE persona_id = :persona_id
-                """,
-                    {
-                        "traits": json.dumps(self._sanitize_for_json(traits))
-                        if traits is not None
-                        else None,
-                        "expertise": json.dumps(self._sanitize_for_json(expertise))
-                        if expertise is not None
-                        else None,
-                        "persona_id": stored_id,
-                    },
+                    f"UPDATE {table_name} SET {', '.join(set_parts)} "
+                    "WHERE persona_id = :persona_id",
+                    common_params,
                 )
-                conn.commit()
+            else:
+                cols = [
+                    "id",
+                    "persona_id",
+                    "name",
+                    "role_type",
+                    "background",
+                    "memory_id",
+                    "agent_id",
+                    "traits",
+                    "expertise",
+                ]
+                vals = [
+                    ":id",
+                    ":persona_id",
+                    ":name",
+                    ":role_type",
+                    ":background",
+                    ":memory_id",
+                    ":agent_id",
+                    ":traits",
+                    ":expertise",
+                ]
+                params = dict(common_params)
+                params["id"] = uuid.uuid4().bytes
+                if embedding is not None:
+                    cols.append("embedding")
+                    vals.append(":embedding")
+                cursor.execute(
+                    f"INSERT INTO {table_name} ({', '.join(cols)}) "
+                    f"VALUES ({', '.join(vals)})",
+                    params,
+                )
+            conn.commit()
 
-        return stored_id
+        return persona_id
 
-    def _store_toolbox_dv(self, data: Dict[str, Any]) -> str:
-        """Store toolbox data using Duality View and update JSON columns if present."""
+    def _store_toolbox(self, data: Dict[str, Any]) -> str:
+        """Store toolbox entry directly in its base table."""
         tool_id = (
             data.get("tool_id")
             or data.get("toolId")
@@ -1106,153 +1287,496 @@ class OracleProvider(MemoryProvider):
             or "function"
         )
 
-        tool_data = {
-            "toolId": tool_id,
-            "name": data.get("name", "unknown_tool"),
-            "description": data.get("description", ""),
-            "signature": data.get("signature", ""),
-            "docstring": data.get("docstring", ""),
-            "toolType": tool_type,
-            "memoryId": data.get("memory_id") or data.get("memoryId"),
-            "agentId": data.get("agent_id") or data.get("agentId"),
-        }
-
-        tool_text = (
-            f"{tool_data['name']}: {tool_data.get('description', '')} "
-            f"{tool_data.get('signature', '')} {tool_data.get('docstring', '')}"
-        )
-        embedding = self._generate_embedding_if_needed(
-            tool_text.strip(), existing_embedding=data.get("embedding")
-        )
-        if embedding is not None:
-            tool_data["embedding"] = embedding
-
-        stored_id = self._store_with_embedding_fallback(
-            view_name="toolbox_dv",
-            data=tool_data,
-            id_field="toolId",
-            store_name="Toolbox",
-        )
-
+        name = data.get("name", "unknown_tool")
+        description = data.get("description", "")
+        signature = data.get("signature", "")
+        docstring = data.get("docstring", "")
         parameters = data.get("parameters")
-        if parameters is not None:
-            table_name = self._get_table_name(MemoryType.TOOLBOX)
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
+        memory_id = data.get("memory_id") or data.get("memoryId")
+        agent_id = data.get("agent_id") or data.get("agentId")
+
+        tool_text = f"{name}: {description} {signature} {docstring}".strip()
+        embedding = self._generate_embedding_if_needed(
+            tool_text, existing_embedding=data.get("embedding")
+        )
+
+        table_name = self._get_table_name(MemoryType.TOOLBOX)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT id FROM {table_name} WHERE tool_id = :tool_id",
+                {"tool_id": tool_id},
+            )
+            existing = cursor.fetchone()
+
+            common_params: Dict[str, Any] = {
+                "tool_id": tool_id,
+                "name": name,
+                "description": description,
+                "signature": signature,
+                "docstring": docstring,
+                "tool_type": tool_type,
+                "parameters": json.dumps(self._sanitize_for_json(parameters))
+                if parameters is not None
+                else None,
+                "memory_id": memory_id,
+                "agent_id": agent_id,
+            }
+            if embedding is not None:
+                common_params["embedding"] = embedding
+
+            if existing:
+                set_parts = [
+                    "name = :name",
+                    "description = :description",
+                    "signature = :signature",
+                    "docstring = :docstring",
+                    "tool_type = :tool_type",
+                    "parameters = :parameters",
+                    "memory_id = :memory_id",
+                    "agent_id = :agent_id",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                if embedding is not None:
+                    set_parts.append("embedding = :embedding")
                 cursor.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET parameters = :parameters
-                    WHERE tool_id = :tool_id
-                """,
-                    {
-                        "parameters": json.dumps(self._sanitize_for_json(parameters)),
-                        "tool_id": stored_id,
-                    },
+                    f"UPDATE {table_name} SET {', '.join(set_parts)} "
+                    "WHERE tool_id = :tool_id",
+                    common_params,
                 )
-                conn.commit()
+            else:
+                cols = [
+                    "id",
+                    "tool_id",
+                    "name",
+                    "description",
+                    "signature",
+                    "docstring",
+                    "tool_type",
+                    "parameters",
+                    "memory_id",
+                    "agent_id",
+                ]
+                vals = [f":{c}" for c in cols]
+                params = dict(common_params)
+                params["id"] = uuid.uuid4().bytes
+                if embedding is not None:
+                    cols.append("embedding")
+                    vals.append(":embedding")
+                cursor.execute(
+                    f"INSERT INTO {table_name} ({', '.join(cols)}) "
+                    f"VALUES ({', '.join(vals)})",
+                    params,
+                )
+            conn.commit()
 
-        return stored_id
+        return tool_id
 
-    def _store_conversation_memory_dv(self, data: Dict[str, Any]) -> str:
-        """Store conversation memory using Duality View."""
-        memory_data = {
-            "memoryId": data.get("memory_id") or str(uuid.uuid4()),
-            "conversationId": data.get("conversation_id"),
-            "role": data.get("role"),
-            "content": data.get("content"),
-            "timestamp": data.get("timestamp"),
-            "agentId": data.get("agent_id"),
+    def _upsert_persona_row(
+        self,
+        cursor,
+        *,
+        persona_id: str,
+        name: str,
+        role_type: Optional[str],
+        background: str,
+        memory_id: Optional[str],
+        agent_id: Optional[str],
+        embedding: Optional[List[float]],
+        traits: Any = None,
+        expertise: Any = None,
+    ) -> None:
+        """Insert or update a personas row using an existing cursor."""
+        cursor.execute(
+            "SELECT id FROM personas WHERE persona_id = :persona_id",
+            {"persona_id": persona_id},
+        )
+        existing = cursor.fetchone()
+
+        params: Dict[str, Any] = {
+            "persona_id": persona_id,
+            "name": name,
+            "role_type": role_type,
+            "background": background,
+            "memory_id": memory_id,
+            "agent_id": agent_id,
+            "traits": json.dumps(self._sanitize_for_json(traits))
+            if traits is not None
+            else None,
+            "expertise": json.dumps(self._sanitize_for_json(expertise))
+            if expertise is not None
+            else None,
         }
-        # Auto-generate embedding if needed
+        if embedding is not None:
+            params["embedding"] = embedding
+
+        if existing:
+            set_parts = [
+                "name = :name",
+                "role_type = :role_type",
+                "background = :background",
+                "memory_id = :memory_id",
+                "agent_id = :agent_id",
+                "traits = :traits",
+                "expertise = :expertise",
+                "updated_at = CURRENT_TIMESTAMP",
+            ]
+            if embedding is not None:
+                set_parts.append("embedding = :embedding")
+            cursor.execute(
+                f"UPDATE personas SET {', '.join(set_parts)} "
+                "WHERE persona_id = :persona_id",
+                params,
+            )
+        else:
+            cols = [
+                "id",
+                "persona_id",
+                "name",
+                "role_type",
+                "background",
+                "memory_id",
+                "agent_id",
+                "traits",
+                "expertise",
+            ]
+            insert_params = dict(params)
+            insert_params["id"] = uuid.uuid4().bytes
+            if embedding is not None:
+                cols.append("embedding")
+            vals = [f":{c}" for c in cols]
+            cursor.execute(
+                f"INSERT INTO personas ({', '.join(cols)}) "
+                f"VALUES ({', '.join(vals)})",
+                insert_params,
+            )
+
+    def _upsert_toolbox_row(
+        self,
+        cursor,
+        *,
+        tool_id: str,
+        name: str,
+        description: str,
+        signature: str,
+        docstring: str,
+        tool_type: str,
+        memory_id: Optional[str],
+        agent_id: Optional[str],
+        embedding: Optional[List[float]],
+        parameters: Any = None,
+    ) -> None:
+        """Insert or update a toolbox row using an existing cursor."""
+        cursor.execute(
+            "SELECT id FROM toolbox WHERE tool_id = :tool_id",
+            {"tool_id": tool_id},
+        )
+        existing = cursor.fetchone()
+
+        params: Dict[str, Any] = {
+            "tool_id": tool_id,
+            "name": name,
+            "description": description,
+            "signature": signature,
+            "docstring": docstring,
+            "tool_type": tool_type,
+            "memory_id": memory_id,
+            "agent_id": agent_id,
+            "parameters": json.dumps(self._sanitize_for_json(parameters))
+            if parameters is not None
+            else None,
+        }
+        if embedding is not None:
+            params["embedding"] = embedding
+
+        if existing:
+            set_parts = [
+                "name = :name",
+                "description = :description",
+                "signature = :signature",
+                "docstring = :docstring",
+                "tool_type = :tool_type",
+                "parameters = :parameters",
+                "memory_id = :memory_id",
+                "agent_id = :agent_id",
+                "updated_at = CURRENT_TIMESTAMP",
+            ]
+            if embedding is not None:
+                set_parts.append("embedding = :embedding")
+            cursor.execute(
+                f"UPDATE toolbox SET {', '.join(set_parts)} "
+                "WHERE tool_id = :tool_id",
+                params,
+            )
+        else:
+            cols = [
+                "id",
+                "tool_id",
+                "name",
+                "description",
+                "signature",
+                "docstring",
+                "tool_type",
+                "parameters",
+                "memory_id",
+                "agent_id",
+            ]
+            insert_params = dict(params)
+            insert_params["id"] = uuid.uuid4().bytes
+            if embedding is not None:
+                cols.append("embedding")
+            vals = [f":{c}" for c in cols]
+            cursor.execute(
+                f"INSERT INTO toolbox ({', '.join(cols)}) "
+                f"VALUES ({', '.join(vals)})",
+                insert_params,
+            )
+
+    def _store_conversation_memory_impl(self, data: Dict[str, Any]) -> str:
+        """Store conversation memory directly in the base table."""
+        memory_id = data.get("memory_id") or str(uuid.uuid4())
+        thread_value = data.get("thread_id") or data.get("conversation_id")
         embedding = self._generate_embedding_if_needed(
             content=data.get("content", ""), existing_embedding=data.get("embedding")
         )
-        if embedding is not None:
-            memory_data["embedding"] = embedding
-
-        return self._store_with_embedding_fallback(
-            view_name="conversation_memory_dv",
-            data=memory_data,
-            id_field="memoryId",
-            store_name="Conversation",
+        table_name = self._get_table_name(MemoryType.CONVERSATION_MEMORY)
+        has_user_id = self._memory_type_has_column(
+            MemoryType.CONVERSATION_MEMORY, "user_id"
         )
 
-    def _store_long_term_memory_dv(self, data: Dict[str, Any]) -> str:
-        """Store long-term memory using Duality View."""
-        memory_data = {
-            "memoryId": data.get("memory_id") or str(uuid.uuid4()),
-            "content": data.get("content"),
-            "memoryType": data.get("memory_type"),
-            "importance": data.get("importance", 1.0),
-            "lastAccessed": data.get("last_accessed"),
-            "accessCount": data.get("access_count", 0),
-            "agentId": data.get("agent_id"),
-        }
-        # Auto-generate embedding if needed
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            row_id = uuid.uuid4().bytes
+
+            columns = ["id", "memory_id", "thread_id", "role", "content", "agent_id"]
+            placeholders = [
+                ":id",
+                ":memory_id",
+                ":thread_id",
+                ":role",
+                ":content",
+                ":agent_id",
+            ]
+            bind_vars: Dict[str, Any] = {
+                "id": row_id,
+                "memory_id": memory_id,
+                "thread_id": thread_value,
+                "role": data.get("role"),
+                "content": data.get("content"),
+                "agent_id": data.get("agent_id"),
+            }
+            if has_user_id:
+                columns.append("user_id")
+                placeholders.append(":user_id")
+                bind_vars["user_id"] = data.get("user_id")
+            if embedding is not None:
+                columns.append("embedding")
+                placeholders.append(":embedding")
+                bind_vars["embedding"] = embedding
+
+            # Let Oracle use DEFAULT CURRENT_TIMESTAMP for the timestamp column.
+            sql = (
+                f"INSERT INTO {table_name} ("
+                + ", ".join(columns)
+                + ") VALUES ("
+                + ", ".join(placeholders)
+                + ")"
+            )
+            try:
+                cursor.execute(sql, bind_vars)
+            except Exception as exc:
+                error_str = str(exc)
+                # Schema drift — if user_id got detected but the actual column
+                # vanished between introspection and insert, drop it and retry.
+                if (
+                    has_user_id
+                    and "ORA-00904" in error_str
+                    and "USER_ID" in error_str.upper()
+                ):
+                    self._table_columns_cache.pop(
+                        MemoryType.CONVERSATION_MEMORY.value.upper(), None
+                    )
+                    columns = [c for c in columns if c != "user_id"]
+                    placeholders = [p for p in placeholders if p != ":user_id"]
+                    bind_vars.pop("user_id", None)
+                    sql = (
+                        f"INSERT INTO {table_name} ("
+                        + ", ".join(columns)
+                        + ") VALUES ("
+                        + ", ".join(placeholders)
+                        + ")"
+                    )
+                    cursor.execute(sql, bind_vars)
+                else:
+                    raise
+            conn.commit()
+            return memory_id
+
+    def _store_conversation_memory(self, data: Dict[str, Any]) -> str:
+        """Store conversation memory directly in the base table."""
+        return self._store_conversation_memory_impl(data)
+
+    def _insert_base_row(
+        self,
+        memory_type: MemoryType,
+        required_columns: Dict[str, Any],
+        optional_columns: Optional[Dict[str, Any]] = None,
+        *,
+        embedding: Optional[Any] = None,
+    ) -> None:
+        """Generic helper that writes a row directly to a base table.
+
+        ``required_columns`` always land in the INSERT; entries in
+        ``optional_columns`` are dropped when the column does not exist on the
+        target table (most commonly ``user_id`` on unmigrated schemas).
+        """
+        table_name = self._get_table_name(memory_type)
+        bind_vars: Dict[str, Any] = dict(required_columns)
+        columns = list(required_columns.keys())
+        placeholders = [f":{name}" for name in columns]
+
+        optional_columns = optional_columns or {}
+        skipped_optional: List[str] = []
+        for column, value in optional_columns.items():
+            if self._memory_type_has_column(memory_type, column):
+                columns.append(column)
+                placeholders.append(f":{column}")
+                bind_vars[column] = value
+            else:
+                skipped_optional.append(column)
+
+        if embedding is not None:
+            columns.append("embedding")
+            placeholders.append(":embedding")
+            # Oracle rejects Python lists on plain SQL inserts with
+            # ORA-01484 ("arrays can only be bound to PL/SQL statements").
+            # Normalize to array.array("f", ...) so it binds as a VECTOR.
+            bind_vars["embedding"] = self._prepare_vector_value(embedding)
+
+        sql = (
+            f"INSERT INTO {table_name} ("
+            + ", ".join(columns)
+            + ") VALUES ("
+            + ", ".join(placeholders)
+            + ")"
+        )
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                if embedding is not None:
+                    # Hint the driver that :embedding is a VECTOR.
+                    self._set_vector_input_size(cursor, "embedding")
+                cursor.execute(sql, bind_vars)
+            except Exception as exc:
+                error_str = str(exc).upper()
+                # Schema drift safety net: if the column vanished between
+                # introspection and insert, drop it and retry once.
+                if "ORA-00904" in error_str and optional_columns:
+                    self._table_columns_cache.pop(memory_type.value.upper(), None)
+                    retry_optional = {
+                        k: v
+                        for k, v in optional_columns.items()
+                        if k.upper() not in error_str
+                    }
+                    if retry_optional != optional_columns:
+                        return self._insert_base_row(
+                            memory_type,
+                            required_columns,
+                            retry_optional,
+                            embedding=embedding,
+                        )
+                # Re-surface unexpected errors so the caller can log context.
+                if skipped_optional:
+                    logger.debug(
+                        "Insert into %s dropped optional columns %s before failing: %s",
+                        table_name,
+                        skipped_optional,
+                        exc,
+                    )
+                raise
+            conn.commit()
+
+    def _store_knowledge_base(self, data: Dict[str, Any]) -> str:
+        """Store knowledge base entry directly in its base table."""
+        memory_id = data.get("memory_id") or str(uuid.uuid4())
         embedding = self._generate_embedding_if_needed(
             content=data.get("content", ""), existing_embedding=data.get("embedding")
         )
-        if embedding is not None:
-            memory_data["embedding"] = embedding
-
-        return self._store_with_embedding_fallback(
-            view_name="long_term_memory_dv",
-            data=memory_data,
-            id_field="memoryId",
-            store_name="Long-term memory",
+        # Chunking metadata is optional at the storage layer so an installation
+        # that hasn't run migration 002 still ingests cleanly (the extra fields
+        # are dropped silently). Run 002_knowledge_base_chunking.sql to enable
+        # namespace + per-ingest grouping.
+        chunk_index = data.get("chunk_index")
+        chunk_count = data.get("chunk_count")
+        self._insert_base_row(
+            MemoryType.KNOWLEDGE_BASE,
+            required_columns={
+                "id": uuid.uuid4().bytes,
+                "memory_id": memory_id,
+                "content": data.get("content"),
+                "memory_type": data.get("memory_type"),
+                "importance": data.get("importance", 1.0),
+                "last_accessed": data.get("last_accessed"),
+                "access_count": data.get("access_count", 0),
+                "agent_id": data.get("agent_id"),
+            },
+            optional_columns={
+                "user_id": data.get("user_id"),
+                "knowledge_base_id": data.get("knowledge_base_id"),
+                "namespace": data.get("namespace"),
+                "chunk_index": int(chunk_index) if chunk_index is not None else None,
+                "chunk_count": int(chunk_count) if chunk_count is not None else None,
+                "chunking_strategy": data.get("chunking_strategy"),
+            },
+            embedding=embedding,
         )
+        return memory_id
 
-    def _store_short_term_memory_dv(self, data: Dict[str, Any]) -> str:
-        """Store short-term memory using Duality View."""
-        memory_data = {
-            "memoryId": data.get("memory_id") or str(uuid.uuid4()),
-            "content": data.get("content"),
-            "memoryType": data.get("memory_type"),
-            "ttl": data.get("ttl"),
-            "agentId": data.get("agent_id"),
-            "expiresAt": data.get("expires_at"),
-        }
-        # Auto-generate embedding if needed
+    def _store_short_term_memory(self, data: Dict[str, Any]) -> str:
+        """Store short-term memory directly in its base table."""
+        memory_id = data.get("memory_id") or str(uuid.uuid4())
         embedding = self._generate_embedding_if_needed(
             content=data.get("content", ""), existing_embedding=data.get("embedding")
         )
-        if embedding is not None:
-            memory_data["embedding"] = embedding
-
-        return self._store_with_embedding_fallback(
-            view_name="short_term_memory_dv",
-            data=memory_data,
-            id_field="memoryId",
-            store_name="Short-term memory",
+        self._insert_base_row(
+            MemoryType.SHORT_TERM_MEMORY,
+            required_columns={
+                "id": uuid.uuid4().bytes,
+                "memory_id": memory_id,
+                "content": data.get("content"),
+                "memory_type": data.get("memory_type"),
+                "ttl": data.get("ttl"),
+                "agent_id": data.get("agent_id"),
+                "expires_at": data.get("expires_at"),
+            },
+            optional_columns={"user_id": data.get("user_id")},
+            embedding=embedding,
         )
+        return memory_id
 
-    def _store_workflow_memory_dv(self, data: Dict[str, Any]) -> str:
-        """Store workflow memory using Duality View (steps/outcome in separate columns)."""
+    def _store_workflow_memory(self, data: Dict[str, Any]) -> str:
+        """Store workflow memory directly in its base table."""
         workflow_id = data.get("workflow_id") or str(uuid.uuid4())
 
-        # First store via Duality View (excludes steps/outcome)
-        workflow_data = {
-            "workflowId": workflow_id,
-            "name": data.get("name"),
-            "description": data.get("description"),
-            "currentStep": data.get("current_step", 0),
-            "status": data.get("status", "pending"),
-            "memoryId": data.get("memory_id"),
-            "agentId": data.get("agent_id"),
-        }
-        # Intentionally skip embeddings for workflows. Workflow payloads often include
-        # arbitrary tool outputs and are not critical for semantic search; skipping
-        # avoids Oracle VECTOR index dimension mismatches from breaking runs.
-
-        self._store_with_embedding_fallback(
-            view_name="workflow_memory_dv",
-            data=workflow_data,
-            id_field="workflowId",
-            store_name="Workflow",
+        # Workflows intentionally skip embeddings — payloads often include
+        # arbitrary tool outputs and are not critical for semantic search.
+        self._insert_base_row(
+            MemoryType.WORKFLOW_MEMORY,
+            required_columns={
+                "id": uuid.uuid4().bytes,
+                "workflow_id": workflow_id,
+                "name": data.get("name"),
+                "description": data.get("description"),
+                "current_step": data.get("current_step", 0),
+                "status": data.get("status", "pending"),
+                "memory_id": data.get("memory_id"),
+                "agent_id": data.get("agent_id"),
+            },
+            optional_columns={"user_id": data.get("user_id")},
         )
 
-        # Then update steps/outcome in base table (excluded from Duality View)
+        # steps/outcome are IS JSON columns and go in a follow-up UPDATE.
         if data.get("steps") or data.get("outcome"):
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -1280,8 +1804,8 @@ class OracleProvider(MemoryProvider):
 
         return workflow_id
 
-    def _store_shared_memory_dv(self, data: Dict[str, Any]) -> str:
-        """Store shared memory directly to base table (skip Duality View)."""
+    def _store_shared_memory(self, data: Dict[str, Any]) -> str:
+        """Store shared memory directly to base table."""
         memory_id = data.get("memory_id") or str(uuid.uuid4())
         table_name = self._get_table_name(MemoryType.SHARED_MEMORY)
 
@@ -1413,33 +1937,27 @@ class OracleProvider(MemoryProvider):
 
         return memory_id
 
-    def _store_summary_dv(self, data: Dict[str, Any]) -> str:
-        """Store summary using Duality View (original_memory_ids in separate column)."""
+    def _store_summary(self, data: Dict[str, Any]) -> str:
+        """Store summary directly in its base table."""
         summary_id = data.get("summary_id") or str(uuid.uuid4())
-
-        # Store via Duality View (excludes original_memory_ids)
-        summary_data = {
-            "summaryId": summary_id,
-            "content": data.get("content"),
-            "summaryType": data.get("summary_type", "general"),
-            "memoryId": data.get("memory_id"),
-            "agentId": data.get("agent_id"),
-        }
-        # Auto-generate embedding if needed
         embedding = self._generate_embedding_if_needed(
             content=data.get("content", ""), existing_embedding=data.get("embedding")
         )
-        if embedding is not None:
-            summary_data["embedding"] = embedding
-
-        self._store_with_embedding_fallback(
-            view_name="summaries_dv",
-            data=summary_data,
-            id_field="summaryId",
-            store_name="Summary",
+        self._insert_base_row(
+            MemoryType.SUMMARIES,
+            required_columns={
+                "id": uuid.uuid4().bytes,
+                "summary_id": summary_id,
+                "content": data.get("content"),
+                "summary_type": data.get("summary_type", "general"),
+                "memory_id": data.get("memory_id"),
+                "agent_id": data.get("agent_id"),
+            },
+            optional_columns={"user_id": data.get("user_id")},
+            embedding=embedding,
         )
 
-        # Update original_memory_ids in base table (excluded from Duality View)
+        # original_memory_ids is an IS JSON column; update separately.
         if data.get("original_memory_ids"):
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -1448,7 +1966,7 @@ class OracleProvider(MemoryProvider):
                     UPDATE summaries
                     SET original_memory_ids = :original_memory_ids
                     WHERE summary_id = :summary_id
-                """,
+                    """,
                     {
                         "original_memory_ids": json.dumps(data["original_memory_ids"]),
                         "summary_id": summary_id,
@@ -1458,31 +1976,35 @@ class OracleProvider(MemoryProvider):
 
         return summary_id
 
-    def _store_semantic_cache_dv(self, data: Dict[str, Any]) -> str:
-        """Store semantic cache using Duality View."""
-        cache_data = {
-            "cacheKey": data.get("cache_key") or str(uuid.uuid4()),
-            "queryText": data.get("query_text"),
-            "response": data.get("response"),
-            "scope": data.get("scope", "global"),
-            "similarityThreshold": data.get("similarity_threshold", 0.8),
-            "hitCount": data.get("hit_count", 0),
-            "agentId": data.get("agent_id"),
-            "expiresAt": data.get("expires_at"),
-        }
-        # Auto-generate embedding if needed (use query_text as content)
+    def _store_semantic_cache(self, data: Dict[str, Any]) -> str:
+        """Store semantic cache entry directly in its base table."""
+        cache_key = data.get("cache_key") or str(uuid.uuid4())
         embedding = self._generate_embedding_if_needed(
             content=data.get("query_text", ""), existing_embedding=data.get("embedding")
         )
-        if embedding is not None:
-            cache_data["embedding"] = embedding
-
-        return self._store_with_embedding_fallback(
-            view_name="semantic_cache_dv",
-            data=cache_data,
-            id_field="cacheKey",
-            store_name="Semantic cache",
+        required: Dict[str, Any] = {
+            "id": uuid.uuid4().bytes,
+            "cache_key": cache_key,
+            "query_text": data.get("query_text"),
+            "response": data.get("response"),
+            "scope": data.get("scope", "global"),
+            "similarity_threshold": data.get("similarity_threshold", 0.8),
+            "hit_count": data.get("hit_count", 0),
+            "agent_id": data.get("agent_id"),
+            "expires_at": data.get("expires_at"),
+        }
+        optional: Dict[str, Any] = {
+            "memory_id": data.get("memory_id"),
+            "session_id": data.get("session_id"),
+            "user_id": data.get("user_id"),
+        }
+        self._insert_base_row(
+            MemoryType.SEMANTIC_CACHE,
+            required_columns=required,
+            optional_columns=optional,
+            embedding=embedding,
         )
+        return cache_key
 
     def _store_entity_memory(self, data: Dict[str, Any]) -> str:
         """Store entity memory directly in the base table."""
@@ -1518,6 +2040,18 @@ class OracleProvider(MemoryProvider):
         }
 
         table_name = self._get_table_name(MemoryType.ENTITY_MEMORY)
+        include_user_id = self._memory_type_has_column(
+            MemoryType.ENTITY_MEMORY, "user_id"
+        )
+        if include_user_id:
+            params["user_id"] = data.get("user_id")
+
+        user_id_update = (
+            ",\n                user_id = :user_id" if include_user_id else ""
+        )
+        user_id_insert_col = ", user_id" if include_user_id else ""
+        user_id_insert_val = ", :user_id" if include_user_id else ""
+
         merge_sql = f"""
             MERGE INTO {table_name} tgt
             USING (SELECT :entity_id AS entity_id FROM dual) src
@@ -1529,16 +2063,16 @@ class OracleProvider(MemoryProvider):
                 relations = :relations,
                 metadata = :metadata,
                 memory_id = :memory_id,
-                agent_id = :agent_id,
+                agent_id = :agent_id{user_id_update},
                 embedding = :embedding,
                 updated_at = CURRENT_TIMESTAMP
             WHEN NOT MATCHED THEN INSERT (
                 id, entity_id, name, entity_type, attributes,
-                relations, metadata, memory_id, agent_id,
+                relations, metadata, memory_id, agent_id{user_id_insert_col},
                 embedding, created_at, updated_at
             ) VALUES (
                 :id, :entity_id, :name, :entity_type, :attributes,
-                :relations, :metadata, :memory_id, :agent_id,
+                :relations, :metadata, :memory_id, :agent_id{user_id_insert_val},
                 :embedding, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
         """
@@ -1559,6 +2093,62 @@ class OracleProvider(MemoryProvider):
             conn.commit()
 
         return entity_id
+
+    def _store_tool_log(self, data: Dict[str, Any]) -> str:
+        """Store tool log directly in the base table."""
+        tool_log_id = data.get("tool_log_id") or str(uuid.uuid4())
+        return self._store_tool_log_impl(data, tool_log_id)
+
+    def _store_tool_log_impl(self, data: Dict[str, Any], tool_log_id: str) -> str:
+        """Insert directly into the tool_log base table."""
+        record_id = uuid.uuid4().bytes
+        required: Dict[str, Any] = {
+            "id": record_id,
+            "tool_log_id": tool_log_id,
+            "tool_name": data.get("tool_name", ""),
+            "arguments": data.get("arguments", ""),
+            "result": data.get("result", ""),
+            "success": 1 if data.get("success", True) else 0,
+            "error": data.get("error"),
+            "timestamp": self._coerce_timestamp_bind(data.get("timestamp")),
+            "agent_id": data.get("agent_id"),
+            "tool_call_id": data.get("tool_call_id", ""),
+            "thread_id": data.get("thread_id", ""),
+            "memory_id": data.get("memory_id", ""),
+        }
+        self._insert_base_row(
+            MemoryType.TOOL_LOG,
+            required_columns=required,
+            optional_columns={"user_id": data.get("user_id")},
+        )
+        return tool_log_id
+
+    @staticmethod
+    def _coerce_timestamp_bind(value: Any) -> Any:
+        """Return a value safe to bind into an Oracle TIMESTAMP column.
+
+        Python ``datetime`` objects map natively via oracledb. ISO-8601 strings
+        (what ``memory_manager`` emits) trigger ORA-01843 because Oracle falls
+        back to ``NLS_DATE_FORMAT`` for implicit string→TIMESTAMP conversion,
+        which doesn't understand ``"2026-04-17T12:34:56+00:00"``.
+        """
+        from datetime import datetime
+
+        if value is None or isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            # ``fromisoformat`` accepts offsets in 3.11+; strip a trailing Z
+            # for broader support.
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                return datetime.fromisoformat(text)
+            except ValueError:
+                return None
+        return value
 
     def retrieve_by_query(
         self,
@@ -1603,6 +2193,10 @@ class OracleProvider(MemoryProvider):
         if memory_store_type is None:
             raise ValueError("Either memory_store_type or memory_type must be provided")
 
+        # Extract user_id up-front so we can apply it consistently across every
+        # branch (dict queries, vector search, legacy cache paths, etc.).
+        user_id_filter = kwargs.pop("user_id", _UNSET)
+
         # If memory_id filter is provided, add it to the query
         if memory_id is not None:
             if isinstance(query, dict):
@@ -1611,15 +2205,29 @@ class OracleProvider(MemoryProvider):
                 # For string queries (semantic search), store memory_id for filtering
                 kwargs["memory_id"] = memory_id
 
+        # Fold user_id into the query/kwargs for downstream helpers that expect
+        # the filter as part of the query dict (relational paths) or as an
+        # explicit keyword (vector-search paths).
+        if user_id_filter is not _UNSET:
+            if isinstance(query, dict) and _memory_type_supports_user_id(
+                memory_store_type
+            ):
+                query = {**query, "user_id": user_id_filter}
+            kwargs["user_id"] = user_id_filter
+
         # Handle special cases with vector search
         if memory_store_type == MemoryType.PERSONAS:
             return self.retrieve_persona_by_query(query, limit=limit)
         elif memory_store_type == MemoryType.TOOLBOX:
             return self.retrieve_toolbox_item(query, limit)
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self.retrieve_workflow_by_query(query, limit)
+            return self.retrieve_workflow_by_query(
+                query, limit, user_id=kwargs.get("user_id", _UNSET)
+            )
         elif memory_store_type == MemoryType.SUMMARIES:
-            return self.retrieve_summaries_by_query(query, limit)
+            return self.retrieve_summaries_by_query(
+                query, limit, user_id=kwargs.get("user_id", _UNSET)
+            )
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             if isinstance(query, dict):
                 return self._retrieve_by_filter(
@@ -1638,6 +2246,7 @@ class OracleProvider(MemoryProvider):
                 embedding,
                 limit=limit,
                 memory_id=kwargs.get("memory_id"),
+                user_id=kwargs.get("user_id", _UNSET),
             )
         elif memory_store_type == MemoryType.SEMANTIC_CACHE:
             if isinstance(query, dict):
@@ -1648,6 +2257,50 @@ class OracleProvider(MemoryProvider):
             else:
                 # String query for semantic similarity search
                 return self.find_similar_cache_entries(query, limit=limit, **kwargs)
+        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+            # Knowledge-base retrieval is always semantic. Callers either
+            # pass a raw string (we embed it here) or a dict carrying a
+            # pre-computed ``embedding`` plus optional scalar filters like
+            # ``namespace`` or ``limit``. Routing the dict to
+            # ``_retrieve_by_filter`` was wrong — it tried to build
+            # ``WHERE embedding = :embedding AND limit = :limit`` and
+            # Oracle rejected ``limit`` as an unknown column (ORA-00904).
+            namespace_filter: Optional[str] = None
+            query_embedding = None
+            if isinstance(query, dict):
+                query_embedding = query.get("embedding")
+                namespace_filter = query.get("namespace") or None
+                # Allow the caller's dict to override the outer limit arg.
+                dict_limit = query.get("limit")
+                if isinstance(dict_limit, int) and dict_limit > 0:
+                    limit = dict_limit
+            elif isinstance(query, str) and query.strip():
+                from ...embeddings import get_embedding
+
+                try:
+                    query_embedding = get_embedding(query)
+                except Exception as exc:
+                    logger.error("Failed to embed knowledge_base query: %s", exc)
+                    return []
+
+            if query_embedding is None:
+                # No embedding to search against — nothing meaningful to return.
+                return []
+
+            rows = self._vector_search(
+                MemoryType.KNOWLEDGE_BASE,
+                query_embedding,
+                limit=limit,
+                memory_id=kwargs.get("memory_id"),
+                user_id=kwargs.get("user_id", _UNSET),
+            )
+            if namespace_filter:
+                rows = [
+                    r
+                    for r in (rows or [])
+                    if str(r.get("namespace") or "") == namespace_filter
+                ]
+            return rows
         else:
             # Standard query
             if isinstance(query, dict):
@@ -1664,9 +2317,20 @@ class OracleProvider(MemoryProvider):
         limit: int,
         include_embedding: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Retrieve documents by filter criteria using base tables (not Duality Views)."""
-        # For semantic cache and other complex queries, use base table
+        """Retrieve documents by filter criteria using base tables."""
         table_name = self._get_table_name(memory_store_type)
+
+        # Drop ``user_id`` from the query predicate when the column has not
+        # been added yet (unmigrated schemas). Defaults to keeping it so
+        # tenant isolation is not silently weakened post-migration.
+        query_has_user_id = "user_id" in query
+        user_id_col_present = not query_has_user_id or self._memory_type_has_column(
+            memory_store_type, "user_id"
+        )
+        cache_has_user_id = (
+            memory_store_type != MemoryType.SEMANTIC_CACHE
+            or self._memory_type_has_column(MemoryType.SEMANTIC_CACHE, "user_id")
+        )
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -1676,15 +2340,27 @@ class OracleProvider(MemoryProvider):
             params = {}
 
             for key, value in query.items():
-                if key != "_id":
-                    where_clauses.append(f"{key} = :{key}")
-                    params[key] = value
+                if key == "_id":
+                    continue
+                if key == "user_id" and not user_id_col_present:
+                    # Silently drop user_id predicate on unmigrated schemas.
+                    continue
+                # Tenant isolation: ``user_id=None`` must match SQL ``IS NULL``,
+                # not ``= NULL`` (which silently never matches in Oracle).
+                if key == "user_id" and value is None:
+                    where_clauses.append("user_id IS NULL")
+                    continue
+                where_clauses.append(f"{key} = :{key}")
+                params[key] = value
 
             where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
             # Select specific columns based on memory type
             if memory_store_type == MemoryType.SEMANTIC_CACHE:
-                columns = "id, cache_key, query_text, response, scope, similarity_threshold, hit_count, agent_id, embedding, created_at, expires_at"
+                if cache_has_user_id:
+                    columns = "id, cache_key, query_text, response, scope, similarity_threshold, hit_count, agent_id, user_id, embedding, created_at, expires_at"
+                else:
+                    columns = "id, cache_key, query_text, response, scope, similarity_threshold, hit_count, agent_id, embedding, created_at, expires_at"
             else:
                 columns = "*"
 
@@ -1702,8 +2378,23 @@ class OracleProvider(MemoryProvider):
             for row in cursor:
                 # Convert row to dict based on memory type
                 if memory_store_type == MemoryType.SEMANTIC_CACHE:
-                    # Convert created_at to timestamp for compatibility with SemanticCacheEntry
-                    created_at = row[9]
+                    if cache_has_user_id:
+                        # Column order (post-migration):
+                        #  0 id, 1 cache_key, 2 query_text, 3 response, 4 scope,
+                        #  5 similarity_threshold, 6 hit_count, 7 agent_id,
+                        #  8 user_id, 9 embedding, 10 created_at, 11 expires_at
+                        user_id_val = row[8]
+                        embedding_idx = 9
+                        created_idx = 10
+                        expires_idx = 11
+                    else:
+                        # Pre-migration column order (no user_id).
+                        user_id_val = None
+                        embedding_idx = 8
+                        created_idx = 9
+                        expires_idx = 10
+
+                    created_at = row[created_idx]
                     timestamp = (
                         created_at.timestamp()
                         if hasattr(created_at, "timestamp")
@@ -1728,12 +2419,13 @@ class OracleProvider(MemoryProvider):
                             int(row[6]) if row[6] is not None else 0
                         ),  # Map hit_count to usage_count
                         "agent_id": row[7],
+                        "user_id": user_id_val,
                         "timestamp": timestamp,
                         "created_at": created_at,
-                        "expires_at": row[10],
+                        "expires_at": row[expires_idx],
                     }
-                    if include_embedding and row[8] is not None:
-                        doc["embedding"] = list(row[8])
+                    if include_embedding and row[embedding_idx] is not None:
+                        doc["embedding"] = list(row[embedding_idx])
                 else:
                     # Generic handling for other types
                     columns = [desc[0].lower() for desc in cursor.description]
@@ -1752,7 +2444,7 @@ class OracleProvider(MemoryProvider):
         self, id: str, memory_store_type: MemoryType
     ) -> Optional[Dict[str, Any]]:
         """
-        Retrieve a document from Oracle by ID using Duality View.
+        Retrieve a document from Oracle by ID.
 
         Parameters:
         -----------
@@ -1854,7 +2546,51 @@ class OracleProvider(MemoryProvider):
                     return record
                 return None
 
-        # For shared memory, query base table directly (skip Duality View)
+        if memory_store_type == MemoryType.TOOL_LOG:
+            # Query the base table by the logical ``tool_log_id`` string
+            # (the UUID the caller sees), not the RAW(16) primary key.
+            # Without this branch, the fallback path tried
+            # ``SELECT id, data FROM tool_log`` — which fails because the
+            # relational schema has no generic ``data`` column, so the
+            # LLM-facing ``retrieve_tool_log_entry`` always returned
+            # "not found" and the compact-reference pattern broke.
+            table_name = self._get_table_name(memory_store_type)
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"""
+                    SELECT id, tool_log_id, tool_name, arguments, result,
+                           success, error, timestamp, agent_id, tool_call_id,
+                           thread_id, memory_id
+                    FROM {table_name}
+                    WHERE tool_log_id = :tool_log_id
+                    """,
+                    {"tool_log_id": id},
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                timestamp = row[7]
+                if hasattr(timestamp, "isoformat"):
+                    timestamp = timestamp.isoformat()
+                elif timestamp is not None:
+                    timestamp = str(timestamp)
+                return {
+                    "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
+                    "tool_log_id": row[1],
+                    "tool_name": row[2],
+                    "arguments": self._read_lob_value(row[3]),
+                    "result": self._read_lob_value(row[4]),
+                    "success": bool(row[5]) if row[5] is not None else True,
+                    "error": self._read_lob_value(row[6]),
+                    "timestamp": timestamp,
+                    "agent_id": row[8],
+                    "tool_call_id": row[9],
+                    "thread_id": row[10],
+                    "memory_id": row[11],
+                }
+
+        # For shared memory, query base table directly
         if memory_store_type == MemoryType.SHARED_MEMORY:
             table_name = self._get_table_name(memory_store_type)
             with self._get_connection() as conn:
@@ -1904,296 +2640,43 @@ class OracleProvider(MemoryProvider):
                     return result
                 return None
 
-        view_name = self._get_duality_view_name(memory_store_type)
+        # Generic base-table fallback for memory types without a dedicated
+        # branch above. Most tables no longer have a ``data`` JSON column,
+        # so this path is deliberately conservative — failures return None
+        # rather than raise, and specific memory types should add their own
+        # branch above when they need reliable by-id lookup.
         table_name = self._get_table_name(memory_store_type)
-
         with self._get_connection() as conn:
             cursor = conn.cursor()
-
-            # Try to query from Duality View first using string ID fields
             try:
-                # Map memory types to their ID field names in Duality Views
-                id_field_map = {
-                    MemoryType.PERSONAS: "personaId",
-                    MemoryType.TOOLBOX: "toolId",
-                    MemoryType.CONVERSATION_MEMORY: "memoryId",
-                    MemoryType.LONG_TERM_MEMORY: "memoryId",
-                    MemoryType.SHORT_TERM_MEMORY: "memoryId",
-                    MemoryType.WORKFLOW_MEMORY: "workflowId",
-                    MemoryType.SUMMARIES: "summaryId",
-                    MemoryType.SEMANTIC_CACHE: "cacheKey",
-                    MemoryType.ENTITY_MEMORY: "entityId",
-                }
-
-                id_field = id_field_map.get(memory_store_type, "memoryId")
-
+                doc_id = uuid.UUID(id).bytes
                 cursor.execute(
-                    f"SELECT data FROM {view_name} WHERE JSON_VALUE(data, '$.\"{id_field}\"') = :id",
-                    {"id": id},
+                    f"SELECT id, data FROM {table_name} WHERE id = :id",
+                    {"id": doc_id},
                 )
-
                 row = cursor.fetchone()
                 if row:
-                    # Parse JSON from Duality View
-                    doc = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                    # Convert camelCase to snake_case
-                    return self._convert_dv_to_dict(doc, memory_store_type)
-
-                return None
-            except Exception as e:
-                logger.warning(
-                    f"Duality View query failed, falling back to base table: {e}"
+                    doc = self._doc_to_dict(row[1])
+                    doc["_id"] = str(uuid.UUID(bytes=row[0]))
+                    return doc
+            except Exception as exc:
+                logger.debug(
+                    "retrieve_by_id fallback failed for %s/%s: %s",
+                    memory_store_type.value,
+                    id,
+                    exc,
                 )
-                # Fallback to base table with UUID
-                try:
-                    doc_id = uuid.UUID(id).bytes
-                    cursor.execute(
-                        f"SELECT id, data FROM {table_name} WHERE id = :id",
-                        {"id": doc_id},
-                    )
-                    row = cursor.fetchone()
-                    if row:
-                        doc = self._doc_to_dict(row[1])
-                        doc["_id"] = str(uuid.UUID(bytes=row[0]))
-                        return doc
-                except Exception:
-                    pass
-
-                return None
-
-    def _convert_dv_to_dict(
-        self, doc: Dict[str, Any], memory_type: MemoryType
-    ) -> Dict[str, Any]:
-        """Convert Duality View JSON (camelCase) to Python dict (snake_case)."""
-        # Convert _id from bytes/JsonId to UUID string if needed
-        _id_value = doc.get("_id")
-        if _id_value is not None:
-            if isinstance(_id_value, bytes):
-                # Convert bytes (RAW(16)) to UUID string
-                try:
-                    _id_value = str(uuid.UUID(bytes=_id_value))
-                except (ValueError, TypeError):
-                    # If conversion fails, try to convert to string as fallback
-                    _id_value = str(_id_value)
-            else:
-                # Handle JsonId objects (from oracledb Duality Views)
-                try:
-                    from oracledb import JsonId
-
-                    if isinstance(_id_value, JsonId):
-                        _id_value = str(_id_value)
-                except (ImportError, AttributeError):
-                    pass
-                # If it's already a string, keep it as-is
-                if not isinstance(_id_value, str):
-                    _id_value = str(_id_value)
-
-        # Common conversions
-        result = {
-            "_id": _id_value,
-        }
-
-        # Memory type specific conversions
-        if memory_type == MemoryType.CONVERSATION_MEMORY:
-            result.update(
-                {
-                    "memory_id": doc.get("memoryId"),
-                    "conversation_id": doc.get("conversationId"),
-                    "role": doc.get("role"),
-                    "content": doc.get("content"),
-                    "timestamp": doc.get("timestamp"),
-                    "agent_id": doc.get("agentId"),
-                    "embedding": doc.get("embedding"),
-                }
-            )
-        elif memory_type == MemoryType.PERSONAS:
-            result.update(
-                {
-                    "persona_id": doc.get("personaId"),
-                    "name": doc.get("name"),
-                    "role_type": doc.get("roleType"),
-                    "background": doc.get("background"),
-                    "memory_id": doc.get("memoryId"),
-                    "agent_id": doc.get("agentId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "updated_at": doc.get("updatedAt"),
-                }
-            )
-            if doc.get("personaId"):
-                result["_id"] = doc.get("personaId")
-        elif memory_type == MemoryType.TOOLBOX:
-            result.update(
-                {
-                    "tool_id": doc.get("toolId"),
-                    "name": doc.get("name"),
-                    "description": doc.get("description"),
-                    "signature": doc.get("signature"),
-                    "docstring": doc.get("docstring"),
-                    "tool_type": doc.get("toolType"),
-                    "memory_id": doc.get("memoryId"),
-                    "agent_id": doc.get("agentId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "updated_at": doc.get("updatedAt"),
-                }
-            )
-            if doc.get("toolId"):
-                result["_id"] = doc.get("toolId")
-        elif memory_type == MemoryType.LONG_TERM_MEMORY:
-            result.update(
-                {
-                    "memory_id": doc.get("memoryId"),
-                    "content": doc.get("content"),
-                    "memory_type": doc.get("memoryType"),
-                    "importance": doc.get("importance"),
-                    "last_accessed": doc.get("lastAccessed"),
-                    "access_count": doc.get("accessCount"),
-                    "agent_id": doc.get("agentId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "updated_at": doc.get("updatedAt"),
-                }
-            )
-        elif memory_type == MemoryType.SHORT_TERM_MEMORY:
-            result.update(
-                {
-                    "memory_id": doc.get("memoryId"),
-                    "content": doc.get("content"),
-                    "memory_type": doc.get("memoryType"),
-                    "ttl": doc.get("ttl"),
-                    "agent_id": doc.get("agentId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "expires_at": doc.get("expiresAt"),
-                }
-            )
-        elif memory_type == MemoryType.WORKFLOW_MEMORY:
-            result.update(
-                {
-                    "workflow_id": doc.get("workflowId"),
-                    "name": doc.get("name"),
-                    "description": doc.get("description"),
-                    "current_step": doc.get("currentStep"),
-                    "status": doc.get("status"),
-                    "memory_id": doc.get("memoryId"),
-                    "agent_id": doc.get("agentId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "updated_at": doc.get("updatedAt"),
-                }
-            )
-        elif memory_type == MemoryType.SHARED_MEMORY:
-            result.update(
-                {
-                    "memory_id": doc.get("memoryId"),
-                    "content": self._deserialize_json_field(doc.get("content")),
-                    "memory_type": doc.get("memoryType"),
-                    "scope": doc.get("scope"),
-                    "owner_agent_id": doc.get("ownerAgentId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "updated_at": doc.get("updatedAt"),
-                }
-            )
-        elif memory_type == MemoryType.SUMMARIES:
-            result.update(
-                {
-                    "summary_id": doc.get("summaryId"),
-                    "content": doc.get("content"),
-                    "summary_type": doc.get("summaryType"),
-                    "memory_id": doc.get("memoryId"),
-                    "agent_id": doc.get("agentId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                }
-            )
-        elif memory_type == MemoryType.SEMANTIC_CACHE:
-            result.update(
-                {
-                    "cache_key": doc.get("cacheKey"),
-                    "query_text": doc.get("queryText"),
-                    "response": doc.get("response"),
-                    "scope": doc.get("scope"),
-                    "similarity_threshold": doc.get("similarityThreshold"),
-                    "hit_count": doc.get("hitCount"),
-                    "agent_id": doc.get("agentId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "expires_at": doc.get("expiresAt"),
-                }
-            )
-        elif memory_type == MemoryType.ENTITY_MEMORY:
-            result.update(
-                {
-                    "entity_id": doc.get("entityId"),
-                    "name": doc.get("name"),
-                    "entity_type": doc.get("entityType"),
-                    "attributes": doc.get("attributes"),
-                    "relations": doc.get("relations"),
-                    "metadata": doc.get("metadata"),
-                    "memory_id": doc.get("memoryId"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "updated_at": doc.get("updatedAt"),
-                }
-            )
-        elif memory_type == MemoryType.MEMAGENT:
-            result.update(
-                {
-                    "agent_id": doc.get("agentId"),
-                    "name": doc.get("name"),
-                    "instruction": doc.get("instruction"),
-                    "application_mode": doc.get("applicationMode"),
-                    "max_steps": doc.get("maxSteps"),
-                    "tool_access": doc.get("toolAccess"),
-                    "semantic_cache": doc.get("semanticCache"),
-                    "is_favorite": doc.get("isFavorite"),
-                    "verbose": doc.get("verbose"),
-                    "memory_ids": doc.get("memoryIds") or [],
-                    "long_term_memory_ids": doc.get("longTermMemoryIds") or [],
-                    "tools": doc.get("tools"),
-                    "persona": doc.get("persona"),
-                    "embedding": doc.get("embedding"),
-                    "created_at": doc.get("createdAt"),
-                    "updated_at": doc.get("updatedAt"),
-                }
-            )
-
-        return result
+            return None
 
     def retrieve_by_name(
         self, name: str, memory_store_type: MemoryType, include_embedding: bool = False
     ) -> Optional[Dict[str, Any]]:
         if memory_store_type not in self.NAME_FILTER_TYPES:
             return None
-        view_name = self._get_duality_view_name(memory_store_type)
         table_name = self._get_table_name(memory_store_type)
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-
-            if view_name:
-                try:
-                    cursor.execute(
-                        f"""
-                        SELECT data FROM {view_name}
-                        WHERE JSON_VALUE(data, '$."name"') = :name
-                        FETCH FIRST 1 ROWS ONLY
-                        """,
-                        {"name": name},
-                    )
-                    row = cursor.fetchone()
-                    if row:
-                        doc = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                        converted_doc = self._convert_dv_to_dict(doc, memory_store_type)
-                        if not include_embedding:
-                            converted_doc.pop("embedding", None)
-                        return converted_doc
-                except Exception as e:
-                    logger.warning(
-                        f"Duality View {view_name} lookup failed, falling back to base table {table_name}: {e}"
-                    )
 
             cursor.execute(
                 f"""
@@ -2285,34 +2768,43 @@ class OracleProvider(MemoryProvider):
             return cursor.rowcount > 0
 
     def list_all(
-        self, memory_store_type: MemoryType, include_embedding: bool = False
+        self,
+        memory_store_type: MemoryType,
+        include_embedding: bool = False,
+        user_id: Any = _UNSET,
     ) -> List[Dict[str, Any]]:
-        """List all documents within a memory store type using Duality Views."""
-        view_name = self._get_duality_view_name(memory_store_type)
+        """List all documents within a memory store type.
+
+        Parameters:
+        -----------
+        memory_store_type : MemoryType
+            Which memory store to enumerate.
+        include_embedding : bool
+            Whether to keep ``embedding`` fields in the returned dicts.
+        user_id : str, optional
+            Tenant scope. When provided (including ``None`` for the
+            anonymous/legacy scope), results are restricted to rows whose
+            stored ``user_id`` matches. When the sentinel default is used no
+            ``user_id`` filter is applied (preserves legacy callers).
+        """
         table_name = self._get_table_name(memory_store_type)
+        base_results = self._list_all_from_table(
+            table_name, memory_store_type, include_embedding
+        )
+        return self._apply_user_id_filter(base_results, memory_store_type, user_id)
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-
-            if view_name:
-                try:
-                    cursor.execute(f"SELECT data FROM {view_name}")
-                    results = []
-                    for row in cursor:
-                        doc = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                        converted_doc = self._convert_dv_to_dict(doc, memory_store_type)
-                        if not include_embedding:
-                            converted_doc.pop("embedding", None)
-                        results.append(converted_doc)
-                    return results
-                except Exception as e:
-                    logger.warning(
-                        f"Duality View {view_name} does not exist, falling back to base table {table_name}: {e}"
-                    )
-
-            return self._list_all_from_table(
-                table_name, memory_store_type, include_embedding
-            )
+    @staticmethod
+    def _apply_user_id_filter(
+        rows: List[Dict[str, Any]],
+        memory_store_type: MemoryType,
+        user_id: Any,
+    ) -> List[Dict[str, Any]]:
+        """Strict client-side user_id filter. ``_UNSET`` disables filtering."""
+        if user_id is _UNSET:
+            return rows
+        if not _memory_type_supports_user_id(memory_store_type):
+            return rows
+        return [row for row in rows if row.get("user_id") == user_id]
 
     def _list_all_from_table(
         self,
@@ -2320,7 +2812,7 @@ class OracleProvider(MemoryProvider):
         memory_store_type: MemoryType,
         include_embedding: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Fallback method to list all documents from base table when Duality View doesn't exist."""
+        """List all documents from a base table."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
@@ -2380,25 +2872,308 @@ class OracleProvider(MemoryProvider):
                         continue
 
                 return results
+            elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
+                # Conversation memory has individual columns, not a data column
+                query = f"""
+                    SELECT id, memory_id, thread_id, role, content, timestamp, agent_id, embedding
+                    FROM {table_name}
+                    ORDER BY timestamp
+                """
+                cursor.execute(query)
+
+                results = []
+                for row in cursor:
+                    try:
+                        content = row[4]
+                        if hasattr(content, "read"):
+                            content = content.read()
+                        timestamp = row[5]
+                        if hasattr(timestamp, "isoformat"):
+                            timestamp = timestamp.isoformat()
+                        elif timestamp:
+                            timestamp = str(timestamp)
+                        doc = {
+                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
+                            "memory_id": row[1],
+                            "thread_id": row[2],
+                            "role": row[3],
+                            "content": content,
+                            "timestamp": timestamp,
+                            "agent_id": row[6],
+                        }
+                        if include_embedding and row[7] is not None:
+                            doc["embedding"] = list(row[7])
+                        results.append(doc)
+                    except Exception as row_error:
+                        logger.warning(
+                            f"Error processing conversation_memory row: {row_error}"
+                        )
+                        continue
+
+                return results
+            elif memory_store_type == MemoryType.TOOLBOX:
+                query = f"""
+                    SELECT id, tool_id, name, description, signature, docstring,
+                           tool_type, parameters, memory_id, agent_id, embedding,
+                           created_at, updated_at
+                    FROM {table_name}
+                """
+                cursor.execute(query)
+                results = []
+                for row in cursor:
+                    try:
+                        doc = {
+                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
+                            "tool_id": row[1],
+                            "name": row[2],
+                            "description": self._read_lob_value(row[3]),
+                            "signature": row[4],
+                            "docstring": self._read_lob_value(row[5]),
+                            "tool_type": row[6],
+                            "parameters": self._deserialize_json_field(row[7]),
+                            "memory_id": row[8],
+                            "agent_id": row[9],
+                        }
+                        if include_embedding and row[10] is not None:
+                            doc["embedding"] = list(row[10])
+                        results.append(doc)
+                    except Exception as row_error:
+                        logger.warning("Error processing toolbox row: %s", row_error)
+                        continue
+                return results
+            elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
+                query = f"""
+                    SELECT id, workflow_id, name, description, steps, current_step,
+                           status, outcome, memory_id, agent_id, embedding,
+                           created_at, updated_at
+                    FROM {table_name}
+                """
+                cursor.execute(query)
+                results = []
+                for row in cursor:
+                    try:
+                        doc = {
+                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
+                            "workflow_id": row[1],
+                            "name": row[2],
+                            "description": self._read_lob_value(row[3]),
+                            "steps": self._deserialize_json_field(row[4]),
+                            "current_step": row[5],
+                            "status": row[6],
+                            "outcome": self._deserialize_json_field(row[7]),
+                            "memory_id": row[8],
+                            "agent_id": row[9],
+                        }
+                        if include_embedding and row[10] is not None:
+                            doc["embedding"] = list(row[10])
+                        results.append(doc)
+                    except Exception as row_error:
+                        logger.warning(
+                            "Error processing workflow_memory row: %s", row_error
+                        )
+                        continue
+                return results
+            elif memory_store_type == MemoryType.SUMMARIES:
+                query = f"""
+                    SELECT id, summary_id, content, original_memory_ids,
+                           summary_type, memory_id, agent_id, embedding, created_at
+                    FROM {table_name}
+                """
+                cursor.execute(query)
+                results = []
+                for row in cursor:
+                    try:
+                        doc = {
+                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
+                            "summary_id": row[1],
+                            "content": self._read_lob_value(row[2]),
+                            "original_memory_ids": self._deserialize_json_field(row[3]),
+                            "summary_type": row[4],
+                            "memory_id": row[5],
+                            "agent_id": row[6],
+                        }
+                        if include_embedding and row[7] is not None:
+                            doc["embedding"] = list(row[7])
+                        if row[8]:
+                            doc["created_at"] = (
+                                row[8].isoformat()
+                                if hasattr(row[8], "isoformat")
+                                else str(row[8])
+                            )
+                        results.append(doc)
+                    except Exception as row_error:
+                        logger.warning("Error processing summaries row: %s", row_error)
+                        continue
+                return results
+            elif memory_store_type == MemoryType.TOOL_LOG:
+                query = f"""
+                    SELECT id, tool_log_id, tool_name, arguments, result, success,
+                           error, timestamp, agent_id, tool_call_id, thread_id, memory_id
+                    FROM {table_name}
+                    ORDER BY timestamp
+                """
+                cursor.execute(query)
+                results = []
+                for row in cursor:
+                    try:
+                        timestamp = row[7]
+                        if hasattr(timestamp, "isoformat"):
+                            timestamp = timestamp.isoformat()
+                        elif timestamp:
+                            timestamp = str(timestamp)
+                        doc = {
+                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
+                            "tool_log_id": row[1],
+                            "tool_name": row[2],
+                            "arguments": self._read_lob_value(row[3]),
+                            "result": self._read_lob_value(row[4]),
+                            "success": bool(row[5]) if row[5] is not None else True,
+                            "error": self._read_lob_value(row[6]),
+                            "timestamp": timestamp,
+                            "agent_id": row[8],
+                            "tool_call_id": row[9],
+                            "thread_id": row[10],
+                            "memory_id": row[11],
+                        }
+                        results.append(doc)
+                    except Exception as row_error:
+                        logger.warning("Error processing tool_log row: %s", row_error)
+                        continue
+                return results
+            elif memory_store_type == MemoryType.MEMAGENT:
+                # Agents are stored across `agents`, `agent_llm_configs`,
+                # `agent_memories`, and `personas`. Reuse ``retrieve_memagent``
+                # per row so every agent comes back fully hydrated instead of
+                # relying on a (non-existent) ``data`` JSON column.
+                try:
+                    cursor.execute("SELECT agent_id FROM agents")
+                    agent_ids = [row[0] for row in cursor.fetchall() if row and row[0]]
+                except Exception as exc:
+                    logger.error("Failed to list agent_ids from agents table: %s", exc)
+                    return []
+
+                results: List[Dict[str, Any]] = []
+                for agent_id in agent_ids:
+                    try:
+                        agent_model = self.retrieve_memagent(agent_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to hydrate memagent %s: %s", agent_id, exc
+                        )
+                        continue
+                    if agent_model is None:
+                        continue
+                    doc = (
+                        agent_model.model_dump()
+                        if hasattr(agent_model, "model_dump")
+                        else agent_model.__dict__
+                    )
+                    if not include_embedding:
+                        doc.pop("embedding", None)
+                    results.append(doc)
+                return results
+            elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+                # Knowledge base rows have relational columns, not a data column.
+                # Chunking metadata (knowledge_base_id, namespace, chunk_*,
+                # chunking_strategy) is optional on older schemas — gracefully
+                # return NULLs if migration 002 hasn't run.
+                has_chunking = all(
+                    self._memory_type_has_column(memory_store_type, col)
+                    for col in (
+                        "knowledge_base_id",
+                        "namespace",
+                        "chunk_index",
+                        "chunk_count",
+                        "chunking_strategy",
+                    )
+                )
+                select_extra = (
+                    ", knowledge_base_id, namespace, chunk_index, chunk_count, chunking_strategy"
+                    if has_chunking
+                    else ", NULL, NULL, NULL, NULL, NULL"
+                )
+                query = f"""
+                    SELECT id, memory_id, content, memory_type, importance,
+                           last_accessed, access_count, agent_id, embedding,
+                           created_at, updated_at{select_extra}
+                    FROM {table_name}
+                """
+                cursor.execute(query)
+                results = []
+                for row in cursor:
+                    try:
+                        created_at = row[9]
+                        updated_at = row[10]
+                        doc = {
+                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
+                            "memory_id": row[1],
+                            "content": self._read_lob_value(row[2]),
+                            "memory_type": row[3],
+                            "importance": row[4],
+                            "last_accessed": (
+                                row[5].isoformat()
+                                if hasattr(row[5], "isoformat")
+                                else row[5]
+                            ),
+                            "access_count": row[6],
+                            "agent_id": row[7],
+                            "created_at": (
+                                created_at.isoformat()
+                                if hasattr(created_at, "isoformat")
+                                else created_at
+                            ),
+                            "updated_at": (
+                                updated_at.isoformat()
+                                if hasattr(updated_at, "isoformat")
+                                else updated_at
+                            ),
+                            "knowledge_base_id": row[11],
+                            "namespace": row[12],
+                            "chunk_index": row[13],
+                            "chunk_count": row[14],
+                            "chunking_strategy": row[15],
+                        }
+                        if include_embedding and row[8] is not None:
+                            doc["embedding"] = list(row[8])
+                        results.append(doc)
+                    except Exception as row_error:
+                        logger.warning(
+                            "Error processing knowledge_base row: %s", row_error
+                        )
+                        continue
+                return results
+            elif memory_store_type in (
+                MemoryType.PERSONAS,
+                MemoryType.SHORT_TERM_MEMORY,
+                MemoryType.SHARED_MEMORY,
+                MemoryType.SEMANTIC_CACHE,
+            ):
+                # These tables have type-specific columns, not a generic
+                # `data` JSON. They aren't exercised by the UI's list_all
+                # path yet, so return [] quietly rather than spamming
+                # ORA-00904 on every Connect. Add a proper SELECT branch
+                # here when these memory types need full listing.
+                logger.debug(
+                    "list_all for %s is not implemented for Oracle; returning empty list",
+                    memory_store_type.value,
+                )
+                return []
             else:
-                # For other memory types, try to query data column
+                # Unknown memory type — surface rather than swallow.
                 try:
                     query = f"SELECT id, data FROM {table_name}"
                     cursor.execute(query)
-
                     results = []
                     for row in cursor:
                         doc = self._doc_to_dict(row[1], include_embedding)
                         if row[0]:
                             doc["_id"] = str(uuid.UUID(bytes=row[0]))
                         results.append(doc)
-
                     return results
                 except Exception as table_error:
                     logger.error(
                         f"Failed to query base table {table_name}: {table_error}"
                     )
-                    # Return empty list if table query also fails
                     return []
 
     def retrieve_conversation_history_ordered_by_timestamp(
@@ -2407,6 +3182,7 @@ class OracleProvider(MemoryProvider):
         include_embedding: bool = False,
         memory_type: Union[str, MemoryType] = None,
         limit: int = None,
+        user_id: Any = _UNSET,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve conversation history ordered by timestamp.
@@ -2421,6 +3197,11 @@ class OracleProvider(MemoryProvider):
             Type of memory (defaults to CONVERSATION_MEMORY)
         limit : int, optional
             Maximum number of entries to return
+        user_id : str, optional
+            Multi-tenant scope. When provided (including explicit ``None``),
+            results are restricted to rows whose stored ``user_id`` matches.
+            When left at the sentinel default, no user_id filter is applied
+            (legacy behavior).
         """
         # Default to CONVERSATION_MEMORY if not specified
         if memory_type is None:
@@ -2429,21 +3210,55 @@ class OracleProvider(MemoryProvider):
             memory_type = MemoryType(memory_type)
 
         # Query from base table for proper timestamp ordering
-        # (Duality Views don't support ORDER BY on JSON fields directly)
         table_name = self._get_table_name(memory_type)
+
+        # Build an optional user_id predicate. We introspect the column set
+        # first so unmigrated schemas (no ``user_id`` yet) are tolerated
+        # without noisy retry-on-exception logs.
+        params = {"memory_id": memory_id}
+        user_clause = ""
+        if user_id is not _UNSET and self._memory_type_has_column(
+            memory_type, "user_id"
+        ):
+            if user_id is None:
+                user_clause = " AND user_id IS NULL"
+            else:
+                user_clause = " AND user_id = :user_id_scope"
+                params["user_id_scope"] = user_id
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # Build SQL to query base table with timestamp ordering
             sql = f"""
-                SELECT id, memory_id, conversation_id, role, content, timestamp, agent_id, embedding
+                SELECT id, memory_id, thread_id, role, content, timestamp, agent_id, embedding
                 FROM {table_name}
-                WHERE memory_id = :memory_id
+                WHERE memory_id = :memory_id{user_clause}
                 ORDER BY timestamp
             """
 
-            cursor.execute(sql, {"memory_id": memory_id})
+            try:
+                cursor.execute(sql, params)
+            except Exception as exc:
+                # Backward compat paths:
+                #   1. user_id column not yet present → drop the predicate
+                #   2. very old schema still using conversation_id → legacy form
+                if user_clause and "user_id" in str(exc).lower():
+                    fallback_params = {"memory_id": memory_id}
+                    fallback_sql = f"""
+                        SELECT id, memory_id, thread_id, role, content, timestamp, agent_id, embedding
+                        FROM {table_name}
+                        WHERE memory_id = :memory_id
+                        ORDER BY timestamp
+                    """
+                    cursor.execute(fallback_sql, fallback_params)
+                else:
+                    legacy_sql = f"""
+                        SELECT id, memory_id, conversation_id, role, content, timestamp, agent_id, embedding
+                        FROM {table_name}
+                        WHERE memory_id = :memory_id
+                        ORDER BY timestamp
+                    """
+                    cursor.execute(legacy_sql, {"memory_id": memory_id})
 
             results = []
             for row in cursor:
@@ -2462,7 +3277,7 @@ class OracleProvider(MemoryProvider):
                 result = {
                     "_id": str(uuid.UUID(bytes=row[0])),
                     "memory_id": row[1],
-                    "conversation_id": row[2],
+                    "thread_id": row[2],
                     "role": row[3],
                     "content": content,
                     "timestamp": timestamp,
@@ -2491,7 +3306,7 @@ class OracleProvider(MemoryProvider):
             MemoryType.CONVERSATION_MEMORY: {
                 "id_field": "memory_id",
                 "fields": {
-                    "conversation_id",
+                    "thread_id",
                     "role",
                     "content",
                     "timestamp",
@@ -2501,7 +3316,7 @@ class OracleProvider(MemoryProvider):
                 "json_fields": set(),
                 "has_updated_at": False,
             },
-            MemoryType.LONG_TERM_MEMORY: {
+            MemoryType.KNOWLEDGE_BASE: {
                 "id_field": "memory_id",
                 "fields": {
                     "content",
@@ -2605,7 +3420,62 @@ class OracleProvider(MemoryProvider):
                 "json_fields": {"attributes", "relations", "metadata"},
                 "has_updated_at": True,
             },
+            MemoryType.SEMANTIC_CACHE: {
+                "id_field": "cache_key",
+                "fields": {
+                    "query_text",
+                    "response",
+                    "scope",
+                    "similarity_threshold",
+                    "hit_count",
+                    "agent_id",
+                    "memory_id",
+                    "session_id",
+                    "expires_at",
+                    "embedding",
+                },
+                "json_fields": set(),
+                "has_updated_at": False,
+            },
+            MemoryType.TOOL_LOG: {
+                "id_field": "tool_log_id",
+                "fields": {
+                    "tool_name",
+                    "arguments",
+                    "result",
+                    "success",
+                    "error",
+                    "timestamp",
+                    "agent_id",
+                    "tool_call_id",
+                    "thread_id",
+                    "memory_id",
+                },
+                "json_fields": set(),
+                "has_updated_at": False,
+            },
+            MemoryType.SHARED_MEMORY: {
+                "id_field": "memory_id",
+                "fields": {
+                    "content",
+                    "memory_type",
+                    "scope",
+                    "owner_agent_id",
+                    "access_list",
+                    "embedding",
+                },
+                "json_fields": {"access_list"},
+                "has_updated_at": True,
+            },
         }
+
+        # ``user_id`` is tenant scope — add it as an allowed field on every
+        # memory type that carries the column so callers can update scope
+        # during data migrations. ``_maybe_set_user_id`` below checks the
+        # actual column presence before emitting the SQL so unmigrated
+        # schemas are tolerated.
+        for cfg in update_config.values():
+            cfg["fields"] = set(cfg["fields"]) | {"user_id"}
 
         config = update_config.get(memory_store_type)
         if config is None:
@@ -2631,12 +3501,18 @@ class OracleProvider(MemoryProvider):
 
         set_clauses = []
         params = {id_field: id_value}
+        skip_user_id = "user_id" in sanitized_data and not self._memory_type_has_column(
+            memory_store_type, "user_id"
+        )
 
         for key, value in sanitized_data.items():
             mapped_key = field_map.get(key, key)
             if mapped_key in ("id", "_id", id_field):
                 continue
             if mapped_key not in allowed_fields:
+                continue
+            if mapped_key == "user_id" and skip_user_id:
+                # Column not yet added — silently drop to tolerate pre-migration schemas.
                 continue
             if mapped_key in json_fields:
                 value = self._ensure_json_text(value)
@@ -2679,7 +3555,7 @@ class OracleProvider(MemoryProvider):
         self, id: str, data: Dict[str, Any], memory_store_type: MemoryType
     ) -> bool:
         """Update a document by ID."""
-        # For semantic cache and shared memory, update base table directly (not Duality View)
+        # For semantic cache and shared memory, update base table directly
         if memory_store_type == MemoryType.SEMANTIC_CACHE:
             return self._update_semantic_cache_by_key(id, data)
 
@@ -2698,7 +3574,7 @@ class OracleProvider(MemoryProvider):
 
         if memory_store_type in {
             MemoryType.CONVERSATION_MEMORY,
-            MemoryType.LONG_TERM_MEMORY,
+            MemoryType.KNOWLEDGE_BASE,
             MemoryType.PERSONAS,
             MemoryType.SHORT_TERM_MEMORY,
             MemoryType.TOOLBOX,
@@ -2708,158 +3584,16 @@ class OracleProvider(MemoryProvider):
         }:
             return self._update_relational_by_id(id, data, memory_store_type)
 
-        json_updates: Dict[str, Any] = {}
-
-        # For other types, use Duality Views
-        view_name = self._get_duality_view_name(memory_store_type)
-
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-
-            # Map memory types to their ID field names
-            id_field_map = {
-                MemoryType.MEMAGENT: "agentId",
-                MemoryType.PERSONAS: "personaId",
-                MemoryType.TOOLBOX: "toolId",
-                MemoryType.CONVERSATION_MEMORY: "memoryId",
-                MemoryType.LONG_TERM_MEMORY: "memoryId",
-                MemoryType.SHORT_TERM_MEMORY: "memoryId",
-                MemoryType.WORKFLOW_MEMORY: "workflowId",
-                MemoryType.SHARED_MEMORY: "memoryId",
-                MemoryType.SUMMARIES: "summaryId",
-            }
-
-            id_field = id_field_map.get(memory_store_type, "memoryId")
-
-            # Get existing document from Duality View
-            cursor.execute(
-                f"SELECT data FROM {view_name} WHERE JSON_VALUE(data, '$.\"{id_field}\"') = :id",
-                {"id": id},
-            )
-            row = cursor.fetchone()
-
-            if not row:
-                return False
-
-            # Parse and merge with existing data
-            existing_doc = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-
-            # Sanitize existing_doc to handle any JsonId objects that might be in nested structures
-            existing_doc = self._sanitize_for_json(existing_doc)
-            if not isinstance(existing_doc, dict):
-                logger.error(
-                    f"Existing document is not a dict after sanitization: {type(existing_doc)}"
-                )
-                return False
-
-            # Convert update data from snake_case to camelCase and sanitize
-            field_mapping = {
-                "memory_id": "memoryId",
-                "conversation_id": "conversationId",
-                "agent_id": "agentId",
-                "memory_type": "memoryType",
-                "workflow_id": "workflowId",
-                "current_step": "currentStep",
-                "owner_agent_id": "ownerAgentId",
-                "summary_id": "summaryId",
-                "summary_type": "summaryType",
-                "persona_id": "personaId",
-                "role": "roleType",
-                "role_type": "roleType",
-                "tool_id": "toolId",
-                "tool_type": "toolType",
-                "created_at": "createdAt",
-                "updated_at": "updatedAt",
-                "expires_at": "expiresAt",
-                "last_accessed": "lastAccessed",
-                "access_count": "accessCount",
-            }
-
-            # Sanitize incoming data before merging
-            sanitized_data = self._sanitize_for_json(data)
-            if not isinstance(sanitized_data, dict):
-                logger.error(
-                    f"Update data is not a dict after sanitization: {type(sanitized_data)}"
-                )
-                return False
-
-            if memory_store_type == MemoryType.PERSONAS:
-                json_updates["traits"] = sanitized_data.pop("traits", None)
-                json_updates["expertise"] = sanitized_data.pop("expertise", None)
-            elif memory_store_type == MemoryType.TOOLBOX:
-                json_updates["parameters"] = sanitized_data.pop("parameters", None)
-
-            for key, value in sanitized_data.items():
-                camel_key = field_mapping.get(key, key)
-                existing_doc[camel_key] = value
-
-            # Sanitize one more time before JSON serialization to catch any missed JsonId objects
-            existing_doc = self._sanitize_for_json(existing_doc)
-            if not isinstance(existing_doc, dict):
-                logger.error(
-                    f"Document is not a dict after final sanitization: {type(existing_doc)}"
-                )
-                return False
-
-            # Update via Duality View
-            doc_json = json.dumps(existing_doc)
-
-            cursor.execute(
-                f"""
-                UPDATE {view_name}
-                SET data = :data
-                WHERE JSON_VALUE(data, '$."{id_field}"') = :id
-                """,
-                {"data": doc_json, "id": id},
-            )
-            updated_rows = cursor.rowcount
-
-            if memory_store_type == MemoryType.PERSONAS and (
-                json_updates.get("traits") is not None
-                or json_updates.get("expertise") is not None
-            ):
-                table_name = self._get_table_name(MemoryType.PERSONAS)
-                cursor.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET traits = :traits, expertise = :expertise
-                    WHERE persona_id = :persona_id
-                    """,
-                    {
-                        "traits": json.dumps(
-                            self._sanitize_for_json(json_updates.get("traits"))
-                        )
-                        if json_updates.get("traits") is not None
-                        else None,
-                        "expertise": json.dumps(
-                            self._sanitize_for_json(json_updates.get("expertise"))
-                        )
-                        if json_updates.get("expertise") is not None
-                        else None,
-                        "persona_id": id,
-                    },
-                )
-            elif memory_store_type == MemoryType.TOOLBOX and (
-                json_updates.get("parameters") is not None
-            ):
-                table_name = self._get_table_name(MemoryType.TOOLBOX)
-                cursor.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET parameters = :parameters
-                    WHERE tool_id = :tool_id
-                    """,
-                    {
-                        "parameters": json.dumps(
-                            self._sanitize_for_json(json_updates.get("parameters"))
-                        ),
-                        "tool_id": id,
-                    },
-                )
-
-            conn.commit()
-
-            return updated_rows > 0
+        # Memory types with a dedicated update path are handled above. Every
+        # other type falls through here; all of those now use base-table
+        # writes via their ``_store_*`` methods, so a generic update_by_id
+        # is no longer meaningful. Log and return False so callers see a
+        # no-op rather than an exception.
+        logger.debug(
+            "update_by_id: no relational update path for %s — skipping",
+            memory_store_type.value,
+        )
+        return False
 
     def _update_shared_memory_by_id(self, memory_id: str, data: Dict[str, Any]) -> bool:
         """Update shared memory entry directly in base table by memory_id."""
@@ -3000,7 +3734,7 @@ class OracleProvider(MemoryProvider):
         return self._vector_search(MemoryType.TOOLBOX, embedding, limit=limit)
 
     def retrieve_workflow_by_query(
-        self, query: Dict[str, Any], limit: int = 1
+        self, query: Dict[str, Any], limit: int = 1, user_id: Any = _UNSET
     ) -> Optional[List[Dict[str, Any]]]:
         """Retrieve workflows using vector search."""
         from ...embeddings import get_embedding
@@ -3011,10 +3745,12 @@ class OracleProvider(MemoryProvider):
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
 
-        return self._vector_search(MemoryType.WORKFLOW_MEMORY, embedding, limit=limit)
+        return self._vector_search(
+            MemoryType.WORKFLOW_MEMORY, embedding, limit=limit, user_id=user_id
+        )
 
     def retrieve_summaries_by_query(
-        self, query: Dict[str, Any], limit: int = 1
+        self, query: Dict[str, Any], limit: int = 1, user_id: Any = _UNSET
     ) -> Optional[List[Dict[str, Any]]]:
         """Retrieve summaries using vector search."""
         from ...embeddings import get_embedding
@@ -3025,7 +3761,9 @@ class OracleProvider(MemoryProvider):
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
 
-        return self._vector_search(MemoryType.SUMMARIES, embedding, limit=limit)
+        return self._vector_search(
+            MemoryType.SUMMARIES, embedding, limit=limit, user_id=user_id
+        )
 
     def find_similar_cache_entries(
         self, query: str, limit: int = 5, **kwargs
@@ -3048,8 +3786,16 @@ class OracleProvider(MemoryProvider):
         if "session_id" in kwargs and kwargs["session_id"] is not None:
             filters["session_id"] = kwargs["session_id"]
 
+        # user_id is tracked separately so None (anonymous) is applied as a
+        # real IS NULL predicate instead of being dropped with truthy filters.
+        user_id = kwargs.get("user_id", _UNSET)
+
         return self._vector_search(
-            MemoryType.SEMANTIC_CACHE, embedding, limit=limit, filters=filters
+            MemoryType.SEMANTIC_CACHE,
+            embedding,
+            limit=limit,
+            filters=filters,
+            user_id=user_id,
         )
 
     def _vector_search(
@@ -3059,6 +3805,7 @@ class OracleProvider(MemoryProvider):
         limit: int = 5,
         filters: Dict[str, Any] = None,
         memory_id: str = None,
+        user_id: Any = _UNSET,
     ) -> List[Dict[str, Any]]:
         """
         Perform vector similarity search using Oracle's VECTOR_DISTANCE function.
@@ -3093,18 +3840,53 @@ class OracleProvider(MemoryProvider):
         allowed_filters = {
             MemoryType.PERSONAS: {"memory_id", "agent_id", "name", "role_type"},
             MemoryType.TOOLBOX: {"memory_id", "agent_id", "name", "tool_type"},
-            MemoryType.WORKFLOW_MEMORY: {"memory_id", "agent_id", "status", "name"},
-            MemoryType.SUMMARIES: {"memory_id", "agent_id", "summary_type"},
-            MemoryType.SEMANTIC_CACHE: {"cache_key", "scope", "agent_id"},
-            MemoryType.ENTITY_MEMORY: {"memory_id", "agent_id", "entity_type", "name"},
+            MemoryType.WORKFLOW_MEMORY: {
+                "memory_id",
+                "agent_id",
+                "status",
+                "name",
+                "user_id",
+            },
+            MemoryType.SUMMARIES: {
+                "memory_id",
+                "agent_id",
+                "summary_type",
+                "user_id",
+            },
+            MemoryType.SEMANTIC_CACHE: {
+                "cache_key",
+                "scope",
+                "agent_id",
+                "memory_id",
+                "session_id",
+                "user_id",
+            },
+            MemoryType.ENTITY_MEMORY: {
+                "memory_id",
+                "agent_id",
+                "entity_type",
+                "name",
+                "user_id",
+            },
             MemoryType.CONVERSATION_MEMORY: {
                 "memory_id",
                 "agent_id",
-                "conversation_id",
+                "thread_id",
                 "role",
+                "user_id",
             },
-            MemoryType.LONG_TERM_MEMORY: {"memory_id", "agent_id", "memory_type"},
-            MemoryType.SHORT_TERM_MEMORY: {"memory_id", "agent_id", "memory_type"},
+            MemoryType.KNOWLEDGE_BASE: {
+                "memory_id",
+                "agent_id",
+                "memory_type",
+                "user_id",
+            },
+            MemoryType.SHORT_TERM_MEMORY: {
+                "memory_id",
+                "agent_id",
+                "memory_type",
+                "user_id",
+            },
             MemoryType.SHARED_MEMORY: {"memory_id", "owner_agent_id", "scope"},
         }
 
@@ -3122,8 +3904,28 @@ class OracleProvider(MemoryProvider):
             if filters:
                 for key, value in filters.items():
                     if key in allowed:
-                        filter_clauses.append(f"{key} = :{key}")
-                        params[key] = value
+                        if value is None:
+                            filter_clauses.append(f"{key} IS NULL")
+                        else:
+                            filter_clauses.append(f"{key} = :{key}")
+                            params[key] = value
+
+            # Tenant isolation: user_id filter is strict — None becomes IS NULL,
+            # not "match everything", to prevent cross-tenant leaks on vector
+            # search paths. _UNSET means "no user_id scoping supplied"
+            # (legacy callers) — we leave the query unfiltered. Skip entirely
+            # when the column doesn't exist yet (pre-migration schemas).
+            apply_user_scope = (
+                user_id is not _UNSET
+                and "user_id" in allowed
+                and self._memory_type_has_column(memory_type, "user_id")
+            )
+            if apply_user_scope:
+                if user_id is None:
+                    filter_clauses.append("user_id IS NULL")
+                else:
+                    filter_clauses.append("user_id = :user_id_scope")
+                    params["user_id_scope"] = user_id
 
             where_clause = " AND ".join(filter_clauses) if filter_clauses else "1=1"
 
@@ -3347,7 +4149,7 @@ class OracleProvider(MemoryProvider):
                 if memory_type == MemoryType.CONVERSATION_MEMORY:
                     sql = f"""
                     SELECT
-                        id, memory_id, conversation_id, role, content, timestamp,
+                        id, memory_id, thread_id, role, content, timestamp,
                         agent_id, embedding,
                         (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
                     FROM {table_name}
@@ -3355,14 +4157,19 @@ class OracleProvider(MemoryProvider):
                     ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
                     FETCH FIRST :limit ROWS ONLY
                     """
-                    cursor.execute(sql, params)
+                    try:
+                        cursor.execute(sql, params)
+                    except Exception:
+                        # Backward compat: unmigrated schema still has conversation_id
+                        sql = sql.replace("thread_id", "conversation_id")
+                        cursor.execute(sql, params)
                     results = []
                     for row in cursor:
                         results.append(
                             {
                                 "_id": str(uuid.UUID(bytes=row[0])),
                                 "memory_id": row[1],
-                                "conversation_id": row[2],
+                                "thread_id": row[2],
                                 "role": row[3],
                                 "content": self._read_lob_value(row[4]),
                                 "timestamp": row[5].isoformat()
@@ -3374,12 +4181,32 @@ class OracleProvider(MemoryProvider):
                         )
                     return results
 
-                if memory_type == MemoryType.LONG_TERM_MEMORY:
+                if memory_type == MemoryType.KNOWLEDGE_BASE:
+                    # Include chunking metadata in the projection so the
+                    # agent-scoped filter in ``knowledge_base_lookup`` has
+                    # a real ``knowledge_base_id`` to match against.
+                    # Tolerate pre-migration schemas: ``NULL`` columns keep
+                    # the tuple shape stable.
+                    has_chunking = all(
+                        self._memory_type_has_column(memory_type, col)
+                        for col in (
+                            "knowledge_base_id",
+                            "namespace",
+                            "chunk_index",
+                            "chunk_count",
+                            "chunking_strategy",
+                        )
+                    )
+                    extra_cols = (
+                        ", knowledge_base_id, namespace, chunk_index, chunk_count, chunking_strategy"
+                        if has_chunking
+                        else ", NULL, NULL, NULL, NULL, NULL"
+                    )
                     sql = f"""
                     SELECT
                         id, memory_id, content, memory_type, importance, last_accessed,
                         access_count, agent_id, embedding, created_at, updated_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
+                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score{extra_cols}
                     FROM {table_name}
                     WHERE {where_clause}
                     ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
@@ -3403,6 +4230,11 @@ class OracleProvider(MemoryProvider):
                                 "created_at": row[9].isoformat() if row[9] else None,
                                 "updated_at": row[10].isoformat() if row[10] else None,
                                 "score": float(row[11]),
+                                "knowledge_base_id": row[12],
+                                "namespace": row[13],
+                                "chunk_index": row[14],
+                                "chunk_count": row[15],
+                                "chunking_strategy": row[16],
                             }
                         )
                     return results
@@ -3505,13 +4337,44 @@ class OracleProvider(MemoryProvider):
                             )
                     return []
 
+                if "ORA-00904" in error_str:
+                    # Column missing — usually ``USER_ID`` on a schema where
+                    # migration 001 has not been applied yet. Invalidate the
+                    # column cache for this table and, if the query was
+                    # user_id-scoped, retry without that predicate instead of
+                    # disabling vector search entirely. Only disable when the
+                    # missing column is something we can't gracefully drop.
+                    self._table_columns_cache.pop(memory_type.value.upper(), None)
+                    upper_err = error_str.upper()
+                    if "USER_ID" in upper_err and user_id is not _UNSET:
+                        logger.warning(
+                            "user_id column not present on %s; retrying vector search without user scope. "
+                            "Run migrations/001_add_user_id.sql to enable tenant scoping.",
+                            memory_type.value,
+                        )
+                        return self._vector_search(
+                            memory_type,
+                            query_embedding,
+                            limit=limit,
+                            filters=filters,
+                            memory_id=memory_id,
+                            user_id=_UNSET,
+                        )
+                    self._vector_search_disabled_for.add(memory_type)
+                    logger.warning(
+                        "Vector search disabled for %s due to missing column: %s",
+                        memory_type.value,
+                        e,
+                    )
+                    return []
+
                 logger.error(f"Vector search failed: {e}")
                 return []
 
     # ===== MEMAGENT METHODS =====
 
     def store_memagent(self, memagent: "MemAgentModel") -> str:
-        """Store a memagent using JSON Relational Duality View."""
+        """Store a memagent."""
         memagent_dict = memagent.model_dump()
 
         with self._get_connection() as conn:
@@ -3526,59 +4389,79 @@ class OracleProvider(MemoryProvider):
             has_is_favorite_column = self._table_has_column(
                 cursor, "agents", "is_favorite"
             )
+            has_verbose_column = self._table_has_column(cursor, "agents", "verbose")
 
-            # Prepare JSON document for Duality View (NO nesting - standalone agent only)
-            agent_json = {
-                "agentId": agent_id_str,
+            cursor.execute(
+                "SELECT id FROM agents WHERE agent_id = :agent_id",
+                {"agent_id": agent_id_str},
+            )
+            existing_agent_row = cursor.fetchone()
+
+            agent_embedding = memagent_dict.get("embedding")
+            agent_params: Dict[str, Any] = {
+                "agent_id": agent_id_str,
                 "name": memagent_dict.get("name"),
                 "instruction": memagent_dict.get("instruction"),
-                "applicationMode": memagent_dict.get("application_mode", "assistant"),
-                "maxSteps": memagent_dict.get("max_steps", 20),
-                "toolAccess": memagent_dict.get("tool_access", "private"),
-                "semanticCache": 1 if memagent_dict.get("semantic_cache") else 0,
-                "verbose": 1 if memagent_dict.get("verbose") else 0,
-                "embedding": memagent_dict.get("embedding"),
+                "application_mode": memagent_dict.get("application_mode", "assistant"),
+                "max_steps": memagent_dict.get("max_steps", 20),
+                "tool_access": memagent_dict.get("tool_access", "private"),
+                "semantic_cache": 1 if memagent_dict.get("semantic_cache") else 0,
             }
+            if has_verbose_column:
+                agent_params["verbose"] = 1 if memagent_dict.get("verbose") else 0
             if has_is_favorite_column:
-                agent_json["isFavorite"] = 1 if memagent_dict.get("is_favorite") else 0
-
-            # Insert/Update via Duality View - Oracle handles relational decomposition!
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO agents_dv VALUES (:json_doc)
-                """,
-                    {"json_doc": json.dumps(agent_json)},
+                agent_params["is_favorite"] = (
+                    1 if memagent_dict.get("is_favorite") else 0
                 )
-            except Exception as e:
-                if "ORA-00001" in str(
-                    e
-                ):  # Unique constraint violation - update instead
-                    # Duality view JSON keys are not SQL columns; use
-                    # JSON_VALUE to locate the row by its JSON key.
-                    cursor.execute(
-                        """
-                        SELECT JSON_VALUE(data, '$."_id"') FROM agents_dv
-                        WHERE JSON_VALUE(data, '$."agentId"') = :agent_id
-                    """,
-                        {"agent_id": agent_id_str},
-                    )
-                    row = cursor.fetchone()
-                    if row:
-                        agent_json["_id"] = row[0]
-                        cursor.execute(
-                            """
-                            UPDATE agents_dv
-                            SET data = :json_doc
-                            WHERE JSON_VALUE(data, '$."agentId"') = :agent_id
-                        """,
-                            {
-                                "json_doc": json.dumps(agent_json),
-                                "agent_id": agent_id_str,
-                            },
-                        )
-                else:
-                    raise
+            if agent_embedding is not None:
+                agent_params["embedding"] = agent_embedding
+
+            if existing_agent_row:
+                set_parts = [
+                    "name = :name",
+                    "instruction = :instruction",
+                    "application_mode = :application_mode",
+                    "max_steps = :max_steps",
+                    "tool_access = :tool_access",
+                    "semantic_cache = :semantic_cache",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                if has_verbose_column:
+                    set_parts.append("verbose = :verbose")
+                if has_is_favorite_column:
+                    set_parts.append("is_favorite = :is_favorite")
+                if agent_embedding is not None:
+                    set_parts.append("embedding = :embedding")
+                cursor.execute(
+                    f"UPDATE agents SET {', '.join(set_parts)} "
+                    "WHERE agent_id = :agent_id",
+                    agent_params,
+                )
+            else:
+                cols = [
+                    "id",
+                    "agent_id",
+                    "name",
+                    "instruction",
+                    "application_mode",
+                    "max_steps",
+                    "tool_access",
+                    "semantic_cache",
+                ]
+                insert_params = dict(agent_params)
+                insert_params["id"] = uuid.uuid4().bytes
+                if has_verbose_column:
+                    cols.append("verbose")
+                if has_is_favorite_column:
+                    cols.append("is_favorite")
+                if agent_embedding is not None:
+                    cols.append("embedding")
+                vals = [f":{c}" for c in cols]
+                cursor.execute(
+                    f"INSERT INTO agents ({', '.join(cols)}) "
+                    f"VALUES ({', '.join(vals)})",
+                    insert_params,
+                )
 
             # Get the internal UUID for foreign key relationships
             cursor.execute(
@@ -3588,14 +4471,13 @@ class OracleProvider(MemoryProvider):
             row = cursor.fetchone()
             agent_uuid = row[0] if row else uuid.UUID(agent_id_str).bytes
 
-            # Store persona separately using personas_dv
+            # Store persona in the personas base table
             if memagent_dict.get("persona"):
                 persona = memagent_dict["persona"]
                 persona_dict = (
                     persona.__dict__ if hasattr(persona, "__dict__") else persona
                 )
 
-                # Generate persona embedding
                 persona_text = f"{persona_dict.get('name', '')}: {persona_dict.get('background', '')} {persona_dict.get('goals', '')}"
                 persona_embedding = None
                 if self._embedding_provider and persona_text.strip():
@@ -3608,62 +4490,33 @@ class OracleProvider(MemoryProvider):
                     except Exception as e:
                         logger.warning(f"Failed to generate embedding for persona: {e}")
 
-                persona_json = {
-                    "personaId": persona_dict.get("persona_id")
-                    or persona_dict.get("name", str(uuid.uuid4())),
-                    "name": persona_dict.get("name", "Unnamed Persona"),
-                    "roleType": (
-                        persona_dict.get("role")
-                        if isinstance(persona_dict.get("role"), str)
-                        else (
-                            persona_dict.get("role").value
-                            if hasattr(persona_dict.get("role"), "value")
-                            else "general"
-                        )
-                    ),
-                    "background": persona_dict.get("background", ""),
-                    "memoryId": persona_dict.get("memory_id"),
-                    "agentId": agent_id_str,  # Link to agent
-                    "embedding": persona_embedding,
-                }
+                persona_id_value = persona_dict.get("persona_id") or persona_dict.get(
+                    "name", str(uuid.uuid4())
+                )
+                role_raw = persona_dict.get("role")
+                if isinstance(role_raw, str):
+                    role_type_value = role_raw
+                elif hasattr(role_raw, "value"):
+                    role_type_value = role_raw.value
+                else:
+                    role_type_value = "general"
 
-                # Remove None embedding to avoid vector errors
-                if persona_json["embedding"] is None:
-                    del persona_json["embedding"]
+                self._upsert_persona_row(
+                    cursor,
+                    persona_id=persona_id_value,
+                    name=persona_dict.get("name", "Unnamed Persona"),
+                    role_type=role_type_value,
+                    background=persona_dict.get("background", ""),
+                    memory_id=persona_dict.get("memory_id"),
+                    agent_id=agent_id_str,
+                    embedding=persona_embedding,
+                    traits=persona_dict.get("traits"),
+                    expertise=persona_dict.get("expertise"),
+                )
 
-                try:
-                    cursor.execute(
-                        "INSERT INTO personas_dv VALUES (:json_doc)",
-                        {"json_doc": json.dumps(persona_json)},
-                    )
-                except Exception as e:
-                    if "ORA-00001" in str(e):  # Already exists, update
-                        cursor.execute(
-                            """
-                            SELECT JSON_VALUE(data, '$."_id"') FROM personas_dv
-                            WHERE JSON_VALUE(data, '$."personaId"') = :persona_id
-                        """,
-                            {"persona_id": persona_json["personaId"]},
-                        )
-                        row = cursor.fetchone()
-                        if row:
-                            persona_json["_id"] = row[0]
-                        cursor.execute(
-                            """
-                            UPDATE personas_dv
-                            SET data = :json_doc
-                            WHERE JSON_VALUE(data, '$."personaId"') = :persona_id
-                        """,
-                            {
-                                "json_doc": json.dumps(persona_json),
-                                "persona_id": persona_json["personaId"],
-                            },
-                        )
-
-            # Store tools separately using toolbox_dv
+            # Store tools in the toolbox base table
             if memagent_dict.get("tools"):
                 for tool_meta in memagent_dict["tools"]:
-                    # Generate tool embedding
                     tool_text = f"{tool_meta.get('name', '')}: {tool_meta.get('description', '')} {tool_meta.get('signature', '')}"
                     tool_embedding = None
                     if self._embedding_provider and tool_text.strip():
@@ -3683,52 +4536,21 @@ class OracleProvider(MemoryProvider):
                     )
                     tool_id = f"{agent_id_str}:{raw_tool_id}"
 
-                    tool_json = {
-                        "toolId": tool_id,
-                        "name": tool_meta.get("name", "unknown_tool"),
-                        "description": tool_meta.get("description", ""),
-                        "signature": tool_meta.get("signature", ""),
-                        "docstring": tool_meta.get("docstring", ""),
-                        "toolType": tool_meta.get("type", "function"),
-                        "memoryId": tool_meta.get("memory_id"),
-                        "agentId": agent_id_str,  # Link to agent
-                        "embedding": tool_embedding,
-                    }
+                    self._upsert_toolbox_row(
+                        cursor,
+                        tool_id=tool_id,
+                        name=tool_meta.get("name", "unknown_tool"),
+                        description=tool_meta.get("description", ""),
+                        signature=tool_meta.get("signature", ""),
+                        docstring=tool_meta.get("docstring", ""),
+                        tool_type=tool_meta.get("type", "function"),
+                        memory_id=tool_meta.get("memory_id"),
+                        agent_id=agent_id_str,
+                        embedding=tool_embedding,
+                        parameters=tool_meta.get("parameters"),
+                    )
 
-                    # Remove None embedding to avoid vector errors
-                    if tool_json["embedding"] is None:
-                        del tool_json["embedding"]
-
-                    try:
-                        cursor.execute(
-                            "INSERT INTO toolbox_dv VALUES (:json_doc)",
-                            {"json_doc": json.dumps(tool_json)},
-                        )
-                    except Exception as e:
-                        if "ORA-00001" in str(e):  # Already exists, update
-                            cursor.execute(
-                                """
-                                SELECT JSON_VALUE(data, '$."_id"') FROM toolbox_dv
-                                WHERE JSON_VALUE(data, '$."toolId"') = :tool_id
-                            """,
-                                {"tool_id": tool_json["toolId"]},
-                            )
-                            row = cursor.fetchone()
-                            if row:
-                                tool_json["_id"] = row[0]
-                            cursor.execute(
-                                """
-                                UPDATE toolbox_dv
-                                SET data = :json_doc
-                                WHERE JSON_VALUE(data, '$."toolId"') = :tool_id
-                            """,
-                                {
-                                    "json_doc": json.dumps(tool_json),
-                                    "tool_id": tool_json["toolId"],
-                                },
-                            )
-
-            # Store LLM config (not in Duality View - in separate table)
+            # Store LLM config in its own table
             llm_config = memagent_dict.get("llm_config") or {}
             additional_cfg = dict(llm_config.get("additional_config", {}) or {})
 
@@ -3870,6 +4692,35 @@ class OracleProvider(MemoryProvider):
                         {"agent_id": agent_uuid, "memory_id": memory_id},
                     )
 
+            # Store knowledge_base_ids (many-to-many via agent_knowledge_bases).
+            # Always DELETE first so detach (empty list) actually clears the
+            # links — otherwise a None-on-empty short-circuit would leak stale rows.
+            kb_ids = memagent_dict.get("knowledge_base_ids") or []
+            # Skip gracefully on pre-migration schemas where the table doesn't
+            # exist — callers still see the SDK behavior, just not persisted.
+            try:
+                cursor.execute(
+                    "DELETE FROM agent_knowledge_bases WHERE agent_id = :agent_id",
+                    {"agent_id": agent_uuid},
+                )
+                for kb_id in kb_ids:
+                    cursor.execute(
+                        """
+                        INSERT INTO agent_knowledge_bases (agent_id, knowledge_base_id)
+                        VALUES (:agent_id, :knowledge_base_id)
+                        """,
+                        {"agent_id": agent_uuid, "knowledge_base_id": str(kb_id)},
+                    )
+            except oracledb.DatabaseError as exc:
+                (err,) = exc.args
+                if err.code == 942:  # ORA-00942: table does not exist
+                    logger.warning(
+                        "agent_knowledge_bases table missing — run the updated "
+                        "schema_relational.sql (knowledge_base_ids not persisted)"
+                    )
+                else:
+                    raise
+
             # Store delegates (many-to-many relationship table)
             if memagent_dict.get("delegates"):
                 cursor.execute(
@@ -3892,7 +4743,7 @@ class OracleProvider(MemoryProvider):
                     except Exception:
                         pass
 
-            # Update IS JSON columns that can't be in Duality View
+            # Update IS JSON columns
             # Update persona traits/expertise if present
             if memagent_dict.get("persona"):
                 persona = memagent_dict["persona"]
@@ -3948,7 +4799,7 @@ class OracleProvider(MemoryProvider):
         self, agent_id: str, agent_uuid: bytes, tools: List[Dict[str, Any]]
     ):
         """
-        Persist agent tools to TOOLBOX table using Duality View.
+        Persist agent tools to TOOLBOX table.
 
         Args:
             agent_id: The agent's string ID
@@ -3966,9 +4817,7 @@ class OracleProvider(MemoryProvider):
                 {"agent_id": agent_id},
             )
 
-            # Insert each tool using Duality View (handles VECTOR type properly)
             for tool_meta in tools:
-                # Generate embedding for the tool if embedding provider is available
                 tool_description = tool_meta.get("description", "")
                 tool_signature = tool_meta.get("signature", "")
                 tool_text = (
@@ -3988,49 +4837,24 @@ class OracleProvider(MemoryProvider):
                             f"Failed to generate embedding for tool {tool_meta.get('name')}: {e}"
                         )
 
-                # Prepare data for Duality View (camelCase keys)
-                tool_dv_data = {
-                    "toolId": tool_meta.get("_id")
-                    or tool_meta.get("name", str(uuid.uuid4())),
-                    "name": tool_meta.get("name", "unknown_tool"),
-                    "description": tool_description,
-                    "signature": tool_signature,
-                    "docstring": tool_meta.get("docstring", ""),
-                    "toolType": tool_meta.get("type", "function"),
-                    "memoryId": tool_meta.get("memory_id"),
-                    "agentId": agent_id,  # Store agent_id as string
-                }
-
-                # Add embedding if available (Duality View handles vector types)
-                if embedding:
-                    tool_dv_data["embedding"] = embedding
+                tool_id_value = tool_meta.get("_id") or tool_meta.get(
+                    "name", str(uuid.uuid4())
+                )
 
                 try:
-                    # Insert via Duality View - handles VECTOR type correctly
-                    json_doc = json.dumps(tool_dv_data)
-                    cursor.execute(
-                        """
-                        INSERT INTO toolbox_dv VALUES (:json_doc)
-                    """,
-                        {"json_doc": json_doc},
+                    self._upsert_toolbox_row(
+                        cursor,
+                        tool_id=tool_id_value,
+                        name=tool_meta.get("name", "unknown_tool"),
+                        description=tool_description,
+                        signature=tool_signature,
+                        docstring=tool_meta.get("docstring", ""),
+                        tool_type=tool_meta.get("type", "function"),
+                        memory_id=tool_meta.get("memory_id"),
+                        agent_id=agent_id,
+                        embedding=embedding,
+                        parameters=tool_meta.get("parameters"),
                     )
-
-                    # Update the parameters column separately (IS JSON constraint, not in DV)
-                    if tool_meta.get("parameters"):
-                        cursor.execute(
-                            """
-                            UPDATE toolbox
-                            SET parameters = :parameters
-                            WHERE tool_id = :tool_id
-                        """,
-                            {
-                                "parameters": json.dumps(
-                                    tool_meta.get("parameters", {})
-                                ),
-                                "tool_id": tool_dv_data["toolId"],
-                            },
-                        )
-
                     logger.info(
                         f"Persisted tool '{tool_meta.get('name')}' for agent {agent_id}"
                     )
@@ -4041,7 +4865,7 @@ class OracleProvider(MemoryProvider):
 
     def _persist_agent_persona(self, agent_id: str, agent_uuid: bytes, persona: Any):
         """
-        Persist agent persona to PERSONAS table using Duality View.
+        Persist agent persona to PERSONAS table.
 
         Args:
             agent_id: The agent's string ID
@@ -4084,57 +4908,30 @@ class OracleProvider(MemoryProvider):
                         f"Failed to generate embedding for persona {persona_dict.get('name')}: {e}"
                     )
 
-            # Prepare data for Duality View (camelCase keys)
-            persona_dv_data = {
-                "personaId": persona_dict.get("persona_id")
-                or persona_dict.get("name", str(uuid.uuid4())),
-                "name": persona_dict.get("name", "Unnamed Persona"),
-                "roleType": (
-                    persona_dict.get("role")
-                    if isinstance(persona_dict.get("role"), str)
-                    else (
-                        persona_dict.get("role").value
-                        if hasattr(persona_dict.get("role"), "value")
-                        else "general"
-                    )
-                ),
-                "background": persona_dict.get("background", ""),
-                "memoryId": persona_dict.get("memory_id"),
-                "agentId": agent_id,  # Link to agent
-            }
-
-            # Add embedding if available (Duality View handles vector types)
-            if embedding:
-                persona_dv_data["embedding"] = embedding
+            persona_id_value = persona_dict.get("persona_id") or persona_dict.get(
+                "name", str(uuid.uuid4())
+            )
+            role_raw = persona_dict.get("role")
+            if isinstance(role_raw, str):
+                role_type_value = role_raw
+            elif hasattr(role_raw, "value"):
+                role_type_value = role_raw.value
+            else:
+                role_type_value = "general"
 
             try:
-                # Insert via Duality View - handles VECTOR type correctly
-                json_doc = json.dumps(persona_dv_data)
-                cursor.execute(
-                    """
-                    INSERT INTO personas_dv VALUES (:json_doc)
-                """,
-                    {"json_doc": json_doc},
+                self._upsert_persona_row(
+                    cursor,
+                    persona_id=persona_id_value,
+                    name=persona_dict.get("name", "Unnamed Persona"),
+                    role_type=role_type_value,
+                    background=persona_dict.get("background", ""),
+                    memory_id=persona_dict.get("memory_id"),
+                    agent_id=agent_id,
+                    embedding=embedding,
+                    traits=persona_dict.get("traits"),
+                    expertise=persona_dict.get("expertise"),
                 )
-
-                # Update the traits and expertise columns separately (IS JSON constraints, not in DV)
-                traits = persona_dict.get("traits")
-                expertise = persona_dict.get("expertise")
-
-                if traits or expertise:
-                    cursor.execute(
-                        """
-                        UPDATE personas
-                        SET traits = :traits, expertise = :expertise
-                        WHERE persona_id = :persona_id
-                    """,
-                        {
-                            "traits": json.dumps(traits) if traits else None,
-                            "expertise": json.dumps(expertise) if expertise else None,
-                            "persona_id": persona_dv_data["personaId"],
-                        },
-                    )
-
                 logger.info(
                     f"Persisted persona '{persona_dict.get('name')}' for agent {agent_id}"
                 )
@@ -4174,11 +4971,8 @@ class OracleProvider(MemoryProvider):
                 if not row:
                     return None
 
-                # Import Persona and RoleType classes
-                from ...long_term_memory.semantic.persona.persona import (
-                    Persona,
-                    RoleType,
-                )
+                # Import Persona class (RoleType already imported at module level)
+                from ...long_term.semantic.persona.persona import Persona
 
                 # Parse the row
                 persona_id = row[0]
@@ -4482,7 +5276,7 @@ class OracleProvider(MemoryProvider):
                 agent_id=agent_id,
                 is_favorite=bool(favorite_value),
                 tools=doc.get("tools"),
-                long_term_memory_ids=doc.get("long_term_memory_ids"),
+                knowledge_base_ids=doc.get("knowledge_base_ids"),
                 self_aware=self_aware_value,
                 self_aware_config=self_aware_cfg_value,
                 automations_enabled=automations_enabled_value,
@@ -4490,27 +5284,11 @@ class OracleProvider(MemoryProvider):
                 memory_provider=self,
             )
 
-            # Construct persona if present
+            # Construct persona if present. Use from_dict so stored goals/
+            # background aren't double-merged with role defaults and
+            # version/evolution_history/storage_id round-trip correctly.
             if doc.get("persona"):
-                persona_data = doc.get("persona")
-                role_str = persona_data.get("role")
-                role = None
-
-                for role_type in RoleType:
-                    if role_type.value == role_str:
-                        role = role_type
-                        break
-
-                if role is None:
-                    role = RoleType.GENERAL
-
-                agent.persona = Persona(
-                    name=persona_data.get("name"),
-                    role=role,
-                    goals=persona_data.get("goals"),
-                    background=persona_data.get("background"),
-                    persona_id=persona_data.get("persona_id"),
-                )
+                agent.persona = Persona.from_dict(doc.get("persona"))
 
             agents.append(agent)
 
@@ -4521,14 +5299,14 @@ class OracleProvider(MemoryProvider):
         return True
 
     def retrieve_memagent(self, agent_id: str) -> "MemAgentModel":
-        """Retrieve a memagent using JSON Relational Duality View."""
+        """Retrieve a memagent."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             has_is_favorite_column = self._table_has_column(
                 cursor, "agents", "is_favorite"
             )
 
-            # Query from base table (easier than Duality View for WHERE clauses)
+            # Query directly from the base table
             if has_is_favorite_column:
                 cursor.execute(
                     """
@@ -4590,7 +5368,7 @@ class OracleProvider(MemoryProvider):
                 ),
             }
 
-            # Query LLM config (not in Duality View)
+            # Query LLM config (in its own table)
             llm_config = None
             if agent_uuid:
                 cursor.execute(
@@ -4626,8 +5404,28 @@ class OracleProvider(MemoryProvider):
                     {"agent_id": agent_uuid},
                 )
                 memory_ids = [row[0] for row in cursor.fetchall()]
+
+                # Query knowledge_base_ids (tolerate missing table on pre-
+                # migration schemas — returns empty list, not an error).
+                try:
+                    cursor.execute(
+                        """
+                        SELECT knowledge_base_id FROM agent_knowledge_bases
+                        WHERE agent_id = :agent_id
+                        ORDER BY created_at
+                        """,
+                        {"agent_id": agent_uuid},
+                    )
+                    knowledge_base_ids = [row[0] for row in cursor.fetchall()]
+                except oracledb.DatabaseError as exc:
+                    (err,) = exc.args
+                    if err.code == 942:  # ORA-00942: table does not exist
+                        knowledge_base_ids = []
+                    else:
+                        raise
             else:
                 memory_ids = []
+                knowledge_base_ids = []
 
             # Query persona separately from personas table
             persona = None
@@ -4642,10 +5440,7 @@ class OracleProvider(MemoryProvider):
             persona_row = cursor.fetchone()
 
             if persona_row:
-                from ...long_term_memory.semantic.persona.persona import (
-                    Persona,
-                    RoleType,
-                )
+                from ...long_term.semantic.persona.persona import Persona
 
                 # Convert role_type string to enum
                 role_type_str = persona_row[2] or "general"
@@ -4764,6 +5559,7 @@ class OracleProvider(MemoryProvider):
                 max_steps=agent_json.get("maxSteps", 20),
                 tool_access=tool_access,
                 memory_ids=memory_ids,
+                knowledge_base_ids=knowledge_base_ids or None,
                 agent_id=agent_json.get("agentId"),
                 is_favorite=bool(
                     agent_json.get("isFavorite")
@@ -4791,16 +5587,34 @@ class OracleProvider(MemoryProvider):
 
             return memagent
 
+    # Tables that do not have a memory_id column.
+    _TYPES_WITHOUT_MEMORY_ID = frozenset(
+        {MemoryType.MEMAGENT, MemoryType.SEMANTIC_CACHE}
+    )
+
     def _delete_memory_units_by_memory_id(
         self, memory_id: str, memory_type: MemoryType
     ):
         """Delete all memory units associated with a memory_id."""
+        if memory_type in self._TYPES_WITHOUT_MEMORY_ID:
+            return
+
         table_name = self._get_table_name(memory_type)
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"DELETE FROM {table_name} WHERE memory_id = :memory_id",
-                {"memory_id": memory_id},
-            )
-            conn.commit()
+            try:
+                cursor.execute(
+                    f"DELETE FROM {table_name} WHERE memory_id = :memory_id",
+                    {"memory_id": memory_id},
+                )
+                conn.commit()
+            except Exception as exc:
+                conn.rollback()
+                if "ORA-00904" in str(exc):
+                    logger.debug(
+                        "Skipping cleanup for %s: memory_id column not present",
+                        memory_type.value,
+                    )
+                else:
+                    raise

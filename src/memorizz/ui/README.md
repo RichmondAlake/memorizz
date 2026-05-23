@@ -105,16 +105,30 @@ The main dashboard displays:
 
 Browse all agents stored in your memory provider:
 - Agent cards showing persona name, application mode, and memory count
-- Click any agent to view full details
+- Click any agent to open it in the playground
 
-### Agent Detail
+### Agent Playground
 
-Detailed view for each agent including:
-- **Information**: Agent ID, application mode, max steps, memory IDs
-- **Persona**: Name, role, background, and goals
-- **Instruction**: The agent's system instruction
-- **Tools**: List of available tools with descriptions
-- **Context Window**: Recent conversation history
+Interactive workspace for each agent:
+- **Chat**: converse with the agent, streaming responses
+- **Context Panel** (right): system instruction, conversation, toolbox memory,
+  workflow memory, entity memory, summary memory, knowledge base entries,
+  tool logs
+- **📎 Attach** / **drag-and-drop**: drop one or more files onto the chat
+  area, or click the Attach button. The UI calls
+  `KnowledgeBase.ingest_file` per upload — the same SDK method you'd use
+  from Python — so every registered format and every registered extractor
+  is automatically supported. Each upload is chunked (default: `fixed`,
+  1000 chars, 100-char overlap), embedded, stored under a new
+  `knowledge_base_id`, and attached to this agent. The Knowledge Base
+  panel refreshes when ingest completes.
+    - Plain-text (`.txt`, `.md`, `.json`, `.csv`, `.py`, `.html`, …) works
+      out of the box.
+    - **PDFs** need `pypdf`: `pip install 'memorizz[ingest-pdf]'`.
+      Scanned/image-only PDFs produce no extractable text and will return
+      an error — they need OCR, which is not bundled.
+    - Add other formats via `register_extractor` in the SDK — see
+      [`semantic/README.md`](../long_term/semantic/README.md#supported-formats--adding-your-own).
 
 ### Memory Type Views
 
@@ -123,7 +137,7 @@ Each memory type has its own list view:
 - Toolbox (Tools)
 - Conversations
 - Workflows
-- Long-term Memory
+- Knowledge Base
 - Short-term Memory
 - Entity Memory
 - Summaries
@@ -142,7 +156,8 @@ src/memorizz/ui/
 │   ├── connect.html     # Provider connection page
 │   ├── dashboard.html   # Main dashboard
 │   ├── agents.html      # Agent list
-│   ├── agent_detail.html # Agent detail view
+│   ├── agent_form.html  # Create/edit agent form
+│   ├── playground.html  # Agent playground (also the agent landing page)
 │   └── memory_list.html # Generic memory type list
 └── static/
     ├── css/

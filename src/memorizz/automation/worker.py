@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import threading
@@ -17,6 +18,8 @@ from typing import Any, Optional
 
 from .runner import run_job_once
 from .schedule import compute_next_run_at, utcnow
+
+logger = logging.getLogger(__name__)
 
 
 def _worker_id() -> str:
@@ -47,17 +50,22 @@ def run_worker(
         last_error = None
         result_payload = None
         status = "failed"
+        max_seconds = max(30, int(job.max_run_seconds or 900))
 
         try:
             for attempt in range(1, int(job.retry_max_attempts or 1) + 1):
                 try:
-                    result_payload = run_job_once(
-                        job,
-                        run_id=run.run_id,
-                        scheduled_for_utc=scheduled_for,
-                        memory_provider=memory_provider,
-                        store=store,
-                    )
+                    # Run with timeout to prevent hung LLM calls from blocking the thread pool.
+                    with ThreadPoolExecutor(max_workers=1) as inner:
+                        future = inner.submit(
+                            run_job_once,
+                            job,
+                            run_id=run.run_id,
+                            scheduled_for_utc=scheduled_for,
+                            memory_provider=memory_provider,
+                            store=store,
+                        )
+                        result_payload = future.result(timeout=max_seconds)
                     # Treat "all deliveries failed" as a failed run so retries kick in.
                     delivery_summary = (
                         result_payload.get("delivery_summary")
@@ -120,7 +128,7 @@ def run_worker(
                     attempt=attempt,
                 )
             except Exception:
-                pass
+                logger.exception("Failed to finish automation run %s", run.run_id)
 
     with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
         inflight = set()
@@ -128,8 +136,12 @@ def run_worker(
             if stop_event is not None and stop_event.is_set():
                 break
 
-            # Clear completed futures.
+            # Clear completed futures and log any errors.
             done = {f for f in inflight if f.done()}
+            for f in done:
+                exc = f.exception()
+                if exc is not None:
+                    logger.error("Automation job execution failed: %s", exc)
             inflight -= done
 
             capacity = max_concurrency - len(inflight)
@@ -142,6 +154,7 @@ def run_worker(
                         worker_id, now_utc, limit=capacity, lease_seconds=lease_seconds
                     )
                 except Exception:
+                    logger.exception("Failed to claim due automation jobs")
                     jobs = []
 
             if jobs:

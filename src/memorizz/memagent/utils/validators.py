@@ -255,34 +255,34 @@ class InputValidator:
         return query
 
     @staticmethod
-    def validate_conversation_id(conversation_id: Optional[str]) -> Optional[str]:
+    def validate_thread_id(thread_id: Optional[str]) -> Optional[str]:
         """
-        Validate conversation ID.
+        Validate thread ID.
 
         Args:
-            conversation_id: Conversation ID to validate
+            thread_id: Thread ID to validate
 
         Returns:
-            Valid conversation ID or None
+            Valid thread ID or None
         """
-        if conversation_id is None:
+        if thread_id is None:
             return None
 
-        if not isinstance(conversation_id, str):
-            raise ValueError("Conversation ID must be a string")
+        if not isinstance(thread_id, str):
+            raise ValueError("Thread ID must be a string")
 
-        conversation_id = conversation_id.strip()
-        if not conversation_id:
+        thread_id = thread_id.strip()
+        if not thread_id:
             return None
 
-        if len(conversation_id) > 200:
-            raise ValueError("Conversation ID cannot exceed 200 characters")
+        if len(thread_id) > 200:
+            raise ValueError("Thread ID cannot exceed 200 characters")
 
         # Check format (UUID-like or alphanumeric with hyphens/underscores)
-        if not re.match(r"^[a-zA-Z0-9_-]+$", conversation_id):
-            raise ValueError("Conversation ID contains invalid characters")
+        if not re.match(r"^[a-zA-Z0-9_-]+$", thread_id):
+            raise ValueError("Thread ID contains invalid characters")
 
-        return conversation_id
+        return thread_id
 
     @staticmethod
     def validate_memory_id(memory_id: Optional[str]) -> Optional[str]:

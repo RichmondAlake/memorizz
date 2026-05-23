@@ -5,7 +5,7 @@ Assistant mode is the default conversational setup for MemoRizz. It prioritizes 
 ## Memory Stack
 
 - `MemoryType.CONVERSATION_MEMORY`
-- `MemoryType.LONG_TERM_MEMORY` + `MemoryType.ENTITY_MEMORY`
+- `MemoryType.KNOWLEDGE_BASE` + `MemoryType.ENTITY_MEMORY`
 - `MemoryType.PERSONAS`
 - `MemoryType.SHORT_TERM_MEMORY`
 - `MemoryType.SUMMARIES`

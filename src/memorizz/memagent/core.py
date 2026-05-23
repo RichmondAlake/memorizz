@@ -35,6 +35,7 @@ from .constants import (
     DEFAULT_MAX_STEPS,
     DEFAULT_TOOL_ACCESS,
     SANDBOX_SYSTEM_PROMPT,
+    TOOL_ITERATION_BUDGET_INSTRUCTION,
 )
 from .managers import (
     AutomationManager,
@@ -55,6 +56,176 @@ if TYPE_CHECKING:
     from ..sandbox.base import SandboxProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Recursively coerce a value into a JSON-serializable primitive.
+
+    Oracle ``oracledb`` surfaces CLOB/BLOB columns as LOB objects with a
+    ``.read()`` method rather than as strings. These slip through
+    conversation-history, knowledge-base, and summary loads into the
+    message list we hand to the LLM provider, where the streaming path
+    ultimately does ``json.dumps(...)`` and fails with
+    ``Object of type LOB is not JSON serializable``.
+
+    Rather than chase every data path individually, we sanitize at the
+    prompt-assembly boundary. One helper, used everywhere we serialize
+    model input or tool output.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    reader = getattr(value, "read", None)
+    if callable(reader):
+        try:
+            read_value = reader()
+        except Exception:
+            return str(value)
+        return _to_jsonable(read_value)
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.decode("utf-8", errors="ignore")
+    if isinstance(value, list):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, tuple):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Tool-log disambiguation helpers
+# ---------------------------------------------------------------------------
+# The agent-facing tool placeholder needs enough signal for the LLM to pick
+# the right ``tool_log_id`` among multiple calls to the same tool in one
+# session. These helpers centralize the three improvements:
+#   1) args summary so calls to the same tool can be told apart
+#   2) field-aware result summary for common tool output shapes
+#   3) a single builder used by both streaming and non-streaming paths
+_TOOL_LOG_PLACEHOLDER_PREFIX = "[Tool '"
+
+
+def _summarize_tool_args(arguments: Any, limit: int = 200) -> str:
+    """One-line, length-bounded JSON summary of tool arguments.
+
+    Falls back to ``str(arguments)`` for anything non-JSON. Empty mapping
+    returns an empty string so the caller can omit the field cleanly.
+    """
+    if arguments is None:
+        return ""
+    try:
+        if isinstance(arguments, str):
+            # Already serialized — just trim.
+            text = arguments
+        else:
+            text = json.dumps(_to_jsonable(arguments), ensure_ascii=False)
+    except Exception:
+        text = str(arguments)
+    text = text.strip()
+    if not text or text in ("{}", "null"):
+        return ""
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _summarize_tool_result(result: Any, preview_limit: int = 500) -> str:
+    """Field-aware summary of a tool's return value.
+
+    Produces a one-line hint based on common tool output shapes plus a
+    bounded ``Preview:`` of the most content-rich field. Unknown shapes
+    fall through to ``str(result)[:preview_limit]`` so nothing blows up.
+    """
+    if result is None:
+        return ""
+    # Errors first — always useful to surface verbatim
+    if isinstance(result, dict):
+        if "error" in result and result.get("error"):
+            err = str(result["error"])
+            return f"error: {err[:preview_limit]}"
+        # matches = KB lookup, entity lookup, semantic search
+        matches = result.get("matches")
+        if isinstance(matches, list):
+            hints: List[str] = [f"{len(matches)} match(es)"]
+            if matches and isinstance(matches[0], dict):
+                top = matches[0]
+                ns = top.get("namespace") or top.get("name")
+                if ns:
+                    hints.append(f"top namespace: {ns}")
+                first_content = top.get("content") or top.get("text") or ""
+                if isinstance(first_content, str) and first_content.strip():
+                    snippet = first_content.strip().replace("\n", " ")
+                    if len(snippet) > preview_limit:
+                        snippet = snippet[: preview_limit - 1] + "…"
+                    hints.append(f"top content: {snippet}")
+            return " · ".join(hints)
+        # generic list-of-entries return shapes
+        entries = result.get("entries") or result.get("logs") or result.get("items")
+        if isinstance(entries, list):
+            return f"{len(entries)} entr(ies)"
+        # single-result wrappers
+        if "content" in result and isinstance(result["content"], str):
+            content = result["content"].strip().replace("\n", " ")
+            if len(content) > preview_limit:
+                content = content[: preview_limit - 1] + "…"
+            return f"content: {content}"
+        if "ok" in result:
+            return f"ok={result['ok']}"
+
+    text = str(result).strip().replace("\n", " ")
+    if len(text) > preview_limit:
+        text = text[: preview_limit - 1] + "…"
+    return text
+
+
+def _build_tool_log_placeholder(
+    *,
+    tool_name: str,
+    tool_log_id: str,
+    arguments: Any,
+    result: Any,
+    error_message: Optional[str] = None,
+) -> str:
+    """Compose the bracketed placeholder that replaces the raw tool result
+    in the LLM message list and in conversation_memory.
+
+    Includes (in order) the tool name, a short args summary, the
+    tool_log_id + retrieval-call template, and a field-aware preview.
+    That's enough signal for the LLM to pick the right id even among
+    several calls to the same tool in one session.
+    """
+    args_summary = _summarize_tool_args(arguments)
+    result_summary = _summarize_tool_result(result)
+    args_clause = f" args={args_summary}" if args_summary else ""
+    if error_message:
+        header = (
+            f"{_TOOL_LOG_PLACEHOLDER_PREFIX}{tool_name}' failed: {error_message}."
+            f"{args_clause} Full output stored as tool_log:{tool_log_id} — "
+            f"use retrieve_tool_log_entry('{tool_log_id}') for complete data]"
+        )
+    else:
+        header = (
+            f"{_TOOL_LOG_PLACEHOLDER_PREFIX}{tool_name}' executed successfully."
+            f"{args_clause} Full output stored as tool_log:{tool_log_id} — "
+            f"use retrieve_tool_log_entry('{tool_log_id}') for complete data]"
+        )
+    return f"{header}\nSummary: {result_summary}" if result_summary else header
+
+
+def _is_tool_placeholder_content(text: Any) -> bool:
+    """True when a stored conversation row's content is a tool-log placeholder.
+
+    Used to filter these rows out of the message list handed to the LLM
+    (they'd otherwise appear as orphan tool-role messages without a
+    matching tool_call_id and the OpenAI API would reject the batch).
+    The placeholders remain visible in the UI and are surfaced to the
+    agent as a structured digest in the system prompt instead.
+    """
+    if not isinstance(text, str):
+        return False
+    return text.lstrip().startswith(_TOOL_LOG_PLACEHOLDER_PREFIX)
 
 
 _MIN_HISTORY_LIMIT = 24
@@ -124,6 +295,10 @@ class MemAgent:
             if memory_ids
             else []
         )
+        # Populated by MemAgent.load() / KnowledgeBase.attach_to_agent().
+        # Initialized to [] here so `getattr(self, "knowledge_base_ids")`
+        # always returns a real list rather than AttributeError.
+        self.knowledge_base_ids: List[str] = []
         self.tools = tools if tools is not None else []
         self.skill_paths = self._normalize_skill_paths(skill_paths)
         self.skills: List[Dict[str, Any]] = []
@@ -150,19 +325,25 @@ class MemAgent:
             memory_types,
         )
 
-        # Initialize conversation state tracking
-        self._current_conversation_id = None
+        # Initialize thread state tracking
+        self._current_thread_id = None
         self._current_memory_id = None
-        self._conversation_ids_by_memory: Dict[str, str] = {}
+        self._thread_ids_by_memory: Dict[str, str] = {}
         self._last_entity_context: List[Dict[str, Any]] = []
 
-        # Initialize LLM
+        # Initialize LLM. We stash any construction error on the instance
+        # so the chat endpoints can surface the real cause (e.g. "model not
+        # cached locally", "401 from HuggingFace") instead of the generic
+        # "No LLM model configured" — which sends users on a wild goose
+        # chase when in reality the model failed to load.
         self.model = model
+        self._llm_init_error: Optional[str] = None
         if not model and llm_config:
             try:
                 self.model = create_llm_provider(llm_config)
             except Exception as e:
-                logger.warning(f"Could not create LLM from config: {e}")
+                self._llm_init_error = f"{type(e).__name__}: {e}"
+                logger.warning("Could not create LLM from config: %s", e)
 
         self._context_window_tokens = self._initialize_context_window_tokens(
             context_window_tokens, llm_config
@@ -178,14 +359,20 @@ class MemAgent:
         )
         self._internet_access_tools_registered = False
         self._internet_access_tool_names = ("internet_search", "open_web_page")
+        self._persona_tools_registered = False
+        self._persona_tool_names = ("update_persona", "read_persona")
         self._skills_marketplace_tools_registered = False
-        self._skills_marketplace_tool_names = ("skills_marketplace_search",)
+        self._skills_marketplace_tool_names = (
+            "skills_marketplace_search",
+            "vercel_skills_search",
+            "vercel_skill_fetch",
+        )
         self._skills_marketplace_provider_name: Optional[str] = None
         self._skills_marketplace_config: Dict[str, Any] = {}
         self._context_tools_registered = False
         self._summary_registry: List[Dict[str, Any]] = []
         self._known_summary_ids: Set[str] = set()
-        self._context_summary_trigger = 85.0
+        self._context_summary_trigger = 80.0
         self._context_summary_cooldown = 90.0
         self._last_summary_timestamp = 0.0
         self._internet_access_failure_count = 0
@@ -234,6 +421,7 @@ class MemAgent:
             self_aware_config=self_aware_config,
         )
         self._register_context_monitor_tools()
+        self._register_knowledge_base_tools()
 
         provider_to_attach = internet_access_provider
         if (
@@ -299,6 +487,14 @@ class MemAgent:
                 self.persona_manager.set_persona(persona, self.agent_id, save=False)
             except Exception as exc:
                 logger.warning("Persona initialization failed: %s", exc)
+
+        # Register persona evolution tools (update_persona, read_persona) once a
+        # persona is attached. The registration is idempotent and safe to call
+        # again via set_persona().
+        try:
+            self._register_persona_tools()
+        except Exception as exc:
+            logger.warning("Persona tools registration failed: %s", exc)
 
         self.skills = self._load_skills()
         if self.skills:
@@ -663,7 +859,10 @@ class MemAgent:
         history = context.get("conversation_history", [])
         messages.extend(self._prepare_history_messages(history, system_prompt, query))
         messages.append({"role": "user", "content": query})
-        return messages
+        # Sanitize once at the boundary so any LOB that slipped through from
+        # memory loaders (conversation history, KB retrievals, summaries…)
+        # doesn't blow up the LLM provider's json.dumps during streaming.
+        return _to_jsonable(messages)
 
     def _register_context_monitor_tools(self):
         """Register tools that expose context stats and summaries."""
@@ -675,27 +874,92 @@ class MemAgent:
             return self.get_context_window_stats() or {}
 
         def list_summary_registry_tool() -> Dict[str, Any]:
-            """List auto-generated summaries."""
-            return {"summaries": self.list_context_summaries()}
+            """List all summaries for the current thread. Each entry contains
+            a summary_id and short_description. Use expand_summary to
+            reconstruct the original conversation from any summary."""
+            if not self.memory_manager or not self._current_memory_id:
+                return {"summaries": self.list_context_summaries()}
+            summaries = self.memory_manager.load_summaries_for_thread(
+                memory_id=self._current_memory_id,
+                agent_id=self.agent_id,
+                limit=20,
+            )
+            return {"summaries": summaries}
 
-        def fetch_summary_tool(summary_id: str) -> Dict[str, Any]:
-            """Fetch full summary content."""
-            summary = self.fetch_context_summary(summary_id)
-            return summary or {}
+        def expand_summary(summary_id: str) -> Dict[str, Any]:
+            """Expand a summary reference to its full content AND the original
+            conversation messages that were compacted into it. Use this when
+            you need more detail from a [Summary ID: xxx] reference in the
+            context window. This performs just-in-time retrieval — the full
+            data is loaded from the database only when you call this tool."""
+            if not self.memory_provider:
+                return {"error": "No memory provider configured."}
 
-        def autosummarize_conversation(
+            # Load the summary document
+            summary_doc = self.fetch_context_summary(summary_id)
+            if not summary_doc:
+                return {"error": f"Summary '{summary_id}' not found."}
+
+            result: Dict[str, Any] = {
+                "summary_id": summary_id,
+                "summary_content": summary_doc.get("content", ""),
+                "period_start": summary_doc.get("period_start"),
+                "period_end": summary_doc.get("period_end"),
+                "memory_units_count": summary_doc.get("memory_units_count", 0),
+            }
+
+            # Reconstruct original messages if source IDs are available
+            source_ids = summary_doc.get("source_message_ids") or []
+            if source_ids and self.memory_manager:
+                original_msgs = self.memory_manager.get_messages_by_ids(source_ids)
+                if original_msgs:
+                    reconstructed = []
+                    for msg in original_msgs:
+                        content = msg.get("content") or msg
+                        if isinstance(content, dict):
+                            role = content.get("role", "unknown")
+                            text = content.get("content", "")
+                        else:
+                            role = msg.get("role", "unknown")
+                            text = str(content)
+                        reconstructed.append({"role": role, "content": text})
+                    result["original_messages"] = reconstructed
+                    result["original_message_count"] = len(reconstructed)
+                else:
+                    result["original_messages"] = []
+                    result["note"] = (
+                        "Original messages could not be retrieved. "
+                        "The summary content above is the best available context."
+                    )
+            else:
+                result["original_messages"] = []
+                result["note"] = "No source message IDs linked to this summary."
+
+            return result
+
+        def summarize_conversation(
             days_back: int = 1, max_memories_per_summary: int = 20
         ) -> Dict[str, Any]:
-            """Generate memory summaries on demand for recent conversations."""
+            """Summarize unsummarized conversation messages in the current thread.
+            This compacts older messages into summary digests, marks the originals
+            as summarized (so they won't appear in conversation history), and
+            stores each summary with a [Summary ID] for later expansion.
+            Use this when conversation memory is getting long or context window
+            utilization is high."""
             if not self.memory_provider:
                 return {
                     "ok": False,
-                    "error": "No memory provider configured. Cannot generate summaries.",
+                    "error": "No memory provider configured.",
                 }
             if not self.model:
+                detail = getattr(self, "_llm_init_error", None)
                 return {
                     "ok": False,
-                    "error": "No LLM model configured. Cannot generate summaries.",
+                    "error": (
+                        f"LLM failed to initialize — {detail}"
+                        if detail
+                        else "No LLM model configured."
+                    ),
                 }
             try:
                 safe_days_back = max(1, min(int(days_back or 1), 365))
@@ -722,12 +986,59 @@ class MemAgent:
                 "summary_ids": summary_ids,
                 "days_back": safe_days_back,
                 "max_memories_per_summary": safe_chunk_size,
+                "message": (
+                    f"Generated {len(summary_ids)} summaries. "
+                    "Original messages are now excluded from conversation history. "
+                    "Use expand_summary(summary_id) to reconstruct any summary."
+                    if summary_ids
+                    else "No unsummarized messages found to compact."
+                ),
             }
+
+        def retrieve_tool_log_entry(tool_log_id: str) -> Dict[str, Any]:
+            """Retrieve a stored tool log entry by its ID. Use this to access
+            full tool output that was offloaded from the context window."""
+            if not self.memory_manager:
+                return {"error": "No memory manager available."}
+            result = self.memory_manager.retrieve_tool_log(tool_log_id)
+            return result or {"error": f"Tool log '{tool_log_id}' not found."}
+
+        def list_recent_tool_logs(limit: int = 10) -> Dict[str, Any]:
+            """List recent tool execution logs for the current thread.
+
+            Each entry includes a short ``args_summary`` and field-aware
+            ``digest`` so the agent can pick the right ``tool_log_id`` to
+            unpack without first fetching every candidate.
+            """
+            if not self.memory_manager or not self._current_memory_id:
+                return {"error": "No memory context available.", "logs": []}
+            raw_logs = self.memory_manager.list_tool_logs(
+                memory_id=self._current_memory_id, limit=limit
+            )
+            enriched: List[Dict[str, Any]] = []
+            for row in raw_logs or []:
+                if not isinstance(row, dict):
+                    continue
+                item = dict(row)
+                parsed = row.get("result")
+                if isinstance(parsed, str) and parsed.strip().startswith(("{", "[")):
+                    try:
+                        parsed = json.loads(parsed)
+                    except Exception:
+                        pass
+                item["args_summary"] = _summarize_tool_args(
+                    row.get("arguments"), limit=200
+                )
+                item["digest"] = _summarize_tool_result(parsed, preview_limit=300)
+                enriched.append(item)
+            return {"count": len(enriched), "logs": enriched}
 
         self.tool_manager.add_tool(context_window_stats_tool)
         self.tool_manager.add_tool(list_summary_registry_tool)
-        self.tool_manager.add_tool(fetch_summary_tool)
-        self.tool_manager.add_tool(autosummarize_conversation)
+        self.tool_manager.add_tool(expand_summary)
+        self.tool_manager.add_tool(summarize_conversation)
+        self.tool_manager.add_tool(retrieve_tool_log_entry)
+        self.tool_manager.add_tool(list_recent_tool_logs)
         self._context_tools_registered = True
 
     def _track_summary_ids(
@@ -932,7 +1243,7 @@ class MemAgent:
         normalized_provider = self._normalize_skills_marketplace_provider_name(
             provider_name
         )
-        if normalized_provider != "skillsmp":
+        if normalized_provider not in ("skillsmp", "vercel"):
             return {}
 
         config: Dict[str, Any] = {}
@@ -946,13 +1257,22 @@ class MemAgent:
                     continue
                 config[key] = value
 
-        if "api_key" not in config:
-            default_key = os.getenv("SKILLSMP_API_KEY", "").strip()
-            if default_key:
-                config["api_key"] = default_key
+        if normalized_provider == "skillsmp":
+            if "api_key" not in config:
+                default_key = os.getenv("SKILLSMP_API_KEY", "").strip()
+                if default_key:
+                    config["api_key"] = default_key
+            if "base_url" not in config:
+                config["base_url"] = "https://skillsmp.com"
+        elif normalized_provider == "vercel":
+            if "github_token" not in config:
+                default_token = os.getenv("GITHUB_TOKEN", "").strip()
+                if default_token:
+                    config["github_token"] = default_token
+            if not config.get("github_token"):
+                from ..vercel_skills.provider import MISSING_GITHUB_TOKEN_MESSAGE
 
-        if "base_url" not in config:
-            config["base_url"] = "https://skillsmp.com"
+                logger.warning(MISSING_GITHUB_TOKEN_MESSAGE)
 
         return config
 
@@ -1560,10 +1880,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             self._unregister_skills_marketplace_tools()
             return self
 
-        if provider_name != "skillsmp":
+        if provider_name not in ("skillsmp", "vercel"):
             raise ValueError(
                 f"Unknown skills marketplace provider '{provider_name}'. "
-                "Supported providers: skillsmp."
+                "Supported providers: skillsmp, vercel."
             )
 
         self._skills_marketplace_provider_name = provider_name
@@ -2144,9 +2464,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         logger.info("Unregistered self-awareness tools")
 
     def _resolve_execution_state(
-        self, memory_id: Optional[str], conversation_id: Optional[str]
+        self, memory_id: Optional[str], thread_id: Optional[str]
     ) -> Tuple[str, str]:
-        """Resolve active memory/conversation IDs and keep thread state isolated."""
+        """Resolve active memory/thread IDs and keep thread state isolated."""
         requested_memory_id = str(memory_id).strip() if memory_id else ""
 
         if requested_memory_id:
@@ -2163,65 +2483,61 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         if resolved_memory_id and resolved_memory_id not in self.memory_ids:
             self.memory_ids.append(resolved_memory_id)
 
-        requested_conversation_id = (
-            str(conversation_id).strip() if conversation_id else ""
-        )
-        if requested_conversation_id:
-            resolved_conversation_id = requested_conversation_id
+        requested_thread_id = str(thread_id).strip() if thread_id else ""
+        if requested_thread_id:
+            resolved_thread_id = requested_thread_id
         else:
-            resolved_conversation_id = self._conversation_ids_by_memory.get(
-                resolved_memory_id
-            )
-            if not resolved_conversation_id:
-                resolved_conversation_id = str(uuid.uuid4())
-                logger.debug("Started new conversation: %s", resolved_conversation_id)
+            resolved_thread_id = self._thread_ids_by_memory.get(resolved_memory_id)
+            if not resolved_thread_id:
+                resolved_thread_id = str(uuid.uuid4())
+                logger.debug("Started new thread: %s", resolved_thread_id)
 
-        self._conversation_ids_by_memory[resolved_memory_id] = resolved_conversation_id
-        self._current_conversation_id = resolved_conversation_id
+        self._thread_ids_by_memory[resolved_memory_id] = resolved_thread_id
+        self._current_thread_id = resolved_thread_id
 
         if self.cache_manager:
             self.cache_manager.update_scope(
                 agent_id=self.agent_id, memory_id=resolved_memory_id
             )
 
-        return resolved_memory_id, resolved_conversation_id
+        return resolved_memory_id, resolved_thread_id
 
-    def switch_thread(
-        self, memory_id: str, start_new_conversation: bool = False
-    ) -> str:
+    def switch_thread(self, memory_id: str, start_new_thread: bool = False) -> str:
         """
         Switch the active thread to a specific memory_id.
 
         Returns:
-            str: Active conversation_id for the selected thread.
+            str: Active thread_id for the selected thread.
         """
         normalized_memory_id = str(memory_id or "").strip()
         if not normalized_memory_id:
             raise ValueError("memory_id is required to switch threads.")
 
-        conversation_id = None
-        if not start_new_conversation:
-            conversation_id = self._conversation_ids_by_memory.get(normalized_memory_id)
+        thread_id = None
+        if not start_new_thread:
+            thread_id = self._thread_ids_by_memory.get(normalized_memory_id)
 
-        resolved_memory_id, resolved_conversation_id = self._resolve_execution_state(
-            normalized_memory_id, conversation_id
+        resolved_memory_id, resolved_thread_id = self._resolve_execution_state(
+            normalized_memory_id, thread_id
         )
-        if start_new_conversation:
-            resolved_conversation_id = str(uuid.uuid4())
-            self._conversation_ids_by_memory[
-                resolved_memory_id
-            ] = resolved_conversation_id
-            self._current_conversation_id = resolved_conversation_id
+        if start_new_thread:
+            resolved_thread_id = str(uuid.uuid4())
+            self._thread_ids_by_memory[resolved_memory_id] = resolved_thread_id
+            self._current_thread_id = resolved_thread_id
             logger.info(
-                "Started new conversation %s for thread %s",
-                resolved_conversation_id,
+                "Started new thread %s for memory %s",
+                resolved_thread_id,
                 resolved_memory_id,
             )
 
-        return resolved_conversation_id
+        return resolved_thread_id
 
     def run(
-        self, query: str, memory_id: str = None, conversation_id: str = None
+        self,
+        query: str,
+        memory_id: str = None,
+        thread_id: str = None,
+        user_id: Optional[str] = None,
     ) -> str:
         """
         Run the agent with the given query using the new manager architecture.
@@ -2229,7 +2545,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         Args:
             query: The user's query
             memory_id: Optional memory ID to use (if not provided, uses stored or default)
-            conversation_id: Optional conversation ID to use (if not provided, reuses current or creates new)
+            thread_id: Optional thread ID to use (if not provided, reuses current or creates new)
+            user_id: Optional end-user identifier for multi-tenant apps. When
+                provided, every memory unit written during this turn is tagged
+                with ``user_id`` and every read is restricted to rows matching
+                the same scope. ``None`` means anonymous/legacy scope — reads
+                return only rows with no ``user_id`` set.
 
         Returns:
             The agent's response
@@ -2238,36 +2559,44 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
         try:
             # 1. Prepare IDs with per-thread state isolation.
-            memory_id, conversation_id = self._resolve_execution_state(
-                memory_id, conversation_id
-            )
+            memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
 
             # 2. Check semantic cache first
             cached_response = None
             if self.cache_manager.enabled:
                 cached_response = self.cache_manager.get_cached_response(
-                    query, conversation_id
+                    query, thread_id, user_id=user_id
                 )
                 if cached_response:
                     logger.info("Returning cached response")
                     self._record_interaction(
-                        query, cached_response, memory_id, conversation_id
+                        query,
+                        cached_response,
+                        memory_id,
+                        thread_id,
+                        user_id=user_id,
                     )
                     return cached_response
 
             # 3. Build context and prompt
-            context = self._build_context(query, memory_id)
+            context = self._build_context(query, memory_id, user_id=user_id)
             system_prompt = self._build_system_prompt()
 
             # 4. Execute with LLM
-            response = self._execute_llm_interaction(system_prompt, query, context)
+            response = self._execute_llm_interaction(
+                system_prompt, query, context, user_id=user_id
+            )
 
             # 5. Cache the response
             if self.cache_manager.enabled:
-                self.cache_manager.cache_response(query, response, conversation_id)
+                self.cache_manager.cache_response(
+                    query, response, thread_id, user_id=user_id
+                )
 
             # 6. Record interaction in memory
-            self._record_interaction(query, response, memory_id, conversation_id)
+            self._record_interaction(
+                query, response, memory_id, thread_id, user_id=user_id
+            )
 
             logger.info(f"MemAgent {self.agent_id} completed successfully")
             return response
@@ -2278,7 +2607,11 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             return error_response
 
     def run_stream(
-        self, query: str, memory_id: str = None, conversation_id: str = None
+        self,
+        query: str,
+        memory_id: str = None,
+        thread_id: str = None,
+        user_id: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """
         Run the agent with streaming output, yielding text chunks as they arrive.
@@ -2290,7 +2623,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         Args:
             query: The user's query
             memory_id: Optional memory ID
-            conversation_id: Optional conversation ID
+            thread_id: Optional thread ID
+            user_id: Optional end-user identifier for multi-tenant scoping. See
+                ``run()`` for the full semantics.
 
         Yields:
             str: Partial text chunks of the agent's response
@@ -2299,46 +2634,60 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
         if not self.model or not hasattr(self.model, "generate_stream"):
             # Fallback: run synchronously and yield the full result
-            yield self.run(query, memory_id=memory_id, conversation_id=conversation_id)
+            yield self.run(
+                query,
+                memory_id=memory_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
             return
 
         self._stream_trace_events = []
         try:
             # 1. Prepare IDs with per-thread state isolation.
-            memory_id, conversation_id = self._resolve_execution_state(
-                memory_id, conversation_id
-            )
+            memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
 
             # 2. Check semantic cache first
             if self.cache_manager.enabled:
-                cached = self.cache_manager.get_cached_response(query, conversation_id)
+                cached = self.cache_manager.get_cached_response(
+                    query, thread_id, user_id=user_id
+                )
                 if cached:
-                    self._record_interaction(query, cached, memory_id, conversation_id)
+                    self._record_interaction(
+                        query, cached, memory_id, thread_id, user_id=user_id
+                    )
                     yield cached
                     return
 
             # 3. Build context and prompt
-            context = self._build_context(query, memory_id)
+            context = self._build_context(query, memory_id, user_id=user_id)
             system_prompt = self._build_system_prompt()
 
             # 4. Stream the LLM interaction
             full_response = ""
             for chunk in self._execute_llm_interaction_stream(
-                system_prompt, query, context
+                system_prompt, query, context, user_id=user_id
             ):
                 full_response += chunk
                 yield chunk
 
             # 5. Cache the response
             if self.cache_manager.enabled:
-                self.cache_manager.cache_response(query, full_response, conversation_id)
+                self.cache_manager.cache_response(
+                    query, full_response, thread_id, user_id=user_id
+                )
 
             # 6. Record interaction in memory
-            self._record_interaction(query, full_response, memory_id, conversation_id)
-            self._record_stream_trace_bundle(memory_id, conversation_id)
+            self._record_interaction(
+                query, full_response, memory_id, thread_id, user_id=user_id
+            )
+            self._record_stream_trace_bundle(memory_id, thread_id, user_id=user_id)
 
         except Exception as e:
-            logger.error(f"MemAgent streaming failed: {e}")
+            # Include full traceback so we can pinpoint which step in the
+            # streaming pipeline failed (LOB-serialization bugs surface here
+            # without a locator, which is useless for debugging).
+            logger.exception("MemAgent streaming failed: %s", e)
             yield f"I apologize, but I encountered an error: {str(e)}"
         finally:
             self._stream_trace_events = None
@@ -2464,7 +2813,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
         return [item for item in normalized if item.get("title") or item.get("content")]
 
-    def _record_stream_trace_bundle(self, memory_id: str, conversation_id: str) -> None:
+    def _record_stream_trace_bundle(
+        self,
+        memory_id: str,
+        thread_id: str,
+        user_id: Optional[str] = None,
+    ) -> None:
         """Persist streamed reasoning/tool traces for later Playground reloads."""
         if not self.memory_manager:
             return
@@ -2482,9 +2836,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             trace_memory = self.memory_manager.create_conversation_memory_unit(
                 role=Role.TOOL,
                 content=json.dumps(payload, ensure_ascii=False),
-                conversation_id=conversation_id,
+                thread_id=thread_id,
                 memory_id=memory_id,
                 agent_id=self.agent_id,
+                user_id=user_id,
             )
             self.memory_manager.save_memory_unit(trace_memory, memory_id)
             logger.debug(
@@ -2494,6 +2849,64 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             )
         except Exception as exc:
             logger.warning(f"Failed to record streamed trace bundle: {exc}")
+
+    def _format_recent_tool_logs_digest(self, limit: int = 10) -> str:
+        """Build a compact, agent-facing digest of this thread's tool_log entries.
+
+        Injected into the system prompt every turn so the agent retains
+        pickable ``tool_log_id`` references across turns — the placeholder
+        rows themselves are filtered out of the LLM's history to avoid
+        orphan tool-role messages. This is the durable recall channel.
+
+        Format (one entry per line):
+            • <tool_log_id>  tool=<name>  args=<short>  digest=<one-liner>
+
+        Returns empty string when there's nothing to surface.
+        """
+        if not self.memory_manager or not self._current_memory_id:
+            return ""
+        try:
+            rows = self.memory_manager.list_tool_logs(
+                memory_id=self._current_memory_id, limit=limit
+            )
+        except Exception as exc:
+            logger.debug("Tool-log digest lookup failed: %s", exc)
+            return ""
+        if not rows:
+            return ""
+        lines: List[str] = []
+        for row in rows[:limit]:
+            if not isinstance(row, dict):
+                continue
+            tlid = row.get("tool_log_id") or row.get("_id") or ""
+            if not tlid:
+                continue
+            tname = row.get("tool_name") or "?"
+            args_text = _summarize_tool_args(row.get("arguments"), limit=120)
+            # Tool-log result is stored as a string; parse if it looks like JSON
+            # so we can still produce a field-aware digest.
+            raw_result: Any = row.get("result")
+            if isinstance(raw_result, str) and raw_result.strip().startswith(
+                ("{", "[")
+            ):
+                try:
+                    raw_result = json.loads(raw_result)
+                except Exception:
+                    pass
+            digest = _summarize_tool_result(raw_result, preview_limit=200)
+            bits = [f"tool={tname}"]
+            if args_text:
+                bits.append(f"args={args_text}")
+            if digest:
+                bits.append(f"digest={digest}")
+            lines.append(f"• {tlid}  " + "  ".join(bits))
+        if not lines:
+            return ""
+        return (
+            "Recent tool outputs in this thread (use "
+            "`retrieve_tool_log_entry('<id>')` to unpack the full result):\n"
+            + "\n".join(lines)
+        )
 
     def _is_trace_bundle_message(self, message: Any) -> bool:
         """Return True when a conversation row is a persisted trace bundle."""
@@ -2520,19 +2933,35 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             and str(payload.get("type") or "").strip().lower() == "trace_bundle"
         )
 
+    def _no_llm_message(self) -> str:
+        """User-facing message when self.model is missing.
+
+        Surfaces the captured init exception (HF download failure, gated
+        repo, missing transformers feature, etc.) so the chat reply names
+        the actual cause rather than the generic "No LLM model configured".
+        """
+        detail = getattr(self, "_llm_init_error", None)
+        if detail:
+            return f"Error: LLM failed to initialize — {detail}"
+        return "Error: No LLM model configured"
+
     def _execute_llm_interaction_stream(
-        self, system_prompt: str, query: str, context: Dict[str, Any]
+        self,
+        system_prompt: str,
+        query: str,
+        context: Dict[str, Any],
+        user_id: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """Execute the LLM interaction with streaming and tool-calling support."""
         if not self.model:
-            yield "Error: No LLM model configured"
+            yield self._no_llm_message()
             return
 
         workflow = None
         WorkflowOutcome = None
         if MemoryType.WORKFLOW_MEMORY in self.active_memory_types:
-            from ..long_term_memory.procedural.workflow.workflow import Workflow
-            from ..long_term_memory.procedural.workflow.workflow import (
+            from ..long_term.procedural.workflow.workflow import Workflow
+            from ..long_term.procedural.workflow.workflow import (
                 WorkflowOutcome as _WorkflowOutcome,
             )
 
@@ -2545,6 +2974,11 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 agent_id=self.agent_id,
                 user_query=query,
             )
+            if user_id is not None:
+                try:
+                    setattr(workflow, "user_id", user_id)
+                except Exception:
+                    pass
             logger.debug(
                 f"Created streaming workflow for tracking: {workflow.workflow_id}"
             )
@@ -2626,6 +3060,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         max_iterations = self._get_tool_iteration_limit()
         try:
             for iteration in range(max_iterations):
+                # Belt-and-braces: messages get appended inside this loop
+                # (assistant tool_calls, tool results). Any LOB that slipped
+                # into `result` via ``str(result)`` preserves shape but still
+                # risks re-entering on subsequent iterations, so coerce once
+                # per LLM call.
+                messages = _to_jsonable(messages)
                 for event in self.model.generate_stream(messages, tools=tools):
                     event_type = event.get("type")
                     if event_type == "content":
@@ -2730,14 +3170,76 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                                 extra={"tool_name": tool_name},
                             )
 
+                            # Offload full tool output to database as a tool log entry
+                            tool_log_id = None
+                            result_str = str(result)
+                            if self.memory_manager and self._current_memory_id:
+                                try:
+                                    tool_log_id = self.memory_manager.store_tool_log(
+                                        tool_name=tool_name,
+                                        arguments=arguments,
+                                        result=result,
+                                        memory_id=self._current_memory_id,
+                                        agent_id=self.agent_id,
+                                        tool_call_id=getattr(tool_call, "id", None),
+                                        success=(error_message is None),
+                                        error=error_message,
+                                        thread_id=self._current_thread_id,
+                                        user_id=user_id,
+                                    )
+                                except Exception as log_exc:
+                                    logger.debug("Tool log storage failed: %s", log_exc)
+
+                            # Use compact reference in context window instead of full output.
+                            # The placeholder now includes args + a field-aware summary
+                            # so the LLM can disambiguate multiple calls to the same tool.
+                            if tool_log_id:
+                                compact_result = _build_tool_log_placeholder(
+                                    tool_name=tool_name,
+                                    tool_log_id=tool_log_id,
+                                    arguments=arguments,
+                                    result=result,
+                                    error_message=error_message,
+                                )
+                            else:
+                                compact_result = result_str
+
                             messages.append(
                                 {
                                     "role": "tool",
                                     "tool_call_id": tool_call.id,
                                     "name": tool_name,
-                                    "content": str(result),
+                                    "content": compact_result,
                                 }
                             )
+
+                            # Persist the placeholder as its own conversation_memory row
+                            # so it survives into future turns (UI audit + system-prompt
+                            # digest). Filtered from LLM message history via
+                            # _is_tool_placeholder_content to avoid orphan tool-role
+                            # messages without matching tool_call_ids.
+                            if (
+                                tool_log_id
+                                and self.memory_manager
+                                and self._current_memory_id
+                            ):
+                                try:
+                                    placeholder_unit = self.memory_manager.create_conversation_memory_unit(
+                                        role=Role.TOOL,
+                                        content=compact_result,
+                                        thread_id=self._current_thread_id,
+                                        memory_id=self._current_memory_id,
+                                        agent_id=self.agent_id,
+                                        user_id=user_id,
+                                    )
+                                    self.memory_manager.save_memory_unit(
+                                        placeholder_unit, self._current_memory_id
+                                    )
+                                except Exception as persist_exc:
+                                    logger.debug(
+                                        "Tool placeholder persist failed: %s",
+                                        persist_exc,
+                                    )
 
                             if workflow:
                                 tool_entry = {}
@@ -2800,7 +3302,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             _store_workflow_if_needed()
             raise
 
-    def _build_context(self, query: str, memory_id: str) -> Dict[str, Any]:
+    def _build_context(
+        self,
+        query: str,
+        memory_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Build context for the query using memory manager."""
         context = {"query": query}
 
@@ -2809,11 +3316,26 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             try:
                 history_limit = self._get_conversation_history_limit()
                 history = self.memory_manager.load_conversation_history(
-                    memory_id, limit=history_limit
+                    memory_id, limit=history_limit, user_id=user_id
                 )
-                history = [
-                    item for item in history if not self._is_trace_bundle_message(item)
-                ]
+
+                # Filter two classes of tool-role rows from the LLM's view:
+                #   1) trace_bundle rows (UI-only replay data)
+                #   2) tool_log placeholder rows (surfaced to the agent as a
+                #      structured digest in the system prompt instead, to
+                #      avoid orphan tool messages without matching tool_call_ids)
+                def _skip(item: Any) -> bool:
+                    if self._is_trace_bundle_message(item):
+                        return True
+                    if isinstance(item, dict):
+                        role = str(item.get("role") or "").strip().lower()
+                        if role == Role.TOOL.value and _is_tool_placeholder_content(
+                            item.get("content")
+                        ):
+                            return True
+                    return False
+
+                history = [item for item in history if not _skip(item)]
                 context["conversation_history"] = history
 
             except Exception as e:
@@ -2823,7 +3345,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             try:
                 relevant: Dict[str, Any] = {}
                 for memory_type, bucket in (
-                    (MemoryType.LONG_TERM_MEMORY, "semantic_memories"),
+                    (MemoryType.KNOWLEDGE_BASE, "semantic_memories"),
                     (MemoryType.CONVERSATION_MEMORY, "episodic_memories"),
                     (MemoryType.TOOLBOX, "procedural_memories"),
                 ):
@@ -2832,6 +3354,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                         memory_type=memory_type,
                         memory_id=memory_id,
                         limit=3,
+                        user_id=user_id,
                     )
                     if snippets:
                         relevant[bucket] = snippets
@@ -2848,7 +3371,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         ):
             try:
                 entity_context = self.entity_memory_manager.build_context(
-                    query=query, memory_id=memory_id
+                    query=query, memory_id=memory_id, user_id=user_id
                 )
                 if entity_context:
                     context["entity_memory_profiles"] = entity_context
@@ -2858,6 +3381,20 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 self._last_entity_context = []
         else:
             self._last_entity_context = []
+
+        # Inject existing summary references so the agent knows what can be expanded
+        if self.memory_manager:
+            try:
+                summaries = self.memory_manager.load_summaries_for_thread(
+                    memory_id=memory_id,
+                    agent_id=self.agent_id,
+                    limit=20,
+                    user_id=user_id,
+                )
+                if summaries:
+                    context["summaries"] = summaries
+            except Exception as e:
+                logger.debug("Failed to load summary references: %s", e)
 
         return context
 
@@ -2883,17 +3420,64 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
         # 1. Base system prompt — always present
         prompt_parts.append(BASE_SYSTEM_PROMPT)
+        prompt_parts.append(TOOL_ITERATION_BUDGET_INSTRUCTION)
 
-        # 2. Active memory types for this specific agent
+        # 2. Active memory types and available memory tools for this agent
         if self.active_memory_types:
             active_names = [
                 mt.value.replace("_", " ").title() for mt in self.active_memory_types
             ]
-            prompt_parts.append(
-                "Active memory systems for this session: "
+            memory_section = (
+                "═══════════════════════════════════════════════════════════════\n"
+                "ACTIVE MEMORY SYSTEMS FOR THIS SESSION\n"
+                "═══════════════════════════════════════════════════════════════\n\n"
+                "The following memory partitions are active and available to you:\n"
                 + ", ".join(active_names)
-                + "."
+                + ".\n\n"
+                "Only the memory systems listed above are configured for this session. "
+                "Focus your memory retrieval strategy on these active systems.\n"
             )
+
+            # Inject available memory management tools
+            memory_tools = []
+            active_values = {mt.value for mt in self.active_memory_types}
+
+            if "summaries" in active_values:
+                memory_tools.append(
+                    "• expand_summary(summary_id) — Reconstruct a compressed summary. "
+                    "Pass the summary ID to retrieve the original messages and summary content. "
+                    "Use this when you need detailed context from a previously summarized conversation."
+                )
+                memory_tools.append(
+                    "• summarize_conversation(days_back, max_memories_per_summary) — "
+                    "Compress older conversation messages into summaries to free context window space. "
+                    "Original messages are preserved and can be reconstructed via expand_summary."
+                )
+                memory_tools.append(
+                    "• list_summary_registry — List all available summaries for this thread. "
+                    "Each entry includes a summary_id and short description. Use this to discover "
+                    "what compressed conversations are available for expansion."
+                )
+
+            if "tool_log" in active_values:
+                memory_tools.append(
+                    "• retrieve_tool_log_entry(tool_log_id) — Retrieve the full output of a "
+                    "previously executed tool by its log ID. Tool outputs over 500 characters are "
+                    "automatically offloaded to the database; use this to access the complete result."
+                )
+                memory_tools.append(
+                    "• list_recent_tool_logs(limit) — List recent tool execution records "
+                    "including tool name, timestamp, and success/failure status."
+                )
+
+            if memory_tools:
+                memory_section += (
+                    "\nAvailable Memory Management Tools:\n"
+                    + "\n".join(memory_tools)
+                    + "\n"
+                )
+
+            prompt_parts.append(memory_section)
 
         # 3. User's custom instruction
         if self.instruction and self.instruction != DEFAULT_INSTRUCTION:
@@ -2901,10 +3485,28 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         else:
             prompt_parts.append(self.instruction)
 
-        # 4. Persona information
-        persona_prompt = self.persona_manager.get_persona_prompt()
+        # 4. Persona information (with evolution history + update guidance)
+        persona_prompt = self.persona_manager.get_persona_prompt(
+            include_history=True, history_limit=5
+        )
         if persona_prompt:
             prompt_parts.append(persona_prompt)
+            if self._persona_tools_registered:
+                prompt_parts.append(
+                    "Persona evolution:\n"
+                    "- You have two persona tools: `update_persona` and `read_persona`.\n"
+                    "- Call `update_persona` ONLY for durable identity shifts (name, role, "
+                    "goals, background). One-off user facts belong in entity_memory, not "
+                    "your persona. Every call appends a traceable entry to your evolution "
+                    "history — maintain continuity with prior versions rather than "
+                    "contradicting them silently.\n"
+                    "- `update_persona` requires a `reason` (why this change is warranted). "
+                    "Provide `source_type` and `source_id` when the change was triggered by "
+                    "a specific memory unit (e.g. source_type='conversation_memory', "
+                    "source_id=<conversation memory id>) so the evolution is auditable.\n"
+                    "- Use `read_persona` to inspect the full evolution history when the "
+                    "summary in this prompt is not enough context."
+                )
 
         # 5. Tool descriptions
         tools = self.tool_manager.get_tool_metadata()
@@ -2918,6 +3520,28 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                     f"Available tools ({len(tool_descriptions)}):\n"
                     + chr(10).join(tool_descriptions)
                 )
+
+        # Knowledge-base instructions (only when the agent has attached KBs)
+        kb_ids = getattr(self, "knowledge_base_ids", None) or []
+        if kb_ids:
+            prompt_parts.append(
+                "Knowledge base usage:\n"
+                f"- This agent has {len(kb_ids)} ingested document(s) available via "
+                "'knowledge_base_lookup'.\n"
+                "- Call 'knowledge_base_lookup' with a natural-language query "
+                "whenever the user's question could be grounded in previously "
+                "uploaded material (PDFs, notes, reference docs).\n"
+                "- Prefer citing retrieved chunks verbatim over summarizing from memory."
+            )
+
+        # Recent tool outputs — durable digest of this thread's tool_log entries.
+        # Without this, tool_log_id references from prior turns would be lost:
+        # the placeholder rows are filtered out of LLM message history to avoid
+        # orphan tool-role messages. Exposing a structured digest here lets the
+        # agent pick the right id via ``retrieve_tool_log_entry`` even turns later.
+        recent_digest = self._format_recent_tool_logs_digest(limit=10)
+        if recent_digest:
+            prompt_parts.append(recent_digest)
 
         # 6. Entity memory instructions
         if (
@@ -3047,17 +3671,21 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         return "\n\n".join(prompt_parts)
 
     def _execute_llm_interaction(
-        self, system_prompt: str, query: str, context: Dict[str, Any]
+        self,
+        system_prompt: str,
+        query: str,
+        context: Dict[str, Any],
+        user_id: Optional[str] = None,
     ) -> str:
         """Execute the LLM interaction with tool calling support."""
         if not self.model:
-            return "Error: No LLM model configured"
+            return self._no_llm_message()
 
         try:
             # Initialize workflow tracking if workflow memory is active
             workflow = None
             if MemoryType.WORKFLOW_MEMORY in self.active_memory_types:
-                from ..long_term_memory.procedural.workflow.workflow import (
+                from ..long_term.procedural.workflow.workflow import (
                     Workflow,
                     WorkflowOutcome,
                 )
@@ -3070,6 +3698,11 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                     agent_id=self.agent_id,
                     user_query=query,
                 )
+                if user_id is not None:
+                    try:
+                        setattr(workflow, "user_id", user_id)
+                    except Exception:
+                        pass
                 logger.debug(f"Created workflow for tracking: {workflow.workflow_id}")
 
             # Build initial messages
@@ -3135,6 +3768,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             # Execute main loop with tool calling
             max_iterations = self._get_tool_iteration_limit()
             for iteration in range(max_iterations):
+                # Coerce LOBs to strings before every LLM call; matches the
+                # streaming path's guarantee.
+                messages = _to_jsonable(messages)
                 # Call LLM
                 response = self.model.generate(messages, tools=tools)
                 self._record_context_window_usage(stage=f"iteration_{iteration + 1}")
@@ -3228,15 +3864,77 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                             if workflow:
                                 tool_outcome = WorkflowOutcome.FAILURE
 
+                        # Offload full tool output to database as a tool log entry
+                        tool_log_id = None
+                        result_str = str(result)
+                        if self.memory_manager and self._current_memory_id:
+                            try:
+                                tool_log_id = self.memory_manager.store_tool_log(
+                                    tool_name=tool_name,
+                                    arguments=arguments,
+                                    result=result,
+                                    memory_id=self._current_memory_id,
+                                    agent_id=self.agent_id,
+                                    tool_call_id=getattr(tool_call, "id", None),
+                                    success=(error_message is None),
+                                    error=error_message,
+                                    thread_id=self._current_thread_id,
+                                    user_id=user_id,
+                                )
+                            except Exception as log_exc:
+                                logger.debug("Tool log storage failed: %s", log_exc)
+
+                        # Use compact reference in context window instead of full output.
+                        # Centralized in ``_build_tool_log_placeholder`` so the
+                        # streaming and non-streaming paths stay in lockstep.
+                        if tool_log_id:
+                            compact_result = _build_tool_log_placeholder(
+                                tool_name=tool_name,
+                                tool_log_id=tool_log_id,
+                                arguments=arguments,
+                                result=result,
+                                error_message=error_message,
+                            )
+                        else:
+                            compact_result = result_str
+
                         # Add tool result to messages
                         messages.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
                                 "name": tool_name,
-                                "content": str(result),
+                                "content": compact_result,
                             }
                         )
+
+                        # Persist the placeholder as its own conversation_memory row so
+                        # it survives into future turns. Filtered out of LLM history
+                        # via _is_tool_placeholder_content; the agent sees recent logs
+                        # as a digest in the system prompt instead.
+                        if (
+                            tool_log_id
+                            and self.memory_manager
+                            and self._current_memory_id
+                        ):
+                            try:
+                                placeholder_unit = (
+                                    self.memory_manager.create_conversation_memory_unit(
+                                        role=Role.TOOL,
+                                        content=compact_result,
+                                        thread_id=self._current_thread_id,
+                                        memory_id=self._current_memory_id,
+                                        agent_id=self.agent_id,
+                                        user_id=user_id,
+                                    )
+                                )
+                                self.memory_manager.save_memory_unit(
+                                    placeholder_unit, self._current_memory_id
+                                )
+                            except Exception as persist_exc:
+                                logger.debug(
+                                    "Tool placeholder persist failed: %s", persist_exc
+                                )
 
                         logger.info(f"Tool {tool_name} returned: {result}")
 
@@ -3428,6 +4126,94 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         self.tool_manager.add_tool(entity_memory_upsert)
         self._entity_memory_tools_registered = True
 
+    def _register_knowledge_base_tools(self):
+        """Register a semantic-search tool over this agent's knowledge base.
+
+        Registered unconditionally during init. When the agent has no KB
+        entries attached (``knowledge_base_ids`` empty) the tool returns
+        an empty result — cheaper than querying the store, and it gives
+        the LLM a consistent tool surface regardless of ingestion timing.
+        """
+        if not self.tool_manager or not self.memory_provider:
+            return
+
+        def knowledge_base_lookup(
+            query: str,
+            limit: int = 5,
+            namespace: str = None,
+        ) -> Dict[str, Any]:
+            """Semantic search over knowledge-base documents ingested for this agent.
+
+            Use this whenever the user's question could be answered by
+            previously ingested reference material (PDFs, docs, notes).
+            Returns the top matching chunks ordered by semantic similarity.
+
+            Parameters:
+                query: natural-language question or phrase to search for.
+                limit: max number of chunks to return (default 5).
+                namespace: optional filter — only return chunks ingested
+                    under this namespace (usually the original filename).
+            """
+            kb_ids = set(getattr(self, "knowledge_base_ids", None) or [])
+            if not kb_ids:
+                return {
+                    "matches": [],
+                    "message": "No knowledge base entries are attached to this agent.",
+                }
+            try:
+                from ..long_term.semantic.knowledge_base import KnowledgeBase
+
+                kb = KnowledgeBase(memory_provider=self.memory_provider)
+                raw = kb.retrieve_knowledge_by_query(
+                    query=query,
+                    namespace=namespace,
+                    # Over-fetch so we can filter to the agent's KB ids and
+                    # still return `limit` results in the common case.
+                    limit=max(limit * 4, limit),
+                )
+            except Exception as exc:
+                logger.warning("knowledge_base_lookup failed: %s", exc)
+                return {"matches": [], "error": str(exc)}
+
+            # Sanitize via the module-level helper so CLOB/LOB values from
+            # the provider never reach the LLM's json.dumps path.
+            matches: List[Dict[str, Any]] = []
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                entry_kb_id = entry.get("knowledge_base_id") or entry.get(
+                    "knowledgeBaseId"
+                )
+                if entry_kb_id and entry_kb_id not in kb_ids:
+                    continue
+                matches.append(
+                    _to_jsonable(
+                        {
+                            "content": entry.get("content") or "",
+                            "namespace": entry.get("namespace"),
+                            "knowledge_base_id": entry_kb_id,
+                            "chunk_index": entry.get("chunk_index"),
+                            "chunk_count": entry.get("chunk_count"),
+                        }
+                    )
+                )
+                if len(matches) >= limit:
+                    break
+
+            logger.info(
+                "knowledge_base_lookup returned %d match(es) (kb_ids=%d, query=%r)",
+                len(matches),
+                len(kb_ids),
+                query[:60],
+            )
+            return {"matches": matches}
+
+        knowledge_base_lookup.__name__ = "knowledge_base_lookup"
+        try:
+            self.tool_manager.add_tool(knowledge_base_lookup)
+        except Exception as exc:
+            logger.debug("Could not register knowledge_base_lookup: %s", exc)
+
     def _register_internet_access_tools(self):
         """Register tools that expose internet search and browsing."""
         if not (
@@ -3476,6 +4262,140 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         self.tool_manager.add_tool(internet_search)
         self.tool_manager.add_tool(open_web_page)
         self._internet_access_tools_registered = True
+
+    def _register_persona_tools(self) -> None:
+        """Register ``update_persona`` and ``read_persona`` tools on the agent.
+
+        These are registered once a persona is attached. The update tool
+        appends a traceable entry to the persona's evolution history
+        (``change_trigger`` metadata links the change to the memory unit or
+        conversation that motivated it) and persists the change in the
+        PERSONAS collection, then refreshes the agent's embedded persona
+        snapshot via ``save()``.
+        """
+        if not self.tool_manager:
+            return
+        if self._persona_tools_registered:
+            return
+        if self.persona_manager is None or self.persona_manager.current_persona is None:
+            return
+
+        def update_persona(
+            updates: Dict[str, str],
+            reason: str,
+            source_type: Optional[str] = None,
+            source_id: Optional[str] = None,
+            conversation_id: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            """Update your own persona (name, role, goals, or background) with traceable provenance.
+
+            Use this ONLY when a meaningful, durable change to your identity is warranted:
+            - The user explicitly asks you to adopt a different persona or role.
+            - A sustained pattern across conversations (not a one-off preference) indicates
+              your goals or background should shift. One-off user facts belong in entity_memory,
+              not in your persona.
+            - New information fundamentally changes how you should present yourself long-term.
+
+            Before calling, review the persona block in your system prompt: it includes the
+            current version and the most recent evolution entries. Maintain continuity — your
+            new values should build on the prior state, not contradict it without explanation.
+
+            Parameters
+            ----------
+            updates : dict
+                Only include the fields you are changing. Valid keys: ``name``, ``role``,
+                ``goals``, ``background``. Omitted fields are preserved. Values that match
+                the current state are no-ops.
+            reason : str
+                Required. A clear explanation of *why* this change is warranted. Saved to the
+                evolution history so future-you (and human auditors) understand how the
+                persona evolved. Be specific — cite the observation that prompted the update.
+            source_type : str, optional
+                The memory type or trigger class that motivated this change. Prefer a known
+                MemoryType value: ``conversation_memory``, ``summaries``, ``entity_memory``,
+                ``knowledge_base``, ``tool_log``, ``workflow_memory``. Extension values
+                accepted: ``manual``, ``ui_form``, ``user_feedback``, ``llm_inference``,
+                ``tool_call``.
+            source_id : str, optional
+                Storage id of the specific memory unit that triggered the change (e.g. the
+                conversation memory id or summary id). Enables traceability back to the
+                triggering observation.
+            conversation_id : str, optional
+                Thread id of the conversation in which this update was decided.
+
+            Returns
+            -------
+            dict
+                ``{"updated": True, "version": int, "history_entry": {...}, "persona": {...}}``
+                when fields changed, or ``{"updated": False, "reason": ...}`` when the supplied
+                updates matched the current state.
+            """
+            change_trigger = {
+                "reason": reason,
+                "source_type": source_type,
+                "source_id": source_id,
+                "conversation_id": conversation_id,
+                "agent_id": self.agent_id,
+            }
+            try:
+                result = self.persona_manager.apply_update(
+                    updates=updates or {},
+                    change_trigger=change_trigger,
+                )
+            except Exception as exc:
+                logger.error("update_persona tool failed: %s", exc, exc_info=True)
+                return {"updated": False, "error": f"Internal error: {exc}"}
+
+            # When the update succeeded, refresh the embedded persona snapshot
+            # on the agent document so later reads don't drift from the
+            # PERSONAS collection.
+            if result.get("updated") and self.memory_provider is not None:
+                try:
+                    self.save()
+                except Exception as exc:
+                    logger.warning(
+                        "Persona updated in PERSONAS collection but agent save failed: %s",
+                        exc,
+                    )
+                    result["agent_snapshot_warning"] = (
+                        "Persona change was persisted to PERSONAS collection, but "
+                        "refreshing the agent document failed. The next successful "
+                        "save will reconcile the snapshot."
+                    )
+            return result
+
+        def read_persona() -> Dict[str, Any]:
+            """Return your current persona state and its evolution history.
+
+            Use this when you need to inspect the full history of changes beyond the
+            recent entries already summarized in your system prompt — for example, before
+            calling ``update_persona`` on a nuanced change where older context matters.
+
+            Returns
+            -------
+            dict
+                ``{"persona": {...}, "version": int, "history_count": int}``. The
+                ``persona`` dict includes ``evolution_history`` with the full trail.
+            """
+            persona = (
+                self.persona_manager.current_persona if self.persona_manager else None
+            )
+            if persona is None:
+                return {"error": "No persona attached to this agent."}
+            payload = persona.to_dict()
+            return {
+                "persona": payload,
+                "version": payload.get("version", 1),
+                "history_count": len(payload.get("evolution_history") or []),
+            }
+
+        update_persona.__name__ = "update_persona"
+        read_persona.__name__ = "read_persona"
+
+        self.tool_manager.add_tool(update_persona)
+        self.tool_manager.add_tool(read_persona)
+        self._persona_tools_registered = True
+        logger.info("Registered persona tools (update_persona, read_persona)")
 
     def _run_skills_marketplace_request(
         self,
@@ -3587,6 +4507,18 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             return
         if not self.has_skills_marketplace():
             return
+
+        provider_name = self.get_skills_marketplace_provider_name() or ""
+
+        if provider_name == "skillsmp":
+            self._register_skillsmp_tools()
+        elif provider_name == "vercel":
+            self._register_vercel_skills_tools()
+
+        self._skills_marketplace_tools_registered = True
+
+    def _register_skillsmp_tools(self):
+        """Register SkillsMP marketplace search tool."""
 
         def skills_marketplace_search(
             q: str,
@@ -3700,7 +4632,68 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
         skills_marketplace_search.__name__ = "skills_marketplace_search"
         self.tool_manager.add_tool(skills_marketplace_search)
-        self._skills_marketplace_tools_registered = True
+
+    def _register_vercel_skills_tools(self):
+        """Register Vercel Agent Skills tools (search + fetch)."""
+        from ..vercel_skills import VercelSkillsProvider
+        from ..vercel_skills.provider import MISSING_GITHUB_TOKEN_MESSAGE
+
+        config = self.get_skills_marketplace_config() or {}
+        if not str(config.get("github_token") or "").strip():
+            logger.warning(MISSING_GITHUB_TOKEN_MESSAGE)
+        provider = VercelSkillsProvider(config=config)
+
+        def vercel_skills_search(
+            q: str,
+            limit: int = 20,
+        ) -> Dict[str, Any]:
+            """Search Vercel Agent Skills across the open skills ecosystem.
+
+            Searches GitHub for repositories containing SKILL.md files that match
+            the query. Use this to discover reusable agent skills for tasks like
+            React, Next.js, AI SDK, deployment, design, and more.
+
+            Args:
+                q: Search query (e.g. "react best practices", "deployment", "AI SDK").
+                limit: Maximum results to return (default: 20, max: 100).
+
+            Returns:
+                Dict with ``ok``, ``skills`` list (each with repo, name, description),
+                and metadata.
+            """
+            return provider.search(query=q, limit=limit)
+
+        def vercel_skill_fetch(
+            repo: str,
+            skill_name: str = "",
+            branch: str = "main",
+        ) -> Dict[str, Any]:
+            """Fetch a Vercel Agent Skill's instructions from a GitHub repository.
+
+            Downloads and parses the SKILL.md file from the given repo. The returned
+            instructions tell you exactly how to apply this skill to the current task.
+
+            For repos with multiple skills, provide the skill_name to target a specific one.
+
+            Args:
+                repo: GitHub repository in ``owner/repo`` format, or a full GitHub URL.
+                skill_name: Optional specific skill within a multi-skill repo.
+                branch: Git branch to fetch from (default: ``main``).
+
+            Returns:
+                Dict with ``ok``, ``name``, ``description``, ``instructions``
+                (the full skill content), and ``metadata``.
+            """
+            return provider.fetch_skill(
+                repo=repo,
+                skill_name=skill_name or None,
+                branch=branch,
+            )
+
+        vercel_skills_search.__name__ = "vercel_skills_search"
+        vercel_skill_fetch.__name__ = "vercel_skill_fetch"
+        self.tool_manager.add_tool(vercel_skills_search)
+        self.tool_manager.add_tool(vercel_skill_fetch)
 
     def _unregister_entity_memory_tools(self):
         """Remove entity memory tools from the tool manager."""
@@ -3753,7 +4746,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         }
 
     def _record_interaction(
-        self, query: str, response: str, memory_id: str, conversation_id: str
+        self,
+        query: str,
+        response: str,
+        memory_id: str,
+        thread_id: str,
+        user_id: Optional[str] = None,
     ):
         """Record the interaction in memory."""
         if not self.memory_manager:
@@ -3764,9 +4762,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             user_memory = self.memory_manager.create_conversation_memory_unit(
                 role=Role.USER,
                 content=query,
-                conversation_id=conversation_id,
+                thread_id=thread_id,
                 memory_id=memory_id,
                 agent_id=self.agent_id,
+                user_id=user_id,
             )
             self.memory_manager.save_memory_unit(user_memory, memory_id)
 
@@ -3774,9 +4773,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             assistant_memory = self.memory_manager.create_conversation_memory_unit(
                 role=Role.ASSISTANT,
                 content=response,
-                conversation_id=conversation_id,
+                thread_id=thread_id,
                 memory_id=memory_id,
                 agent_id=self.agent_id,
+                user_id=user_id,
             )
             self.memory_manager.save_memory_unit(assistant_memory, memory_id)
 
@@ -3786,12 +4786,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             logger.warning(f"Failed to record interaction: {e}")
 
     # Conversation state management methods
-    def start_new_conversation(self, memory_id: str = None) -> str:
+    def start_new_thread(self, memory_id: str = None) -> str:
         """
-        Start a new conversation within the specified (or current) thread.
+        Start a new thread within the specified (or current) memory scope.
 
         Returns:
-            str: The new conversation_id
+            str: The new thread_id
         """
         target_memory_id = str(memory_id or "").strip()
         if not target_memory_id:
@@ -3801,23 +4801,23 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 or str(uuid.uuid4())
             )
 
-        new_conversation_id = str(uuid.uuid4())
-        self._resolve_execution_state(target_memory_id, new_conversation_id)
+        new_thread_id = str(uuid.uuid4())
+        self._resolve_execution_state(target_memory_id, new_thread_id)
         logger.info(
-            "Started new conversation: %s (thread=%s)",
-            new_conversation_id,
+            "Started new thread: %s (memory=%s)",
+            new_thread_id,
             target_memory_id,
         )
-        return new_conversation_id
+        return new_thread_id
 
-    def get_current_conversation_id(self) -> Optional[str]:
+    def get_current_thread_id(self) -> Optional[str]:
         """
-        Get the current conversation ID.
+        Get the current thread ID.
 
         Returns:
-            str: Current conversation_id or None
+            str: Current thread_id or None
         """
-        return self._current_conversation_id
+        return self._current_thread_id
 
     def get_current_memory_id(self) -> Optional[str]:
         """
@@ -3828,12 +4828,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         """
         return self._current_memory_id
 
-    def reset_conversation_state(self):
-        """Reset both conversation_id and memory_id (start completely fresh)."""
-        self._current_conversation_id = None
+    def reset_thread_state(self):
+        """Reset both thread_id and memory_id (start completely fresh)."""
+        self._current_thread_id = None
         self._current_memory_id = None
-        self._conversation_ids_by_memory = {}
-        logger.info("Reset conversation state")
+        self._thread_ids_by_memory = {}
+        logger.info("Reset thread state")
 
     def enable_semantic_cache(
         self,
@@ -3938,8 +4938,112 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         return self.tool_manager.add_tool(tool, persist)
 
     def set_persona(self, persona, save: bool = True):
-        """Set persona (delegated to persona manager)."""
-        return self.persona_manager.set_persona(persona, self.agent_id, save)
+        """Set persona (delegated to persona manager) and ensure persona tools are registered."""
+        result = self.persona_manager.set_persona(persona, self.agent_id, save)
+        try:
+            self._register_persona_tools()
+        except Exception as exc:
+            logger.warning("Persona tools registration failed: %s", exc)
+        return result
+
+    def download_memory(self, memagent: "MemAgent") -> bool:
+        """
+        Download memory from another MemAgent by copying its memory_ids.
+
+        This adds the source agent's memory_ids to this agent's memory_ids,
+        giving this agent access to the same conversation history. The source
+        agent's memory is not affected.
+
+        Args:
+            memagent: The MemAgent to copy memory_ids from.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            for mid in memagent.memory_ids:
+                if mid not in self.memory_ids:
+                    self.memory_ids.append(mid)
+
+            if hasattr(self.memory_provider, "update_memagent_memory_ids"):
+                self.memory_provider.update_memagent_memory_ids(
+                    self.agent_id, self.memory_ids
+                )
+
+            if self.memory_manager:
+                self.memory_manager.clear_conversation_cache()
+
+            logger.info(
+                f"Downloaded memory from agent {memagent.agent_id} to {self.agent_id}"
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"Error downloading memory from agent {memagent.agent_id}: {e}"
+            )
+            return False
+
+    def update_memory(self, memory_ids: List[str]) -> bool:
+        """
+        Add memory_ids to this agent, giving it access to additional conversation history.
+
+        Args:
+            memory_ids: List of memory_ids to add.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            for mid in memory_ids:
+                if mid not in self.memory_ids:
+                    self.memory_ids.append(mid)
+
+            if hasattr(self.memory_provider, "update_memagent_memory_ids"):
+                self.memory_provider.update_memagent_memory_ids(
+                    self.agent_id, self.memory_ids
+                )
+
+            if self.memory_manager:
+                self.memory_manager.clear_conversation_cache()
+
+            logger.info(f"Updated memory_ids for agent {self.agent_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating memory_ids for agent {self.agent_id}: {e}")
+            return False
+
+    def delete_memory(self) -> bool:
+        """
+        Delete all memory associated with this agent.
+
+        Deletes the stored conversation data for each memory_id, removes the
+        agent's memory_id references from the memory provider, and clears all
+        local state (memory_ids, cached memory_id, conversation cache).
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            # Delete the actual conversation data for each memory_id
+            if self.memory_manager:
+                for mid in self.memory_ids:
+                    self.memory_manager.delete_memory(mid)
+
+            # Remove memory_id references from the agent record
+            if hasattr(self.memory_provider, "delete_memagent_memory_ids"):
+                self.memory_provider.delete_memagent_memory_ids(self.agent_id)
+
+            # Clear all local state so the next run() starts fresh
+            self.memory_ids = []
+            self._current_memory_id = None
+            self._current_thread_id = None
+            self._thread_ids_by_memory.clear()
+
+            logger.info(f"Deleted all memory for agent {self.agent_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting memory for agent {self.agent_id}: {e}")
+            return False
 
     def save(self):
         """
@@ -3984,6 +5088,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 ]
                 or None,
                 memory_ids=self.memory_ids,
+                knowledge_base_ids=getattr(self, "knowledge_base_ids", None) or None,
                 agent_id=self.agent_id,
                 persona=(
                     self.persona_manager.current_persona
@@ -4090,28 +5195,15 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         if not tools_metadata:
             return None
 
-        # Determine the memory_id to use for tools
-        # Priority: current memory_id → first memory_id → generate new
-        agent_memory_id = self._current_memory_id or (
-            self.memory_ids[0] if self.memory_ids else None
-        )
-
-        # If no memory_id exists, generate one and add it to the agent
-        if not agent_memory_id:
-            agent_memory_id = str(uuid.uuid4())
-            self.memory_ids.append(agent_memory_id)
-            self._current_memory_id = agent_memory_id
-            logger.info(
-                f"Generated new memory_id for agent {self.agent_id}: {agent_memory_id}"
-            )
-
-        # Convert tool metadata to serializable format with all necessary fields for TOOLBOX table
+        # Tools are agent-scoped (shared across threads), so stamp agent_id
+        # and leave memory_id unset. The UI toolbox-memory filter treats
+        # rows with agent_id but no memory_id as agent-global, which makes
+        # them visible on every thread for this agent.
         serializable_tools = []
         for tool_meta in tools_metadata:
             if isinstance(tool_meta, dict):
                 serializable_tool = {
-                    "_id": tool_meta.get("_id")
-                    or tool_meta.get("name"),  # Use name as fallback ID
+                    "_id": tool_meta.get("_id") or tool_meta.get("name"),
                     "name": tool_meta.get("name"),
                     "description": tool_meta.get("description", ""),
                     "signature": tool_meta.get("signature", ""),
@@ -4120,8 +5212,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                     ),
                     "parameters": tool_meta.get("parameters", {}),
                     "type": tool_meta.get("type", "function"),
-                    "memory_id": tool_meta.get("memory_id")
-                    or agent_memory_id,  # Use agent's memory_id
+                    "agent_id": self.agent_id,
                 }
                 serializable_tools.append(serializable_tool)
 
@@ -4248,14 +5339,19 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 f"MemAgent with agent id {agent_id} not found in the memory provider"
             )
 
-        # Reconstruct LLM model
+        # Reconstruct LLM model. Stash any construction error so we can
+        # attach it to the new instance below — otherwise chat would
+        # surface a generic "No LLM model configured" instead of the
+        # actual cause (e.g. uncached HF repo, network failure).
         model_to_load = None
+        load_llm_error: Optional[str] = None
         if hasattr(saved_memagent, "llm_config") and saved_memagent.llm_config:
             try:
                 model_to_load = create_llm_provider(saved_memagent.llm_config)
             except Exception as e:
+                load_llm_error = f"{type(e).__name__}: {e}"
                 logger.warning(
-                    f"Could not load model from config: {e}. Model will be None."
+                    "Could not load model from config: %s. Model will be None.", e
                 )
         elif hasattr(saved_memagent, "model") and saved_memagent.model:
             model_to_load = saved_memagent.model
@@ -4430,6 +5526,24 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             streaming=overrides.get("streaming", False),
         )
 
+        # Hydrate knowledge_base_ids separately — it isn't a constructor arg
+        # (yet) but needs to survive reloads so the `knowledge_base_lookup`
+        # tool can scope retrievals to this agent's ingested documents.
+        agent_instance.knowledge_base_ids = list(
+            overrides.get(
+                "knowledge_base_ids",
+                getattr(saved_memagent, "knowledge_base_ids", None) or [],
+            )
+        )
+
+        # Carry the LLM-init failure forward so chat surfaces the real
+        # cause. Constructor sets this when *it* tries to build the LLM;
+        # here we propagate the error from the load-time create_llm_provider
+        # call above (the constructor never sees llm_config in the load
+        # path so its own try/except can't catch this case).
+        if load_llm_error and not getattr(agent_instance, "_llm_init_error", None):
+            agent_instance._llm_init_error = load_llm_error
+
         logger.info(f"MemAgent loaded successfully with agent_id: {agent_id}")
         return agent_instance
 
@@ -4463,6 +5577,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                         self.max_steps = saved_memagent.max_steps
                     if hasattr(saved_memagent, "memory_ids"):
                         self.memory_ids = saved_memagent.memory_ids
+                    if hasattr(saved_memagent, "knowledge_base_ids"):
+                        self.knowledge_base_ids = (
+                            list(saved_memagent.knowledge_base_ids)
+                            if saved_memagent.knowledge_base_ids
+                            else []
+                        )
                     if hasattr(saved_memagent, "name"):
                         self.name = saved_memagent.name
                     if hasattr(saved_memagent, "is_favorite"):
@@ -4473,11 +5593,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                             config=getattr(saved_memagent, "self_aware_config", None),
                         )
 
-                    # Update persona if changed
+                    # Update persona if changed. Route through the public
+                    # ``set_persona`` wrapper so persona evolution tools
+                    # (update_persona, read_persona) register when a persona
+                    # is added via refresh(), not just via __init__.
                     if hasattr(saved_memagent, "persona") and self.persona_manager:
-                        self.persona_manager.set_persona(
-                            saved_memagent.persona, self.agent_id, save=False
-                        )
+                        self.set_persona(saved_memagent.persona, save=False)
 
                     logger.info(f"MemAgent {self.agent_id} refreshed successfully")
                     return self
@@ -4672,7 +5793,16 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                             self.memory_ids[0] if self.memory_ids else "default"
                         )
 
-                    # Create summary document
+                    # Collect source message IDs for back-reference
+                    source_message_ids = []
+                    for mem in memory_chunk:
+                        msg_id = (
+                            mem.get("id") or mem.get("_id") or mem.get("memory_unit_id")
+                        )
+                        if msg_id:
+                            source_message_ids.append(str(msg_id))
+
+                    # Create summary document with source references
                     summary_doc = {
                         "memory_id": chunk_memory_id,
                         "agent_id": self.agent_id,
@@ -4680,6 +5810,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                         "period_start": period_start,
                         "period_end": period_end,
                         "memory_units_count": len(memory_chunk),
+                        "source_message_ids": source_message_ids,
                         "summary_type": "automatic",
                         "created_at": current_time,
                         "embedding": get_embedding(summary_content),
@@ -4690,6 +5821,23 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                         summary_doc, MemoryType.SUMMARIES
                     )
                     summary_ids.append(summary_id)
+
+                    # Mark original messages as summarized so they are
+                    # excluded from conversation history on future loads
+                    if source_message_ids and self.memory_manager:
+                        try:
+                            self.memory_manager.mark_messages_as_summarized(
+                                source_message_ids, summary_id
+                            )
+                            # Clear conversation cache so next load reflects changes
+                            self.memory_manager.clear_conversation_cache(
+                                chunk_memory_id
+                            )
+                        except Exception as mark_exc:
+                            logger.debug(
+                                "Could not mark messages as summarized: %s",
+                                mark_exc,
+                            )
 
                     logger.info(
                         f"Created summary {summary_id} for memory_id {chunk_memory_id} covering {len(memory_chunk)} memories"

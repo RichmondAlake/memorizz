@@ -117,7 +117,7 @@ class TestPerformanceBenchmarks:
                 content={
                     "role": Role.USER.value,
                     "content": f"Test message {i}",
-                    "conversation_id": f"conv_{i % 100}",
+                    "thread_id": f"conv_{i % 100}",
                 },
                 timestamp=datetime.now() - timedelta(seconds=i),
             )
@@ -332,7 +332,7 @@ class TestStressTests:
 
         # Pre-populate with large conversation history
         for conv_i in range(conversations):
-            conversation_id = f"stress_conv_{conv_i}"
+            thread_id = f"stress_conv_{conv_i}"
             for msg_i in range(messages_per_conversation):
                 # User message
                 user_memory = MockMemoryUnit(
@@ -340,7 +340,7 @@ class TestStressTests:
                     content={
                         "role": Role.USER.value,
                         "content": f"User message {msg_i} in conversation {conv_i}",
-                        "conversation_id": conversation_id,
+                        "thread_id": thread_id,
                     },
                     timestamp=datetime.now()
                     - timedelta(minutes=(conv_i * 100) + (msg_i * 2)),
@@ -353,7 +353,7 @@ class TestStressTests:
                     content={
                         "role": Role.ASSISTANT.value,
                         "content": f"Assistant response {msg_i} in conversation {conv_i}",
-                        "conversation_id": conversation_id,
+                        "thread_id": thread_id,
                     },
                     timestamp=datetime.now()
                     - timedelta(minutes=(conv_i * 100) + (msg_i * 2) - 1),
@@ -381,7 +381,7 @@ class TestStressTests:
             response = agent.run(
                 f"Query against heavy memory dataset {i}",
                 memory_id=memory_id,
-                conversation_id=f"new_stress_conv_{i}",
+                thread_id=f"new_stress_conv_{i}",
             )
 
             end_time = time.time()
@@ -437,7 +437,7 @@ class TestStressTests:
                     response = agent.run(
                         f"Stress query {i} from {agent.agent_id}",
                         memory_id=f"stress_{agent.agent_id}",
-                        conversation_id=f"stress_conv_{i}",
+                        thread_id=f"stress_conv_{i}",
                     )
                     end_time = time.time()
                     results.append(
@@ -537,7 +537,7 @@ class TestMemoryPerformance:
                     content={
                         "role": Role.USER.value if i % 2 == 0 else Role.ASSISTANT.value,
                         "content": f"Message {i} of {size}",
-                        "conversation_id": "perf_conversation",
+                        "thread_id": "perf_conversation",
                     },
                     timestamp=datetime.now() - timedelta(minutes=size - i),
                 )
@@ -588,7 +588,7 @@ class TestMemoryPerformance:
         for i in range(1000):
             topic = topics[i % len(topics)]
             memory_unit = MockMemoryUnit(
-                memory_type=MemoryType.LONG_TERM_MEMORY,
+                memory_type=MemoryType.KNOWLEDGE_BASE,
                 content={
                     "topic": topic,
                     "information": f"Information about {topic} number {i}",
@@ -667,7 +667,7 @@ class TestCachingPerformance:
             agent_id="cache_perf_agent",
         )
 
-        conversation_id = "cache_perf_session"
+        thread_id = "cache_perf_session"
         memory_id = "cache_perf_memory"
 
         # First, populate cache with some queries
@@ -680,7 +680,7 @@ class TestCachingPerformance:
         ]
 
         for query in cache_population_queries:
-            agent.run(query, memory_id=memory_id, conversation_id=conversation_id)
+            agent.run(query, memory_id=memory_id, thread_id=thread_id)
 
         initial_llm_calls = llm_provider.call_count
 
@@ -694,9 +694,7 @@ class TestCachingPerformance:
 
         for query in similar_queries:
             start_time = time.time()
-            response = agent.run(
-                query, memory_id=memory_id, conversation_id=conversation_id
-            )
+            response = agent.run(query, memory_id=memory_id, thread_id=thread_id)
             end_time = time.time()
 
             cache_hit_times.append(end_time - start_time)
@@ -712,9 +710,7 @@ class TestCachingPerformance:
 
         for query in new_queries:
             start_time = time.time()
-            response = agent.run(
-                query, memory_id=memory_id, conversation_id=conversation_id
-            )
+            response = agent.run(query, memory_id=memory_id, thread_id=thread_id)
             end_time = time.time()
 
             cache_miss_times.append(end_time - start_time)
@@ -748,7 +744,7 @@ class TestCachingPerformance:
             agent_id="cache_scaling_agent",
         )
 
-        conversation_id = "scaling_session"
+        thread_id = "scaling_session"
         memory_id = "scaling_memory"
 
         cache_sizes = [10, 25, 50, 100]
@@ -760,7 +756,7 @@ class TestCachingPerformance:
                 agent.run(
                     f"Unique query number {i} for cache size {cache_size}",
                     memory_id=memory_id,
-                    conversation_id=f"{conversation_id}_{cache_size}",
+                    thread_id=f"{thread_id}_{cache_size}",
                 )
 
             # Measure performance with current cache size
@@ -770,7 +766,7 @@ class TestCachingPerformance:
                 response = agent.run(
                     f"Test query {i} with cache size {cache_size}",
                     memory_id=memory_id,
-                    conversation_id=f"{conversation_id}_{cache_size}",
+                    thread_id=f"{thread_id}_{cache_size}",
                 )
                 end_time = time.time()
                 query_times.append(end_time - start_time)

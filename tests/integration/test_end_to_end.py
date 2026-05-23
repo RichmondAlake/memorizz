@@ -45,12 +45,12 @@ class TestEndToEndWorkflow:
 
         # Phase 1: Initial interaction
         memory_id = "e2e_project"
-        conversation_id = "e2e_session"
+        thread_id = "e2e_session"
 
         response1 = agent.run(
             "Hi, I'm starting a new Python project for data analysis.",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response1)
 
@@ -58,7 +58,7 @@ class TestEndToEndWorkflow:
         response2 = agent.run(
             "The project involves processing CSV files and generating reports.",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response2)
 
@@ -66,7 +66,7 @@ class TestEndToEndWorkflow:
         response3 = agent.run(
             "I'm getting a pandas error when trying to read the CSV. Can you help?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response3)
 
@@ -74,7 +74,7 @@ class TestEndToEndWorkflow:
         response4 = agent.run(
             "Give me a comprehensive debugging strategy for my pandas CSV issue.",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response4)
 
@@ -209,14 +209,14 @@ class TestEndToEndWorkflow:
             agent_id="cache_integration_agent",
         )
 
-        conversation_id = "cache_session"
+        thread_id = "cache_session"
         memory_id = "cache_test"
 
         # First query - should hit LLM and cache result
         response1 = agent.run(
             "What is the capital of France?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response1)
 
@@ -226,7 +226,7 @@ class TestEndToEndWorkflow:
         response2 = agent.run(
             "What's France's capital city?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response2)
 
@@ -234,7 +234,7 @@ class TestEndToEndWorkflow:
         response3 = agent.run(
             "What is machine learning?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response3)
 
@@ -335,13 +335,13 @@ class TestComponentIntegration:
         )
 
         memory_id = "assistant_workflow"
-        conversation_id = "assistant_session"
+        thread_id = "assistant_session"
 
         # Test persona-driven response
         response1 = agent.run(
             "I need help managing my schedule",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response1)
 
@@ -349,7 +349,7 @@ class TestComponentIntegration:
         response2 = agent.run(
             "Schedule a meeting with the team for tomorrow at 2pm",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response2)
 
@@ -357,7 +357,7 @@ class TestComponentIntegration:
         response3 = agent.run(
             "I have a conflict with the 3pm meeting",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response3)
 
@@ -440,13 +440,13 @@ class TestComponentIntegration:
         )
 
         memory_id = "project_coordination"
-        conversation_id = "management_session"
+        thread_id = "management_session"
 
         # Phase 1: Project initialization
         response1 = agent.run(
             "We're starting a new AI-powered chatbot project. Set it up.",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response1)
 
@@ -454,7 +454,7 @@ class TestComponentIntegration:
         response2 = agent.run(
             "Check Sarah's availability and assign her to UI development.",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response2)
 
@@ -462,7 +462,7 @@ class TestComponentIntegration:
         response3 = agent.run(
             "What's the current status of our chatbot project?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response3)
 
@@ -470,7 +470,7 @@ class TestComponentIntegration:
         response4 = agent.run(
             "Based on everything we've discussed, what's our next strategic move?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         assert_agent_response_valid(response4)
 

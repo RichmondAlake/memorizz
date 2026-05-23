@@ -57,15 +57,19 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
         """Initialize the Ollama embeddings client."""
         try:
             from langchain_ollama import OllamaEmbeddings
-
-            self.embeddings = OllamaEmbeddings(
-                model=self.model, base_url=self.base_url, timeout=self.timeout
-            )
         except ImportError:
             raise ImportError(
                 "langchain_ollama is required for Ollama embeddings. "
                 "Install it with: pip install langchain-ollama"
             )
+
+        # langchain-ollama >=1.0 dropped the `timeout` constructor arg.
+        try:
+            self.embeddings = OllamaEmbeddings(
+                model=self.model, base_url=self.base_url, timeout=self.timeout
+            )
+        except (TypeError, ValueError):
+            self.embeddings = OllamaEmbeddings(model=self.model, base_url=self.base_url)
 
     def _probe_dimensions(self):
         """Probe the actual dimensions of the model by generating a test embedding."""
@@ -106,9 +110,9 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
         """
         # Check if model override is requested
         model = kwargs.get("model", self.model)
-        if model != self.model:
-            # Temporarily switch model
-            original_model = self.model
+        original_model = self.model
+        overridden = model != self.model
+        if overridden:
             self.model = model
             self._init_client()
             self._dimensions_probed = False
@@ -123,22 +127,15 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
 
             # Generate embedding
             embedding = self.embeddings.embed_query(text)
-
-            # Restore original model if it was overridden
-            if model != original_model:
-                self.model = original_model
-                self._init_client()
-                self._dimensions_probed = False
-
             return embedding
         except Exception as e:
             logger.error(f"Error generating Ollama embedding: {str(e)}")
-            # Restore original model if it was overridden
-            if model != original_model:
+            raise
+        finally:
+            if overridden:
                 self.model = original_model
                 self._init_client()
                 self._dimensions_probed = False
-            raise
 
     def get_dimensions(self) -> int:
         """Get the dimensionality of embeddings produced by this provider."""

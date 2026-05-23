@@ -1109,27 +1109,10 @@ class OracleProvider(MemoryProvider):
                 memory_provider=self,
             )
 
-            # Construct persona if present
+            # Construct persona if present. Use from_dict so stored goals/
+            # background aren't double-merged with role defaults.
             if doc.get("persona"):
-                persona_data = doc.get("persona")
-                role_str = persona_data.get("role")
-                role = None
-
-                for role_type in RoleType:
-                    if role_type.value == role_str:
-                        role = role_type
-                        break
-
-                if role is None:
-                    role = RoleType.GENERAL
-
-                agent.persona = Persona(
-                    name=persona_data.get("name"),
-                    role=role,
-                    goals=persona_data.get("goals"),
-                    background=persona_data.get("background"),
-                    persona_id=persona_data.get("persona_id"),
-                )
+                agent.persona = Persona.from_dict(doc.get("persona"))
 
             agents.append(agent)
 
@@ -1154,27 +1137,10 @@ class OracleProvider(MemoryProvider):
             memory_provider=self,
         )
 
-        # Construct persona if present
+        # Construct persona if present. Use from_dict so stored goals/
+        # background aren't double-merged with role defaults.
         if document.get("persona"):
-            persona_data = document.get("persona")
-            role_str = persona_data.get("role")
-            role = None
-
-            for role_type in RoleType:
-                if role_type.value == role_str:
-                    role = role_type
-                    break
-
-            if role is None:
-                role = RoleType.GENERAL
-
-            memagent.persona = Persona(
-                name=persona_data.get("name"),
-                role=role,
-                goals=persona_data.get("goals"),
-                background=persona_data.get("background"),
-                persona_id=persona_data.get("persona_id"),
-            )
+            memagent.persona = Persona.from_dict(document.get("persona"))
 
         return memagent
 

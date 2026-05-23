@@ -7,7 +7,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from ...long_term_memory.procedural.workflow.workflow import Workflow, WorkflowOutcome
+from ...long_term.procedural.workflow.workflow import Workflow, WorkflowOutcome
 
 logger = logging.getLogger(__name__)
 

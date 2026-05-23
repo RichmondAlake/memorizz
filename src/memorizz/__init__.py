@@ -9,9 +9,9 @@ from .internet_access import (
     TavilyProvider,
     create_internet_access_provider,
 )
-from .long_term_memory.procedural.toolbox import Toolbox
-from .long_term_memory.semantic import KnowledgeBase
-from .long_term_memory.semantic.persona import Persona, RoleType
+from .long_term.procedural.toolbox import Toolbox
+from .long_term.semantic import KnowledgeBase
+from .long_term.semantic.persona import Persona, RoleType
 from .memagent import MemAgent
 from .memory_provider import MemoryProvider, MemoryType
 from .short_term_memory.working_memory.cwm import CWM

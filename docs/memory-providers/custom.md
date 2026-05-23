@@ -4,7 +4,7 @@ MemoRizz decouples the high-level memory interfaces from the backing database vi
 
 ## Steps
 
-1. **Subclass `MemoryProvider`** and implement CRUD helpers for each memory bucket you care about (personas, long-term memory, etc.).
+1. **Subclass `MemoryProvider`** and implement CRUD helpers for each memory bucket you care about (personas, knowledge base, etc.).
 2. **Handle embeddings** – either pre-compute embeddings before storing documents or call the shared embedding registry inside your provider methods.
 3. **Respect schemas** – store the `id`, `agent_id`, `memory_type`, `data`, `embedding`, and timestamps so higher layers can filter and audit records consistently.
 4. **Register the provider** – pass an instance to `MemAgentBuilder().with_memory_provider(...)`.

@@ -6,7 +6,7 @@ Workflow mode targets deterministic task execution (think onboarding checklists,
 
 - `MemoryType.WORKFLOW_MEMORY`
 - `MemoryType.TOOLBOX`
-- `MemoryType.LONG_TERM_MEMORY`
+- `MemoryType.KNOWLEDGE_BASE`
 - `MemoryType.SHORT_TERM_MEMORY`
 
 ## Sample Flow

@@ -25,6 +25,8 @@
 #   ORACLE_ADMIN_PASSWORD  - Admin password (default: MyPassword123!)
 #   ORACLE_IMAGE_CHOICE    - Image selection (1, 2, or 3; default: interactive)
 #   ORACLE_IMAGE_TAG       - Oracle image tag (legacy, use ORACLE_IMAGE_CHOICE instead)
+#   ORACLE_VECTOR_MEMORY_SIZE - Vector memory pool size (default: 512M)
+#                              Set higher (e.g., 1G) for large embedding workloads
 #   PLATFORM_FLAG          - Docker platform flag (default: empty, auto-detect)
 #                            Use "--platform linux/amd64" for Apple Silicon
 #
@@ -181,12 +183,14 @@ else
 
   log "🚀 Creating and starting new container '$CONTAINER_NAME'..."
   log "   Using persistent volume: $VOLUME_NAME"
+  # ORACLE_PWD for official images, ORACLE_PASSWORD for gvenzl community image
   if [ -n "$PLATFORM_FLAG" ]; then
     docker run -d \
       $PLATFORM_FLAG \
       --name $CONTAINER_NAME \
       -p 1521:1521 \
       -e ORACLE_PWD=$PASSWORD \
+      -e ORACLE_PASSWORD=$PASSWORD \
       -v $VOLUME_NAME:/opt/oracle/oradata \
       $IMAGE_NAME
   else
@@ -194,6 +198,7 @@ else
       --name $CONTAINER_NAME \
       -p 1521:1521 \
       -e ORACLE_PWD=$PASSWORD \
+      -e ORACLE_PASSWORD=$PASSWORD \
       -v $VOLUME_NAME:/opt/oracle/oradata \
       $IMAGE_NAME
   fi
@@ -210,6 +215,56 @@ done
 
 echo "" >&2
 log "✅ Oracle Database is ready!"
+
+# --- Configure Vector Memory Pool ---
+# Strategy:
+#   1. Try SCOPE=BOTH (works on official Oracle images that have an SPFILE)
+#   2. If that fails, create SPFILE from PFILE, set via SCOPE=SPFILE, and restart
+VECTOR_MEMORY_SIZE="${ORACLE_VECTOR_MEMORY_SIZE:-512M}"
+log "🧠 Configuring vector memory pool (${VECTOR_MEMORY_SIZE})..."
+
+# Fast path: SCOPE=BOTH (works on official Oracle images)
+FAST_RESULT=$(docker exec $CONTAINER_NAME bash -c '
+  echo "ALTER SYSTEM SET vector_memory_size='"${VECTOR_MEMORY_SIZE}"' SCOPE=BOTH;" | \
+  sqlplus -s sys/'"${PASSWORD}"'@localhost:1521/FREE as sysdba
+' 2>&1)
+
+if echo "$FAST_RESULT" | grep -q "System altered"; then
+  success "✓ Vector memory pool set to ${VECTOR_MEMORY_SIZE}"
+else
+  # Slow path: create SPFILE, set parameter, restart (needed for gvenzl/community images)
+  log "   Setting via SPFILE (requires restart)..."
+  docker exec $CONTAINER_NAME bash -c '
+    sqlplus -s sys/'"${PASSWORD}"'@localhost:1521/FREE as sysdba <<EOSQL
+CREATE SPFILE FROM PFILE;
+ALTER SYSTEM SET vector_memory_size='"${VECTOR_MEMORY_SIZE}"' SCOPE=SPFILE;
+EOSQL
+  ' >/dev/null 2>&1
+
+  log "   Restarting container to apply vector memory setting..."
+  docker restart $CONTAINER_NAME >/dev/null 2>&1
+
+  # Wait for database readiness after restart
+  until docker logs $CONTAINER_NAME 2>&1 | tail -20 | grep -q "DATABASE IS READY TO USE!"; do
+    sleep 5
+    echo -n "." >&2
+  done
+  echo "" >&2
+
+  # Verify
+  ACTUAL_SIZE=$(docker exec $CONTAINER_NAME bash -c '
+    echo "SELECT value FROM v\$parameter WHERE name='"'"'vector_memory_size'"'"';" | \
+    sqlplus -s sys/'"${PASSWORD}"'@localhost:1521/FREE as sysdba
+  ' 2>/dev/null | grep -oE '[0-9]+' | head -1)
+
+  if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" != "0" ]; then
+    success "✓ Vector memory pool set to ${VECTOR_MEMORY_SIZE}"
+  else
+    error "⚠ Could not set vector memory pool (non-fatal, HNSW indexes may fail)"
+    error "  See: https://docs.oracle.com/error-help/db/ora-51962/"
+  fi
+fi
+
 echo "" >&2
 echo "Connection details:" >&2
 echo "  Host: localhost" >&2

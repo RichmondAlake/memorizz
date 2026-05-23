@@ -14,7 +14,8 @@ class ConversationMemoryUnit(BaseModel):
     content: str
     timestamp: str
     memory_id: str
-    conversation_id: str
+    thread_id: str
     embedding: list[float]
+    user_id: Optional[str] = None
     recall_recency: Optional[float] = None
-    associated_conversation_ids: Optional[list[str]] = None
+    associated_thread_ids: Optional[list[str]] = None

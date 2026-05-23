@@ -246,7 +246,7 @@ def memory_types():
 
     return [
         MemoryType.CONVERSATION_MEMORY,
-        MemoryType.LONG_TERM_MEMORY,
+        MemoryType.KNOWLEDGE_BASE,
         MemoryType.TOOLBOX,
         MemoryType.WORKFLOW_MEMORY,
     ]
@@ -261,21 +261,21 @@ def conversation_memory_setup(mock_memory_provider):
     memory_manager = MemoryManager(mock_memory_provider)
 
     # Pre-populate with some conversation history
-    conversation_id = "test_conv_123"
+    thread_id = "test_conv_123"
     memory_id = "test_memory_456"
 
     # Add some sample conversation entries
     user_memory = memory_manager.create_conversation_memory_unit(
         role=Role.USER,
         content="Hello, how are you?",
-        conversation_id=conversation_id,
+        thread_id=thread_id,
         memory_id=memory_id,
     )
 
     assistant_memory = memory_manager.create_conversation_memory_unit(
         role=Role.ASSISTANT,
         content="I'm doing well, thank you! How can I help you today?",
-        conversation_id=conversation_id,
+        thread_id=thread_id,
         memory_id=memory_id,
     )
 
@@ -284,7 +284,7 @@ def conversation_memory_setup(mock_memory_provider):
 
     return {
         "memory_manager": memory_manager,
-        "conversation_id": conversation_id,
+        "thread_id": thread_id,
         "memory_id": memory_id,
         "sample_memories": [user_memory, assistant_memory],
     }
@@ -391,7 +391,7 @@ def integration_test_setup():
     """Setup for integration tests."""
     return {
         "test_agent_ids": ["agent_1", "agent_2", "coordinator"],
-        "test_conversation_ids": ["conv_1", "conv_2", "conv_3"],
+        "test_thread_ids": ["conv_1", "conv_2", "conv_3"],
         "test_memory_ids": ["mem_1", "mem_2", "mem_3"],
         "test_scenarios": [
             "single_turn_conversation",

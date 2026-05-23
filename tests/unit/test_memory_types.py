@@ -33,12 +33,12 @@ class TestConversationMemory:
         )
 
         memory_id = "conv_memory_test"
-        conversation_id = "conv_123"
+        thread_id = "conv_123"
 
         response = agent.run(
             "Hello, my name is Alice and I like pizza.",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
 
         assert_agent_response_valid(response)
@@ -52,13 +52,13 @@ class TestConversationMemory:
         assert user_memory.memory_type == MemoryType.CONVERSATION_MEMORY
         assert user_memory.content["role"] == Role.USER.value
         assert "Alice" in user_memory.content["content"]
-        assert user_memory.content["conversation_id"] == conversation_id
+        assert user_memory.content["thread_id"] == thread_id
 
         # Check assistant message
         assistant_memory = stored_memories[1]
         assert assistant_memory.memory_type == MemoryType.CONVERSATION_MEMORY
         assert assistant_memory.content["role"] == Role.ASSISTANT.value
-        assert assistant_memory.content["conversation_id"] == conversation_id
+        assert assistant_memory.content["thread_id"] == thread_id
 
     @pytest.mark.memory
     @pytest.mark.conversation_memory
@@ -68,7 +68,7 @@ class TestConversationMemory:
 
         # Pre-populate memory with conversation history
         memory_id = "conv_retrieval_test"
-        conversation_id = "conv_456"
+        thread_id = "conv_456"
 
         # Add some historical conversation
         for i, (role, content) in enumerate(
@@ -84,7 +84,7 @@ class TestConversationMemory:
                 content={
                     "role": role.value,
                     "content": content,
-                    "conversation_id": conversation_id,
+                    "thread_id": thread_id,
                     "timestamp": datetime.now().isoformat(),
                 },
                 timestamp=datetime.now() - timedelta(minutes=i),
@@ -106,7 +106,7 @@ class TestConversationMemory:
         response = agent.run(
             "Do you remember what I do for work?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
 
         assert_agent_response_valid(response)
@@ -121,7 +121,7 @@ class TestConversationMemory:
         """Test conversation memory retrieval limits."""
         memory_provider = MockMemoryProvider()
         memory_id = "conv_limits_test"
-        conversation_id = "conv_789"
+        thread_id = "conv_789"
 
         # Create a long conversation history (20 exchanges)
         for i in range(20):
@@ -130,7 +130,7 @@ class TestConversationMemory:
                 content={
                     "role": Role.USER.value,
                     "content": f"User message {i+1}",
-                    "conversation_id": conversation_id,
+                    "thread_id": thread_id,
                     "timestamp": datetime.now().isoformat(),
                 },
                 timestamp=datetime.now() - timedelta(minutes=40 - i * 2),
@@ -141,7 +141,7 @@ class TestConversationMemory:
                 content={
                     "role": Role.ASSISTANT.value,
                     "content": f"Assistant response {i+1}",
-                    "conversation_id": conversation_id,
+                    "thread_id": thread_id,
                     "timestamp": datetime.now().isoformat(),
                 },
                 timestamp=datetime.now() - timedelta(minutes=39 - i * 2),
@@ -164,7 +164,7 @@ class TestConversationMemory:
         response = agent.run(
             "Summarize our conversation",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
 
         assert_agent_response_valid(response)
@@ -200,26 +200,24 @@ class TestConversationMemory:
         responses = {}
         for conv_id, message in conversations.items():
             responses[conv_id] = agent.run(
-                message, memory_id=memory_id, conversation_id=conv_id
+                message, memory_id=memory_id, thread_id=conv_id
             )
 
         # Verify all responses are valid
         for response in responses.values():
             assert_agent_response_valid(response)
 
-        # Verify conversations are stored separately by conversation_id
+        # Verify conversations are stored separately by thread_id
         all_memories = memory_provider.storage[memory_id]
 
         alice_memories = [
-            m for m in all_memories if m.content.get("conversation_id") == "conv_alice"
+            m for m in all_memories if m.content.get("thread_id") == "conv_alice"
         ]
         bob_memories = [
-            m for m in all_memories if m.content.get("conversation_id") == "conv_bob"
+            m for m in all_memories if m.content.get("thread_id") == "conv_bob"
         ]
         charlie_memories = [
-            m
-            for m in all_memories
-            if m.content.get("conversation_id") == "conv_charlie"
+            m for m in all_memories if m.content.get("thread_id") == "conv_charlie"
         ]
 
         assert len(alice_memories) == 2  # user + assistant
@@ -244,7 +242,7 @@ class TestSemanticMemory:
     """Test semantic memory functionality."""
 
     @pytest.mark.memory
-    @pytest.mark.semantic_memory
+    @pytest.mark.knowledge_base
     def test_semantic_memory_storage_and_retrieval(self):
         """Test storing and retrieving semantic memories."""
         memory_provider = MockMemoryProvider()
@@ -254,7 +252,7 @@ class TestSemanticMemory:
             {
                 "machine learning": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.LONG_TERM_MEMORY,
+                        memory_type=MemoryType.KNOWLEDGE_BASE,
                         content={
                             "topic": "machine learning",
                             "information": "Machine learning is a subset of AI that learns patterns from data",
@@ -264,7 +262,7 @@ class TestSemanticMemory:
                 ],
                 "python programming": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.LONG_TERM_MEMORY,
+                        memory_type=MemoryType.KNOWLEDGE_BASE,
                         content={
                             "topic": "python programming",
                             "information": "Python is a versatile programming language great for beginners",
@@ -304,7 +302,7 @@ class TestSemanticMemory:
         assert len(retrieve_calls) > 0
 
     @pytest.mark.memory
-    @pytest.mark.semantic_memory
+    @pytest.mark.knowledge_base
     def test_semantic_memory_learning(self):
         """Test learning new semantic information."""
         memory_provider = MockMemoryProvider()
@@ -335,7 +333,7 @@ class TestSemanticMemory:
         assert len(stored_memories) >= 2  # user + assistant messages
 
     @pytest.mark.memory
-    @pytest.mark.semantic_memory
+    @pytest.mark.knowledge_base
     def test_semantic_memory_relevance_ranking(self):
         """Test that semantic memory retrieval ranks by relevance."""
         memory_provider = MockMemoryProvider()
@@ -345,7 +343,7 @@ class TestSemanticMemory:
             {
                 "artificial intelligence": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.LONG_TERM_MEMORY,
+                        memory_type=MemoryType.KNOWLEDGE_BASE,
                         content={
                             "topic": "machine learning",
                             "information": "ML is a branch of AI focusing on learning from data",
@@ -353,7 +351,7 @@ class TestSemanticMemory:
                         },
                     ),
                     MockMemoryUnit(
-                        memory_type=MemoryType.LONG_TERM_MEMORY,
+                        memory_type=MemoryType.KNOWLEDGE_BASE,
                         content={
                             "topic": "neural networks",
                             "information": "Neural networks are AI models inspired by the brain",
@@ -361,7 +359,7 @@ class TestSemanticMemory:
                         },
                     ),
                     MockMemoryUnit(
-                        memory_type=MemoryType.LONG_TERM_MEMORY,
+                        memory_type=MemoryType.KNOWLEDGE_BASE,
                         content={
                             "topic": "expert systems",
                             "information": "Expert systems use rules to make decisions",
@@ -753,7 +751,7 @@ class TestMemoryIntegration:
             {
                 "machine_learning": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.LONG_TERM_MEMORY,
+                        memory_type=MemoryType.KNOWLEDGE_BASE,
                         content={
                             "topic": "machine learning basics",
                             "information": "ML algorithms learn patterns from data to make predictions",
@@ -800,7 +798,7 @@ class TestMemoryIntegration:
 
         # Add conversation memory
         memory_id = "integration_test"
-        conversation_id = "multi_memory_conv"
+        thread_id = "multi_memory_conv"
 
         llm_provider = MockLLMProvider(
             [
@@ -818,7 +816,7 @@ class TestMemoryIntegration:
         response = agent.run(
             "I want to start a machine learning project. What should I know?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
 
         assert_agent_response_valid(response)
@@ -843,7 +841,7 @@ class TestMemoryIntegration:
             {
                 "best_practices": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.LONG_TERM_MEMORY,
+                        memory_type=MemoryType.KNOWLEDGE_BASE,
                         content={
                             "topic": "testing best practices",
                             "information": "Unit tests should cover at least 80% of code for good quality",
@@ -913,7 +911,7 @@ class TestMemoryIntegration:
             {
                 "chatbot_development": [
                     MockMemoryUnit(
-                        memory_type=MemoryType.LONG_TERM_MEMORY,
+                        memory_type=MemoryType.KNOWLEDGE_BASE,
                         content={
                             "topic": "chatbot architecture",
                             "information": "Modern chatbots use transformer models with attention mechanisms",
@@ -995,7 +993,7 @@ class TestMemoryManagementOperations:
                 content={
                     "role": Role.USER.value,
                     "content": f"Test message {i}",
-                    "conversation_id": f"conv_{i}",
+                    "thread_id": f"conv_{i}",
                 },
                 timestamp=datetime.now() - timedelta(days=i),
             )
@@ -1037,7 +1035,7 @@ class TestMemoryManagementOperations:
 
         for i, topic in enumerate(topics):
             memory_unit = MockMemoryUnit(
-                memory_type=MemoryType.LONG_TERM_MEMORY,
+                memory_type=MemoryType.KNOWLEDGE_BASE,
                 content={
                     "topic": topic,
                     "information": f"Information about {topic}",
@@ -1098,7 +1096,7 @@ class TestMemoryManagementOperations:
                 content={
                     "role": Role.USER.value,
                     "content": f"Message {i}",
-                    "conversation_id": f"conv_{i % 10}",  # 10 different conversations
+                    "thread_id": f"conv_{i % 10}",  # 10 different conversations
                 },
                 timestamp=datetime.now() - timedelta(minutes=i),
             )
@@ -1116,7 +1114,7 @@ class TestMemoryManagementOperations:
         # Add more memories that might trigger capacity management
         for i in range(10):
             response = agent.run(
-                f"New message {95 + i}", memory_id=memory_id, conversation_id="new_conv"
+                f"New message {95 + i}", memory_id=memory_id, thread_id="new_conv"
             )
             assert_agent_response_valid(response)
 

@@ -70,6 +70,17 @@ stats = agent.get_context_window_stats()
 print(stats)
 ```
 
+!!! tip "Building a multi-user app?"
+    For applications that serve a user base, pass `user_id` alongside
+    `memory_id` — one agent instance safely serves every tenant.
+    See [Multi-Tenant Applications](../guides/multi-tenant.md) for the
+    full contract and provider requirements.
+
+    ```python
+    agent.run("My favorite color is purple.", user_id="alice")
+    agent.run("What's my favorite color?", user_id="bob")  # isolated
+    ```
+
 ## 5. Optional: Oracle Backend
 
 ```bash

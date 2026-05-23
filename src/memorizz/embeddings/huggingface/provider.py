@@ -5,6 +5,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 
+from ...llms._hf_offline import enable_hf_offline_env, is_hf_offline
 from .. import BaseEmbeddingProvider
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,13 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
         self.auth_token = self.config.get("auth_token")
         self._dimensions_override = self.config.get("dimensions")
 
+        local_only = self.config.get("local_files_only")
+        if local_only is None:
+            local_only = is_hf_offline()
+        if local_only:
+            enable_hf_offline_env()
+        self.local_files_only = bool(local_only)
+
         self._model_cache: Dict[str, Any] = {}
         self._dimensions_cache: Dict[str, int] = {}
 
@@ -76,8 +84,20 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
             kwargs["revision"] = self.revision
         if self.auth_token:
             kwargs["use_auth_token"] = self.auth_token
+        if self.local_files_only:
+            kwargs["local_files_only"] = True
 
-        model = SentenceTransformer(model_name, **kwargs)
+        try:
+            model = SentenceTransformer(model_name, **kwargs)
+        except OSError as exc:
+            if self.local_files_only:
+                raise OSError(
+                    f"HuggingFace embedding model '{model_name}' is not cached "
+                    "locally and the host appears to be offline. Connect to "
+                    "the internet to download it, or pick a model already in "
+                    "the local cache."
+                ) from exc
+            raise
         return model
 
     def _infer_dimensions(self, model_name: str) -> int:

@@ -20,7 +20,7 @@ Open `http://127.0.0.1:8765` after starting the command above.
 - **Application modes**: pre-configured memory stacks for assistant, workflow, and deep research agents.
 - **Provider abstraction**: Oracle, MongoDB, filesystem, or custom `MemoryProvider` implementations.
 - **Agent runtime features**: tool calling, semantic cache, context-window stats, and summary generation.
-- **Optional integrations**: internet access providers, sandbox code execution, and local web UI.
+- **Optional integrations**: internet access providers, sandbox code execution, skills marketplace (Vercel Agent Skills, SkillsMP), and local web UI.
 
 ## Docs Map
 
@@ -28,6 +28,7 @@ Open `http://127.0.0.1:8765` after starting the command above.
 - **Memory Types**: detailed behavior of each memory subsystem.
 - **Memory Providers**: persistence backend setup and tradeoffs.
 - **Use Cases**: mode-specific patterns for assistants, workflows, and deep research.
+- **Skills Marketplace**: discover and use Vercel Agent Skills or SkillsMP skills at runtime.
 - **Internet Access + Sandbox**: optional runtime capabilities for web research and isolated code execution.
 
 ## Local Preview

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from memorizz.enums.memory_type import MemoryType
-from memorizz.long_term_memory.semantic.entity_memory import EntityMemory
+from memorizz.long_term.semantic.entity_memory import EntityMemory
 from memorizz.memagent.managers.entity_memory_manager import EntityMemoryManager
 
 
@@ -70,7 +70,7 @@ def mock_embeddings(monkeypatch):
         return [float(len(text or ""))]
 
     monkeypatch.setattr(
-        "memorizz.long_term_memory.semantic.entity_memory.entity_memory.get_embedding",
+        "memorizz.long_term.semantic.entity_memory.entity_memory.get_embedding",
         _fake_embedding,
     )
 

@@ -203,6 +203,7 @@ class SemanticCache:
         threshold: float,
         session_id: Optional[str] = None,
         limit: int = 10,
+        user_id: Optional[str] = None,
     ) -> Optional[SemanticCacheEntry]:
         """
         Search for similar cache entries using the memory provider's vector search capabilities.
@@ -221,6 +222,10 @@ class SemanticCache:
             # Apply session_id filter only if session scoping is enabled
             if self.config.enable_session_scoping and session_id:
                 search_filter["session_id"] = session_id
+
+            # Tenant isolation: always scope the semantic cache by user_id.
+            # None means "anonymous/legacy" — it will match rows with no user_id.
+            search_filter["user_id"] = user_id
 
             logger.debug(f"Semantic cache search filter: {search_filter}")
             logger.debug(
@@ -278,6 +283,7 @@ class SemanticCache:
                 session_id=best_result.get("session_id"),
                 memory_id=best_result.get("memory_id"),
                 agent_id=best_result.get("agent_id"),
+                user_id=best_result.get("user_id"),
                 usage_count=best_result.get("usage_count", 0),
                 last_accessed=best_result.get("last_accessed"),
                 metadata=best_result.get("metadata", {}),
@@ -359,6 +365,7 @@ class SemanticCache:
         query: str,
         session_id: Optional[str] = None,
         similarity_threshold: Optional[float] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[str]:
         """
         Retrieve cached response for semantically similar queries.
@@ -394,7 +401,7 @@ class SemanticCache:
             if should_use_provider:
                 logger.debug("Using memory provider for semantic cache retrieval")
                 best_match = self._search_via_memory_provider(
-                    query, threshold, session_id
+                    query, threshold, session_id, user_id=user_id
                 )
             else:
                 # Generate query embedding for in-memory search (with caching)
@@ -412,6 +419,10 @@ class SemanticCache:
                 best_similarity = 0.0
 
                 for entry in self.cache.values():
+                    # Tenant isolation: skip entries from other users.
+                    if getattr(entry, "user_id", None) != user_id:
+                        continue
+
                     # Skip entries that don't match scope (only if session scoping is enabled)
                     if (
                         self.config.enable_session_scoping
@@ -502,6 +513,7 @@ class SemanticCache:
         response: str,
         session_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> bool:
         """
         Store query-response pair in cache with embedding.
@@ -538,6 +550,7 @@ class SemanticCache:
                 session_id=session_id,
                 memory_id=self.memory_id,
                 agent_id=self.agent_id,
+                user_id=user_id,
                 metadata=metadata or {},
                 cache_key=cache_key,
             )
@@ -570,6 +583,7 @@ class SemanticCache:
             data["created_at"] = datetime.fromtimestamp(entry.timestamp)
             data["agent_id"] = self.agent_id
             data["memory_id"] = self.memory_id
+            data["user_id"] = getattr(entry, "user_id", None)
 
             # Map 'query' to 'query_text' for compatibility with Oracle provider
             if "query" in data:
@@ -648,6 +662,7 @@ class SemanticCache:
                         session_id=entry_data.get("session_id"),
                         memory_id=entry_data.get("memory_id"),
                         agent_id=entry_data.get("agent_id"),
+                        user_id=entry_data.get("user_id"),
                         usage_count=entry_data.get("usage_count", 0),
                         last_accessed=entry_data.get("last_accessed"),
                         metadata=metadata,
@@ -681,6 +696,7 @@ class SemanticCache:
         session_id: Optional[str] = None,
         memory_id: Optional[str] = None,
         clear_persistent: Optional[bool] = None,
+        user_id: Optional[str] = None,
     ) -> int:
         """
         Clear cache entries with optional filtering.
@@ -711,7 +727,7 @@ class SemanticCache:
         memory_cleared = 0
         persistent_cleared = 0
 
-        if session_id is None and memory_id is None:
+        if session_id is None and memory_id is None and user_id is None:
             # Clear all entries
             memory_cleared = len(self.cache)
             self.cache.clear()
@@ -740,6 +756,8 @@ class SemanticCache:
             if session_id is not None and entry.session_id != session_id:
                 should_remove = False
             if memory_id is not None and entry.memory_id != memory_id:
+                should_remove = False
+            if user_id is not None and getattr(entry, "user_id", None) != user_id:
                 should_remove = False
             if should_remove:
                 keys_to_remove.append(key)

@@ -141,11 +141,11 @@ class MockMemoryProvider:
                 memory_unit.memory_id = memory_id
             return memory_unit
 
-        if hasattr(memory_unit, "role") and hasattr(memory_unit, "conversation_id"):
+        if hasattr(memory_unit, "role") and hasattr(memory_unit, "thread_id"):
             content = {
                 "role": getattr(memory_unit, "role"),
                 "content": getattr(memory_unit, "content"),
-                "conversation_id": getattr(memory_unit, "conversation_id"),
+                "thread_id": getattr(memory_unit, "thread_id"),
                 "timestamp": getattr(memory_unit, "timestamp", None),
             }
             return MockMemoryUnit(
@@ -357,7 +357,7 @@ class MockMemoryProvider:
         effective_type_key = ""
         if type_key is not None:
             effective_type_key = type_key.name.lower()
-            if type_key == MemoryType.LONG_TERM_MEMORY:
+            if type_key == MemoryType.KNOWLEDGE_BASE:
                 effective_type_key = "semantic_memory"
             elif type_key == MemoryType.CONVERSATION_MEMORY:
                 effective_type_key = "episodic_memory"

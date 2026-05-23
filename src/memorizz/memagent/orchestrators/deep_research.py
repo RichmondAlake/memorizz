@@ -41,11 +41,9 @@ class DeepResearchOrchestrator(MultiAgentOrchestrator):
                     getattr(agent, "agent_id", "unknown"),
                 )
 
-    def execute(
-        self, user_query: str, memory_id: str = None, conversation_id: str = None
-    ):
+    def execute(self, user_query: str, memory_id: str = None, thread_id: str = None):
         """Execute Deep Research workflow."""
-        return self.execute_multi_agent_workflow(user_query, memory_id, conversation_id)
+        return self.execute_multi_agent_workflow(user_query, memory_id, thread_id)
 
     # Hook overrides -----------------------------------------------------------
     def _after_task_decomposition(

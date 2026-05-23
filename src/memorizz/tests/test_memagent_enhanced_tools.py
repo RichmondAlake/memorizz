@@ -185,7 +185,7 @@ class TestMemAgentEnhancedTools(unittest.TestCase):
         """Test that existing functionality still works."""
 
         # Mock toolbox and existing methods should still work
-        from memorizz.long_term_memory.procedural.toolbox import Toolbox
+        from memorizz.long_term.procedural.toolbox import Toolbox
 
         mock_toolbox = MagicMock(spec=Toolbox)
         mock_toolbox.list_tools.return_value = []

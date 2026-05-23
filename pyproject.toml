@@ -21,9 +21,13 @@ dependencies = [
     "openai",
     "numpy",
     "pydantic>=2.0.0",
-    "sentence-transformers>=2.5.0",
-    "transformers>=4.36.0",
-    "accelerate>=0.26.0",
+    "python-dotenv>=0.19.0",
+    # Gemma 4 was added to transformers in v5.5.0 (April 2026); huggingface-hub
+    # 1.x ships the offline/constants surface transformers 5.x relies on.
+    "sentence-transformers>=5.0.0",
+    "transformers>=5.5.0",
+    "huggingface-hub>=1.0.0",
+    "accelerate>=1.0.0",
     "requests>=2.31.0",
 ]
 
@@ -32,13 +36,23 @@ mongodb = ["pymongo>=4.0.0"]
 oracle = ["oracledb>=2.0.0"]
 filesystem = ["faiss-cpu>=1.7.4"]
 anthropic = ["anthropic>=0.26.0"]
-ollama = ["langchain_ollama", "ollama"]
+# langchain-ollama 1.x dropped the `timeout=` constructor kwarg; the embedding
+# provider has a fallback for it but we still want the ollama daemon SDK at a
+# version that knows about Gemma 4 tags (>=0.6.0).
+ollama = ["langchain_ollama>=1.0.0", "ollama>=0.6.0"]
 voyageai = ["voyageai"]
 huggingface = [
     "numpy>=1.21,<2",
-    "sentence-transformers>=2.5.0",
-    "transformers>=4.36.0",
-    "accelerate>=0.26.0",
+    "sentence-transformers>=5.0.0",
+    "transformers>=5.5.0",
+    "huggingface-hub>=1.0.0",
+    "accelerate>=1.0.0",
+]
+# Apple-MLX backend for native arm64 Macs. mlx-lm has no x86_64 wheels — installs
+# will fail under Rosetta. Use a native Apple Silicon Python (arm64).
+mlx = [
+    "mlx>=0.18.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.20.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
 docs = [
     "mkdocs>=1.6.0",
@@ -56,24 +70,27 @@ ui = [
     "jinja2>=3.1.0",
     "python-multipart>=0.0.6",
 ]
+ingest-pdf = ["pypdf>=4.0.0"]
 all = [
     "anthropic>=0.26.0",
     "pymongo>=4.0.0",
     "oracledb>=2.0.0",
-    "langchain_ollama",
-    "ollama",
+    "langchain_ollama>=1.0.0",
+    "ollama>=0.6.0",
     "voyageai",
     "faiss-cpu>=1.7.4",
     "numpy>=1.21,<2",
-    "sentence-transformers>=2.5.0",
-    "transformers>=4.36.0",
-    "accelerate>=0.26.0",
+    "sentence-transformers>=5.0.0",
+    "transformers>=5.5.0",
+    "huggingface-hub>=1.0.0",
+    "accelerate>=1.0.0",
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "jinja2>=3.1.0",
     "python-multipart>=0.0.6",
     "e2b-code-interpreter>=1.0",
     "daytona>=1.0",
+    "pypdf>=4.0.0",
 ]
 
 [project.scripts]

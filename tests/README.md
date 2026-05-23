@@ -34,7 +34,7 @@ This comprehensive test suite covers all aspects of the refactored MemAgent arch
 - `@pytest.mark.single_agent` - Single agent functionality
 - `@pytest.mark.multi_agent` - Multi-agent coordination
 - `@pytest.mark.conversation_memory` - Conversation memory tests
-- `@pytest.mark.semantic_memory` - Semantic memory tests
+- `@pytest.mark.knowledge_base` - Knowledge base (semantic long-term memory) tests
 - `@pytest.mark.episodic_memory` - Episodic memory tests
 - `@pytest.mark.procedural_memory` - Procedural memory tests
 
@@ -64,7 +64,7 @@ pytest -m single_agent
 pytest -m multi_agent
 
 # Memory type tests
-pytest -m "conversation_memory or semantic_memory or episodic_memory or procedural_memory"
+pytest -m "conversation_memory or knowledge_base or episodic_memory or procedural_memory"
 
 # Integration tests
 pytest -m integration

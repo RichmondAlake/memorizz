@@ -28,6 +28,7 @@ class SemanticCacheEntry(BaseModel):
     session_id: Optional[str] = None
     memory_id: Optional[str] = None
     agent_id: Optional[str] = None
+    user_id: Optional[str] = None
     usage_count: int = 0
     last_accessed: Optional[float] = None
     metadata: Optional[Dict[str, Any]] = None

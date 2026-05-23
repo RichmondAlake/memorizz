@@ -1,5 +1,5 @@
 -- ==============================================================================
--- Oracle Relational Schema for JSON Duality Views
+-- Oracle Relational Schema for Memorizz
 -- This replaces the hybrid JSON-in-CLOB approach with proper relational tables
 -- ==============================================================================
 
@@ -75,6 +75,25 @@ CREATE TABLE agent_memories (
 CREATE INDEX idx_agent_memories_memory_id ON agent_memories(memory_id);
 
 -- ==============================================================================
+-- AGENT_KNOWLEDGE_BASES TABLE (Many-to-many: agents to knowledge_base ingests)
+-- ==============================================================================
+-- Each row links an agent to one knowledge_base_id (an ingest-scoped group of
+-- chunks in the `knowledge_base` table). Separate from agent_memories so the
+-- two id spaces can't collide and we can filter retrievals cleanly.
+CREATE TABLE agent_knowledge_bases (
+    agent_id RAW(16) NOT NULL,
+    knowledge_base_id VARCHAR2(64) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (agent_id, knowledge_base_id),
+
+    CONSTRAINT fk_agent_knowledge_bases FOREIGN KEY (agent_id)
+        REFERENCES agents(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_agent_kb_knowledge_base_id ON agent_knowledge_bases(knowledge_base_id);
+
+-- ==============================================================================
 -- AGENT_DELEGATES TABLE (Many-to-many: agents to delegate agents)
 -- ==============================================================================
 CREATE TABLE agent_delegates (
@@ -109,7 +128,7 @@ CREATE TABLE personas (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-    -- Foreign key to agents (required for nested Duality Views)
+    -- Foreign key to agents
     CONSTRAINT fk_personas_agent FOREIGN KEY (agent_id)
         REFERENCES agents(agent_id) ON DELETE CASCADE
 );
@@ -138,7 +157,7 @@ CREATE TABLE toolbox (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-    -- Foreign key to agents (required for nested Duality Views)
+    -- Foreign key to agents
     CONSTRAINT fk_toolbox_agent FOREIGN KEY (agent_id)
         REFERENCES agents(agent_id) ON DELETE CASCADE
 );
@@ -156,11 +175,12 @@ CREATE INDEX idx_toolbox_agent_id ON toolbox(agent_id);
 CREATE TABLE conversation_memory (
     id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
     memory_id VARCHAR2(255) NOT NULL,
-    conversation_id VARCHAR2(255),
+    thread_id VARCHAR2(255),
     role VARCHAR2(50) NOT NULL,              -- 'user', 'assistant', 'system', 'tool'
     content CLOB NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     agent_id VARCHAR2(255),
+    user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     embedding VECTOR(256, FLOAT32),
 
     -- Constraints
@@ -169,14 +189,16 @@ CREATE TABLE conversation_memory (
 
 -- Indexes
 CREATE INDEX idx_conv_memory_id ON conversation_memory(memory_id);
-CREATE INDEX idx_conv_conversation_id ON conversation_memory(conversation_id);
+CREATE INDEX idx_conv_thread_id ON conversation_memory(thread_id);
 CREATE INDEX idx_conv_timestamp ON conversation_memory(timestamp);
 CREATE INDEX idx_conv_agent_id ON conversation_memory(agent_id);
+CREATE INDEX idx_conv_user_id ON conversation_memory(user_id);
+CREATE INDEX idx_conv_memory_user ON conversation_memory(memory_id, user_id);
 
 -- ==============================================================================
--- LONG_TERM_MEMORY TABLE (Facts, knowledge)
+-- KNOWLEDGE_BASE TABLE (Facts, knowledge)
 -- ==============================================================================
-CREATE TABLE long_term_memory (
+CREATE TABLE knowledge_base (
     id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
     memory_id VARCHAR2(255) NOT NULL,
     content CLOB NOT NULL,
@@ -185,16 +207,27 @@ CREATE TABLE long_term_memory (
     last_accessed TIMESTAMP,
     access_count NUMBER(10) DEFAULT 0,
     agent_id VARCHAR2(255),
+    user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
+    -- Chunking metadata: groups every chunk from one ingest under a single id
+    -- and records the strategy used so downstream callers can reason about it.
+    knowledge_base_id VARCHAR2(64),
+    namespace VARCHAR2(255),
+    chunk_index NUMBER(10) DEFAULT 0,
+    chunk_count NUMBER(10) DEFAULT 1,
+    chunking_strategy VARCHAR2(32),
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Indexes
-CREATE INDEX idx_ltm_memory_id ON long_term_memory(memory_id);
-CREATE INDEX idx_ltm_memory_type ON long_term_memory(memory_type);
-CREATE INDEX idx_ltm_importance ON long_term_memory(importance);
-CREATE INDEX idx_ltm_agent_id ON long_term_memory(agent_id);
+CREATE INDEX idx_ltm_memory_id ON knowledge_base(memory_id);
+CREATE INDEX idx_ltm_memory_type ON knowledge_base(memory_type);
+CREATE INDEX idx_ltm_importance ON knowledge_base(importance);
+CREATE INDEX idx_ltm_agent_id ON knowledge_base(agent_id);
+CREATE INDEX idx_ltm_user_id ON knowledge_base(user_id);
+CREATE INDEX idx_kb_knowledge_base_id ON knowledge_base(knowledge_base_id);
+CREATE INDEX idx_kb_namespace ON knowledge_base(namespace);
 
 -- ==============================================================================
 -- SHORT_TERM_MEMORY TABLE (Working memory, temporary context)
@@ -206,6 +239,7 @@ CREATE TABLE short_term_memory (
     memory_type VARCHAR2(50),
     ttl NUMBER(10),                           -- Time-to-live in seconds
     agent_id VARCHAR2(255),
+    user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP
@@ -215,6 +249,7 @@ CREATE TABLE short_term_memory (
 CREATE INDEX idx_stm_memory_id ON short_term_memory(memory_id);
 CREATE INDEX idx_stm_expires_at ON short_term_memory(expires_at);
 CREATE INDEX idx_stm_agent_id ON short_term_memory(agent_id);
+CREATE INDEX idx_stm_user_id ON short_term_memory(user_id);
 
 -- ==============================================================================
 -- WORKFLOW_MEMORY TABLE (Workflow states and outcomes)
@@ -230,6 +265,7 @@ CREATE TABLE workflow_memory (
     outcome CLOB CHECK (outcome IS JSON),     -- JSON result of workflow
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
+    user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -243,6 +279,7 @@ CREATE INDEX idx_workflow_workflow_id ON workflow_memory(workflow_id);
 CREATE INDEX idx_workflow_status ON workflow_memory(status);
 CREATE INDEX idx_workflow_memory_id ON workflow_memory(memory_id);
 CREATE INDEX idx_workflow_agent_id ON workflow_memory(agent_id);
+CREATE INDEX idx_workflow_user_id ON workflow_memory(user_id);
 
 -- ==============================================================================
 -- SHARED_MEMORY TABLE (Multi-agent shared memory)
@@ -279,6 +316,7 @@ CREATE TABLE summaries (
     summary_type VARCHAR2(50),
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
+    user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -288,6 +326,7 @@ CREATE INDEX idx_summaries_summary_id ON summaries(summary_id);
 CREATE INDEX idx_summaries_type ON summaries(summary_type);
 CREATE INDEX idx_summaries_memory_id ON summaries(memory_id);
 CREATE INDEX idx_summaries_agent_id ON summaries(agent_id);
+CREATE INDEX idx_summaries_user_id ON summaries(user_id);
 
 -- ==============================================================================
 -- SEMANTIC_CACHE TABLE (Query response cache)
@@ -301,6 +340,9 @@ CREATE TABLE semantic_cache (
     similarity_threshold NUMBER(3,2) DEFAULT 0.85,
     hit_count NUMBER(10) DEFAULT 0,
     agent_id VARCHAR2(255),
+    memory_id VARCHAR2(255),
+    session_id VARCHAR2(255),
+    user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP,
@@ -313,6 +355,7 @@ CREATE TABLE semantic_cache (
 CREATE INDEX idx_cache_cache_key ON semantic_cache(cache_key);
 CREATE INDEX idx_cache_scope ON semantic_cache(scope);
 CREATE INDEX idx_cache_agent_id ON semantic_cache(agent_id);
+CREATE INDEX idx_cache_user_id ON semantic_cache(user_id);
 CREATE INDEX idx_cache_expires_at ON semantic_cache(expires_at);
 
 -- ==============================================================================
@@ -328,6 +371,7 @@ CREATE TABLE entity_memory (
     metadata CLOB,
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
+    user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -337,6 +381,34 @@ CREATE TABLE entity_memory (
 CREATE INDEX idx_entity_memory_entity_id ON entity_memory(entity_id);
 CREATE INDEX idx_entity_memory_memory_id ON entity_memory(memory_id);
 CREATE INDEX idx_entity_memory_agent_id ON entity_memory(agent_id);
+CREATE INDEX idx_entity_memory_user_id ON entity_memory(user_id);
+
+-- ==============================================================================
+-- TOOL_LOG TABLE (Tool execution logs for context window offloading)
+-- ==============================================================================
+CREATE TABLE tool_log (
+    id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    tool_log_id VARCHAR2(255) UNIQUE NOT NULL,
+    tool_name VARCHAR2(255) NOT NULL,
+    arguments CLOB,
+    result CLOB,
+    success NUMBER(1) DEFAULT 1,
+    error CLOB,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    agent_id VARCHAR2(255),
+    tool_call_id VARCHAR2(255),
+    thread_id VARCHAR2(255),
+    memory_id VARCHAR2(255),
+    user_id VARCHAR2(255)                      -- Multi-tenant scope (NULL = legacy/anonymous)
+);
+
+-- Indexes
+CREATE INDEX idx_tool_log_tool_log_id ON tool_log(tool_log_id);
+CREATE INDEX idx_tool_log_memory_id ON tool_log(memory_id);
+CREATE INDEX idx_tool_log_agent_id ON tool_log(agent_id);
+CREATE INDEX idx_tool_log_thread_id ON tool_log(thread_id);
+CREATE INDEX idx_tool_log_tool_name ON tool_log(tool_name);
+CREATE INDEX idx_tool_log_user_id ON tool_log(user_id);
 
 -- ==============================================================================
 -- AUTOMATIONS TABLES (Durable scheduling + run history)
@@ -434,8 +506,8 @@ ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
--- Long-term memory vector index
-CREATE VECTOR INDEX idx_ltm_vec ON long_term_memory(embedding)
+-- Knowledge base vector index
+CREATE VECTOR INDEX idx_kb_vec ON knowledge_base(embedding)
 ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
@@ -487,13 +559,14 @@ COMMENT ON TABLE agent_delegates IS 'Multi-agent delegation relationships';
 COMMENT ON TABLE personas IS 'Agent personas and role configurations';
 COMMENT ON TABLE toolbox IS 'Agent tools and functions';
 COMMENT ON TABLE conversation_memory IS 'Conversation history and interactions';
-COMMENT ON TABLE long_term_memory IS 'Persistent facts and knowledge';
+COMMENT ON TABLE knowledge_base IS 'Persistent facts and knowledge';
 COMMENT ON TABLE short_term_memory IS 'Temporary working memory with TTL';
 COMMENT ON TABLE workflow_memory IS 'Workflow states and execution history';
 COMMENT ON TABLE shared_memory IS 'Multi-agent shared memory space';
 COMMENT ON TABLE summaries IS 'Memory summaries for compression';
 COMMENT ON TABLE semantic_cache IS 'Query-response semantic cache';
 COMMENT ON TABLE entity_memory IS 'Structured entity facts and profiles';
+COMMENT ON TABLE tool_log IS 'Tool execution logs for context window offloading';
 COMMENT ON TABLE automation_jobs IS 'Durable scheduled automation jobs';
 COMMENT ON TABLE automation_runs IS 'Execution history for automation jobs';
 COMMENT ON TABLE automation_deliveries IS 'Delivery attempts for automation runs';

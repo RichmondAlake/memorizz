@@ -66,7 +66,7 @@ class MemoryUnit:
             return self._generate_conversational_memory_unit(content)
         elif MemoryType.WORKFLOW_MEMORY in self.active_memory_types:
             return self._generate_workflow_memory_unit(content)
-        elif MemoryType.LONG_TERM_MEMORY in self.active_memory_types:
+        elif MemoryType.KNOWLEDGE_BASE in self.active_memory_types:
             return self._generate_knowledge_base_unit(content)
         else:
             # Default to conversational if available, otherwise use the first active memory type
@@ -93,9 +93,10 @@ class MemoryUnit:
             role=content["role"],
             content=content["content"],
             timestamp=content["timestamp"],
-            conversation_id=content["conversation_id"],
+            thread_id=content["thread_id"],
             memory_id=content["memory_id"],
             embedding=content["embedding"],
+            user_id=content.get("user_id"),
         )
 
         # Save the memory unit to the memory provider
@@ -117,6 +118,7 @@ class MemoryUnit:
             "content": content["content"],
             "timestamp": content.get("timestamp", time.time()),
             "memory_id": content["memory_id"],
+            "user_id": content.get("user_id"),
             "embedding": content["embedding"],
             "component_type": "workflow",
             "workflow_step": content.get("workflow_step", "unknown"),
@@ -142,6 +144,7 @@ class MemoryUnit:
             "content": content["content"],
             "timestamp": content.get("timestamp", time.time()),
             "memory_id": content["memory_id"],
+            "user_id": content.get("user_id"),
             "embedding": content["embedding"],
             "component_type": "knowledge",
             "category": content.get("category", "general"),
@@ -149,7 +152,7 @@ class MemoryUnit:
         }
 
         # Save the memory unit to the memory provider
-        self._save_memory_unit(knowledge_component, MemoryType.LONG_TERM_MEMORY)
+        self._save_memory_unit(knowledge_component, MemoryType.KNOWLEDGE_BASE)
 
         return knowledge_component
 
@@ -231,7 +234,7 @@ class MemoryUnit:
         else:
             raise ValueError(f"Invalid memory type: {memory_type}")
 
-    def retrieve_memory_units_by_conversation_id(self, conversation_id: str):
+    def retrieve_memory_units_by_thread_id(self, thread_id: str):
         pass
 
     def retrieve_memory_units_by_query(
@@ -258,16 +261,16 @@ class MemoryUnit:
             query, self.query_embedding, memory_id, memory_type, limit
         )
 
-        # Get the surronding conversation ids from each of the memory units
-        # Handle cases where conversation_id might be missing or _id is used instead
-        surrounding_conversation_ids = []
+        # Get the surrounding thread ids from each of the memory units
+        # Handle cases where thread_id might be missing or _id is used instead
+        surrounding_thread_ids = []
         for memory_unit in memory_units:
-            surrounding_conversation_ids.append(memory_unit["_id"])
+            surrounding_thread_ids.append(memory_unit["_id"])
 
         # Before returning the memory units, we need to update the memory signals within the memory units
         for memory_unit in memory_units:
             self.update_memory_signals_within_memory_unit(
-                memory_unit, memory_type, surrounding_conversation_ids
+                memory_unit, memory_type, surrounding_thread_ids
             )
 
         # Calculate the memory signal for each of the memory units
@@ -286,7 +289,7 @@ class MemoryUnit:
         self,
         memory_unit: any,
         memory_type: MemoryType,
-        surrounding_conversation_ids: list[str],
+        surrounding_thread_ids: list[str],
     ):
         """
         Update the memory signal within the memory unit.
@@ -294,15 +297,15 @@ class MemoryUnit:
         Parameters:
             memory_unit (dict): The memory unit to update the memory signal within.
             memory_type (MemoryType): The type of the memory to update the memory signal within.
-            surrounding_conversation_ids (list[str]): The list of surrounding conversation ids.
+            surrounding_thread_ids (list[str]): The list of surrounding thread ids.
         """
 
         # Update the recall_recency field (how recently the memory unit was recalled), this is the current timestamp
         memory_unit["recall_recency"] = time.time()
 
         if memory_type == MemoryType.CONVERSATION_MEMORY:
-            # Update the importance field with a list of calling ID and surronding conversation ID's
-            memory_unit["associated_conversation_ids"] = surrounding_conversation_ids
+            # Update the importance field with a list of calling ID and surrounding thread ID's
+            memory_unit["associated_thread_ids"] = surrounding_thread_ids
 
         # Save the memory unit to the memory provider
         self._save_memory_unit(memory_unit)
@@ -322,9 +325,7 @@ class MemoryUnit:
         recency = time.time() - memory_unit["recall_recency"]
 
         # Get the number of associated memory ids (this is used to calcualte the importance of the memory unit)
-        number_of_associated_conversation_ids = len(
-            memory_unit["associated_conversation_ids"]
-        )
+        number_of_associated_thread_ids = len(memory_unit["associated_thread_ids"])
 
         # If the score exists, use it as the relevance score (this is the vector similarity score calculated by the vector search of the memory provider)
         if "score" in memory_unit:
@@ -338,7 +339,7 @@ class MemoryUnit:
 
         # Calculate the normalized memory signal
         memory_signal = (
-            recency * number_of_associated_conversation_ids * relevance * importance
+            recency * number_of_associated_thread_ids * relevance * importance
         )
 
         # Normalize the memory signal between 0 and 1

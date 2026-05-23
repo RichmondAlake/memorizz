@@ -77,7 +77,10 @@ class CacheManager:
             self.cache_instance = None
 
     def get_cached_response(
-        self, query: str, session_id: Optional[str] = None
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[str]:
         """
         Get a cached response for a query.
@@ -85,6 +88,9 @@ class CacheManager:
         Args:
             query: The query to look up.
             session_id: Optional session/conversation ID.
+            user_id: Optional end-user identifier for multi-tenant scoping.
+                When set, only cache entries matching the same ``user_id`` are
+                considered.
 
         Returns:
             Cached response if found, None otherwise.
@@ -93,7 +99,9 @@ class CacheManager:
             return None
 
         try:
-            response = self.cache_instance.get(query=query, session_id=session_id)
+            response = self.cache_instance.get(
+                query=query, session_id=session_id, user_id=user_id
+            )
 
             if response:
                 logger.debug(f"Cache hit for query: {query[:50]}...")
@@ -107,7 +115,11 @@ class CacheManager:
             return None
 
     def cache_response(
-        self, query: str, response: str, session_id: Optional[str] = None
+        self,
+        query: str,
+        response: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> bool:
         """
         Cache a query-response pair.
@@ -116,6 +128,7 @@ class CacheManager:
             query: The query.
             response: The response to cache.
             session_id: Optional session/conversation ID.
+            user_id: Optional end-user identifier for multi-tenant scoping.
 
         Returns:
             True if successfully cached, False otherwise.
@@ -125,7 +138,10 @@ class CacheManager:
 
         try:
             self.cache_instance.set(
-                query=query, response=response, session_id=session_id
+                query=query,
+                response=response,
+                session_id=session_id,
+                user_id=user_id,
             )
 
             logger.debug(f"Cached response for query: {query[:50]}...")
@@ -135,22 +151,29 @@ class CacheManager:
             logger.error(f"Failed to cache response: {e}")
             return False
 
-    def clear_cache(self, session_id: Optional[str] = None):
+    def clear_cache(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ):
         """
         Clear the cache.
 
         Args:
             session_id: If provided, only clear cache for this session.
                        Otherwise, clear entire cache.
+            user_id: If provided, only clear cache entries for this user.
         """
         if not self.cache_instance:
             return
 
         try:
-            if session_id:
-                # Clear session-specific cache
-                self.cache_instance.clear_session(session_id)
-                logger.debug(f"Cleared cache for session: {session_id}")
+            if session_id or user_id is not None:
+                # Clear session-specific / user-specific cache
+                self.cache_instance.clear(session_id=session_id, user_id=user_id)
+                logger.debug(
+                    "Cleared cache for session=%s user_id=%s", session_id, user_id
+                )
             else:
                 # Clear entire cache
                 self.cache_instance.clear()

@@ -1,6 +1,6 @@
 # Episodic Memory
 
-Episodic memory chronicles every interaction an agent has with users, teammates, or tools. It lives under `src/memorizz/long_term_memory/episodic/` and fulfills both `MemoryType.CONVERSATION_MEMORY` and `MemoryType.SUMMARIES`.
+Episodic memory chronicles every interaction an agent has with users, teammates, or tools. It lives under `src/memorizz/long_term/episodic/` and fulfills both `MemoryType.CONVERSATION_MEMORY` and `MemoryType.SUMMARIES`.
 
 ## Structure
 

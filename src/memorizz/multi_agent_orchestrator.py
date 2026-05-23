@@ -37,7 +37,7 @@ class MultiAgentOrchestrator:
         )
 
     def execute_multi_agent_workflow(
-        self, user_query: str, memory_id: str = None, conversation_id: str = None
+        self, user_query: str, memory_id: str = None, thread_id: str = None
     ) -> str:
         """
         Execute a multi-agent workflow with hierarchical coordination support.
@@ -51,7 +51,7 @@ class MultiAgentOrchestrator:
         Parameters:
             user_query (str): The task to be executed
             memory_id (str): Memory context for the execution
-            conversation_id (str): Conversation context
+            thread_id (str): Thread context
 
         Returns:
             str: The consolidated response from all agents
@@ -171,7 +171,7 @@ class MultiAgentOrchestrator:
                 # Fallback to single agent execution
                 logger.warning("Task decomposition failed, falling back to root agent")
                 logger.info("Executing fallback with root agent...")
-                result = self.root_agent.run(user_query, memory_id, conversation_id)
+                result = self.root_agent.run(user_query, memory_id, thread_id)
                 logger.info(
                     f"Root agent returned: {result[:100]}..."
                     if result
@@ -191,7 +191,7 @@ class MultiAgentOrchestrator:
             # 3. Execute sub-tasks in parallel
             logger.info(f"Executing {len(sub_tasks)} sub-tasks in parallel...")
             sub_task_results = self._execute_sub_tasks_parallel(
-                sub_tasks, memory_id, conversation_id
+                sub_tasks, memory_id, thread_id
             )
             logger.info(
                 f"Sub-task execution completed with {len(sub_task_results)} results"
@@ -236,7 +236,7 @@ class MultiAgentOrchestrator:
             # Fallback to single agent execution
             logger.info("Attempting fallback to root agent due to error...")
             try:
-                result = self.root_agent.run(user_query, memory_id, conversation_id)
+                result = self.root_agent.run(user_query, memory_id, thread_id)
                 logger.info(
                     f"Fallback completed: {result[:100]}..."
                     if result
@@ -248,7 +248,7 @@ class MultiAgentOrchestrator:
                 return f"Multi-agent workflow failed: {str(e)}. Fallback also failed: {str(fallback_error)}"
 
     def _execute_sub_tasks_parallel(
-        self, sub_tasks: List[SubTask], memory_id: str, conversation_id: str
+        self, sub_tasks: List[SubTask], memory_id: str, thread_id: str
     ) -> List[Dict[str, Any]]:
         """Execute sub-tasks in parallel using ThreadPoolExecutor."""
 
@@ -277,7 +277,7 @@ class MultiAgentOrchestrator:
                             task,
                             agent,
                             memory_id,
-                            conversation_id,
+                            thread_id,
                         )
                         future_to_task[future] = task
 
@@ -330,14 +330,14 @@ class MultiAgentOrchestrator:
                                 task,
                                 agent,
                                 memory_id,
-                                conversation_id,
+                                thread_id,
                             )
                             future_to_task[future] = task
 
         return results
 
     def _execute_single_task(
-        self, task: SubTask, agent: "MemAgent", memory_id: str, conversation_id: str
+        self, task: SubTask, agent: "MemAgent", memory_id: str, thread_id: str
     ) -> str:
         """Execute a single sub-task with an agent."""
 
@@ -355,7 +355,7 @@ class MultiAgentOrchestrator:
             )
 
             # Execute the task
-            result = agent.run(task.description, memory_id, conversation_id)
+            result = agent.run(task.description, memory_id, thread_id)
 
             return result
 

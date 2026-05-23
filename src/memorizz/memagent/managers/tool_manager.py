@@ -10,10 +10,44 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from ...long_term_memory.procedural.toolbox.toolbox import Toolbox
-from ...long_term_memory.procedural.workflow.workflow import Workflow, WorkflowOutcome
+from ...long_term.procedural.toolbox.toolbox import Toolbox
+from ...long_term.procedural.workflow.workflow import Workflow, WorkflowOutcome
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_jsonable(value: Any) -> Any:
+    """Recursively coerce a value into a JSON-serializable primitive.
+
+    Tool metadata persisted in Oracle has CLOB ``description`` /
+    ``docstring`` fields, which ``oracledb`` returns as LOB objects. If
+    these are left in tool definitions and later passed to the OpenAI
+    SDK's ``chat.completions.create(tools=...)`` call, the SDK's
+    internal ``json.dumps`` fails with
+    ``Object of type LOB is not JSON serializable``.
+
+    Mirrors the helper in ``memagent/core.py`` — duplicated here because
+    the tool manager shouldn't import from core (circular).
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    reader = getattr(value, "read", None)
+    if callable(reader):
+        try:
+            read_value = reader()
+        except Exception:
+            return str(value)
+        return _coerce_jsonable(read_value)
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.decode("utf-8", errors="ignore")
+    if isinstance(value, (list, tuple)):
+        return [_coerce_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _coerce_jsonable(v) for k, v in value.items()}
+    return str(value)
 
 
 class ToolManager:
@@ -279,15 +313,22 @@ class ToolManager:
             else:
                 return {}
         else:
-            # Return all tool metadata
+            # Return all tool metadata. Accept both the canonical wrapped
+            # shape (``{"metadata": {...}, "function": f}``) and a flat
+            # metadata dict — the latter can arise from tool data loaded
+            # from persistence before ``_register_tool_from_data`` has had
+            # a chance to normalize it.
             all_metadata = []
             for tool_id, tool_data in self.tools.items():
-                # Only expose metadata that can be used for tool calling.
-                metadata = (
-                    tool_data.get("metadata") if isinstance(tool_data, dict) else None
-                )
-                if not isinstance(metadata, dict):
+                if not isinstance(tool_data, dict):
                     continue
+                metadata = tool_data.get("metadata")
+                if not isinstance(metadata, dict):
+                    # Flat dict fallback — treat the entry itself as metadata.
+                    if "name" in tool_data or "parameters" in tool_data:
+                        metadata = tool_data
+                    else:
+                        continue
                 if not str(metadata.get("name", "")).strip():
                     continue
                 all_metadata.append(metadata)
@@ -330,13 +371,63 @@ class ToolManager:
         return list(self.tools.keys())
 
     def _register_tool_from_data(self, tool_id: str, tool_data: Dict) -> bool:
-        """Register a tool from raw data."""
+        """Register a tool from raw data.
+
+        Normalizes to the canonical wrapped shape
+        ``{"metadata": {...}, "function": f | None, "type": "function"}``
+        regardless of whether ``tool_data`` is already wrapped (as
+        ``_add_function_tool`` produces) or is a flat metadata dict (as
+        persisted Toolbox entries look after serialize/deserialize).
+
+        If a callable for this tool was previously registered in-memory,
+        we preserve the function — otherwise a later replay of persisted
+        flat metadata would clobber the runtime callable and the tool
+        would silently stop working.
+
+        Metadata values coming from persistence are also run through the
+        LOB coercion helper: when the backing store is Oracle, CLOB
+        fields (``description``, ``docstring``, etc.) surface as LOB
+        objects. Those are JSON-unserializable and blow up the first
+        time the streaming pipeline tries to send tools to the LLM —
+        with a generic "Object of type LOB is not JSON serializable"
+        that gives no hint about tool metadata being the culprit.
+        """
         try:
-            self.tools[tool_id] = tool_data
+            if not isinstance(tool_data, dict):
+                logger.warning("Tool data for %s is not a dict", tool_id)
+                return False
 
-            if "metadata" in tool_data:
-                self._tool_metadata_cache[tool_id] = tool_data["metadata"]
+            existing = (
+                self.tools.get(tool_id)
+                if isinstance(self.tools.get(tool_id), dict)
+                else None
+            )
+            existing_func = existing.get("function") if existing else None
 
+            # Two shapes supported:
+            #   wrapped: already has "metadata" key
+            #   flat:    the dict itself IS the metadata (name/parameters/...)
+            if isinstance(tool_data.get("metadata"), dict):
+                metadata = _coerce_jsonable(tool_data["metadata"])
+                function = tool_data.get("function", existing_func)
+                tool_type = tool_data.get("type", "function")
+                workflow = tool_data.get("workflow")
+            else:
+                metadata = _coerce_jsonable(tool_data)
+                function = existing_func
+                tool_type = tool_data.get("type", "function")
+                workflow = tool_data.get("workflow")
+
+            entry: Dict[str, Any] = {
+                "metadata": metadata,
+                "function": function,
+                "type": tool_type,
+            }
+            if workflow is not None:
+                entry["workflow"] = workflow
+
+            self.tools[tool_id] = entry
+            self._tool_metadata_cache[tool_id] = metadata
             return True
         except Exception as e:
             logger.error(f"Failed to register tool {tool_id}: {e}")

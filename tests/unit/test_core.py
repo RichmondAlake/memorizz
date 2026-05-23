@@ -434,11 +434,11 @@ class TestMemAgentRun:
         # (Detailed memory testing in test_memory_manager.py)
 
     @pytest.mark.unit
-    def test_run_with_conversation_id(self, memagent_with_mocks):
-        """Test query execution with conversation ID."""
+    def test_run_with_thread_id(self, memagent_with_mocks):
+        """Test query execution with thread ID."""
         agent = memagent_with_mocks
 
-        response = agent.run("Continue our chat", conversation_id="conv_456")
+        response = agent.run("Continue our chat", thread_id="conv_456")
 
         assert_agent_response_valid(response)
 
@@ -549,27 +549,27 @@ class TestMemAgentRun:
         assert selected[-1]["content"] == history[-1]["content"]
 
     @pytest.mark.unit
-    def test_run_isolates_conversation_state_per_thread(self, memagent_with_mocks):
-        """Switching memory_ids should keep per-thread conversation IDs isolated."""
+    def test_run_isolates_thread_state_per_memory(self, memagent_with_mocks):
+        """Switching memory_ids should keep per-thread thread IDs isolated."""
         agent = memagent_with_mocks
 
         response_a = agent.run("Thread A message", memory_id="thread_a")
         assert_agent_response_valid(response_a)
-        conv_a = agent.get_current_conversation_id()
+        conv_a = agent.get_current_thread_id()
         assert conv_a
 
         response_b = agent.run("Thread B message", memory_id="thread_b")
         assert_agent_response_valid(response_b)
-        conv_b = agent.get_current_conversation_id()
+        conv_b = agent.get_current_thread_id()
         assert conv_b
         assert conv_b != conv_a
 
         response_a_2 = agent.run("Thread A follow-up", memory_id="thread_a")
         assert_agent_response_valid(response_a_2)
-        assert agent.get_current_conversation_id() == conv_a
+        assert agent.get_current_thread_id() == conv_a
 
-        assert agent._conversation_ids_by_memory.get("thread_a") == conv_a
-        assert agent._conversation_ids_by_memory.get("thread_b") == conv_b
+        assert agent._thread_ids_by_memory.get("thread_a") == conv_a
+        assert agent._thread_ids_by_memory.get("thread_b") == conv_b
 
 
 class TestMemAgentMethods:
@@ -607,6 +607,107 @@ class TestMemAgentMethods:
 
         # Should return True for successful setting
         assert result is True
+
+    @pytest.mark.unit
+    def test_persona_tools_registered_on_init_with_persona(self):
+        """Constructing an agent with a persona should register the
+        update_persona / read_persona tools so the LLM can evolve its own
+        persona. Uses a dict payload (not SimpleNamespace) so the
+        PersonaManager rehydrates it via Persona.from_dict without
+        triggering an embedding network call."""
+        persona_payload = {
+            "name": "Hype Coach",
+            "role": "general",
+            "goals": "keep momentum high",
+            "background": "motivator/hype-man",
+            "embedding": None,
+        }
+        agent = MemAgent(instruction="Persona init test", persona=persona_payload)
+
+        assert agent._persona_tools_registered is True
+        assert "update_persona" in agent.tool_manager.tools
+        assert "read_persona" in agent.tool_manager.tools
+
+    @pytest.mark.unit
+    def test_no_persona_tools_without_persona(self):
+        """Agents built without a persona must not expose the persona
+        evolution tools — current behavior is intentional (no identity to
+        evolve)."""
+        agent = MemAgent(instruction="No persona test")
+
+        assert agent._persona_tools_registered is False
+        assert "update_persona" not in agent.tool_manager.tools
+        assert "read_persona" not in agent.tool_manager.tools
+
+    @pytest.mark.unit
+    def test_set_persona_wrapper_registers_tools(self):
+        """The public set_persona wrapper (core.py:4925) must register persona
+        tools when attaching a persona after construction."""
+        agent = MemAgent(instruction="Late persona attach")
+        assert "update_persona" not in agent.tool_manager.tools
+
+        result = agent.set_persona(
+            {"name": "Hype Coach", "role": "general", "embedding": None},
+            save=False,
+        )
+
+        assert result is True
+        assert agent._persona_tools_registered is True
+        assert "update_persona" in agent.tool_manager.tools
+        assert "read_persona" in agent.tool_manager.tools
+
+    @pytest.mark.unit
+    def test_refresh_registers_persona_tools_when_persona_added(
+        self, mock_memory_provider
+    ):
+        """Regression: refresh() used to call persona_manager.set_persona
+        directly, bypassing the public wrapper, so a persona added via the
+        UI wouldn't get the update_persona / read_persona tools until the
+        agent was fully reloaded. After the fix, refresh() must go through
+        the wrapper and register the tools in-place."""
+        agent = MemAgent(
+            instruction="Refresh persona test",
+            memory_provider=mock_memory_provider,
+            agent_id="agent_refresh_persona",
+        )
+        assert "update_persona" not in agent.tool_manager.tools
+
+        saved = MemAgentModel(
+            agent_id="agent_refresh_persona",
+            instruction="Refresh persona test",
+            persona={
+                "name": "Hype Coach",
+                "role": "general",
+                "embedding": None,
+            },
+        )
+        mock_memory_provider.retrieve_memagent = MagicMock(return_value=saved)
+
+        result = agent.refresh()
+
+        assert result is agent
+        assert agent._persona_tools_registered is True
+        assert "update_persona" in agent.tool_manager.tools
+        assert "read_persona" in agent.tool_manager.tools
+
+    @pytest.mark.unit
+    def test_register_persona_tools_is_idempotent(self):
+        """_register_persona_tools is called unconditionally on construction
+        AND via the set_persona wrapper. Calling it twice must not double-
+        register or error — the guard flag prevents re-entry."""
+        persona_payload = {
+            "name": "Hype Coach",
+            "role": "general",
+            "embedding": None,
+        }
+        agent = MemAgent(instruction="Idempotent persona", persona=persona_payload)
+        assert agent._persona_tools_registered is True
+
+        # A second call should be a no-op (guarded by _persona_tools_registered).
+        agent._register_persona_tools()
+
+        assert "update_persona" in agent.tool_manager.tools
+        assert "read_persona" in agent.tool_manager.tools
 
 
 class TestMemAgentConfig:

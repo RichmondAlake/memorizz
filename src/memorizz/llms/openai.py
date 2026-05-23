@@ -29,6 +29,7 @@ class OpenAI(LLMProvider):
         self,
         api_key: Optional[str] = None,
         model: str = "gpt-4o",
+        base_url: Optional[str] = None,
         context_window_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -46,15 +47,32 @@ class OpenAI(LLMProvider):
         Parameters:
         -----------
         api_key : str
-            The API key for the OpenAI API.
+            The API key for the OpenAI API. Local OpenAI-compatible servers
+            (llama.cpp, LM Studio, vLLM) ignore this; pass any non-empty
+            string to satisfy the SDK's required-arg check.
         model : str, optional
             The model to use for the OpenAI API.
+        base_url : str, optional
+            Override the API endpoint. Set this to point at a local
+            OpenAI-compatible server (e.g. ``http://127.0.0.1:8080/v1``
+            for llama.cpp's ``llama-server``, or LM Studio's local URL).
+            Falls back to the official OpenAI endpoint when unset.
         """
+        # Local OpenAI-compatible servers don't authenticate but the SDK
+        # still requires a non-empty api_key. Substitute a placeholder so
+        # users running llama.cpp / LM Studio don't need to set anything.
         if api_key is None:
             api_key = os.getenv("OPENAI_API_KEY")
+        if base_url and not api_key:
+            api_key = "sk-local"
 
-        self.client = openai.OpenAI(api_key=api_key)
+        client_kwargs: Dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        self.client = openai.OpenAI(**client_kwargs)
         self.model = model
+        self.base_url = base_url
         self.context_window_tokens = (
             context_window_tokens or self._infer_context_window_tokens(model)
         )
@@ -119,7 +137,10 @@ class OpenAI(LLMProvider):
 
     def get_config(self) -> Dict[str, Any]:
         """Returns a serializable configuration for the OpenAI provider."""
-        return {"provider": "openai", "model": self.model}
+        config: Dict[str, Any] = {"provider": "openai", "model": self.model}
+        if self.base_url:
+            config["base_url"] = self.base_url
+        return config
 
     def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
         """
@@ -135,7 +156,7 @@ class OpenAI(LLMProvider):
         Dict[str, Any]
         """
         # We'll import ToolSchemaType here to avoid circular imports
-        from ..long_term_memory.procedural.toolbox.tool_schema import ToolSchemaType
+        from ..long_term.procedural.toolbox.tool_schema import ToolSchemaType
 
         docstring = func.__doc__ or ""
         signature = str(inspect.signature(func))

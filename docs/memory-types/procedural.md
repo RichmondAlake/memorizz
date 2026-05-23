@@ -1,6 +1,6 @@
 # Procedural Memory
 
-Procedural memory captures *how* an agent should act. It bundles tool registration, workflows, and scripted behaviors so that the agent can plan or execute actions consistently. Source code lives in `src/memorizz/long_term_memory/procedural/`.
+Procedural memory captures *how* an agent should act. It bundles tool registration, workflows, and scripted behaviors so that the agent can plan or execute actions consistently. Source code lives in `src/memorizz/long_term/procedural/`.
 
 ## Components
 
@@ -12,7 +12,7 @@ Procedural memory captures *how* an agent should act. It bundles tool registrati
 
 ```python
 from memorizz.memagent.builders import MemAgentBuilder
-from memorizz.long_term_memory.procedural.toolbox import Toolbox
+from memorizz.long_term.procedural.toolbox import Toolbox
 
 toolbox = Toolbox(memory_provider)
 

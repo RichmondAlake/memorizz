@@ -70,6 +70,9 @@
                         {% endif %}
                     </td>
                     <td style="white-space: nowrap;">
+                        {% if job.latest_run %}
+                        <button type="button" class="btn btn-sm" onclick="toggleLatestRun('{{ job.job_id }}')">Latest</button>
+                        {% endif %}
                         <a class="btn btn-sm" href="/automations/{{ job.job_id }}">View</a>
                         <a class="btn btn-sm" href="/automations/{{ job.job_id }}/edit">Edit</a>
                         <form method="post" action="/automations/{{ job.job_id }}/run-now" style="display:inline;">
@@ -86,6 +89,25 @@
                         {% endif %}
                     </td>
                 </tr>
+                {% if job.latest_run %}
+                <tr id="latest-run-{{ job.job_id }}" class="latest-run-row" style="display: none;">
+                    <td colspan="7" style="padding: 0;">
+                        <div class="latest-run-panel">
+                            <div class="latest-run-header">
+                                <span class="badge {% if job.latest_run.status == 'succeeded' %}badge--success{% elif job.latest_run.status == 'failed' %}badge--danger{% endif %}">{{ job.latest_run.status }}</span>
+                                <span class="latest-run-time">{{ job.latest_run.finished_at or job.latest_run.started_at or '' }}</span>
+                            </div>
+                            {% if job.latest_run.result_summary %}
+                            <div class="latest-run-body">{{ job.latest_run.result_summary }}</div>
+                            {% elif job.latest_run.error %}
+                            <div class="latest-run-body latest-run-error">{{ job.latest_run.error }}</div>
+                            {% else %}
+                            <div class="latest-run-body" style="opacity: 0.5;">No output recorded.</div>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endif %}
                 {% endfor %}
             </tbody>
         </table>
@@ -98,4 +120,249 @@
     </div>
     {% endif %}
 </div>
+
+<!-- Bloomberg-style Terminal: Latest Responses -->
+{% set jobs_with_runs = jobs | selectattr('latest_run') | list %}
+{% if jobs_with_runs %}
+<div class="detail-section observability-section" style="margin-top: var(--spacing-md);">
+    <div class="traces-toolbar">
+        <h2>Terminal &mdash; Latest Responses</h2>
+        <p class="form-hint">{{ jobs_with_runs|length }} feed{% if jobs_with_runs|length != 1 %}s{% endif %} &bull; auto-refresh 30s</p>
+    </div>
+
+    <div class="terminal-grid">
+        {% for job in jobs_with_runs %}
+        {% set run = job.latest_run %}
+        {% set status = run.status|default('unknown') %}
+        {% set payload = run.result_payload or {} if run.result_payload is mapping else {} %}
+        {% set output_text = run.result_summary or payload.get('response', '') %}
+        <div class="terminal-tile terminal-tile--{{ status }}">
+            <div class="terminal-tile-header">
+                <span class="terminal-tile-name">{{ job.name }}</span>
+                <span class="terminal-tile-status terminal-status--{{ status }}">{{ status|upper }}</span>
+            </div>
+            <div class="terminal-tile-meta">
+                <span>{{ job.agent_id[:12] }}</span>
+                <span>{{ run.finished_at or run.started_at or '' }}</span>
+            </div>
+            <div class="terminal-tile-body">
+                {%- if output_text -%}
+                    {{ output_text }}
+                {%- elif run.error -%}
+                    <span class="terminal-error">ERR: {{ run.error }}</span>
+                {%- else -%}
+                    <span class="terminal-empty">NO OUTPUT</span>
+                {%- endif -%}
+            </div>
+            <div class="terminal-tile-footer">
+                <a href="/automations/{{ job.job_id }}">DETAIL</a>
+                <span class="terminal-tile-sched">
+                    {% if job.schedule_type == 'cron' and job.cron_expr %}{{ job.cron_expr }}{% elif job.interval_seconds %}{{ job.interval_seconds }}s{% endif %}
+                </span>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<style>
+/* ── Existing latest-run inline expand ── */
+.latest-run-row td {
+    background: var(--bg-tertiary, #1a1a2e);
+    border-top: 1px solid rgba(0, 217, 255, 0.1);
+}
+.latest-run-panel {
+    padding: 0.75rem 1rem;
+}
+.latest-run-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.8rem;
+}
+.latest-run-time {
+    opacity: 0.6;
+    font-size: 0.75rem;
+}
+.latest-run-body {
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-secondary, #111);
+    border-radius: 6px;
+}
+.latest-run-error {
+    color: #ff6b6b;
+}
+.badge--success {
+    background: rgba(0, 200, 83, 0.15);
+    color: #00c853;
+}
+.badge--danger {
+    background: rgba(255, 107, 107, 0.15);
+    color: #ff6b6b;
+}
+
+/* ── Bloomberg Terminal Grid ── */
+.terminal-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 2px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+}
+
+.terminal-tile {
+    background: #0a0a0a;
+    border-left: 3px solid #333;
+    display: flex;
+    flex-direction: column;
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    min-height: 180px;
+}
+.terminal-tile--succeeded { border-left-color: #00c853; }
+.terminal-tile--failed    { border-left-color: #ff5252; }
+.terminal-tile--running   { border-left-color: #ff8c00; }
+
+.terminal-tile-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: #111;
+    border-bottom: 1px solid #222;
+}
+.terminal-tile-name {
+    font-weight: 700;
+    color: #ff8c00;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.terminal-tile-status {
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 2px;
+    letter-spacing: 0.8px;
+}
+.terminal-status--succeeded {
+    background: rgba(0, 200, 83, 0.15);
+    color: #00ff41;
+}
+.terminal-status--failed {
+    background: rgba(255, 82, 82, 0.15);
+    color: #ff5252;
+}
+.terminal-status--running {
+    background: rgba(255, 140, 0, 0.15);
+    color: #ff8c00;
+    animation: terminal-blink 1.2s step-end infinite;
+}
+@keyframes terminal-blink {
+    50% { opacity: 0.4; }
+}
+
+.terminal-tile-meta {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 10px;
+    font-size: 0.7rem;
+    color: #666;
+    border-bottom: 1px solid #1a1a1a;
+}
+
+.terminal-tile-body {
+    flex: 1;
+    padding: 8px 10px;
+    overflow-y: auto;
+    max-height: 200px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #ccc;
+}
+.terminal-error {
+    color: #ff5252;
+}
+.terminal-empty {
+    color: #444;
+}
+
+.terminal-tile-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 10px;
+    border-top: 1px solid #1a1a1a;
+    font-size: 0.7rem;
+}
+.terminal-tile-footer a {
+    color: #00d9ff;
+    text-decoration: none;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.terminal-tile-footer a:hover {
+    color: #fff;
+}
+.terminal-tile-sched {
+    color: #555;
+}
+
+/* Light theme overrides */
+body.theme-light .terminal-grid {
+    background: #e0e0e0;
+    border-color: #ccc;
+}
+body.theme-light .terminal-tile {
+    background: #fafafa;
+}
+body.theme-light .terminal-tile-header {
+    background: #f0f0f0;
+    border-bottom-color: #ddd;
+}
+body.theme-light .terminal-tile-name {
+    color: #b35900;
+}
+body.theme-light .terminal-tile-meta {
+    color: #999;
+}
+body.theme-light .terminal-tile-body {
+    color: #333;
+}
+body.theme-light .terminal-error {
+    color: #d32f2f;
+}
+body.theme-light .terminal-empty {
+    color: #bbb;
+}
+body.theme-light .terminal-tile-sched {
+    color: #aaa;
+}
+</style>
+
+<script>
+function toggleLatestRun(jobId) {
+    var row = document.getElementById('latest-run-' + jobId);
+    if (row) {
+        row.style.display = row.style.display === 'none' ? '' : 'none';
+    }
+}
+
+// Auto-refresh the page every 30s to keep the terminal live
+(function() {
+    var _refreshTimer = setTimeout(function refresh() {
+        window.location.reload();
+    }, 30000);
+})();
+</script>
 {% endblock %}

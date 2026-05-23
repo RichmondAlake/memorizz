@@ -361,9 +361,9 @@ class MemAgent:
 
         self.agent_id = agent_id
 
-        # Conversation ID persistence: Store current conversation_id to reuse across runs
-        # This fixes the issue where each run() generates a new conversation_id
-        self._current_conversation_id = None
+        # Thread ID persistence: Store current thread_id to reuse across runs
+        # This fixes the issue where each run() generates a new thread_id
+        self._current_thread_id = None
 
         # Update semantic cache with agent ID and memory ID if enabled
         if self.semantic_cache_instance:
@@ -1007,9 +1007,7 @@ class MemAgent:
 
         return self.tools
 
-    def run(
-        self, query: str, memory_id: str = None, conversation_id: str = None
-    ) -> str:
+    def run(self, query: str, memory_id: str = None, thread_id: str = None) -> str:
         """
         Run the agent with the given query.
 
@@ -1019,7 +1017,7 @@ class MemAgent:
         Parameters:
             query (str): The query to run the agent with.
             memory_id (str): The memory id to use.
-            conversation_id (str): The conversation id to use.
+            thread_id (str): The thread id to use.
 
         Returns:
             str: The response from the agent.
@@ -1036,13 +1034,11 @@ class MemAgent:
             if self.is_multi_agent_mode:
                 self._initialize_multi_agent_orchestrator()
                 return self._multi_agent_orchestrator.execute_multi_agent_workflow(
-                    query, memory_id, conversation_id
+                    query, memory_id, thread_id
                 )
 
-            # 1) Prepare memory and conversation IDs
-            memory_id, conversation_id = self._prepare_memory_and_ids(
-                memory_id, conversation_id
-            )
+            # 1) Prepare memory and thread IDs
+            memory_id, thread_id = self._prepare_memory_and_ids(memory_id, thread_id)
 
             # 2) Check semantic cache for similar queries (if enabled)
             logger.debug(
@@ -1051,11 +1047,11 @@ class MemAgent:
             if self.semantic_cache_instance:
                 logger.debug(f"Checking semantic cache for query: {query[:50]}...")
                 logger.debug(
-                    f"Cache context - session_id: {conversation_id}, agent_id: {self.semantic_cache_instance.agent_id}, memory_id: {self.semantic_cache_instance.memory_id}"
+                    f"Cache context - session_id: {thread_id}, agent_id: {self.semantic_cache_instance.agent_id}, memory_id: {self.semantic_cache_instance.memory_id}"
                 )
 
                 cached_response = self.semantic_cache_instance.get(
-                    query=query, session_id=conversation_id
+                    query=query, session_id=thread_id
                 )
 
                 logger.debug(
@@ -1063,19 +1059,19 @@ class MemAgent:
                 )
                 if cached_response:
                     # Record user's query in memory before returning cached response
-                    self._record_user_query(query, conversation_id, memory_id)
+                    self._record_user_query(query, thread_id, memory_id)
 
                     # Record the cached response as assistant response in conversation memory
                     if MemoryType.CONVERSATION_MEMORY in self.active_memory_types:
                         logger.info(
-                            f"Recording cached assistant response to memory - memory_id: {memory_id}, conversation_id: {conversation_id}"
+                            f"Recording cached assistant response to memory - memory_id: {memory_id}, thread_id: {thread_id}"
                         )
                         memory_unit = self._generate_conversational_memory_unit(
                             {
                                 "role": Role.ASSISTANT,
                                 "content": cached_response,
                                 "timestamp": datetime.now().isoformat(),
-                                "conversation_id": conversation_id,
+                                "thread_id": thread_id,
                                 "memory_id": memory_id,
                             }
                         )
@@ -1103,11 +1099,11 @@ class MemAgent:
             self._log_prompt_debug_info(system_prompt, augmented_query)
 
             # 6) Record user's query in memory
-            self._record_user_query(query, conversation_id, memory_id)
+            self._record_user_query(query, thread_id, memory_id)
 
             # 7) Execute main interaction loop
             final_response = self._execute_main_loop(
-                messages, query, memory_id, conversation_id
+                messages, query, memory_id, thread_id
             )
 
             # 8) Cache the response for future similar queries (if semantic cache enabled)
@@ -1115,7 +1111,7 @@ class MemAgent:
                 self.semantic_cache_instance.set(
                     query=query,
                     response=final_response,
-                    session_id=conversation_id,
+                    session_id=thread_id,
                     metadata={
                         "memory_id": memory_id,
                         "agent_id": self.agent_id,
@@ -1133,17 +1129,17 @@ class MemAgent:
             return f"An error occurred while running the agent: {e}"
 
     def _prepare_memory_and_ids(
-        self, memory_id: str, conversation_id: str
+        self, memory_id: str, thread_id: str
     ) -> tuple[str, str]:
         """
-        Prepare and validate memory_id and conversation_id for the agent run.
+        Prepare and validate memory_id and thread_id for the agent run.
 
         Parameters:
             memory_id (str): The memory id to use (can be None).
-            conversation_id (str): The conversation id to use (can be None).
+            thread_id (str): The thread id to use (can be None).
 
         Returns:
-            tuple[str, str]: Validated (memory_id, conversation_id) pair.
+            tuple[str, str]: Validated (memory_id, thread_id) pair.
         """
         # 1) Ensure memory_id
         if memory_id is None:
@@ -1165,21 +1161,21 @@ class MemAgent:
                     self.agent_id, self.memory_ids
                 )
 
-        # 2) Ensure conversation_id with persistence
-        if conversation_id is None:
-            # Check if we already have a current conversation_id stored
-            if self._current_conversation_id:
-                # Reuse existing conversation_id to maintain conversation continuity
-                conversation_id = self._current_conversation_id
+        # 2) Ensure thread_id with persistence
+        if thread_id is None:
+            # Check if we already have a current thread_id stored
+            if self._current_thread_id:
+                # Reuse existing thread_id to maintain thread continuity
+                thread_id = self._current_thread_id
             else:
-                # Generate new conversation_id and store it for future reuse
-                conversation_id = str(ObjectId())
-                self._current_conversation_id = conversation_id
+                # Generate new thread_id and store it for future reuse
+                thread_id = str(ObjectId())
+                self._current_thread_id = thread_id
         else:
-            # Explicit conversation_id provided - store it as current for future runs
-            self._current_conversation_id = conversation_id
+            # Explicit thread_id provided - store it as current for future runs
+            self._current_thread_id = thread_id
 
-        return memory_id, conversation_id
+        return memory_id, thread_id
 
     def _build_augmented_query(self, query: str, memory_id: str) -> str:
         """
@@ -1441,18 +1437,18 @@ class MemAgent:
                 f"Skipping multi-agent logging for single-agent mode (agent {self.agent_id})"
             )
 
-    def _record_user_query(self, query: str, conversation_id: str, memory_id: str):
+    def _record_user_query(self, query: str, thread_id: str, memory_id: str):
         """Record the user's query in conversational memory."""
         if MemoryType.CONVERSATION_MEMORY in self.active_memory_types:
             logger.info(
-                f"Recording user query to memory - memory_id: {memory_id}, conversation_id: {conversation_id}"
+                f"Recording user query to memory - memory_id: {memory_id}, thread_id: {thread_id}"
             )
             memory_unit = self._generate_conversational_memory_unit(
                 {
                     "role": Role.USER,
                     "content": query,
                     "timestamp": datetime.now().isoformat(),
-                    "conversation_id": conversation_id,
+                    "thread_id": thread_id,
                     "memory_id": memory_id,
                 }
             )
@@ -1465,7 +1461,7 @@ class MemAgent:
             )
 
     def _execute_main_loop(
-        self, messages: List[Dict], query: str, memory_id: str, conversation_id: str
+        self, messages: List[Dict], query: str, memory_id: str, thread_id: str
     ) -> str:
         """
         Execute the main agent interaction loop with tool calls and responses.
@@ -1474,7 +1470,7 @@ class MemAgent:
             messages (List[Dict]): The conversation messages.
             query (str): The original user query.
             memory_id (str): The memory ID.
-            conversation_id (str): The conversation ID.
+            thread_id (str): The thread ID.
 
         Returns:
             str: The final response from the agent.
@@ -1511,7 +1507,7 @@ class MemAgent:
             # h) No function calls → final answer
             if response.output_text:
                 return self._finalize_response(
-                    response.output_text, messages, conversation_id, memory_id
+                    response.output_text, messages, thread_id, memory_id
                 )
 
         # 11) If we never returned…
@@ -1710,7 +1706,7 @@ class MemAgent:
         self,
         response_text: str,
         messages: List[Dict],
-        conversation_id: str,
+        thread_id: str,
         memory_id: str,
     ) -> str:
         """
@@ -1719,7 +1715,7 @@ class MemAgent:
         Parameters:
             response_text (str): The final response text from the LLM.
             messages (List[Dict]): The conversation messages.
-            conversation_id (str): The conversation ID.
+            thread_id (str): The thread ID.
             memory_id (str): The memory ID.
 
         Returns:
@@ -1728,14 +1724,14 @@ class MemAgent:
         # Record into memory
         if MemoryType.CONVERSATION_MEMORY in self.active_memory_types:
             logger.info(
-                f"Recording assistant response to memory - memory_id: {memory_id}, conversation_id: {conversation_id}"
+                f"Recording assistant response to memory - memory_id: {memory_id}, thread_id: {thread_id}"
             )
             memory_unit = self._generate_conversational_memory_unit(
                 {
                     "role": Role.ASSISTANT,
                     "content": response_text,
                     "timestamp": datetime.now().isoformat(),
-                    "conversation_id": conversation_id,
+                    "thread_id": thread_id,
                     "memory_id": memory_id,
                 }
             )
@@ -1770,18 +1766,18 @@ class MemAgent:
             memory_id, MemoryType.CONVERSATION_MEMORY
         )
 
-    def start_new_conversation(self):
+    def start_new_thread(self):
         """
-        Start a new conversation by clearing the current conversation ID.
+        Start a new thread by clearing the current thread ID.
 
-        The next run() call will generate a new conversation_id and subsequent
-        calls will reuse that new ID, maintaining conversation continuity.
+        The next run() call will generate a new thread_id and subsequent
+        calls will reuse that new ID, maintaining thread continuity.
 
         Returns:
-            str: The new conversation_id that will be generated on next run()
+            str: The new thread_id that will be generated on next run()
         """
-        self._current_conversation_id = None
-        return "New conversation will start on next run()"
+        self._current_thread_id = None
+        return "New thread will start on next run()"
 
     def _load_relevant_memory_units(
         self, query: str, memory_type: MemoryType, memory_id: str = None, limit: int = 5

@@ -13,12 +13,58 @@ from pymongo.operations import SearchIndexModel
 
 from ...embeddings import get_embedding
 from ...enums.memory_type import MemoryType
-from ...long_term_memory.semantic.persona.persona import Persona
-from ...long_term_memory.semantic.persona.role_type import RoleType
+from ...long_term.semantic.persona.persona import Persona
+from ...long_term.semantic.persona.role_type import RoleType
 from ...memagent import MemAgentModel
 from ..base import MemoryProvider
 
 logger = logging.getLogger(__name__)
+
+
+# Sentinel so "user_id filter not supplied" is distinguishable from
+# "user_id is explicitly None" (anonymous/legacy scope).
+class _MongoUserIdUnset:
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "<user_id unset>"
+
+
+_MONGO_UNSET = _MongoUserIdUnset()
+
+
+_MONGO_USER_SCOPED_TYPES = frozenset(
+    {
+        MemoryType.CONVERSATION_MEMORY,
+        MemoryType.KNOWLEDGE_BASE,
+        MemoryType.SHORT_TERM_MEMORY,
+        MemoryType.WORKFLOW_MEMORY,
+        MemoryType.SUMMARIES,
+        MemoryType.SEMANTIC_CACHE,
+        MemoryType.ENTITY_MEMORY,
+        MemoryType.TOOL_LOG,
+    }
+)
+
+
+def _mongo_memory_type_supports_user_id(memory_store_type: Any) -> bool:
+    try:
+        if isinstance(memory_store_type, str):
+            memory_store_type = MemoryType(memory_store_type)
+    except Exception:
+        return False
+    return memory_store_type in _MONGO_USER_SCOPED_TYPES
+
+
+def _mongo_user_id_predicate(user_id: Any) -> Dict[str, Any]:
+    """Build a Mongo filter that matches rows in the given user_id scope.
+
+    ``None`` matches documents whose ``user_id`` is missing or null so that
+    legacy rows are still visible to anonymous callers. Any other value
+    enforces strict equality — preventing cross-tenant leaks even when the
+    stored row predates this change.
+    """
+    if user_id is None:
+        return {"user_id": {"$in": [None]}}
+    return {"user_id": user_id}
 
 
 @dataclass
@@ -84,7 +130,7 @@ class MongoDBProvider(MemoryProvider):
         self.persona_collection = self.db[MemoryType.PERSONAS.value]
         self.toolbox_collection = self.db[MemoryType.TOOLBOX.value]
         self.short_term_memory_collection = self.db[MemoryType.SHORT_TERM_MEMORY.value]
-        self.long_term_memory_collection = self.db[MemoryType.LONG_TERM_MEMORY.value]
+        self.knowledge_base_collection = self.db[MemoryType.KNOWLEDGE_BASE.value]
         self.conversation_memory_collection = self.db[
             MemoryType.CONVERSATION_MEMORY.value
         ]
@@ -94,6 +140,7 @@ class MongoDBProvider(MemoryProvider):
         self.shared_memory_collection = self.db[MemoryType.SHARED_MEMORY.value]
         self.summaries_collection = self.db[MemoryType.SUMMARIES.value]
         self.semantic_cache_collection = self.db[MemoryType.SEMANTIC_CACHE.value]
+        self.tool_log_collection = self.db[MemoryType.TOOL_LOG.value]
 
         # Track which vector indexes have been created
         self._vector_indexes_created = set()
@@ -115,6 +162,15 @@ class MongoDBProvider(MemoryProvider):
                 logger.info("Vector indexes will be created lazily when needed")
                 # Set lazy mode if immediate creation fails
                 self.config.lazy_vector_indexes = True
+
+    @staticmethod
+    def _normalize_legacy_fields(doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Migrate old conversation_id → thread_id on read for backward compat."""
+        if "conversation_id" in doc and "thread_id" not in doc:
+            doc["thread_id"] = doc.pop("conversation_id")
+        if "associated_conversation_ids" in doc and "associated_thread_ids" not in doc:
+            doc["associated_thread_ids"] = doc.pop("associated_conversation_ids")
+        return doc
 
     def _setup_embedding_provider(self, config: MongoDBConfig):
         """
@@ -236,11 +292,12 @@ class MongoDBProvider(MemoryProvider):
         self._create_memory_store(MemoryType.PERSONAS)
         self._create_memory_store(MemoryType.TOOLBOX)
         self._create_memory_store(MemoryType.SHORT_TERM_MEMORY)
-        self._create_memory_store(MemoryType.LONG_TERM_MEMORY)
+        self._create_memory_store(MemoryType.KNOWLEDGE_BASE)
         self._create_memory_store(MemoryType.CONVERSATION_MEMORY)
         self._create_memory_store(MemoryType.WORKFLOW_MEMORY)
         self._create_memory_store(MemoryType.SHARED_MEMORY)
         self._create_memory_store(MemoryType.SUMMARIES)
+        self._create_memory_store(MemoryType.TOOL_LOG)
 
     def _create_memory_store(self, memory_store_type: MemoryType) -> None:
         """
@@ -368,8 +425,8 @@ class MongoDBProvider(MemoryProvider):
             collection = self.workflow_memory_collection
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
             collection = self.short_term_memory_collection
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            collection = self.long_term_memory_collection
+        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+            collection = self.knowledge_base_collection
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             collection = self.conversation_memory_collection
         elif memory_store_type == MemoryType.SHARED_MEMORY:
@@ -380,12 +437,14 @@ class MongoDBProvider(MemoryProvider):
             collection = self.semantic_cache_collection
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             collection = self.entity_memory_collection
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            collection = self.tool_log_collection
 
         if collection is None:
             raise ValueError(f"Invalid memory store type: {memory_store_type}")
 
         # Clean data by removing custom ID fields - only use MongoDB _id
-        # Note: conversation_id is preserved for CONVERSATION_MEMORY as it serves a functional purpose
+        # Note: thread_id is preserved for CONVERSATION_MEMORY as it serves a functional purpose
         data_copy = data.copy()
 
         # Remove custom ID fields since we only want to use _id
@@ -397,13 +456,13 @@ class MongoDBProvider(MemoryProvider):
             "agent_id",
         ]
 
-        # Don't remove conversation_id for conversation memory
+        # Don't remove thread_id for conversation memory
         if memory_store_type != MemoryType.CONVERSATION_MEMORY:
-            custom_id_fields.append("conversation_id")
+            custom_id_fields.append("thread_id")
 
-        # Don't remove long_term_memory_id for long-term memory as it's needed for knowledge linking
-        if memory_store_type != MemoryType.LONG_TERM_MEMORY:
-            custom_id_fields.append("long_term_memory_id")
+        # Don't remove knowledge_base_id for knowledge base entries as it's needed for knowledge linking
+        if memory_store_type != MemoryType.KNOWLEDGE_BASE:
+            custom_id_fields.append("knowledge_base_id")
 
         # Don't remove agent_id and memory_id for semantic cache as they're needed for filtering and scoping
         if memory_store_type == MemoryType.SEMANTIC_CACHE:
@@ -412,6 +471,17 @@ class MongoDBProvider(MemoryProvider):
                 field for field in custom_id_fields if field != "agent_id"
             ]
             # Don't add memory_id to removal list for semantic cache
+        elif memory_store_type == MemoryType.TOOLBOX:
+            # Preserve agent_id so the playground toolbox-memory pane can
+            # scope rows to the right agent, and tool_id so the UI can show
+            # a human-readable identifier. Tools are agent-scoped across
+            # threads, so memory_id is still stripped.
+            custom_id_fields = [
+                field
+                for field in custom_id_fields
+                if field not in ("agent_id", "tool_id")
+            ]
+            custom_id_fields.append("memory_id")
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             # Don't remove memory_id for conversation memory as it's needed for conversation history retrieval
             pass  # Keep memory_id for conversation memory
@@ -482,6 +552,9 @@ class MongoDBProvider(MemoryProvider):
         if memory_store_type is None:
             raise ValueError("Either memory_store_type or memory_type must be provided")
 
+        # Extract user_id up-front for consistent scoping across all branches.
+        user_id_scope = kwargs.pop("user_id", _MONGO_UNSET)
+
         # If memory_id filter is provided, add it to the query
         if memory_id is not None:
             if isinstance(query, dict):
@@ -489,6 +562,16 @@ class MongoDBProvider(MemoryProvider):
             else:
                 # For string queries (semantic search), store memory_id for filtering
                 kwargs["memory_id"] = memory_id
+
+        # Fold user_id into the query/kwargs depending on the call shape.
+        # For dict queries against user-scoped memory types we push down an
+        # equality predicate (None matches missing/null via $in).
+        if user_id_scope is not _MONGO_UNSET:
+            if isinstance(query, dict) and _mongo_memory_type_supports_user_id(
+                memory_store_type
+            ):
+                query = {**query, **_mongo_user_id_predicate(user_id_scope)}
+            kwargs["user_id"] = user_id_scope
 
         # Define projection to exclude embeddings by default
         projection = {} if include_embedding else {"embedding": 0}
@@ -503,8 +586,8 @@ class MongoDBProvider(MemoryProvider):
             return self.short_term_memory_collection.find(query, projection).limit(
                 limit
             )
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            return self.long_term_memory_collection.find(query, projection).limit(limit)
+        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+            return self.knowledge_base_collection.find(query, projection).limit(limit)
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             return self.conversation_memory_collection.find(query, projection).limit(
                 limit
@@ -537,6 +620,10 @@ class MongoDBProvider(MemoryProvider):
             if isinstance(query, dict):
                 return self.memagent_collection.find(query, projection).limit(limit)
             return []
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            if isinstance(query, dict):
+                return self.tool_log_collection.find(query, projection).limit(limit)
+            return []
 
     def retrieve_by_id(
         self, id: str, memory_store_type: MemoryType
@@ -562,13 +649,14 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.TOOLBOX: self.toolbox_collection,
             MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
-            MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
+            MemoryType.KNOWLEDGE_BASE: self.knowledge_base_collection,
             MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
             MemoryType.SHARED_MEMORY: self.shared_memory_collection,
             MemoryType.SUMMARIES: self.summaries_collection,
             MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
             MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
             MemoryType.MEMAGENT: self.memagent_collection,
+            MemoryType.TOOL_LOG: self.tool_log_collection,
         }
 
         collection = collection_mapping.get(memory_store_type)
@@ -595,7 +683,10 @@ class MongoDBProvider(MemoryProvider):
         # Retrieve using MongoDB _id only
         try:
             if ObjectId.is_valid(id):
-                return collection.find_one({"_id": ObjectId(id)}, projection)
+                doc = collection.find_one({"_id": ObjectId(id)}, projection)
+                if doc and memory_store_type == MemoryType.CONVERSATION_MEMORY:
+                    self._normalize_legacy_fields(doc)
+                return doc
         except Exception:
             pass
 
@@ -634,8 +725,8 @@ class MongoDBProvider(MemoryProvider):
             return self.short_term_memory_collection.find_one(
                 {"name": name}, projection
             )
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            return self.long_term_memory_collection.find_one({"name": name}, projection)
+        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+            return self.knowledge_base_collection.find_one({"name": name}, projection)
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             return self.conversation_memory_collection.find_one(
                 {"name": name}, projection
@@ -654,6 +745,8 @@ class MongoDBProvider(MemoryProvider):
             )
         elif memory_store_type == MemoryType.MEMAGENT:
             return self.memagent_collection.find_one({"name": name}, projection)
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            return self.tool_log_collection.find_one({"name": name}, projection)
 
     def retrieve_persona_by_query(
         self, query: Dict[str, Any], limit: int = 1
@@ -783,6 +876,10 @@ class MongoDBProvider(MemoryProvider):
         if memory_id is not None:
             search_filter["memory_id"] = str(memory_id)
 
+        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
+        if user_id_scope is not _MONGO_UNSET:
+            search_filter.update(_mongo_user_id_predicate(user_id_scope))
+
         vector_stage: Dict[str, Any] = {
             "$vectorSearch": {
                 "queryVector": embedding,
@@ -805,6 +902,7 @@ class MongoDBProvider(MemoryProvider):
                 "relations": 1,
                 "metadata": 1,
                 "memory_id": 1,
+                "user_id": 1,
                 "created_at": 1,
                 "updated_at": 1,
                 "embedding": 0,
@@ -1086,6 +1184,11 @@ class MongoDBProvider(MemoryProvider):
         if "session_id" in kwargs and kwargs["session_id"] is not None:
             search_filter["session_id"] = str(kwargs["session_id"])
 
+        # Tenant isolation: only allow matches within the same user_id scope.
+        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
+        if user_id_scope is not _MONGO_UNSET:
+            search_filter.update(_mongo_user_id_predicate(user_id_scope))
+
         # Get the embedding for the query
         # Construct the vector search stage
         vector_search_stage = {
@@ -1204,13 +1307,14 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.TOOLBOX: self.toolbox_collection,
             MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
-            MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
+            MemoryType.KNOWLEDGE_BASE: self.knowledge_base_collection,
             MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
             MemoryType.SHARED_MEMORY: self.shared_memory_collection,
             MemoryType.SUMMARIES: self.summaries_collection,
             MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
             MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
             MemoryType.MEMAGENT: self.memagent_collection,
+            MemoryType.TOOL_LOG: self.tool_log_collection,
         }
 
         collection = collection_mapping.get(memory_store_type)
@@ -1249,8 +1353,8 @@ class MongoDBProvider(MemoryProvider):
             result = self.persona_collection.delete_one({"name": name})
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
             result = self.short_term_memory_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            result = self.long_term_memory_collection.delete_one({"name": name})
+        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+            result = self.knowledge_base_collection.delete_one({"name": name})
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             result = self.conversation_memory_collection.delete_one({"name": name})
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
@@ -1267,6 +1371,8 @@ class MongoDBProvider(MemoryProvider):
             )
         elif memory_store_type == MemoryType.MEMAGENT:
             result = self.memagent_collection.delete_one({"name": name})
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            result = self.tool_log_collection.delete_one({"name": name})
         else:
             return False
 
@@ -1292,8 +1398,8 @@ class MongoDBProvider(MemoryProvider):
             result = self.toolbox_collection.delete_many({})
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
             result = self.short_term_memory_collection.delete_many({})
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            result = self.long_term_memory_collection.delete_many({})
+        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+            result = self.knowledge_base_collection.delete_many({})
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             result = self.conversation_memory_collection.delete_many({})
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
@@ -1308,13 +1414,18 @@ class MongoDBProvider(MemoryProvider):
             result = self.semantic_cache_collection.delete_many({})
         elif memory_store_type == MemoryType.MEMAGENT:
             result = self.memagent_collection.delete_many({})
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            result = self.tool_log_collection.delete_many({})
         else:
             return False
 
         return result.deleted_count > 0
 
     def list_all(
-        self, memory_store_type: MemoryType, include_embedding: bool = False
+        self,
+        memory_store_type: MemoryType,
+        include_embedding: bool = False,
+        user_id: Any = _MONGO_UNSET,
     ) -> List[Dict[str, Any]]:
         """
         List all documents within a memory store type in MongoDB.
@@ -1325,6 +1436,10 @@ class MongoDBProvider(MemoryProvider):
             The type of memory store (e.g., "persona", "toolbox", etc.)
         include_embedding : bool
             Whether to include the embedding field in the results. Default is False for performance.
+        user_id : str, optional
+            Multi-tenant scope. When provided, results are restricted to rows
+            whose ``user_id`` matches. When the sentinel default is used no
+            ``user_id`` filter is applied (legacy callers).
 
         Returns:
         --------
@@ -1334,28 +1449,40 @@ class MongoDBProvider(MemoryProvider):
         # Define projection to exclude embeddings by default
         projection = {} if include_embedding else {"embedding": 0}
 
+        mongo_filter: Dict[str, Any] = {}
+        if user_id is not _MONGO_UNSET and _mongo_memory_type_supports_user_id(
+            memory_store_type
+        ):
+            mongo_filter.update(_mongo_user_id_predicate(user_id))
+
         if memory_store_type == MemoryType.PERSONAS:
-            return list(self.persona_collection.find({}, projection))
+            return list(self.persona_collection.find(mongo_filter, projection))
         elif memory_store_type == MemoryType.TOOLBOX:
-            return list(self.toolbox_collection.find({}, projection))
+            return list(self.toolbox_collection.find(mongo_filter, projection))
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            return list(self.short_term_memory_collection.find({}, projection))
-        elif memory_store_type == MemoryType.LONG_TERM_MEMORY:
-            return list(self.long_term_memory_collection.find({}, projection))
+            return list(
+                self.short_term_memory_collection.find(mongo_filter, projection)
+            )
+        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
+            return list(self.knowledge_base_collection.find(mongo_filter, projection))
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            return list(self.conversation_memory_collection.find({}, projection))
+            return list(
+                self.conversation_memory_collection.find(mongo_filter, projection)
+            )
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return list(self.workflow_memory_collection.find({}, projection))
+            return list(self.workflow_memory_collection.find(mongo_filter, projection))
         elif memory_store_type == MemoryType.SHARED_MEMORY:
-            return list(self.shared_memory_collection.find({}, projection))
+            return list(self.shared_memory_collection.find(mongo_filter, projection))
         elif memory_store_type == MemoryType.SUMMARIES:
-            return list(self.summaries_collection.find({}, projection))
+            return list(self.summaries_collection.find(mongo_filter, projection))
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
-            return list(self.entity_memory_collection.find({}, projection))
+            return list(self.entity_memory_collection.find(mongo_filter, projection))
         elif memory_store_type == MemoryType.SEMANTIC_CACHE:
-            return list(self.semantic_cache_collection.find({}, projection))
+            return list(self.semantic_cache_collection.find(mongo_filter, projection))
         elif memory_store_type == MemoryType.MEMAGENT:
             return list(self.memagent_collection.find({}, projection))
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            return list(self.tool_log_collection.find(mongo_filter, projection))
         else:
             logger.warning(
                 f"Unsupported memory store type for list_all: {memory_store_type}"
@@ -1419,13 +1546,14 @@ class MongoDBProvider(MemoryProvider):
             MemoryType.TOOLBOX: self.toolbox_collection,
             MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
             MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
-            MemoryType.LONG_TERM_MEMORY: self.long_term_memory_collection,
+            MemoryType.KNOWLEDGE_BASE: self.knowledge_base_collection,
             MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
             MemoryType.SHARED_MEMORY: self.shared_memory_collection,
             MemoryType.SUMMARIES: self.summaries_collection,
             MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
             MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
             MemoryType.MEMAGENT: self.memagent_collection,
+            MemoryType.TOOL_LOG: self.tool_log_collection,
         }
 
         collection = collection_mapping.get(memory_store_type)
@@ -1486,6 +1614,7 @@ class MongoDBProvider(MemoryProvider):
         include_embedding: bool = False,
         memory_type: Union[str, "MemoryType"] = None,
         limit: int = None,
+        user_id: Any = _MONGO_UNSET,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve the conversation history ordered by timestamp.
@@ -1500,22 +1629,27 @@ class MongoDBProvider(MemoryProvider):
             Type of memory (defaults to CONVERSATION_MEMORY)
         limit : int, optional
             Maximum number of entries to return
+        user_id : str, optional
+            Multi-tenant scope. When provided, results are restricted to rows
+            whose ``user_id`` matches. When the sentinel default is used, no
+            ``user_id`` filter is applied (legacy callers).
 
         Returns:
         --------
         List[Dict[str, Any]]
             The conversation history ordered by timestamp.
         """
-        # Default to conversation_memory_collection if not specified
-        # (memory_type parameter is accepted for API compatibility but not currently used)
         projection = {} if include_embedding else {"embedding": 0}
+
+        base_filter: Dict[str, Any] = {"memory_id": memory_id}
+        if user_id is not _MONGO_UNSET:
+            base_filter.update(_mongo_user_id_predicate(user_id))
+
         if limit is not None:
             # Retrieve newest rows first, then reverse so callers still receive
             # chronological order (oldest -> newest) for prompt construction.
             query = (
-                self.conversation_memory_collection.find(
-                    {"memory_id": memory_id}, projection
-                )
+                self.conversation_memory_collection.find(base_filter, projection)
                 .sort("timestamp", -1)
                 .limit(limit)
             )
@@ -1523,9 +1657,13 @@ class MongoDBProvider(MemoryProvider):
             results.reverse()
         else:
             query = self.conversation_memory_collection.find(
-                {"memory_id": memory_id}, projection
+                base_filter, projection
             ).sort("timestamp", 1)
             results = list(query)
+
+        # Backward compat: migrate old conversation_id → thread_id on read
+        for doc in results:
+            self._normalize_legacy_fields(doc)
 
         logger.debug(
             f"Retrieved {len(results)} conversation items for memory_id: {memory_id}"
@@ -1539,6 +1677,7 @@ class MongoDBProvider(MemoryProvider):
         memory_id: str = None,
         memory_type: MemoryType = None,
         limit: int = 5,
+        user_id: Any = _MONGO_UNSET,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve memory units by query.
@@ -1555,6 +1694,8 @@ class MongoDBProvider(MemoryProvider):
             The type of memory to retrieve the memory units for.
         limit : int
             The maximum number of memory units to return.
+        user_id : str, optional
+            Multi-tenant scope; forwarded to downstream vector-search helpers.
 
         Returns:
         --------
@@ -1565,15 +1706,15 @@ class MongoDBProvider(MemoryProvider):
         # Detect the memory type
         if memory_type == MemoryType.CONVERSATION_MEMORY:
             return self.get_conversation_memory_units(
-                query, query_embedding, memory_id, limit
+                query, query_embedding, memory_id, limit, user_id=user_id
             )
         elif memory_type == MemoryType.WORKFLOW_MEMORY:
             return self.get_workflow_memory_units(
-                query, query_embedding, memory_id, limit
+                query, query_embedding, memory_id, limit, user_id=user_id
             )
         elif memory_type == MemoryType.SUMMARIES:
             return self.get_summaries_memory_units(
-                query, query_embedding, memory_id, limit
+                query, query_embedding, memory_id, limit, user_id=user_id
             )
         else:
             # Return empty list for unsupported memory types
@@ -1585,6 +1726,7 @@ class MongoDBProvider(MemoryProvider):
         query_embedding: list[float] = None,
         memory_id: str = None,
         limit: int = 5,
+        user_id: Any = _MONGO_UNSET,
     ) -> List[Dict[str, Any]]:
         """
         Get the conversation memory units.
@@ -1599,6 +1741,8 @@ class MongoDBProvider(MemoryProvider):
             The id of the memory to retrieve the memory units for.
         limit : int
             The maximum number of memory units to return.
+        user_id : str, optional
+            Multi-tenant scope for tenant-isolated vector search.
 
         Returns:
         --------
@@ -1622,6 +1766,10 @@ class MongoDBProvider(MemoryProvider):
                 logger.error(f"Failed to generate embedding for query: {e}")
                 return []
 
+        vs_filter: Dict[str, Any] = {"memory_id": memory_id}
+        if user_id is not _MONGO_UNSET:
+            vs_filter.update(_mongo_user_id_predicate(user_id))
+
         vector_stage = {
             "$vectorSearch": {
                 "index": "vector_index",
@@ -1629,7 +1777,7 @@ class MongoDBProvider(MemoryProvider):
                 "path": "embedding",
                 "numCandidates": 100,
                 "limit": limit,
-                "filter": {"memory_id": memory_id},
+                "filter": vs_filter,
             }
         }
 
@@ -1653,6 +1801,7 @@ class MongoDBProvider(MemoryProvider):
         query_embedding: list[float] = None,
         memory_id: str = None,
         limit: int = 5,
+        user_id: Any = _MONGO_UNSET,
     ) -> List[Dict[str, Any]]:
         """
         Get the summaries memory units.
@@ -1667,6 +1816,8 @@ class MongoDBProvider(MemoryProvider):
             The id of the memory to retrieve the memory units for.
         limit : int
             The maximum number of memory units to return.
+        user_id : str, optional
+            Multi-tenant scope for tenant-isolated vector search.
 
         Returns:
         --------
@@ -1682,6 +1833,10 @@ class MongoDBProvider(MemoryProvider):
                 logger.error(f"Failed to generate embedding for query: {e}")
                 return []
 
+        vs_filter: Dict[str, Any] = {"memory_id": memory_id}
+        if user_id is not _MONGO_UNSET:
+            vs_filter.update(_mongo_user_id_predicate(user_id))
+
         vector_stage = {
             "$vectorSearch": {
                 "index": "vector_index",
@@ -1689,7 +1844,7 @@ class MongoDBProvider(MemoryProvider):
                 "path": "embedding",
                 "numCandidates": 100,
                 "limit": limit,
-                "filter": {"memory_id": memory_id},
+                "filter": vs_filter,
             }
         }
 
@@ -1713,6 +1868,7 @@ class MongoDBProvider(MemoryProvider):
         query_embedding: list[float] = None,
         memory_id: str = None,
         limit: int = 5,
+        user_id: Any = _MONGO_UNSET,
     ) -> List[Dict[str, Any]]:
         """
         Get the workflow memory units.
@@ -1727,6 +1883,8 @@ class MongoDBProvider(MemoryProvider):
             The id of the memory to retrieve the memory units for.
         limit : int
             The maximum number of memory units to return.
+        user_id : str, optional
+            Multi-tenant scope for tenant-isolated vector search.
 
         Returns:
         --------
@@ -1748,6 +1906,10 @@ class MongoDBProvider(MemoryProvider):
                 logger.error(f"Failed to generate embedding for query: {e}")
                 return []
 
+        vs_filter: Dict[str, Any] = {"memory_id": memory_id}
+        if user_id is not _MONGO_UNSET:
+            vs_filter.update(_mongo_user_id_predicate(user_id))
+
         vector_stage = {
             "$vectorSearch": {
                 "index": "vector_index",
@@ -1755,7 +1917,7 @@ class MongoDBProvider(MemoryProvider):
                 "path": "embedding",
                 "numCandidates": 100,
                 "limit": limit,
-                "filter": {"memory_id": memory_id},
+                "filter": vs_filter,
             }
         }
 
@@ -1830,6 +1992,10 @@ class MongoDBProvider(MemoryProvider):
         # Add the generated _id to the response
         memagent_dict["_id"] = result.inserted_id
 
+        self._sync_agent_tools_to_toolbox(
+            str(result.inserted_id), memagent_dict.get("tools")
+        )
+
         return memagent_dict
 
     def update_memagent(self, memagent: "MemAgentModel") -> "MemAgentModel":
@@ -1851,7 +2017,64 @@ class MongoDBProvider(MemoryProvider):
                 {"_id": ObjectId(str(agent_id))}, {"$set": memagent_dict}
             )
 
+        if agent_id is not None:
+            self._sync_agent_tools_to_toolbox(str(agent_id), memagent_dict.get("tools"))
+
         return memagent_dict
+
+    def _sync_agent_tools_to_toolbox(
+        self, agent_id: str, tools: Optional[List[Dict[str, Any]]]
+    ) -> None:
+        """Mirror an agent's tool list into the TOOLBOX collection.
+
+        Deletes any existing TOOLBOX rows for this ``agent_id`` before
+        re-inserting the current set so tools removed from the agent
+        don't linger in the playground's toolbox-memory pane.
+        ``tools=None`` is treated as "caller didn't include tools in this
+        save" and is a no-op — only an explicit empty list clears rows.
+        """
+        if not agent_id or tools is None:
+            return
+
+        try:
+            self.toolbox_collection.delete_many({"agent_id": agent_id})
+        except Exception as exc:
+            logger.warning(
+                "Failed to clear toolbox rows for agent %s: %s", agent_id, exc
+            )
+            return
+
+        if not tools:
+            return
+
+        for tool_meta in tools:
+            if not isinstance(tool_meta, dict):
+                continue
+            raw_id = tool_meta.get("_id") or tool_meta.get("name")
+            if not raw_id:
+                continue
+            tool_doc = {
+                "_id": f"{agent_id}:{raw_id}",
+                "tool_id": f"{agent_id}:{raw_id}",
+                "name": tool_meta.get("name"),
+                "description": tool_meta.get("description", ""),
+                "signature": tool_meta.get("signature", ""),
+                "docstring": tool_meta.get(
+                    "docstring", tool_meta.get("description", "")
+                ),
+                "tool_type": tool_meta.get("type", "function"),
+                "parameters": tool_meta.get("parameters", {}),
+                "agent_id": agent_id,
+            }
+            try:
+                self.store(tool_doc, memory_store_type=MemoryType.TOOLBOX)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to sync tool %s for agent %s to TOOLBOX: %s",
+                    tool_doc.get("name"),
+                    agent_id,
+                    exc,
+                )
 
     def retrieve_memagent(self, agent_id: str) -> "MemAgentModel":
         """
@@ -1893,7 +2116,14 @@ class MongoDBProvider(MemoryProvider):
             agent_id=str(document.get("_id")),
             is_favorite=bool(document.get("is_favorite", False)),
             tools=document.get("tools"),
-            long_term_memory_ids=document.get("long_term_memory_ids"),
+            tool_access=document.get("tool_access"),
+            knowledge_base_ids=document.get("knowledge_base_ids"),
+            delegates=document.get("delegates"),
+            llm_config=document.get("llm_config"),
+            embedding_config=document.get("embedding_config"),
+            semantic_cache=bool(document.get("semantic_cache", False)),
+            semantic_cache_config=document.get("semantic_cache_config"),
+            context_window_tokens=document.get("context_window_tokens"),
             sandbox_provider=document.get("sandbox_provider"),
             internet_access_provider=document.get("internet_access_provider"),
             internet_access_config=document.get("internet_access_config"),
@@ -1905,33 +2135,16 @@ class MongoDBProvider(MemoryProvider):
             self_aware_config=document.get("self_aware_config"),
             automations_enabled=bool(document.get("automations_enabled", True)),
             default_timezone=document.get("default_timezone"),
+            whatsapp_enabled=bool(document.get("whatsapp_enabled", False)),
+            whatsapp_config=document.get("whatsapp_config"),
             memory_provider=self,
         )
 
-        # Construct persona if present in the document
+        # Construct persona if present in the document. Use from_dict so
+        # stored goals/background aren't double-merged with role defaults and
+        # version/evolution_history/storage_id round-trip correctly.
         if document.get("persona"):
-            persona_data = document.get("persona")
-            # Handle role as a string by matching it to a RoleType enum
-            role_str = persona_data.get("role")
-            role = None
-
-            # Match the string role to a RoleType enum
-            for role_type in RoleType:
-                if role_type.value == role_str:
-                    role = role_type
-                    break
-
-            # If no matching enum is found, default to GENERAL
-            if role is None:
-                role = RoleType.GENERAL
-
-            memagent.persona = Persona(
-                name=persona_data.get("name"),
-                role=role,  # Pass the RoleType enum instead of string
-                goals=persona_data.get("goals"),
-                background=persona_data.get("background"),
-                persona_id=persona_data.get("persona_id"),
-            )
+            memagent.persona = Persona.from_dict(document.get("persona"))
 
         return memagent
 
@@ -1960,7 +2173,14 @@ class MongoDBProvider(MemoryProvider):
                 agent_id=str(doc.get("_id")),
                 is_favorite=bool(doc.get("is_favorite", False)),
                 tools=doc.get("tools"),  # Include tools from document
-                long_term_memory_ids=doc.get("long_term_memory_ids"),
+                tool_access=doc.get("tool_access"),
+                knowledge_base_ids=doc.get("knowledge_base_ids"),
+                delegates=doc.get("delegates"),
+                llm_config=doc.get("llm_config"),
+                embedding_config=doc.get("embedding_config"),
+                semantic_cache=bool(doc.get("semantic_cache", False)),
+                semantic_cache_config=doc.get("semantic_cache_config"),
+                context_window_tokens=doc.get("context_window_tokens"),
                 sandbox_provider=doc.get("sandbox_provider"),
                 internet_access_provider=doc.get("internet_access_provider"),
                 internet_access_config=doc.get("internet_access_config"),
@@ -1972,33 +2192,16 @@ class MongoDBProvider(MemoryProvider):
                 self_aware_config=doc.get("self_aware_config"),
                 automations_enabled=bool(doc.get("automations_enabled", True)),
                 default_timezone=doc.get("default_timezone"),
+                whatsapp_enabled=bool(doc.get("whatsapp_enabled", False)),
+                whatsapp_config=doc.get("whatsapp_config"),
                 memory_provider=self,
             )
 
-            # Construct persona if present in the document
+            # Construct persona if present in the document. Use from_dict so
+            # stored goals/background aren't double-merged with role defaults
+            # and version/evolution_history/storage_id round-trip correctly.
             if doc.get("persona"):
-                persona_data = doc.get("persona")
-                # Handle role as a string by matching it to a RoleType enum
-                role_str = persona_data.get("role")
-                role = None
-
-                # Match the string role to a RoleType enum
-                for role_type in RoleType:
-                    if role_type.value == role_str:
-                        role = role_type
-                        break
-
-                # If no matching enum is found, default to GENERAL
-                if role is None:
-                    role = RoleType.GENERAL
-
-                agent.persona = Persona(
-                    name=persona_data.get("name"),
-                    role=role,  # Pass the RoleType enum instead of string
-                    goals=persona_data.get("goals"),
-                    background=persona_data.get("background"),
-                    persona_id=persona_data.get("persona_id"),
-                )
+                agent.persona = Persona.from_dict(doc.get("persona"))
 
             agents.append(agent)
 
@@ -2127,14 +2330,16 @@ class MongoDBProvider(MemoryProvider):
             self.workflow_memory_collection.delete_many({"memory_id": memory_id})
         elif memory_type == MemoryType.SHORT_TERM_MEMORY:
             self.short_term_memory_collection.delete_many({"memory_id": memory_id})
-        elif memory_type == MemoryType.LONG_TERM_MEMORY:
-            self.long_term_memory_collection.delete_many({"memory_id": memory_id})
+        elif memory_type == MemoryType.KNOWLEDGE_BASE:
+            self.knowledge_base_collection.delete_many({"memory_id": memory_id})
         elif memory_type == MemoryType.PERSONAS:
             self.persona_collection.delete_many({"memory_id": memory_id})
         elif memory_type == MemoryType.TOOLBOX:
             self.toolbox_collection.delete_many({"memory_id": memory_id})
         elif memory_type == MemoryType.MEMAGENT:
             self.memagent_collection.delete_many({"memory_id": memory_id})
+        elif memory_type == MemoryType.TOOL_LOG:
+            self.tool_log_collection.delete_many({"memory_id": memory_id})
 
     def _setup_vector_search_index(
         self, collection, index_name="vector_index", memory_store: bool = False

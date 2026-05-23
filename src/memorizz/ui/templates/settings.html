@@ -3,6 +3,153 @@
 {% block title %}Settings - Memorizz{% endblock %}
 
 {% block content %}
+<style>
+    /* Local-model status banner + manage-list (Ollama / HuggingFace).
+       Shown below the Default Model picker when those providers are picked. */
+    .local-model-status .model-manager {
+        margin-top: 12px;
+        border: 1px solid var(--border-color, #2a2d36);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.02);
+    }
+    .local-model-status .model-manager > summary {
+        cursor: pointer;
+        padding: 0.55rem 0.85rem;
+        font-size: 0.85rem;
+        color: var(--text-secondary, #aaa);
+        list-style: none;
+        user-select: none;
+    }
+    .local-model-status .model-manager > summary::-webkit-details-marker { display: none; }
+    .local-model-status .model-manager > summary::before {
+        content: '▸ ';
+        display: inline-block;
+        transition: transform 0.15s ease;
+    }
+    .local-model-status .model-manager[open] > summary::before {
+        transform: rotate(90deg);
+    }
+    .local-model-status .model-list {
+        border-top: 1px solid var(--border-color, #2a2d36);
+        padding: 0.4rem 0.5rem 0.5rem;
+    }
+    .local-model-status .model-list-section {
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-secondary, #888);
+        padding: 0.5rem 0.35rem 0.25rem;
+    }
+    .local-model-status .model-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        padding: 0.35rem 0.5rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+    }
+    .local-model-status .model-row + .model-row {
+        border-top: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .local-model-status .model-row-text { min-width: 0; word-break: break-all; }
+    .local-model-status .model-row-text code,
+    .local-model-status .model-row-select code {
+        background: transparent;
+        padding: 0;
+        font-size: 0.85rem;
+    }
+    /* The clickable "select this model" wrapper around the row text. We
+       style the <button> to look like text — only on hover does it pick
+       up a faint outline so users learn it's interactive. */
+    .local-model-status .model-row-select {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        text-align: left;
+        background: transparent;
+        border: 1px solid transparent;
+        color: inherit;
+        padding: 0.2rem 0.45rem;
+        border-radius: 5px;
+        cursor: pointer;
+        font: inherit;
+        word-break: break-all;
+    }
+    .local-model-status .model-row-select:hover {
+        background: rgba(0, 217, 255, 0.06);
+        border-color: rgba(0, 217, 255, 0.25);
+    }
+    .local-model-status .model-row-select:focus-visible {
+        outline: 2px solid var(--accent-primary, #00d9ff);
+        outline-offset: 1px;
+    }
+    .local-model-status .model-row[data-selected="true"] {
+        background: rgba(0, 217, 255, 0.06);
+        border-left: 2px solid var(--accent-primary, #00d9ff);
+        padding-left: calc(0.5rem - 2px);
+    }
+    .local-model-status .model-row[data-selected="true"] .model-row-select {
+        color: var(--accent-primary, #00d9ff);
+        font-weight: 600;
+    }
+    .local-model-status .model-row-check {
+        color: var(--accent-primary, #00d9ff);
+        font-weight: 700;
+    }
+    .local-model-status .model-row-label { color: var(--text-secondary, #888); }
+    .local-model-status .model-action-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border-radius: 6px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--text-secondary, #aaa);
+        cursor: pointer;
+        transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+    }
+    .local-model-status .model-row[data-row-action="delete"] .model-action-btn:hover {
+        color: var(--accent-danger, #ff5577);
+        border-color: rgba(255, 85, 119, 0.45);
+        background: rgba(255, 85, 119, 0.08);
+    }
+    .local-model-status .model-row[data-row-action="pull"] .model-action-btn:hover {
+        color: var(--accent-primary, #00d9ff);
+        border-color: rgba(0, 217, 255, 0.45);
+        background: rgba(0, 217, 255, 0.08);
+    }
+    .local-model-status .model-action-btn:disabled {
+        cursor: progress;
+        opacity: 0.7;
+    }
+    .local-model-status .model-action-spinner {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: lm-spin 0.8s linear infinite;
+    }
+    @keyframes lm-spin { to { transform: rotate(360deg); } }
+
+    /* When the manage-list is the active selector for a local provider,
+       hide the redundant dropdown + custom input + hint so users only have
+       one way to pick a model. The label-row (with the Set/Missing badge)
+       stays visible so the field's status is still legible. */
+    .form-group.is-local-provider #MEMORIZZ_DEFAULT_LLM_MODEL_select,
+    .form-group.is-local-provider #MEMORIZZ_DEFAULT_LLM_MODEL_custom,
+    .form-group.is-local-provider > .form-hint {
+        display: none !important;
+    }
+</style>
 <div class="page-header">
     <h1>Settings</h1>
     <p>Manage API keys for providers and integrations.</p>
@@ -78,6 +225,7 @@
                     style="display: none; margin-top: 8px;"
                 >
                 <input type="hidden" id="{{ field.env }}" name="{{ field.env }}" value="{{ field.current_value }}">
+                <div id="local-model-status" class="local-model-status" style="display: none; margin-top: 10px;"></div>
                 {% else %}
                 <select id="{{ field.env }}" name="{{ field.env }}">
                     {% for opt in field.options %}
@@ -130,7 +278,7 @@
                 >
                 {% endif %}
                 {% if field.hint %}
-                <p class="form-hint">{{ field.hint }}</p>
+                <p class="form-hint">{{ field.hint|safe }}</p>
                 {% endif %}
             </div>
             {% endfor %}
@@ -165,6 +313,383 @@
 
         function setHiddenModelValue(value) {
             modelHiddenInput.value = (value || '').trim();
+            scheduleLocalCheck();
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, function(c) {
+                return ({
+                    '&': '&amp;', '<': '&lt;', '>': '&gt;',
+                    '"': '&quot;', "'": '&#39;'
+                })[c];
+            });
+        }
+
+        // Debounced wrapper because the custom-model text input fires `input`
+        // on every keystroke; we don't want to spam the API per char typed.
+        let _localCheckDebounce = null;
+        function scheduleLocalCheck() {
+            if (_localCheckDebounce) clearTimeout(_localCheckDebounce);
+            _localCheckDebounce = setTimeout(checkLocalModelAvailability, 350);
+        }
+
+        // Race protection — if a second fetch starts before the first returns
+        // (e.g. user flips providers quickly) only the most recent paints.
+        let _localCheckSeq = 0;
+        async function checkLocalModelAvailability() {
+            const statusEl = document.getElementById('local-model-status');
+            if (!statusEl) return;
+
+            const provider = (providerSelect.value || '').trim();
+            const model = (modelHiddenInput.value || '').trim();
+            if ((provider !== 'ollama' && provider !== 'huggingface') || !model) {
+                statusEl.style.display = 'none';
+                statusEl.innerHTML = '';
+                return;
+            }
+
+            const seq = ++_localCheckSeq;
+            statusEl.style.display = 'block';
+            statusEl.innerHTML = '<p class="form-hint">Checking '
+                + (provider === 'ollama' ? 'local Ollama' : 'HuggingFace cache')
+                + '…</p>';
+
+            const url = provider === 'ollama'
+                ? '/api/ollama/installed'
+                : '/api/huggingface/installed';
+
+            let info;
+            try {
+                const res = await fetch(url, { cache: 'no-store' });
+                info = await res.json();
+            } catch (err) {
+                if (seq !== _localCheckSeq) return;
+                statusEl.innerHTML =
+                    '<div class="warning-message"><strong>Could not reach the UI server</strong>: '
+                    + escapeHtml(String(err)) + '</div>';
+                return;
+            }
+            if (seq !== _localCheckSeq) return;
+
+            if (provider === 'ollama') {
+                renderOllamaStatus(statusEl, model, info);
+            } else {
+                renderHuggingFaceStatus(statusEl, model, info);
+            }
+        }
+
+        function renderOllamaStatus(statusEl, model, info) {
+            if (!info.reachable) {
+                statusEl.innerHTML =
+                    '<div class="warning-message">'
+                    + '<strong>Ollama is not running</strong> at <code>'
+                    + escapeHtml(info.host) + '</code>'
+                    + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
+                    + '.<br>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a> and start it, then '
+                    + '<a href="#" data-local-refresh>refresh this check</a>.'
+                    + '</div>';
+                wireRefreshLink(statusEl);
+                return;
+            }
+
+            // Ollama treats a bare name as `:latest` — match both directions
+            // so existing values like `llama3.1` register as installed when
+            // the user actually pulled `llama3.1:latest`.
+            const installed = (info.models || []).some(function(m) {
+                return m === model
+                    || m === model + ':latest'
+                    || m + ':latest' === model;
+            });
+
+            const base = model.split(':')[0];
+            const libUrl = 'https://ollama.com/library/' + encodeURIComponent(base);
+
+            const banner = installed
+                ? '<div class="success-message">'
+                    + '<strong><code>' + escapeHtml(model) + '</code> is available offline</strong>'
+                    + ' on Ollama at <code>' + escapeHtml(info.host) + '</code>.'
+                    + '</div>'
+                : '<div class="warning-message">'
+                    + '<strong><code>' + escapeHtml(model) + '</code> is not installed locally.</strong><br>'
+                    + 'Run <code>ollama pull ' + escapeHtml(model) + '</code> in a terminal, or '
+                    + '<a href="' + libUrl + '" target="_blank" rel="noopener">browse <code>'
+                    + escapeHtml(base) + '</code> on ollama.com</a>. '
+                    + 'Then <a href="#" data-local-refresh>refresh this check</a>.'
+                    + '</div>';
+
+            statusEl.innerHTML = banner + manageListHtml(info.models, 'ollama', 'Ollama');
+            wireRefreshLink(statusEl);
+        }
+
+        function renderHuggingFaceStatus(statusEl, model, info) {
+            if (!info.available) {
+                statusEl.innerHTML =
+                    '<div class="warning-message">'
+                    + '<strong>HuggingFace cache unavailable</strong>'
+                    + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
+                    + '.<br>Install the SDK with <code>pip install memorizz[huggingface]</code>, then '
+                    + '<a href="#" data-local-refresh>refresh this check</a>.'
+                    + '</div>';
+                wireRefreshLink(statusEl);
+                return;
+            }
+
+            // HF repo IDs are case-sensitive; only exact match counts.
+            const cached = (info.models || []).indexOf(model) !== -1;
+            const repoUrl = 'https://huggingface.co/'
+                + model.split('/').map(encodeURIComponent).join('/');
+            const cacheLoc = info.cache_dir || 'local HF cache';
+
+            const banner = cached
+                ? '<div class="success-message">'
+                    + '<strong><code>' + escapeHtml(model) + '</code> is cached locally</strong>'
+                    + ' at <code>' + escapeHtml(cacheLoc) + '</code>.'
+                    + '</div>'
+                : '<div class="warning-message">'
+                    + '<strong><code>' + escapeHtml(model) + '</code> is not cached locally.</strong><br>'
+                    + 'It will be downloaded the first time the agent loads (a few hundred MB to several GB). '
+                    + 'You can pre-download with <code>huggingface-cli download ' + escapeHtml(model) + '</code>, '
+                    + 'or <a href="' + repoUrl + '" target="_blank" rel="noopener">view the model card</a>. '
+                    + 'Then <a href="#" data-local-refresh>refresh this check</a>.'
+                    + '</div>';
+
+            statusEl.innerHTML = banner + manageListHtml(info.models, 'huggingface', 'HuggingFace');
+            wireRefreshLink(statusEl);
+        }
+
+        // Build the manage-list panel: every locally-pulled model with a
+        // trash button, plus every catalog model that isn't pulled yet with
+        // a download button. Catalog data comes from the same `modelCatalog`
+        // dict the dropdown uses, so the two surfaces never drift.
+        function manageListHtml(installedModels, provider, label) {
+            const installed = (installedModels || []).filter(Boolean);
+            const installedSet = new Set(installed);
+            const isInstalled = function(val) {
+                if (installedSet.has(val)) return true;
+                if (provider === 'ollama') {
+                    if (installedSet.has(val + ':latest')) return true;
+                    if (val.endsWith(':latest') && installedSet.has(val.slice(0, -7))) return true;
+                }
+                return false;
+            };
+
+            const catalog = (modelCatalog[provider] || []);
+            const catalogValueSet = new Set(catalog.map(function(m) { return m.value; }));
+            const catalogInstalled = catalog.filter(function(m) { return isInstalled(m.value); });
+            const catalogMissing = catalog.filter(function(m) { return !isInstalled(m.value); });
+            // User-pulled models that we don't have a catalog row for.
+            const extras = installed.filter(function(name) {
+                if (catalogValueSet.has(name)) return false;
+                if (provider === 'ollama' && name.endsWith(':latest')) {
+                    if (catalogValueSet.has(name.slice(0, -7))) return false;
+                }
+                return true;
+            });
+            const totalInstalled = catalogInstalled.length + extras.length;
+
+            if (totalInstalled === 0 && catalogMissing.length === 0) {
+                return '';
+            }
+
+            const rows = [];
+            if (totalInstalled > 0) {
+                rows.push('<div class="model-list-section">Available offline ('
+                    + totalInstalled + ')</div>');
+                catalogInstalled.forEach(function(m) {
+                    rows.push(modelRow(m.value, m.label, provider, 'delete'));
+                });
+                extras.forEach(function(name) {
+                    rows.push(modelRow(name, name, provider, 'delete'));
+                });
+            }
+            if (catalogMissing.length > 0) {
+                rows.push('<div class="model-list-section">Available to download ('
+                    + catalogMissing.length + ')</div>');
+                catalogMissing.forEach(function(m) {
+                    rows.push(modelRow(m.value, m.label, provider, 'pull'));
+                });
+            }
+
+            return '<details class="model-manager" open>'
+                + '<summary>Manage ' + escapeHtml(label) + ' models</summary>'
+                + '<div class="model-list">' + rows.join('') + '</div>'
+                + '</details>';
+        }
+
+        function modelRow(value, label, provider, action) {
+            const icon = action === 'delete' ? trashIconSvg() : downloadIconSvg();
+            const title = action === 'delete' ? 'Remove from local cache' : 'Download to local cache';
+            const aria = action === 'delete' ? ('Remove ' + value) : ('Download ' + value);
+            const labelHtml = (label && label !== value)
+                ? '<span class="model-row-label"> &mdash; ' + escapeHtml(label) + '</span>'
+                : '';
+            // Only "Available offline" rows (action === 'delete') are
+            // selectable — picking one loads it into the Default Model
+            // field above and triggers the existing setHiddenModelValue
+            // flow so Save Keys persists it. Catalog rows that aren't
+            // pulled yet stay non-selectable; they'd 404 if selected.
+            const isSelectable = action === 'delete';
+            const currentValue = (modelHiddenInput.value || '').trim();
+            const isSelected = isSelectable && currentValue === value;
+            const inner = '<code>' + escapeHtml(value) + '</code>' + labelHtml;
+            const textHtml = isSelectable
+                ? '<button type="button" class="model-row-select"'
+                    + ' data-select-model="' + escapeHtml(value) + '"'
+                    + ' aria-pressed="' + (isSelected ? 'true' : 'false') + '"'
+                    + ' title="Use this model as the Default Model">'
+                    + (isSelected
+                        ? '<span class="model-row-check" aria-hidden="true">✓</span>'
+                        : '')
+                    + inner
+                    + '</button>'
+                : '<div class="model-row-text">' + inner + '</div>';
+            return '<div class="model-row" data-row-action="' + action + '"'
+                + (isSelected ? ' data-selected="true"' : '')
+                + '>'
+                + textHtml
+                + '<button type="button" class="model-action-btn"'
+                + ' data-action="' + action + '"'
+                + ' data-provider="' + escapeHtml(provider) + '"'
+                + ' data-model="' + escapeHtml(value) + '"'
+                + ' title="' + escapeHtml(title) + '"'
+                + ' aria-label="' + escapeHtml(aria) + '">'
+                + icon + '</button>'
+                + '</div>';
+        }
+
+        function selectModelFromRow(value) {
+            const provider = (providerSelect.value || '').trim();
+            const catalog = modelCatalog[provider] || [];
+            const inCatalog = catalog.some(function(m) { return m.value === value; });
+            if (inCatalog) {
+                modelSelect.value = value;
+                modelCustomInput.value = value;
+                showCustomInput(false);
+            } else {
+                // User-pulled model that isn't in the dropdown's options —
+                // route it through the "Custom" path so the value still
+                // persists on Save Keys.
+                modelSelect.value = CUSTOM_VALUE;
+                modelCustomInput.value = value;
+                showCustomInput(true);
+            }
+            setHiddenModelValue(value);
+        }
+
+        function trashIconSvg() {
+            return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                + '<polyline points="3 6 5 6 21 6"></polyline>'
+                + '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>'
+                + '<path d="M10 11v6"></path><path d="M14 11v6"></path>'
+                + '<path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>'
+                + '</svg>';
+        }
+
+        function downloadIconSvg() {
+            return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>'
+                + '<polyline points="7 10 12 15 17 10"></polyline>'
+                + '<line x1="12" y1="15" x2="12" y2="3"></line>'
+                + '</svg>';
+        }
+
+        // Single click handler delegated from document, so freshly-rendered
+        // rows after a refresh keep working without re-binding.
+        let _modelActionInFlight = false;
+        async function handleModelActionClick(button) {
+            if (_modelActionInFlight) return;
+            const action = button.dataset.action;
+            const provider = button.dataset.provider;
+            const model = button.dataset.model;
+            if (!action || !provider || !model) return;
+
+            if (action === 'delete' && !window.confirm('Remove ' + model + ' from local cache?')) {
+                return;
+            }
+            if (action === 'pull') {
+                const ok = window.confirm('Download ' + model + '?\n\n'
+                    + 'Large models can take 5–15 minutes. The page will appear to hang while the download runs in the background.');
+                if (!ok) return;
+            }
+
+            _modelActionInFlight = true;
+            button.disabled = true;
+            button.classList.add('is-busy');
+            const originalHtml = button.innerHTML;
+            button.innerHTML = '<span class="model-action-spinner" aria-hidden="true"></span>';
+
+            try {
+                let res;
+                if (action === 'delete' && provider === 'ollama') {
+                    res = await fetch('/api/ollama/models/' + encodeURIComponent(model), { method: 'DELETE' });
+                } else if (action === 'delete' && provider === 'huggingface') {
+                    res = await fetch('/api/huggingface/models/' + encodeURIComponent(model), { method: 'DELETE' });
+                } else if (action === 'pull') {
+                    const fd = new FormData();
+                    fd.append(provider === 'ollama' ? 'name' : 'repo_id', model);
+                    const url = provider === 'ollama' ? '/api/ollama/pull' : '/api/huggingface/pull';
+                    res = await fetch(url, { method: 'POST', body: fd });
+                } else {
+                    return;
+                }
+                let data = {};
+                try { data = await res.json(); } catch (_) { /* ignore */ }
+                if (!data.ok) {
+                    window.alert('Failed: ' + (data.error || ('HTTP ' + res.status)));
+                }
+            } catch (err) {
+                window.alert('Error: ' + err);
+            } finally {
+                _modelActionInFlight = false;
+                button.disabled = false;
+                button.classList.remove('is-busy');
+                button.innerHTML = originalHtml;
+                checkLocalModelAvailability();
+            }
+        }
+
+        document.addEventListener('click', function(ev) {
+            const btn = ev.target.closest && ev.target.closest('.model-action-btn');
+            if (!btn) return;
+            ev.preventDefault();
+            handleModelActionClick(btn);
+        });
+
+        document.addEventListener('click', function(ev) {
+            const sel = ev.target.closest && ev.target.closest('[data-select-model]');
+            if (!sel) return;
+            ev.preventDefault();
+            selectModelFromRow(sel.getAttribute('data-select-model'));
+        });
+
+        // Toggle dropdown vs. manage-list as the single selector. We watch
+        // the status panel for a `.model-manager` element: if one is
+        // present, the manage-list is taking over selection so we hide
+        // the dropdown; otherwise (e.g. provider isn't local, or the
+        // Ollama daemon is down) the dropdown stays visible as the
+        // fallback selector.
+        function syncDropdownVisibility() {
+            const formGroup = modelHiddenInput.closest('.form-group');
+            if (!formGroup) return;
+            const hasManageList = !!document.querySelector('#local-model-status .model-manager');
+            formGroup.classList.toggle('is-local-provider', hasManageList);
+        }
+        const _statusPanel = document.getElementById('local-model-status');
+        if (_statusPanel && typeof MutationObserver !== 'undefined') {
+            new MutationObserver(syncDropdownVisibility).observe(_statusPanel, {
+                childList: true,
+                subtree: true,
+            });
+        }
+        syncDropdownVisibility();
+
+        function wireRefreshLink(scope) {
+            const link = scope.querySelector('[data-local-refresh]');
+            if (!link) return;
+            link.addEventListener('click', function(ev) {
+                ev.preventDefault();
+                checkLocalModelAvailability();
+            });
         }
 
         function showCustomInput(show) {

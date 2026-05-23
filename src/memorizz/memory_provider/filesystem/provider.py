@@ -32,6 +32,30 @@ from ..base import MemoryProvider
 logger = logging.getLogger(__name__)
 
 
+class _FsUserIdUnset:
+    """Sentinel for "user_id filter not supplied" — distinct from explicit None."""
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return "<user_id unset>"
+
+
+_FS_UNSET = _FsUserIdUnset()
+
+
+_FS_USER_SCOPED_TYPES = frozenset(
+    {
+        MemoryType.CONVERSATION_MEMORY,
+        MemoryType.KNOWLEDGE_BASE,
+        MemoryType.SHORT_TERM_MEMORY,
+        MemoryType.WORKFLOW_MEMORY,
+        MemoryType.SUMMARIES,
+        MemoryType.SEMANTIC_CACHE,
+        MemoryType.ENTITY_MEMORY,
+        MemoryType.TOOL_LOG,
+    }
+)
+
+
 @dataclass
 class FileSystemConfig:
     """Configuration for the filesystem provider."""
@@ -58,7 +82,7 @@ class FileSystemProvider(MemoryProvider):
     INDEX_VERSION = 1
     VECTOR_ENABLED_TYPES = {
         MemoryType.CONVERSATION_MEMORY,
-        MemoryType.LONG_TERM_MEMORY,
+        MemoryType.KNOWLEDGE_BASE,
         MemoryType.SHORT_TERM_MEMORY,
         MemoryType.WORKFLOW_MEMORY,
         MemoryType.SUMMARIES,
@@ -139,14 +163,23 @@ class FileSystemProvider(MemoryProvider):
         **kwargs,
     ) -> Optional[List[Dict[str, Any]]]:
         resolved_type = self._normalize_memory_type(memory_type or memory_store_type)
+        user_id_scope = kwargs.get("user_id", _FS_UNSET)
 
         if isinstance(query, dict):
             return self._filter_documents(
-                resolved_type, query, limit, memory_id=memory_id
+                resolved_type,
+                query,
+                limit,
+                memory_id=memory_id,
+                user_id=user_id_scope,
             )
         elif isinstance(query, str):
             return self._semantic_search(
-                resolved_type, query, limit, memory_id=memory_id
+                resolved_type,
+                query,
+                limit,
+                memory_id=memory_id,
+                user_id=user_id_scope,
             )
         else:
             raise ValueError("query must be either a dict filter or a string")
@@ -226,15 +259,23 @@ class FileSystemProvider(MemoryProvider):
             return True
 
     def list_all(
-        self, memory_store_type: Union[str, MemoryType, None]
+        self,
+        memory_store_type: Union[str, MemoryType, None],
+        user_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         memory_type = self._normalize_memory_type(memory_store_type)
         documents: List[Dict[str, Any]] = []
+        apply_user_filter = (
+            user_id is not _FS_UNSET and memory_type in _FS_USER_SCOPED_TYPES
+        )
         with self._locks[memory_type]:
             for doc_id in self._indexes[memory_type].keys():
                 document = self._read_document(memory_type, doc_id)
-                if document:
-                    documents.append(document)
+                if not document:
+                    continue
+                if apply_user_filter and document.get("user_id") != user_id:
+                    continue
+                documents.append(document)
         return documents
 
     def retrieve_conversation_history_ordered_by_timestamp(
@@ -242,10 +283,12 @@ class FileSystemProvider(MemoryProvider):
         memory_id: str,
         memory_type: Union[str, MemoryType, None] = None,
         limit: Optional[int] = None,
+        user_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         resolved_type = self._normalize_memory_type(
             memory_type or MemoryType.CONVERSATION_MEMORY
         )
+        apply_user_filter = user_id is not _FS_UNSET
         with self._locks[resolved_type]:
             documents: List[Tuple[float, Dict[str, Any]]] = []
             for doc_id in self._indexes[resolved_type]:
@@ -253,6 +296,8 @@ class FileSystemProvider(MemoryProvider):
                 if not document:
                     continue
                 if document.get("memory_id") != memory_id:
+                    continue
+                if apply_user_filter and document.get("user_id") != user_id:
                     continue
                 timestamp = self._coerce_timestamp(
                     document.get("timestamp") or document.get("created_at")
@@ -308,7 +353,69 @@ class FileSystemProvider(MemoryProvider):
                     tool.pop("function")
 
         self._write_document(MemoryType.MEMAGENT, agent_id, memagent_dict)
+        self._sync_agent_tools_to_toolbox(agent_id, tools)
         return agent_id
+
+    def _sync_agent_tools_to_toolbox(
+        self, agent_id: str, tools: Optional[List[Dict[str, Any]]]
+    ) -> None:
+        """Mirror an agent's tool list into the TOOLBOX store.
+
+        Deletes any existing TOOLBOX rows for this ``agent_id`` before
+        re-inserting the current set so tools removed from the agent
+        don't linger in the playground's toolbox-memory pane.
+        ``tools=None`` is treated as "caller didn't include tools in this
+        save" and is a no-op — only an explicit empty list clears rows.
+        """
+        if not agent_id or tools is None:
+            return
+
+        try:
+            for doc in list(self.list_all(MemoryType.TOOLBOX) or []):
+                if not isinstance(doc, dict):
+                    continue
+                if doc.get("agent_id") != agent_id:
+                    continue
+                doc_id = doc.get("_id") or doc.get("id")
+                if doc_id:
+                    self.delete_by_id(str(doc_id), MemoryType.TOOLBOX)
+        except Exception as exc:
+            logger.warning(
+                "Failed to clear toolbox rows for agent %s: %s", agent_id, exc
+            )
+            return
+
+        if not tools:
+            return
+
+        for tool_meta in tools:
+            if not isinstance(tool_meta, dict):
+                continue
+            raw_id = tool_meta.get("_id") or tool_meta.get("name")
+            if not raw_id:
+                continue
+            tool_doc = {
+                "_id": f"{agent_id}:{raw_id}",
+                "tool_id": f"{agent_id}:{raw_id}",
+                "name": tool_meta.get("name"),
+                "description": tool_meta.get("description", ""),
+                "signature": tool_meta.get("signature", ""),
+                "docstring": tool_meta.get(
+                    "docstring", tool_meta.get("description", "")
+                ),
+                "tool_type": tool_meta.get("type", "function"),
+                "parameters": tool_meta.get("parameters", {}),
+                "agent_id": agent_id,
+            }
+            try:
+                self.store(tool_doc, memory_store_type=MemoryType.TOOLBOX)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to sync tool %s for agent %s to TOOLBOX: %s",
+                    tool_doc.get("name"),
+                    agent_id,
+                    exc,
+                )
 
     def delete_memagent(self, agent_id: str, cascade: bool = False) -> bool:
         if cascade:
@@ -335,8 +442,8 @@ class FileSystemProvider(MemoryProvider):
         if not documents:
             return agents
 
-        from ...long_term_memory.semantic.persona.persona import Persona
-        from ...long_term_memory.semantic.persona.role_type import RoleType
+        from ...long_term.semantic.persona.persona import Persona
+        from ...long_term.semantic.persona.role_type import RoleType
         from ...memagent import MemAgentModel
 
         for doc in documents:
@@ -350,7 +457,14 @@ class FileSystemProvider(MemoryProvider):
                 agent_id=doc.get("agent_id") or doc.get("_id"),
                 is_favorite=bool(doc.get("is_favorite", False)),
                 tools=doc.get("tools"),
-                long_term_memory_ids=doc.get("long_term_memory_ids"),
+                tool_access=doc.get("tool_access"),
+                knowledge_base_ids=doc.get("knowledge_base_ids"),
+                delegates=doc.get("delegates"),
+                llm_config=doc.get("llm_config"),
+                embedding_config=doc.get("embedding_config"),
+                semantic_cache=bool(doc.get("semantic_cache", False)),
+                semantic_cache_config=doc.get("semantic_cache_config"),
+                context_window_tokens=doc.get("context_window_tokens"),
                 sandbox_provider=doc.get("sandbox_provider"),
                 internet_access_provider=doc.get("internet_access_provider"),
                 internet_access_config=doc.get("internet_access_config"),
@@ -362,25 +476,14 @@ class FileSystemProvider(MemoryProvider):
                 self_aware_config=doc.get("self_aware_config"),
                 automations_enabled=bool(doc.get("automations_enabled", True)),
                 default_timezone=doc.get("default_timezone"),
+                whatsapp_enabled=bool(doc.get("whatsapp_enabled", False)),
+                whatsapp_config=doc.get("whatsapp_config"),
                 memory_provider=self,
             )
 
             persona_data = doc.get("persona")
             if persona_data:
-                role_value = persona_data.get("role")
-                role = None
-                for role_type in RoleType:
-                    if role_type.value == role_value:
-                        role = role_type
-                        break
-                role = role or RoleType.GENERAL
-                agent.persona = Persona(
-                    name=persona_data.get("name"),
-                    role=role,
-                    goals=persona_data.get("goals"),
-                    background=persona_data.get("background"),
-                    persona_id=persona_data.get("persona_id"),
-                )
+                agent.persona = Persona.from_dict(persona_data)
             agents.append(agent)
         return agents
 
@@ -389,8 +492,8 @@ class FileSystemProvider(MemoryProvider):
         if not document:
             return None
 
-        from ...long_term_memory.semantic.persona.persona import Persona
-        from ...long_term_memory.semantic.persona.role_type import RoleType
+        from ...long_term.semantic.persona.persona import Persona
+        from ...long_term.semantic.persona.role_type import RoleType
         from ...memagent import MemAgentModel
 
         memagent = MemAgentModel(
@@ -403,7 +506,14 @@ class FileSystemProvider(MemoryProvider):
             agent_id=document.get("agent_id") or document.get("_id"),
             is_favorite=bool(document.get("is_favorite", False)),
             tools=document.get("tools"),
-            long_term_memory_ids=document.get("long_term_memory_ids"),
+            tool_access=document.get("tool_access"),
+            knowledge_base_ids=document.get("knowledge_base_ids"),
+            delegates=document.get("delegates"),
+            llm_config=document.get("llm_config"),
+            embedding_config=document.get("embedding_config"),
+            semantic_cache=bool(document.get("semantic_cache", False)),
+            semantic_cache_config=document.get("semantic_cache_config"),
+            context_window_tokens=document.get("context_window_tokens"),
             sandbox_provider=document.get("sandbox_provider"),
             internet_access_provider=document.get("internet_access_provider"),
             internet_access_config=document.get("internet_access_config"),
@@ -415,25 +525,14 @@ class FileSystemProvider(MemoryProvider):
             self_aware_config=document.get("self_aware_config"),
             automations_enabled=bool(document.get("automations_enabled", True)),
             default_timezone=document.get("default_timezone"),
+            whatsapp_enabled=bool(document.get("whatsapp_enabled", False)),
+            whatsapp_config=document.get("whatsapp_config"),
             memory_provider=self,
         )
 
         persona_data = document.get("persona")
         if persona_data:
-            role_value = persona_data.get("role")
-            role = None
-            for role_type in RoleType:
-                if role_type.value == role_value:
-                    role = role_type
-                    break
-            role = role or RoleType.GENERAL
-            memagent.persona = Persona(
-                name=persona_data.get("name"),
-                role=role,
-                goals=persona_data.get("goals"),
-                background=persona_data.get("background"),
-                persona_id=persona_data.get("persona_id"),
-            )
+            memagent.persona = Persona.from_dict(persona_data)
         return memagent
 
     def supports_entity_memory(self) -> bool:
@@ -563,7 +662,16 @@ class FileSystemProvider(MemoryProvider):
             return None
         try:
             with file_path.open("r", encoding="utf-8") as handle:
-                return json.load(handle)
+                doc = json.load(handle)
+            # Backward compat: migrate old conversation_id → thread_id on read
+            if "conversation_id" in doc and "thread_id" not in doc:
+                doc["thread_id"] = doc.pop("conversation_id")
+            if (
+                "associated_conversation_ids" in doc
+                and "associated_thread_ids" not in doc
+            ):
+                doc["associated_thread_ids"] = doc.pop("associated_conversation_ids")
+            return doc
         except Exception as exc:
             logger.warning("Failed to read %s: %s", file_path, exc)
             return None
@@ -574,9 +682,10 @@ class FileSystemProvider(MemoryProvider):
             "id": document.get("id"),
             "name": document.get("name") or document.get("title"),
             "memory_id": document.get("memory_id"),
+            "user_id": document.get("user_id"),
             "timestamp": timestamp,
             "has_embedding": bool(document.get("embedding")),
-            "conversation_id": document.get("conversation_id"),
+            "thread_id": document.get("thread_id") or document.get("conversation_id"),
         }
 
     def _read_index_file(self, store_path: Path) -> Dict[str, Dict[str, Any]]:
@@ -605,12 +714,25 @@ class FileSystemProvider(MemoryProvider):
             json.dump(payload, handle, ensure_ascii=False)
         os.replace(tmp_path, index_path)
 
+    @staticmethod
+    def _user_id_scope_matches(document: Dict[str, Any], user_id: Any) -> bool:
+        """Return True when ``document`` belongs to the given tenant scope.
+
+        ``_FS_UNSET`` disables filtering entirely. Any other value enforces
+        strict equality — ``None`` only matches rows where ``user_id`` is
+        missing or literally ``None``.
+        """
+        if user_id is _FS_UNSET:
+            return True
+        return document.get("user_id") == user_id
+
     def _filter_documents(
         self,
         memory_type: MemoryType,
         filters: Dict[str, Any],
         limit: int,
         memory_id: Optional[str],
+        user_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         matches: List[Dict[str, Any]] = []
         with self._locks[memory_type]:
@@ -619,6 +741,8 @@ class FileSystemProvider(MemoryProvider):
                 if not document:
                     continue
                 if memory_id and document.get("memory_id") != memory_id:
+                    continue
+                if not self._user_id_scope_matches(document, user_id):
                     continue
                 if all(document.get(k) == v for k, v in filters.items()):
                     matches.append(document)
@@ -632,20 +756,28 @@ class FileSystemProvider(MemoryProvider):
         query: str,
         limit: int,
         memory_id: Optional[str],
+        user_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         embedding_provider = self._get_embedding_provider()
         if embedding_provider is None:
             logger.debug(
                 "Embedding provider not configured; falling back to keyword search"
             )
-            return self._keyword_search(memory_type, query, limit, memory_id)
+            return self._keyword_search(
+                memory_type, query, limit, memory_id, user_id=user_id
+            )
 
         if faiss is None or np is None:
             logger.debug(
                 "FAISS/numpy unavailable; falling back to brute-force cosine search"
             )
             return self._brute_force_search(
-                memory_type, query, limit, memory_id, embedding_provider
+                memory_type,
+                query,
+                limit,
+                memory_id,
+                embedding_provider,
+                user_id=user_id,
             )
 
         query_embedding = embedding_provider.get_embedding(query)
@@ -658,7 +790,8 @@ class FileSystemProvider(MemoryProvider):
             return []
 
         top_k = max(limit or 1, 1)
-        distances, indices = index.search(query_vector.reshape(1, -1), top_k * 2)
+        # Over-fetch so the user_id filter still returns enough matches.
+        distances, indices = index.search(query_vector.reshape(1, -1), top_k * 4)
 
         matches: List[Dict[str, Any]] = []
         for position, score in zip(indices[0], distances[0]):
@@ -669,6 +802,8 @@ class FileSystemProvider(MemoryProvider):
             if not document:
                 continue
             if memory_id and document.get("memory_id") != memory_id:
+                continue
+            if not self._user_id_scope_matches(document, user_id):
                 continue
             document["score"] = float(score)
             matches.append(document)
@@ -683,10 +818,13 @@ class FileSystemProvider(MemoryProvider):
         limit: int,
         memory_id: Optional[str],
         embedding_provider=None,
+        user_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         embedding_provider = embedding_provider or self._get_embedding_provider()
         if embedding_provider is None:
-            return self._keyword_search(memory_type, query, limit, memory_id)
+            return self._keyword_search(
+                memory_type, query, limit, memory_id, user_id=user_id
+            )
 
         query_embedding = embedding_provider.get_embedding(query)
         query_vector = (
@@ -700,6 +838,8 @@ class FileSystemProvider(MemoryProvider):
                 if not document or "embedding" not in document:
                     continue
                 if memory_id and document.get("memory_id") != memory_id:
+                    continue
+                if not self._user_id_scope_matches(document, user_id):
                     continue
                 target = document["embedding"]
                 similarity = self._cosine_similarity(query_vector, target)
@@ -717,6 +857,7 @@ class FileSystemProvider(MemoryProvider):
         query: str,
         limit: int,
         memory_id: Optional[str],
+        user_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         if not query:
             return []
@@ -728,6 +869,8 @@ class FileSystemProvider(MemoryProvider):
                 if not document:
                     continue
                 if memory_id and document.get("memory_id") != memory_id:
+                    continue
+                if not self._user_id_scope_matches(document, user_id):
                     continue
                 haystacks = [
                     str(document.get("content", "")),

@@ -13,7 +13,7 @@ This document explains how Memorizz organizes memory for single-agent and multi-
 
 ```text
 src/memorizz/
-├── long_term_memory/
+├── long_term/
 │   ├── semantic/
 │   │   ├── knowledge_base.py
 │   │   ├── persona/
@@ -42,7 +42,7 @@ src/memorizz/
 
 `MemoryType` is defined in `src/memorizz/enums/memory_type.py`.
 
-- `LONG_TERM_MEMORY`: semantic facts/knowledge
+- `KNOWLEDGE_BASE`: semantic facts/knowledge
 - `ENTITY_MEMORY`: structured entity attributes and updates
 - `TOOLBOX`: executable tools and metadata
 - `WORKFLOW_MEMORY`: process/task state
@@ -58,11 +58,11 @@ src/memorizz/
 `ApplicationModeConfig` in `src/memorizz/enums/application_mode.py` maps modes to default memory stacks:
 
 - `assistant`
-  - `CONVERSATION_MEMORY`, `LONG_TERM_MEMORY`, `PERSONAS`, `ENTITY_MEMORY`, `SHORT_TERM_MEMORY`, `SUMMARIES`
+  - `CONVERSATION_MEMORY`, `KNOWLEDGE_BASE`, `PERSONAS`, `ENTITY_MEMORY`, `SHORT_TERM_MEMORY`, `SUMMARIES`
 - `workflow`
-  - `WORKFLOW_MEMORY`, `TOOLBOX`, `LONG_TERM_MEMORY`, `SHORT_TERM_MEMORY`, `SUMMARIES`
+  - `WORKFLOW_MEMORY`, `TOOLBOX`, `KNOWLEDGE_BASE`, `SHORT_TERM_MEMORY`, `SUMMARIES`
 - `deep_research`
-  - `TOOLBOX`, `SHARED_MEMORY`, `LONG_TERM_MEMORY`, `SHORT_TERM_MEMORY`, `SUMMARIES`
+  - `TOOLBOX`, `SHARED_MEMORY`, `KNOWLEDGE_BASE`, `SHORT_TERM_MEMORY`, `SUMMARIES`
 
 These defaults can be overridden by passing explicit `memory_types` to `MemAgent`.
 
@@ -74,14 +74,17 @@ These defaults can be overridden by passing explicit `memory_types` to `MemAgent
 - `EntityMemoryManager`
 - `ToolManager`
 - `CacheManager`
-- `PersonaManager`
+- `PersonaManager` — exposes a versioned `Persona` (stable identity with
+  `evolution_history`) and registers the `update_persona` / `read_persona`
+  tools on every agent that has a persona attached. Changes are traceable
+  via a `change_trigger` (reason + source memory/conversation id).
 - `WorkflowManager`
 - `InternetAccessManager`
 - `SandboxManager` (when configured)
 
 Request lifecycle (high level):
 
-1. Resolve `memory_id` and `conversation_id`
+1. Resolve `memory_id` and `thread_id`
 2. Try semantic cache (if enabled)
 3. Build context from active memory types
 4. Execute LLM/tool loop

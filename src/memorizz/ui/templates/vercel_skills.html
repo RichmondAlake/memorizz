@@ -1,0 +1,541 @@
+{% extends "base.html" %}
+
+{% block title %}Vercel Skills - Memorizz{% endblock %}
+
+{% block head %}
+<style>
+    .vercel-hero {
+        background: linear-gradient(135deg, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0.3) 100%);
+        border: 1px solid var(--border-color, #1a1a2e);
+        border-radius: 12px;
+        padding: 2rem;
+        margin-bottom: 2rem;
+    }
+    .vercel-hero h1 {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        font-size: 1.5rem;
+        margin-bottom: 0.5rem;
+    }
+    .vercel-hero .vercel-logo {
+        display: inline-block;
+        width: 24px;
+        height: 24px;
+    }
+    .vercel-hero p {
+        color: var(--text-secondary, #8b8b9e);
+        margin: 0;
+        font-size: 0.95rem;
+    }
+
+    .skills-search-bar {
+        display: flex;
+        gap: 0.75rem;
+        margin-bottom: 1.5rem;
+    }
+    .skills-search-bar input[type="text"] {
+        flex: 1;
+        background: var(--bg-secondary, #0a0a1a);
+        border: 1px solid var(--border-color, #1a1a2e);
+        border-radius: 8px;
+        padding: 0.7rem 1rem;
+        color: var(--text-primary, #e0e0e0);
+        font-size: 0.95rem;
+    }
+    .skills-search-bar input[type="text"]::placeholder {
+        color: var(--text-muted, #555);
+    }
+    .skills-search-bar input[type="text"]:focus {
+        outline: none;
+        border-color: var(--accent-primary, #00d9ff);
+    }
+    .skills-search-bar button {
+        background: var(--accent-primary, #00d9ff);
+        color: #000;
+        border: none;
+        border-radius: 8px;
+        padding: 0.7rem 1.5rem;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+    }
+    .skills-search-bar button:hover {
+        opacity: 0.9;
+    }
+
+    .repo-fetch-bar {
+        display: flex;
+        gap: 0.75rem;
+        margin-bottom: 2rem;
+        padding: 1.25rem;
+        background: var(--bg-secondary, #0a0a1a);
+        border: 1px solid var(--border-color, #1a1a2e);
+        border-radius: 10px;
+    }
+    .repo-fetch-bar input[type="text"] {
+        flex: 1;
+        background: var(--bg-primary, #000);
+        border: 1px solid var(--border-color, #1a1a2e);
+        border-radius: 8px;
+        padding: 0.7rem 1rem;
+        color: var(--text-primary, #e0e0e0);
+        font-size: 0.95rem;
+    }
+    .repo-fetch-bar input[type="text"]::placeholder {
+        color: var(--text-muted, #555);
+    }
+    .repo-fetch-bar input[type="text"]:focus {
+        outline: none;
+        border-color: var(--accent-primary, #00d9ff);
+    }
+    .repo-fetch-bar button {
+        background: transparent;
+        color: var(--accent-primary, #00d9ff);
+        border: 1px solid var(--accent-primary, #00d9ff);
+        border-radius: 8px;
+        padding: 0.7rem 1.5rem;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+    }
+    .repo-fetch-bar button:hover {
+        background: rgba(0, 217, 255, 0.1);
+    }
+    .repo-fetch-label {
+        font-size: 0.85rem;
+        color: var(--text-secondary, #8b8b9e);
+        margin-bottom: 0.5rem;
+    }
+
+    .skills-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 1rem;
+    }
+    .skill-card {
+        background: var(--bg-secondary, #0a0a1a);
+        border: 1px solid var(--border-color, #1a1a2e);
+        border-radius: 10px;
+        padding: 1.25rem;
+        transition: border-color 0.2s;
+    }
+    .skill-card:hover {
+        border-color: var(--accent-primary, #00d9ff);
+    }
+    .skill-card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 0.5rem;
+    }
+    .skill-card-name {
+        font-weight: 600;
+        font-size: 1rem;
+        color: var(--text-primary, #e0e0e0);
+        word-break: break-word;
+    }
+    .skill-card-repo {
+        font-size: 0.8rem;
+        color: var(--text-muted, #555);
+        margin-bottom: 0.5rem;
+    }
+    .skill-card-repo a {
+        color: var(--accent-primary, #00d9ff);
+        text-decoration: none;
+    }
+    .skill-card-repo a:hover {
+        text-decoration: underline;
+    }
+    .skill-card-desc {
+        font-size: 0.88rem;
+        color: var(--text-secondary, #8b8b9e);
+        line-height: 1.5;
+        margin-bottom: 0.75rem;
+    }
+    .skill-card-actions {
+        display: flex;
+        gap: 0.5rem;
+    }
+    .skill-card-actions button {
+        background: transparent;
+        color: var(--accent-primary, #00d9ff);
+        border: 1px solid var(--border-color, #1a1a2e);
+        border-radius: 6px;
+        padding: 0.4rem 0.8rem;
+        font-size: 0.8rem;
+        cursor: pointer;
+    }
+    .skill-card-actions button:hover {
+        border-color: var(--accent-primary, #00d9ff);
+        background: rgba(0, 217, 255, 0.08);
+    }
+    .skill-stars {
+        color: var(--text-muted, #555);
+        font-size: 0.8rem;
+        white-space: nowrap;
+    }
+
+    .skill-detail-panel {
+        display: none;
+        background: var(--bg-secondary, #0a0a1a);
+        border: 1px solid var(--accent-primary, #00d9ff);
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin-bottom: 2rem;
+    }
+    .skill-detail-panel.active {
+        display: block;
+    }
+    .skill-detail-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+    }
+    .skill-detail-header h2 {
+        font-size: 1.2rem;
+        margin: 0;
+    }
+    .skill-detail-close {
+        background: transparent;
+        border: 1px solid var(--border-color, #1a1a2e);
+        color: var(--text-secondary, #8b8b9e);
+        border-radius: 6px;
+        padding: 0.3rem 0.7rem;
+        cursor: pointer;
+        font-size: 0.85rem;
+    }
+    .skill-detail-close:hover {
+        border-color: var(--text-secondary);
+    }
+    .skill-instructions {
+        background: var(--bg-primary, #000);
+        border: 1px solid var(--border-color, #1a1a2e);
+        border-radius: 8px;
+        padding: 1rem;
+        font-family: monospace;
+        font-size: 0.85rem;
+        line-height: 1.6;
+        color: var(--text-primary, #e0e0e0);
+        white-space: pre-wrap;
+        max-height: 500px;
+        overflow-y: auto;
+    }
+    .skill-meta-row {
+        display: flex;
+        gap: 1.5rem;
+        margin-bottom: 0.75rem;
+        font-size: 0.85rem;
+        color: var(--text-secondary, #8b8b9e);
+    }
+    .skill-meta-row strong {
+        color: var(--text-primary, #e0e0e0);
+    }
+
+    .search-status {
+        color: var(--text-secondary, #8b8b9e);
+        font-size: 0.9rem;
+        margin-bottom: 1rem;
+    }
+    .search-status.error {
+        color: #ff6b6b;
+    }
+
+    .token-alert {
+        background: rgba(255, 170, 0, 0.08);
+        border: 1px solid rgba(255, 170, 0, 0.5);
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1.5rem;
+        display: flex;
+        gap: 0.85rem;
+        align-items: flex-start;
+    }
+    .token-alert .token-alert-icon {
+        flex-shrink: 0;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: rgba(255, 170, 0, 0.25);
+        color: #ffaa00;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.85rem;
+        margin-top: 0.15rem;
+    }
+    .token-alert-body {
+        flex: 1;
+        font-size: 0.9rem;
+        line-height: 1.55;
+        color: var(--text-primary, #e0e0e0);
+    }
+    .token-alert-body strong {
+        color: #ffc966;
+    }
+    .token-alert-body a {
+        color: var(--accent-primary, #00d9ff);
+        text-decoration: none;
+    }
+    .token-alert-body a:hover {
+        text-decoration: underline;
+    }
+    .token-alert-body p {
+        margin: 0 0 0.4rem 0;
+    }
+    .token-alert-body p:last-child {
+        margin-bottom: 0;
+    }
+
+    .empty-state {
+        text-align: center;
+        padding: 3rem;
+        color: var(--text-secondary, #8b8b9e);
+    }
+    .empty-state p {
+        margin: 0.5rem 0;
+    }
+
+    .loading-spinner {
+        display: inline-block;
+        width: 16px;
+        height: 16px;
+        border: 2px solid var(--border-color, #1a1a2e);
+        border-top-color: var(--accent-primary, #00d9ff);
+        border-radius: 50%;
+        animation: spin 0.6s linear infinite;
+        margin-right: 0.5rem;
+        vertical-align: middle;
+    }
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="vercel-hero">
+    <h1>
+        <svg class="vercel-logo" viewBox="0 0 76 65" fill="currentColor">
+            <path d="M37.5274 0L75.0548 65H0L37.5274 0Z"/>
+        </svg>
+        Vercel Agent Skills
+    </h1>
+    <p>Search and browse reusable agent skills from the open Vercel skills ecosystem. Skills provide structured instructions your agents can follow to complete tasks.</p>
+</div>
+
+{% if not github_token_present %}
+<div class="token-alert" role="alert">
+    <div class="token-alert-icon">!</div>
+    <div class="token-alert-body">
+        <p><strong>GitHub token required for Vercel Skills search.</strong></p>
+        <p>Skill search uses GitHub's code search API, which rejects unauthenticated requests (HTTP 401). Fetching a skill directly by <code>owner/repo</code> still works, but search will fail until you set a token.</p>
+        <p>
+            Add a <code>GITHUB_TOKEN</code> in the <a href="/settings#GITHUB_TOKEN">Settings page</a>, or create one at
+            <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>.
+            Memorizz only reads public skills data, so <strong>no scopes are required</strong> — leave every checkbox unchecked. See the
+            <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noopener noreferrer">GitHub docs</a>
+            for step-by-step instructions.
+        </p>
+    </div>
+</div>
+{% endif %}
+
+<!-- Fetch from repo -->
+<div class="repo-fetch-bar">
+    <div style="flex: 1;">
+        <div class="repo-fetch-label">Fetch skill from a GitHub repository</div>
+        <div style="display: flex; gap: 0.75rem;">
+            <input type="text" id="repo-input" placeholder="owner/repo or GitHub URL (e.g. vercel-labs/skills)" />
+            <input type="text" id="skill-name-input" placeholder="Skill name (optional)" style="max-width: 200px;" />
+            <button type="button" id="fetch-repo-btn" onclick="fetchSkillFromRepo()">Fetch Skill</button>
+        </div>
+    </div>
+</div>
+
+<!-- Skill detail panel -->
+<div class="skill-detail-panel" id="skill-detail-panel">
+    <div class="skill-detail-header">
+        <h2 id="detail-skill-name">Skill Name</h2>
+        <button type="button" class="skill-detail-close" onclick="closeDetailPanel()">Close</button>
+    </div>
+    <div class="skill-meta-row">
+        <span>Repo: <strong id="detail-skill-repo">-</strong></span>
+        <span>Path: <strong id="detail-skill-path">-</strong></span>
+    </div>
+    <div class="skill-meta-row" id="detail-skill-desc-row" style="display:none;">
+        <span id="detail-skill-desc"></span>
+    </div>
+    <h3 style="font-size:0.95rem; margin: 1rem 0 0.5rem;">Instructions</h3>
+    <div class="skill-instructions" id="detail-skill-instructions">-</div>
+</div>
+
+<!-- Search -->
+<div class="skills-search-bar">
+    <input type="text" id="search-input" placeholder="Search skills (e.g. React, Next.js, deployment, AI SDK...)" />
+    <button type="button" id="search-btn" onclick="searchSkills()">Search</button>
+</div>
+
+<div class="search-status" id="search-status"></div>
+
+<!-- Results grid -->
+<div class="skills-grid" id="skills-grid">
+    <div class="empty-state">
+        <p>Search for skills or fetch one directly from a GitHub repository.</p>
+        <p style="font-size: 0.85rem;">Try: "react", "deployment", "AI SDK", "design"</p>
+    </div>
+</div>
+
+<script>
+    var searchInput = document.getElementById('search-input');
+    searchInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') searchSkills();
+    });
+    var repoInput = document.getElementById('repo-input');
+    repoInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') fetchSkillFromRepo();
+    });
+
+    function searchSkills() {
+        var query = document.getElementById('search-input').value.trim();
+        if (!query) return;
+
+        var status = document.getElementById('search-status');
+        var grid = document.getElementById('skills-grid');
+
+        status.className = 'search-status';
+        status.innerHTML = '<span class="loading-spinner"></span> Searching for "' + escapeHtml(query) + '"...';
+        grid.innerHTML = '';
+
+        fetch('/vercel-skills/api/search?q=' + encodeURIComponent(query))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.ok) {
+                    status.className = 'search-status error';
+                    status.textContent = data.error || 'Search failed.';
+                    if (data.hint) {
+                        status.textContent += ' ' + data.hint;
+                    }
+                    return;
+                }
+                var skills = data.skills || [];
+                status.textContent = 'Found ' + data.count + ' skill' + (data.count !== 1 ? 's' : '') + ' for "' + query + '"';
+                if (skills.length === 0) {
+                    grid.innerHTML = '<div class="empty-state"><p>No skills found for "' + escapeHtml(query) + '". Try different keywords.</p></div>';
+                    return;
+                }
+                var html = '';
+                for (var i = 0; i < skills.length; i++) {
+                    var s = skills[i];
+                    html += renderSkillCard(s);
+                }
+                grid.innerHTML = html;
+            })
+            .catch(function(err) {
+                status.className = 'search-status error';
+                status.textContent = 'Request failed: ' + err.message;
+            });
+    }
+
+    function renderSkillCard(skill) {
+        var starsHtml = '';
+        if (skill.stars) {
+            starsHtml = '<span class="skill-stars">' + skill.stars + ' stars</span>';
+        }
+        return '<div class="skill-card">' +
+            '<div class="skill-card-header">' +
+                '<span class="skill-card-name">' + escapeHtml(skill.name || skill.repo || '-') + '</span>' +
+                starsHtml +
+            '</div>' +
+            '<div class="skill-card-repo"><a href="' + escapeHtml(skill.repo_url || ('https://github.com/' + skill.repo)) + '" target="_blank" rel="noopener">' + escapeHtml(skill.repo || '-') + '</a></div>' +
+            '<div class="skill-card-desc">' + escapeHtml(skill.description || 'No description available.') + '</div>' +
+            '<div class="skill-card-actions">' +
+                '<button onclick="fetchAndShowSkill(\'' + escapeHtml(skill.repo || '') + '\')">View Instructions</button>' +
+            '</div>' +
+        '</div>';
+    }
+
+    function fetchSkillFromRepo() {
+        var repo = document.getElementById('repo-input').value.trim();
+        if (!repo) return;
+        var skillName = document.getElementById('skill-name-input').value.trim();
+        fetchAndShowSkill(repo, skillName);
+    }
+
+    function fetchAndShowSkill(repo, skillName) {
+        var panel = document.getElementById('skill-detail-panel');
+        var status = document.getElementById('search-status');
+
+        status.className = 'search-status';
+        status.innerHTML = '<span class="loading-spinner"></span> Fetching skill from ' + escapeHtml(repo) + '...';
+
+        var url = '/vercel-skills/api/fetch?repo=' + encodeURIComponent(repo);
+        if (skillName) {
+            url += '&skill_name=' + encodeURIComponent(skillName);
+        }
+
+        fetch(url)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.ok) {
+                    status.className = 'search-status error';
+                    status.textContent = data.error || 'Failed to fetch skill.';
+                    panel.classList.remove('active');
+                    return;
+                }
+
+                status.textContent = '';
+
+                // Multi-skill repo
+                if (data.multi_skill_repo) {
+                    var skills = data.available_skills || [];
+                    var html = '<div style="margin-bottom: 0.5rem; font-size: 0.95rem;">This repository contains <strong>' + skills.length + '</strong> skills. Click one to view:</div>';
+                    for (var i = 0; i < skills.length; i++) {
+                        html += '<button onclick="fetchAndShowSkill(\'' + escapeHtml(data.repo) + '\', \'' + escapeHtml(skills[i].name) + '\')" ' +
+                            'style="background:transparent; border:1px solid var(--border-color); color:var(--accent-primary); border-radius:6px; padding:0.4rem 0.8rem; margin:0.25rem; cursor:pointer; font-size:0.85rem;">' +
+                            escapeHtml(skills[i].name) + '</button>';
+                    }
+                    document.getElementById('detail-skill-name').textContent = data.repo + ' (multi-skill)';
+                    document.getElementById('detail-skill-repo').textContent = data.repo;
+                    document.getElementById('detail-skill-path').textContent = 'skills/';
+                    document.getElementById('detail-skill-instructions').innerHTML = html;
+                    document.getElementById('detail-skill-desc-row').style.display = 'none';
+                    panel.classList.add('active');
+                    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    return;
+                }
+
+                document.getElementById('detail-skill-name').textContent = data.name || repo;
+                document.getElementById('detail-skill-repo').textContent = data.repo || repo;
+                document.getElementById('detail-skill-path').textContent = data.path || '-';
+                document.getElementById('detail-skill-instructions').textContent = data.instructions || 'No instructions found.';
+
+                if (data.description) {
+                    document.getElementById('detail-skill-desc').textContent = data.description;
+                    document.getElementById('detail-skill-desc-row').style.display = '';
+                } else {
+                    document.getElementById('detail-skill-desc-row').style.display = 'none';
+                }
+
+                panel.classList.add('active');
+                panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            })
+            .catch(function(err) {
+                status.className = 'search-status error';
+                status.textContent = 'Request failed: ' + err.message;
+                panel.classList.remove('active');
+            });
+    }
+
+    function closeDetailPanel() {
+        document.getElementById('skill-detail-panel').classList.remove('active');
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+</script>
+{% endblock %}

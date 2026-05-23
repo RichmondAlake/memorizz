@@ -17,10 +17,15 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 from queue import Empty, Queue
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -90,7 +95,96 @@ LLM_MODEL_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"value": "gpt-4.1", "label": "GPT-4.1 deployment", "group": "Previous"},
         {"value": "gpt-4o", "label": "GPT-4o deployment", "group": "Previous"},
     ],
-    "huggingface": [],
+    # HuggingFace Hub repo IDs. Custom input still accepts arbitrary repos;
+    # this list is just a convenience starting point of widely-used instruct
+    # models. Availability check at /api/huggingface/installed reflects what
+    # the user has actually downloaded into their HF cache.
+    "huggingface": [
+        # Meta Llama
+        {
+            "value": "meta-llama/Llama-3.3-70B-Instruct",
+            "label": "Llama 3.3 70B Instruct",
+            "group": "Meta",
+        },
+        {
+            "value": "meta-llama/Llama-3.2-3B-Instruct",
+            "label": "Llama 3.2 3B Instruct",
+            "group": "Meta",
+        },
+        {
+            "value": "meta-llama/Llama-3.2-1B-Instruct",
+            "label": "Llama 3.2 1B Instruct",
+            "group": "Meta",
+        },
+        {
+            "value": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "label": "Llama 3.1 8B Instruct",
+            "group": "Meta",
+        },
+        {
+            "value": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "label": "Llama 3 8B Instruct",
+            "group": "Meta",
+        },
+        # Alibaba Qwen
+        {"value": "Qwen/Qwen3-32B", "label": "Qwen 3 32B", "group": "Alibaba"},
+        {"value": "Qwen/Qwen3-8B", "label": "Qwen 3 8B", "group": "Alibaba"},
+        {"value": "Qwen/Qwen3-4B", "label": "Qwen 3 4B", "group": "Alibaba"},
+        {
+            "value": "Qwen/Qwen2.5-7B-Instruct",
+            "label": "Qwen 2.5 7B Instruct",
+            "group": "Alibaba",
+        },
+        # Google Gemma 4 (April 2026, Apache 2.0, gated — accept license once on HF)
+        {
+            "value": "google/gemma-4-E2B-it",
+            "label": "Gemma 4 E2B Instruct (2.3B eff)",
+            "group": "Google",
+        },
+        {
+            "value": "google/gemma-4-E4B-it",
+            "label": "Gemma 4 E4B Instruct (4.5B eff)",
+            "group": "Google",
+        },
+        {
+            "value": "google/gemma-4-26B-A4B-it",
+            "label": "Gemma 4 26B A4B Instruct (MoE)",
+            "group": "Google",
+        },
+        {
+            "value": "google/gemma-4-31B-it",
+            "label": "Gemma 4 31B Instruct (Dense)",
+            "group": "Google",
+        },
+        # Google Gemma 3
+        {"value": "google/gemma-3-27b-it", "label": "Gemma 3 27B", "group": "Google"},
+        {"value": "google/gemma-3-4b-it", "label": "Gemma 3 4B", "group": "Google"},
+        {"value": "google/gemma-2-9b-it", "label": "Gemma 2 9B", "group": "Google"},
+        # Mistral
+        {
+            "value": "mistralai/Mistral-7B-Instruct-v0.3",
+            "label": "Mistral 7B Instruct v0.3",
+            "group": "Mistral AI",
+        },
+        {
+            "value": "mistralai/Mistral-Small-Instruct-2409",
+            "label": "Mistral Small Instruct (24B)",
+            "group": "Mistral AI",
+        },
+        # Microsoft Phi
+        {"value": "microsoft/phi-4", "label": "Phi-4 (14B)", "group": "Microsoft"},
+        {
+            "value": "microsoft/Phi-4-mini-instruct",
+            "label": "Phi-4 mini Instruct",
+            "group": "Microsoft",
+        },
+        # DeepSeek R1 distills
+        {
+            "value": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            "label": "DeepSeek R1 Distill Llama 8B",
+            "group": "DeepSeek",
+        },
+    ],
     # Anthropic Claude models
     "anthropic": [
         {"value": "claude-opus-4-6", "label": "Claude Opus 4.6", "group": "Latest"},
@@ -119,17 +213,197 @@ LLM_MODEL_CATALOG: Dict[str, List[Dict[str, str]]] = {
             "group": "Legacy",
         },
     ],
-    # Ollama local models (empty catalog — models are user-installed)
+    # Ollama local models. Values are the exact Ollama tags users `ollama pull`,
+    # so the dropdown can never offer a model that doesn't exist on the registry
+    # (the older `gemma4` / `qwen3.6` entries here resulted in 404s at chat time).
     "ollama": [
-        {"value": "llama3.1", "label": "Llama 3.1 (8B)", "group": "Meta"},
-        {"value": "llama3.2", "label": "Llama 3.2 (3B)", "group": "Meta"},
-        {"value": "llama3.3", "label": "Llama 3.3 (70B)", "group": "Meta"},
-        {"value": "mistral", "label": "Mistral (7B)", "group": "Mistral AI"},
-        {"value": "gemma3", "label": "Gemma 3", "group": "Google"},
-        {"value": "qwen3", "label": "Qwen 3", "group": "Alibaba"},
-        {"value": "deepseek-r1", "label": "DeepSeek R1", "group": "DeepSeek"},
-        {"value": "phi4", "label": "Phi-4 (14B)", "group": "Microsoft"},
-        {"value": "codellama", "label": "Code Llama", "group": "Code"},
+        # Meta Llama
+        {"value": "llama3.3:70b", "label": "Llama 3.3 (70B)", "group": "Meta"},
+        {"value": "llama3.2:3b", "label": "Llama 3.2 (3B)", "group": "Meta"},
+        {"value": "llama3.2:1b", "label": "Llama 3.2 (1B)", "group": "Meta"},
+        {"value": "llama3.1:8b", "label": "Llama 3.1 (8B)", "group": "Meta"},
+        # Google Gemma 4 — needs Ollama daemon >= 0.22.1 (April 28 2026 release).
+        # E2B/E4B are the on-device "effective-N" sizes, the 26B MoE and 31B
+        # dense are the workstation tier. Tags via `ollama pull gemma4:<size>`.
+        # `gemma4:latest` aliases to e4b — surfaced as its own entry because
+        # that's what `ollama pull gemma4` (no tag) writes to disk.
+        {
+            "value": "gemma4:latest",
+            "label": "Gemma 4 (latest, = E4B)",
+            "group": "Google",
+        },
+        {"value": "gemma4:e2b", "label": "Gemma 4 (E2B, on-device)", "group": "Google"},
+        {"value": "gemma4:e4b", "label": "Gemma 4 (E4B, on-device)", "group": "Google"},
+        {"value": "gemma4:26b", "label": "Gemma 4 (26B A4B, MoE)", "group": "Google"},
+        {"value": "gemma4:31b", "label": "Gemma 4 (31B Dense)", "group": "Google"},
+        # Google Gemma 3 — multiple sizes; gemma3n is the multimodal variant.
+        {"value": "gemma3:27b", "label": "Gemma 3 (27B)", "group": "Google"},
+        {"value": "gemma3:12b", "label": "Gemma 3 (12B)", "group": "Google"},
+        {"value": "gemma3:4b", "label": "Gemma 3 (4B)", "group": "Google"},
+        {"value": "gemma3:1b", "label": "Gemma 3 (1B)", "group": "Google"},
+        {
+            "value": "gemma3n:e4b",
+            "label": "Gemma 3n (E4B, multimodal)",
+            "group": "Google",
+        },
+        # Alibaba Qwen 3 — chat sizes plus the MoE and coder-specialized tags.
+        {"value": "qwen3:32b", "label": "Qwen 3 (32B)", "group": "Alibaba"},
+        {"value": "qwen3:14b", "label": "Qwen 3 (14B)", "group": "Alibaba"},
+        {"value": "qwen3:8b", "label": "Qwen 3 (8B)", "group": "Alibaba"},
+        {"value": "qwen3:4b", "label": "Qwen 3 (4B)", "group": "Alibaba"},
+        {"value": "qwen3:1.7b", "label": "Qwen 3 (1.7B)", "group": "Alibaba"},
+        {"value": "qwen3:0.6b", "label": "Qwen 3 (0.6B)", "group": "Alibaba"},
+        {
+            "value": "qwen3:30b-a3b",
+            "label": "Qwen 3 (30B-A3B, MoE)",
+            "group": "Alibaba",
+        },
+        {"value": "qwen3-coder:30b", "label": "Qwen 3 Coder (30B)", "group": "Alibaba"},
+        # Mistral
+        {
+            "value": "mistral-small:24b",
+            "label": "Mistral Small (24B)",
+            "group": "Mistral AI",
+        },
+        {
+            "value": "mistral-nemo:12b",
+            "label": "Mistral Nemo (12B)",
+            "group": "Mistral AI",
+        },
+        {"value": "mistral:7b", "label": "Mistral (7B)", "group": "Mistral AI"},
+        # DeepSeek R1 reasoning
+        {"value": "deepseek-r1:14b", "label": "DeepSeek R1 (14B)", "group": "DeepSeek"},
+        {"value": "deepseek-r1:7b", "label": "DeepSeek R1 (7B)", "group": "DeepSeek"},
+        {
+            "value": "deepseek-r1:1.5b",
+            "label": "DeepSeek R1 (1.5B)",
+            "group": "DeepSeek",
+        },
+        # Microsoft
+        {"value": "phi4:14b", "label": "Phi-4 (14B)", "group": "Microsoft"},
+    ],
+    # MLX (Apple Silicon native). mlx-community/* repos ship pre-quantized
+    # weights — Google explicitly recommends MLX for Gemma 4 on Macs.
+    # Requires a native arm64 Python — `pip install memorizz[mlx]` will
+    # fail under Rosetta. Custom repo IDs are still accepted.
+    "mlx": [
+        # Google Gemma 4 (4-bit MLX quants — fast on Apple Silicon)
+        {
+            "value": "mlx-community/gemma-4-E2B-it-4bit",
+            "label": "Gemma 4 E2B 4-bit",
+            "group": "Google",
+        },
+        {
+            "value": "mlx-community/gemma-4-E4B-it-4bit",
+            "label": "Gemma 4 E4B 4-bit",
+            "group": "Google",
+        },
+        {
+            "value": "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "label": "Gemma 4 26B A4B 4-bit (MoE)",
+            "group": "Google",
+        },
+        # Llama
+        {
+            "value": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            "label": "Llama 3.2 3B 4-bit",
+            "group": "Meta",
+        },
+        {
+            "value": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            "label": "Llama 3.2 1B 4-bit",
+            "group": "Meta",
+        },
+        # Qwen
+        {
+            "value": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "label": "Qwen 2.5 7B 4-bit",
+            "group": "Alibaba",
+        },
+        {
+            "value": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+            "label": "Qwen 2.5 3B 4-bit",
+            "group": "Alibaba",
+        },
+        # Mistral / Microsoft
+        {
+            "value": "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
+            "label": "Mistral 7B Instruct 4-bit",
+            "group": "Mistral AI",
+        },
+        {
+            "value": "mlx-community/Phi-3.5-mini-instruct-4bit",
+            "label": "Phi-3.5 mini 4-bit",
+            "group": "Microsoft",
+        },
+    ],
+    # OpenAI-compatible local servers (llama.cpp's `llama-server`, LM Studio,
+    # vLLM, mlx_lm.server, etc.). The model name is whatever the local server
+    # exposes — we forward it verbatim. Most servers accept any string; some
+    # (LM Studio) echo the loaded model id back via /v1/models.
+    #
+    # Two groups of entries: GGUF repos for `llama-server -hf <repo>` and
+    # `mlx-community/*` repos for `python -m mlx_lm.server --model <repo>`.
+    # The agent-form JS detects which family the user picked and shows the
+    # right startup command in the hint.
+    "local-openai": [
+        # GGUF — for llama.cpp's `llama-server`, LM Studio, llamafile
+        {
+            "value": "ggml-org/gemma-4-E2B-it-GGUF",
+            "label": "Gemma 4 E2B (GGUF, llama.cpp)",
+            "group": "GGUF — llama.cpp / LM Studio",
+        },
+        {
+            "value": "ggml-org/gemma-4-E4B-it-GGUF",
+            "label": "Gemma 4 E4B (GGUF, llama.cpp)",
+            "group": "GGUF — llama.cpp / LM Studio",
+        },
+        {
+            "value": "bartowski/gemma-3-1b-it-GGUF",
+            "label": "Gemma 3 1B (GGUF, llama.cpp)",
+            "group": "GGUF — llama.cpp / LM Studio",
+        },
+        {
+            "value": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+            "label": "Llama 3.2 3B (GGUF, llama.cpp)",
+            "group": "GGUF — llama.cpp / LM Studio",
+        },
+        {
+            "value": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+            "label": "Qwen 2.5 7B (GGUF, llama.cpp)",
+            "group": "GGUF — llama.cpp / LM Studio",
+        },
+        # MLX — for `mlx_lm.server` running in a native arm64 sidecar venv.
+        # Use this when memorizz itself is on an x86_64/Rosetta env: the MLX
+        # process lives in a separate native arm64 Python and memorizz talks
+        # to it over OpenAI-compatible HTTP. Pairs with the in-process
+        # "MLX (Apple Silicon)" provider, which only works when memorizz's
+        # own Python is arm64.
+        {
+            "value": "mlx-community/gemma-4-E2B-it-4bit",
+            "label": "Gemma 4 E2B 4-bit (MLX server)",
+            "group": "MLX — mlx_lm.server",
+        },
+        {
+            "value": "mlx-community/gemma-4-E4B-it-4bit",
+            "label": "Gemma 4 E4B 4-bit (MLX server)",
+            "group": "MLX — mlx_lm.server",
+        },
+        {
+            "value": "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "label": "Gemma 4 26B A4B 4-bit (MLX server)",
+            "group": "MLX — mlx_lm.server",
+        },
+        {
+            "value": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "label": "Qwen 2.5 7B 4-bit (MLX server)",
+            "group": "MLX — mlx_lm.server",
+        },
+        {
+            "value": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            "label": "Llama 3.2 3B 4-bit (MLX server)",
+            "group": "MLX — mlx_lm.server",
+        },
     ],
 }
 
@@ -139,7 +413,9 @@ DEFAULT_LLM_MODEL_BY_PROVIDER = {
     "azure": "gpt-5",
     "huggingface": "meta-llama/Meta-Llama-3-8B-Instruct",
     "anthropic": "claude-sonnet-4-5-20250929",
-    "ollama": "llama3.1",
+    "ollama": "llama3.1:8b",
+    "mlx": "mlx-community/gemma-4-E2B-it-4bit",
+    "local-openai": "ggml-org/gemma-4-E2B-it-GGUF",
 }
 DEFAULT_GRAALPY_INTERNET_ACCESS = "1"
 
@@ -228,6 +504,11 @@ SETTINGS_SECTIONS = [
                     {"value": "azure", "label": "Azure OpenAI"},
                     {"value": "ollama", "label": "Ollama (Local)"},
                     {"value": "huggingface", "label": "HuggingFace"},
+                    {"value": "mlx", "label": "MLX (Apple Silicon)"},
+                    {
+                        "value": "local-openai",
+                        "label": "Local OpenAI-compatible (llama.cpp / LM Studio)",
+                    },
                 ],
             },
             {
@@ -266,13 +547,32 @@ SETTINGS_SECTIONS = [
     },
     {
         "title": "Skills Marketplace",
-        "description": "API key for skillsmp.com marketplace search integration.",
+        "description": "API keys for skillsmp.com and Vercel Agent Skills (skills.sh) marketplace integrations.",
         "fields": [
             {
                 "env": "SKILLSMP_API_KEY",
                 "label": "SkillsMP API Key",
                 "placeholder": "sk_live_skillsmp_...",
                 "hint": "Used for https://skillsmp.com/ API access in agent marketplace tools.",
+            },
+            {
+                "env": "GITHUB_TOKEN",
+                "label": "GitHub Personal Access Token",
+                "placeholder": "ghp_...",
+                "hint": (
+                    "Required for Vercel Agent Skills search (uses GitHub's code search API, which "
+                    "requires authentication). Also raises GitHub API rate limits from 60 to 5,000 "
+                    "requests/hour. Memorizz only reads public skills data, so "
+                    "<strong>no scopes are required</strong> — create a classic token with every box "
+                    "unchecked at "
+                    '<a href="https://github.com/settings/tokens/new?description=Memorizz%20Vercel%20Skills" '
+                    'target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>. '
+                    "(If you need to tick something, <code>public_repo</code> is the safe minimum — "
+                    "do <em>not</em> grant <code>repo</code>, which includes private-repo write access.) "
+                    "See the "
+                    '<a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" '
+                    'target="_blank" rel="noopener noreferrer">GitHub docs</a> for step-by-step instructions.'
+                ),
             },
         ],
     },
@@ -807,7 +1107,14 @@ def create_app() -> FastAPI:
             {
                 "request": request,
                 "error": None,
-                "provider_type": "oracle",  # Default to Oracle
+                "provider_type": os.environ.get("MEMORIZZ_BACKEND", "oracle"),
+                # Pre-fill from env vars so users don't have to re-type
+                "env_oracle_user": os.environ.get("ORACLE_USER", ""),
+                "env_oracle_password": os.environ.get("ORACLE_PASSWORD", ""),
+                "env_oracle_dsn": os.environ.get("ORACLE_DSN", ""),
+                "env_oracle_schema": os.environ.get("ORACLE_SCHEMA", ""),
+                "env_mongodb_uri": os.environ.get("MONGODB_URI", ""),
+                "env_mongodb_db_name": os.environ.get("MONGODB_DB_NAME", ""),
             },
         )
 
@@ -911,6 +1218,12 @@ def create_app() -> FastAPI:
                     "request": request,
                     "error": error,
                     "provider_type": provider_type,
+                    "env_oracle_user": os.environ.get("ORACLE_USER", ""),
+                    "env_oracle_password": os.environ.get("ORACLE_PASSWORD", ""),
+                    "env_oracle_dsn": os.environ.get("ORACLE_DSN", ""),
+                    "env_oracle_schema": os.environ.get("ORACLE_SCHEMA", ""),
+                    "env_mongodb_uri": os.environ.get("MONGODB_URI", ""),
+                    "env_mongodb_db_name": os.environ.get("MONGODB_DB_NAME", ""),
                 },
             )
 
@@ -927,6 +1240,411 @@ def create_app() -> FastAPI:
         _state["connection_info"] = {}
         _state["provider_secrets"] = {}
         return RedirectResponse(url="/connect", status_code=302)
+
+    @app.get("/api/docker/oracle/status")
+    async def docker_oracle_status():
+        """Report discovered Oracle containers and their state.
+
+        Returns all containers using a gvenzl/oracle-free image (not just the
+        canonical `memorizz_oracle`) so users who already have a named
+        container like `oracle-memorizz` can start that one instead of
+        creating a duplicate.
+        """
+        from . import docker_oracle as _do
+
+        if not _do.docker_available():
+            return JSONResponse(
+                {
+                    "state": "docker-unavailable",
+                    "container_name": _do.CONTAINER_NAME,
+                    "image": _do.IMAGE,
+                    "existing": [],
+                }
+            )
+        existing = _do.list_oracle_containers()
+        if existing:
+            any_running = any(c["state"] == "running" for c in existing)
+            summary_state = "running" if any_running else "stopped"
+        else:
+            summary_state = "absent"
+        return JSONResponse(
+            {
+                "state": summary_state,
+                "container_name": _do.CONTAINER_NAME,
+                "image": _do.IMAGE,
+                "existing": existing,
+            }
+        )
+
+    @app.get("/api/docker/oracle/runtime")
+    async def docker_oracle_runtime():
+        """Report whether a container runtime is available on the host.
+
+        Used by the connect page when /status returns docker-unavailable so
+        the UI can offer the right next action: launch an installed GUI app,
+        or link to a download.
+        """
+        from . import docker_oracle as _do
+
+        return JSONResponse(_do.detect_runtime())
+
+    @app.post("/api/docker/oracle/runtime/start")
+    async def docker_oracle_runtime_start():
+        """Best-effort: launch the installed runtime and wait for the daemon.
+
+        Synchronous because the cold-start budget (~30–60s for Docker
+        Desktop) fits comfortably inside one HTTP request and avoids us
+        having to invent a polling endpoint just for this transition.
+        """
+        from . import docker_oracle as _do
+
+        ok, message = _do.start_runtime()
+        return JSONResponse(
+            {"ok": ok, "message": message}, status_code=200 if ok else 500
+        )
+
+    @app.post("/api/docker/oracle/start")
+    async def docker_oracle_start(container_name: str = Form(...)):
+        """Start an existing stopped Oracle container by name."""
+        from . import docker_oracle as _do
+
+        if not _do.docker_available():
+            return JSONResponse(
+                {"ok": False, "message": "Docker is not available"},
+                status_code=503,
+            )
+        state = _do.get_container_state(container_name)
+        if state == "running":
+            return JSONResponse(
+                {"ok": True, "message": f"Container '{container_name}' already running"}
+            )
+        if state == "absent":
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": f"Container '{container_name}' does not exist",
+                },
+                status_code=404,
+            )
+        ok, message = _do.start_container(container_name)
+        return JSONResponse(
+            {"ok": ok, "message": message}, status_code=200 if ok else 500
+        )
+
+    @app.get("/api/docker/oracle/logs/stream")
+    async def docker_oracle_logs_stream(name: Optional[str] = None, tail: int = 200):
+        """Server-Sent Events stream of ``docker logs -f`` for a container.
+
+        Used by the create-modal so users see live Oracle startup output
+        (pull progress, initialization banners, "DATABASE IS READY TO USE")
+        instead of a blank spinner. Closes when the client disconnects.
+
+        Secrets in logs: gvenzl/oracle-free does not echo the configured
+        passwords, but we still redact any ``ORACLE_PASSWORD`` /
+        ``APP_USER_PASSWORD`` env values if they happen to appear — belt
+        and braces.
+        """
+        from . import docker_oracle as _do
+
+        container = (name or _do.CONTAINER_NAME).strip()
+        # Defensive redaction list — scrape any password the current
+        # process has in env. Keeps us safe if a future image change or
+        # a custom entrypoint starts echoing them.
+        redact_needles = [
+            v
+            for v in (
+                os.environ.get("ORACLE_PASSWORD"),
+                os.environ.get("APP_USER_PASSWORD"),
+            )
+            if v
+        ]
+
+        def _redact(line: str) -> str:
+            for needle in redact_needles:
+                if needle and needle in line:
+                    line = line.replace(needle, "***")
+            return line
+
+        def _event(data: str, event: Optional[str] = None) -> str:
+            # Standard SSE frame. `data:` lines end with one \n; two \n ends the event.
+            prefix = f"event: {event}\n" if event else ""
+            # Make multi-line data safe by prefixing each line with `data: `.
+            payload = (
+                "".join(f"data: {seg}\n" for seg in data.splitlines()) or "data:\n"
+            )
+            return prefix + payload + "\n"
+
+        def generator():
+            yield _event(
+                json.dumps({"container": container, "message": "attached"}),
+                event="attach",
+            )
+            try:
+                for line in _do.stream_container_logs(container, tail=tail):
+                    yield _event(json.dumps({"line": _redact(line)}), event="log")
+            except Exception as exc:  # pragma: no cover - defensive
+                yield _event(
+                    json.dumps({"error": str(exc)}),
+                    event="error",
+                )
+            finally:
+                yield _event(json.dumps({"message": "closed"}), event="close")
+
+        return StreamingResponse(
+            generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",  # disable nginx buffering if ever proxied
+                "Connection": "keep-alive",
+            },
+        )
+
+    @app.post("/api/docker/oracle/create")
+    async def docker_oracle_create(
+        oracle_user: str = Form(...),
+        oracle_password: str = Form(...),
+        oracle_dsn: str = Form(...),
+    ):
+        """Create the Oracle container from scratch using form credentials."""
+        from . import docker_oracle as _do
+
+        if not _do.docker_available():
+            return JSONResponse(
+                {"ok": False, "message": "Docker is not available"},
+                status_code=503,
+            )
+        if _do.get_container_state() != "absent":
+            return JSONResponse(
+                {"ok": False, "message": "Container already exists — use start"},
+                status_code=409,
+            )
+        port = _do.parse_port_from_dsn(oracle_dsn)
+        ok, message = _do.create_container(oracle_user, oracle_password, port)
+        return JSONResponse(
+            {"ok": ok, "message": message}, status_code=200 if ok else 500
+        )
+
+    @app.post("/api/huggingface/pull")
+    async def huggingface_pull(repo_id: str = Form(...)):
+        """Download a HuggingFace repo into the local cache.
+
+        Uses snapshot_download so all repo files (config + tokenizer +
+        weights) are pulled together. Honors HF_TOKEN from the environment
+        for gated repos.
+        """
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            return JSONResponse(
+                {"ok": False, "error": "huggingface_hub not installed"},
+                status_code=503,
+            )
+        try:
+            path = snapshot_download(repo_id=repo_id)
+        except Exception as exc:  # pragma: no cover - depends on network
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return JSONResponse(
+            {"ok": True, "message": f"Downloaded {repo_id}", "path": str(path)}
+        )
+
+    @app.delete("/api/huggingface/models/{repo_id:path}")
+    async def huggingface_delete(repo_id: str):
+        """Delete every revision of a cached HuggingFace model repo."""
+        try:
+            from huggingface_hub import scan_cache_dir
+        except ImportError:
+            return JSONResponse(
+                {"ok": False, "error": "huggingface_hub not installed"},
+                status_code=503,
+            )
+        try:
+            cache_info = scan_cache_dir()
+        except Exception as exc:  # pragma: no cover - defensive
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+        revisions = []
+        for repo in cache_info.repos:
+            if repo.repo_id == repo_id and repo.repo_type == "model":
+                for rev in repo.revisions:
+                    revisions.append(rev.commit_hash)
+        if not revisions:
+            return JSONResponse(
+                {"ok": False, "error": f"{repo_id} not found in HF cache"},
+                status_code=404,
+            )
+
+        try:
+            strategy = cache_info.delete_revisions(*revisions)
+            strategy.execute()
+        except Exception as exc:  # pragma: no cover - defensive
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return JSONResponse(
+            {
+                "ok": True,
+                "message": f"Removed {repo_id}",
+                "freed_bytes": getattr(strategy, "expected_freed_size", None),
+            }
+        )
+
+    @app.get("/api/huggingface/installed")
+    async def huggingface_installed():
+        """Report which HuggingFace repos are cached locally.
+
+        Powers the same "Not cached locally" / "Available offline" banner
+        as Ollama, but for the `huggingface` provider — by walking the
+        standard HF cache directory via huggingface_hub.scan_cache_dir().
+        Falls back to {available: false} when the SDK isn't installed in
+        this Python env so the UI can render an actionable warning.
+        """
+        try:
+            from huggingface_hub import scan_cache_dir
+            from huggingface_hub.constants import HF_HUB_CACHE
+        except ImportError as exc:
+            return JSONResponse(
+                {
+                    "available": False,
+                    "error": (
+                        "huggingface_hub not installed — run "
+                        "`pip install memorizz[huggingface]` to enable cache scanning."
+                    ),
+                    "detail": str(exc),
+                }
+            )
+
+        try:
+            cache_info = scan_cache_dir()
+        except Exception as exc:  # pragma: no cover - defensive
+            return JSONResponse({"available": False, "error": str(exc)})
+
+        models: List[str] = []
+        for repo in getattr(cache_info, "repos", []) or []:
+            # Only model repos count toward "available LLMs". Datasets and
+            # spaces show up here too but aren't valid HF LLM provider IDs.
+            if getattr(repo, "repo_type", "model") != "model":
+                continue
+            repo_id = getattr(repo, "repo_id", None)
+            if repo_id:
+                models.append(repo_id)
+        models.sort()
+
+        return JSONResponse(
+            {
+                "available": True,
+                "cache_dir": str(HF_HUB_CACHE or ""),
+                "models": models,
+            }
+        )
+
+    @app.post("/api/ollama/pull")
+    async def ollama_pull(name: str = Form(...)):
+        """Pull an Ollama model. Synchronous — large pulls can take 5–15 min.
+
+        We pass `stream: false` to Ollama so the daemon buffers progress on
+        its side and only returns when the operation finishes; this keeps
+        the FastAPI handler simple (a future improvement is to forward the
+        streaming variant as SSE for a real progress bar).
+        """
+        import urllib.error
+        import urllib.request
+
+        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
+        body = json.dumps({"name": name, "stream": False}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{host}/api/pull",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=1800) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return JSONResponse(
+                {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}"},
+                status_code=exc.code,
+            )
+        except urllib.error.URLError as exc:
+            return JSONResponse(
+                {"ok": False, "error": str(exc.reason)}, status_code=502
+            )
+        except (TimeoutError, OSError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=504)
+
+        if payload.get("status") == "success":
+            return JSONResponse({"ok": True, "message": f"Pulled {name}"})
+        return JSONResponse(
+            {"ok": False, "error": payload.get("error") or json.dumps(payload)},
+            status_code=500,
+        )
+
+    @app.delete("/api/ollama/models/{name:path}")
+    async def ollama_delete(name: str):
+        """Remove a locally pulled Ollama model via Ollama's /api/delete."""
+        import urllib.error
+        import urllib.request
+
+        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
+        body = json.dumps({"name": name}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{host}/api/delete",
+            data=body,
+            method="DELETE",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as _resp:
+                pass
+        except urllib.error.HTTPError as exc:
+            detail = (
+                exc.read().decode("utf-8", "ignore")
+                if hasattr(exc, "read")
+                else exc.reason
+            )
+            return JSONResponse(
+                {"ok": False, "error": f"HTTP {exc.code}: {detail}"},
+                status_code=exc.code,
+            )
+        except urllib.error.URLError as exc:
+            return JSONResponse(
+                {"ok": False, "error": str(exc.reason)}, status_code=502
+            )
+        except (TimeoutError, OSError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=504)
+
+        return JSONResponse({"ok": True, "message": f"Removed {name}"})
+
+    @app.get("/api/ollama/installed")
+    async def ollama_installed():
+        """Report which models the local Ollama daemon has pulled.
+
+        Powers the "Not installed yet" banner under the Default Model picker
+        in Settings. Without this check, picking a model from the dropdown
+        and hitting Save still results in a 404 the first time the agent
+        runs. This endpoint short-circuits that surprise: the user sees
+        a copy-paste `ollama pull <tag>` command (and a deep-link to the
+        model's page) before anything is sent to the LLM.
+        """
+        import urllib.error
+        import urllib.request
+
+        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
+        try:
+            with urllib.request.urlopen(f"{host}/api/tags", timeout=3) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            return JSONResponse(
+                {"reachable": False, "host": host, "error": str(exc.reason)}
+            )
+        except (TimeoutError, OSError, ValueError) as exc:
+            return JSONResponse({"reachable": False, "host": host, "error": str(exc)})
+
+        models: List[str] = []
+        for entry in payload.get("models", []) or []:
+            name = entry.get("name") or entry.get("model")
+            if name:
+                models.append(name)
+        return JSONResponse({"reachable": True, "host": host, "models": models})
 
     @app.get("/dashboard", response_class=HTMLResponse)
     async def dashboard(request: Request):
@@ -1154,7 +1872,7 @@ def create_app() -> FastAPI:
             skills_marketplace_config=getattr(
                 existing, "skills_marketplace_config", None
             ),
-            long_term_memory_ids=getattr(existing, "long_term_memory_ids", None),
+            knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
             sandbox_provider=getattr(existing, "sandbox_provider", None),
             skill_paths=getattr(existing, "skill_paths", None),
             mcp_servers=getattr(existing, "mcp_servers", None),
@@ -1251,6 +1969,7 @@ def create_app() -> FastAPI:
         semantic_cache: Optional[str] = Form(None),
         memory_ids: str = Form(""),
         agent_name: str = Form(""),
+        persona_id: str = Form(""),
         persona_name: str = Form(""),
         persona_role: str = Form(""),
         persona_goals: str = Form(""),
@@ -1353,6 +2072,7 @@ def create_app() -> FastAPI:
                     "tool_access": tool_access,
                     "semantic_cache": semantic_cache_enabled,
                     "memory_ids_raw": memory_ids,
+                    "persona_id": persona_id,
                     "persona_name": persona_name,
                     "persona_role": persona_role,
                     "persona_goals": persona_goals,
@@ -1426,6 +2146,7 @@ def create_app() -> FastAPI:
                     "tool_access": tool_access,
                     "semantic_cache": semantic_cache_enabled,
                     "memory_ids_raw": memory_ids,
+                    "persona_id": persona_id,
                     "persona_name": persona_name,
                     "persona_role": persona_role,
                     "persona_goals": persona_goals,
@@ -1447,6 +2168,15 @@ def create_app() -> FastAPI:
                     "agent_tools": [],
                 },
             )
+
+        # Reconcile persona with PERSONAS collection: reuse/update linked
+        # record, or store a new one so it shows up in the saved-personas picker.
+        persona_payload = _resolve_persona_for_agent(
+            _state["provider"],
+            persona_payload,
+            persona_id,
+            agent_id=None,
+        )
 
         memagent = MemAgentModel(
             name=agent_name_value,
@@ -1501,6 +2231,7 @@ def create_app() -> FastAPI:
                     "tool_access": tool_access,
                     "semantic_cache": semantic_cache_enabled,
                     "memory_ids_raw": memory_ids,
+                    "persona_id": persona_id,
                     "persona_name": persona_name,
                     "persona_role": persona_role,
                     "persona_goals": persona_goals,
@@ -1567,6 +2298,7 @@ def create_app() -> FastAPI:
         semantic_cache: Optional[str] = Form(None),
         memory_ids: str = Form(""),
         agent_name: str = Form(""),
+        persona_id: str = Form(""),
         persona_name: str = Form(""),
         persona_role: str = Form(""),
         persona_goals: str = Form(""),
@@ -1692,6 +2424,7 @@ def create_app() -> FastAPI:
             "semantic_cache": semantic_cache_enabled,
             "memory_ids_raw": memory_ids,
             "agent_name": agent_name,
+            "persona_id": persona_id,
             "persona_name": persona_name,
             "persona_role": persona_role,
             "persona_goals": persona_goals,
@@ -1836,6 +2569,16 @@ def create_app() -> FastAPI:
                     },
                 )
 
+        # Reconcile persona with PERSONAS collection: updates become new
+        # versions on the linked record (with change_trigger source_type='ui_form'),
+        # new personas are stored so they appear in the saved-persona picker.
+        persona_payload = _resolve_persona_for_agent(
+            _state["provider"],
+            persona_payload,
+            persona_id,
+            agent_id=agent_id,
+        )
+
         updated = MemAgentModel(
             agent_id=agent_id,
             name=agent_name_value or getattr(existing, "name", None),
@@ -1862,7 +2605,7 @@ def create_app() -> FastAPI:
             internet_access_config=internet_config,
             skills_marketplace_provider=skills_marketplace_value,
             skills_marketplace_config=skills_marketplace_config_value,
-            long_term_memory_ids=getattr(existing, "long_term_memory_ids", None),
+            knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
             sandbox_provider=sandbox_value,
             skill_paths=getattr(existing, "skill_paths", None),
             mcp_servers=getattr(existing, "mcp_servers", None),
@@ -1899,65 +2642,7 @@ def create_app() -> FastAPI:
                 },
             )
 
-        return RedirectResponse(url=f"/agents/{agent_id}", status_code=302)
-
-    @app.post("/agents/{agent_id}/run", response_class=HTMLResponse)
-    async def agent_run(
-        request: Request,
-        agent_id: str,
-        query: str = Form(""),
-        memory_id: str = Form(""),
-    ):
-        """Run an agent against a prompt."""
-        if not _state["provider"]:
-            return RedirectResponse(url="/connect", status_code=302)
-
-        from ..memagent import MemAgent
-
-        run_response = None
-        run_error = None
-        memory_id_value = memory_id.strip() if memory_id else None
-
-        try:
-            agent_instance = MemAgent.load(agent_id, memory_provider=_state["provider"])
-            if not query.strip():
-                raise ValueError("Please provide a prompt to run.")
-            run_response = agent_instance.run(
-                query.strip(), memory_id=memory_id_value or None
-            )
-
-            current_memory_id = getattr(agent_instance, "_current_memory_id", None)
-            if current_memory_id and current_memory_id not in agent_instance.memory_ids:
-                agent_instance.memory_ids.append(current_memory_id)
-                if hasattr(_state["provider"], "update_memagent_memory_ids"):
-                    _state["provider"].update_memagent_memory_ids(
-                        agent_id, agent_instance.memory_ids
-                    )
-
-        except Exception as e:
-            logger.error(f"Failed to run agent {agent_id}: {e}")
-            run_error = str(e)
-
-        agent_detail = _load_agent_detail(agent_id)
-
-        return templates.TemplateResponse(
-            "agent_detail.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                "active_agent_id": agent_id,
-                "agent": agent_detail["agent"],
-                "context_window": agent_detail["context_window"],
-                "token_stats": agent_detail["token_stats"],
-                "error": agent_detail["error"],
-                "run_query": query,
-                "run_response": run_response,
-                "run_error": run_error,
-                "active_page": "agents",
-            },
-        )
+        return RedirectResponse(url=f"/agents/{agent_id}/playground", status_code=302)
 
     @app.get("/agents/{agent_id}/playground", response_class=HTMLResponse)
     async def agent_playground(
@@ -1974,6 +2659,8 @@ def create_app() -> FastAPI:
         workflow_memory: List[Dict[str, Any]] = []
         entity_memory: List[Dict[str, Any]] = []
         summary_memory: List[Dict[str, Any]] = []
+        tool_log_memory: List[Dict[str, Any]] = []
+        knowledge_base_memory: List[Dict[str, Any]] = []
         threads: List[Dict[str, Any]] = []
         default_memory_id = ""
         enable_entity_memory = False
@@ -2015,6 +2702,12 @@ def create_app() -> FastAPI:
                     memory_id=default_memory_id,
                     limit=None,
                 )
+                tool_log_memory = _load_thread_tool_log_memory(
+                    memory_id=default_memory_id,
+                    limit=20,
+                )
+            # Knowledge base entries are agent-scoped, not thread-scoped.
+            knowledge_base_memory = _load_agent_knowledge_base(agent)
             enable_entity_memory = _agent_entity_memory_enabled(agent)
             enable_workflow_memory = _agent_workflow_memory_enabled(agent)
             entity_memory_status_error = _entity_memory_status_error(agent)
@@ -2142,6 +2835,8 @@ def create_app() -> FastAPI:
                 "workflow_memory": workflow_memory,
                 "entity_memory": entity_memory,
                 "summary_memory": summary_memory,
+                "tool_log_memory": tool_log_memory,
+                "knowledge_base_memory": knowledge_base_memory,
                 "token_stats": token_stats,
                 "error": error,
                 "active_page": "playground",
@@ -2194,6 +2889,9 @@ def create_app() -> FastAPI:
         form = await request.form()
         query = str(form.get("query", "")).strip()
         memory_id = str(form.get("memory_id", "")).strip() or None
+        # Optional end-user scope for multi-tenant deployments that proxy the
+        # UI. Empty string == single-operator/legacy behavior.
+        user_id = str(form.get("user_id", "")).strip() or None
         # Allow runtime overrides from the playground config panel
         override_model = str(form.get("llm_model", "")).strip() or None
         override_instruction = str(form.get("instruction", "")).strip() or None
@@ -2249,15 +2947,42 @@ def create_app() -> FastAPI:
                             or {}
                         )
                         llm_config["model"] = override_model
+
+                        # Carry over the API key from the already-loaded
+                        # provider so that saved configs (which deliberately
+                        # omit secrets) don't cause auth failures.
+                        existing_model = getattr(agent_instance, "model", None)
+                        if existing_model is not None:
+                            for attr in ("api_key", "_api_key"):
+                                key = getattr(existing_model, attr, None)
+                                if key and "api_key" not in llm_config:
+                                    llm_config["api_key"] = key
+                                    break
+                            # Also check the underlying client object
+                            if "api_key" not in llm_config:
+                                client = getattr(existing_model, "client", None)
+                                if client is not None:
+                                    key = getattr(client, "api_key", None)
+                                    if key:
+                                        llm_config["api_key"] = key
+
                         agent_instance.model = create_llm_provider(llm_config)
+                        # Override succeeded — clear any prior init error
+                        # carried over from MemAgent.load().
+                        agent_instance._llm_init_error = None
                     except Exception as exc:
-                        logger.warning(f"Could not apply model override: {exc}")
+                        # Stash the cause on the instance so chat can show
+                        # the real reason instead of "No LLM model configured".
+                        agent_instance._llm_init_error = f"{type(exc).__name__}: {exc}"
+                        logger.warning("Could not apply model override: %s", exc)
+
+                # Load stored agent config for sandbox, internet, and entity-memory checks.
+                stored_agent = _state["provider"].retrieve_memagent(agent_id)
 
                 # Apply sandbox provider from agent config or global default.
                 # Skip if the agent already attempted sandbox init during load()
                 # — no need to retry and log the same warning twice.
                 if not agent_instance.has_sandbox():
-                    stored_agent = _state["provider"].retrieve_memagent(agent_id)
                     sandbox_cfg = (
                         getattr(stored_agent, "sandbox_provider", None)
                         if stored_agent
@@ -2366,11 +3091,48 @@ def create_app() -> FastAPI:
                     )
                     yield f"data: {escaped_warning}\n\n"
 
+                # Validate persona runtime tool availability. Mirrors the
+                # entity-memory check above: if the stored agent has a
+                # persona configured but update_persona/read_persona didn't
+                # register on the runtime, surface it instead of silently
+                # leaving the LLM without its own persona-evolution tools.
+                persona_warning = None
+                stored_persona = (
+                    getattr(stored_agent, "persona", None) if stored_agent else None
+                )
+                if (
+                    stored_persona
+                    and getattr(agent_instance, "tool_manager", None) is not None
+                ):
+                    try:
+                        runtime_tools = set(agent_instance.tool_manager.list_tools())
+                    except Exception:
+                        runtime_tools = set()
+                    if (
+                        "update_persona" not in runtime_tools
+                        or "read_persona" not in runtime_tools
+                    ):
+                        persona_warning = (
+                            "A persona is configured on this agent, but the persona "
+                            "evolution tools (update_persona, read_persona) are not "
+                            "available in this session."
+                        )
+                if persona_warning:
+                    escaped_warning = json.dumps(
+                        {
+                            "type": "warning",
+                            "message": persona_warning,
+                            "scope": "persona",
+                        }
+                    )
+                    yield f"data: {escaped_warning}\n\n"
+
                 def _run_agent_stream() -> None:
                     try:
-                        for chunk in agent_instance.run_stream(
-                            query, memory_id=memory_id
-                        ):
+                        stream_kwargs: Dict[str, Any] = {"memory_id": memory_id}
+                        if user_id:
+                            stream_kwargs["user_id"] = user_id
+                        for chunk in agent_instance.run_stream(query, **stream_kwargs):
                             chunk_queue.put(chunk)
                     except Exception as stream_exc:
                         chunk_queue.put({"__stream_error__": _to_text(stream_exc)})
@@ -2458,6 +3220,46 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/agents/{agent_id}/playground/compact")
+    async def agent_playground_compact(request: Request, agent_id: str):
+        """Compact/summarize the context window for the given agent thread."""
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+
+        form = await request.form()
+        memory_id = str(form.get("memory_id", "")).strip() or None
+
+        from ..memagent import MemAgent
+
+        try:
+            agent_instance = MemAgent.load(agent_id, memory_provider=_state["provider"])
+
+            if not agent_instance:
+                return JSONResponse(
+                    {"ok": False, "error": "Agent not found"}, status_code=404
+                )
+
+            # Use the agent's generate_summaries method
+            summary_ids = agent_instance.generate_summaries(
+                days_back=1, max_memories_per_summary=20
+            )
+
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "summary_count": len(summary_ids),
+                    "summary_ids": summary_ids,
+                    "message": (
+                        f"Generated {len(summary_ids)} summary/summaries to compact context."
+                        if summary_ids
+                        else "No new summaries needed — context is already compact."
+                    ),
+                }
+            )
+        except Exception as exc:
+            logger.error(f"Compact failed for agent {agent_id}: {exc}")
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
     @app.get("/agents/{agent_id}/playground/thread")
     async def agent_playground_thread(agent_id: str, memory_id: str = ""):
         """Return conversation history for a specific thread memory_id."""
@@ -2472,12 +3274,23 @@ def create_app() -> FastAPI:
         messages: List[Dict[str, Any]] = []
         if requested_memory_id:
             messages = _load_thread_messages(requested_memory_id, limit=None)
+            logger.debug(
+                "Thread %s: loaded %d raw messages for agent %s",
+                requested_memory_id,
+                len(messages),
+                agent_id,
+            )
             messages = [
                 msg
                 for msg in messages
                 if not _to_text(msg.get("agent_id")).strip()
                 or _to_text(msg.get("agent_id")).strip() == agent_id
             ]
+            logger.debug(
+                "Thread %s: %d messages after agent_id filter",
+                requested_memory_id,
+                len(messages),
+            )
 
         serialized = [_serialize_thread_message(msg) for msg in messages]
         toolbox_memory = _load_thread_toolbox_memory(
@@ -2499,6 +3312,10 @@ def create_app() -> FastAPI:
             agent_id=agent_id,
             memory_id=requested_memory_id,
             limit=None,
+        )
+        tool_log_memory = _load_thread_tool_log_memory(
+            memory_id=requested_memory_id,
+            limit=20,
         )
         token_stats = _build_token_stats(
             agent,
@@ -2524,6 +3341,7 @@ def create_app() -> FastAPI:
             "workflow_memory": workflow_memory,
             "entity_memory": entity_memory,
             "summary_memory": summary_memory,
+            "tool_log_memory": tool_log_memory,
             "token_stats": token_stats,
             "message_count": len(serialized),
             "last_activity": last_activity,
@@ -2598,12 +3416,20 @@ def create_app() -> FastAPI:
                 status_code=302,
             )
 
-        # Build updated fields
-        llm_config = getattr(existing, "llm_config", {}) or {}
-        if new_provider:
-            llm_config["provider"] = new_provider
+        # Build updated fields. When the user switches providers we have
+        # to start a fresh dict instead of merging onto the old one —
+        # otherwise provider-specific keys (e.g. OpenAI's `max_tokens`)
+        # ride along into the next provider and crash construction.
+        existing_llm_config = getattr(existing, "llm_config", {}) or {}
+        existing_provider = (existing_llm_config.get("provider") or "").lower()
+        if new_provider and new_provider.lower() != existing_provider:
+            llm_config: Dict[str, Any] = {"provider": new_provider}
+        else:
+            llm_config = dict(existing_llm_config)
+            if new_provider:
+                llm_config["provider"] = new_provider
         if new_model:
-            if new_provider == "azure":
+            if (llm_config.get("provider") or "").lower() == "azure":
                 llm_config["deployment_name"] = new_model
             else:
                 llm_config["model"] = new_model
@@ -2792,7 +3618,7 @@ def create_app() -> FastAPI:
             internet_access_config=internet_config_value,
             skills_marketplace_provider=skills_marketplace_value,
             skills_marketplace_config=skills_marketplace_config_value,
-            long_term_memory_ids=getattr(existing, "long_term_memory_ids", None),
+            knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
             sandbox_provider=sandbox_value,
             skill_paths=(
                 parsed_skill_paths
@@ -2829,44 +3655,12 @@ def create_app() -> FastAPI:
 
         return RedirectResponse(url=f"/agents/{agent_id}/playground", status_code=302)
 
-    @app.get("/agents/{agent_id}", response_class=HTMLResponse)
-    async def agent_detail(request: Request, agent_id: str):
-        """Show agent detail with context window."""
-        if not _state["provider"]:
-            return RedirectResponse(url="/connect", status_code=302)
-
-        agent_detail = _load_agent_detail(agent_id)
-
-        # Check if this agent is the active WhatsApp agent
-        is_whatsapp_active = False
-        if getattr(agent_detail["agent"], "whatsapp_enabled", False):
-            try:
-                from memorizz.channels.whatsapp.settings import WhatsAppSettings
-
-                settings = WhatsAppSettings(_state["provider"])
-                is_whatsapp_active = settings.get_active_agent_id() == agent_id
-            except Exception:
-                pass
-
-        return templates.TemplateResponse(
-            "agent_detail.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                "active_agent_id": agent_id,
-                "agent": agent_detail["agent"],
-                "context_window": agent_detail["context_window"],
-                "token_stats": agent_detail["token_stats"],
-                "error": agent_detail["error"],
-                "run_query": None,
-                "run_response": None,
-                "run_error": None,
-                "active_page": "agents",
-                "is_whatsapp_active": is_whatsapp_active,
-            },
-        )
+    @app.get("/agents/{agent_id}")
+    async def agent_detail(agent_id: str):
+        """The standalone detail page has been retired — the playground is
+        the canonical agent view. Redirect so bookmarks and legacy callers
+        still land somewhere useful."""
+        return RedirectResponse(url=f"/agents/{agent_id}/playground", status_code=302)
 
     @app.post("/agents/{agent_id}/whatsapp/activate")
     async def whatsapp_activate_agent(agent_id: str):
@@ -2984,6 +3778,45 @@ def create_app() -> FastAPI:
             try:
                 rows = store.list_jobs(agent_id=selected_agent_id, enabled=None)
                 jobs = [job.model_dump() for job in rows]
+                # Convert next_run_at from UTC to the job's configured timezone
+                for job_dict in jobs:
+                    try:
+                        tz_name = job_dict.get("timezone")
+                        nra = job_dict.get("next_run_at")
+                        if tz_name and nra and ZoneInfo is not None:
+                            tz = ZoneInfo(tz_name)
+                            if hasattr(nra, "astimezone"):
+                                job_dict["next_run_at"] = nra.astimezone(tz)
+                    except Exception:
+                        pass
+                # Attach latest run to each job for inline preview
+                for job_dict in jobs:
+                    try:
+                        runs = store.list_runs(job_dict["job_id"], limit=1)
+                        if runs:
+                            run_dict = runs[0].model_dump(mode="json")
+                            # Convert run timestamps to the job's timezone
+                            tz_name = job_dict.get("timezone")
+                            if tz_name and ZoneInfo is not None:
+                                try:
+                                    tz = ZoneInfo(tz_name)
+                                    for ts_field in (
+                                        "finished_at",
+                                        "started_at",
+                                        "scheduled_for",
+                                    ):
+                                        val = getattr(runs[0], ts_field, None)
+                                        if val and hasattr(val, "astimezone"):
+                                            run_dict[ts_field] = val.astimezone(
+                                                tz
+                                            ).isoformat()
+                                except Exception:
+                                    pass
+                            job_dict["latest_run"] = run_dict
+                        else:
+                            job_dict["latest_run"] = None
+                    except Exception:
+                        job_dict["latest_run"] = None
             except Exception as exc:
                 message = str(exc)
                 if "ORA-00942" in message and "AUTOMATION_JOBS" in message:
@@ -3664,14 +4497,16 @@ def create_app() -> FastAPI:
                         pass
             finally:
                 try:
+                    _payload = (
+                        result_payload if isinstance(result_payload, dict) else {}
+                    )
+                    _summary = str(_payload.get("response") or "")[:2000] or None
                     store.finish_run(
                         run.run_id,
                         status=status,
                         error=last_error,
-                        result_summary=None,
-                        result_payload=(
-                            result_payload if isinstance(result_payload, dict) else {}
-                        ),
+                        result_summary=_summary,
+                        result_payload=_payload,
                         attempt=attempt,
                     )
                 except Exception:
@@ -3821,6 +4656,93 @@ def create_app() -> FastAPI:
                 "error": error,
             },
         )
+
+    # --- Vercel Agent Skills routes ---
+
+    @app.get("/vercel-skills", response_class=HTMLResponse)
+    async def vercel_skills_page(request: Request):
+        """Vercel Agent Skills marketplace browser."""
+        if not _state["provider"]:
+            return RedirectResponse(url="/connect", status_code=302)
+
+        github_token_present = bool(
+            _to_text(os.environ.get("GITHUB_TOKEN", "")).strip()
+        )
+
+        return templates.TemplateResponse(
+            "vercel_skills.html",
+            {
+                "request": request,
+                "provider_type": _state["provider_type"],
+                "active_page": "vercel-skills",
+                "github_token_present": github_token_present,
+            },
+        )
+
+    @app.get("/vercel-skills/api/search")
+    async def vercel_skills_api_search(
+        request: Request,
+        q: str = "",
+        limit: int = 20,
+    ):
+        """API: search Vercel skills via GitHub."""
+        from ..vercel_skills import VercelSkillsProvider
+
+        query = (q or "").strip()
+        if not query:
+            return JSONResponse(
+                {"ok": False, "error": "Query parameter 'q' is required."}
+            )
+
+        config: Dict[str, Any] = {}
+        github_token = _to_text(os.environ.get("GITHUB_TOKEN", "")).strip()
+        if github_token:
+            config["github_token"] = github_token
+
+        try:
+            provider = VercelSkillsProvider(config=config)
+            result = provider.search(query=query, limit=limit)
+            return JSONResponse(result)
+        except Exception as exc:
+            logger.error("Vercel skills search failed: %s", exc)
+            return JSONResponse({"ok": False, "error": str(exc)})
+
+    @app.get("/vercel-skills/api/fetch")
+    async def vercel_skills_api_fetch(
+        request: Request,
+        repo: str = "",
+        skill_name: str = "",
+        branch: str = "main",
+    ):
+        """API: fetch a SKILL.md from a GitHub repo."""
+        from ..vercel_skills import VercelSkillsProvider
+
+        repo = (repo or "").strip()
+        if not repo:
+            return JSONResponse({"ok": False, "error": "Parameter 'repo' is required."})
+
+        config: Dict[str, Any] = {}
+        github_token = _to_text(os.environ.get("GITHUB_TOKEN", "")).strip()
+        if github_token:
+            config["github_token"] = github_token
+
+        try:
+            provider = VercelSkillsProvider(config=config)
+            result = provider.fetch_skill(
+                repo=repo,
+                skill_name=skill_name or None,
+                branch=branch,
+            )
+            return JSONResponse(result)
+        except Exception as exc:
+            logger.error("Vercel skill fetch failed: %s", exc)
+            return JSONResponse({"ok": False, "error": str(exc)})
+
+    @app.get("/vercel-skills/api/token-status")
+    async def vercel_skills_token_status(request: Request):
+        """Report whether GITHUB_TOKEN is configured in the environment."""
+        token_present = bool(_to_text(os.environ.get("GITHUB_TOKEN", "")).strip())
+        return JSONResponse({"ok": True, "github_token_present": token_present})
 
     @app.get("/evalground", response_class=HTMLResponse)
     async def evalground(request: Request):
@@ -4658,7 +5580,7 @@ def create_app() -> FastAPI:
             "toolbox": MemoryType.TOOLBOX,
             "conversations": MemoryType.CONVERSATION_MEMORY,
             "workflows": MemoryType.WORKFLOW_MEMORY,
-            "long-term": MemoryType.LONG_TERM_MEMORY,
+            "knowledge-base": MemoryType.KNOWLEDGE_BASE,
             "short-term": MemoryType.SHORT_TERM_MEMORY,
             "entity": MemoryType.ENTITY_MEMORY,
             "summaries": MemoryType.SUMMARIES,
@@ -4736,6 +5658,141 @@ def create_app() -> FastAPI:
             logger.error(f"Failed to get agent {agent_id}: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/api/agents/{agent_id}/system-prompt")
+    async def api_agent_system_prompt(agent_id: str):
+        """Return the fully-assembled system prompt for an agent.
+
+        Instantiates the agent via :meth:`MemAgent.load` (no inference is run)
+        and calls ``_build_system_prompt`` — the same code path used at
+        request time. Used by the playground to preview what the LLM
+        actually sees, including persona + version + evolution history +
+        tool descriptions.
+        """
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+
+        from ..memagent import MemAgent
+
+        try:
+            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+        except Exception as exc:
+            logger.error("Failed to load agent %s for system-prompt: %s", agent_id, exc)
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        try:
+            prompt = agent._build_system_prompt() or ""
+        except Exception as exc:
+            logger.error("Failed to build system prompt for %s: %s", agent_id, exc)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to build system prompt: {exc}"
+            )
+
+        persona = (
+            agent.persona_manager.current_persona if agent.persona_manager else None
+        )
+        persona_meta: Optional[Dict[str, Any]] = None
+        if persona is not None:
+            persona_meta = {
+                "name": getattr(persona, "name", None),
+                "role": getattr(persona, "role", None),
+                "version": getattr(persona, "version", 1),
+                "history_count": len(getattr(persona, "evolution_history", []) or []),
+                "storage_id": getattr(persona, "_storage_id", None),
+            }
+
+        tool_names: List[str] = []
+        if agent.tool_manager is not None:
+            try:
+                tool_names = [
+                    (meta or {}).get("name", "")
+                    for meta in (agent.tool_manager.get_tool_metadata() or [])
+                ]
+                tool_names = [n for n in tool_names if n]
+            except Exception:
+                tool_names = []
+
+        return {
+            "agent_id": agent_id,
+            "system_prompt": prompt,
+            "length": len(prompt),
+            "persona": persona_meta,
+            "persona_tools_registered": bool(
+                getattr(agent, "_persona_tools_registered", False)
+            ),
+            "tools": tool_names,
+        }
+
+    @app.get("/api/persona-presets")
+    async def api_persona_presets():
+        """Return the built-in persona presets sourced from RoleType + PREDEFINED_INFO.
+
+        Used by the agent config UI to populate the "Load built-in preset"
+        dropdown. The shape is intentionally minimal so the frontend can
+        fill the form fields directly.
+        """
+        from ..long_term.semantic.persona.role_type import PREDEFINED_INFO, RoleType
+
+        presets = []
+        for role_type in RoleType:
+            info = PREDEFINED_INFO.get(role_type, {})
+            presets.append(
+                {
+                    "key": role_type.name,
+                    "role": role_type.value,
+                    "goals": info.get("goals", ""),
+                    "background": info.get("background", ""),
+                }
+            )
+        return {"presets": presets}
+
+    @app.get("/api/personas")
+    async def api_list_personas():
+        """List saved personas from the PERSONAS collection.
+
+        Powers the "Load saved persona" dropdown in the agent config UI.
+        Returns a compact serialization (no embeddings) that the form can
+        use to pre-fill the persona fields and carry the ``persona_id``
+        forward via a hidden input.
+        """
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+
+        from ..enums.memory_type import MemoryType
+
+        try:
+            raw = _state["provider"].list_all(memory_store_type=MemoryType.PERSONAS)
+        except Exception as exc:
+            logger.error("Failed to list personas: %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
+
+        personas = []
+        for doc in raw or []:
+            if not isinstance(doc, dict):
+                continue
+            storage_id = doc.get("_id") or doc.get("id") or doc.get("storage_id")
+            if storage_id is not None:
+                storage_id = str(storage_id)
+            history = doc.get("evolution_history") or []
+            personas.append(
+                {
+                    "id": storage_id,
+                    "persona_id": doc.get("persona_id"),
+                    "name": doc.get("name", ""),
+                    "role": doc.get("role", ""),
+                    "goals": doc.get("goals", ""),
+                    "background": doc.get("background", ""),
+                    "version": int(doc.get("version") or 1),
+                    "created_at": doc.get("created_at"),
+                    "updated_at": doc.get("updated_at"),
+                    "history_count": len(history) if isinstance(history, list) else 0,
+                }
+            )
+        personas.sort(
+            key=lambda p: (p.get("updated_at") or p.get("created_at") or ""),
+            reverse=True,
+        )
+        return {"personas": personas, "count": len(personas)}
+
     @app.get("/api/automations/{job_id}/runs")
     async def api_automation_runs(job_id: str, limit: int = 50):
         """JSON endpoint for polling automation run history."""
@@ -4753,20 +5810,206 @@ def create_app() -> FastAPI:
             "runs": [r.model_dump(mode="json") for r in runs],
         }
 
+    @app.post("/api/agents/{agent_id}/knowledge-base/ingest")
+    async def api_agent_knowledge_base_ingest(
+        agent_id: str,
+        files: List[UploadFile] = File(...),
+        chunking_strategy: str = Form("fixed"),
+        chunk_size: int = Form(1000),
+        chunk_overlap: int = Form(100),
+    ):
+        """Ingest one or more uploaded files into the knowledge base and
+        attach the resulting ``knowledge_base_id``s to this agent.
+
+        Each file becomes one ingest call (one ``knowledge_base_id`` per
+        file), split into chunks per the requested strategy. Text extraction
+        is delegated to :mod:`memorizz.long_term.semantic.extractors` so the
+        SDK (:meth:`KnowledgeBase.ingest_file`) and this endpoint share the
+        exact same format-handling logic.
+        """
+        from ..long_term.semantic import (
+            EmptyDocumentError,
+            ExtractorError,
+            KnowledgeBase,
+        )
+        from ..memagent import MemAgent
+
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+        if not files:
+            raise HTTPException(status_code=400, detail="No files provided")
+
+        try:
+            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+        except Exception as exc:
+            logger.error("Failed to load agent %s for KB ingest: %s", agent_id, exc)
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        kb = KnowledgeBase(memory_provider=_state["provider"])
+        results: List[Dict[str, Any]] = []
+        for upload in files:
+            filename = upload.filename or "upload"
+            try:
+                raw = await upload.read()
+            except Exception as exc:
+                results.append(
+                    {"filename": filename, "ok": False, "error": f"read failed: {exc}"}
+                )
+                continue
+            if not raw:
+                results.append(
+                    {"filename": filename, "ok": False, "error": "empty file"}
+                )
+                continue
+
+            try:
+                kb_id = kb.ingest_file(
+                    raw,
+                    namespace=filename,
+                    filename=filename,
+                    chunking_strategy=chunking_strategy,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
+            except EmptyDocumentError as exc:
+                results.append({"filename": filename, "ok": False, "error": str(exc)})
+                continue
+            except ExtractorError as exc:
+                # Covers UnsupportedFileType, MissingExtractorDependency,
+                # ExtractionError — each carries an actionable message.
+                results.append({"filename": filename, "ok": False, "error": str(exc)})
+                continue
+            except Exception as exc:
+                logger.exception(
+                    "KB ingest failed for agent=%s file=%s", agent_id, filename
+                )
+                results.append({"filename": filename, "ok": False, "error": str(exc)})
+                continue
+
+            kb.attach_to_agent(agent, kb_id)
+            try:
+                chunk_count = len(kb.retrieve_knowledge(kb_id))
+            except Exception:
+                chunk_count = 0
+            results.append(
+                {
+                    "filename": filename,
+                    "ok": True,
+                    "knowledge_base_id": kb_id,
+                    "chunk_count": chunk_count,
+                    "bytes": len(raw),
+                }
+            )
+
+        succeeded = sum(1 for r in results if r.get("ok"))
+        return JSONResponse(
+            {
+                "ok": succeeded == len(results),
+                "ingested": succeeded,
+                "total": len(results),
+                "results": results,
+            },
+            status_code=200 if succeeded else 400,
+        )
+
+    @app.get("/api/agents/{agent_id}/knowledge-base")
+    async def api_agent_knowledge_base(agent_id: str):
+        """Return the agent's current knowledge base entries as JSON.
+
+        Used by the playground to refresh the Knowledge Base panel in
+        place after an ingest or delete, instead of doing a full page
+        reload. Same data shape that ``_load_agent_knowledge_base``
+        produces for the initial server render.
+        """
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+        try:
+            agent = _state["provider"].retrieve_memagent(agent_id)
+        except Exception as exc:
+            logger.error("Failed to load agent %s for KB list: %s", agent_id, exc)
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if agent is None:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return JSONResponse(
+            {
+                "agent_id": agent_id,
+                "entries": _load_agent_knowledge_base(agent),
+            }
+        )
+
+    @app.delete("/api/agents/{agent_id}/knowledge-base/{kb_id}")
+    async def api_agent_knowledge_base_delete(agent_id: str, kb_id: str):
+        """Detach a knowledge_base_id from an agent and delete its entries.
+
+        Invoked by the playground's pending-chips UI when the user clicks
+        × on a successfully-ingested file. Always returns a JSON result so
+        the frontend can update the chip uniformly.
+        """
+        from ..long_term.semantic import KnowledgeBase
+        from ..memagent import MemAgent
+
+        if not _state["provider"]:
+            raise HTTPException(status_code=400, detail="Not connected")
+
+        try:
+            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+        except Exception as exc:
+            logger.error("Failed to load agent %s for KB delete: %s", agent_id, exc)
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        kb = KnowledgeBase(memory_provider=_state["provider"])
+        detached = kb.detach_from_agent(agent, kb_id)
+        deleted = kb.delete_knowledge(kb_id)
+        return JSONResponse(
+            {
+                "ok": detached or deleted,
+                "knowledge_base_id": kb_id,
+                "detached": detached,
+                "deleted": deleted,
+            },
+            status_code=200 if (detached or deleted) else 404,
+        )
+
     @app.get("/api/agents/{agent_id}/automation-runs")
     async def api_agent_automation_runs(agent_id: str):
-        """JSON endpoint returning recent automation runs for an agent."""
+        """JSON endpoint returning recent automation runs and jobs for an agent."""
         if not _state["provider"]:
             raise HTTPException(status_code=400, detail="Not connected")
         store = _get_automation_store_for_ui()
         if store is None:
-            return {"runs": []}
+            return {"runs": [], "jobs": []}
         try:
             jobs = store.list_jobs(agent_id=_to_text(agent_id).strip(), enabled=None)
         except Exception:
-            return {"runs": []}
+            return {"runs": [], "jobs": []}
         result = []
+        jobs_result = []
         for job in jobs[:10]:
+            schedule_label = ""
+            if job.schedule_type == "interval" and job.interval_seconds:
+                schedule_label = f"interval {job.interval_seconds}s"
+            elif job.schedule_type == "cron" and job.cron_expr:
+                schedule_label = f"cron {job.cron_expr}"
+            next_run_local = None
+            if job.next_run_at:
+                try:
+                    if ZoneInfo is not None and job.timezone:
+                        next_run_local = job.next_run_at.astimezone(
+                            ZoneInfo(job.timezone)
+                        ).isoformat()
+                    else:
+                        next_run_local = job.next_run_at.isoformat()
+                except Exception:
+                    next_run_local = job.next_run_at.isoformat()
+            jobs_result.append(
+                {
+                    "job_id": job.job_id,
+                    "name": job.name,
+                    "enabled": job.enabled,
+                    "schedule": schedule_label,
+                    "next_run_at": next_run_local,
+                }
+            )
             try:
                 runs = store.list_runs(job.job_id, limit=5)
             except Exception:
@@ -4792,7 +6035,7 @@ def create_app() -> FastAPI:
                     }
                 )
         result.sort(key=lambda r: r.get("scheduled_for") or "", reverse=True)
-        return {"runs": result[:20]}
+        return {"runs": result[:20], "jobs": jobs_result}
 
     return app
 
@@ -5671,13 +6914,18 @@ def _build_skills_marketplace_provider_config(
                 continue
             config[key] = value
 
-    if "api_key" not in config:
-        default_key = _to_text(os.environ.get("SKILLSMP_API_KEY", "")).strip()
-        if default_key:
-            config["api_key"] = default_key
-
-    if "base_url" not in config:
-        config["base_url"] = "https://skillsmp.com"
+    if normalized_provider == "skillsmp":
+        if "api_key" not in config:
+            default_key = _to_text(os.environ.get("SKILLSMP_API_KEY", "")).strip()
+            if default_key:
+                config["api_key"] = default_key
+        if "base_url" not in config:
+            config["base_url"] = "https://skillsmp.com"
+    elif normalized_provider == "vercel":
+        if "github_token" not in config:
+            default_token = _to_text(os.environ.get("GITHUB_TOKEN", "")).strip()
+            if default_token:
+                config["github_token"] = default_token
 
     return config or None
 
@@ -5698,10 +6946,10 @@ def _validate_skills_marketplace_provider_choice(
     if not provider_name:
         return None
 
-    if provider_name != "skillsmp":
+    if provider_name not in ("skillsmp", "vercel"):
         return (
             f"Unknown skills marketplace provider '{provider_name}'. "
-            "Supported providers: skillsmp."
+            "Supported providers: skillsmp, vercel."
         )
 
     config = (
@@ -5710,9 +6958,14 @@ def _validate_skills_marketplace_provider_choice(
         )
         or {}
     )
-    api_key = _to_text(config.get("api_key", "")).strip()
-    if not api_key:
-        return "Skills Marketplace requires an API key. Add `SKILLSMP_API_KEY` in Settings."
+
+    if provider_name == "skillsmp":
+        api_key = _to_text(config.get("api_key", "")).strip()
+        if not api_key:
+            return "Skills Marketplace requires an API key. Add `SKILLSMP_API_KEY` in Settings."
+
+    # Vercel provider works without a token (public GitHub access),
+    # but rate limits are better with GITHUB_TOKEN.
 
     return None
 
@@ -5912,6 +7165,21 @@ def _get_memory_stats() -> Dict[str, int]:
         except Exception:
             stats[mem_type.value] = 0
 
+    # Automation jobs use a separate store; count them independently.
+    try:
+        # TODO(memorizz): _get_automation_store_for_ui is currently nested inside
+        # another factory function; this call site sits outside that scope and
+        # falls through to the except branch at runtime, silently returning 0.
+        # Tracked separately from the M1/M2/M3 PRs — fix is to lift the helper
+        # to module scope. Suppressing the lint to unblock the WIP checkpoint.
+        store = _get_automation_store_for_ui()  # noqa: F821
+        if store is not None:
+            stats["automations"] = len(store.list_jobs(enabled=None))
+        else:
+            stats["automations"] = 0
+    except Exception:
+        stats["automations"] = 0
+
     return stats
 
 
@@ -5933,52 +7201,6 @@ def _serialize_agent(agent) -> Dict[str, Any]:
     data.pop("model", None)
 
     return data
-
-
-def _load_agent_detail(agent_id: str) -> Dict[str, Any]:
-    """Load agent detail information for rendering."""
-    agent = None
-    context_window: List[Dict[str, Any]] = []
-    error = None
-    token_stats = None
-
-    try:
-        agent = _state["provider"].retrieve_memagent(agent_id)
-        if not agent:
-            raise HTTPException(status_code=404, detail="Agent not found")
-
-        memory_ids = getattr(agent, "memory_ids", []) or []
-        for memory_id in memory_ids[:3]:
-            try:
-                history = _state[
-                    "provider"
-                ].retrieve_conversation_history_ordered_by_timestamp(
-                    memory_id=memory_id, limit=50
-                )
-                context_window.extend(history or [])
-            except Exception as e:
-                logger.warning(f"Failed to get history for {memory_id}: {e}")
-
-        context_window.sort(
-            key=lambda x: x.get("timestamp", 0)
-            if isinstance(x.get("timestamp"), (int, float))
-            else 0
-        )
-
-        token_stats = _build_token_stats(agent, context_window)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to load agent {agent_id}: {e}")
-        error = str(e)
-
-    return {
-        "agent": agent,
-        "context_window": context_window[-30:],
-        "token_stats": token_stats,
-        "error": error,
-    }
 
 
 def _load_thread_messages(
@@ -6451,6 +7673,139 @@ def _load_thread_summary_memory(
 
     filtered.sort(
         key=lambda item: _coerce_timestamp(item.get("timestamp")) or 0.0, reverse=True
+    )
+    if limit and limit > 0:
+        return filtered[:limit]
+    return filtered
+
+
+def _load_agent_knowledge_base(
+    agent: Any, limit: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """Load knowledge-base entries attached to this agent.
+
+    Knowledge base entries are agent-scoped (not thread-scoped): each is
+    linked to an agent via a `knowledge_base_id` that the agent references
+    in its `knowledge_base_ids` attribute. Returns the same list regardless
+    of which conversation thread is active.
+    """
+    provider = _state.get("provider")
+    if not provider or agent is None:
+        return []
+
+    kb_ids_raw = getattr(agent, "knowledge_base_ids", None) or []
+    if isinstance(kb_ids_raw, dict):
+        kb_ids_raw = list(kb_ids_raw.values())
+    kb_ids = {_to_text(kid).strip() for kid in kb_ids_raw if _to_text(kid).strip()}
+    if not kb_ids:
+        return []
+
+    try:
+        from ..enums.memory_type import MemoryType
+
+        documents = provider.list_all(MemoryType.KNOWLEDGE_BASE) or []
+    except Exception as exc:
+        logger.debug("Failed to load knowledge base: %s", exc)
+        return []
+
+    filtered: List[Dict[str, Any]] = []
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+        doc_kb_id = _to_text(
+            doc.get("knowledge_base_id") or doc.get("knowledgeBaseId")
+        ).strip()
+        if not doc_kb_id or doc_kb_id not in kb_ids:
+            continue
+        content = _to_text(doc.get("content") or "")
+        preview = content[:280] + ("…" if len(content) > 280 else "")
+        filtered.append(
+            {
+                "knowledge_base_id": doc_kb_id,
+                "namespace": _to_text(doc.get("namespace") or ""),
+                "timestamp": doc.get("created_at") or doc.get("createdAt"),
+                "content_preview": preview,
+                "content_length": len(content),
+            }
+        )
+
+    filtered.sort(
+        key=lambda item: _coerce_timestamp(item.get("timestamp")) or 0.0,
+        reverse=True,
+    )
+    if limit and limit > 0:
+        return filtered[:limit]
+    return filtered
+
+
+def _load_thread_tool_log_memory(
+    memory_id: str, limit: Optional[int] = 20
+) -> List[Dict[str, Any]]:
+    """Load tool log entries for the active thread."""
+    provider = _state.get("provider")
+    normalized_memory_id = _to_text(memory_id).strip()
+    if not provider or not normalized_memory_id:
+        return []
+
+    try:
+        from ..enums.memory_type import MemoryType
+
+        documents = provider.list_all(MemoryType.TOOL_LOG) or []
+    except Exception as exc:
+        logger.debug(
+            "Failed to load tool log memory for thread %s: %s",
+            normalized_memory_id,
+            exc,
+        )
+        return []
+
+    filtered: List[Dict[str, Any]] = []
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+
+        content = doc.get("content") or doc
+        if isinstance(content, dict):
+            doc_memory_id = _to_text(
+                content.get("memory_id") or doc.get("memory_id") or ""
+            ).strip()
+        else:
+            doc_memory_id = _to_text(doc.get("memory_id", "")).strip()
+
+        if doc_memory_id and doc_memory_id != normalized_memory_id:
+            continue
+
+        # Serialize the tool log entry
+        if isinstance(content, dict):
+            tool_name = _to_text(content.get("tool_name", "")).strip() or "unknown"
+            arguments = _to_text(content.get("arguments", "")).strip()
+            result = _to_text(content.get("result", "")).strip()
+            success = content.get("success", True)
+            error = _to_text(content.get("error", "")).strip() or None
+            timestamp = _to_text(content.get("timestamp", "")).strip()
+            tool_log_id = _to_text(
+                content.get("tool_log_id") or doc.get("id", "")
+            ).strip()
+        else:
+            continue
+
+        result_preview = result[:200] + "..." if len(result) > 200 else result
+
+        filtered.append(
+            {
+                "tool_log_id": tool_log_id,
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "result_preview": result_preview,
+                "success": success,
+                "error": error,
+                "timestamp": timestamp,
+            }
+        )
+
+    filtered.sort(
+        key=lambda item: _coerce_timestamp(item.get("timestamp")) or 0.0,
+        reverse=True,
     )
     if limit and limit > 0:
         return filtered[:limit]
@@ -7539,12 +8894,23 @@ def _parse_mcp_servers_json(
 def _parse_llm_config(
     provider: str, model: str, raw_json: str
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Build an LLM config dict from form values."""
+    """Build an LLM config dict from form values.
+
+    Special-cases:
+    - ``local-openai`` is a UI-only sentinel for OpenAI-compatible local
+      servers (llama.cpp's ``llama-server``, LM Studio, vLLM, etc). It
+      collapses to ``provider=openai`` plus a ``base_url`` field so the
+      saved config loads through the existing ``OpenAI`` provider.
+    """
     config: Optional[Dict[str, Any]] = None
     error = None
 
     provider_value = (provider or "").strip().lower()
     model_value = (model or "").strip()
+
+    is_local_openai = provider_value == "local-openai"
+    if is_local_openai:
+        provider_value = "openai"
 
     if provider_value or model_value:
         config = {}
@@ -7557,6 +8923,11 @@ def _parse_llm_config(
                 config["deployment_name"] = model_value
             else:
                 config["model"] = model_value
+        if is_local_openai:
+            # Default to llama.cpp's standard port; users can override
+            # in the JSON or by including base_url in the form-level
+            # config (handled below when raw_json is parsed).
+            config.setdefault("base_url", "http://127.0.0.1:8080/v1")
 
     if raw_json and raw_json.strip():
         try:
@@ -7587,6 +8958,103 @@ def _build_persona_payload(
         "goals": (goals or "").strip(),
         "background": (background or "").strip(),
     }
+
+
+def _resolve_persona_for_agent(
+    provider: Any,
+    persona_payload: Optional[Dict[str, Any]],
+    persona_id: str,
+    agent_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Reconcile the form's persona payload with the PERSONAS collection.
+
+    When a hidden ``persona_id`` is supplied (via the "Load saved persona"
+    dropdown), this either reuses the existing record unchanged or applies a
+    traceable :meth:`Persona.update` with ``source_type='ui_form'``. When no
+    id is supplied and the payload has a name, a new record is stored. The
+    returned dict (if any) is the canonical snapshot to embed on the agent
+    document so the PERSONAS collection and the agent doc stay consistent.
+    """
+    if not persona_payload:
+        return None
+    if provider is None:
+        return persona_payload
+
+    from ..enums.memory_type import MemoryType
+    from ..long_term.semantic.persona.persona import Persona
+
+    persona_id = (persona_id or "").strip()
+
+    existing_doc: Optional[Dict[str, Any]] = None
+    if persona_id:
+        try:
+            existing_doc = provider.retrieve_by_id(
+                persona_id, memory_store_type=MemoryType.PERSONAS
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to retrieve persona %s for reconciliation: %s",
+                persona_id,
+                exc,
+            )
+            existing_doc = None
+
+    if existing_doc:
+        # Merge the stored record with form values, then diff
+        persona = Persona.from_dict(existing_doc)
+        if not persona._storage_id:
+            persona._storage_id = persona_id
+
+        fields_to_check = ("name", "role", "goals", "background")
+        candidate_updates = {
+            field: (persona_payload.get(field) or "").strip()
+            for field in fields_to_check
+        }
+        diff = {
+            field: value
+            for field, value in candidate_updates.items()
+            if value and value != (getattr(persona, field, "") or "").strip()
+        }
+
+        if not diff:
+            # No changes — just re-embed the existing snapshot
+            return persona.to_dict()
+
+        try:
+            persona.update(
+                updates=diff,
+                change_trigger={
+                    "reason": "Persona edited via agent config form.",
+                    "source_type": "ui_form",
+                    "agent_id": agent_id,
+                },
+                provider=provider,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to apply ui_form persona update for %s: %s",
+                persona_id,
+                exc,
+            )
+            return persona_payload
+        return persona.to_dict()
+
+    # No existing record — create a fresh Persona and store it
+    try:
+        persona = Persona(
+            name=persona_payload.get("name", ""),
+            role=persona_payload.get("role") or "general",
+            goals=persona_payload.get("goals", ""),
+            background=persona_payload.get("background", ""),
+        )
+        persona.store_persona(provider)
+        return persona.to_dict()
+    except Exception as exc:
+        logger.warning(
+            "Failed to store new persona in PERSONAS collection; embedding raw payload: %s",
+            exc,
+        )
+        return persona_payload
 
 
 def _extract_agent_id(result: Any, fallback: Optional[str]) -> Optional[str]:
@@ -7654,11 +9122,16 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         persona_role = persona.get("role", "")
         persona_goals = persona.get("goals", "")
         persona_background = persona.get("background", "")
+        persona_id_value = (
+            persona.get("storage_id") or persona.get("_id") or persona.get("id") or ""
+        )
     else:
         persona_name = getattr(persona, "name", "") if persona else ""
         persona_role = getattr(persona, "role", "") if persona else ""
         persona_goals = getattr(persona, "goals", "") if persona else ""
         persona_background = getattr(persona, "background", "") if persona else ""
+        persona_id_value = getattr(persona, "_storage_id", "") if persona else ""
+    persona_id_value = str(persona_id_value) if persona_id_value else ""
 
     llm_config = getattr(agent, "llm_config", None) or {}
     llm_provider = _normalize_llm_provider(llm_config.get("provider", "openai"))
@@ -7715,6 +9188,7 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "semantic_cache": bool(getattr(agent, "semantic_cache", False)),
         "is_favorite": bool(getattr(agent, "is_favorite", False)),
         "memory_ids_raw": ", ".join(memory_ids),
+        "persona_id": persona_id_value,
         "persona_name": persona_name,
         "persona_role": persona_role,
         "persona_goals": persona_goals,

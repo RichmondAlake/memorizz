@@ -194,12 +194,10 @@ class TestBackwardCompatibilityMethods:
         response2 = agent.run("Query with memory", memory_id="test_memory")
         assert_agent_response_valid(response2)
 
-        response3 = agent.run("Query with conversation", conversation_id="test_conv")
+        response3 = agent.run("Query with conversation", thread_id="test_conv")
         assert_agent_response_valid(response3)
 
-        response4 = agent.run(
-            "Full query", memory_id="test_mem", conversation_id="test_conv"
-        )
+        response4 = agent.run("Full query", memory_id="test_mem", thread_id="test_conv")
         assert_agent_response_valid(response4)
 
     @pytest.mark.compatibility
@@ -341,21 +339,19 @@ class TestBackwardCompatibilityBehavior:
         )
 
         memory_id = "compat_conversation"
-        conversation_id = "compat_session"
+        thread_id = "compat_session"
 
         # Simulate the same conversation flow as pre-refactor
-        response1 = agent.run(
-            "Hi there!", memory_id=memory_id, conversation_id=conversation_id
-        )
+        response1 = agent.run("Hi there!", memory_id=memory_id, thread_id=thread_id)
         response2 = agent.run(
             "I need help with Python",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
         response3 = agent.run(
             "What do you recommend?",
             memory_id=memory_id,
-            conversation_id=conversation_id,
+            thread_id=thread_id,
         )
 
         # All responses should be valid

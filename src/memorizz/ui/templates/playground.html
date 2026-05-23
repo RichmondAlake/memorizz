@@ -2,6 +2,274 @@
 
 {% block title %}Playground - {{ agent.persona.name if agent and agent.persona and agent.persona.name else 'Agent' }} - Memorizz{% endblock %}
 
+{% block head %}
+<!-- marked.js for markdown rendering -->
+<script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
+<style>
+    /* Pre-flight + manage panel for local providers (mirrors settings.html). */
+    .local-model-status .model-manager {
+        margin-top: 12px;
+        border: 1px solid var(--border-color, #2a2d36);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.02);
+    }
+    .local-model-status .model-manager > summary {
+        cursor: pointer;
+        padding: 0.55rem 0.85rem;
+        font-size: 0.85rem;
+        color: var(--text-secondary, #aaa);
+        list-style: none;
+        user-select: none;
+    }
+    .local-model-status .model-manager > summary::-webkit-details-marker { display: none; }
+    .local-model-status .model-manager > summary::before {
+        content: '▸ ';
+        display: inline-block;
+        transition: transform 0.15s ease;
+    }
+    .local-model-status .model-manager[open] > summary::before { transform: rotate(90deg); }
+    .local-model-status .model-list {
+        border-top: 1px solid var(--border-color, #2a2d36);
+        padding: 0.4rem 0.5rem 0.5rem;
+    }
+    .local-model-status .model-list-section {
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-secondary, #888);
+        padding: 0.5rem 0.35rem 0.25rem;
+    }
+    .local-model-status .model-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        padding: 0.35rem 0.5rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+    }
+    .local-model-status .model-row + .model-row {
+        border-top: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .local-model-status .model-row-text { min-width: 0; word-break: break-all; }
+    .local-model-status .model-row-text code,
+    .local-model-status .model-row-select code {
+        background: transparent;
+        padding: 0;
+        font-size: 0.85rem;
+    }
+    .local-model-status .model-row-select {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        text-align: left;
+        background: transparent;
+        border: 1px solid transparent;
+        color: inherit;
+        padding: 0.2rem 0.45rem;
+        border-radius: 5px;
+        cursor: pointer;
+        font: inherit;
+        word-break: break-all;
+    }
+    .local-model-status .model-row-select:hover {
+        background: rgba(0, 217, 255, 0.06);
+        border-color: rgba(0, 217, 255, 0.25);
+    }
+    .local-model-status .model-row-select:focus-visible {
+        outline: 2px solid var(--accent-primary, #00d9ff);
+        outline-offset: 1px;
+    }
+    .local-model-status .model-row[data-selected="true"] {
+        background: rgba(0, 217, 255, 0.06);
+        border-left: 2px solid var(--accent-primary, #00d9ff);
+        padding-left: calc(0.5rem - 2px);
+    }
+    .local-model-status .model-row[data-selected="true"] .model-row-select {
+        color: var(--accent-primary, #00d9ff);
+        font-weight: 600;
+    }
+    .local-model-status .model-row-check {
+        color: var(--accent-primary, #00d9ff);
+        font-weight: 700;
+    }
+    .local-model-status .model-row-label { color: var(--text-secondary, #888); }
+    .local-model-status .model-action-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border-radius: 6px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--text-secondary, #aaa);
+        cursor: pointer;
+        transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+    }
+    .local-model-status .model-row[data-row-action="delete"] .model-action-btn:hover {
+        color: var(--accent-danger, #ff5577);
+        border-color: rgba(255, 85, 119, 0.45);
+        background: rgba(255, 85, 119, 0.08);
+    }
+    .local-model-status .model-row[data-row-action="pull"] .model-action-btn:hover {
+        color: var(--accent-primary, #00d9ff);
+        border-color: rgba(0, 217, 255, 0.45);
+        background: rgba(0, 217, 255, 0.08);
+    }
+    .local-model-status .model-action-btn:disabled {
+        cursor: progress;
+        opacity: 0.7;
+    }
+    .local-model-status .model-action-spinner {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: pg-lm-spin 0.8s linear infinite;
+    }
+    @keyframes pg-lm-spin { to { transform: rotate(360deg); } }
+    /* When the manage panel takes over selection, hide the redundant
+       dropdown + custom input on the playground config form. */
+    .config-field#cfg-llm-model-field.is-local-provider #cfg-llm-model,
+    .config-field#cfg-llm-model-field.is-local-provider #cfg-llm-model-custom {
+        display: none !important;
+    }
+
+    /* Markdown rendered content styles */
+    .pg-message-text.md-rendered {
+        line-height: 1.6;
+    }
+    .pg-message-text.md-rendered p {
+        margin: 0.4em 0;
+    }
+    .pg-message-text.md-rendered p:first-child {
+        margin-top: 0;
+    }
+    .pg-message-text.md-rendered p:last-child {
+        margin-bottom: 0;
+    }
+    .pg-message-text.md-rendered pre {
+        background: rgba(0, 0, 0, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 12px 14px;
+        overflow-x: auto;
+        margin: 0.6em 0;
+        font-size: 0.88em;
+    }
+    .pg-message-text.md-rendered code {
+        background: rgba(0, 0, 0, 0.25);
+        border-radius: 3px;
+        padding: 2px 5px;
+        font-size: 0.9em;
+        font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+    .pg-message-text.md-rendered pre code {
+        background: none;
+        padding: 0;
+        border-radius: 0;
+        font-size: inherit;
+    }
+    .pg-message-text.md-rendered ul,
+    .pg-message-text.md-rendered ol {
+        margin: 0.4em 0;
+        padding-left: 1.6em;
+    }
+    .pg-message-text.md-rendered li {
+        margin: 0.2em 0;
+    }
+    .pg-message-text.md-rendered blockquote {
+        border-left: 3px solid rgba(0, 217, 255, 0.4);
+        margin: 0.5em 0;
+        padding: 0.3em 0.8em;
+        color: rgba(255, 255, 255, 0.75);
+    }
+    .pg-message-text.md-rendered h1,
+    .pg-message-text.md-rendered h2,
+    .pg-message-text.md-rendered h3,
+    .pg-message-text.md-rendered h4 {
+        margin: 0.6em 0 0.3em 0;
+        font-weight: 600;
+    }
+    .pg-message-text.md-rendered h1 { font-size: 1.3em; }
+    .pg-message-text.md-rendered h2 { font-size: 1.15em; }
+    .pg-message-text.md-rendered h3 { font-size: 1.05em; }
+    .pg-message-text.md-rendered table {
+        border-collapse: collapse;
+        margin: 0.5em 0;
+        width: 100%;
+        font-size: 0.92em;
+    }
+    .pg-message-text.md-rendered th,
+    .pg-message-text.md-rendered td {
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 6px 10px;
+        text-align: left;
+    }
+    .pg-message-text.md-rendered th {
+        background: rgba(255, 255, 255, 0.05);
+        font-weight: 600;
+    }
+    .pg-message-text.md-rendered a {
+        color: #00d9ff;
+        text-decoration: underline;
+    }
+    .pg-message-text.md-rendered hr {
+        border: none;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        margin: 0.8em 0;
+    }
+    .pg-message-text.md-rendered img {
+        max-width: 100%;
+        border-radius: 6px;
+    }
+
+    /* Compact button styles */
+    .compact-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 5px 12px;
+        font-size: 0.78em;
+        border: 1px solid rgba(0, 217, 255, 0.3);
+        border-radius: 6px;
+        background: rgba(0, 217, 255, 0.08);
+        color: rgba(255, 255, 255, 0.85);
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+    .compact-btn:hover {
+        background: rgba(0, 217, 255, 0.18);
+        border-color: rgba(0, 217, 255, 0.5);
+    }
+    .compact-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    .compact-btn .compact-icon {
+        font-size: 1.1em;
+    }
+    .auto-compact-badge {
+        display: inline-block;
+        font-size: 0.7em;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: rgba(0, 255, 136, 0.12);
+        color: rgba(0, 255, 136, 0.85);
+        border: 1px solid rgba(0, 255, 136, 0.2);
+        margin-left: 6px;
+        vertical-align: middle;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="page-header page-header--agent">
     {% set agent_is_favorite = agent.is_favorite if agent and agent.is_favorite is not none else false %}
@@ -64,14 +332,21 @@
                     <option value="azure" {% if llm_provider == 'azure' %}selected{% endif %}>Azure OpenAI</option>
                     <option value="ollama" {% if llm_provider == 'ollama' %}selected{% endif %}>Ollama (Local)</option>
                     <option value="huggingface" {% if llm_provider == 'huggingface' %}selected{% endif %}>HuggingFace</option>
+                    <option value="mlx" {% if llm_provider == 'mlx' %}selected{% endif %}>MLX (Apple Silicon)</option>
+                    <option value="local-openai" {% if llm_provider == 'local-openai' %}selected{% endif %}>Local OpenAI-compatible (llama.cpp / LM Studio)</option>
                 </select>
             </div>
-            <div class="config-field">
+            <div class="config-field" id="cfg-llm-model-field">
                 <label for="cfg-llm-model">Model</label>
                 <select id="cfg-llm-model" name="llm_model" {% if llm_provider == 'azure' %}style="display:none"{% endif %}>
                 </select>
                 <input id="cfg-llm-model-custom" type="text" value="{{ llm_model }}"
                        placeholder="Deployment name" {% if llm_provider != 'azure' %}style="display:none"{% endif %}>
+                <!-- Pre-flight + manage panel for local providers (Ollama / HF).
+                     Populated by playgroundCheckLocalModel() so users see at
+                     send time whether the chosen model is actually available
+                     offline, instead of finding out from a 404 mid-chat. -->
+                <div id="cfg-local-model-status" class="local-model-status" style="display:none; margin-top:10px;"></div>
             </div>
             <div class="config-field">
                 <label for="cfg-max-steps">Max Tool Iterations</label>
@@ -162,10 +437,44 @@
                 <select id="cfg-skills-marketplace-provider" name="skills_marketplace_provider">
                     <option value="" {% if not skills_marketplace_provider %}selected{% endif %}>None (disabled)</option>
                     <option value="skillsmp" {% if skills_marketplace_provider == 'skillsmp' %}selected{% endif %}>SkillsMP (skillsmp.com)</option>
+                    <option value="vercel" {% if skills_marketplace_provider == 'vercel' %}selected{% endif %}>Vercel Agent Skills (skills.sh)</option>
                 </select>
                 {% if skills_marketplace_status_error %}
                 <p class="form-hint sandbox-error-hint">{{ skills_marketplace_status_error }}</p>
                 {% endif %}
+                <p class="form-hint sandbox-error-hint" id="cfg-skills-marketplace-token-warning" style="display:none;">
+                    Vercel Agent Skills is selected but <code>GITHUB_TOKEN</code> is not set. Skill search will fail (HTTP 401) until you add a token in
+                    <a href="/settings#GITHUB_TOKEN">Settings</a>, or create one at
+                    <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>
+                    (no scopes required) — see the
+                    <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noopener noreferrer">GitHub docs</a>.
+                </p>
+                <script>
+                    (function() {
+                        var select = document.getElementById('cfg-skills-marketplace-provider');
+                        var warning = document.getElementById('cfg-skills-marketplace-token-warning');
+                        if (!select || !warning) return;
+                        var githubTokenPresent = null;
+
+                        function renderWarning() {
+                            if (select.value === 'vercel' && githubTokenPresent === false) {
+                                warning.style.display = '';
+                            } else {
+                                warning.style.display = 'none';
+                            }
+                        }
+
+                        fetch('/vercel-skills/api/token-status')
+                            .then(function(r) { return r.json(); })
+                            .then(function(data) {
+                                githubTokenPresent = !!(data && data.github_token_present);
+                                renderWarning();
+                            })
+                            .catch(function() { /* ignore */ });
+
+                        select.addEventListener('change', renderWarning);
+                    })();
+                </script>
             </div>
             <div class="config-field">
                 <label for="cfg-persona-name">Persona Name</label>
@@ -285,60 +594,110 @@
         return d.innerHTML;
     }
 
+    function renderJobs(container, jobs) {
+        for (var i = 0; i < jobs.length; i++) {
+            var job = jobs[i];
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'playground-thread-tab';
+            btn.title = job.schedule || '';
+            btn.addEventListener('click', (function(jid) {
+                return function() { window.location.href = '/automations/' + encodeURIComponent(jid); };
+            })(job.job_id));
+
+            var titleSpan = document.createElement('span');
+            titleSpan.className = 'thread-tab-title';
+            titleSpan.textContent = job.name;
+
+            var metaSpan = document.createElement('span');
+            metaSpan.className = 'thread-tab-meta';
+            var statusClass = job.enabled ? 'badge-success' : '';
+            var statusLabel = job.enabled ? 'enabled' : 'paused';
+            metaSpan.innerHTML = '<span class="badge ' + statusClass + '" style="font-size:0.65rem;padding:1px 5px;">'
+                + escHtml(statusLabel) + '</span> '
+                + escHtml(job.schedule)
+                + (job.next_run_at ? ' &middot; next: ' + escHtml(fmtTs(job.next_run_at)) : '');
+
+            btn.appendChild(titleSpan);
+            btn.appendChild(metaSpan);
+            container.appendChild(btn);
+        }
+    }
+
+    function renderRuns(container, runs) {
+        for (var i = 0; i < runs.length; i++) {
+            var run = runs[i];
+            var memId = run.memory_id || '';
+            var statusClass = run.status === 'succeeded' ? 'badge-success'
+                : run.status === 'failed' ? 'badge-warning' : '';
+
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'playground-thread-tab';
+            btn.title = run.response_snippet || '';
+            if (memId) {
+                btn.dataset.memoryId = memId;
+                btn.addEventListener('click', (function(mid) {
+                    return function() { useThreadMemoryId(mid); };
+                })(memId));
+            }
+
+            var titleSpan = document.createElement('span');
+            titleSpan.className = 'thread-tab-title';
+            titleSpan.textContent = run.job_name;
+
+            var metaSpan = document.createElement('span');
+            metaSpan.className = 'thread-tab-meta';
+            var runDate = run.finished_at || run.scheduled_for || '';
+            metaSpan.innerHTML = '<span class="badge ' + statusClass + '" style="font-size:0.65rem;padding:1px 5px;">'
+                + escHtml(run.status) + '</span> ' + escHtml(fmtTs(runDate));
+
+            btn.appendChild(titleSpan);
+            btn.appendChild(metaSpan);
+            if (memId) {
+                var codeEl = document.createElement('code');
+                codeEl.textContent = memId;
+                btn.appendChild(codeEl);
+            }
+            container.appendChild(btn);
+        }
+    }
+
     function loadAutomationRuns() {
         fetch('/api/agents/' + encodeURIComponent(AGENT_ID) + '/automation-runs')
             .then(function(r) { return r.ok ? r.json() : null; })
             .then(function(data) {
-                if (!data || !data.runs) return;
+                if (!data) return;
                 var container = document.getElementById('playground-automation-tabs');
                 var emptyMsg = document.getElementById('automation-tabs-empty');
                 if (!container) return;
 
-                if (data.runs.length === 0) {
-                    if (emptyMsg) emptyMsg.textContent = 'No automation runs yet.';
+                var jobs = data.jobs || [];
+                var runs = data.runs || [];
+
+                if (jobs.length === 0 && runs.length === 0) {
+                    if (emptyMsg) emptyMsg.textContent = 'No automations yet.';
                     return;
                 }
 
                 container.innerHTML = '';
-                for (var i = 0; i < data.runs.length; i++) {
-                    var run = data.runs[i];
-                    var memId = run.memory_id || '';
-                    var statusClass = run.status === 'succeeded' ? 'badge-success'
-                        : run.status === 'failed' ? 'badge-warning' : '';
 
-                    var btn = document.createElement('button');
-                    btn.type = 'button';
-                    btn.className = 'playground-thread-tab';
-                    btn.title = run.response_snippet || '';
-                    if (memId) {
-                        btn.dataset.memoryId = memId;
-                        btn.addEventListener('click', (function(mid) {
-                            return function() { useThreadMemoryId(mid); };
-                        })(memId));
-                    }
+                if (jobs.length > 0) {
+                    renderJobs(container, jobs);
+                }
 
-                    var titleSpan = document.createElement('span');
-                    titleSpan.className = 'thread-tab-title';
-                    titleSpan.textContent = run.job_name;
-
-                    var metaSpan = document.createElement('span');
-                    metaSpan.className = 'thread-tab-meta';
-                    metaSpan.innerHTML = '<span class="badge ' + statusClass + '" style="font-size:0.65rem;padding:1px 5px;">'
-                        + escHtml(run.status) + '</span> ' + escHtml(fmtTs(run.scheduled_for));
-
-                    btn.appendChild(titleSpan);
-                    btn.appendChild(metaSpan);
-                    if (memId) {
-                        var codeEl = document.createElement('code');
-                        codeEl.textContent = memId;
-                        btn.appendChild(codeEl);
-                    }
-                    container.appendChild(btn);
+                if (runs.length > 0) {
+                    var runsHeader = document.createElement('p');
+                    runsHeader.className = 'form-hint';
+                    runsHeader.style.marginTop = '10px';
+                    runsHeader.textContent = 'Recent Runs';
+                    container.appendChild(runsHeader);
+                    renderRuns(container, runs);
                 }
             })
             .catch(function() {
                 var emptyMsg = document.getElementById('automation-tabs-empty');
-                if (emptyMsg) emptyMsg.textContent = 'Could not load automation runs.';
+                if (emptyMsg) emptyMsg.textContent = 'Could not load automations.';
             });
     }
 
@@ -350,6 +709,15 @@
 <div class="playground-workbench">
     <!-- Chat Area (left) -->
     <div class="playground-chat" id="playground-chat">
+        <!-- Drag-and-drop overlay: revealed when files are dragged over the chat area -->
+        <div class="pg-dropzone" id="pg-dropzone" aria-hidden="true">
+            <div class="pg-dropzone-inner">
+                <div class="pg-dropzone-icon" aria-hidden="true">📥</div>
+                <div class="pg-dropzone-title">Drop file(s) to ingest</div>
+                <div class="pg-dropzone-hint">Each file is chunked, embedded, and attached to this agent's knowledge base.</div>
+            </div>
+        </div>
+
         <input id="pg-memory-id" type="hidden" value="{{ default_memory_id }}">
         <div class="playground-messages" id="playground-messages">
             {% if context_window %}
@@ -360,7 +728,7 @@
                     </div>
                     <div class="pg-message-body">
                         <div class="pg-message-role">{{ msg.role|default('Unknown')|title }}</div>
-                        <div class="pg-message-text">{{ msg.content or msg.get('text', '') }}</div>
+                        <div class="pg-message-text{% if msg.role == 'assistant' %} md-rendered{% endif %}" {% if msg.role == 'assistant' %}data-md-raw="{{ (msg.content or msg.get('text', '')) | e }}"{% endif %}>{{ msg.content or msg.get('text', '') }}</div>
                     </div>
                 </div>
                 {% endfor %}
@@ -380,6 +748,11 @@
                 <textarea id="pg-query" rows="2" placeholder="Type your message... (Enter to send, Shift+Enter for newline)" autofocus></textarea>
             </div>
             <div class="composer-row">
+                <button type="button" id="pg-attach-btn" class="btn" onclick="document.getElementById('pg-kb-file-input').click()" title="Upload file(s) to knowledge base">
+                    <span id="pg-attach-icon">📎</span>
+                    <span id="pg-attach-label">Attach</span>
+                </button>
+                <input id="pg-kb-file-input" type="file" multiple style="display:none;" onchange="uploadKbFiles(this.files)">
                 <button type="button" id="pg-send-btn" class="btn btn-primary" onclick="sendMessage()">
                     <span id="pg-send-text">Send</span>
                     <span id="pg-send-spinner" class="spinner" style="display:none;"></span>
@@ -388,6 +761,8 @@
                     <span>⏹ Stop</span>
                 </button>
             </div>
+            <div id="pg-kb-chips" class="pg-kb-chips" style="display:none;"></div>
+            <div id="pg-kb-upload-status" class="pg-kb-upload-status" style="display:none;"></div>
         </div>
     </div>
 
@@ -446,6 +821,13 @@
                     <span class="token-percentage" id="token-percentage">{{ token_stats.percentage_used|default(0) }}% used</span>
                     <span class="token-messages" id="token-messages">{{ token_stats.message_count|default(0) }} messages</span>
                 </div>
+                <div style="margin-top: 8px; display: flex; align-items: center; gap: 6px;">
+                    <button type="button" class="compact-btn" id="compact-context-btn" onclick="compactContextWindow()" title="Summarize and compact the context window to free up tokens">
+                        <span class="compact-icon">🗜️</span>
+                        <span>Compact</span>
+                    </button>
+                    <span class="auto-compact-badge" title="Context window auto-compacts at 80% utilization">Auto @ 80%</span>
+                </div>
             </div>
             {% endif %}
 
@@ -465,6 +847,99 @@
                         </div>
                     </details>
                     {% endif %}
+
+                    <details id="full-system-prompt-details" class="context-block context-block-collapsible" data-agent-id="{{ agent.agent_id }}">
+                        <summary class="context-block-title">Full System Prompt (preview)</summary>
+                        <div class="context-block-body">
+                            <p class="form-hint">This is the full prompt assembled at inference time (base + memory + instruction + persona + tools + ...). Fetched on demand.</p>
+                            <div id="full-system-prompt-meta" class="form-hint" style="display: none;"></div>
+                            <pre id="full-system-prompt-text" class="instruction-text" style="white-space: pre-wrap; max-height: 480px; overflow:auto;">Loading…</pre>
+                            <div class="form-actions" style="margin-top: 8px;">
+                                <button type="button" id="full-system-prompt-refresh" class="btn">Refresh</button>
+                                <button type="button" id="full-system-prompt-copy" class="btn">Copy</button>
+                            </div>
+                        </div>
+                    </details>
+                    <script>
+                        (function() {
+                            var details = document.getElementById('full-system-prompt-details');
+                            if (!details) return;
+                            var agentId = details.dataset.agentId;
+                            if (!agentId) return;
+                            var textEl = document.getElementById('full-system-prompt-text');
+                            var metaEl = document.getElementById('full-system-prompt-meta');
+                            var refreshBtn = document.getElementById('full-system-prompt-refresh');
+                            var copyBtn = document.getElementById('full-system-prompt-copy');
+                            var loaded = false;
+                            var inflight = false;
+
+                            function formatMeta(data) {
+                                var parts = [];
+                                parts.push(data.length + ' chars');
+                                if (data.persona) {
+                                    var p = data.persona;
+                                    var name = p.name || '(unnamed)';
+                                    parts.push('persona: ' + name + ' v' + (p.version || 1) + ' (' + (p.history_count || 0) + ' history)');
+                                }
+                                if (Array.isArray(data.tools)) {
+                                    parts.push(data.tools.length + ' tools');
+                                    if (data.persona_tools_registered) {
+                                        parts.push('update_persona: registered');
+                                    } else {
+                                        parts.push('update_persona: NOT registered');
+                                    }
+                                }
+                                return parts.join(' · ');
+                            }
+
+                            function load() {
+                                if (inflight) return;
+                                inflight = true;
+                                textEl.textContent = 'Loading…';
+                                if (metaEl) { metaEl.style.display = 'none'; metaEl.textContent = ''; }
+                                fetch('/api/agents/' + encodeURIComponent(agentId) + '/system-prompt')
+                                    .then(function(r) {
+                                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                                        return r.json();
+                                    })
+                                    .then(function(data) {
+                                        textEl.textContent = data.system_prompt || '(empty)';
+                                        if (metaEl) {
+                                            metaEl.textContent = formatMeta(data);
+                                            metaEl.style.display = 'block';
+                                        }
+                                        loaded = true;
+                                    })
+                                    .catch(function(err) {
+                                        textEl.textContent = 'Failed to load system prompt: ' + err.message;
+                                    })
+                                    .finally(function() { inflight = false; });
+                            }
+
+                            details.addEventListener('toggle', function() {
+                                if (details.open && !loaded) load();
+                            });
+
+                            if (refreshBtn) {
+                                refreshBtn.addEventListener('click', function() {
+                                    loaded = false;
+                                    load();
+                                });
+                            }
+                            if (copyBtn) {
+                                copyBtn.addEventListener('click', function() {
+                                    var text = textEl.textContent || '';
+                                    if (!text) return;
+                                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                                        navigator.clipboard.writeText(text).then(function() {
+                                            copyBtn.textContent = 'Copied';
+                                            setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+                                        });
+                                    }
+                                });
+                            }
+                        })();
+                    </script>
 
                     {% if agent.persona %}
                     <details class="context-block context-block-collapsible" open>
@@ -647,6 +1122,66 @@
                     </details>
 
                     <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Knowledge Base</summary>
+                        <div id="context-knowledge-base-container">
+                        {% if knowledge_base_memory %}
+                        <div class="context-summary-list">
+                            {% for item in knowledge_base_memory %}
+                            <div class="context-summary-item">
+                                <div class="context-summary-header">
+                                    <span class="context-summary-type">{{ item.namespace or 'knowledge' }}</span>
+                                    {% if item.timestamp %}
+                                    <span class="context-summary-time">{{ item.timestamp }}</span>
+                                    {% endif %}
+                                </div>
+                                {% if item.content_preview %}
+                                <div class="context-summary-content">{{ item.content_preview }}</div>
+                                {% endif %}
+                                {% if item.content_length %}
+                                <div class="context-toolbox-time">{{ item.content_length }} chars · id {{ item.knowledge_base_id[:8] }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No knowledge base entries attached to this agent.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible">
+                        <summary class="context-block-title">Tool Logs</summary>
+                        <div id="context-tool-log-container">
+                        {% if tool_log_memory %}
+                        <div class="context-toolbox-list">
+                            {% for item in tool_log_memory %}
+                            <div class="context-toolbox-item">
+                                <div class="context-toolbox-header">
+                                    <span class="context-toolbox-name">{{ item.tool_name }}</span>
+                                    <span class="context-toolbox-type">{% if item.success %}✓{% else %}✗{% endif %}</span>
+                                </div>
+                                {% if item.timestamp %}
+                                <div class="context-toolbox-time">{{ item.timestamp }}</div>
+                                {% endif %}
+                                {% if item.arguments %}
+                                <div class="context-toolbox-description" style="font-size:0.82em;opacity:0.7;">Args: {{ item.arguments[:120] }}{% if item.arguments|length > 120 %}...{% endif %}</div>
+                                {% endif %}
+                                {% if item.result_preview %}
+                                <pre class="context-toolbox-value">{{ item.result_preview }}</pre>
+                                {% endif %}
+                                {% if item.error %}
+                                <div style="color: #ff6b6b; font-size: 0.82em;">Error: {{ item.error }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No tool logs for this thread. Tool outputs are offloaded here to save context window space.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
                         <summary class="context-block-title">Conversation</summary>
                         <div id="context-conversation-container">
                         {% if context_window %}
@@ -796,7 +1331,357 @@ function populateModelSelect(provider) {
 function onProviderChange() {
     const provider = document.getElementById('cfg-llm-provider').value;
     populateModelSelect(provider);
+    playgroundCheckLocalModel();
 }
+
+// =====================================================================
+// Local model pre-flight + manage panel for the Playground.
+// Mirrors the logic in settings.html so users see the same Available
+// Offline / Available to Download list (with select + trash + download
+// buttons), and so they're warned *before* sending a chat that the
+// chosen model isn't actually present locally.
+// =====================================================================
+
+function pgEscapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+}
+
+function pgCurrentModel() {
+    const customInput = document.getElementById('cfg-llm-model-custom');
+    const select = document.getElementById('cfg-llm-model');
+    const fromCustom = (customInput && customInput.value || '').trim();
+    if (fromCustom) return fromCustom;
+    if (select && select.value && select.value !== CUSTOM_MODEL_VALUE) return select.value.trim();
+    return '';
+}
+
+function pgSelectModel(value) {
+    // Set the value on the form so Save persists it. Route through the
+    // custom input + select.value=CUSTOM_MODEL_VALUE so off-catalog
+    // values (e.g. nomic-embed-text:latest) round-trip cleanly.
+    const select = document.getElementById('cfg-llm-model');
+    const customInput = document.getElementById('cfg-llm-model-custom');
+    if (!select || !customInput) return;
+    customInput.value = value;
+    if (select.style.display !== 'none') {
+        const inCatalog = Array.from(select.options).some(function(opt) {
+            return opt.value === value;
+        });
+        select.value = inCatalog ? value : CUSTOM_MODEL_VALUE;
+    }
+    syncPlaygroundModelInputMode();
+    playgroundCheckLocalModel();
+}
+
+let _pgLocalCheckSeq = 0;
+let _pgLocalCheckDebounce = null;
+
+function pgScheduleLocalCheck() {
+    if (_pgLocalCheckDebounce) clearTimeout(_pgLocalCheckDebounce);
+    _pgLocalCheckDebounce = setTimeout(playgroundCheckLocalModel, 350);
+}
+
+async function playgroundCheckLocalModel() {
+    const statusEl = document.getElementById('cfg-local-model-status');
+    const fieldEl = document.getElementById('cfg-llm-model-field');
+    if (!statusEl || !fieldEl) return;
+
+    const provider = (document.getElementById('cfg-llm-provider').value || '').trim();
+    const model = pgCurrentModel();
+
+    // MLX uses the same HF cache directory as `huggingface_hub`, so the
+    // /api/huggingface/installed endpoint already covers it.
+    const usesHFCache = provider === 'huggingface' || provider === 'mlx';
+    if (provider !== 'ollama' && !usesHFCache || !model) {
+        statusEl.style.display = 'none';
+        statusEl.innerHTML = '';
+        fieldEl.classList.remove('is-local-provider');
+        return;
+    }
+
+    const seq = ++_pgLocalCheckSeq;
+    statusEl.style.display = 'block';
+    let providerLabel = 'local Ollama';
+    if (provider === 'huggingface') providerLabel = 'HuggingFace cache';
+    if (provider === 'mlx') providerLabel = 'MLX cache (HuggingFace)';
+    statusEl.innerHTML = '<p class="form-hint">Checking ' + providerLabel + '…</p>';
+
+    const url = provider === 'ollama'
+        ? '/api/ollama/installed'
+        : '/api/huggingface/installed';
+
+    let info;
+    try {
+        const res = await fetch(url, { cache: 'no-store' });
+        info = await res.json();
+    } catch (err) {
+        if (seq !== _pgLocalCheckSeq) return;
+        statusEl.innerHTML = '<div class="warning-message"><strong>Could not reach the UI server</strong>: '
+            + pgEscapeHtml(String(err)) + '</div>';
+        return;
+    }
+    if (seq !== _pgLocalCheckSeq) return;
+
+    if (provider === 'ollama') {
+        pgRenderOllama(statusEl, model, info);
+    } else {
+        // MLX shares the HF cache; the same renderer applies.
+        pgRenderHuggingFace(statusEl, model, info);
+    }
+    pgSyncFieldClass();
+}
+
+function pgSyncFieldClass() {
+    const fieldEl = document.getElementById('cfg-llm-model-field');
+    if (!fieldEl) return;
+    const hasManageList = !!document.querySelector('#cfg-local-model-status .model-manager');
+    fieldEl.classList.toggle('is-local-provider', hasManageList);
+}
+
+function pgRenderOllama(statusEl, model, info) {
+    if (!info.reachable) {
+        statusEl.innerHTML = '<div class="warning-message">'
+            + '<strong>Ollama is not running</strong> at <code>'
+            + pgEscapeHtml(info.host) + '</code>'
+            + (info.error ? ' &mdash; ' + pgEscapeHtml(info.error) : '')
+            + '.<br>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a> and start it, then '
+            + '<a href="#" data-pg-refresh>refresh this check</a>.'
+            + '</div>';
+        pgWireRefresh(statusEl);
+        return;
+    }
+    const installed = (info.models || []).some(function(m) {
+        return m === model || m === model + ':latest' || m + ':latest' === model;
+    });
+    const base = model.split(':')[0];
+    const libUrl = 'https://ollama.com/library/' + encodeURIComponent(base);
+    const banner = installed
+        ? '<div class="success-message">'
+            + '<strong><code>' + pgEscapeHtml(model) + '</code> is available offline</strong>'
+            + ' on Ollama at <code>' + pgEscapeHtml(info.host) + '</code>.'
+            + '</div>'
+        : '<div class="warning-message">'
+            + '<strong>Pre-flight: <code>' + pgEscapeHtml(model) + '</code> is not installed locally.</strong><br>'
+            + 'Sending a message will fail with a 404. Run <code>ollama pull '
+            + pgEscapeHtml(model) + '</code>, click the download icon below, or '
+            + '<a href="' + libUrl + '" target="_blank" rel="noopener">browse <code>'
+            + pgEscapeHtml(base) + '</code> on ollama.com</a>. Then '
+            + '<a href="#" data-pg-refresh>refresh</a>.'
+            + '</div>';
+    statusEl.innerHTML = banner + pgManageListHtml(info.models, 'ollama', 'Ollama');
+    pgWireRefresh(statusEl);
+}
+
+function pgRenderHuggingFace(statusEl, model, info) {
+    if (!info.available) {
+        statusEl.innerHTML = '<div class="warning-message">'
+            + '<strong>HuggingFace cache unavailable</strong>'
+            + (info.error ? ' &mdash; ' + pgEscapeHtml(info.error) : '')
+            + '.<br>Install it with <code>pip install memorizz[huggingface]</code>, then '
+            + '<a href="#" data-pg-refresh>refresh</a>.'
+            + '</div>';
+        pgWireRefresh(statusEl);
+        return;
+    }
+    const cached = (info.models || []).indexOf(model) !== -1;
+    const repoUrl = 'https://huggingface.co/'
+        + model.split('/').map(encodeURIComponent).join('/');
+    const cacheLoc = info.cache_dir || 'local HF cache';
+    const banner = cached
+        ? '<div class="success-message">'
+            + '<strong><code>' + pgEscapeHtml(model) + '</code> is cached locally</strong> at '
+            + '<code>' + pgEscapeHtml(cacheLoc) + '</code>.'
+            + '</div>'
+        : '<div class="warning-message">'
+            + '<strong>Pre-flight: <code>' + pgEscapeHtml(model) + '</code> is not cached locally.</strong><br>'
+            + 'Sending a message will trigger a download (a few hundred MB to several GB) and may stall. '
+            + 'Click the download icon below, or pre-download with '
+            + '<code>huggingface-cli download ' + pgEscapeHtml(model) + '</code>, '
+            + 'or <a href="' + repoUrl + '" target="_blank" rel="noopener">view the model card</a>. Then '
+            + '<a href="#" data-pg-refresh>refresh</a>.'
+            + '</div>';
+    statusEl.innerHTML = banner + pgManageListHtml(info.models, 'huggingface', 'HuggingFace');
+    pgWireRefresh(statusEl);
+}
+
+function pgWireRefresh(scope) {
+    const link = scope.querySelector('[data-pg-refresh]');
+    if (!link) return;
+    link.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        playgroundCheckLocalModel();
+    });
+}
+
+function pgManageListHtml(installedModels, provider, label) {
+    const installed = (installedModels || []).filter(Boolean);
+    const installedSet = new Set(installed);
+    const isInstalled = function(val) {
+        if (installedSet.has(val)) return true;
+        if (provider === 'ollama') {
+            if (installedSet.has(val + ':latest')) return true;
+            if (val.endsWith(':latest') && installedSet.has(val.slice(0, -7))) return true;
+        }
+        return false;
+    };
+    const catalog = (PROVIDER_MODELS[provider] || []);
+    const catalogValueSet = new Set(catalog.map(function(m) { return m.value; }));
+    const catalogInstalled = catalog.filter(function(m) { return isInstalled(m.value); });
+    const catalogMissing = catalog.filter(function(m) { return !isInstalled(m.value); });
+    const extras = installed.filter(function(name) {
+        if (catalogValueSet.has(name)) return false;
+        if (provider === 'ollama' && name.endsWith(':latest')) {
+            if (catalogValueSet.has(name.slice(0, -7))) return false;
+        }
+        return true;
+    });
+    const totalInstalled = catalogInstalled.length + extras.length;
+    if (totalInstalled === 0 && catalogMissing.length === 0) return '';
+
+    const rows = [];
+    if (totalInstalled > 0) {
+        rows.push('<div class="model-list-section">Available offline (' + totalInstalled + ')</div>');
+        catalogInstalled.forEach(function(m) {
+            rows.push(pgModelRow(m.value, m.label, provider, 'delete'));
+        });
+        extras.forEach(function(name) {
+            rows.push(pgModelRow(name, name, provider, 'delete'));
+        });
+    }
+    if (catalogMissing.length > 0) {
+        rows.push('<div class="model-list-section">Available to download (' + catalogMissing.length + ')</div>');
+        catalogMissing.forEach(function(m) {
+            rows.push(pgModelRow(m.value, m.label, provider, 'pull'));
+        });
+    }
+    return '<details class="model-manager" open>'
+        + '<summary>Manage ' + pgEscapeHtml(label) + ' models</summary>'
+        + '<div class="model-list">' + rows.join('') + '</div>'
+        + '</details>';
+}
+
+function pgModelRow(value, label, provider, action) {
+    const icon = action === 'delete' ? pgTrashIconSvg() : pgDownloadIconSvg();
+    const title = action === 'delete' ? 'Remove from local cache' : 'Download to local cache';
+    const aria = action === 'delete' ? ('Remove ' + value) : ('Download ' + value);
+    const labelHtml = (label && label !== value)
+        ? '<span class="model-row-label"> &mdash; ' + pgEscapeHtml(label) + '</span>'
+        : '';
+    const isSelectable = action === 'delete';
+    const isSelected = isSelectable && pgCurrentModel() === value;
+    const inner = '<code>' + pgEscapeHtml(value) + '</code>' + labelHtml;
+    const textHtml = isSelectable
+        ? '<button type="button" class="model-row-select"'
+            + ' data-pg-select-model="' + pgEscapeHtml(value) + '"'
+            + ' aria-pressed="' + (isSelected ? 'true' : 'false') + '"'
+            + ' title="Use this model in the playground">'
+            + (isSelected ? '<span class="model-row-check" aria-hidden="true">✓</span>' : '')
+            + inner
+            + '</button>'
+        : '<div class="model-row-text">' + inner + '</div>';
+    return '<div class="model-row" data-row-action="' + action + '"'
+        + (isSelected ? ' data-selected="true"' : '')
+        + '>'
+        + textHtml
+        + '<button type="button" class="model-action-btn"'
+        + ' data-pg-action="' + action + '"'
+        + ' data-pg-provider="' + pgEscapeHtml(provider) + '"'
+        + ' data-pg-model="' + pgEscapeHtml(value) + '"'
+        + ' title="' + pgEscapeHtml(title) + '"'
+        + ' aria-label="' + pgEscapeHtml(aria) + '">'
+        + icon + '</button>'
+        + '</div>';
+}
+
+function pgTrashIconSvg() {
+    return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<polyline points="3 6 5 6 21 6"></polyline>'
+        + '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>'
+        + '<path d="M10 11v6"></path><path d="M14 11v6"></path>'
+        + '<path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>'
+        + '</svg>';
+}
+function pgDownloadIconSvg() {
+    return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>'
+        + '<polyline points="7 10 12 15 17 10"></polyline>'
+        + '<line x1="12" y1="15" x2="12" y2="3"></line>'
+        + '</svg>';
+}
+
+let _pgActionInFlight = false;
+async function pgHandleActionClick(button) {
+    if (_pgActionInFlight) return;
+    const action = button.dataset.pgAction;
+    const provider = button.dataset.pgProvider;
+    const model = button.dataset.pgModel;
+    if (!action || !provider || !model) return;
+
+    if (action === 'delete' && !window.confirm('Remove ' + model + ' from local cache?')) return;
+    if (action === 'pull') {
+        const ok = window.confirm('Download ' + model + '?\n\n'
+            + 'Large models can take 5–15 minutes. The page will appear to hang while the download runs in the background.');
+        if (!ok) return;
+    }
+
+    _pgActionInFlight = true;
+    button.disabled = true;
+    button.classList.add('is-busy');
+    const originalHtml = button.innerHTML;
+    button.innerHTML = '<span class="model-action-spinner" aria-hidden="true"></span>';
+
+    try {
+        let res;
+        if (action === 'delete' && provider === 'ollama') {
+            res = await fetch('/api/ollama/models/' + encodeURIComponent(model), { method: 'DELETE' });
+        } else if (action === 'delete' && provider === 'huggingface') {
+            res = await fetch('/api/huggingface/models/' + encodeURIComponent(model), { method: 'DELETE' });
+        } else if (action === 'pull') {
+            const fd = new FormData();
+            fd.append(provider === 'ollama' ? 'name' : 'repo_id', model);
+            const url = provider === 'ollama' ? '/api/ollama/pull' : '/api/huggingface/pull';
+            res = await fetch(url, { method: 'POST', body: fd });
+        } else {
+            return;
+        }
+        let data = {};
+        try { data = await res.json(); } catch (_) { /* ignore */ }
+        if (!data.ok) {
+            window.alert('Failed: ' + (data.error || ('HTTP ' + res.status)));
+        }
+    } catch (err) {
+        window.alert('Error: ' + err);
+    } finally {
+        _pgActionInFlight = false;
+        button.disabled = false;
+        button.classList.remove('is-busy');
+        button.innerHTML = originalHtml;
+        playgroundCheckLocalModel();
+    }
+}
+
+document.addEventListener('click', function(ev) {
+    const btn = ev.target.closest && ev.target.closest('.model-action-btn[data-pg-action]');
+    if (!btn) return;
+    ev.preventDefault();
+    pgHandleActionClick(btn);
+});
+document.addEventListener('click', function(ev) {
+    const sel = ev.target.closest && ev.target.closest('[data-pg-select-model]');
+    if (!sel) return;
+    ev.preventDefault();
+    pgSelectModel(sel.getAttribute('data-pg-select-model'));
+});
+
+// Re-check on dropdown / custom-input changes so the banner updates live.
+(function wirePgModelChangeListeners() {
+    const select = document.getElementById('cfg-llm-model');
+    const customInput = document.getElementById('cfg-llm-model-custom');
+    if (select) select.addEventListener('change', playgroundCheckLocalModel);
+    if (customInput) customInput.addEventListener('input', pgScheduleLocalCheck);
+})();
 
 function removeDynamicRow(buttonEl) {
     const row = buttonEl.closest('.config-dynamic-row');
@@ -1019,6 +1904,7 @@ function initConfigCollections() {
 
 // Initialise on page load
 populateModelSelect("{{ llm_provider }}");
+playgroundCheckLocalModel();
 const playgroundModelSelect = document.getElementById('cfg-llm-model');
 const playgroundModelCustom = document.getElementById('cfg-llm-model-custom');
 if (playgroundModelSelect) {
@@ -1177,13 +2063,16 @@ function renderThreadMessages(messages, memoryId) {
         const role = ((msg && msg.role) ? String(msg.role) : 'system').toLowerCase();
         const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
         const content = msg && (msg.content ?? msg.text) ? String(msg.content ?? msg.text) : '';
+        const useMarkdown = (role === 'assistant' || role === 'system');
+        const renderedContent = useMarkdown ? renderMarkdown(content) : escapeHtml(content);
+        const mdClass = useMarkdown ? ' md-rendered' : '';
         const div = document.createElement('div');
         div.className = `pg-message pg-message--${role}`;
         div.innerHTML = `
             <div class="pg-message-avatar">${avatars[role] || '📝'}</div>
             <div class="pg-message-body">
                 <div class="pg-message-role">${escapeHtml(roleLabel)}</div>
-                <div class="pg-message-text">${escapeHtml(content)}</div>
+                <div class="pg-message-text${mdClass}">${renderedContent}</div>
             </div>
         `;
         container.appendChild(div);
@@ -1349,6 +2238,40 @@ function renderContextSummaries(entries) {
     container.innerHTML = `<div class="context-summary-list">${rows}</div>`;
 }
 
+function renderContextToolLogs(entries) {
+    const container = document.getElementById('context-tool-log-container');
+    if (!container) return;
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+        container.innerHTML = '<div class="context-log-empty">No tool logs for this thread. Tool outputs are offloaded here to save context window space.</div>';
+        return;
+    }
+
+    const rows = entries.map(function(entry) {
+        const toolName = entry && entry.tool_name ? String(entry.tool_name) : 'unknown_tool';
+        const success = entry && entry.success;
+        const timestamp = entry && entry.timestamp ? String(entry.timestamp) : '';
+        const args = entry && entry.arguments ? String(entry.arguments) : '';
+        const resultPreview = entry && entry.result_preview ? String(entry.result_preview) : '';
+        const error = entry && entry.error ? String(entry.error) : '';
+        const argsPreview = args.length > 120 ? args.substring(0, 120) + '...' : args;
+        return `
+            <div class="context-toolbox-item">
+                <div class="context-toolbox-header">
+                    <span class="context-toolbox-name">${escapeHtml(toolName)}</span>
+                    <span class="context-toolbox-type">${success ? '✓' : '✗'}</span>
+                </div>
+                ${timestamp ? `<div class="context-toolbox-time">${escapeHtml(timestamp)}</div>` : ''}
+                ${argsPreview ? `<div class="context-toolbox-description" style="font-size:0.82em;opacity:0.7;">Args: ${escapeHtml(argsPreview)}</div>` : ''}
+                ${resultPreview ? `<pre class="context-toolbox-value">${escapeHtml(resultPreview)}</pre>` : ''}
+                ${error ? `<div style="color: #ff6b6b; font-size: 0.82em;">Error: ${escapeHtml(error)}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `<div class="context-toolbox-list">${rows}</div>`;
+}
+
 function updateContextWindowCount(messageCount) {
     const countEl = document.getElementById('context-window-count');
     if (!countEl) return;
@@ -1424,6 +2347,7 @@ async function loadThreadMessages(memoryId, options = {}) {
         renderContextWorkflows([]);
         renderContextEntities([]);
         renderContextSummaries([]);
+        renderContextToolLogs([]);
         updateContextWindowCount(0);
         return;
     }
@@ -1438,6 +2362,15 @@ async function loadThreadMessages(memoryId, options = {}) {
         const payload = await response.json();
         if (requestSeq !== threadLoadSequence) return;
         const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        console.debug('[playground] Thread data loaded:', {
+            memory_id: normalized,
+            messages: messages.length,
+            toolbox: (payload.toolbox_memory || []).length,
+            workflow: (payload.workflow_memory || []).length,
+            entity: (payload.entity_memory || []).length,
+            summary: (payload.summary_memory || []).length,
+            tool_logs: (payload.tool_log_memory || []).length,
+        });
         if (renderChat) {
             renderThreadMessages(messages, normalized);
         }
@@ -1446,6 +2379,7 @@ async function loadThreadMessages(memoryId, options = {}) {
         renderContextWorkflows(Array.isArray(payload.workflow_memory) ? payload.workflow_memory : []);
         renderContextEntities(Array.isArray(payload.entity_memory) ? payload.entity_memory : []);
         renderContextSummaries(Array.isArray(payload.summary_memory) ? payload.summary_memory : []);
+        renderContextToolLogs(Array.isArray(payload.tool_log_memory) ? payload.tool_log_memory : []);
         updateContextWindowCount(messages.length);
         applyTokenStats(payload.token_stats || null);
         updateThreadTabMeta(
@@ -1455,6 +2389,7 @@ async function loadThreadMessages(memoryId, options = {}) {
         );
     } catch (err) {
         if (requestSeq !== threadLoadSequence) return;
+        console.error('[playground] Failed to load thread data:', err);
         if (!renderChat) return;
         const container = document.getElementById('playground-messages');
         if (!container) return;
@@ -1509,13 +2444,16 @@ function appendMessage(role, content) {
     if (emptyState) emptyState.remove();
 
     const avatars = { user: '👤', assistant: '🤖', tool: '🔧', system: '📝' };
+    const useMarkdown = (role === 'assistant' || role === 'system');
+    const renderedContent = useMarkdown ? renderMarkdown(content) : escapeHtml(content);
+    const mdClass = useMarkdown ? ' md-rendered' : '';
     const div = document.createElement('div');
     div.className = `pg-message pg-message--${role}`;
     div.innerHTML = `
         <div class="pg-message-avatar">${avatars[role] || '📝'}</div>
         <div class="pg-message-body">
             <div class="pg-message-role">${role.charAt(0).toUpperCase() + role.slice(1)}</div>
-            <div class="pg-message-text">${escapeHtml(content)}</div>
+            <div class="pg-message-text${mdClass}">${renderedContent}</div>
         </div>
     `;
     container.appendChild(div);
@@ -1621,6 +2559,64 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function renderMarkdown(text) {
+    if (typeof marked === 'undefined' || !text || !text.trim()) {
+        return escapeHtml(text || '');
+    }
+    try {
+        marked.setOptions({
+            breaks: true,
+            gfm: true,
+            headerIds: false,
+            mangle: false,
+        });
+        return marked.parse(text);
+    } catch (e) {
+        return escapeHtml(text);
+    }
+}
+
+async function compactContextWindow() {
+    const btn = document.getElementById('compact-context-btn');
+    if (!btn || btn.disabled) return;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="compact-icon">⏳</span><span>Compacting...</span>';
+
+    try {
+        const memoryEl = document.getElementById('pg-memory-id');
+        const memoryId = memoryEl ? memoryEl.value.trim() : '';
+
+        const formData = new FormData();
+        formData.append('query', '__compact_context_window__');
+        if (memoryId) formData.append('memory_id', memoryId);
+
+        const response = await fetch(`/agents/${AGENT_ID}/playground/compact`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const result = await response.json();
+
+        if (result.ok) {
+            appendMessage('system', `Context compacted: ${result.summary_count || 0} summaries generated. ${result.message || ''}`);
+            // Refresh thread to show updated context
+            if (memoryId) {
+                await loadThreadMessages(memoryId, { renderChat: false });
+            }
+        } else {
+            appendMessage('system', `Compact failed: ${result.error || 'Unknown error'}`);
+        }
+    } catch (err) {
+        appendMessage('system', `Compact error: ${err.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<span class="compact-icon">🗜️</span><span>Compact</span>';
+    }
+}
+
 function appendTraceBox(traceTimeline, traceEvent) {
     if (!traceTimeline || !traceEvent || typeof traceEvent !== 'object') return;
 
@@ -1692,6 +2688,361 @@ function stopStreaming() {
         currentAbortController = null;
     }
     setLoading(false);
+}
+
+// --- Drag-and-drop files onto the chat area ---
+function initKbDragAndDrop() {
+    const chat = document.getElementById('playground-chat');
+    const overlay = document.getElementById('pg-dropzone');
+    if (!chat || !overlay) return;
+
+    // Counter to handle dragenter/leave firing for every child element.
+    // Incrementing on enter and decrementing on leave keeps the overlay
+    // stable until the cursor truly exits the chat area.
+    let dragDepth = 0;
+
+    const containsFiles = (ev) => {
+        const types = ev.dataTransfer && ev.dataTransfer.types;
+        if (!types) return false;
+        for (let i = 0; i < types.length; i++) {
+            if (types[i] === 'Files') return true;
+        }
+        return false;
+    };
+
+    chat.addEventListener('dragenter', (ev) => {
+        if (!containsFiles(ev)) return;
+        ev.preventDefault();
+        dragDepth += 1;
+        overlay.classList.add('is-active');
+    });
+
+    chat.addEventListener('dragover', (ev) => {
+        if (!containsFiles(ev)) return;
+        ev.preventDefault();
+        // 'copy' cursor = "we'll add this" (vs move/link)
+        if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'copy';
+    });
+
+    chat.addEventListener('dragleave', (ev) => {
+        if (!containsFiles(ev)) return;
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) overlay.classList.remove('is-active');
+    });
+
+    chat.addEventListener('drop', (ev) => {
+        if (!containsFiles(ev)) return;
+        ev.preventDefault();
+        dragDepth = 0;
+        overlay.classList.remove('is-active');
+        const files = ev.dataTransfer && ev.dataTransfer.files;
+        if (files && files.length > 0) {
+            uploadKbFiles(files);
+        }
+    });
+
+    // Prevent the browser from navigating away if the drop misses the zone
+    // (e.g. lands on the context panel). Without this, dropping a file
+    // anywhere else in the window navigates to it.
+    ['dragover', 'drop'].forEach(evt => {
+        window.addEventListener(evt, (ev) => {
+            if (ev.target === chat || chat.contains(ev.target)) return;
+            if (containsFiles(ev)) ev.preventDefault();
+        });
+    });
+}
+
+// Initialize once the DOM is ready (the script is at end-of-body so elements exist)
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initKbDragAndDrop);
+} else {
+    initKbDragAndDrop();
+}
+
+// --- Knowledge base file upload (per-file chips with cancel/undo) ---
+// Each dropped/selected file gets its own chip. Upload proceeds one
+// request per file so we can update chip state independently and support
+// cancel (abort) before completion and delete (server-side) after.
+
+const KB_CHIP_REGISTRY = new Map();  // chipId -> {controller, state, kbId, filename}
+let _kbChipCounter = 0;
+
+function fmtBytes(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function kbChipsContainer() {
+    const el = document.getElementById('pg-kb-chips');
+    el.style.display = KB_CHIP_REGISTRY.size === 0 ? 'none' : 'flex';
+    return el;
+}
+
+function renderChip(chipId, data) {
+    const { filename, bytes, state, error } = data;
+    const chip = document.createElement('div');
+    chip.className = `pg-kb-chip pg-kb-chip--${state}`;
+    chip.id = chipId;
+    const titleByState = {
+        queued: 'Waiting…',
+        uploading: 'Ingesting…',
+        done: 'Ingested — click × to remove from knowledge base',
+        error: error || 'Failed',
+    };
+    chip.title = titleByState[state];
+
+    // Uploading state gets a real CSS spinner; other states use a glyph
+    // (static, so no rotation artifacts).
+    let iconMarkup;
+    if (state === 'uploading') {
+        iconMarkup = `<span class="pg-kb-chip-spinner" aria-hidden="true"></span>`;
+    } else {
+        const glyphByState = { queued: '⏳', done: '✓', error: '✗' };
+        iconMarkup = `<span class="pg-kb-chip-icon">${glyphByState[state]}</span>`;
+    }
+
+    chip.innerHTML = `
+        ${iconMarkup}
+        <span class="pg-kb-chip-name">${escapeChipHtml(filename)}</span>
+        <span class="pg-kb-chip-size">${bytes != null ? fmtBytes(bytes) : ''}</span>
+        <button type="button" class="pg-kb-chip-remove" aria-label="Remove">×</button>
+    `;
+    chip.querySelector('.pg-kb-chip-remove').addEventListener('click', () => {
+        removeChip(chipId);
+    });
+    return chip;
+}
+
+// --- Chat bubbles for ingest events ---
+// Transient system-style bubbles — not saved to conversation memory.
+// Keyed by bubbleId so we can update a single bubble across the
+// uploading → done/error transition.
+function kbBubbleAppend(bubbleId, text, variant) {
+    const container = document.getElementById('playground-messages');
+    if (!container) return;
+    // Clear the "start a conversation" empty state if present.
+    const empty = container.querySelector('.pg-empty');
+    if (empty) empty.remove();
+
+    let node = document.getElementById(bubbleId);
+    if (!node) {
+        node = document.createElement('div');
+        node.id = bubbleId;
+        node.className = 'pg-message pg-message--system pg-kb-event';
+        node.innerHTML = `
+            <div class="pg-message-avatar">📎</div>
+            <div class="pg-message-body">
+                <div class="pg-message-role">Knowledge base</div>
+                <div class="pg-message-text pg-kb-event-text"></div>
+            </div>
+        `;
+        container.appendChild(node);
+    }
+    node.classList.toggle('pg-kb-event--error', variant === 'error');
+    node.classList.toggle('pg-kb-event--done', variant === 'done');
+    node.classList.toggle('pg-kb-event--uploading', variant === 'uploading');
+    const textEl = node.querySelector('.pg-kb-event-text');
+    if (textEl) textEl.textContent = text;
+    container.scrollTop = container.scrollHeight;
+}
+
+function escapeChipHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+}
+
+function updateChip(chipId, patch) {
+    const entry = KB_CHIP_REGISTRY.get(chipId);
+    if (!entry) return;
+    Object.assign(entry, patch);
+    const oldEl = document.getElementById(chipId);
+    if (!oldEl) return;
+    const newEl = renderChip(chipId, entry);
+    oldEl.replaceWith(newEl);
+}
+
+async function removeChip(chipId) {
+    const entry = KB_CHIP_REGISTRY.get(chipId);
+    if (!entry) return;
+
+    // In-flight → abort and drop the chip
+    if (entry.state === 'queued' || entry.state === 'uploading') {
+        if (entry.controller) entry.controller.abort();
+        dropChip(chipId);
+        return;
+    }
+
+    // Ingested → ask server to delete before dropping
+    if (entry.state === 'done' && entry.kbId) {
+        updateChip(chipId, { state: 'uploading' });  // spinner during delete
+        try {
+            await fetch(
+                `/api/agents/${encodeURIComponent(AGENT_ID)}/knowledge-base/${encodeURIComponent(entry.kbId)}`,
+                { method: 'DELETE' }
+            );
+        } catch (_) {
+            // Network error — still drop the chip; user can refresh to see real state.
+        }
+        dropChip(chipId);
+        return;
+    }
+
+    // Error / unknown → just drop
+    dropChip(chipId);
+}
+
+function dropChip(chipId) {
+    KB_CHIP_REGISTRY.delete(chipId);
+    const el = document.getElementById(chipId);
+    if (el) el.remove();
+    kbChipsContainer();  // toggle visibility
+    // When every chip is gone, reload so the Knowledge Base panel reflects
+    // the new server state (unless the user is mid-conversation — debounce a bit).
+    if (KB_CHIP_REGISTRY.size === 0) {
+        scheduleKbPanelRefresh();
+    }
+}
+
+// --- In-place refresh of the Knowledge Base panel (no full page reload) ---
+// Debounce so a batch of fast ingests/deletes coalesces into one fetch.
+let _kbRefreshTimer = null;
+function scheduleKbPanelRefresh(delayMs = 400) {
+    if (_kbRefreshTimer) clearTimeout(_kbRefreshTimer);
+    _kbRefreshTimer = setTimeout(() => refreshKnowledgeBasePanel(), delayMs);
+}
+
+async function refreshKnowledgeBasePanel() {
+    const container = document.getElementById('context-knowledge-base-container');
+    if (!container) return;
+    try {
+        const res = await fetch(
+            `/api/agents/${encodeURIComponent(AGENT_ID)}/knowledge-base`,
+            { cache: 'no-store' },
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        renderKnowledgeBasePanel(container, data.entries || []);
+    } catch (e) {
+        // Network blip — leave the panel as-is; user can manually reload.
+        console.warn('KB panel refresh failed:', e);
+    }
+}
+
+function renderKnowledgeBasePanel(container, entries) {
+    if (!entries.length) {
+        container.innerHTML = '<div class="context-log-empty">No knowledge base entries attached to this agent.</div>';
+        return;
+    }
+    const items = entries.map(item => {
+        const ns = escapeChipHtml(item.namespace || 'knowledge');
+        const ts = item.timestamp
+            ? `<span class="context-summary-time">${escapeChipHtml(String(item.timestamp))}</span>`
+            : '';
+        const preview = item.content_preview
+            ? `<div class="context-summary-content">${escapeChipHtml(item.content_preview)}</div>`
+            : '';
+        const idSuffix = item.knowledge_base_id ? String(item.knowledge_base_id).slice(0, 8) : '';
+        const meta = item.content_length
+            ? `<div class="context-toolbox-time">${item.content_length} chars · id ${escapeChipHtml(idSuffix)}</div>`
+            : '';
+        return `
+            <div class="context-summary-item">
+                <div class="context-summary-header">
+                    <span class="context-summary-type">${ns}</span>
+                    ${ts}
+                </div>
+                ${preview}
+                ${meta}
+            </div>
+        `;
+    }).join('');
+    container.innerHTML = `<div class="context-summary-list">${items}</div>`;
+}
+
+async function uploadKbFiles(fileList) {
+    if (!fileList || fileList.length === 0) return;
+    const container = kbChipsContainer();
+    const fileInput = document.getElementById('pg-kb-file-input');
+
+    // Create chips immediately (before any network work) so the user sees
+    // their files as "pending" right away.
+    const pending = [];
+    for (const f of Array.from(fileList)) {
+        const chipId = `kb-chip-${++_kbChipCounter}`;
+        const entry = {
+            filename: f.name,
+            bytes: f.size,
+            state: 'queued',
+            controller: new AbortController(),
+            kbId: null,
+            error: null,
+        };
+        KB_CHIP_REGISTRY.set(chipId, entry);
+        container.appendChild(renderChip(chipId, entry));
+        pending.push({ chipId, file: f, controller: entry.controller });
+    }
+    kbChipsContainer();
+    if (fileInput) fileInput.value = '';  // allow re-selecting the same file
+
+    // Upload sequentially — one request per file so each chip updates
+    // independently and cancel-before-completion is meaningful.
+    for (const { chipId, file, controller } of pending) {
+        // Chip may have been removed while we were waiting our turn.
+        if (!KB_CHIP_REGISTRY.has(chipId)) continue;
+        updateChip(chipId, { state: 'uploading' });
+
+        const bubbleId = `kb-bubble-${chipId}`;
+        kbBubbleAppend(bubbleId, `Ingesting "${file.name}"…`, 'uploading');
+
+        const fd = new FormData();
+        fd.append('files', file, file.name);
+        fd.append('chunking_strategy', 'fixed');
+        fd.append('chunk_size', '1000');
+        fd.append('chunk_overlap', '100');
+
+        try {
+            const res = await fetch(
+                `/api/agents/${encodeURIComponent(AGENT_ID)}/knowledge-base/ingest`,
+                { method: 'POST', body: fd, signal: controller.signal }
+            );
+            const data = await res.json();
+            const row = (data.results || [])[0] || {};
+            if (res.ok && row.ok) {
+                updateChip(chipId, {
+                    state: 'done',
+                    kbId: row.knowledge_base_id,
+                    error: null,
+                });
+                const chunkSuffix = row.chunk_count
+                    ? ` (${row.chunk_count} chunk${row.chunk_count === 1 ? '' : 's'})`
+                    : '';
+                kbBubbleAppend(
+                    bubbleId,
+                    `✓ Added "${file.name}" to knowledge base${chunkSuffix}. You can reference it in your next message.`,
+                    'done',
+                );
+                // Refresh the side panel immediately so the user sees the new
+                // entry without reloading the page. Debounced so a multi-file
+                // upload only fetches once at the end of the batch.
+                scheduleKbPanelRefresh();
+            } else {
+                const msg = row.error || data.detail || `HTTP ${res.status}`;
+                updateChip(chipId, { state: 'error', error: msg });
+                kbBubbleAppend(bubbleId, `✗ "${file.name}" failed: ${msg}`, 'error');
+            }
+        } catch (e) {
+            if (e.name === 'AbortError') {
+                // User hit × — chip was already dropped in removeChip().
+                const node = document.getElementById(bubbleId);
+                if (node) node.remove();
+                continue;
+            }
+            updateChip(chipId, { state: 'error', error: String(e) });
+            kbBubbleAppend(bubbleId, `✗ "${file.name}" failed: ${e}`, 'error');
+        }
+    }
 }
 
 async function sendMessage() {
@@ -1830,7 +3181,8 @@ async function sendMessage() {
         const cursor = streamTarget.querySelector('.streaming-cursor');
         if (cursor) cursor.remove();
         if (fullText) {
-            streamTarget.textContent = fullText;
+            streamTarget.innerHTML = renderMarkdown(fullText);
+            streamTarget.classList.add('md-rendered');
         }
 
     } catch (err) {
@@ -1862,6 +3214,15 @@ document.getElementById('pg-query').addEventListener('keydown', function(e) {
 
 initThreadTabs();
 initTokenTooltip();
+
+// Render markdown for server-rendered assistant messages
+document.querySelectorAll('.pg-message-text[data-md-raw]').forEach(function(el) {
+    const raw = el.getAttribute('data-md-raw');
+    if (raw) {
+        el.innerHTML = renderMarkdown(raw);
+    }
+});
+
 scrollToBottom();
 </script>
 {% endblock %}

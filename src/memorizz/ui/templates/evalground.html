@@ -250,10 +250,14 @@
         {% endif %}
     </table>
 
-    <div class="eval-category-grid">
-        {% for category, metrics in eval_results.category_results.items() %}
+    <h3 class="eval-ability-heading">Information Extraction</h3>
+    <p class="eval-ability-desc">Ability to extract and recall facts from prior conversations, broken down by source.</p>
+    <div class="eval-category-grid eval-category-grid--trio">
+        {% for cat_key in ['single-session-user', 'single-session-assistant', 'single-session-preference'] %}
+        {% if cat_key in eval_results.category_results %}
+        {% set metrics = eval_results.category_results[cat_key] %}
         <div class="eval-category-card">
-            <div class="eval-category-name">{{ category|replace('-', ' ')|title }}</div>
+            <div class="eval-category-name">{{ cat_key|replace('-', ' ')|title }}</div>
             <div class="eval-category-metric">
                 <span class="metric-label">Accuracy</span>
                 <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
@@ -267,7 +271,84 @@
                 <span class="metric-value">{{ metrics.num_samples }}</span>
             </div>
         </div>
+        {% endif %}
         {% endfor %}
+    </div>
+
+    <h3 class="eval-ability-heading">Multi-Session Reasoning</h3>
+    <p class="eval-ability-desc">Ability to reason across information spread over multiple sessions.</p>
+    <div class="eval-category-grid eval-category-grid--single">
+        {% if 'multi-session' in eval_results.category_results %}
+        {% set metrics = eval_results.category_results['multi-session'] %}
+        <div class="eval-category-card">
+            <div class="eval-category-name">Multi Session</div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Accuracy</span>
+                <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
+            </div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Avg Score</span>
+                <span class="metric-value">{{ metrics.average_score|round(2) }}</span>
+            </div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Samples</span>
+                <span class="metric-value">{{ metrics.num_samples }}</span>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <h3 class="eval-ability-heading">Temporal Reasoning</h3>
+    <p class="eval-ability-desc">Ability to reason about when events occurred and handle time-sensitive queries.</p>
+    <div class="eval-category-grid eval-category-grid--single">
+        {% if 'temporal-reasoning' in eval_results.category_results %}
+        {% set metrics = eval_results.category_results['temporal-reasoning'] %}
+        <div class="eval-category-card">
+            <div class="eval-category-name">Temporal Reasoning</div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Accuracy</span>
+                <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
+            </div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Avg Score</span>
+                <span class="metric-value">{{ metrics.average_score|round(2) }}</span>
+            </div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Samples</span>
+                <span class="metric-value">{{ metrics.num_samples }}</span>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <h3 class="eval-ability-heading">Knowledge Updates</h3>
+    <p class="eval-ability-desc">Ability to handle updated or corrected information across sessions.</p>
+    <div class="eval-category-grid eval-category-grid--single">
+        {% if 'knowledge-update' in eval_results.category_results %}
+        {% set metrics = eval_results.category_results['knowledge-update'] %}
+        <div class="eval-category-card">
+            <div class="eval-category-name">Knowledge Update</div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Accuracy</span>
+                <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
+            </div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Avg Score</span>
+                <span class="metric-value">{{ metrics.average_score|round(2) }}</span>
+            </div>
+            <div class="eval-category-metric">
+                <span class="metric-label">Samples</span>
+                <span class="metric-value">{{ metrics.num_samples }}</span>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="eval-abstention-callout">
+        <span class="eval-abstention-icon">&#9432;</span>
+        <div>
+            <strong>Abstention</strong> &mdash; The fifth core LongMemEval ability (knowing when <em>not</em> to answer) is evaluated across all categories above via questions with a <code>_abs</code> suffix, rather than as a separate category. Scores penalise both hallucinated answers when the agent should abstain and refusals when the agent should know the answer.
+        </div>
     </div>
 </div>
 {% elif selected_agent %}

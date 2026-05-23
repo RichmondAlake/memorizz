@@ -28,7 +28,7 @@ class MemAgentModel(BaseModel):
     max_steps: int = Field(default=DEFAULT_MAX_STEPS)
     memory_ids: Optional[List[str]] = None
     tool_access: Optional[str] = Field(default=DEFAULT_TOOL_ACCESS)
-    long_term_memory_ids: Optional[List[str]] = None
+    knowledge_base_ids: Optional[List[str]] = None
     delegates: Optional[List[str]] = None  # Store delegate agent IDs
     embedding_config: Optional[Dict[str, Any]] = None
     semantic_cache: Optional[bool] = False  # Enable semantic cache

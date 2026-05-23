@@ -334,15 +334,21 @@ class OracleAutomationStore:
 
         with self.provider.pool.acquire() as conn:
             cursor = conn.cursor()
+            # Use a subquery so that FETCH FIRST is evaluated before
+            # FOR UPDATE SKIP LOCKED — Oracle rejects the combination
+            # when they appear in the same query block (ORA-02014).
             cursor.execute(
                 f"""
                 SELECT {self._select_job_columns()}
                 FROM {jobs_table}
-                WHERE enabled = 1
-                  AND next_run_at <= :now_utc
-                  AND (lock_expires_at IS NULL OR lock_expires_at <= :now_utc)
-                ORDER BY next_run_at
-                FETCH FIRST {safe_limit} ROWS ONLY
+                WHERE ROWID IN (
+                    SELECT ROWID FROM {jobs_table}
+                    WHERE enabled = 1
+                      AND next_run_at <= :now_utc
+                      AND (lock_expires_at IS NULL OR lock_expires_at <= :now_utc)
+                    ORDER BY next_run_at
+                    FETCH FIRST {safe_limit} ROWS ONLY
+                )
                 FOR UPDATE SKIP LOCKED
                 """,
                 {"now_utc": now_utc},

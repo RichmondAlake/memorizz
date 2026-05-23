@@ -7,7 +7,7 @@
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 
-from ...long_term_memory.semantic.entity_memory import EntityMemory
+from ...long_term.semantic.entity_memory import EntityMemory
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +33,18 @@ class EntityMemoryManager:
         return self._entity_memory is not None
 
     def build_context(
-        self, query: str, memory_id: Optional[str], limit: int = 3
+        self,
+        query: str,
+        memory_id: Optional[str],
+        limit: int = 3,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Return simplified entity profiles relevant to the query."""
         if not self.is_enabled() or not query:
             return []
 
         records = self._entity_memory.search_entities(
-            query, limit=limit, memory_id=memory_id
+            query, limit=limit, memory_id=memory_id, user_id=user_id
         )
         return [
             self._simplify_record(record)
@@ -56,24 +60,27 @@ class EntityMemoryManager:
         query: Optional[str] = None,
         limit: int = 5,
         memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Lookup utility exposed via agent tools."""
         if not self.is_enabled():
             return []
 
         if entity_id:
-            record = self._entity_memory.get_entity(entity_id)
+            record = self._entity_memory.get_entity(entity_id, user_id=user_id)
             return [self._simplify_record(record)] if record else []
 
         if name:
-            record = self._entity_memory.get_entity_by_name(name)
+            record = self._entity_memory.get_entity_by_name(name, user_id=user_id)
             return [self._simplify_record(record)] if record else []
 
         if query:
-            return self.build_context(query, memory_id, limit=limit)
+            return self.build_context(query, memory_id, limit=limit, user_id=user_id)
 
         # No selector provided – list scoped entities
-        entities = self._entity_memory.list_entities(memory_id=memory_id)
+        entities = self._entity_memory.list_entities(
+            memory_id=memory_id, user_id=user_id
+        )
         return [
             self._simplify_record(entity)
             for entity in entities[:limit]
@@ -90,6 +97,7 @@ class EntityMemoryManager:
         relations: Optional[Sequence[Dict[str, Any]]],
         metadata: Optional[Dict[str, Any]],
         memory_id: str,
+        user_id: Optional[str] = None,
     ) -> str:
         """Persist entity updates triggered via the built-in tool."""
         if not self.is_enabled():
@@ -105,6 +113,7 @@ class EntityMemoryManager:
             relations=relations,
             metadata=metadata,
             memory_id=memory_id,
+            user_id=user_id,
         )
 
     def summarize_for_prompt(self, profiles: List[Dict[str, Any]]) -> str:

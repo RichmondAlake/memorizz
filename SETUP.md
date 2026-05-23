@@ -559,7 +559,7 @@ cursor.execute("""
     SELECT table_name FROM user_tables
     WHERE table_name IN ('AGENTS', 'AGENT_LLM_CONFIGS', 'AGENT_MEMORIES',
                          'PERSONAS', 'TOOLBOX', 'CONVERSATION_MEMORY',
-                         'LONG_TERM_MEMORY', 'SHORT_TERM_MEMORY',
+                         'KNOWLEDGE_BASE', 'SHORT_TERM_MEMORY',
                          'WORKFLOW_MEMORY', 'SHARED_MEMORY', 'SUMMARIES',
                          'SEMANTIC_CACHE')
     ORDER BY table_name

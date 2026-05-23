@@ -90,7 +90,7 @@ class AzureOpenAI(LLMProvider):
         Dict[str, Any]
         """
         # We'll import ToolSchemaType here to avoid circular imports
-        from ..long_term_memory.procedural.toolbox.tool_schema import ToolSchemaType
+        from ..long_term.procedural.toolbox.tool_schema import ToolSchemaType
 
         docstring = func.__doc__ or ""
         signature = str(inspect.signature(func))

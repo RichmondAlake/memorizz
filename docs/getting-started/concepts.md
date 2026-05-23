@@ -8,12 +8,12 @@ Memorizz composes agent behavior from memory types, storage providers, and appli
 
 | Enum | Purpose | Main Implementation |
 |---|---|---|
-| `LONG_TERM_MEMORY` | Semantic facts and reusable knowledge | `src/memorizz/long_term_memory/semantic/` |
-| `ENTITY_MEMORY` | Structured entity profiles and attributes | `src/memorizz/long_term_memory/semantic/entity_memory/` |
-| `TOOLBOX` | Callable tools and tool metadata | `src/memorizz/long_term_memory/procedural/toolbox/` |
-| `WORKFLOW_MEMORY` | Process and task execution traces | `src/memorizz/long_term_memory/procedural/workflow/` |
-| `CONVERSATION_MEMORY` | User/assistant interaction history | `src/memorizz/long_term_memory/episodic/` |
-| `SUMMARIES` | Compressed conversation summaries | `src/memorizz/long_term_memory/episodic/summary_component.py` |
+| `KNOWLEDGE_BASE` | Semantic facts and reusable knowledge | `src/memorizz/long_term/semantic/` |
+| `ENTITY_MEMORY` | Structured entity profiles and attributes | `src/memorizz/long_term/semantic/entity_memory/` |
+| `TOOLBOX` | Callable tools and tool metadata | `src/memorizz/long_term/procedural/toolbox/` |
+| `WORKFLOW_MEMORY` | Process and task execution traces | `src/memorizz/long_term/procedural/workflow/` |
+| `CONVERSATION_MEMORY` | User/assistant interaction history | `src/memorizz/long_term/episodic/` |
+| `SUMMARIES` | Compressed conversation summaries | `src/memorizz/long_term/episodic/summary_component.py` |
 | `SHORT_TERM_MEMORY` | Working session context | `src/memorizz/short_term_memory/working_memory/` |
 | `SEMANTIC_CACHE` | Similar-query response caching | `src/memorizz/short_term_memory/semantic_cache.py` |
 | `SHARED_MEMORY` | Multi-agent coordination state | `src/memorizz/coordination/shared_memory/` |

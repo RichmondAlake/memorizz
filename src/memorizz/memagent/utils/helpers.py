@@ -32,15 +32,15 @@ class IDGenerator:
         return f"{prefix}_{unique_part}"
 
     @staticmethod
-    def generate_conversation_id(prefix: str = "conv") -> str:
+    def generate_thread_id(prefix: str = "thread") -> str:
         """
-        Generate a unique conversation ID.
+        Generate a unique thread ID.
 
         Args:
             prefix: Optional prefix for the ID
 
         Returns:
-            Unique conversation ID
+            Unique thread ID
         """
         unique_part = str(uuid.uuid4()).replace("-", "")[:16]
         return f"{prefix}_{unique_part}"

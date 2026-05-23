@@ -42,21 +42,21 @@ def test_store_and_query_documents(tmp_path):
             "content": "hello filesystem memory",
             "memory_id": "memory-123",
         },
-        memory_store_type=MemoryType.LONG_TERM_MEMORY,
+        memory_store_type=MemoryType.KNOWLEDGE_BASE,
     )
 
-    retrieved = provider.retrieve_by_id(doc_id, MemoryType.LONG_TERM_MEMORY)
+    retrieved = provider.retrieve_by_id(doc_id, MemoryType.KNOWLEDGE_BASE)
     assert retrieved["content"] == "hello filesystem memory"
 
     results = provider.retrieve_by_query(
         {"memory_id": "memory-123"},
-        memory_type=MemoryType.LONG_TERM_MEMORY,
+        memory_type=MemoryType.KNOWLEDGE_BASE,
         limit=1,
     )
     assert results and results[0]["id"] == doc_id
 
-    provider.delete_by_id(doc_id, MemoryType.LONG_TERM_MEMORY)
-    assert provider.list_all(MemoryType.LONG_TERM_MEMORY) == []
+    provider.delete_by_id(doc_id, MemoryType.KNOWLEDGE_BASE)
+    assert provider.list_all(MemoryType.KNOWLEDGE_BASE) == []
 
 
 def test_memagent_round_trip(tmp_path):
@@ -116,7 +116,7 @@ def test_semantic_query_uses_embedding_provider(tmp_path):
             "memory_id": "alpha",
             "embedding": dummy.get_embedding("alpha memory block"),
         },
-        memory_store_type=MemoryType.LONG_TERM_MEMORY,
+        memory_store_type=MemoryType.KNOWLEDGE_BASE,
     )
     provider.store(
         {
@@ -124,12 +124,12 @@ def test_semantic_query_uses_embedding_provider(tmp_path):
             "memory_id": "beta",
             "embedding": dummy.get_embedding("beta unrelated record"),
         },
-        memory_store_type=MemoryType.LONG_TERM_MEMORY,
+        memory_store_type=MemoryType.KNOWLEDGE_BASE,
     )
 
     results = provider.retrieve_by_query(
         "alpha memory block",
-        memory_type=MemoryType.LONG_TERM_MEMORY,
+        memory_type=MemoryType.KNOWLEDGE_BASE,
         limit=1,
         memory_id="alpha",
     )
@@ -141,7 +141,7 @@ def test_keyword_search_without_embeddings(tmp_path):
     provider = _make_provider(tmp_path)
     provider.store(
         {"content": "remember keyword fallback", "memory_id": "k1"},
-        memory_store_type=MemoryType.LONG_TERM_MEMORY,
+        memory_store_type=MemoryType.KNOWLEDGE_BASE,
     )
 
     # Force keyword path by disabling embedding lookups
@@ -149,7 +149,7 @@ def test_keyword_search_without_embeddings(tmp_path):
     provider._get_embedding_provider = lambda: None
 
     results = provider.retrieve_by_query(
-        "keyword fallback", memory_type=MemoryType.LONG_TERM_MEMORY, limit=1
+        "keyword fallback", memory_type=MemoryType.KNOWLEDGE_BASE, limit=1
     )
     assert results and results[0]["memory_id"] == "k1"
 
