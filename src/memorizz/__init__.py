@@ -15,6 +15,7 @@ from .long_term.semantic.persona import Persona, RoleType
 from .memagent import MemAgent
 from .memory_provider import MemoryProvider, MemoryType
 from .short_term_memory.working_memory.cwm import CWM
+from .tool_context import get_tool_context, reset_tool_context, set_tool_context
 
 
 # Lazy import MongoDB to avoid requiring pymongo when not needed
@@ -59,4 +60,7 @@ __all__ = [
     "AutomationJob",
     "AutomationRun",
     "AutomationDelivery",
+    "get_tool_context",
+    "set_tool_context",
+    "reset_tool_context",
 ]

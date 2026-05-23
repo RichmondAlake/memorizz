@@ -2570,6 +2570,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         thread_id: str = None,
         user_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        tool_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Run the agent with the given query using the new manager architecture.
@@ -2602,11 +2603,23 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
                 Callers may pass any JSON-serialisable dict; unknown keys
                 are included verbatim.
+            tool_context: Optional per-call dict made available to tool
+                functions via ``memorizz.get_tool_context()`` (M4). Unlike
+                ``context`` above, this is NOT sent to the LLM at all — it's
+                stored in a ``contextvars.ContextVar`` set before the tool
+                loop and reset when the call returns. Use it for per-request
+                facts the LLM should not see or be required to pass
+                (e.g. ``{"user_id": "..."}`` for tenant-scoped tool queries).
 
         Returns:
             The agent's response
         """
         logger.info(f"MemAgent {self.agent_id} executing query: {query[:50]}...")
+
+        # M4: scope per-call tool context for tools reading via get_tool_context().
+        from ..tool_context import reset_tool_context, set_tool_context
+
+        _tc_token = set_tool_context(tool_context or {})
 
         try:
             # 1. Prepare IDs with per-thread state isolation.
@@ -2660,6 +2673,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             logger.error(f"MemAgent execution failed: {e}")
             error_response = f"I apologize, but I encountered an error: {str(e)}"
             return error_response
+        finally:
+            # M4: always release the per-call tool_context scope.
+            reset_tool_context(_tc_token)
 
     def run_stream(
         self,
@@ -2668,6 +2684,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         thread_id: str = None,
         user_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        tool_context: Optional[Dict[str, Any]] = None,
     ) -> Generator[str, None, None]:
         """
         Run the agent with streaming output, yielding text chunks as they arrive.
@@ -2685,6 +2702,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             context: Optional per-call ephemeral context (M2). See ``run()``
                 for the full semantics and recommended schema. Not persisted
                 to ``conversation_memory``.
+            tool_context: Optional per-call dict made available to tool
+                functions via ``memorizz.get_tool_context()`` (M4). See
+                ``run()`` for the full semantics. Not sent to the LLM.
 
         Yields:
             str: Partial text chunks of the agent's response
@@ -2699,8 +2719,14 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 thread_id=thread_id,
                 user_id=user_id,
                 context=context,
+                tool_context=tool_context,
             )
             return
+
+        # M4: scope per-call tool context for tools reading via get_tool_context().
+        from ..tool_context import reset_tool_context, set_tool_context
+
+        _tc_token = set_tool_context(tool_context or {})
 
         # M3: lifecycle event so the consumer (e.g. an SSE translator) can
         # render "thinking…" indicators immediately, before any text chunk.
@@ -2795,6 +2821,8 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             yield f"I apologize, but I encountered an error: {str(e)}"
         finally:
             self._stream_trace_events = None
+            # M4: always release the per-call tool_context scope.
+            reset_tool_context(_tc_token)
 
     def set_stream_event_callback(
         self, callback: Optional[Callable[[Dict[str, Any]], None]]

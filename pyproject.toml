@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.0.42"
+version = "0.0.43"
 description = "A memory management library for Python"
 readme = "README.md"
 requires-python = ">=3.7"
