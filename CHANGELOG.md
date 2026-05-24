@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.0.46 — 2026-05-24
+
+### Performance
+
+* **`tool_log` queries are now native-indexed.** `MemoryManager.list_tool_logs`
+  previously did a full `list_all(MemoryType.TOOL_LOG)` and filtered + sorted +
+  sliced in Python — O(n) in the user's lifetime tool-call count. The MongoDB
+  provider now ships a native `list_tool_logs(memory_id, user_id, limit)`
+  that pushes filter + sort + limit to the server, backed by two new
+  compound btree indexes (`tool_log_memory_timestamp`,
+  `tool_log_user_timestamp`) plus a unique `tool_log_id` index. The
+  manager uses the native helper via duck-typing (`hasattr`) so other
+  providers continue to use the in-memory fallback unchanged.
+* **Hot-path btree indexes** added for CONVERSATION_MEMORY
+  (`memory_id + thread_id + timestamp`, `user_id + timestamp`),
+  ENTITY_MEMORY (`user_id + updated_at`), and SUMMARIES
+  (`memory_id + period_end`). Created idempotently at provider init
+  via a new `_ensure_btree_indexes` helper. Failures (duplicate spec
+  from an earlier migration, etc.) are logged at DEBUG so a single
+  provisioning hiccup never breaks agent boot.
+
 ## 0.0.45 — 2026-05-24
 
 ### Bug fixes

@@ -490,6 +490,97 @@ class MongoDBProvider(MemoryProvider):
             if memory_store_type.value not in self.db.list_collection_names():
                 self.db.create_collection(memory_store_type.value)
 
+        # Standard btree indexes for the hot-path queries (per-thread tool
+        # log listing, per-thread conversation history, per-user entity
+        # lookup). Vector indexes are created separately via
+        # ``_create_vector_indexes_for_memory_stores`` since they need
+        # Atlas Search and have a different failure model.
+        self._ensure_btree_indexes()
+
+    # Hot-path query coverage. Each (collection, [(field, direction), …])
+    # entry becomes one compound index. Compound order matters: the most
+    # selective filter goes first, the sort field goes last with the same
+    # direction the query asks for, so MongoDB can satisfy filter + sort
+    # from the index alone (no in-memory sort, no FETCH for skipped docs).
+    _BTREE_INDEX_SPECS = {
+        MemoryType.TOOL_LOG: [
+            (
+                "tool_log_memory_timestamp",
+                [("memory_id", 1), ("timestamp", -1)],
+            ),
+            (
+                "tool_log_user_timestamp",
+                [("user_id", 1), ("timestamp", -1)],
+            ),
+            (
+                "tool_log_id_unique",
+                [("tool_log_id", 1)],
+                {"unique": True, "sparse": True},
+            ),
+        ],
+        MemoryType.CONVERSATION_MEMORY: [
+            (
+                "conv_memory_thread_ts",
+                [("memory_id", 1), ("thread_id", 1), ("timestamp", 1)],
+            ),
+            (
+                "conv_memory_user_ts",
+                [("user_id", 1), ("timestamp", 1)],
+            ),
+        ],
+        MemoryType.ENTITY_MEMORY: [
+            (
+                "entity_memory_user_updated",
+                [("user_id", 1), ("updated_at", -1)],
+            ),
+        ],
+        MemoryType.SUMMARIES: [
+            (
+                "summaries_memory_period_end",
+                [("memory_id", 1), ("period_end", -1)],
+            ),
+        ],
+    }
+
+    def _ensure_btree_indexes(self) -> None:
+        """Create missing btree indexes for hot-path queries.
+
+        Idempotent: ``create_index`` is a no-op when an equivalent index
+        already exists, and we trap any unexpected failure so a single
+        provisioning hiccup never breaks agent boot. (Failures here only
+        cost us query speed, not correctness — the Python-side fallback
+        in :meth:`MemoryManager.list_tool_logs` still works without
+        the index.)
+        """
+        collections_by_type = {
+            MemoryType.TOOL_LOG: self.tool_log_collection,
+            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
+            MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
+            MemoryType.SUMMARIES: self.summaries_collection,
+        }
+        for memory_type, specs in self._BTREE_INDEX_SPECS.items():
+            collection = collections_by_type.get(memory_type)
+            if collection is None:
+                continue
+            for spec in specs:
+                name = spec[0]
+                fields = spec[1]
+                options = spec[2] if len(spec) > 2 else {}
+                try:
+                    collection.create_index(
+                        fields, name=name, background=True, **options
+                    )
+                except Exception as exc:
+                    # Most common: duplicate index spec under a different
+                    # name (left over from a prior migration). Log once
+                    # and move on — the existing index already covers us.
+                    logger.debug(
+                        "btree index %s on %s skipped: %s",
+                        name,
+                        collection.name,
+                        exc,
+                    )
+
     def _create_vector_indexes_for_memory_stores(self) -> None:
         """
         Create a vector index for each memory store in MongoDB.
@@ -1690,6 +1781,45 @@ class MongoDBProvider(MemoryProvider):
             logger.warning(
                 f"Unsupported memory store type for list_all: {memory_store_type}"
             )
+            return []
+
+    def list_tool_logs(
+        self,
+        memory_id: Optional[str] = None,
+        user_id: Any = _MONGO_UNSET,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Return recent tool-log rows for a given memory/user, native-side.
+
+        ``MemoryManager.list_tool_logs`` previously had to ``list_all``
+        the entire tool_log collection and filter + sort + slice in
+        Python, which becomes O(n) in the user's lifetime tool-call
+        count. This method runs the equivalent query as a single
+        ``find(...).sort("timestamp", -1).limit(N)`` aggregate; with the
+        ``tool_log_memory_timestamp`` / ``tool_log_user_timestamp``
+        compound indexes created in :meth:`_ensure_btree_indexes`,
+        MongoDB satisfies it from the index without scanning.
+
+        Implemented as an optional method on the provider — MemoryManager
+        uses ``hasattr`` to prefer it when available and falls back to
+        the in-memory scan for providers that don't ship one. This keeps
+        ``MemoryProvider`` provider-agnostic.
+        """
+        mongo_filter: Dict[str, Any] = {}
+        if memory_id is not None:
+            mongo_filter["memory_id"] = str(memory_id)
+        if user_id is not _MONGO_UNSET:
+            mongo_filter.update(_mongo_user_id_predicate(user_id))
+
+        try:
+            cursor = (
+                self.tool_log_collection.find(mongo_filter, {"embedding": 0})
+                .sort("timestamp", -1)
+                .limit(max(int(limit), 1) if limit else 0)
+            )
+            return list(cursor)
+        except Exception as exc:
+            logger.warning("list_tool_logs query failed: %s", exc)
             return []
 
     def update_by_id(

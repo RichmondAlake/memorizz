@@ -512,11 +512,25 @@ class MemoryManager:
             List of tool log entries, most recent first.
         """
         try:
-            # Use list_all so we hit the provider's relational TOOL_LOG branch
-            # (retrieve_by_query with a string query falls through to the
-            # empty default for TOOL_LOG and returns nothing). The set is
-            # scoped per-thread so the client-side filter is cheap even for
-            # agents with thousands of lifetime tool calls.
+            # Prefer the provider's native scoped query when it ships one
+            # (MongoDBProvider.list_tool_logs uses an indexed find + sort +
+            # limit aggregate). Falls back to the in-memory scan for
+            # providers without a tuned implementation so MemoryManager
+            # stays provider-agnostic. Wrapped in hasattr rather than
+            # isinstance to avoid pulling the MongoDB provider import
+            # path here.
+            native = getattr(self.memory_provider, "list_tool_logs", None)
+            if callable(native):
+                kwargs: Dict[str, Any] = {"memory_id": memory_id, "limit": limit}
+                if user_id is not None:
+                    kwargs["user_id"] = user_id
+                rows = native(**kwargs) or []
+                # The native implementation already filtered + sorted +
+                # limited, so we just normalize the type and return.
+                return [r for r in rows if isinstance(r, dict)]
+
+            # Fallback: in-memory scan + filter + sort. O(n) in the
+            # provider's tool_log size but correct for any backend.
             all_rows = self.memory_provider.list_all(MemoryType.TOOL_LOG) or []
             filtered: List[Dict[str, Any]] = []
             for row in all_rows:
