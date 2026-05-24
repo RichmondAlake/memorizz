@@ -63,6 +63,26 @@ def set_tool_context(ctx: Dict[str, Any] | None):
     return _tool_context.set(dict(ctx) if ctx else {})
 
 
-def reset_tool_context(token) -> None:
-    """Reset the per-call tool context to its previous value (or ``{}``)."""
+def reset_tool_context(token: contextvars.Token | None = None) -> None:
+    """Reset the per-call tool context.
+
+    Two calling shapes are supported:
+
+    * ``reset_tool_context(token)`` — restore to whatever was active before
+      the matching :func:`set_tool_context` call. This is the recommended
+      pattern: a ``set_tool_context`` / ``reset_tool_context`` pair behaves
+      like a context manager and composes correctly across nested calls.
+
+    * ``reset_tool_context()`` — clear the context unconditionally. Useful
+      as a defensive cleanup in fixtures or top-level error handlers
+      where the original token is no longer in scope. Note this *drops*
+      any outer scope; prefer the token-based call when you have it.
+
+    Prior to 0.0.44 the ``token`` argument was required; 0.0.45 makes it
+    optional for backwards compatibility with the 0.0.42-era no-arg
+    pattern downstream code still uses.
+    """
+    if token is None:
+        _tool_context.set({})
+        return
     _tool_context.reset(token)

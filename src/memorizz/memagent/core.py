@@ -337,6 +337,11 @@ class MemAgent:
         # "No LLM model configured" — which sends users on a wild goose
         # chase when in reality the model failed to load.
         self.model = model
+        # Preserve the resolved LLM config dict so callers / status pages /
+        # debug tooling can introspect ``agent.llm_config`` /
+        # ``agent.llm_provider`` / ``agent.llm_model`` without having to
+        # crack open the underlying model wrapper.
+        self.llm_config: Dict[str, Any] = dict(llm_config) if llm_config else {}
         self._llm_init_error: Optional[str] = None
         if not model and llm_config:
             try:
@@ -518,6 +523,25 @@ class MemAgent:
         logger.info(
             f"MemAgent {self.agent_id} initialized with memory types: {self.active_memory_types}"
         )
+
+    @property
+    def llm_provider(self) -> Optional[str]:
+        """The configured LLM provider name (``"openai"``, ``"anthropic"``, …).
+
+        Read from the resolved ``llm_config`` dict. Returns ``None`` when
+        the agent was constructed with a pre-built ``model=`` instance
+        rather than a config dict.
+        """
+        return self.llm_config.get("provider") if self.llm_config else None
+
+    @property
+    def llm_model(self) -> Optional[str]:
+        """The configured LLM model name (e.g. ``"gpt-5-mini"``).
+
+        Read from the resolved ``llm_config`` dict. Returns ``None`` when
+        the agent was constructed with a pre-built ``model=`` instance.
+        """
+        return self.llm_config.get("model") if self.llm_config else None
 
     def _resolve_application_mode(
         self, application_mode: Optional[Union[str, ApplicationMode]]

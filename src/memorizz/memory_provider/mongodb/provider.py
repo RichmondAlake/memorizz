@@ -144,6 +144,16 @@ class MongoDBProvider(MemoryProvider):
 
         # Track which vector indexes have been created
         self._vector_indexes_created = set()
+        # Collections for which vector-search index creation failed because
+        # the cluster cannot provision more search indexes (Atlas FTS quota,
+        # missing tier, etc.). Consumers of those vector-search paths check
+        # this set to short-circuit gracefully instead of hammering the API
+        # with queries that will return zero rows.
+        self._vector_indexes_unavailable: set = set()
+        # Root-cause dedup set — when the same Mongo error hits every
+        # collection at boot, only the first one logs a WARNING; the rest
+        # are recorded silently. See _handle_index_unavailable.
+        self._vector_index_unavailable_root_causes: set = set()
 
         # Process embedding provider configuration
         self._embedding_provider = self._setup_embedding_provider(config)
@@ -171,6 +181,167 @@ class MongoDBProvider(MemoryProvider):
         if "associated_conversation_ids" in doc and "associated_thread_ids" not in doc:
             doc["associated_thread_ids"] = doc.pop("associated_conversation_ids")
         return doc
+
+    @staticmethod
+    def _is_quota_or_unsupported(exc: Exception) -> bool:
+        """Classify a Mongo OperationFailure as "expected on small tiers".
+
+        Atlas free / shared tiers cap the number of search indexes per
+        cluster and reject ``createSearchIndex`` calls past the cap with
+        ``IllegalOperation`` (code 20). We use this classifier to convert
+        those into a single graceful WARNING instead of a stderr stack
+        trace at every agent boot — see :meth:`_handle_index_unavailable`.
+        Also catches CommandNotFound which is what shared tiers without
+        Search enabled return.
+        """
+        code = getattr(exc, "code", None)
+        code_name = (getattr(exc, "details", None) or {}).get("codeName", "")
+        text = str(exc).lower()
+        if code in (20, 59):  # IllegalOperation, CommandNotFound
+            return True
+        if code_name in {"IllegalOperation", "CommandNotFound"}:
+            return True
+        # String-based fallbacks for older driver/server combos that don't
+        # surface a numeric code on every error path.
+        for needle in (
+            "maximum number of fts indexes",
+            "search is not supported",
+            "no such command: 'createsearchindex'",
+            "atlas search is not enabled",
+        ):
+            if needle in text:
+                return True
+        return False
+
+    def _handle_index_unavailable(
+        self, collection_name: str, index_name: str, exc: Exception
+    ) -> None:
+        """Mark a collection's vector index as unavailable and warn once.
+
+        Downstream vector-search helpers (``find_similar_*``,
+        ``_knowledge_base_vector_search``) check
+        ``self._vector_indexes_unavailable`` before issuing a
+        ``$vectorSearch`` aggregation so we don't keep racking up failed
+        requests for indexes Atlas won't let us create.
+
+        When the *same* quota/unsupported error hits every collection on
+        boot, we want one summary log line rather than twelve. The first
+        offender for a given root cause gets a full WARNING with the
+        remediation hint; subsequent offenders are silently added to the
+        unavailable set so the agent still degrades gracefully but the
+        boot log stays readable.
+        """
+        if collection_name in self._vector_indexes_unavailable:
+            return
+        # Bucket by root cause so we only emit one structured warning for
+        # cluster-wide failures (Atlas quota, Search not enabled, etc.).
+        root_cause = self._root_cause_key(exc)
+        first_for_root = root_cause not in self._vector_index_unavailable_root_causes
+        self._vector_indexes_unavailable.add(collection_name)
+        if root_cause is not None:
+            self._vector_index_unavailable_root_causes.add(root_cause)
+        if first_for_root:
+            logger.warning(
+                "MongoDB vector-search index unavailable (first offender: "
+                "collection=%r, index=%s). Vector-search consumers will "
+                "degrade to no-op for any collection hitting the same root "
+                "cause. Likely cause: Atlas Search quota exceeded on this "
+                "cluster tier (M0/M2 cap is 3 search indexes) or Atlas "
+                "Search not enabled. Original error: %s",
+                collection_name,
+                index_name,
+                exc,
+            )
+        else:
+            logger.debug(
+                "MongoDB vector index unavailable for %r (same root cause "
+                "as previous warning, suppressing)",
+                collection_name,
+            )
+
+    @staticmethod
+    def _root_cause_key(exc: Exception) -> Optional[str]:
+        """Stable string for an exception's root cause, used to dedupe logs."""
+        code = getattr(exc, "code", None)
+        code_name = (getattr(exc, "details", None) or {}).get("codeName")
+        if code or code_name:
+            return f"code={code}|name={code_name}"
+        # Fall back to the exception class + first line of the message.
+        text = str(exc).splitlines()[0] if str(exc) else ""
+        return f"{type(exc).__name__}|{text[:120]}"
+
+    def _vector_index_unavailable(self, collection_name: str) -> bool:
+        """True when the named collection's vector index can't be used."""
+        return collection_name in self._vector_indexes_unavailable
+
+    @staticmethod
+    def _build_vector_search_pipeline(
+        embedding,
+        limit: int,
+        *,
+        index_name: str = "vector_index",
+        search_filter: Dict[str, Any] | None = None,
+        num_candidates: int | None = None,
+        path: str = "embedding",
+    ) -> List[Dict[str, Any]]:
+        """Build the canonical 3-stage vector-search aggregation pipeline.
+
+        Atlas ``$vectorSearch`` followed by a single ``$project`` that
+        mixes inclusion (``"field": 1``) with exclusion (``"embedding":
+        0``) is rejected by MongoDB ("Cannot do exclusion on field
+        embedding in inclusion projection"). Splitting the projection
+        from the score addition sidesteps the rule entirely:
+
+        1. ``$vectorSearch`` — semantic match
+        2. ``$project: {embedding: 0}`` — pure exclusion (allowed)
+        3. ``$addFields: {score: {$meta: "vectorSearchScore"}}`` —
+           computed field, no inclusion/exclusion mix
+
+        Every consumer (persona, toolbox, workflow, summary,
+        conversation, KB, entity, semantic-cache) uses this builder so
+        the rule is enforced in exactly one place.
+        """
+        stage: Dict[str, Any] = {
+            "$vectorSearch": {
+                "queryVector": embedding,
+                "path": path,
+                "numCandidates": (
+                    num_candidates
+                    if num_candidates is not None
+                    else max(100, limit * 10)
+                ),
+                "limit": limit,
+                "index": index_name,
+            }
+        }
+        if search_filter:
+            stage["$vectorSearch"]["filter"] = search_filter
+        return [
+            stage,
+            {"$project": {"embedding": 0}},
+            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+        ]
+
+    def _run_vector_search(
+        self, collection, pipeline: List[Dict[str, Any]], *, label: str
+    ) -> List[Dict[str, Any]]:
+        """Run a vector-search pipeline, honoring the unavailable-index flag.
+
+        Short-circuits to ``[]`` when the collection's vector index is
+        known to be unavailable (Atlas quota / Search not enabled), so
+        we don't keep racking up failed aggregations once the index
+        creator has already flagged the collection.
+        """
+        if self._vector_index_unavailable(collection.name):
+            return []
+        try:
+            return list(collection.aggregate(pipeline))
+        except Exception as exc:
+            if self._is_quota_or_unsupported(exc):
+                self._handle_index_unavailable(collection.name, "vector_index", exc)
+                return []
+            logger.warning("Vector search failed for %s: %s", label, exc)
+            return []
 
     def _setup_embedding_provider(self, config: MongoDBConfig):
         """
@@ -831,30 +1002,10 @@ class MongoDBProvider(MemoryProvider):
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
 
-        # Create the vector search pipeline
-        pipeline = [
-            {
-                "$vectorSearch": {
-                    "queryVector": embedding,
-                    "path": "embedding",
-                    "numCandidates": 100,
-                    "limit": limit,
-                    "index": "vector_index",
-                }
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "embedding": 0,
-                    "score": {"$meta": "vectorSearchScore"},
-                }
-            },
-        ]
-
-        # Execute the vector search
-        results = list(self.persona_collection.aggregate(pipeline))
-
-        # Return the results
+        pipeline = self._build_vector_search_pipeline(embedding, limit)
+        results = self._run_vector_search(
+            self.persona_collection, pipeline, label="persona"
+        )
         return results if results else None
 
     def retrieve_toolbox_item(
@@ -883,30 +1034,10 @@ class MongoDBProvider(MemoryProvider):
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
 
-        # Create the vector search pipeline
-        pipeline = [
-            {
-                "$vectorSearch": {
-                    "queryVector": embedding,
-                    "path": "embedding",
-                    "numCandidates": 100,
-                    "limit": limit,
-                    "index": "vector_index",
-                }
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "embedding": 0,
-                    "score": {"$meta": "vectorSearchScore"},
-                }
-            },
-        ]
-
-        # Execute the vector search
-        results = list(self.toolbox_collection.aggregate(pipeline))
-
-        # Return the results
+        pipeline = self._build_vector_search_pipeline(embedding, limit)
+        results = self._run_vector_search(
+            self.toolbox_collection, pipeline, label="toolbox"
+        )
         return results if results else None
 
     def retrieve_entity_memory_records(
@@ -930,51 +1061,20 @@ class MongoDBProvider(MemoryProvider):
             logger.error(f"Failed to generate embedding for entity query: {e}")
             return []
 
-        search_filter = {}
+        search_filter: Dict[str, Any] = {}
         memory_id = kwargs.get("memory_id")
         if memory_id is not None:
             search_filter["memory_id"] = str(memory_id)
-
         user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
         if user_id_scope is not _MONGO_UNSET:
             search_filter.update(_mongo_user_id_predicate(user_id_scope))
 
-        vector_stage: Dict[str, Any] = {
-            "$vectorSearch": {
-                "queryVector": embedding,
-                "path": "embedding",
-                "numCandidates": 100,
-                "limit": limit,
-                "index": "vector_index",
-            }
-        }
-        if search_filter:
-            vector_stage["$vectorSearch"]["filter"] = search_filter
-
-        project_stage = {
-            "$project": {
-                "_id": 1,
-                "entity_id": 1,
-                "name": 1,
-                "entity_type": 1,
-                "attributes": 1,
-                "relations": 1,
-                "metadata": 1,
-                "memory_id": 1,
-                "user_id": 1,
-                "created_at": 1,
-                "updated_at": 1,
-                "embedding": 0,
-                "score": {"$meta": "vectorSearchScore"},
-            }
-        }
-
-        pipeline = [vector_stage, project_stage]
-        try:
-            return list(self.entity_memory_collection.aggregate(pipeline))
-        except Exception as e:
-            logger.warning(f"Vector search failed for entity memory: {e}")
-            return []
+        pipeline = self._build_vector_search_pipeline(
+            embedding, limit, search_filter=search_filter or None
+        )
+        return self._run_vector_search(
+            self.entity_memory_collection, pipeline, label="entity_memory"
+        )
 
     def retrieve_workflow_by_query(
         self, query: Dict[str, Any], limit: int = 1
@@ -1003,30 +1103,10 @@ class MongoDBProvider(MemoryProvider):
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
 
-        # Create the vector search pipeline
-        pipeline = [
-            {
-                "$vectorSearch": {
-                    "queryVector": embedding,
-                    "path": "embedding",
-                    "numCandidates": 100,
-                    "limit": limit,
-                    "index": "vector_index",
-                }
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "embedding": 0,
-                    "score": {"$meta": "vectorSearchScore"},
-                }
-            },
-        ]
-
-        # Execute the vector search
-        results = list(self.workflow_memory_collection.aggregate(pipeline))
-
-        # Return the results
+        pipeline = self._build_vector_search_pipeline(embedding, limit)
+        results = self._run_vector_search(
+            self.workflow_memory_collection, pipeline, label="workflow_memory"
+        )
         return results if results else None
 
     def retrieve_summaries_by_query(
@@ -1054,30 +1134,10 @@ class MongoDBProvider(MemoryProvider):
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
 
-        # Create the vector search pipeline
-        pipeline = [
-            {
-                "$vectorSearch": {
-                    "queryVector": embedding,
-                    "path": "embedding",
-                    "numCandidates": 100,
-                    "limit": limit,
-                    "index": "vector_index",
-                }
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "embedding": 0,
-                    "score": {"$meta": "vectorSearchScore"},
-                }
-            },
-        ]
-
-        # Execute the vector search
-        results = list(self.summaries_collection.aggregate(pipeline))
-
-        # Return the results
+        pipeline = self._build_vector_search_pipeline(embedding, limit)
+        results = self._run_vector_search(
+            self.summaries_collection, pipeline, label="summaries"
+        )
         return results if results else None
 
     def get_summaries_by_memory_id(
@@ -1194,6 +1254,12 @@ class MongoDBProvider(MemoryProvider):
         """
         Store a semantic cache entry in the semantic_cache collection.
 
+        Short-circuits when the semantic cache's vector index is unavailable
+        (Atlas Search quota exceeded / Search not enabled) — there is no
+        point persisting entries that can never be retrieved, and silent
+        writes would mask a misconfigured deployment. Returns ``""`` in
+        that case so callers can detect the no-op.
+
         Parameters:
         -----------
         cache_entry : Dict[str, Any]
@@ -1202,8 +1268,11 @@ class MongoDBProvider(MemoryProvider):
         Returns:
         --------
         str
-            The ID of the stored cache entry.
+            The ID of the stored cache entry, or ``""`` when the cache is
+            disabled due to a missing vector index.
         """
+        if self._vector_index_unavailable(self.semantic_cache_collection.name):
+            return ""
         return self.store(cache_entry, MemoryType.SEMANTIC_CACHE)
 
     def find_similar_conversation_entries(
@@ -1251,35 +1320,14 @@ class MongoDBProvider(MemoryProvider):
         if user_id_scope is not _MONGO_UNSET:
             search_filter.update(_mongo_user_id_predicate(user_id_scope))
 
-        vector_stage: Dict[str, Any] = {
-            "$vectorSearch": {
-                "queryVector": embedding,
-                "path": "embedding",
-                "numCandidates": max(100, limit * 10),
-                "limit": limit,
-                "index": "vector_index",
-            }
-        }
-        if search_filter:
-            vector_stage["$vectorSearch"]["filter"] = search_filter
-
-        # Pure exclusion projection — Atlas $vectorSearch + $project rejects
-        # mixing inclusion (field: 1) with exclusion (field: 0) except _id.
-        project_stage = {
-            "$project": {
-                "embedding": 0,
-            }
-        }
-        pipeline = [
-            vector_stage,
-            project_stage,
-            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
-        ]
-        try:
-            return list(self.conversation_memory_collection.aggregate(pipeline))
-        except Exception as e:
-            logger.warning(f"Vector search failed for conversation_memory: {e}")
-            return []
+        pipeline = self._build_vector_search_pipeline(
+            embedding, limit, search_filter=search_filter or None
+        )
+        return self._run_vector_search(
+            self.conversation_memory_collection,
+            pipeline,
+            label="conversation_memory",
+        )
 
     def find_similar_knowledge_base_entries(
         self, query: str, limit: int = 5, **kwargs
@@ -1320,28 +1368,12 @@ class MongoDBProvider(MemoryProvider):
         if namespace:
             search_filter["namespace"] = str(namespace)
 
-        vector_stage: Dict[str, Any] = {
-            "$vectorSearch": {
-                "queryVector": embedding,
-                "path": "embedding",
-                "numCandidates": max(100, limit * 10),
-                "limit": limit,
-                "index": "vector_index",
-            }
-        }
-        if search_filter:
-            vector_stage["$vectorSearch"]["filter"] = search_filter
-
-        pipeline = [
-            vector_stage,
-            {"$project": {"embedding": 0}},
-            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
-        ]
-        try:
-            return list(self.knowledge_base_collection.aggregate(pipeline))
-        except Exception as e:
-            logger.warning(f"Vector search failed for knowledge_base: {e}")
-            return []
+        pipeline = self._build_vector_search_pipeline(
+            embedding, limit, search_filter=search_filter or None
+        )
+        return self._run_vector_search(
+            self.knowledge_base_collection, pipeline, label="knowledge_base"
+        )
 
     def find_similar_cache_entries(
         self, query: str, limit: int = 5, **kwargs
@@ -1385,40 +1417,15 @@ class MongoDBProvider(MemoryProvider):
         if user_id_scope is not _MONGO_UNSET:
             search_filter.update(_mongo_user_id_predicate(user_id_scope))
 
-        # Get the embedding for the query
-        # Construct the vector search stage
-        vector_search_stage = {
-            "$vectorSearch": {
-                "queryVector": embedding,
-                "path": "embedding",
-                "numCandidates": 100,
-                "limit": limit,
-                "index": "vector_index",
-            }
-        }
-
-        # Only add filter if we have any filter criteria (enables true GLOBAL scope)
-        if search_filter:
-            vector_search_stage["$vectorSearch"]["filter"] = search_filter
-
-        # Add projection stage
-        project_stage = {
-            "$project": {
-                "_id": 0,
-                "embedding": 0,
-                "score": {"$meta": "vectorSearchScore"},
-            }
-        }
-
-        pipeline = [vector_search_stage, project_stage]
-
-        try:
-            result = self.semantic_cache_collection.aggregate(pipeline)
-            results = list(result)
-            return results
-        except Exception as e:
-            logger.warning(f"Vector search failed for semantic cache: {e}")
-            return []
+        pipeline = self._build_vector_search_pipeline(
+            embedding,
+            limit,
+            search_filter=search_filter or None,
+            num_candidates=100,  # cache hit-rate tuned, not query-volume scaled
+        )
+        return self._run_vector_search(
+            self.semantic_cache_collection, pipeline, label="semantic_cache"
+        )
 
     def update_cache_entry_usage(
         self, cache_id: str, usage_count: int, last_accessed: float
@@ -2587,7 +2594,20 @@ class MongoDBProvider(MemoryProvider):
 
             return result
 
-        except Exception:
+        except Exception as exc:
+            # Mark the collection as unavailable for vector search and warn
+            # once. Quota / unsupported errors are very common on small
+            # Atlas tiers and shouldn't blow up the agent boot path.
+            if self._is_quota_or_unsupported(exc):
+                self._handle_index_unavailable(collection.name, index_name, exc)
+            else:
+                logger.warning(
+                    "Failed to create vector index '%s' on %s: %s",
+                    index_name,
+                    collection.name,
+                    exc,
+                )
+                self._vector_indexes_unavailable.add(collection.name)
             return None
 
     def _wait_for_index_ready(
@@ -2738,8 +2758,24 @@ class MongoDBProvider(MemoryProvider):
                 return result
 
             except Exception as e:
-                logger.error(f" Failed to create semantic cache vector index: {e}")
-                raise RuntimeError(f"Could not create semantic cache vector index: {e}")
+                # Quota / unsupported errors are an expected failure on small
+                # Atlas tiers — soft-warn and disable the cache writer for
+                # this session instead of raising up the boot path.
+                if self._is_quota_or_unsupported(e):
+                    self._handle_index_unavailable(
+                        self.semantic_cache_collection.name, index_name, e
+                    )
+                    return None
+                # Any other failure is unexpected and worth surfacing.
+                logger.error(
+                    "Failed to create semantic cache vector index '%s': %s",
+                    index_name,
+                    e,
+                )
+                self._vector_indexes_unavailable.add(
+                    self.semantic_cache_collection.name
+                )
+                return None
         else:
             logger.info(
                 f" Vector index '{index_name}' already exists and has correct definition"
