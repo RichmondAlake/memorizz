@@ -235,7 +235,9 @@ class MemoryManager:
                 entries with a matching ``user_id``.
 
         Returns:
-            List of relevant memory entries.
+            List of relevant memory entries. Always a list — providers that
+            return ``None`` (legacy "no results" convention) or a PyMongo
+            cursor are coerced here so callers can rely on the shape.
         """
         try:
             results = self.memory_provider.retrieve_by_query(
@@ -245,6 +247,20 @@ class MemoryManager:
                 limit=limit,
                 user_id=user_id,
             )
+
+            # Normalize provider return types:
+            # - ``None`` is the legacy "no results" sentinel from some
+            #   providers (e.g. MongoDB's ``retrieve_toolbox_item``).
+            # - PyMongo cursors don't support ``len()`` and exhaust on
+            #   iteration, so materialize them here once.
+            if results is None:
+                results = []
+            elif not isinstance(results, list):
+                try:
+                    results = list(results)
+                except TypeError:
+                    # Single dict from "find_one"-style helpers.
+                    results = [results] if results else []
 
             logger.debug(
                 f"Retrieved {len(results)} relevant memories for query: {query[:50]}..."

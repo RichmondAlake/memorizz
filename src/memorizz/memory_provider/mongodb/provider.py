@@ -467,6 +467,19 @@ class MongoDBProvider(MemoryProvider):
                 field for field in custom_id_fields if field != "agent_id"
             ]
             # Don't add memory_id to removal list for semantic cache
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            # Tool-log rows carry the context the row was produced under:
+            # which thread the agent was responding in, which memory bucket
+            # it belonged to, and which agent emitted it. Stripping these
+            # would break ``list_recent_tool_logs`` / per-thread audit views
+            # and is the source of "tool_log rows have no thread" complaints.
+            custom_id_fields = [
+                field
+                for field in custom_id_fields
+                if field not in ("agent_id", "thread_id")
+            ]
+            # ``memory_id`` is not in the base list yet for TOOL_LOG, so
+            # nothing to remove there; this branch just keeps it that way.
         elif memory_store_type == MemoryType.TOOLBOX:
             # Preserve agent_id so the playground toolbox-memory pane can
             # scope rows to the right agent, and tool_id so the UI can show
@@ -483,6 +496,11 @@ class MongoDBProvider(MemoryProvider):
             pass  # Keep memory_id for conversation memory
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             # Entity memory relies on memory_id for scoping
+            pass
+        elif memory_store_type == MemoryType.TOOL_LOG:
+            # Tool-log rows need ``memory_id`` to be scopable per
+            # conversation thread; stripping it would force every audit
+            # view to scan the entire collection.
             pass
         else:
             # For all other memory types, remove memory_id as before
@@ -571,21 +589,62 @@ class MongoDBProvider(MemoryProvider):
         projection = {} if include_embedding else {"embedding": 0}
 
         if memory_store_type == MemoryType.PERSONAS:
-            return self.retrieve_persona_by_query(query, limit=limit)
+            return self.retrieve_persona_by_query(query, limit=limit) or []
         elif memory_store_type == MemoryType.TOOLBOX:
-            return self.retrieve_toolbox_item(query, limit)
+            return self.retrieve_toolbox_item(query, limit) or []
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self.retrieve_workflow_by_query(query, limit)
+            return self.retrieve_workflow_by_query(query, limit) or []
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            return self.short_term_memory_collection.find(query, projection).limit(
-                limit
-            )
+            # Short-term memory is a scratchpad — dict queries do a filter,
+            # string queries from the relevant-memories path have no
+            # semantic index here yet, so degrade gracefully to ``[]``
+            # rather than crashing PyMongo's ``find()``.
+            if isinstance(query, dict):
+                return self.short_term_memory_collection.find(query, projection).limit(
+                    limit
+                )
+            return []
         elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
-            return self.knowledge_base_collection.find(query, projection).limit(limit)
+            # Three calling shapes:
+            #   1. Plain dict filter (legacy) → ``find()``
+            #   2. Dict carrying a pre-computed ``embedding`` (from
+            #      :meth:`KnowledgeBase.retrieve_knowledge_by_query`) → vector
+            #      search via that embedding
+            #   3. Raw string (from MemAgent.retrieve_relevant_memories) →
+            #      embed-then-vector-search via the helper
+            if isinstance(query, dict):
+                if "embedding" in query and isinstance(query["embedding"], list):
+                    embedding = query["embedding"]
+                    kb_kwargs = dict(kwargs)
+                    if "namespace" in query and "namespace" not in kb_kwargs:
+                        kb_kwargs["namespace"] = query["namespace"]
+                    return self._knowledge_base_vector_search(
+                        embedding,
+                        limit=query.get("limit", limit),
+                        **kb_kwargs,
+                    )
+                return self.knowledge_base_collection.find(query, projection).limit(
+                    limit
+                )
+            if isinstance(query, str):
+                return self.find_similar_knowledge_base_entries(
+                    query, limit=limit, **kwargs
+                )
+            return []
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            return self.conversation_memory_collection.find(query, projection).limit(
-                limit
-            )
+            # Dict → straight filter; string → semantic recall via vector
+            # index over per-turn embeddings. Previously the string path
+            # crashed with ``filter must be an instance of dict`` because
+            # PyMongo's ``find()`` rejects raw strings.
+            if isinstance(query, dict):
+                return self.conversation_memory_collection.find(
+                    query, projection
+                ).limit(limit)
+            if isinstance(query, str):
+                return self.find_similar_conversation_entries(
+                    query, limit=limit, **kwargs
+                )
+            return []
         elif memory_store_type == MemoryType.SHARED_MEMORY:
             if isinstance(query, dict):
                 return self.shared_memory_collection.find(query, projection).limit(
@@ -593,11 +652,14 @@ class MongoDBProvider(MemoryProvider):
                 )
             return []
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
-            return self.retrieve_entity_memory_records(
-                query, limit, include_embedding=include_embedding, **kwargs
+            return (
+                self.retrieve_entity_memory_records(
+                    query, limit, include_embedding=include_embedding, **kwargs
+                )
+                or []
             )
         elif memory_store_type == MemoryType.SUMMARIES:
-            return self.retrieve_summaries_by_query(query, limit)
+            return self.retrieve_summaries_by_query(query, limit) or []
         elif memory_store_type == MemoryType.SEMANTIC_CACHE:
             # For semantic cache, we need to handle two different cases:
             # 1. Dict query: Loading existing cache entries (e.g., {"agent_id": "xyz"})
@@ -618,6 +680,9 @@ class MongoDBProvider(MemoryProvider):
             if isinstance(query, dict):
                 return self.tool_log_collection.find(query, projection).limit(limit)
             return []
+        # Fall-through: unknown memory type — never return None implicitly,
+        # which would break callers that ``len()`` the result.
+        return []
 
     def retrieve_by_id(
         self, id: str, memory_store_type: MemoryType
@@ -1140,6 +1205,143 @@ class MongoDBProvider(MemoryProvider):
             The ID of the stored cache entry.
         """
         return self.store(cache_entry, MemoryType.SEMANTIC_CACHE)
+
+    def find_similar_conversation_entries(
+        self, query: str, limit: int = 5, **kwargs
+    ) -> List[Dict[str, Any]]:
+        """
+        Find semantically similar conversation_memory entries using vector search.
+
+        Mirrors :meth:`find_similar_cache_entries` but targets the
+        conversation memory collection. Conversation rows store an
+        ``embedding`` field per turn (see ``MemoryManager.create_conversation_memory_unit``);
+        this method embeds the query string, runs an Atlas ``$vectorSearch``,
+        and applies the standard ``memory_id`` / ``user_id`` filters.
+
+        Parameters
+        ----------
+        query : str
+            Free-text query to match against past turns.
+        limit : int
+            Maximum number of similar entries to return.
+        **kwargs : Dict[str, Any]
+            Optional ``memory_id``, ``user_id`` filters used by the
+            ``MemAgent`` runtime when building relevant-memory context.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            Conversation entries with a ``score`` field (cosine similarity
+            via vectorSearchScore). Returns ``[]`` on any failure so the
+            caller can rely on the return shape.
+        """
+        try:
+            embedding = get_embedding(query)
+        except Exception as e:
+            logger.warning(
+                f"Failed to generate embedding for conversation_memory query: {e}"
+            )
+            return []
+
+        search_filter: Dict[str, Any] = {}
+        memory_id = kwargs.get("memory_id")
+        if memory_id is not None:
+            search_filter["memory_id"] = str(memory_id)
+        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
+        if user_id_scope is not _MONGO_UNSET:
+            search_filter.update(_mongo_user_id_predicate(user_id_scope))
+
+        vector_stage: Dict[str, Any] = {
+            "$vectorSearch": {
+                "queryVector": embedding,
+                "path": "embedding",
+                "numCandidates": max(100, limit * 10),
+                "limit": limit,
+                "index": "vector_index",
+            }
+        }
+        if search_filter:
+            vector_stage["$vectorSearch"]["filter"] = search_filter
+
+        # Pure exclusion projection — Atlas $vectorSearch + $project rejects
+        # mixing inclusion (field: 1) with exclusion (field: 0) except _id.
+        project_stage = {
+            "$project": {
+                "embedding": 0,
+            }
+        }
+        pipeline = [
+            vector_stage,
+            project_stage,
+            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+        ]
+        try:
+            return list(self.conversation_memory_collection.aggregate(pipeline))
+        except Exception as e:
+            logger.warning(f"Vector search failed for conversation_memory: {e}")
+            return []
+
+    def find_similar_knowledge_base_entries(
+        self, query: str, limit: int = 5, **kwargs
+    ) -> List[Dict[str, Any]]:
+        """
+        Find semantically similar knowledge_base entries using vector search.
+
+        The :class:`KnowledgeBase` helper normally passes a dict carrying a
+        pre-computed embedding, but callers like
+        ``MemAgent.retrieve_relevant_memories`` pass a raw string. Previously
+        the string path crashed on ``.find(<str>)``; this method gives string
+        queries a real semantic path.
+        """
+        try:
+            embedding = get_embedding(query)
+        except Exception as e:
+            logger.warning(
+                f"Failed to generate embedding for knowledge_base query: {e}"
+            )
+            return []
+
+        return self._knowledge_base_vector_search(embedding, limit=limit, **kwargs)
+
+    def _knowledge_base_vector_search(
+        self, embedding: List[float], limit: int = 5, **kwargs
+    ) -> List[Dict[str, Any]]:
+        """Internal: run a ``$vectorSearch`` on the KB collection with a
+        pre-computed embedding plus optional ``memory_id`` / ``user_id`` /
+        ``namespace`` filters."""
+        search_filter: Dict[str, Any] = {}
+        memory_id = kwargs.get("memory_id")
+        if memory_id is not None:
+            search_filter["memory_id"] = str(memory_id)
+        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
+        if user_id_scope is not _MONGO_UNSET:
+            search_filter.update(_mongo_user_id_predicate(user_id_scope))
+        namespace = kwargs.get("namespace")
+        if namespace:
+            search_filter["namespace"] = str(namespace)
+
+        vector_stage: Dict[str, Any] = {
+            "$vectorSearch": {
+                "queryVector": embedding,
+                "path": "embedding",
+                "numCandidates": max(100, limit * 10),
+                "limit": limit,
+                "index": "vector_index",
+            }
+        }
+        if search_filter:
+            vector_stage["$vectorSearch"]["filter"] = search_filter
+
+        pipeline = [
+            vector_stage,
+            {"$project": {"embedding": 0}},
+            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+        ]
+        try:
+            return list(self.knowledge_base_collection.aggregate(pipeline))
+        except Exception as e:
+            logger.warning(f"Vector search failed for knowledge_base: {e}")
+            return []
 
     def find_similar_cache_entries(
         self, query: str, limit: int = 5, **kwargs

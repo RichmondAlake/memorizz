@@ -821,6 +821,22 @@ class MemAgent:
         if not normalized:
             return []
 
+        # OpenAI Chat Completions rejects any ``role: "tool"`` message that
+        # isn't immediately preceded by an ``role: "assistant"`` message
+        # carrying ``tool_calls`` (the LLM matches the tool result to the
+        # original call via ``tool_call_id``). Stored conversation history
+        # does not preserve ``tool_calls`` metadata on the assistant turn —
+        # only the rendered text — so any tool-role entry pulled back from
+        # the provider would be an orphan and trip a 400 from the API.
+        #
+        # The tool placeholder text has already been embedded into the
+        # assistant's textual reply via ``_build_tool_log_placeholder``
+        # before persistence, so dropping the standalone tool rows here
+        # loses no information the model needs.
+        normalized = [m for m in normalized if m.get("role") != "tool"]
+        if not normalized:
+            return []
+
         history_limit = self._get_conversation_history_limit()
         normalized = normalized[-history_limit:]
 
