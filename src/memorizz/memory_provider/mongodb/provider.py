@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from bson import ObjectId
 from pymongo import MongoClient
+from pymongo.errors import CollectionInvalid, OperationFailure
 from pymongo.operations import SearchIndexModel
 
 from ...embeddings import get_embedding
@@ -488,7 +489,23 @@ class MongoDBProvider(MemoryProvider):
         # Check if the collection exists within the database and if it doesn't, create an empty collection
         for memory_store_type in MemoryType:
             if memory_store_type.value not in self.db.list_collection_names():
-                self.db.create_collection(memory_store_type.value)
+                try:
+                    self.db.create_collection(memory_store_type.value)
+                except CollectionInvalid:
+                    # Cold-start race: another worker/process created this
+                    # collection between the list_collection_names() check
+                    # and create_collection() (e.g. concurrent gunicorn
+                    # workers each building the provider on their first
+                    # request). The collection exists either way, so treat
+                    # "already exists" as success rather than letting it
+                    # abort provider initialisation.
+                    pass
+                except OperationFailure as exc:
+                    # 48 = NamespaceExists — the same race surfaced
+                    # server-side (e.g. Atlas). Anything else is a real
+                    # failure and must propagate.
+                    if exc.code != 48:
+                        raise
 
         # Standard btree indexes for the hot-path queries (per-thread tool
         # log listing, per-thread conversation history, per-user entity

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.47 — 2026-05-31
+
+### Bug fixes
+
+* **Concurrent provider init no longer crashes with `CollectionInvalid`.**
+  `MongoDBProvider._create_memory_store` checks `list_collection_names()`
+  and then `create_collection()` for each memory store. Under concurrent
+  initialisation — e.g. multiple gunicorn workers each building the
+  provider on their first request after a deploy, before the collections
+  exist — two workers could both pass the existence check and the loser's
+  `create_collection()` then raised
+  `pymongo.errors.CollectionInvalid: collection <name> already exists`,
+  aborting provider construction (and taking down the agent for that
+  worker). Creation is now idempotent: `CollectionInvalid` and
+  `OperationFailure` code 48 (`NamespaceExists`) are swallowed, since the
+  collection exists either way. Any other `OperationFailure` still
+  propagates.
+
 ## 0.0.46 — 2026-05-24
 
 ### Performance
