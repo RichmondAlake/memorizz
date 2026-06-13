@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+from .conversation_history import is_trace_bundle_entry, strip_trace_bundles
 from .coordination import SharedMemory
 from .internet_access import (
     FirecrawlProvider,
@@ -63,4 +64,6 @@ __all__ = [
     "get_tool_context",
     "set_tool_context",
     "reset_tool_context",
+    "is_trace_bundle_entry",
+    "strip_trace_bundles",
 ]

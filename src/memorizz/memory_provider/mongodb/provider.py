@@ -1965,6 +1965,8 @@ class MongoDBProvider(MemoryProvider):
         memory_type: Union[str, "MemoryType"] = None,
         limit: int = None,
         user_id: Any = _MONGO_UNSET,
+        exclude_trace_bundles: bool = False,
+        thread_id: str = None,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve the conversation history ordered by timestamp.
@@ -1983,6 +1985,15 @@ class MongoDBProvider(MemoryProvider):
             Multi-tenant scope. When provided, results are restricted to rows
             whose ``user_id`` matches. When the sentinel default is used, no
             ``user_id`` filter is applied (legacy callers).
+        exclude_trace_bundles : bool, optional
+            When ``True``, drop the internal streamed-trace-bundle rows
+            (``role="tool"`` rows holding a ``{"type": "trace_bundle"}`` blob,
+            written by ``MemAgent.run_stream`` for Playground replay) from the
+            result. Defaults to ``False`` so existing callers — including the
+            Playground, which renders those rows — are unaffected. Pass ``True``
+            when building a user-facing history view so the telemetry rows don't
+            surface as empty, nameless tool entries. See
+            :func:`memorizz.strip_trace_bundles`.
 
         Returns:
         --------
@@ -1994,6 +2005,11 @@ class MongoDBProvider(MemoryProvider):
         base_filter: Dict[str, Any] = {"memory_id": memory_id}
         if user_id is not _MONGO_UNSET:
             base_filter.update(_mongo_user_id_predicate(user_id))
+        if thread_id:
+            # Thread-scoped read — hits the (memory_id, thread_id, timestamp)
+            # compound index so a single thread's history is fetched directly
+            # instead of loading the whole memory_id and filtering in Python.
+            base_filter["thread_id"] = thread_id
 
         if limit is not None:
             # Retrieve newest rows first, then reverse so callers still receive
@@ -2015,10 +2031,58 @@ class MongoDBProvider(MemoryProvider):
         for doc in results:
             self._normalize_legacy_fields(doc)
 
+        if exclude_trace_bundles:
+            from ...conversation_history import strip_trace_bundles
+
+            results = strip_trace_bundles(results)
+
         logger.debug(
             f"Retrieved {len(results)} conversation items for memory_id: {memory_id}"
         )
         return results
+
+    def delete_conversation_thread(
+        self,
+        memory_id: str,
+        thread_id: str,
+        user_id: Any = _MONGO_UNSET,
+    ) -> int:
+        """Delete every conversation row for one thread in a single indexed
+        ``delete_many`` — replaces the consumer's load-all-then-per-row delete
+        (an N+1). Returns the number of rows removed.
+
+        Parameters
+        ----------
+        memory_id : str
+            The memory the thread belongs to.
+        thread_id : str
+            The thread to delete.
+        user_id : optional
+            Multi-tenant scope; when provided, restricts the delete to rows
+            whose ``user_id`` matches (defence against cross-tenant deletes).
+        """
+        if not memory_id or not thread_id:
+            return 0
+        flt: Dict[str, Any] = {"memory_id": memory_id, "thread_id": thread_id}
+        if user_id is not _MONGO_UNSET:
+            flt.update(_mongo_user_id_predicate(user_id))
+        try:
+            result = self.conversation_memory_collection.delete_many(flt)
+            deleted = int(getattr(result, "deleted_count", 0) or 0)
+            logger.debug(
+                "Deleted %d conversation rows for thread %s (memory_id=%s)",
+                deleted,
+                thread_id,
+                memory_id,
+            )
+            return deleted
+        except Exception:
+            logger.exception(
+                "delete_conversation_thread failed (memory_id=%s thread_id=%s)",
+                memory_id,
+                thread_id,
+            )
+            return 0
 
     def retrieve_memory_units_by_query(
         self,
@@ -2773,14 +2837,18 @@ class MongoDBProvider(MemoryProvider):
         def predicate(index):
             return index.get("queryable") is True
 
-        while True:
+        # Bounded poll — never block a request thread / worker boot forever.
+        # If the index isn't queryable within the budget, log and return so the
+        # caller degrades to no-op vector search instead of hanging indefinitely.
+        max_attempts = 24  # ~120s at 5s intervals
+        for _attempt in range(max_attempts):
             try:
                 # List search indexes and find the one we just created
                 indices = list(collection.list_search_indexes(index_name_result))
 
                 # Check if the index exists and is queryable
                 if indices and predicate(indices[0]):
-                    break
+                    return
 
                 # Wait 5 seconds before checking again
                 time.sleep(5)
@@ -2788,6 +2856,11 @@ class MongoDBProvider(MemoryProvider):
             except Exception:
                 # Continue polling even if there's an error
                 time.sleep(5)
+        logger.warning(
+            "%s did not become queryable within the wait budget; continuing "
+            "(vector search may be unavailable until provisioning finishes)",
+            display_name,
+        )
 
     def _ensure_vector_index(
         self, collection, index_name="vector_index", memory_store: bool = False

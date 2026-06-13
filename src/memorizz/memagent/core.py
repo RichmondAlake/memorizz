@@ -25,6 +25,7 @@ from typing import (
     Union,
 )
 
+from ..conversation_history import is_trace_bundle_entry
 from ..enums import ApplicationMode, ApplicationModeConfig, MemoryType, Role
 from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
@@ -3112,29 +3113,13 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         )
 
     def _is_trace_bundle_message(self, message: Any) -> bool:
-        """Return True when a conversation row is a persisted trace bundle."""
-        if not isinstance(message, dict):
-            return False
-        role = str(message.get("role") or "").strip().lower()
-        if role != Role.TOOL.value:
-            return False
+        """Return True when a conversation row is a persisted trace bundle.
 
-        raw_content = message.get("content")
-        if not isinstance(raw_content, str):
-            return False
-        content = raw_content.strip()
-        if not content:
-            return False
-
-        try:
-            payload = json.loads(content)
-        except Exception:
-            return False
-
-        return (
-            isinstance(payload, dict)
-            and str(payload.get("type") or "").strip().lower() == "trace_bundle"
-        )
+        Delegates to the public :func:`memorizz.is_trace_bundle_entry` so the
+        detection lives in exactly one place (the same helper external consumers
+        use to filter these internal rows out of displayed history).
+        """
+        return is_trace_bundle_entry(message)
 
     def _no_llm_message(self) -> str:
         """User-facing message when self.model is missing.
