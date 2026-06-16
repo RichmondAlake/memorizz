@@ -1281,6 +1281,9 @@ class OracleProvider(MemoryProvider):
             or data.get("name")
             or str(uuid.uuid4())
         )
+        # Callers (e.g. Toolbox.register_tool) may hand us a uuid.UUID; oracledb
+        # can't bind that type (DPY-3002), so coerce the id to text.
+        tool_id = str(tool_id)
         tool_type = (
             data.get("tool_type")
             or data.get("toolType")

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.51 — 2026-06-16
+
+### Bug fixes
+
+* **Oracle provider: `Toolbox.register_tool` failed with `DPY-3002`.** `_store_toolbox`
+  bound the tool id straight from the caller, but `Toolbox` hands it a `uuid.UUID`
+  object, which python-oracledb cannot bind ("Python value of type UUID is not
+  supported"). The id is now coerced to text (`str(tool_id)`) before binding, so
+  registering tools into a `Toolbox` (and the procedural-memory notebook flow)
+  works against Oracle. Complements the 0.0.50 VECTOR-binding fix.
+
 ## 0.0.50 — 2026-06-16
 
 ### Bug fixes
