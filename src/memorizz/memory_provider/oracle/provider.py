@@ -449,9 +449,10 @@ class OracleProvider(MemoryProvider):
             # Prevent repeated Oracle VECTOR mismatch retries in long-running sessions.
             return None
 
-        # If embedding already exists, use it
+        # If embedding already exists, use it (normalized to array.array so it binds
+        # to a VECTOR column — a raw list raises ORA-01484 in thin mode).
         if existing_embedding is not None:
-            return existing_embedding
+            return self._prepare_vector_value(existing_embedding)
 
         # If no embedding provider configured, return None
         if self._embedding_provider is None:
@@ -465,7 +466,7 @@ class OracleProvider(MemoryProvider):
         try:
             embedding = self._embedding_provider.get_embedding(content)
             logger.debug(f"Generated embedding with {len(embedding)} dimensions")
-            return embedding
+            return self._prepare_vector_value(embedding)
         except Exception as e:
             logger.warning(f"Failed to generate embedding: {e}")
             return None
@@ -1214,7 +1215,7 @@ class OracleProvider(MemoryProvider):
                 else None,
             }
             if embedding is not None:
-                common_params["embedding"] = embedding
+                common_params["embedding"] = self._prepare_vector_value(embedding)
 
             if existing:
                 set_parts = [
@@ -1323,7 +1324,7 @@ class OracleProvider(MemoryProvider):
                 "agent_id": agent_id,
             }
             if embedding is not None:
-                common_params["embedding"] = embedding
+                common_params["embedding"] = self._prepare_vector_value(embedding)
 
             if existing:
                 set_parts = [
@@ -1408,7 +1409,7 @@ class OracleProvider(MemoryProvider):
             else None,
         }
         if embedding is not None:
-            params["embedding"] = embedding
+            params["embedding"] = self._prepare_vector_value(embedding)
 
         if existing:
             set_parts = [
@@ -1487,7 +1488,9 @@ class OracleProvider(MemoryProvider):
             else None,
         }
         if embedding is not None:
-            params["embedding"] = embedding
+            # Normalize to array.array so it binds to the VECTOR column (a raw list
+            # raises ORA-01484 in thin mode); _prepare_vector_value is the shared helper.
+            params["embedding"] = self._prepare_vector_value(embedding)
 
         if existing:
             set_parts = [

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.50 — 2026-06-16
+
+### Bug fixes
+
+* **Oracle provider: `ORA-01484` on VECTOR writes in thin mode.** Several store
+  paths bound the embedding as a raw Python `list`, which python-oracledb's thin
+  mode rejects ("arrays can only be bound to PL/SQL statements") — breaking
+  `agent.save()` (toolbox + persona rows), entity-memory upserts, and the
+  multi-agent / shared-memory writes behind `MultiAgentOrchestrator`. Every
+  embedding bind now flows through the existing `_prepare_vector_value` helper
+  (`list` → `array.array("f", …)`): `_generate_embedding_if_needed` normalizes
+  both the provided- and freshly-generated-embedding branches (covering all
+  `_store_*` impls), and the agent / persona / toolbox upsert sites use the same
+  helper. Verified end-to-end against Oracle Database 23ai Free.
+
 ## 0.0.47 — 2026-05-31
 
 ### Bug fixes
