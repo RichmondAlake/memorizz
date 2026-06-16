@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.52 — 2026-06-16
+
+### Bug fixes
+
+* **Oracle provider: workflows were stored without embeddings, so
+  `retrieve_workflows_by_query` never matched.** The `workflow_memory` table has
+  an `embedding VECTOR` column and `retrieve_by_query` runs a `VECTOR_DISTANCE`
+  search over it, but `_store_workflow_memory` skipped embedding entirely —
+  leaving every workflow unsearchable by intent. It now embeds the workflow's
+  stable identity (name + description) via `_generate_embedding_if_needed`, so
+  `Workflow.retrieve_workflows_by_query(...)` returns semantically relevant
+  runbooks. Steps/outcome are still excluded from the embedding (they carry
+  volatile, arbitrary tool output).
+
 ## 0.0.51 — 2026-06-16
 
 ### Bug fixes

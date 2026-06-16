@@ -1765,8 +1765,17 @@ class OracleProvider(MemoryProvider):
         """Store workflow memory directly in its base table."""
         workflow_id = data.get("workflow_id") or str(uuid.uuid4())
 
-        # Workflows intentionally skip embeddings — payloads often include
-        # arbitrary tool outputs and are not critical for semantic search.
+        # Embed the workflow's *stable identity* (name + description) so it is
+        # retrievable by intent via ``retrieve_workflows_by_query`` (which runs a
+        # VECTOR_DISTANCE search over this column). We deliberately do NOT embed
+        # steps/outcome — those carry volatile, arbitrary tool output.
+        embed_text = " ".join(
+            str(x) for x in (data.get("name"), data.get("description")) if x
+        ).strip()
+        embedding = self._generate_embedding_if_needed(
+            embed_text, existing_embedding=data.get("embedding")
+        )
+
         self._insert_base_row(
             MemoryType.WORKFLOW_MEMORY,
             required_columns={
@@ -1780,6 +1789,7 @@ class OracleProvider(MemoryProvider):
                 "agent_id": data.get("agent_id"),
             },
             optional_columns={"user_id": data.get("user_id")},
+            embedding=embedding,
         )
 
         # steps/outcome are IS JSON columns and go in a follow-up UPDATE.
