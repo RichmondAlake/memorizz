@@ -21,6 +21,10 @@
 * **Canonical config at `~/.memorizz/`.** Keys/settings live in
   `~/.memorizz/.env` (override via `MEMORIZZ_HOME` / `MEMORIZZ_ENV_FILE`), shared
   by the CLI and the local web UI. `$CWD/.env` is still honored for back-compat.
+* **One persistent agent + memory across launches.** Each `memorizz` session
+  loads (or creates once) a single default `MemAgent` and reuses its rolling
+  memory id, persisted to `~/.memorizz/state.json`, so facts learned in one
+  session are recalled in the next instead of starting fresh every launch.
 * **Distribution.** Installable via `uv tool install memorizz` / `pipx install
   memorizz`, a Homebrew tap, and an npm shim (`npm i -g memorizz`, bootstraps uv).
 
@@ -31,6 +35,14 @@
   `site-packages` where nothing read it. Env handling is now centralized in
   `memorizz._env_io`, and the UI reads/writes the same `~/.memorizz/.env` as the
   CLI.
+* **Ollama reasoning models returned truncated/empty output.** `OllamaLLM` now
+  auto-enables `think` for reasoning families (qwen3 / deepseek-r1 / qwq /
+  magistral), so their thinking is surfaced (shown dimmed in the REPL) and the
+  full answer streams through instead of being cut off.
+* **FileSystem semantic recall could crash** with *"only length-1 arrays can be
+  converted to Python scalars"* when a stored embedding had an unexpected shape;
+  cosine similarity now flattens and shape-checks operands, skipping mismatches
+  rather than aborting retrieval.
 
 ### Breaking changes
 

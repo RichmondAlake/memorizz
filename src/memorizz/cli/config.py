@@ -8,6 +8,8 @@ Thin wrapper over :mod:`memorizz._env_io` so the rest of the CLI imports paths
 and env helpers from one place, plus the small set of CLI default constants.
 """
 
+import json
+
 from .._env_io import (
     apply_env_updates,
     ensure_home,
@@ -35,6 +37,9 @@ __all__ = [
     "DEFAULT_AZURE_MODEL",
     "MEMORY_ASSISTANT_INSTRUCTION",
     "OLLAMA_DEFAULT_HOST",
+    "state_file",
+    "load_state",
+    "save_state",
 ]
 
 # --- Provider defaults (all overridable via MEMORIZZ_DEFAULT_LLM_MODEL etc.) ---
@@ -60,3 +65,32 @@ MEMORY_ASSISTANT_INSTRUCTION = (
     "Remember the salient facts, preferences, and context the user shares, and "
     "recall them naturally in later turns. Be concise and direct."
 )
+
+
+# --- Persistent CLI state (default agent id + memory id) --------------------
+# So that each `memorizz` launch reuses ONE persistent MemAgent and its memory,
+# instead of creating a throwaway agent per session.
+
+
+def state_file():
+    """Path to the CLI state file holding the persistent agent + memory ids."""
+    return memorizz_home() / "state.json"
+
+
+def load_state():
+    """Load persisted CLI state (agent_id, memory_id). Returns {} if absent."""
+    path = state_file()
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_state(updates):
+    """Merge non-None values into the CLI state file (creating it)."""
+    ensure_home()
+    state = load_state()
+    state.update({k: v for k, v in updates.items() if v is not None})
+    state_file().write_text(json.dumps(state, indent=2))

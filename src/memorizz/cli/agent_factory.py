@@ -103,18 +103,37 @@ def _pick_ollama_model(models: List[str]) -> Optional[str]:
                 return m
     chat = [m for m in models if "embed" not in m.lower()]
     pool = chat or models
-    for fav in (
-        "llama3.1",
-        "llama3.2",
-        "llama3",
-        "qwen2.5",
-        "qwen",
-        "mistral",
-        "gemma",
-    ):
-        for m in pool:
-            if m.split(":")[0] == fav or m.startswith(fav):
-                return m
+
+    def _rank(name: str) -> int:
+        base = name.split(":")[0].lower()
+        # Prefer reliable tool-capable instruct families (the agent always sends
+        # tools, so the default must support tool-calling).
+        order = [
+            "llama3.1",
+            "llama3.2",
+            "llama3",
+            "qwen2.5",
+            "qwen2",
+            "mistral",
+            "mixtral",
+            "command-r",
+            "firefunction",
+        ]
+        for i, fav in enumerate(order):
+            if base == fav or base.startswith(fav):
+                return i
+        # Deprioritize families that don't support tools in Ollama (gemma) or are
+        # reasoning-first (r1/qwq) — poor zero-config defaults for a tool agent.
+        if (
+            "gemma" in base
+            or "r1" in base
+            or base.startswith("qwq")
+            or "deepseek-r1" in base
+        ):
+            return 100
+        return 50
+
+    pool = sorted(pool, key=_rank)
     return pool[0] if pool else None
 
 
@@ -264,30 +283,75 @@ def build_session_agent(
     llm_config: Optional[Dict[str, Any]] = None,
     memory_provider: Optional[Any] = None,
     instruction: Optional[str] = None,
+    fresh: bool = False,
 ) -> Session:
-    """Detect config and build a ready-to-run :class:`Session`."""
+    """Detect config and return a ready-to-run :class:`Session`.
+
+    Reuses ONE persistent MemAgent across launches: the default agent id and the
+    rolling memory id are stored in ``~/.memorizz/state.json`` so memory carries
+    over between `memorizz` invocations. Pass ``fresh=True`` to ignore saved
+    state and start a brand-new agent + memory.
+    """
+    from ..memagent import MemAgent
     from ..memagent.builders.agent_builder import MemAgentBuilder
 
     warnings: List[str] = []
     resolved_llm = llm_config or detect_llm_config()
     provider = memory_provider or detect_memory_provider(resolved_llm, warnings)
 
-    builder = (
-        MemAgentBuilder()
-        .with_instruction(instruction or cfg.MEMORY_ASSISTANT_INSTRUCTION)
-        .with_application_mode("assistant")
-        .with_llm_config(resolved_llm)
-        .with_memory_provider(provider)
-        .with_max_steps(20)
-    )
-    if code_mode:
-        builder = builder.with_self_aware(True, {"allow_writes": True})
+    state = {} if fresh else cfg.load_state()
+    agent = None
 
-    agent = builder.build()
+    # 1. Reuse the persistent default agent if one was saved.
+    saved_agent_id = state.get("agent_id")
+    if saved_agent_id:
+        try:
+            agent = MemAgent.load(saved_agent_id, memory_provider=provider)
+        except Exception:
+            agent = None  # not found / unreadable -> create a fresh one below
+
+    if agent is not None:
+        # Re-point the loaded agent at the currently-detected provider/model;
+        # the saved llm_config may be stale or omit secrets.
+        try:
+            from ..llms.llm_factory import create_llm_provider
+
+            agent.model = create_llm_provider(resolved_llm)
+            agent.llm_config = dict(resolved_llm)
+            agent._llm_init_error = None
+        except Exception as exc:
+            agent._llm_init_error = f"{type(exc).__name__}: {exc}"
+    else:
+        # 2. First run (or fresh): build and persist a new default agent.
+        agent = (
+            MemAgentBuilder()
+            .with_instruction(instruction or cfg.MEMORY_ASSISTANT_INSTRUCTION)
+            .with_application_mode("assistant")
+            .with_llm_config(resolved_llm)
+            .with_memory_provider(provider)
+            .with_max_steps(20)
+            .build()
+        )
+        if not fresh:
+            try:
+                agent.save()
+            except Exception:
+                pass
+            cfg.save_state({"agent_id": getattr(agent, "agent_id", None)})
+
+    # 3. Coding tools track the requested mode deterministically.
+    agent.with_self_aware(
+        bool(code_mode), {"allow_writes": True} if code_mode else None
+    )
+
+    # 4. Reuse the rolling memory id so long-term recall spans sessions.
+    memory_id = None if fresh else state.get("memory_id")
+
     return Session(
         agent=agent,
         provider=provider,
         llm_config=resolved_llm,
-        code_mode=code_mode,
+        code_mode=bool(code_mode),
+        memory_id=memory_id,
         warnings=warnings,
     )

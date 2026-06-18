@@ -19,10 +19,11 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
 
 from . import commands
 from . import config as cfg
@@ -65,17 +66,58 @@ def _banner(console: Console, session) -> None:
 
 
 def _stream_turn(session, query: str) -> None:
+    """Stream one turn: dim reasoning + tool activity above the live answer."""
     console = session.console
     agent = session.agent
-    acc = ""
-    gen = None
-    started = False
-    live = None
-    interrupted = False
-    error = None
 
-    status = console.status("[dim]thinking…[/dim]", spinner="dots")
-    status.start()
+    turn = {"reasoning": "", "answer": "", "tools": [], "error": None}
+    live = None
+
+    def renderable():
+        parts = []
+        if turn["reasoning"].strip():
+            parts.append(
+                Panel(
+                    Text(turn["reasoning"].strip(), style="dim italic"),
+                    title="reasoning",
+                    border_style="grey42",
+                    expand=False,
+                )
+            )
+        if turn["tools"]:
+            uniq = list(dict.fromkeys(turn["tools"]))
+            parts.append(Text("⚙ " + ", ".join(uniq), style="dim cyan"))
+        if turn["error"]:
+            parts.append(Text("⚠ " + str(turn["error"]), style="red"))
+        elif turn["answer"].strip():
+            parts.append(Markdown(turn["answer"]))
+        return Group(*parts) if parts else Text("thinking…", style="dim")
+
+    def refresh():
+        if live is not None:
+            live.update(renderable())
+            live.refresh()
+
+    def on_event(ev):
+        etype = ev.get("type")
+        if etype == "trace":
+            kind = ev.get("trace_kind")
+            if kind == "reasoning":
+                turn["reasoning"] += ev.get("content", "") or ""
+            elif kind == "tool_call":
+                turn["tools"].append(
+                    str(ev.get("tool_name") or ev.get("title") or "tool")
+                )
+        elif etype == "error":
+            turn["error"] = ev.get("message") or turn["error"]
+        refresh()
+
+    gen = None
+    interrupted = False
+    agent.set_stream_event_callback(on_event)
+    live = Live(console=console, refresh_per_second=12, auto_refresh=False)
+    live.start()
+    refresh()
     try:
         gen = agent.run_stream(
             query,
@@ -84,16 +126,9 @@ def _stream_turn(session, query: str) -> None:
             user_id=session.user_id,
         )
         for chunk in gen:
-            if not chunk:
-                continue
-            if not started:
-                status.stop()
-                started = True
-                live = Live(console=console, refresh_per_second=12, auto_refresh=False)
-                live.start()
-            acc += chunk
-            live.update(Markdown(acc))
-            live.refresh()
+            if chunk:
+                turn["answer"] += chunk
+                refresh()
     except KeyboardInterrupt:
         interrupted = True
         if gen is not None:
@@ -102,32 +137,35 @@ def _stream_turn(session, query: str) -> None:
             except Exception:
                 pass
     except Exception as exc:  # surface, don't crash the REPL
-        error = exc
-        if gen is not None:
-            try:
-                gen.close()
-            except Exception:
-                pass
+        turn["error"] = turn["error"] or str(exc)
+        refresh()
     finally:
-        if not started:
-            try:
-                status.stop()
-            except Exception:
-                pass
-        if live is not None:
-            try:
-                live.stop()
-            except Exception:
-                pass
+        try:
+            live.stop()
+        except Exception:
+            pass
+        try:
+            agent.set_stream_event_callback(None)
+        except Exception:
+            pass
 
-    if error is not None:
-        console.print(f"[red]Error:[/red] {error}")
+    if turn["error"]:
+        if "does not support tools" in str(turn["error"]).lower():
+            console.print(
+                "[yellow]This model can't tool-call.[/yellow] Try a tool-capable "
+                "model, e.g. [cyan]ollama pull llama3.1:8b[/cyan] then "
+                "[cyan]/model llama3.1:8b[/cyan]."
+            )
     elif interrupted:
         console.print("[yellow]⏹ interrupted[/yellow]")
-    elif not acc.strip():
+    elif not turn["answer"].strip() and not turn["reasoning"].strip():
         console.print("[dim](no output)[/dim]")
 
     session.sync_ids()
+    try:
+        cfg.save_state({"memory_id": session.memory_id})
+    except Exception:
+        pass
 
 
 def run_repl(session) -> None:

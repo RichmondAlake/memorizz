@@ -323,7 +323,9 @@ def _run_oneshot(text, code_mode=False):
         user_id=session.user_id,
     )
     print(result)
+    session.sync_ids()
     try:
+        cfg.save_state({"memory_id": session.memory_id})
         if getattr(session.agent, "memory_provider", None) is not None:
             session.agent.save()
     except Exception:
