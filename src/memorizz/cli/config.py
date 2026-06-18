@@ -40,6 +40,7 @@ __all__ = [
     "state_file",
     "load_state",
     "save_state",
+    "clear_state",
 ]
 
 # --- Provider defaults (all overridable via MEMORIZZ_DEFAULT_LLM_MODEL etc.) ---
@@ -94,3 +95,16 @@ def save_state(updates):
     state = load_state()
     state.update({k: v for k, v in updates.items() if v is not None})
     state_file().write_text(json.dumps(state, indent=2))
+
+
+def clear_state(keys):
+    """Remove the given keys from the CLI state file (e.g. after a memory wipe)."""
+    state = load_state()
+    changed = False
+    for key in keys:
+        if key in state:
+            del state[key]
+            changed = True
+    if changed:
+        ensure_home()
+        state_file().write_text(json.dumps(state, indent=2))

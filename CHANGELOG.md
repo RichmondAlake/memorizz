@@ -8,7 +8,8 @@
   Running `memorizz` with no arguments launches an interactive REPL that streams
   the agent's replies live, with `/` slash commands (`/help`, `/model`,
   `/provider`, `/ollama`, `/code`, `/memory`, `/history`, `/agents`, `/agent`,
-  `/new`, `/tools`, `/ingest`, `/ui`, `/login`, `/config`, `/clear`, `/exit`).
+  `/new`, `/persona`, `/tools`, `/ingest`, `/ui`, `/login`, `/config`, `/clear`
+  (wipe memory, with confirmation), `/cls`, `/exit`).
   Also adds `memorizz chat`, one-shot `memorizz run "<prompt>"`, `memorizz init`,
   `memorizz config`, and `memorizz --version`. `python -m memorizz` now works.
 * **Zero-config local stack.** With no API key set and an Ollama daemon running,
@@ -43,6 +44,10 @@
   converted to Python scalars"* when a stored embedding had an unexpected shape;
   cosine similarity now flattens and shape-checks operands, skipping mismatches
   rather than aborting retrieval.
+* **Persona / knowledge-base embeddings failed on a keyless local stack.**
+  Components using the module-level `get_embedding()` defaulted to OpenAI; the
+  CLI now points the global embedding manager at the active provider (e.g.
+  Ollama `nomic-embed-text`), so `/persona` and `/ingest` work fully offline.
 
 ### Breaking changes
 

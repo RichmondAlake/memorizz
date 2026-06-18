@@ -263,6 +263,19 @@ def detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> A
             "No embedding model available — semantic recall is degraded "
             "(brute-force). Run `ollama pull nomic-embed-text` or set OPENAI_API_KEY."
         )
+    else:
+        # Point the GLOBAL embedding manager at the same provider so personas,
+        # knowledge-base ingestion, and other components that call the
+        # module-level get_embedding() don't fall back to the OpenAI default
+        # (which fails on a keyless local stack).
+        try:
+            from ..embeddings import configure_embeddings
+
+            configure_embeddings(
+                embed["embedding_provider"], embed.get("embedding_config") or {}
+            )
+        except Exception:
+            pass
     root = cfg.memory_root()
     return FileSystemProvider(
         FileSystemConfig(

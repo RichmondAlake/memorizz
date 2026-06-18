@@ -275,6 +275,42 @@ def cmd_agent(session, args: str):
     console.print(f"[green]Loaded agent[/green] {agent_id}")
 
 
+def cmd_persona(session, args: str):
+    console = _con(session)
+    pm = getattr(session.agent, "persona_manager", None)
+    text = args.strip()
+
+    if not text:
+        cur = getattr(pm, "current_persona", None) if pm else None
+        if not cur:
+            console.print("[dim]No persona set.[/dim]")
+            console.print("Usage: /persona <name> [| goals | background]")
+            return
+        console.print("[bold]Persona[/bold]")
+        console.print(f"  name: [cyan]{getattr(cur, 'name', '?')}[/cyan]")
+        console.print(f"  role: {getattr(cur, 'role', '?')}")
+        goals = str(getattr(cur, "goals", "") or "").strip()
+        background = str(getattr(cur, "background", "") or "").strip()
+        if goals:
+            console.print(f"  goals: {goals[:300]}")
+        if background:
+            console.print(f"  background: {background[:300]}")
+        return
+
+    parts = [p.strip() for p in text.split("|")]
+    name = parts[0]
+    goals = parts[1] if len(parts) > 1 else ""
+    background = parts[2] if len(parts) > 2 else ""
+
+    from ..long_term.semantic.persona import Persona
+
+    persona = Persona(name=name, goals=goals, background=background)
+    if session.agent.set_persona(persona):
+        console.print(f"[green]Persona set →[/green] {name}")
+    else:
+        console.print("[red]Failed to set persona.[/red]")
+
+
 def cmd_new(session, args: str):
     console = _con(session)
     session.agent.reset_thread_state()
@@ -425,8 +461,61 @@ def cmd_config(session, args: str):
     console.print(f"  coding mode:   {'on' if session.code_mode else 'off'}")
 
 
-def cmd_clear(session, args: str):
+def cmd_cls(session, args: str):
     _con(session).clear()
+
+
+def cmd_clear(session, args: str):
+    """Erase the agent's stored memory after a typed confirmation."""
+    console = _con(session)
+    provider = getattr(session, "provider", None)
+    if provider is None:
+        console.print("[yellow]No memory provider; nothing to clear.[/yellow]")
+        return
+
+    console.print(
+        "[red bold]This permanently erases this agent's stored memory[/red bold] "
+        "— conversations, knowledge base, entities, summaries, workflows, caches "
+        "and tool logs. The agent itself (persona + tools) is kept."
+    )
+    try:
+        answer = (
+            input("Type 'wipe' to confirm (anything else cancels): ").strip().lower()
+        )
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[yellow]Cancelled.[/yellow]")
+        return
+    if answer != "wipe":
+        console.print("[yellow]Cancelled.[/yellow]")
+        return
+
+    from ..enums.memory_type import MemoryType
+
+    keep = {MemoryType.PERSONAS, MemoryType.TOOLBOX, MemoryType.MEMAGENT}
+    cleared = 0
+    for memory_type in MemoryType:
+        if memory_type in keep:
+            continue
+        try:
+            if provider.delete_all(memory_type):
+                cleared += 1
+        except Exception:
+            pass
+
+    try:
+        session.agent.reset_thread_state()
+    except Exception:
+        pass
+    session.memory_id = None
+    session.thread_id = None
+    try:
+        cfg.clear_state(["memory_id"])
+    except Exception:
+        pass
+    console.print(
+        f"[green]Memory wiped.[/green] Cleared {cleared} memory store(s); "
+        "the agent starts fresh."
+    )
 
 
 def cmd_exit(session, args: str):
@@ -493,7 +582,17 @@ COMMANDS: Dict[str, Command] = {
         cmd_login, "Save an API key to ~/.memorizz/.env.", "/login [openai|anthropic]"
     ),
     "config": Command(cmd_config, "Show resolved config + paths.", "/config"),
-    "clear": Command(cmd_clear, "Clear the screen.", "/clear"),
+    "persona": Command(
+        cmd_persona,
+        "Show or set the agent's persona.",
+        "/persona [name | goals | background]",
+    ),
+    "clear": Command(
+        cmd_clear,
+        "Erase the agent's stored memory (asks to confirm).",
+        "/clear",
+    ),
+    "cls": Command(cmd_cls, "Clear the terminal screen.", "/cls"),
     "exit": Command(cmd_exit, "Save and quit.", "/exit"),
 }
 
