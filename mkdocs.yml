@@ -12,7 +12,9 @@ nav:
       - Overview: getting-started/overview.md
       - Concepts: getting-started/concepts.md
       - Python SDK Quickstart: getting-started/python-sdk-quickstart.md
+      - CLI Guide: getting-started/cli.md
       - Local UI Guide: getting-started/local-ui.md
+  - CLI: getting-started/cli.md
   - Local UI: getting-started/local-ui.md
   - Memory Types:
       - Semantic Memory: memory-types/semantic.md

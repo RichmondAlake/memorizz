@@ -411,12 +411,28 @@ print(report)
 
 ## CLI
 
-After installation, the `memorizz` command exposes:
+Memorizz ships an interactive, Claude-Code-style terminal agent with **persistent
+memory** — just run `memorizz`:
 
 ```bash
-memorizz run local                  # start local web UI (requires [ui])
-memorizz install-oracle             # start Oracle container helper
-memorizz setup-oracle               # initialize Oracle schema/user
+memorizz                       # interactive REPL (memory persists across launches)
+memorizz --code                # enable coding tools (read/write files + commands)
+memorizz run "your prompt"     # one-shot, prints the reply
+memorizz ui                    # start the local web UI (requires [ui])
+```
+
+With no API key and a running [Ollama](https://ollama.com) daemon it runs a
+**100% local stack** (Ollama LLM + embeddings + on-disk memory). Inside the REPL,
+`/help` lists 20+ slash commands (`/model`, `/code`, `/persona`, `/memory`,
+`/forget`, `/clear`, `/ingest`, `/ui`, …).
+
+See the **[CLI Guide](docs/getting-started/cli.md)** for the full reference.
+
+Database/admin helpers:
+
+```bash
+memorizz oracle install             # start Oracle container helper
+memorizz oracle setup               # initialize Oracle schema/user
 ```
 
 ## Examples
