@@ -529,6 +529,38 @@ def cmd_config(session, args: str):
     console.print(f"  coding mode:   {'on' if session.code_mode else 'off'}")
 
 
+_DOCS_BASE = "https://richmondalake.github.io/memorizz"
+_DOCS_PAGES = {
+    "": "/",
+    "cli": "/getting-started/cli/",
+    "ui": "/getting-started/local-ui/",
+    "quickstart": "/getting-started/python-sdk-quickstart/",
+    "concepts": "/getting-started/concepts/",
+}
+
+
+def cmd_docs(session, args: str):
+    console = _con(session)
+    key = args.strip().lower()
+    url = _DOCS_BASE + _DOCS_PAGES.get(key, "/")
+
+    import webbrowser
+
+    try:
+        opened = webbrowser.open(url)
+    except Exception:
+        opened = False
+
+    if opened:
+        console.print(f"[green]Opening docs →[/green] {url}")
+    else:
+        console.print(f"[bold]Docs:[/bold] {url}")
+    if not key:
+        console.print(
+            "[dim]Jump to a page: /docs cli · /docs ui · /docs quickstart[/dim]"
+        )
+
+
 def cmd_cls(session, args: str):
     _con(session).clear()
 
@@ -653,6 +685,9 @@ COMMANDS: Dict[str, Command] = {
         cmd_login, "Save an API key to ~/.memorizz/.env.", "/login [openai|anthropic]"
     ),
     "config": Command(cmd_config, "Show resolved config + paths.", "/config"),
+    "docs": Command(
+        cmd_docs, "Open the documentation in your browser.", "/docs [cli|ui]"
+    ),
     "persona": Command(
         cmd_persona,
         "Show or set the agent's persona.",
