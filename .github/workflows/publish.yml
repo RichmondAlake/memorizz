@@ -1,0 +1,109 @@
+name: Publish
+
+# Tag-triggered release: build -> PyPI (OIDC trusted publishing, no stored token)
+# -> GitHub release -> bump the Homebrew tap + publish the npm shim.
+# The git tag (vX.Y.Z) is the single source of truth for the version.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Check artifacts
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # OIDC -> PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  npm:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Sync version + publish shim
+        working-directory: packaging/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          npm version "$VER" --no-git-tag-version --allow-same-version
+          npm publish --provenance --access public
+
+  # Bumping the Homebrew tap requires the published sdist's sha256. This job
+  # computes it and opens a bump in the tap repo. Requires a TAP_PUSH_TOKEN
+  # secret with write access to RichmondAlake/homebrew-memorizz.
+  homebrew:
+    needs: pypi
+    runs-on: ubuntu-latest
+    if: ${{ secrets.TAP_PUSH_TOKEN != '' }}
+    steps:
+      - name: Compute version + sdist sha256
+        id: meta
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          for i in $(seq 1 30); do
+            URL=$(curl -fsSL "https://pypi.org/pypi/memorizz/$VER/json" \
+              | python3 -c "import sys,json;print(next(u['url'] for u in json.load(sys.stdin)['urls'] if u['packagetype']=='sdist'))" 2>/dev/null || true)
+            [ -n "$URL" ] && break
+            sleep 10
+          done
+          test -n "$URL"
+          curl -fsSL "$URL" -o sdist.tar.gz
+          echo "sha256=$(sha256sum sdist.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Bump formula in tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          VER: ${{ steps.meta.outputs.version }}
+          SHA: ${{ steps.meta.outputs.sha256 }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/RichmondAlake/homebrew-memorizz.git" tap
+          F=tap/Formula/memorizz.rb
+          sed -i -E "s|memorizz-[0-9.]+\.tar\.gz|memorizz-${VER}.tar.gz|" "$F"
+          sed -i -E "s|sha256 \"[a-f0-9]*\"|sha256 \"${SHA}\"|" "$F"
+          sed -i -E "s|version \"[0-9.]+\"|version \"${VER}\"|" "$F"
+          cd tap
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git commit -am "memorizz ${VER}" && git push

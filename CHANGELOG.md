@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.1.0 — 2026-06-18
+
+### Features
+
+* **New interactive CLI — `memorizz` is now a Claude-Code-style local agent.**
+  Running `memorizz` with no arguments launches an interactive REPL that streams
+  the agent's replies live, with `/` slash commands (`/help`, `/model`,
+  `/provider`, `/ollama`, `/code`, `/memory`, `/history`, `/agents`, `/agent`,
+  `/new`, `/tools`, `/ingest`, `/ui`, `/login`, `/config`, `/clear`, `/exit`).
+  Also adds `memorizz chat`, one-shot `memorizz run "<prompt>"`, `memorizz init`,
+  `memorizz config`, and `memorizz --version`. `python -m memorizz` now works.
+* **Zero-config local stack.** With no API key set and an Ollama daemon running,
+  the CLI defaults to Ollama (LLM + `nomic-embed-text` embeddings) + an on-disk
+  FileSystem memory store under `~/.memorizz/memory` — a 100%-local agent with no
+  keys. Cloud keys (Anthropic / OpenAI / Azure) are auto-detected when present.
+* **`/code` coding mode.** `memorizz --code` (or `/code` in the REPL) enables the
+  agent's self-aware file read/write + bounded command tools, scoped to the
+  working directory (writes on, deletes off).
+* **Canonical config at `~/.memorizz/`.** Keys/settings live in
+  `~/.memorizz/.env` (override via `MEMORIZZ_HOME` / `MEMORIZZ_ENV_FILE`), shared
+  by the CLI and the local web UI. `$CWD/.env` is still honored for back-compat.
+* **Distribution.** Installable via `uv tool install memorizz` / `pipx install
+  memorizz`, a Homebrew tap, and an npm shim (`npm i -g memorizz`, bootstraps uv).
+
+### Bug fixes
+
+* **Local UI wrote `.env` to an unreadable path.** The Settings page computed the
+  env file as `<package>/../../../.env`, which under a pip/uv install landed in
+  `site-packages` where nothing read it. Env handling is now centralized in
+  `memorizz._env_io`, and the UI reads/writes the same `~/.memorizz/.env` as the
+  CLI.
+
+### Breaking changes
+
+* **The heavy local-ML stack is no longer installed by default.** `transformers`,
+  `sentence-transformers`, `accelerate`, and `huggingface-hub` moved out of the
+  base dependencies into the existing `huggingface` extra, so a default
+  `pip install memorizz` (and `uv tool install memorizz`) no longer pulls a
+  multi-GB PyTorch stack. If you use local HuggingFace models or HF embeddings,
+  install `pip install "memorizz[huggingface]"`.
+* **Minimum Python is now 3.10** (the old `>=3.7` never matched the actual
+  dependency floors).
+
 ## 0.0.52 — 2026-06-16
 
 ### Bug fixes

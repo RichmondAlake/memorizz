@@ -1,0 +1,24 @@
+{
+  "name": "memorizz",
+  "version": "0.1.0",
+  "description": "npm bootstrapper for the memorizz Python CLI — installs the real tool via uv.",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://github.com/RichmondAlake/memorizz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RichmondAlake/memorizz.git",
+    "directory": "packaging/npm"
+  },
+  "keywords": ["memorizz", "ai", "agent", "cli", "memory", "llm", "ollama"],
+  "bin": {
+    "memorizz": "bin/memorizz.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "files": ["bin/", "scripts/", "README.md"],
+  "engines": {
+    "node": ">=16"
+  },
+  "os": ["darwin", "linux", "win32"]
+}

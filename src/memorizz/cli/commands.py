@@ -1,0 +1,532 @@
+# Copyright (c) 2024 Richmond Alake. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0.
+# See LICENSE file in the project root for full license information.
+
+"""Slash-command registry for the interactive REPL.
+
+A single ``COMMANDS`` table feeds both the REPL dispatcher and the
+prompt_toolkit completer. Each handler has the signature
+``handler(session, args: str) -> Optional[bool]`` and returns ``False`` to end
+the REPL (any other value continues).
+"""
+
+import os
+import sys
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+from . import agent_factory
+from . import config as cfg
+from . import ollama_probe
+
+
+@dataclass
+class Command:
+    handler: Callable
+    help: str
+    usage: str = ""
+
+
+def _con(session):
+    """Return the session console, creating a fallback if needed."""
+    if getattr(session, "console", None) is not None:
+        return session.console
+    from rich.console import Console
+
+    session.console = Console()
+    return session.console
+
+
+# --------------------------------------------------------------------------- #
+# Model / provider switching
+# --------------------------------------------------------------------------- #
+
+
+def _carry_api_key(existing, new_config: Dict[str, object]) -> None:
+    """Copy the API key off the current provider into ``new_config`` in place.
+
+    Saved/derived configs deliberately omit secrets; when changing only the
+    model within the same provider we reuse the live key (mirrors ui/app.py).
+    """
+    if existing is None or "api_key" in new_config:
+        return
+    for attr in ("api_key", "_api_key"):
+        key = getattr(existing, attr, None)
+        if key:
+            new_config["api_key"] = key
+            return
+    client = getattr(existing, "client", None)
+    if client is not None:
+        key = getattr(client, "api_key", None)
+        if key:
+            new_config["api_key"] = key
+
+
+def _swap_model(session, new_config: Dict[str, object], carry_key: bool) -> None:
+    from ..llms.llm_factory import create_llm_provider
+
+    agent = session.agent
+    if carry_key and new_config.get("provider") != "ollama":
+        _carry_api_key(getattr(agent, "model", None), new_config)
+    agent.model = create_llm_provider(new_config)
+    agent.llm_config = dict(new_config)
+    agent._llm_init_error = None
+    session.llm_config = dict(new_config)
+
+
+def cmd_model(session, args: str):
+    console = _con(session)
+    name = args.strip()
+    if not name:
+        console.print(
+            f"Model: [cyan]{session.model_name}[/cyan]  (provider: {session.provider_name})"
+        )
+        console.print("Usage: /model <model-name>")
+        return
+    new_config = dict(session.llm_config)
+    new_config["model"] = name
+    _swap_model(session, new_config, carry_key=True)
+    console.print(f"[green]Model →[/green] {name}")
+
+
+def cmd_provider(session, args: str):
+    console = _con(session)
+    name = args.strip().lower()
+    if not name:
+        console.print(f"Provider: [cyan]{session.provider_name}[/cyan]")
+        console.print(
+            "Usage: /provider <openai|anthropic|ollama|azure|huggingface|mlx>"
+        )
+        return
+    new_config = agent_factory.config_for_provider(name)
+    _swap_model(session, new_config, carry_key=False)
+    console.print(
+        f"[green]Provider →[/green] {new_config.get('provider')} "
+        f"({new_config.get('model') or new_config.get('deployment_name')})"
+    )
+
+
+def cmd_ollama(session, args: str):
+    console = _con(session)
+    parts = args.split(maxsplit=1)
+    sub = parts[0].lower() if parts else "list"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "host":
+        if not rest:
+            console.print(f"OLLAMA_HOST: [cyan]{ollama_probe.resolve_host()}[/cyan]")
+            return
+        os.environ["OLLAMA_HOST"] = rest
+        cfg.apply_env_updates({"OLLAMA_HOST": rest})
+        console.print(f"[green]OLLAMA_HOST →[/green] {rest}")
+        return
+
+    if sub == "pull":
+        if not rest:
+            console.print("Usage: /ollama pull <model-tag>")
+            return
+        console.print(f"Pulling [cyan]{rest}[/cyan] … (this can take a while)")
+        ok, msg = ollama_probe.pull(rest)
+        console.print(
+            ("[green]" + msg + "[/green]") if ok else ("[red]" + msg + "[/red]")
+        )
+        return
+
+    # default: list
+    result = ollama_probe.probe()
+    if not result["reachable"]:
+        console.print(
+            f"[red]Ollama not reachable[/red] at {result['host']}: {result['error']}"
+        )
+        return
+    models = result["models"] or []
+    if not models:
+        console.print(
+            f"Ollama is up at {result['host']} but has no models. Try /ollama pull llama3.1"
+        )
+        return
+    console.print(f"[bold]Ollama models[/bold] ({result['host']}):")
+    for m in models:
+        console.print(f"  • {m}")
+
+
+# --------------------------------------------------------------------------- #
+# Coding mode
+# --------------------------------------------------------------------------- #
+
+
+def cmd_code(session, args: str):
+    console = _con(session)
+    arg = args.strip().lower()
+    turn_on = arg not in ("off", "false", "no", "0")
+    session.agent.with_self_aware(turn_on, {"allow_writes": True} if turn_on else None)
+    session.code_mode = turn_on
+    if turn_on:
+        try:
+            scoped = session.agent.get_self_aware_config().get("root_paths") or [
+                os.getcwd()
+            ]
+        except Exception:
+            scoped = [os.getcwd()]
+        console.print(
+            "[green]Coding mode ON[/green] — file read/write + bounded commands enabled."
+        )
+        console.print(f"  scoped to: {', '.join(scoped)}  (deletes stay off)")
+    else:
+        console.print("[yellow]Coding mode OFF[/yellow]")
+
+
+# --------------------------------------------------------------------------- #
+# Memory / threads / agents
+# --------------------------------------------------------------------------- #
+
+
+def cmd_memory(session, args: str):
+    console = _con(session)
+    mid = args.strip()
+    if not mid:
+        console.print(
+            f"memory_id: [cyan]{session.memory_id or '(new on first turn)'}[/cyan]"
+        )
+        console.print(
+            f"thread_id: [cyan]{session.thread_id or '(new on first turn)'}[/cyan]"
+        )
+        return
+    session.memory_id = mid
+    try:
+        history = session.agent.load_conversation_history(mid) or []
+        console.print(
+            f"[green]Switched to memory[/green] {mid}  ({len(history)} entries)"
+        )
+    except Exception as exc:
+        console.print(
+            f"[green]Switched to memory[/green] {mid}  (history unavailable: {exc})"
+        )
+
+
+def _render_history_entry(entry) -> Optional[str]:
+    if isinstance(entry, dict):
+        role = entry.get("role") or ("user" if entry.get("query") else "assistant")
+        content = (
+            entry.get("content") or entry.get("response") or entry.get("query") or ""
+        )
+        content = str(content).strip().replace("\n", " ")
+        if not content:
+            return None
+        return f"[dim]{role}:[/dim] {content[:200]}"
+    text = str(entry).strip()
+    return text[:200] if text else None
+
+
+def cmd_history(session, args: str):
+    console = _con(session)
+    try:
+        history = session.agent.load_conversation_history(session.memory_id) or []
+    except Exception as exc:
+        console.print(f"[red]Could not load history:[/red] {exc}")
+        return
+    if not history:
+        console.print("[dim]No conversation history yet.[/dim]")
+        return
+    console.print(f"[bold]Conversation history[/bold] ({len(history)} entries):")
+    for entry in history[-20:]:
+        line = _render_history_entry(entry)
+        if line:
+            console.print("  " + line)
+
+
+def cmd_agents(session, args: str):
+    console = _con(session)
+    try:
+        agents = session.provider.list_memagents() or []
+    except Exception as exc:
+        console.print(f"[red]Could not list agents:[/red] {exc}")
+        return
+    if not agents:
+        console.print("[dim]No saved agents.[/dim]")
+        return
+    console.print(f"[bold]Saved agents[/bold] ({len(agents)}):")
+    for a in agents:
+        agent_id = getattr(a, "agent_id", None) or getattr(a, "id", "?")
+        name = getattr(a, "name", None) or ""
+        mode = getattr(a, "application_mode", None) or ""
+        fav = "★ " if getattr(a, "is_favorite", False) else ""
+        console.print(f"  {fav}{agent_id}  [cyan]{name}[/cyan] [dim]{mode}[/dim]")
+
+
+def cmd_agent(session, args: str):
+    console = _con(session)
+    agent_id = args.strip()
+    if not agent_id:
+        console.print("Usage: /agent <agent-id>   (see /agents)")
+        return
+    from ..memagent import MemAgent
+
+    loaded = MemAgent.load(agent_id, memory_provider=session.provider)
+    session.agent = loaded
+    session.memory_id = None
+    session.thread_id = None
+    try:
+        session.llm_config = dict(getattr(loaded, "llm_config", {}) or {})
+    except Exception:
+        pass
+    console.print(f"[green]Loaded agent[/green] {agent_id}")
+
+
+def cmd_new(session, args: str):
+    console = _con(session)
+    session.agent.reset_thread_state()
+    session.memory_id = None
+    session.thread_id = None
+    console.print("[green]Started a fresh conversation thread.[/green]")
+
+
+def cmd_tools(session, args: str):
+    console = _con(session)
+    manager = getattr(session.agent, "tool_manager", None)
+    if manager is None or not hasattr(manager, "list_tools"):
+        console.print("[dim]No tool manager available.[/dim]")
+        return
+    try:
+        tools = manager.list_tools() or []
+    except Exception as exc:
+        console.print(f"[red]Could not list tools:[/red] {exc}")
+        return
+    if not tools:
+        console.print("[dim]No tools registered.[/dim]")
+        return
+    console.print(f"[bold]Tools[/bold] ({len(tools)}):")
+    for t in tools:
+        if isinstance(t, dict):
+            name = t.get("name") or t.get("function", {}).get("name") or "?"
+            desc = (
+                t.get("description") or t.get("function", {}).get("description") or ""
+            )
+        else:
+            name = getattr(t, "name", str(t))
+            desc = getattr(t, "description", "")
+        desc = str(desc).strip().replace("\n", " ")
+        console.print(f"  • [cyan]{name}[/cyan] [dim]{desc[:80]}[/dim]")
+
+
+def cmd_ingest(session, args: str):
+    console = _con(session)
+    target = args.strip().strip('"').strip("'")
+    if not target:
+        console.print("Usage: /ingest <path-to-file>")
+        return
+    path = Path(target).expanduser()
+    if not path.exists():
+        console.print(f"[red]File not found:[/red] {path}")
+        return
+    from ..long_term.semantic import KnowledgeBase
+
+    kb = KnowledgeBase(memory_provider=session.provider)
+    kb_id = kb.ingest_file(str(path))
+    console.print(f"[green]Ingested[/green] {path.name} → knowledge_base_id {kb_id}")
+
+
+# --------------------------------------------------------------------------- #
+# UI / config / session
+# --------------------------------------------------------------------------- #
+
+
+def cmd_ui(session, args: str):
+    console = _con(session)
+    host, port = "127.0.0.1", 8765
+    tokens = args.split()
+    i = 0
+    while i < len(tokens):
+        if tokens[i] == "--port" and i + 1 < len(tokens):
+            try:
+                port = int(tokens[i + 1])
+            except ValueError:
+                console.print(f"[red]Invalid port:[/red] {tokens[i + 1]}")
+                return
+            i += 2
+        elif tokens[i] == "--host" and i + 1 < len(tokens):
+            host = tokens[i + 1]
+            i += 2
+        else:
+            i += 1
+
+    existing = getattr(session, "ui_proc", None)
+    if existing is not None and existing.poll() is None:
+        console.print("[yellow]UI already running.[/yellow]")
+        return
+
+    import subprocess
+
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "memorizz",
+                "ui",
+                "--host",
+                host,
+                "--port",
+                str(port),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        console.print(f"[red]Failed to launch UI:[/red] {exc}")
+        return
+    session.ui_proc = proc
+    console.print(
+        f"[green]Local UI →[/green] http://{host}:{port}  (stops when you /exit)"
+    )
+
+
+def cmd_login(session, args: str):
+    console = _con(session)
+    import getpass
+
+    choice = args.strip().lower()
+    key_map = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "azure": "AZURE_OPENAI_API_KEY",
+        "voyage": "VOYAGE_API_KEY",
+    }
+    key_name = key_map.get(choice, choice.upper() if choice else "OPENAI_API_KEY")
+    try:
+        value = getpass.getpass(f"Paste {key_name} (hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[yellow]Cancelled.[/yellow]")
+        return
+    if not value:
+        console.print("[yellow]No value entered; nothing saved.[/yellow]")
+        return
+    err = cfg.apply_env_updates({key_name: value})
+    if err:
+        console.print(
+            f"[yellow]Set for this session, but failed to persist:[/yellow] {err}"
+        )
+    else:
+        console.print(f"[green]Saved[/green] {key_name} → {cfg.resolve_env_file()}")
+
+
+def cmd_config(session, args: str):
+    console = _con(session)
+    provider_type = type(session.provider).__name__ if session.provider else "(none)"
+    console.print("[bold]memorizz config[/bold]")
+    console.print(f"  home:          {cfg.memorizz_home()}")
+    console.print(f"  env file:      {cfg.resolve_env_file()}")
+    console.print(f"  memory root:   {cfg.memory_root()}")
+    console.print(f"  llm provider:  {session.provider_name}")
+    console.print(f"  llm model:     {session.model_name}")
+    console.print(f"  memory store:  {provider_type}")
+    console.print(f"  coding mode:   {'on' if session.code_mode else 'off'}")
+
+
+def cmd_clear(session, args: str):
+    _con(session).clear()
+
+
+def cmd_exit(session, args: str):
+    console = _con(session)
+    agent = getattr(session, "agent", None)
+    if agent is not None and getattr(agent, "memory_provider", None) is not None:
+        try:
+            agent.save()
+        except Exception:
+            pass
+    proc = getattr(session, "ui_proc", None)
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    console.print("[dim]Goodbye.[/dim]")
+    return False
+
+
+def cmd_help(session, args: str):
+    console = _con(session)
+    console.print("[bold]Slash commands[/bold]")
+    for name in sorted(COMMANDS):
+        cmd = COMMANDS[name]
+        usage = cmd.usage or f"/{name}"
+        console.print(f"  [cyan]{usage:<26}[/cyan] {cmd.help}")
+    console.print(
+        "\nType plain text to chat. Ctrl-C aborts a reply; Ctrl-D or /exit quits."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Registry + dispatch
+# --------------------------------------------------------------------------- #
+
+COMMANDS: Dict[str, Command] = {
+    "help": Command(cmd_help, "Show this help.", "/help"),
+    "model": Command(cmd_model, "Show or switch the chat model.", "/model [name]"),
+    "provider": Command(cmd_provider, "Switch the LLM provider.", "/provider [name]"),
+    "ollama": Command(
+        cmd_ollama,
+        "List/pull Ollama models or set host.",
+        "/ollama [list|pull <t>|host <u>]",
+    ),
+    "code": Command(
+        cmd_code, "Toggle coding tools (file edits + commands).", "/code [on|off]"
+    ),
+    "memory": Command(
+        cmd_memory, "Show or switch the active memory id.", "/memory [id]"
+    ),
+    "history": Command(
+        cmd_history, "Print the current conversation history.", "/history"
+    ),
+    "agents": Command(cmd_agents, "List saved agents.", "/agents"),
+    "agent": Command(cmd_agent, "Load a saved agent by id.", "/agent <id>"),
+    "new": Command(cmd_new, "Start a fresh conversation thread.", "/new"),
+    "tools": Command(cmd_tools, "List the agent's tools.", "/tools"),
+    "ingest": Command(
+        cmd_ingest, "Ingest a file into the knowledge base.", "/ingest <file>"
+    ),
+    "ui": Command(cmd_ui, "Launch the local web UI.", "/ui [--port N]"),
+    "login": Command(
+        cmd_login, "Save an API key to ~/.memorizz/.env.", "/login [openai|anthropic]"
+    ),
+    "config": Command(cmd_config, "Show resolved config + paths.", "/config"),
+    "clear": Command(cmd_clear, "Clear the screen.", "/clear"),
+    "exit": Command(cmd_exit, "Save and quit.", "/exit"),
+}
+
+ALIASES: Dict[str, str] = {
+    "quit": "exit",
+    "q": "exit",
+    "h": "help",
+    "?": "help",
+    "models": "model",
+}
+
+
+def command_completions() -> List[str]:
+    """Return ``/name`` strings for the prompt_toolkit completer."""
+    return [f"/{name}" for name in sorted(COMMANDS)]
+
+
+def dispatch(line: str, session) -> bool:
+    """Dispatch a ``/command`` line. Returns False to end the REPL."""
+    console = _con(session)
+    body = line[1:] if line.startswith("/") else line
+    parts = body.split(maxsplit=1)
+    name = parts[0].lower() if parts else ""
+    args = parts[1] if len(parts) > 1 else ""
+    name = ALIASES.get(name, name)
+
+    cmd = COMMANDS.get(name)
+    if cmd is None:
+        console.print(f"[yellow]Unknown command:[/yellow] /{name}  (try /help)")
+        return True
+    try:
+        result = cmd.handler(session, args)
+    except Exception as exc:
+        console.print(f"[red]/{name} failed:[/red] {exc}")
+        return True
+    return result is not False

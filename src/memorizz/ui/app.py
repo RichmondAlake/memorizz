@@ -35,6 +35,12 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .._env_io import apply_env_updates as _shared_apply_env_updates
+from .._env_io import format_env_value as _shared_format_env_value
+from .._env_io import load_layered_env as _load_layered_env
+from .._env_io import resolve_env_file as _resolve_env_file
+from .._env_io import update_env_file as _shared_update_env_file
+
 logger = logging.getLogger(__name__)
 
 # Global state for the connected memory provider
@@ -57,7 +63,11 @@ UI_DIR = Path(__file__).parent
 TEMPLATES_DIR = UI_DIR / "templates"
 STATIC_DIR = UI_DIR / "static"
 ROOT_DIR = UI_DIR.parent.parent.parent
-ENV_FILE_PATH = ROOT_DIR / ".env"
+# Canonical env file is resolved centrally (~/.memorizz/.env by default) so the
+# CLI, `memorizz ui`, and this Settings page all read/write the SAME file. The
+# old `ROOT_DIR/.env` landed inside site-packages under a pip/uv install where
+# nothing ever read it.
+ENV_FILE_PATH = _resolve_env_file()
 
 LLM_MODEL_CATALOG: Dict[str, List[Dict[str, str]]] = {
     # Source: https://platform.openai.com/docs/models (Latest models section)
@@ -1060,6 +1070,9 @@ def _get_eval_run_delta(run_id: str, after: int = 0) -> Optional[Dict[str, Any]]
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    # Load layered env (~/.memorizz/.env, then $CWD/.env) so the UI sees the
+    # same keys the CLI configured. override=False keeps real env vars winning.
+    _load_layered_env()
     app = FastAPI(
         title="Memorizz Local UI",
         description="Web interface for exploring Memorizz memory providers",
@@ -7096,58 +7109,28 @@ def _resolve_sandbox_provider_config(sandbox_provider: Any) -> Any:
 
 
 def _apply_env_updates(updates: Dict[str, str]) -> Optional[str]:
-    """Apply updates to process env and persist to .env when possible."""
-    for key, value in updates.items():
-        os.environ[key] = value
+    """Apply updates to process env and persist to the canonical .env.
 
-    try:
-        _update_env_file(ENV_FILE_PATH, updates)
-    except Exception as exc:
-        logger.warning(f"Failed to update .env: {exc}")
-        return str(exc)
-    return None
+    Delegates to memorizz._env_io so the UI and CLI write the exact same file.
+    """
+    err = _shared_apply_env_updates(updates)
+    if err:
+        logger.warning(f"Failed to update .env: {err}")
+    return err
 
 
 def _update_env_file(env_path: Path, updates: Dict[str, str]) -> None:
-    """Update or append environment variables in a .env file."""
-    if env_path.exists():
-        lines = env_path.read_text().splitlines()
-    else:
-        lines = []
+    """Update or append environment variables in a .env file.
 
-    updated_lines: List[str] = []
-    seen = set()
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            updated_lines.append(line)
-            continue
-        key, _value = line.split("=", 1)
-        key = key.strip()
-        if key in updates:
-            updated_lines.append(f"{key}={_format_env_value(updates[key])}")
-            seen.add(key)
-        else:
-            updated_lines.append(line)
-
-    for key, value in updates.items():
-        if key in seen:
-            continue
-        if updated_lines and updated_lines[-1].strip():
-            updated_lines.append("")
-        updated_lines.append(f"{key}={_format_env_value(value)}")
-
-    env_path.write_text("\n".join(updated_lines) + "\n")
+    Thin wrapper kept for back-compat; the implementation lives in
+    memorizz._env_io so the CLI and UI stay byte-identical.
+    """
+    _shared_update_env_file(env_path, updates)
 
 
 def _format_env_value(value: str) -> str:
-    """Format env var values for .env files."""
-    if value == "":
-        return ""
-    if any(ch.isspace() for ch in value) or "#" in value or "=" in value:
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
-    return value
+    """Format env var values for .env files (delegates to memorizz._env_io)."""
+    return _shared_format_env_value(value)
 
 
 def _get_memory_stats() -> Dict[str, int]:
