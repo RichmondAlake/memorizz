@@ -237,6 +237,37 @@ def cmd_history(session, args: str):
             console.print("  " + line)
 
 
+def cmd_forget(session, args: str):
+    console = _con(session)
+    target = args.strip()
+    if not target:
+        console.print("Usage: /forget <id>   (a stored memory or knowledge-base id)")
+        return
+    provider = getattr(session, "provider", None)
+    if provider is None:
+        console.print("[yellow]No memory provider.[/yellow]")
+        return
+
+    from ..enums.memory_type import MemoryType
+
+    skip = {MemoryType.MEMAGENT, MemoryType.PERSONAS, MemoryType.TOOLBOX}
+    deleted_from = None
+    for memory_type in MemoryType:
+        if memory_type in skip:
+            continue
+        try:
+            if provider.delete_by_id(target, memory_type):
+                deleted_from = memory_type.value
+                break
+        except Exception:
+            pass
+
+    if deleted_from:
+        console.print(f"[green]Forgot[/green] {target}  [dim]({deleted_from})[/dim]")
+    else:
+        console.print(f"[yellow]No memory found with id[/yellow] {target}")
+
+
 def cmd_agents(session, args: str):
     console = _con(session)
     try:
@@ -309,6 +340,43 @@ def cmd_persona(session, args: str):
         console.print(f"[green]Persona set →[/green] {name}")
     else:
         console.print("[red]Failed to set persona.[/red]")
+
+
+def cmd_persona_reset(session, args: str):
+    console = _con(session)
+    agent = session.agent
+    pm = getattr(agent, "persona_manager", None)
+    cur = getattr(pm, "current_persona", None) if pm else None
+    storage_id = None
+    if cur is not None:
+        storage_id = getattr(cur, "_storage_id", None) or getattr(
+            cur, "persona_id", None
+        )
+
+    try:
+        agent.set_persona(None)
+    except Exception as exc:
+        console.print(f"[red]Failed to clear persona:[/red] {exc}")
+        return
+
+    # Best-effort: drop the saved persona doc and persist the cleared state.
+    provider = getattr(session, "provider", None)
+    if storage_id and provider is not None:
+        try:
+            from ..enums.memory_type import MemoryType
+
+            provider.delete_by_id(storage_id, MemoryType.PERSONAS)
+        except Exception:
+            pass
+    try:
+        if provider is not None:
+            agent.save()
+    except Exception:
+        pass
+
+    console.print(
+        "[green]Persona reset.[/green] The agent reverts to its default persona."
+    )
 
 
 def cmd_new(session, args: str):
@@ -570,6 +638,9 @@ COMMANDS: Dict[str, Command] = {
     "history": Command(
         cmd_history, "Print the current conversation history.", "/history"
     ),
+    "forget": Command(
+        cmd_forget, "Delete a single stored memory by id.", "/forget <id>"
+    ),
     "agents": Command(cmd_agents, "List saved agents.", "/agents"),
     "agent": Command(cmd_agent, "Load a saved agent by id.", "/agent <id>"),
     "new": Command(cmd_new, "Start a fresh conversation thread.", "/new"),
@@ -586,6 +657,11 @@ COMMANDS: Dict[str, Command] = {
         cmd_persona,
         "Show or set the agent's persona.",
         "/persona [name | goals | background]",
+    ),
+    "persona-reset": Command(
+        cmd_persona_reset,
+        "Clear the agent's persona (revert to default).",
+        "/persona-reset",
     ),
     "clear": Command(
         cmd_clear,

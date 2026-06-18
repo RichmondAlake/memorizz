@@ -8,8 +8,9 @@
   Running `memorizz` with no arguments launches an interactive REPL that streams
   the agent's replies live, with `/` slash commands (`/help`, `/model`,
   `/provider`, `/ollama`, `/code`, `/memory`, `/history`, `/agents`, `/agent`,
-  `/new`, `/persona`, `/tools`, `/ingest`, `/ui`, `/login`, `/config`, `/clear`
-  (wipe memory, with confirmation), `/cls`, `/exit`).
+  `/new`, `/persona`, `/persona-reset`, `/tools`, `/ingest`, `/forget`, `/ui`,
+  `/login`, `/config`, `/clear` (wipe all memory, with confirmation), `/cls`,
+  `/exit`).
   Also adds `memorizz chat`, one-shot `memorizz run "<prompt>"`, `memorizz init`,
   `memorizz config`, and `memorizz --version`. `python -m memorizz` now works.
 * **Zero-config local stack.** With no API key set and an Ollama daemon running,
