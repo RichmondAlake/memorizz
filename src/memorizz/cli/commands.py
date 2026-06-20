@@ -83,6 +83,12 @@ def cmd_model(session, args: str):
         console.print(
             f"Model: [cyan]{session.model_name}[/cyan]  (provider: {session.provider_name})"
         )
+        if session.provider_name == "ollama":
+            models = ollama_probe.list_models() or []
+            if models:
+                console.print("Available Ollama models:")
+                for m in models:
+                    console.print(f"  • {m}")
         console.print("Usage: /model <model-name>")
         return
     new_config = dict(session.llm_config)
@@ -96,9 +102,10 @@ def cmd_provider(session, args: str):
     name = args.strip().lower()
     if not name:
         console.print(f"Provider: [cyan]{session.provider_name}[/cyan]")
-        console.print(
-            "Usage: /provider <openai|anthropic|ollama|azure|huggingface|mlx>"
-        )
+        console.print("Available providers:")
+        for prov in ("openai", "anthropic", "ollama", "azure", "huggingface", "mlx"):
+            console.print(f"  • {prov}")
+        console.print("Usage: /provider <name>")
         return
     new_config = agent_factory.config_for_provider(name)
     _swap_model(session, new_config, carry_key=False)
@@ -160,18 +167,20 @@ def cmd_ollama(session, args: str):
 def cmd_web(session, args: str):
     console = _con(session)
     agent = session.agent
-    arg = args.strip().lower()
+    parts = args.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""  # preserve URL case
 
-    if not arg:
+    if not sub:
         try:
             name = agent.get_internet_access_provider_name()
         except Exception:
             name = None
         console.print(f"Internet access: [cyan]{name or 'off'}[/cyan]")
-        console.print("Usage: /web on|off|tavily|firecrawl")
+        console.print("Usage: /web on | off | tavily | firecrawl | open <url>")
         return
 
-    if arg in ("off", "false", "no", "0"):
+    if sub in ("off", "false", "no", "0"):
         try:
             agent.with_internet_access_provider(None)
             console.print("[yellow]Internet access OFF[/yellow]")
@@ -179,17 +188,47 @@ def cmd_web(session, args: str):
             console.print(f"[red]Failed:[/red] {exc}")
         return
 
+    if sub == "open":
+        if not rest:
+            console.print("Usage: /web open <url>")
+            return
+        try:
+            current = agent.get_internet_access_provider_name()
+        except Exception:
+            current = None
+        mgr = getattr(agent, "internet_access_manager", None)
+        if mgr is None or not current or current == "offline":
+            console.print("[yellow]Enable internet first:[/yellow] /web tavily")
+            return
+        try:
+            page = mgr.fetch_url(url=rest)
+            title = (
+                page.get("title")
+                if isinstance(page, dict)
+                else getattr(page, "title", None)
+            )
+            content = (
+                page.get("content")
+                if isinstance(page, dict)
+                else getattr(page, "content", None)
+            )
+            console.print(f"[bold]{title or rest}[/bold]")
+            console.print(str(content or page)[:1500])
+        except Exception as exc:
+            console.print(f"[red]Could not open page:[/red] {exc}")
+        return
+
     try:
-        if arg in ("on", "true", "yes"):
+        if sub in ("on", "true", "yes"):
             provider = agent_factory.make_internet_provider()
         else:
             from ..internet_access import create_internet_access_provider
 
-            key = os.environ.get(f"{arg.upper()}_API_KEY")
+            key = os.environ.get(f"{sub.upper()}_API_KEY")
             config = {"api_key": key} if key else {}
-            if arg == "tavily":
+            if sub == "tavily":
                 config["search_depth"] = "advanced"
-            provider = create_internet_access_provider(arg, config)
+            provider = create_internet_access_provider(sub, config)
         if provider is None or getattr(provider, "provider_name", None) == "offline":
             console.print(
                 "[yellow]No internet key configured.[/yellow] Add one with "
@@ -197,7 +236,7 @@ def cmd_web(session, args: str):
             )
             return
         agent.with_internet_access_provider(provider)
-        name = agent.get_internet_access_provider_name() or arg
+        name = agent.get_internet_access_provider_name() or sub
         console.print(f"[green]Internet access →[/green] {name}")
     except Exception as exc:
         console.print(f"[red]Could not enable internet access:[/red] {exc}")
@@ -779,8 +818,8 @@ COMMANDS: Dict[str, Command] = {
     ),
     "web": Command(
         cmd_web,
-        "Enable/disable internet access (Tavily/Firecrawl).",
-        "/web [on|off|tavily|firecrawl]",
+        "Enable/disable internet access; open a URL.",
+        "/web [on|off|tavily|firecrawl|open <url>]",
     ),
     "code": Command(
         cmd_code, "Toggle coding tools (file edits + commands).", "/code [on|off]"

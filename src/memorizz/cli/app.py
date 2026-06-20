@@ -22,7 +22,7 @@ app = typer.Typer(
     name="memorizz",
     help="memorizz — a local agent CLI with persistent memory.",
     no_args_is_help=False,
-    add_completion=False,
+    add_completion=True,
 )
 
 
