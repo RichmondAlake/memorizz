@@ -75,7 +75,7 @@ class OllamaLLM(LLMProvider):
         except ImportError:
             raise ImportError(
                 "The ollama package is required for the Ollama provider. "
-                "Install it with: pip install ollama"
+                'Install it with: pip install "memorizz[ollama]"'
             )
 
         if host is None:

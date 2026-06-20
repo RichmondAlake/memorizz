@@ -12,6 +12,19 @@ license = "PolyForm-Noncommercial-1.0.0"
 authors = [
     { name = "Richmond Alake", email = "richmond.alake@gmail.com" }
 ]
+keywords = [
+    "ai",
+    "agents",
+    "llm",
+    "memory",
+    "rag",
+    "long-term-memory",
+    "agent-memory",
+    "openai",
+    "anthropic",
+    "ollama",
+    "cli",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -84,6 +97,16 @@ ui = [
     "python-multipart>=0.0.6",
 ]
 ingest-pdf = ["pypdf>=4.0.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-timeout>=2.1",
+    "pytest-xdist>=3.0",
+    "black==23.12.1",
+    "flake8>=6.0",
+    "isort>=5.12",
+    "pre-commit>=3.0",
+]
 all = [
     "anthropic>=0.26.0",
     "pymongo>=4.0.0",
@@ -104,17 +127,26 @@ all = [
     "e2b-code-interpreter>=1.0",
     "daytona>=1.0",
     "pypdf>=4.0.0",
+    "mlx>=0.18.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.20.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
 memorizz = "memorizz.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/RichmondAlake/memorizz"
+Documentation = "https://richmondalake.github.io/memorizz"
+Repository = "https://github.com/RichmondAlake/memorizz"
+Changelog = "https://github.com/RichmondAlake/memorizz/blob/main/CHANGELOG.md"
+Issues = "https://github.com/RichmondAlake/memorizz/issues"
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 exclude = [
-    "**/memagent_original_backup.py",
+    "**/*_backup.py",
 ]
 
 [tool.hatch.build.targets.wheel.sources]
@@ -123,6 +155,7 @@ exclude = [
 [tool.hatch.build.targets.wheel.force-include]
 "eval/longmemeval/evaluate_memorizz.py" = "eval/longmemeval/evaluate_memorizz.py"
 "eval/longmemeval/download_dataset.py" = "eval/longmemeval/download_dataset.py"
+"src/memorizz/py.typed" = "memorizz/py.typed"
 
 [tool.hatch.build.targets.sdist]
 exclude = [

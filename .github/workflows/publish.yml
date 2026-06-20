@@ -1,18 +1,36 @@
 name: Publish
 
-# Tag-triggered release: build -> PyPI (OIDC trusted publishing, no stored token)
-# -> GitHub release -> bump the Homebrew tap + publish the npm shim.
-# The git tag (vX.Y.Z) is the single source of truth for the version.
+# Tag-triggered release: test -> build -> PyPI (OIDC trusted publishing) ->
+# GitHub release -> bump the Homebrew tap + publish the npm shim.
+# The pyproject `version` is the source of truth; the vX.Y.Z tag must match it
+# (enforced below) so the wheel, npm shim, and brew formula all agree.
 on:
   push:
     tags: ["v*"]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -q
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: Verify tag matches pyproject version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PROJ=$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$TAG pyproject=$PROJ"
+          test "$TAG" = "$PROJ" || { echo "::error::tag v$TAG != pyproject version $PROJ — bump pyproject.toml before tagging"; exit 1; }
       - name: Build sdist + wheel
         run: uv build
       - name: Check artifacts

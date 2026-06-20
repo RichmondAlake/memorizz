@@ -2607,8 +2607,8 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
     def run(
         self,
         query: str,
-        memory_id: str = None,
-        thread_id: str = None,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
         user_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
@@ -2721,8 +2721,8 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
     def run_stream(
         self,
         query: str,
-        memory_id: str = None,
-        thread_id: str = None,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
         user_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
         tool_context: Optional[Dict[str, Any]] = None,

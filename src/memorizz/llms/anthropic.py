@@ -59,7 +59,7 @@ class Anthropic(LLMProvider):
         except ImportError:
             raise ImportError(
                 "The anthropic package is required for the Anthropic provider. "
-                "Install it with: pip install anthropic"
+                'Install it with: pip install "memorizz[anthropic]"'
             )
 
         if api_key is None:

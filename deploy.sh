@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MANUAL FALLBACK ONLY. The canonical release path is the tag-triggered CI in
+# .github/workflows/publish.yml: push a vX.Y.Z tag that matches pyproject's
+# version and it builds + publishes via OIDC (no stored token). Use this script
+# only for local/TestPyPI testing; prefer CI to avoid double-publishing.
+# ─────────────────────────────────────────────────────────────────────────────
+
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║         🚀 Memorizz PyPI Deployment Script                    ║"
 echo "╚══════════════════════════════════════════════════════════════╝"

@@ -18,6 +18,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src
 from memorizz import embeddings as _embeddings  # noqa: E402
 from memorizz.short_term_memory import semantic_cache as _semantic_cache  # noqa: E402
 
+# Skip provider tests whose modules import an optional DB driver at import time,
+# so a plain offline `pytest` collects cleanly without the mongodb/oracle extras.
+collect_ignore = []
+try:
+    import pymongo  # noqa: F401
+except ImportError:
+    collect_ignore.append("unit/test_mongodb_provider_self_aware.py")
+
 
 def _test_embedding(_text: str, **kwargs):
     """Return a stub embedding vector for test isolation."""
