@@ -127,8 +127,9 @@ Or manage it from the REPL:
 /web                # show status  (also: /web on | off | tavily | firecrawl)
 ```
 
-When enabled, the agent gains `internet_search` and `open_web_page` tools and
-uses them for questions that need current information.
+When enabled, the agent gains `internet_search` (web search) and `open_web_page`
+(fetch + read a full page). It can search, then open the most relevant result for
+deeper detail. Use a 7B+ model for reliable multi-step web use.
 
 ## Persistent agent & memory
 
@@ -217,6 +218,9 @@ The agent always sends tools, so the local model **must support tool-calling**:
 - **Smaller models** (`3b`, even `0.5b`) give simpler answers but stay snappy —
   plain chat exposes no tools by default, so they no longer loop. `gemma` models
   lack tool-calling in Ollama, so only use them for plain chat (not `/code`).
+- **For web search + memory reasoning, prefer 7B+** (`qwen2.5:7b` /
+  `llama3.1:8b`): smaller models tend to answer from guesswork instead of reading
+  their memory or chaining `internet_search → open_web_page`.
 
 Zero-config auto-selection already prefers tool-capable, non-reasoning families.
 

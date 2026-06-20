@@ -386,6 +386,14 @@ def build_session_agent(
                 pass
             cfg.save_state({"agent_id": getattr(agent, "agent_id", None)})
 
+    # Keep the assistant instruction current — a loaded agent may carry an older
+    # one. The guidance steers even small models to use memory and chain web
+    # tools (search -> open_web_page) instead of guessing.
+    try:
+        agent.instruction = instruction or cfg.MEMORY_ASSISTANT_INSTRUCTION
+    except Exception:
+        pass
+
     # 3. Coding tools track the requested mode deterministically.
     agent.with_self_aware(
         bool(code_mode), {"allow_writes": True} if code_mode else None
