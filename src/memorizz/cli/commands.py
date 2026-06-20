@@ -181,16 +181,15 @@ def cmd_web(session, args: str):
 
     try:
         if arg in ("on", "true", "yes"):
-            from ..internet_access import get_default_internet_access_provider
-
-            provider = get_default_internet_access_provider()
+            provider = agent_factory.make_internet_provider()
         else:
             from ..internet_access import create_internet_access_provider
 
             key = os.environ.get(f"{arg.upper()}_API_KEY")
-            provider = create_internet_access_provider(
-                arg, {"api_key": key} if key else {}
-            )
+            config = {"api_key": key} if key else {}
+            if arg == "tavily":
+                config["search_depth"] = "advanced"
+            provider = create_internet_access_provider(arg, config)
         if provider is None or getattr(provider, "provider_name", None) == "offline":
             console.print(
                 "[yellow]No internet key configured.[/yellow] Add one with "
@@ -615,17 +614,13 @@ def cmd_login(session, args: str):
     # Internet keys take effect immediately: attach the provider to the live
     # agent so the user doesn't also have to run /web.
     if key_name in ("TAVILY_API_KEY", "FIRECRAWL_API_KEY"):
-        provider_name = "tavily" if key_name == "TAVILY_API_KEY" else "firecrawl"
         try:
-            from ..internet_access import create_internet_access_provider
-
-            provider = create_internet_access_provider(
-                provider_name, {"api_key": value}
-            )
+            provider = agent_factory.make_internet_provider()
             if provider is not None:
                 session.agent.with_internet_access_provider(provider)
                 console.print(
-                    f"[green]Internet access enabled →[/green] {provider_name}"
+                    "[green]Internet access enabled →[/green] "
+                    f"{session.agent.get_internet_access_provider_name()}"
                 )
         except Exception as exc:
             console.print(f"[yellow]Saved, but enabling web failed:[/yellow] {exc}")

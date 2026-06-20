@@ -287,6 +287,41 @@ def detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> A
 
 
 # --------------------------------------------------------------------------- #
+# Internet provider
+# --------------------------------------------------------------------------- #
+
+
+def make_internet_provider():
+    """Build an internet provider from env, or None if no key is configured.
+
+    Uses CLI-tuned defaults: Tavily runs at ``advanced`` search depth so
+    internet_search returns much richer content (~5x). The model rarely chains
+    to open_web_page, so the depth has to come from search itself.
+    """
+    from ..internet_access import (
+        create_internet_access_provider,
+        get_default_internet_access_provider,
+    )
+
+    tavily_key = _env("TAVILY_API_KEY")
+    if tavily_key:
+        return create_internet_access_provider(
+            "tavily", {"api_key": tavily_key, "search_depth": "advanced"}
+        )
+    firecrawl_key = _env("FIRECRAWL_API_KEY")
+    if firecrawl_key:
+        return create_internet_access_provider("firecrawl", {"api_key": firecrawl_key})
+    if _env("MEMORIZZ_DEFAULT_INTERNET_PROVIDER"):
+        try:
+            prov = get_default_internet_access_provider()
+            if getattr(prov, "provider_name", None) != "offline":
+                return prov
+        except Exception:
+            return None
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Agent assembly
 # --------------------------------------------------------------------------- #
 
@@ -405,28 +440,11 @@ def build_session_agent(
     if not code_mode:
         _slim_chat_tools(agent)
 
-    # 3c. Internet access: attach a real provider only when a key is configured
-    # (Tavily/Firecrawl). get_default_*() returns an "offline" placeholder when
-    # no key is set, so we gate on the key and skip offline — otherwise the model
-    # is handed an internet_search tool that just answers "internet unavailable".
-    has_internet_key = bool(
-        _env("TAVILY_API_KEY")
-        or _env("FIRECRAWL_API_KEY")
-        or _env("MEMORIZZ_DEFAULT_INTERNET_PROVIDER")
-    )
-    net_provider = None
-    if has_internet_key:
-        try:
-            from ..internet_access import get_default_internet_access_provider
-
-            candidate = get_default_internet_access_provider()
-            if getattr(candidate, "provider_name", None) != "offline":
-                net_provider = candidate
-        except Exception:
-            net_provider = None
+    # 3c. Internet access: attach a real provider when a key is configured
+    # (Tavily/Firecrawl), else detach so the offline placeholder tools aren't
+    # exposed. make_internet_provider() returns None when no key is set.
     try:
-        # Real provider -> registers internet_search/open_web_page; None -> detach.
-        agent.with_internet_access_provider(net_provider)
+        agent.with_internet_access_provider(make_internet_provider())
     except Exception:
         pass
 

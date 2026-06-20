@@ -23,7 +23,8 @@
 * **Internet access.** Set `TAVILY_API_KEY` or `FIRECRAWL_API_KEY` (or `/login
   tavily`) and the agent gains web search + page reading (`internet_search` /
   `open_web_page`); toggle at runtime with `/web on|off|tavily|firecrawl`. No
-  extra install — the providers call the REST APIs directly.
+  extra install — the providers call the REST APIs directly. Tavily runs at advanced search
+  depth for ~5x richer results.
 * **Canonical config at `~/.memorizz/`.** Keys/settings live in
   `~/.memorizz/.env` (override via `MEMORIZZ_HOME` / `MEMORIZZ_ENV_FILE`), shared
   by the CLI and the local web UI. `$CWD/.env` is still honored for back-compat.

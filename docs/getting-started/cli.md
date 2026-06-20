@@ -129,7 +129,8 @@ Or manage it from the REPL:
 
 When enabled, the agent gains `internet_search` (web search) and `open_web_page`
 (fetch + read a full page). It can search, then open the most relevant result for
-deeper detail. Use a 7B+ model for reliable multi-step web use.
+deeper detail (Tavily runs at advanced search depth for ~5x richer results). Use
+a 7B+ model for reliable multi-step web use.
 
 ## Persistent agent & memory
 
