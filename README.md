@@ -19,6 +19,7 @@ It provides:
 - agent builders and application modes (`assistant`, `workflow`, `deep_research`)
 - scheduled automations (cron, interval, one-shot) with optional WhatsApp delivery
 - optional internet access, sandbox code execution, skills marketplace, and local web UI
+- an interactive, Claude-Code-style terminal CLI (`memorizz`) with persistent memory — see [CLI](#cli)
 
 ## Key Capabilities
 
@@ -40,6 +41,8 @@ Base install:
 ```bash
 pip install memorizz
 ```
+
+The base install also gives you the interactive **`memorizz` CLI** (see [CLI](#cli)) — no extra needed.
 
 Common extras:
 
