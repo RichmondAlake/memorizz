@@ -26,6 +26,7 @@ from queue import Empty, Queue
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -3245,7 +3246,9 @@ def create_app() -> FastAPI:
         from ..memagent import MemAgent
 
         try:
-            agent_instance = MemAgent.load(agent_id, memory_provider=_state["provider"])
+            agent_instance = await run_in_threadpool(
+                MemAgent.load, agent_id, memory_provider=_state["provider"]
+            )
 
             if not agent_instance:
                 return JSONResponse(
@@ -3253,8 +3256,10 @@ def create_app() -> FastAPI:
                 )
 
             # Use the agent's generate_summaries method
-            summary_ids = agent_instance.generate_summaries(
-                days_back=1, max_memories_per_summary=20
+            summary_ids = await run_in_threadpool(
+                agent_instance.generate_summaries,
+                days_back=1,
+                max_memories_per_summary=20,
             )
 
             return JSONResponse(
@@ -5687,7 +5692,9 @@ def create_app() -> FastAPI:
         from ..memagent import MemAgent
 
         try:
-            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+            agent = await run_in_threadpool(
+                MemAgent.load, agent_id, memory_provider=_state["provider"]
+            )
         except Exception as exc:
             logger.error("Failed to load agent %s for system-prompt: %s", agent_id, exc)
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -5853,7 +5860,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="No files provided")
 
         try:
-            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+            agent = await run_in_threadpool(
+                MemAgent.load, agent_id, memory_provider=_state["provider"]
+            )
         except Exception as exc:
             logger.error("Failed to load agent %s for KB ingest: %s", agent_id, exc)
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -5965,7 +5974,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Not connected")
 
         try:
-            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+            agent = await run_in_threadpool(
+                MemAgent.load, agent_id, memory_provider=_state["provider"]
+            )
         except Exception as exc:
             logger.error("Failed to load agent %s for KB delete: %s", agent_id, exc)
             raise HTTPException(status_code=404, detail="Agent not found")
