@@ -188,11 +188,9 @@ def run_repl(session) -> None:
         try:
             with patch_stdout():
                 line = ptk.prompt(prompt_text)
-        except KeyboardInterrupt:
-            # Ctrl-C at the prompt: clear the line, keep going.
-            continue
-        except EOFError:
-            # Ctrl-D: graceful exit.
+        except (KeyboardInterrupt, EOFError):
+            # Ctrl-C or Ctrl-D at the prompt: exit. (Ctrl-C *during* a streaming
+            # reply only aborts that reply — handled in _stream_turn.)
             commands.cmd_exit(session, "")
             break
 

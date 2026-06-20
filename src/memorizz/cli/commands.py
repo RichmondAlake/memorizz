@@ -644,7 +644,8 @@ def cmd_help(session, args: str):
         usage = cmd.usage or f"/{name}"
         console.print(f"  [cyan]{usage:<26}[/cyan] {cmd.help}")
     console.print(
-        "\nType plain text to chat. Ctrl-C aborts a reply; Ctrl-D or /exit quits."
+        "\nType plain text to chat. Ctrl-C / Ctrl-D / /exit quits; "
+        "Ctrl-C during a reply aborts just that reply."
     )
 
 

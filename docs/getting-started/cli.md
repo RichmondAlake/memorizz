@@ -67,8 +67,8 @@ Running `memorizz` with no arguments launches the interactive loop:
 - Type plain text to chat; the reply streams live and renders as Markdown.
 - For **reasoning models** (e.g. `qwen3`, `deepseek-r1`), the model's thinking is
   shown dimmed above the answer, and tool activity is shown as it happens.
-- **Ctrl-C** aborts an in-progress reply (you stay in the REPL).
-- **Ctrl-D** or `/exit` saves the agent and quits.
+- **Ctrl-C** during a reply aborts just that reply (you stay in the REPL).
+- **Ctrl-C** at the prompt, **Ctrl-D**, or `/exit` saves the agent and quits.
 - Press **Tab** to autocomplete slash commands.
 
 ## Slash commands
