@@ -94,7 +94,7 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/tools` | List the agent's registered tools. |
 | `/ingest <file>` | Ingest a file into the knowledge base. |
 | `/ui [--port N] [--host H]` | Launch the local web UI. |
-| `/login [openai\|anthropic]` | Save an API key to `~/.memorizz/.env`. |
+| `/login [provider]` | Log in / save an API key — lists platforms to pick from if none given. |
 | `/config` | Show resolved config + paths. |
 | `/docs [cli\|ui]` | Open the documentation in your browser. |
 | `/exit` | Save the agent and quit. |

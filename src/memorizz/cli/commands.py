@@ -553,20 +553,49 @@ def cmd_ui(session, args: str):
     )
 
 
+_LOGIN_PROVIDERS = [
+    ("openai", "OPENAI_API_KEY", "OpenAI — LLM + embeddings"),
+    ("anthropic", "ANTHROPIC_API_KEY", "Anthropic — LLM"),
+    ("azure", "AZURE_OPENAI_API_KEY", "Azure OpenAI"),
+    ("tavily", "TAVILY_API_KEY", "Tavily — internet search"),
+    ("firecrawl", "FIRECRAWL_API_KEY", "Firecrawl — internet search"),
+    ("voyage", "VOYAGE_API_KEY", "Voyage AI — embeddings"),
+]
+
+
 def cmd_login(session, args: str):
     console = _con(session)
     import getpass
 
+    by_name = {p[0]: p for p in _LOGIN_PROVIDERS}
     choice = args.strip().lower()
-    key_map = {
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "azure": "AZURE_OPENAI_API_KEY",
-        "voyage": "VOYAGE_API_KEY",
-        "tavily": "TAVILY_API_KEY",
-        "firecrawl": "FIRECRAWL_API_KEY",
-    }
-    key_name = key_map.get(choice, choice.upper() if choice else "OPENAI_API_KEY")
+
+    # No provider given -> list the platforms and let the user pick.
+    if not choice:
+        console.print("[bold]Log in to a platform[/bold]")
+        for i, (name, env_var, desc) in enumerate(_LOGIN_PROVIDERS, 1):
+            status = " [green]✓ set[/green]" if os.environ.get(env_var) else ""
+            console.print(f"  [cyan]{i}[/cyan]. {name:<10} [dim]{desc}[/dim]{status}")
+        try:
+            choice = input("Select a platform [number or name]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[yellow]Cancelled.[/yellow]")
+            return
+        if not choice:
+            console.print("[yellow]Cancelled.[/yellow]")
+            return
+
+    # Resolve selection: number, known name, or an arbitrary KEY name.
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if not (0 <= idx < len(_LOGIN_PROVIDERS)):
+            console.print(f"[yellow]Invalid selection:[/yellow] {choice}")
+            return
+        key_name = _LOGIN_PROVIDERS[idx][1]
+    elif choice in by_name:
+        key_name = by_name[choice][1]
+    else:
+        key_name = choice.upper()
     try:
         value = getpass.getpass(f"Paste {key_name} (hidden): ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -779,7 +808,9 @@ COMMANDS: Dict[str, Command] = {
     ),
     "ui": Command(cmd_ui, "Launch the local web UI.", "/ui [--port N]"),
     "login": Command(
-        cmd_login, "Save an API key to ~/.memorizz/.env.", "/login [openai|anthropic]"
+        cmd_login,
+        "Log in / save an API key (lists platforms if none given).",
+        "/login [provider]",
     ),
     "config": Command(cmd_config, "Show resolved config + paths.", "/config"),
     "docs": Command(
