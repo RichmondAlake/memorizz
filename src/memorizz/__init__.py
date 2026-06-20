@@ -2,32 +2,19 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+"""memorizz — a memory framework for AI agents.
+
+The entire public API is resolved lazily (PEP 562 ``__getattr__``) so that a bare
+``import memorizz`` — and therefore ``memorizz --help`` / ``--version`` and any
+tool that merely imports the package — costs almost nothing: no numpy, no
+pydantic model building, no provider SDKs. The heavy modules load only when a
+symbol is actually accessed (``from memorizz import MemAgent`` triggers the core
+import at that point, exactly as before).
+"""
+
+import importlib
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
-
-from .conversation_history import is_trace_bundle_entry, strip_trace_bundles
-from .coordination import SharedMemory
-from .enums import ApplicationMode
-from .internet_access import (
-    FirecrawlProvider,
-    InternetAccessProvider,
-    TavilyProvider,
-    create_internet_access_provider,
-)
-from .long_term.procedural.toolbox import Toolbox
-from .long_term.semantic import KnowledgeBase
-from .long_term.semantic.persona import Persona, RoleType
-from .memagent import MemAgent, MemAgentModel
-from .memagent.builders import (
-    MemAgentBuilder,
-    create_assistant,
-    create_chatbot,
-    create_deep_research_agent,
-    create_task_agent,
-)
-from .memory_provider import MemoryProvider, MemoryType
-from .short_term_memory.working_memory.cwm import CWM
-from .tool_context import get_tool_context, reset_tool_context, set_tool_context
 
 try:
     __version__ = _pkg_version("memorizz")
@@ -35,14 +22,63 @@ except PackageNotFoundError:  # pragma: no cover - source checkout without insta
     __version__ = "0.0.0"
 
 
-# Lazy imports for optional-dependency / heavy-SDK surfaces, so a plain
-# `import memorizz` stays lean (no pymongo/oracledb/anthropic/ollama import
-# unless the corresponding symbol is actually used).
-def __getattr__(name):
-    if name == "MongoDBProvider":
-        from .memory_provider.mongodb import MongoDBProvider
+# name -> (submodule, attribute). Imported on first attribute access.
+_LAZY = {
+    # Agent
+    "MemAgent": (".memagent", "MemAgent"),
+    "MemAgentModel": (".memagent", "MemAgentModel"),
+    "MemAgentBuilder": (".memagent.builders", "MemAgentBuilder"),
+    "create_assistant": (".memagent.builders", "create_assistant"),
+    "create_chatbot": (".memagent.builders", "create_chatbot"),
+    "create_task_agent": (".memagent.builders", "create_task_agent"),
+    "create_deep_research_agent": (".memagent.builders", "create_deep_research_agent"),
+    "ApplicationMode": (".enums", "ApplicationMode"),
+    # Memory providers + configs
+    "MemoryProvider": (".memory_provider", "MemoryProvider"),
+    "MemoryType": (".memory_provider", "MemoryType"),
+    "MongoDBProvider": (".memory_provider.mongodb", "MongoDBProvider"),
+    "OracleProvider": (".memory_provider.oracle", "OracleProvider"),
+    "OracleConfig": (".memory_provider.oracle.provider", "OracleConfig"),
+    "FileSystemProvider": (".memory_provider.filesystem", "FileSystemProvider"),
+    "FileSystemConfig": (".memory_provider.filesystem", "FileSystemConfig"),
+    # LLM providers
+    "OpenAI": (".llms", "OpenAI"),
+    "AzureOpenAI": (".llms", "AzureOpenAI"),
+    "Anthropic": (".llms", "Anthropic"),
+    "OllamaLLM": (".llms", "OllamaLLM"),
+    "HuggingFaceLLM": (".llms", "HuggingFaceLLM"),
+    # Memory primitives
+    "Persona": (".long_term.semantic.persona", "Persona"),
+    "RoleType": (".long_term.semantic.persona", "RoleType"),
+    "Toolbox": (".long_term.procedural.toolbox", "Toolbox"),
+    "KnowledgeBase": (".long_term.semantic", "KnowledgeBase"),
+    "CWM": (".short_term_memory.working_memory.cwm", "CWM"),
+    "SharedMemory": (".coordination", "SharedMemory"),
+    # Internet access
+    "InternetAccessProvider": (".internet_access", "InternetAccessProvider"),
+    "FirecrawlProvider": (".internet_access", "FirecrawlProvider"),
+    "TavilyProvider": (".internet_access", "TavilyProvider"),
+    "create_internet_access_provider": (
+        ".internet_access",
+        "create_internet_access_provider",
+    ),
+    # Automation
+    "AutomationJob": (".automation", "AutomationJob"),
+    "AutomationRun": (".automation", "AutomationRun"),
+    "AutomationDelivery": (".automation", "AutomationDelivery"),
+    # Tool context + trace helpers
+    "get_tool_context": (".tool_context", "get_tool_context"),
+    "set_tool_context": (".tool_context", "set_tool_context"),
+    "reset_tool_context": (".tool_context", "reset_tool_context"),
+    "is_trace_bundle_entry": (".conversation_history", "is_trace_bundle_entry"),
+    "strip_trace_bundles": (".conversation_history", "strip_trace_bundles"),
+}
 
-        return MongoDBProvider
+
+def __getattr__(name):
+    # MongoDBConfig pulls pymongo/bson transitively; give the same actionable
+    # message as the other optional-dependency surfaces instead of a raw
+    # ModuleNotFoundError('bson').
     if name == "MongoDBConfig":
         try:
             from .memory_provider.mongodb.provider import MongoDBConfig
@@ -50,34 +86,17 @@ def __getattr__(name):
             raise ImportError(
                 'MongoDB support requires pymongo. Install with: pip install "memorizz[mongodb]"'
             ) from exc
-
         return MongoDBConfig
-    if name == "OracleProvider":
-        from .memory_provider.oracle import OracleProvider
 
-        return OracleProvider
-    if name == "OracleConfig":
-        from .memory_provider.oracle.provider import OracleConfig
+    spec = _LAZY.get(name)
+    if spec is None:
+        raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+    module = importlib.import_module(spec[0], __name__)
+    return getattr(module, spec[1])
 
-        return OracleConfig
-    if name in ("FileSystemProvider", "FileSystemConfig"):
-        from .memory_provider.filesystem import FileSystemConfig, FileSystemProvider
 
-        return FileSystemProvider if name == "FileSystemProvider" else FileSystemConfig
-    if name in ("OpenAI", "AzureOpenAI", "Anthropic", "OllamaLLM", "HuggingFaceLLM"):
-        from . import llms
-
-        return getattr(llms, name)
-    if name in ("AutomationJob", "AutomationRun", "AutomationDelivery"):
-        from .automation import AutomationDelivery, AutomationJob, AutomationRun
-
-        _map = {
-            "AutomationJob": AutomationJob,
-            "AutomationRun": AutomationRun,
-            "AutomationDelivery": AutomationDelivery,
-        }
-        return _map[name]
-    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+def __dir__():
+    return sorted(__all__)
 
 
 __all__ = [
@@ -100,7 +119,7 @@ __all__ = [
     "OracleConfig",
     "FileSystemProvider",
     "FileSystemConfig",
-    # LLM providers (lazy)
+    # LLM providers
     "OpenAI",
     "AzureOpenAI",
     "Anthropic",
@@ -118,7 +137,7 @@ __all__ = [
     "FirecrawlProvider",
     "TavilyProvider",
     "create_internet_access_provider",
-    # Automation (lazy)
+    # Automation
     "AutomationJob",
     "AutomationRun",
     "AutomationDelivery",

@@ -17,10 +17,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install (lean base + dev tools)
-        run: pip install -e ".[dev]"
-      - name: Run tests (offline unit suite)
-        run: pytest tests/ -q
+      - name: Install (base + dev tools + ui for route tests)
+        run: pip install -e ".[dev,ui]"
+      - name: Run tests (deterministic unit suite)
+        # tests/unit is offline + deterministic. tests/performance is timing/
+        # stress (flaky on shared CI runners) and tests/integration may need
+        # live services — run those locally/manually, not as the merge gate.
+        run: pytest tests/unit -q
 
   lint:
     runs-on: ubuntu-latest

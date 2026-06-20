@@ -26,6 +26,7 @@ from queue import Empty, Queue
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -33,35 +34,26 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from .._env_io import apply_env_updates as _shared_apply_env_updates
 from .._env_io import format_env_value as _shared_format_env_value
 from .._env_io import load_layered_env as _load_layered_env
 from .._env_io import resolve_env_file as _resolve_env_file
 from .._env_io import update_env_file as _shared_update_env_file
+from .routers.agents_api import router as agents_api_router
+from .routers.huggingface import router as huggingface_router
+from .routers.ollama import router as ollama_router
+from .routers.oracle_docker import router as oracle_docker_router
+from .state import STATIC_DIR, UI_DIR, _state, templates
 
 logger = logging.getLogger(__name__)
-
-# Global state for the connected memory provider
-_state: Dict[str, Any] = {
-    "provider": None,
-    "provider_type": None,
-    "connection_info": {},
-    "provider_secrets": {},
-    "whatsapp_worker_thread": None,
-    "whatsapp_worker_stop_event": None,
-}
 
 _eval_runs_lock = threading.Lock()
 _eval_runs: Dict[str, Dict[str, Any]] = {}
 _eval_run_processes: Dict[str, subprocess.Popen] = {}
 _EVAL_RUN_MAX_LOG_LINES = 2000
 
-# Paths
-UI_DIR = Path(__file__).parent
-TEMPLATES_DIR = UI_DIR / "templates"
-STATIC_DIR = UI_DIR / "static"
+# Paths (UI_DIR / TEMPLATES_DIR / STATIC_DIR now live in ui.state)
 ROOT_DIR = UI_DIR.parent.parent.parent
 # Canonical env file is resolved centrally (~/.memorizz/.env by default) so the
 # CLI, `memorizz ui`, and this Settings page all read/write the SAME file. The
@@ -1082,9 +1074,12 @@ def create_app() -> FastAPI:
 
     # Mount static files
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.include_router(ollama_router)
+    app.include_router(huggingface_router)
+    app.include_router(oracle_docker_router)
+    app.include_router(agents_api_router)
 
-    # Setup templates
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # Configure the shared template engine (imported from ui.state)
     templates.env.globals["llm_model_catalog"] = LLM_MODEL_CATALOG
     templates.env.globals["default_llm_provider"] = DEFAULT_LLM_PROVIDER
     templates.env.globals[
@@ -1253,411 +1248,6 @@ def create_app() -> FastAPI:
         _state["connection_info"] = {}
         _state["provider_secrets"] = {}
         return RedirectResponse(url="/connect", status_code=302)
-
-    @app.get("/api/docker/oracle/status")
-    async def docker_oracle_status():
-        """Report discovered Oracle containers and their state.
-
-        Returns all containers using a gvenzl/oracle-free image (not just the
-        canonical `memorizz_oracle`) so users who already have a named
-        container like `oracle-memorizz` can start that one instead of
-        creating a duplicate.
-        """
-        from . import docker_oracle as _do
-
-        if not _do.docker_available():
-            return JSONResponse(
-                {
-                    "state": "docker-unavailable",
-                    "container_name": _do.CONTAINER_NAME,
-                    "image": _do.IMAGE,
-                    "existing": [],
-                }
-            )
-        existing = _do.list_oracle_containers()
-        if existing:
-            any_running = any(c["state"] == "running" for c in existing)
-            summary_state = "running" if any_running else "stopped"
-        else:
-            summary_state = "absent"
-        return JSONResponse(
-            {
-                "state": summary_state,
-                "container_name": _do.CONTAINER_NAME,
-                "image": _do.IMAGE,
-                "existing": existing,
-            }
-        )
-
-    @app.get("/api/docker/oracle/runtime")
-    async def docker_oracle_runtime():
-        """Report whether a container runtime is available on the host.
-
-        Used by the connect page when /status returns docker-unavailable so
-        the UI can offer the right next action: launch an installed GUI app,
-        or link to a download.
-        """
-        from . import docker_oracle as _do
-
-        return JSONResponse(_do.detect_runtime())
-
-    @app.post("/api/docker/oracle/runtime/start")
-    async def docker_oracle_runtime_start():
-        """Best-effort: launch the installed runtime and wait for the daemon.
-
-        Synchronous because the cold-start budget (~30–60s for Docker
-        Desktop) fits comfortably inside one HTTP request and avoids us
-        having to invent a polling endpoint just for this transition.
-        """
-        from . import docker_oracle as _do
-
-        ok, message = _do.start_runtime()
-        return JSONResponse(
-            {"ok": ok, "message": message}, status_code=200 if ok else 500
-        )
-
-    @app.post("/api/docker/oracle/start")
-    async def docker_oracle_start(container_name: str = Form(...)):
-        """Start an existing stopped Oracle container by name."""
-        from . import docker_oracle as _do
-
-        if not _do.docker_available():
-            return JSONResponse(
-                {"ok": False, "message": "Docker is not available"},
-                status_code=503,
-            )
-        state = _do.get_container_state(container_name)
-        if state == "running":
-            return JSONResponse(
-                {"ok": True, "message": f"Container '{container_name}' already running"}
-            )
-        if state == "absent":
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "message": f"Container '{container_name}' does not exist",
-                },
-                status_code=404,
-            )
-        ok, message = _do.start_container(container_name)
-        return JSONResponse(
-            {"ok": ok, "message": message}, status_code=200 if ok else 500
-        )
-
-    @app.get("/api/docker/oracle/logs/stream")
-    async def docker_oracle_logs_stream(name: Optional[str] = None, tail: int = 200):
-        """Server-Sent Events stream of ``docker logs -f`` for a container.
-
-        Used by the create-modal so users see live Oracle startup output
-        (pull progress, initialization banners, "DATABASE IS READY TO USE")
-        instead of a blank spinner. Closes when the client disconnects.
-
-        Secrets in logs: gvenzl/oracle-free does not echo the configured
-        passwords, but we still redact any ``ORACLE_PASSWORD`` /
-        ``APP_USER_PASSWORD`` env values if they happen to appear — belt
-        and braces.
-        """
-        from . import docker_oracle as _do
-
-        container = (name or _do.CONTAINER_NAME).strip()
-        # Defensive redaction list — scrape any password the current
-        # process has in env. Keeps us safe if a future image change or
-        # a custom entrypoint starts echoing them.
-        redact_needles = [
-            v
-            for v in (
-                os.environ.get("ORACLE_PASSWORD"),
-                os.environ.get("APP_USER_PASSWORD"),
-            )
-            if v
-        ]
-
-        def _redact(line: str) -> str:
-            for needle in redact_needles:
-                if needle and needle in line:
-                    line = line.replace(needle, "***")
-            return line
-
-        def _event(data: str, event: Optional[str] = None) -> str:
-            # Standard SSE frame. `data:` lines end with one \n; two \n ends the event.
-            prefix = f"event: {event}\n" if event else ""
-            # Make multi-line data safe by prefixing each line with `data: `.
-            payload = (
-                "".join(f"data: {seg}\n" for seg in data.splitlines()) or "data:\n"
-            )
-            return prefix + payload + "\n"
-
-        def generator():
-            yield _event(
-                json.dumps({"container": container, "message": "attached"}),
-                event="attach",
-            )
-            try:
-                for line in _do.stream_container_logs(container, tail=tail):
-                    yield _event(json.dumps({"line": _redact(line)}), event="log")
-            except Exception as exc:  # pragma: no cover - defensive
-                yield _event(
-                    json.dumps({"error": str(exc)}),
-                    event="error",
-                )
-            finally:
-                yield _event(json.dumps({"message": "closed"}), event="close")
-
-        return StreamingResponse(
-            generator(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",  # disable nginx buffering if ever proxied
-                "Connection": "keep-alive",
-            },
-        )
-
-    @app.post("/api/docker/oracle/create")
-    async def docker_oracle_create(
-        oracle_user: str = Form(...),
-        oracle_password: str = Form(...),
-        oracle_dsn: str = Form(...),
-    ):
-        """Create the Oracle container from scratch using form credentials."""
-        from . import docker_oracle as _do
-
-        if not _do.docker_available():
-            return JSONResponse(
-                {"ok": False, "message": "Docker is not available"},
-                status_code=503,
-            )
-        if _do.get_container_state() != "absent":
-            return JSONResponse(
-                {"ok": False, "message": "Container already exists — use start"},
-                status_code=409,
-            )
-        port = _do.parse_port_from_dsn(oracle_dsn)
-        ok, message = _do.create_container(oracle_user, oracle_password, port)
-        return JSONResponse(
-            {"ok": ok, "message": message}, status_code=200 if ok else 500
-        )
-
-    @app.post("/api/huggingface/pull")
-    async def huggingface_pull(repo_id: str = Form(...)):
-        """Download a HuggingFace repo into the local cache.
-
-        Uses snapshot_download so all repo files (config + tokenizer +
-        weights) are pulled together. Honors HF_TOKEN from the environment
-        for gated repos.
-        """
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError:
-            return JSONResponse(
-                {"ok": False, "error": "huggingface_hub not installed"},
-                status_code=503,
-            )
-        try:
-            path = snapshot_download(repo_id=repo_id)
-        except Exception as exc:  # pragma: no cover - depends on network
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-        return JSONResponse(
-            {"ok": True, "message": f"Downloaded {repo_id}", "path": str(path)}
-        )
-
-    @app.delete("/api/huggingface/models/{repo_id:path}")
-    async def huggingface_delete(repo_id: str):
-        """Delete every revision of a cached HuggingFace model repo."""
-        try:
-            from huggingface_hub import scan_cache_dir
-        except ImportError:
-            return JSONResponse(
-                {"ok": False, "error": "huggingface_hub not installed"},
-                status_code=503,
-            )
-        try:
-            cache_info = scan_cache_dir()
-        except Exception as exc:  # pragma: no cover - defensive
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-
-        revisions = []
-        for repo in cache_info.repos:
-            if repo.repo_id == repo_id and repo.repo_type == "model":
-                for rev in repo.revisions:
-                    revisions.append(rev.commit_hash)
-        if not revisions:
-            return JSONResponse(
-                {"ok": False, "error": f"{repo_id} not found in HF cache"},
-                status_code=404,
-            )
-
-        try:
-            strategy = cache_info.delete_revisions(*revisions)
-            strategy.execute()
-        except Exception as exc:  # pragma: no cover - defensive
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-        return JSONResponse(
-            {
-                "ok": True,
-                "message": f"Removed {repo_id}",
-                "freed_bytes": getattr(strategy, "expected_freed_size", None),
-            }
-        )
-
-    @app.get("/api/huggingface/installed")
-    async def huggingface_installed():
-        """Report which HuggingFace repos are cached locally.
-
-        Powers the same "Not cached locally" / "Available offline" banner
-        as Ollama, but for the `huggingface` provider — by walking the
-        standard HF cache directory via huggingface_hub.scan_cache_dir().
-        Falls back to {available: false} when the SDK isn't installed in
-        this Python env so the UI can render an actionable warning.
-        """
-        try:
-            from huggingface_hub import scan_cache_dir
-            from huggingface_hub.constants import HF_HUB_CACHE
-        except ImportError as exc:
-            return JSONResponse(
-                {
-                    "available": False,
-                    "error": (
-                        "huggingface_hub not installed — run "
-                        "`pip install memorizz[huggingface]` to enable cache scanning."
-                    ),
-                    "detail": str(exc),
-                }
-            )
-
-        try:
-            cache_info = scan_cache_dir()
-        except Exception as exc:  # pragma: no cover - defensive
-            return JSONResponse({"available": False, "error": str(exc)})
-
-        models: List[str] = []
-        for repo in getattr(cache_info, "repos", []) or []:
-            # Only model repos count toward "available LLMs". Datasets and
-            # spaces show up here too but aren't valid HF LLM provider IDs.
-            if getattr(repo, "repo_type", "model") != "model":
-                continue
-            repo_id = getattr(repo, "repo_id", None)
-            if repo_id:
-                models.append(repo_id)
-        models.sort()
-
-        return JSONResponse(
-            {
-                "available": True,
-                "cache_dir": str(HF_HUB_CACHE or ""),
-                "models": models,
-            }
-        )
-
-    @app.post("/api/ollama/pull")
-    async def ollama_pull(name: str = Form(...)):
-        """Pull an Ollama model. Synchronous — large pulls can take 5–15 min.
-
-        We pass `stream: false` to Ollama so the daemon buffers progress on
-        its side and only returns when the operation finishes; this keeps
-        the FastAPI handler simple (a future improvement is to forward the
-        streaming variant as SSE for a real progress bar).
-        """
-        import urllib.error
-        import urllib.request
-
-        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
-        body = json.dumps({"name": name, "stream": False}).encode("utf-8")
-        req = urllib.request.Request(
-            f"{host}/api/pull",
-            data=body,
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=1800) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            return JSONResponse(
-                {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}"},
-                status_code=exc.code,
-            )
-        except urllib.error.URLError as exc:
-            return JSONResponse(
-                {"ok": False, "error": str(exc.reason)}, status_code=502
-            )
-        except (TimeoutError, OSError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=504)
-
-        if payload.get("status") == "success":
-            return JSONResponse({"ok": True, "message": f"Pulled {name}"})
-        return JSONResponse(
-            {"ok": False, "error": payload.get("error") or json.dumps(payload)},
-            status_code=500,
-        )
-
-    @app.delete("/api/ollama/models/{name:path}")
-    async def ollama_delete(name: str):
-        """Remove a locally pulled Ollama model via Ollama's /api/delete."""
-        import urllib.error
-        import urllib.request
-
-        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
-        body = json.dumps({"name": name}).encode("utf-8")
-        req = urllib.request.Request(
-            f"{host}/api/delete",
-            data=body,
-            method="DELETE",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as _resp:
-                pass
-        except urllib.error.HTTPError as exc:
-            detail = (
-                exc.read().decode("utf-8", "ignore")
-                if hasattr(exc, "read")
-                else exc.reason
-            )
-            return JSONResponse(
-                {"ok": False, "error": f"HTTP {exc.code}: {detail}"},
-                status_code=exc.code,
-            )
-        except urllib.error.URLError as exc:
-            return JSONResponse(
-                {"ok": False, "error": str(exc.reason)}, status_code=502
-            )
-        except (TimeoutError, OSError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=504)
-
-        return JSONResponse({"ok": True, "message": f"Removed {name}"})
-
-    @app.get("/api/ollama/installed")
-    async def ollama_installed():
-        """Report which models the local Ollama daemon has pulled.
-
-        Powers the "Not installed yet" banner under the Default Model picker
-        in Settings. Without this check, picking a model from the dropdown
-        and hitting Save still results in a 404 the first time the agent
-        runs. This endpoint short-circuits that surprise: the user sees
-        a copy-paste `ollama pull <tag>` command (and a deep-link to the
-        model's page) before anything is sent to the LLM.
-        """
-        import urllib.error
-        import urllib.request
-
-        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
-        try:
-            with urllib.request.urlopen(f"{host}/api/tags", timeout=3) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            return JSONResponse(
-                {"reachable": False, "host": host, "error": str(exc.reason)}
-            )
-        except (TimeoutError, OSError, ValueError) as exc:
-            return JSONResponse({"reachable": False, "host": host, "error": str(exc)})
-
-        models: List[str] = []
-        for entry in payload.get("models", []) or []:
-            name = entry.get("name") or entry.get("model")
-            if name:
-                models.append(name)
-        return JSONResponse({"reachable": True, "host": host, "models": models})
 
     @app.get("/dashboard", response_class=HTMLResponse)
     async def dashboard(request: Request):
@@ -3245,7 +2835,9 @@ def create_app() -> FastAPI:
         from ..memagent import MemAgent
 
         try:
-            agent_instance = MemAgent.load(agent_id, memory_provider=_state["provider"])
+            agent_instance = await run_in_threadpool(
+                MemAgent.load, agent_id, memory_provider=_state["provider"]
+            )
 
             if not agent_instance:
                 return JSONResponse(
@@ -3253,8 +2845,10 @@ def create_app() -> FastAPI:
                 )
 
             # Use the agent's generate_summaries method
-            summary_ids = agent_instance.generate_summaries(
-                days_back=1, max_memories_per_summary=20
+            summary_ids = await run_in_threadpool(
+                agent_instance.generate_summaries,
+                days_back=1,
+                max_memories_per_summary=20,
             )
 
             return JSONResponse(
@@ -5628,113 +5222,6 @@ def create_app() -> FastAPI:
     # API Routes (for AJAX/HTMX)
     # -------------------------------------------------------------------------
 
-    @app.get("/api/status")
-    async def api_status():
-        """Get current connection status."""
-        return {
-            "connected": _state["provider"] is not None,
-            "provider_type": _state["provider_type"],
-            "connection_info": _state["connection_info"],
-        }
-
-    @app.get("/api/agents")
-    async def api_list_agents():
-        """API endpoint to list all agents."""
-        if not _state["provider"]:
-            raise HTTPException(status_code=400, detail="Not connected")
-
-        agents = []
-        try:
-            raw_agents = _state["provider"].list_memagents()
-            for agent in raw_agents:
-                agents.append(_serialize_agent(agent))
-        except Exception as e:
-            logger.error(f"Failed to list agents: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-        return {"agents": agents, "count": len(agents)}
-
-    @app.get("/api/agents/{agent_id}")
-    async def api_get_agent(agent_id: str):
-        """API endpoint to get agent details."""
-        if not _state["provider"]:
-            raise HTTPException(status_code=400, detail="Not connected")
-
-        try:
-            agent = _state["provider"].retrieve_memagent(agent_id)
-            if not agent:
-                raise HTTPException(status_code=404, detail="Agent not found")
-            return _serialize_agent(agent)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to get agent {agent_id}: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/api/agents/{agent_id}/system-prompt")
-    async def api_agent_system_prompt(agent_id: str):
-        """Return the fully-assembled system prompt for an agent.
-
-        Instantiates the agent via :meth:`MemAgent.load` (no inference is run)
-        and calls ``_build_system_prompt`` — the same code path used at
-        request time. Used by the playground to preview what the LLM
-        actually sees, including persona + version + evolution history +
-        tool descriptions.
-        """
-        if not _state["provider"]:
-            raise HTTPException(status_code=400, detail="Not connected")
-
-        from ..memagent import MemAgent
-
-        try:
-            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
-        except Exception as exc:
-            logger.error("Failed to load agent %s for system-prompt: %s", agent_id, exc)
-            raise HTTPException(status_code=404, detail="Agent not found")
-
-        try:
-            prompt = agent._build_system_prompt() or ""
-        except Exception as exc:
-            logger.error("Failed to build system prompt for %s: %s", agent_id, exc)
-            raise HTTPException(
-                status_code=500, detail=f"Failed to build system prompt: {exc}"
-            )
-
-        persona = (
-            agent.persona_manager.current_persona if agent.persona_manager else None
-        )
-        persona_meta: Optional[Dict[str, Any]] = None
-        if persona is not None:
-            persona_meta = {
-                "name": getattr(persona, "name", None),
-                "role": getattr(persona, "role", None),
-                "version": getattr(persona, "version", 1),
-                "history_count": len(getattr(persona, "evolution_history", []) or []),
-                "storage_id": getattr(persona, "_storage_id", None),
-            }
-
-        tool_names: List[str] = []
-        if agent.tool_manager is not None:
-            try:
-                tool_names = [
-                    (meta or {}).get("name", "")
-                    for meta in (agent.tool_manager.get_tool_metadata() or [])
-                ]
-                tool_names = [n for n in tool_names if n]
-            except Exception:
-                tool_names = []
-
-        return {
-            "agent_id": agent_id,
-            "system_prompt": prompt,
-            "length": len(prompt),
-            "persona": persona_meta,
-            "persona_tools_registered": bool(
-                getattr(agent, "_persona_tools_registered", False)
-            ),
-            "tools": tool_names,
-        }
-
     @app.get("/api/persona-presets")
     async def api_persona_presets():
         """Return the built-in persona presets sourced from RoleType + PREDEFINED_INFO.
@@ -5853,7 +5340,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="No files provided")
 
         try:
-            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+            agent = await run_in_threadpool(
+                MemAgent.load, agent_id, memory_provider=_state["provider"]
+            )
         except Exception as exc:
             logger.error("Failed to load agent %s for KB ingest: %s", agent_id, exc)
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -5965,7 +5454,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Not connected")
 
         try:
-            agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+            agent = await run_in_threadpool(
+                MemAgent.load, agent_id, memory_provider=_state["provider"]
+            )
         except Exception as exc:
             logger.error("Failed to load agent %s for KB delete: %s", agent_id, exc)
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -7164,26 +6655,6 @@ def _get_memory_stats() -> Dict[str, int]:
         stats["automations"] = 0
 
     return stats
-
-
-def _serialize_agent(agent) -> Dict[str, Any]:
-    """Convert agent object to serializable dict."""
-    if hasattr(agent, "model_dump"):
-        data = agent.model_dump()
-    elif hasattr(agent, "__dict__"):
-        data = dict(agent.__dict__)
-    else:
-        data = {"agent_id": str(agent)}
-
-    # Handle persona serialization
-    if "persona" in data and data["persona"] and hasattr(data["persona"], "to_dict"):
-        data["persona"] = data["persona"].to_dict()
-
-    # Remove non-serializable items
-    data.pop("memory_provider", None)
-    data.pop("model", None)
-
-    return data
 
 
 def _load_thread_messages(
