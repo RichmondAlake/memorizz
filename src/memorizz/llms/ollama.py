@@ -66,7 +66,7 @@ class OllamaLLM(LLMProvider):
         seed: Optional[int] = None,
         context_window_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
-        think: Optional[bool] = False,
+        think: Optional[bool] = None,
         additional_config: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ):
@@ -75,7 +75,7 @@ class OllamaLLM(LLMProvider):
         except ImportError:
             raise ImportError(
                 "The ollama package is required for the Ollama provider. "
-                "Install it with: pip install ollama"
+                'Install it with: pip install "memorizz[ollama]"'
             )
 
         if host is None:
@@ -119,6 +119,17 @@ class OllamaLLM(LLMProvider):
             for key, value in cfg.items():
                 if value is not None:
                     self._options[key] = value
+
+        # Reasoning models (qwen3 / deepseek-r1 / qwq / magistral / *thinking*)
+        # must run with `think` enabled — otherwise Ollama returns truncated or
+        # empty content and no separable reasoning trace. Auto-enable when the
+        # caller didn't specify, so reasoning + the full answer both surface.
+        if self.think is None:
+            _name = (self.model or "").lower()
+            self.think = any(
+                hint in _name
+                for hint in ("qwen3", "deepseek-r1", "qwq", "magistral", "thinking")
+            )
 
     def _chat_kwargs(self, **extra: Any) -> Dict[str, Any]:
         """Build the kwarg dict for ``ollama.Client.chat`` calls.

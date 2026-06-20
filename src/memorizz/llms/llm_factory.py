@@ -8,10 +8,7 @@ import inspect
 import logging
 from typing import Any, Dict
 
-from .azure import AzureOpenAI
-from .huggingface import HuggingFaceLLM
 from .llm_provider import LLMProvider
-from .openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -85,14 +82,18 @@ def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
     """
     provider_name = config.get("provider", "openai").lower()
     if provider_name == "openai":
+        from .openai import OpenAI
+
         return OpenAI(**_filter_kwargs_for_class(config, OpenAI))
 
     elif provider_name == "azure":
-        # AzureOpenAI requires a specific subset; the filter handles it
-        # but we keep this branch for future per-provider tweaks.
+        from .azure import AzureOpenAI
+
         return AzureOpenAI(**_filter_kwargs_for_class(config, AzureOpenAI))
 
     elif provider_name == "huggingface":
+        from .huggingface import HuggingFaceLLM
+
         return HuggingFaceLLM(**_filter_kwargs_for_class(config, HuggingFaceLLM))
 
     elif provider_name == "anthropic":

@@ -18,6 +18,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src
 from memorizz import embeddings as _embeddings  # noqa: E402
 from memorizz.short_term_memory import semantic_cache as _semantic_cache  # noqa: E402
 
+# Skip provider tests whose modules import an optional DB driver at import time,
+# so a plain offline `pytest` collects cleanly without the mongodb/oracle extras.
+collect_ignore = []
+try:
+    import pymongo  # noqa: F401
+except ImportError:
+    collect_ignore.append("unit/test_mongodb_provider_self_aware.py")
+
 
 def _test_embedding(_text: str, **kwargs):
     """Return a stub embedding vector for test isolation."""
@@ -126,16 +134,20 @@ def sample_tools():
 
 @pytest.fixture
 def sample_persona():
-    """Sample persona for testing."""
-    from types import SimpleNamespace
+    """Sample persona for testing (a real Persona, built without embeddings)."""
+    from memorizz.long_term.semantic.persona import Persona
 
-    return SimpleNamespace(
-        name="TestBot",
-        role="Assistant",
-        personality_traits=["helpful", "friendly", "knowledgeable"],
-        expertise=["python", "testing", "ai"],
-        background="I am a test assistant designed to help with various tasks.",
+    persona = Persona.from_dict(
+        {
+            "name": "TestBot",
+            "role": "Assistant",
+            "goals": "Help with various tasks.",
+            "background": "I am a test assistant designed to help with various tasks.",
+        }
     )
+    persona.personality_traits = ["helpful", "friendly", "knowledgeable"]
+    persona.expertise = ["python", "testing", "ai"]
+    return persona
 
 
 # =============================================================================

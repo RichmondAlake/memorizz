@@ -1,5 +1,76 @@
 # Changelog
 
+## 0.1.0 — 2026-06-18
+
+### Features
+
+* **New interactive CLI — `memorizz` is now a Claude-Code-style local agent.**
+  Running `memorizz` with no arguments launches an interactive REPL that streams
+  the agent's replies live, with `/` slash commands (`/help`, `/model`,
+  `/provider`, `/ollama`, `/code`, `/memory`, `/history`, `/agents`, `/agent`,
+  `/new`, `/persona`, `/persona-reset`, `/tools`, `/ingest`, `/forget`, `/ui`,
+  `/login`, `/config`, `/docs`, `/clear` (wipe all memory, with confirmation),
+  `/cls`, `/exit`).
+  Also adds `memorizz chat`, one-shot `memorizz run "<prompt>"`, `memorizz init`,
+  `memorizz config`, and `memorizz --version`. `python -m memorizz` now works.
+* **Zero-config local stack.** With no API key set and an Ollama daemon running,
+  the CLI defaults to Ollama (LLM + `nomic-embed-text` embeddings) + an on-disk
+  FileSystem memory store under `~/.memorizz/memory` — a 100%-local agent with no
+  keys. Cloud keys (Anthropic / OpenAI / Azure) are auto-detected when present.
+* **`/code` coding mode.** `memorizz --code` (or `/code` in the REPL) enables the
+  agent's self-aware file read/write + bounded command tools, scoped to the
+  working directory (writes on, deletes off).
+* **Internet access.** Set `TAVILY_API_KEY` or `FIRECRAWL_API_KEY` (or `/login
+  tavily`) and the agent gains web search + page reading (`internet_search` /
+  `open_web_page`); toggle at runtime with `/web on|off|tavily|firecrawl`. No
+  extra install — the providers call the REST APIs directly. Tavily runs at advanced search
+  depth for ~5x richer results.
+* **Canonical config at `~/.memorizz/`.** Keys/settings live in
+  `~/.memorizz/.env` (override via `MEMORIZZ_HOME` / `MEMORIZZ_ENV_FILE`), shared
+  by the CLI and the local web UI. `$CWD/.env` is still honored for back-compat.
+* **One persistent agent + memory across launches.** Each `memorizz` session
+  loads (or creates once) a single default `MemAgent` and reuses its rolling
+  memory id, persisted to `~/.memorizz/state.json`, so facts learned in one
+  session are recalled in the next instead of starting fresh every launch.
+* **Distribution.** Installable via `uv tool install memorizz` / `pipx install
+  memorizz`, a Homebrew tap, and an npm shim (`npm i -g memorizz`, bootstraps uv).
+
+### Bug fixes
+
+* **Local UI wrote `.env` to an unreadable path.** The Settings page computed the
+  env file as `<package>/../../../.env`, which under a pip/uv install landed in
+  `site-packages` where nothing read it. Env handling is now centralized in
+  `memorizz._env_io`, and the UI reads/writes the same `~/.memorizz/.env` as the
+  CLI.
+* **Ollama reasoning models returned truncated/empty output.** `OllamaLLM` now
+  auto-enables `think` for reasoning families (qwen3 / deepseek-r1 / qwq /
+  magistral), so their thinking is surfaced (shown dimmed in the REPL) and the
+  full answer streams through instead of being cut off.
+* **FileSystem semantic recall could crash** with *"only length-1 arrays can be
+  converted to Python scalars"* when a stored embedding had an unexpected shape;
+  cosine similarity now flattens and shape-checks operands, skipping mismatches
+  rather than aborting retrieval.
+* **Persona / knowledge-base embeddings failed on a keyless local stack.**
+  Components using the module-level `get_embedding()` defaulted to OpenAI; the
+  CLI now points the global embedding manager at the active provider (e.g.
+  Ollama `nomic-embed-text`), so `/persona` and `/ingest` work fully offline.
+* **Small local models looped on tool calls during plain chat**, hitting the
+  20-step cap on even simple questions. The default memory-assistant no longer
+  exposes the auto-registered lookup/utility tools (`knowledge_base_lookup`,
+  entity/summary/tool-log helpers) that small models compulsively call — memory
+  is still injected via context, so recall is unaffected. `/code` keeps its tools.
+
+### Breaking changes
+
+* **The heavy local-ML stack is no longer installed by default.** `transformers`,
+  `sentence-transformers`, `accelerate`, and `huggingface-hub` moved out of the
+  base dependencies into the existing `huggingface` extra, so a default
+  `pip install memorizz` (and `uv tool install memorizz`) no longer pulls a
+  multi-GB PyTorch stack. If you use local HuggingFace models or HF embeddings,
+  install `pip install "memorizz[huggingface]"`.
+* **Minimum Python is now 3.10** (the old `>=3.7` never matched the actual
+  dependency floors).
+
 ## 0.0.52 — 2026-06-16
 
 ### Bug fixes

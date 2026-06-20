@@ -125,8 +125,12 @@ class PersonaManager:
             logger.error("Failed to load persona %s: %s", persona_id, exc)
             return None
 
-    def delete_persona(self, agent_id: str) -> bool:
-        """Clear the agent's active persona (does not delete from storage)."""
+    def delete_persona(self, agent_id: str, save: bool = False) -> bool:
+        """Clear the agent's active persona (does not delete from storage).
+
+        ``save`` is accepted for call-site symmetry with ``set_persona``; clearing
+        is in-memory only, so it is currently a no-op.
+        """
         try:
             self.current_persona = None
             if agent_id in self._persona_cache:

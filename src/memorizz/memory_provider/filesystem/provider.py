@@ -942,8 +942,15 @@ class FileSystemProvider(MemoryProvider):
             except Exception:
                 return None
 
-        vec_a = np.array(vector_a, dtype="float32")
-        vec_b = np.array(vector_b, dtype="float32")
+        vec_a = np.asarray(vector_a, dtype="float32").ravel()
+        vec_b = np.asarray(vector_b, dtype="float32").ravel()
+        # Guard against malformed/mismatched embeddings (e.g. a document embedded
+        # with a different model/dimension, or a nested [[...]] shape). Flatten to
+        # 1-D and bail on shape mismatch so np.dot stays scalar — otherwise
+        # float(np.dot(...)) raises "only length-1 arrays can be converted to
+        # Python scalars" and aborts brute-force retrieval.
+        if vec_a.size == 0 or vec_a.shape != vec_b.shape:
+            return None
         norm_a = np.linalg.norm(vec_a)
         norm_b = np.linalg.norm(vec_b)
         if norm_a == 0 or norm_b == 0:

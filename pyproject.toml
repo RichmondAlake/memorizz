@@ -4,16 +4,32 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.0.52"
-description = "A memory management library for Python"
+version = "0.1.0"
+description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 license = "PolyForm-Noncommercial-1.0.0"
 authors = [
     { name = "Richmond Alake", email = "richmond.alake@gmail.com" }
 ]
+keywords = [
+    "ai",
+    "agents",
+    "llm",
+    "memory",
+    "rag",
+    "long-term-memory",
+    "agent-memory",
+    "openai",
+    "anthropic",
+    "ollama",
+    "cli",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: Other/Proprietary License",
     "Operating System :: OS Independent",
 ]
@@ -22,19 +38,29 @@ dependencies = [
     "numpy",
     "pydantic>=2.0.0",
     "python-dotenv>=0.19.0",
-    # Gemma 4 was added to transformers in v5.5.0 (April 2026); huggingface-hub
-    # 1.x ships the offline/constants surface transformers 5.x relies on.
-    "sentence-transformers>=5.0.0",
-    "transformers>=5.5.0",
-    "huggingface-hub>=1.0.0",
-    "accelerate>=1.0.0",
     "requests>=2.31.0",
+    # CLI front-end — tiny, pure-Python. Kept in base (not behind an extra) so
+    # `uv tool install memorizz` / `pipx install memorizz` / `npm i -g memorizz`
+    # yield a working `memorizz` REPL with no extra install flags.
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    "prompt_toolkit>=3.0.0",
+    "platformdirs>=4.0.0",
+    # NOTE: the heavy local-ML stack (transformers / sentence-transformers /
+    # accelerate / huggingface-hub) moved OUT of base into the `huggingface`
+    # extra so the default install stays lean (no multi-GB torch download).
+    # Install it with `pip install memorizz[huggingface]` when using local HF
+    # models or HF embeddings.
 ]
 
 [project.optional-dependencies]
 mongodb = ["pymongo>=4.0.0"]
 oracle = ["oracledb>=2.0.0"]
 filesystem = ["faiss-cpu>=1.7.4"]
+# CLI deps ship in base; this empty alias keeps `pip install memorizz[cli]` valid.
+cli = []
+# Fully-local stack: Ollama LLM + Ollama embeddings + FAISS filesystem memory.
+local = ["memorizz[ollama]", "memorizz[filesystem]"]
 anthropic = ["anthropic>=0.26.0"]
 # langchain-ollama 1.x dropped the `timeout=` constructor kwarg; the embedding
 # provider has a fallback for it but we still want the ollama daemon SDK at a
@@ -71,6 +97,16 @@ ui = [
     "python-multipart>=0.0.6",
 ]
 ingest-pdf = ["pypdf>=4.0.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-timeout>=2.1",
+    "pytest-xdist>=3.0",
+    "black==23.12.1",
+    "flake8>=6.0",
+    "isort>=5.12",
+    "pre-commit>=3.0",
+]
 all = [
     "anthropic>=0.26.0",
     "pymongo>=4.0.0",
@@ -91,13 +127,27 @@ all = [
     "e2b-code-interpreter>=1.0",
     "daytona>=1.0",
     "pypdf>=4.0.0",
+    "mlx>=0.18.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.20.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
 memorizz = "memorizz.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/RichmondAlake/memorizz"
+Documentation = "https://richmondalake.github.io/memorizz"
+Repository = "https://github.com/RichmondAlake/memorizz"
+Changelog = "https://github.com/RichmondAlake/memorizz/blob/main/CHANGELOG.md"
+Issues = "https://github.com/RichmondAlake/memorizz/issues"
+
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+exclude = [
+    "**/*_backup.py",
+]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
@@ -105,6 +155,7 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel.force-include]
 "eval/longmemeval/evaluate_memorizz.py" = "eval/longmemeval/evaluate_memorizz.py"
 "eval/longmemeval/download_dataset.py" = "eval/longmemeval/download_dataset.py"
+"src/memorizz/py.typed" = "memorizz/py.typed"
 
 [tool.hatch.build.targets.sdist]
 exclude = [

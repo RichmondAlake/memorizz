@@ -15,7 +15,7 @@ def _lazy_import_mongodb():
         return MongoDBProvider
     except ImportError as e:
         raise ImportError(
-            "MongoDB provider requires pymongo. Install with: pip install pymongo"
+            'MongoDB provider requires pymongo. Install with: pip install "memorizz[mongodb]"'
         ) from e
 
 
@@ -27,7 +27,7 @@ def _lazy_import_oracle():
         return OracleProvider
     except ImportError as e:
         raise ImportError(
-            "Oracle provider requires oracledb. Install with: pip install oracledb"
+            'Oracle provider requires oracledb. Install with: pip install "memorizz[oracle]"'
         ) from e
 
 
@@ -46,8 +46,8 @@ def __getattr__(name):
             )
         except ImportError as e:
             raise ImportError(
-                "Filesystem provider requires optional dependencies. "
-                "Install FAISS (pip install faiss-cpu) for vector search support."
+                "Filesystem provider requires faiss-cpu for vector search. "
+                'Install with: pip install "memorizz[filesystem]"'
             ) from e
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
