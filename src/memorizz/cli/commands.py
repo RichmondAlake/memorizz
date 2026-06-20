@@ -191,8 +191,11 @@ def cmd_web(session, args: str):
             provider = create_internet_access_provider(
                 arg, {"api_key": key} if key else {}
             )
-        if provider is None:
-            console.print(f"[red]Unknown or unconfigured provider:[/red] {arg}")
+        if provider is None or getattr(provider, "provider_name", None) == "offline":
+            console.print(
+                "[yellow]No internet key configured.[/yellow] Add one with "
+                "/login tavily (or /login firecrawl)."
+            )
             return
         agent.with_internet_access_provider(provider)
         name = agent.get_internet_access_provider_name() or arg
@@ -356,6 +359,17 @@ def cmd_agent(session, args: str):
     console.print(f"[green]Loaded agent[/green] {agent_id}")
 
 
+def _persona_usage(console):
+    console.print("[dim]Usage:[/dim]   /persona <name> [| goals | background]")
+    console.print(
+        "[dim]Example:[/dim] /persona Ada | tutor me in mathematics | "
+        "a patient senior engineer"
+    )
+    console.print(
+        "[dim](separate name, goals, and background with the | character)[/dim]"
+    )
+
+
 def cmd_persona(session, args: str):
     console = _con(session)
     pm = getattr(session.agent, "persona_manager", None)
@@ -365,7 +379,7 @@ def cmd_persona(session, args: str):
         cur = getattr(pm, "current_persona", None) if pm else None
         if not cur:
             console.print("[dim]No persona set.[/dim]")
-            console.print("Usage: /persona <name> [| goals | background]")
+            _persona_usage(console)
             return
         console.print("[bold]Persona[/bold]")
         console.print(f"  name: [cyan]{getattr(cur, 'name', '?')}[/cyan]")
@@ -376,6 +390,8 @@ def cmd_persona(session, args: str):
             console.print(f"  goals: {goals[:300]}")
         if background:
             console.print(f"  background: {background[:300]}")
+        console.print()
+        _persona_usage(console)
         return
 
     parts = [p.strip() for p in text.split("|")]
@@ -566,6 +582,24 @@ def cmd_login(session, args: str):
         )
     else:
         console.print(f"[green]Saved[/green] {key_name} → {cfg.resolve_env_file()}")
+
+    # Internet keys take effect immediately: attach the provider to the live
+    # agent so the user doesn't also have to run /web.
+    if key_name in ("TAVILY_API_KEY", "FIRECRAWL_API_KEY"):
+        provider_name = "tavily" if key_name == "TAVILY_API_KEY" else "firecrawl"
+        try:
+            from ..internet_access import create_internet_access_provider
+
+            provider = create_internet_access_provider(
+                provider_name, {"api_key": value}
+            )
+            if provider is not None:
+                session.agent.with_internet_access_provider(provider)
+                console.print(
+                    f"[green]Internet access enabled →[/green] {provider_name}"
+                )
+        except Exception as exc:
+            console.print(f"[yellow]Saved, but enabling web failed:[/yellow] {exc}")
 
 
 def cmd_config(session, args: str):

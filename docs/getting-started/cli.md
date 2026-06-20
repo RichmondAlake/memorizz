@@ -123,9 +123,8 @@ memorizz                            # internet tools auto-enable when a key is s
 Or manage it from the REPL:
 
 ```
-/login tavily       # save the key to ~/.memorizz/.env
-/web tavily         # enable (also: /web on, /web firecrawl, /web off)
-/web                # show status
+/login tavily       # save the key AND enable internet immediately
+/web                # show status  (also: /web on | off | tavily | firecrawl)
 ```
 
 When enabled, the agent gains `internet_search` and `open_web_page` tools and

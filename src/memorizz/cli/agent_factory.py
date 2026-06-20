@@ -397,20 +397,30 @@ def build_session_agent(
     if not code_mode:
         _slim_chat_tools(agent)
 
-    # 3c. Attach an internet provider when one is configured (Tavily/Firecrawl
-    # via env), exposing internet_search / open_web_page. Done after slimming —
-    # these are tools the user explicitly opted into by setting a key.
-    try:
-        from ..internet_access import get_default_internet_access_provider
-
-        net_provider = get_default_internet_access_provider()
-    except Exception:
-        net_provider = None
-    if net_provider is not None:
+    # 3c. Internet access: attach a real provider only when a key is configured
+    # (Tavily/Firecrawl). get_default_*() returns an "offline" placeholder when
+    # no key is set, so we gate on the key and skip offline — otherwise the model
+    # is handed an internet_search tool that just answers "internet unavailable".
+    has_internet_key = bool(
+        _env("TAVILY_API_KEY")
+        or _env("FIRECRAWL_API_KEY")
+        or _env("MEMORIZZ_DEFAULT_INTERNET_PROVIDER")
+    )
+    net_provider = None
+    if has_internet_key:
         try:
-            agent.with_internet_access_provider(net_provider)
+            from ..internet_access import get_default_internet_access_provider
+
+            candidate = get_default_internet_access_provider()
+            if getattr(candidate, "provider_name", None) != "offline":
+                net_provider = candidate
         except Exception:
-            pass
+            net_provider = None
+    try:
+        # Real provider -> registers internet_search/open_web_page; None -> detach.
+        agent.with_internet_access_provider(net_provider)
+    except Exception:
+        pass
 
     # 4. Reuse the rolling memory id so long-term recall spans sessions.
     memory_id = None if fresh else state.get("memory_id")
