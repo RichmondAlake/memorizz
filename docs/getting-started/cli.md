@@ -192,8 +192,9 @@ The agent always sends tools, so the local model **must support tool-calling**:
 - **Reasoning models** (`qwen3`, `deepseek-r1`, `qwq`, `magistral`) work — Memorizz
   auto-enables their "thinking" so reasoning is surfaced and answers aren't
   truncated — but for a snappy default a non-reasoning instruct model is better.
-- **Avoid for the agent:** `gemma` models (no tool-calling support in Ollama) and
-  very small models (e.g. `0.5b`), which tend to loop on tool calls.
+- **Smaller models** (`3b`, even `0.5b`) give simpler answers but stay snappy —
+  plain chat exposes no tools by default, so they no longer loop. `gemma` models
+  lack tool-calling in Ollama, so only use them for plain chat (not `/code`).
 
 Zero-config auto-selection already prefers tool-capable, non-reasoning families.
 

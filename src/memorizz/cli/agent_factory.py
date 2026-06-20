@@ -290,6 +290,40 @@ def detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> A
 # Agent assembly
 # --------------------------------------------------------------------------- #
 
+# Auto-registered lookup/utility tools that small local models compulsively call
+# (and loop on, hitting the tool-iteration cap). Memory — conversation history
+# AND knowledge base — is injected into the prompt by MemAgent._build_context, so
+# dropping these for plain chat keeps recall intact while preventing tool loops.
+# Code mode keeps its full tool set.
+_CHAT_NOISE_TOOLS = (
+    "knowledge_base_lookup",
+    "entity_memory_lookup",
+    "entity_memory_upsert",
+    "context_window_stats_tool",
+    "list_summary_registry_tool",
+    "expand_summary",
+    "summarize_conversation",
+    "retrieve_tool_log_entry",
+    "list_recent_tool_logs",
+)
+
+
+def _slim_chat_tools(agent) -> None:
+    """Remove loop-prone lookup/utility tools so plain chat stays snappy."""
+    tm = getattr(agent, "tool_manager", None)
+    if tm is None:
+        return
+    try:
+        registered = set(tm.list_tools())
+    except Exception:
+        return
+    for name in _CHAT_NOISE_TOOLS:
+        if name in registered:
+            try:
+                tm.remove_tool(name)
+            except Exception:
+                pass
+
 
 def build_session_agent(
     code_mode: bool = False,
@@ -356,6 +390,12 @@ def build_session_agent(
     agent.with_self_aware(
         bool(code_mode), {"allow_writes": True} if code_mode else None
     )
+
+    # 3b. Keep plain chat snappy on small local models by dropping the
+    # auto-registered lookup/utility tools they loop on (memory is still injected
+    # via context). Code mode keeps its full tool set.
+    if not code_mode:
+        _slim_chat_tools(agent)
 
     # 4. Reuse the rolling memory id so long-term recall spans sessions.
     memory_id = None if fresh else state.get("memory_id")

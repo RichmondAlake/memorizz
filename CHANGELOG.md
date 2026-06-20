@@ -49,6 +49,11 @@
   Components using the module-level `get_embedding()` defaulted to OpenAI; the
   CLI now points the global embedding manager at the active provider (e.g.
   Ollama `nomic-embed-text`), so `/persona` and `/ingest` work fully offline.
+* **Small local models looped on tool calls during plain chat**, hitting the
+  20-step cap on even simple questions. The default memory-assistant no longer
+  exposes the auto-registered lookup/utility tools (`knowledge_base_lookup`,
+  entity/summary/tool-log helpers) that small models compulsively call — memory
+  is still injected via context, so recall is unaffected. `/code` keeps its tools.
 
 ### Breaking changes
 
