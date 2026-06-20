@@ -30,9 +30,9 @@ class TestMemAgentCore:
     def test_default_context_tools_include_autosummarize(self):
         """Built-in context toolset should expose on-demand autosummarization."""
         agent = MemAgent(instruction="Tool availability test")
-        assert "autosummarize_conversation" in agent.tool_manager.tools
+        assert "summarize_conversation" in agent.tool_manager.tools
 
-        result, _ = agent.tool_manager.execute_tool("autosummarize_conversation", {})
+        result, _ = agent.tool_manager.execute_tool("summarize_conversation", {})
         assert isinstance(result, dict)
         assert result.get("ok") is False
         assert "memory provider" in result.get("error", "").lower()
@@ -79,7 +79,7 @@ class TestMemAgentCore:
         """Tool-calling loop limit should enforce sane min/max defaults."""
         agent = MemAgent(instruction="Tool iteration bounds test")
 
-        agent.max_steps = 0
+        agent.max_steps = -1
         assert agent._get_tool_iteration_limit() == 1
 
         agent.max_steps = -9

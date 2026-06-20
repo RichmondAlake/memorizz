@@ -579,32 +579,26 @@ class MockToolbox:
             raise ValueError(f"Unknown operation: {operation}")
 
 
-class MockPersona:
-    """Mock persona for testing."""
+def MockPersona(
+    name: str = "TestBot",
+    role: str = "Assistant",
+    traits: List[str] = None,
+    expertise: List[str] = None,
+):
+    """Build a real Persona for tests via from_dict (no embedding/network call)."""
+    from memorizz.long_term.semantic.persona import Persona
 
-    def __init__(
-        self,
-        name: str = "TestBot",
-        role: str = "Assistant",
-        traits: List[str] = None,
-        expertise: List[str] = None,
-    ):
-        """Initialize mock persona."""
-        self.name = name
-        self.role = role
-        self.personality_traits = traits or ["helpful", "friendly"]
-        self.expertise = expertise or ["testing", "mocking"]
-        self.background = "I am a mock persona for testing purposes."
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        return {
-            "name": self.name,
-            "role": self.role,
-            "personality_traits": self.personality_traits,
-            "expertise": self.expertise,
-            "background": self.background,
+    persona = Persona.from_dict(
+        {
+            "name": name,
+            "role": role,
+            "goals": "",
+            "background": "I am a mock persona for testing purposes.",
         }
+    )
+    persona.personality_traits = traits or ["helpful", "friendly"]
+    persona.expertise = expertise or ["testing", "mocking"]
+    return persona
 
 
 class MockSemanticCache:

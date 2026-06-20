@@ -134,16 +134,20 @@ def sample_tools():
 
 @pytest.fixture
 def sample_persona():
-    """Sample persona for testing."""
-    from types import SimpleNamespace
+    """Sample persona for testing (a real Persona, built without embeddings)."""
+    from memorizz.long_term.semantic.persona import Persona
 
-    return SimpleNamespace(
-        name="TestBot",
-        role="Assistant",
-        personality_traits=["helpful", "friendly", "knowledgeable"],
-        expertise=["python", "testing", "ai"],
-        background="I am a test assistant designed to help with various tasks.",
+    persona = Persona.from_dict(
+        {
+            "name": "TestBot",
+            "role": "Assistant",
+            "goals": "Help with various tasks.",
+            "background": "I am a test assistant designed to help with various tasks.",
+        }
     )
+    persona.personality_traits = ["helpful", "friendly", "knowledgeable"]
+    persona.expertise = ["python", "testing", "ai"]
+    return persona
 
 
 # =============================================================================

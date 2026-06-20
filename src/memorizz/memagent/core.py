@@ -5731,11 +5731,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         # Hydrate knowledge_base_ids separately — it isn't a constructor arg
         # (yet) but needs to survive reloads so the `knowledge_base_lookup`
         # tool can scope retrievals to this agent's ingested documents.
-        agent_instance.knowledge_base_ids = list(
-            overrides.get(
-                "knowledge_base_ids",
-                getattr(saved_memagent, "knowledge_base_ids", None) or [],
-            )
+        _kb_ids = overrides.get(
+            "knowledge_base_ids",
+            getattr(saved_memagent, "knowledge_base_ids", None),
+        )
+        agent_instance.knowledge_base_ids = (
+            list(_kb_ids) if isinstance(_kb_ids, (list, tuple)) else []
         )
 
         # Carry the LLM-init failure forward so chat surfaces the real
@@ -5780,10 +5781,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                     if hasattr(saved_memagent, "memory_ids"):
                         self.memory_ids = saved_memagent.memory_ids
                     if hasattr(saved_memagent, "knowledge_base_ids"):
+                        _kb = saved_memagent.knowledge_base_ids
                         self.knowledge_base_ids = (
-                            list(saved_memagent.knowledge_base_ids)
-                            if saved_memagent.knowledge_base_ids
-                            else []
+                            list(_kb) if isinstance(_kb, (list, tuple)) else []
                         )
                     if hasattr(saved_memagent, "name"):
                         self.name = saved_memagent.name
