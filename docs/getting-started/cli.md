@@ -79,6 +79,7 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/model [name]` | Show or switch the chat model (keeps the provider). |
 | `/provider [name]` | Switch provider: `openai`/`anthropic`/`ollama`/`azure`/`huggingface`/`mlx`. |
 | `/ollama [list\|pull <tag>\|host <url>]` | List/pull Ollama models or set `OLLAMA_HOST`. |
+| `/web [on\|off\|tavily\|firecrawl]` | Enable/disable internet search (Tavily/Firecrawl). |
 | `/code [on\|off]` | Toggle coding tools (file read/write + bounded commands, scoped to cwd). |
 | `/memory [id]` | Show or switch the active memory id. |
 | `/history` | Print the current conversation history. |
@@ -107,6 +108,28 @@ sessions.
 **Coding mode.** Launch with `memorizz --code`, or type `/code` in the REPL, to
 enable the agent's self-aware tools: read/write files and run a bounded set of
 commands, scoped to the current working directory (writes on, deletes off).
+
+## Internet access
+
+Give the agent web search + page reading via [Tavily](https://tavily.com) or
+[Firecrawl](https://firecrawl.dev). No extra install is needed — the providers
+call the REST APIs directly.
+
+```bash
+export TAVILY_API_KEY=tvly-...      # or FIRECRAWL_API_KEY=fc-...
+memorizz                            # internet tools auto-enable when a key is set
+```
+
+Or manage it from the REPL:
+
+```
+/login tavily       # save the key to ~/.memorizz/.env
+/web tavily         # enable (also: /web on, /web firecrawl, /web off)
+/web                # show status
+```
+
+When enabled, the agent gains `internet_search` and `open_web_page` tools and
+uses them for questions that need current information.
 
 ## Persistent agent & memory
 

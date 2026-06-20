@@ -153,6 +153,56 @@ def cmd_ollama(session, args: str):
 
 
 # --------------------------------------------------------------------------- #
+# Internet access
+# --------------------------------------------------------------------------- #
+
+
+def cmd_web(session, args: str):
+    console = _con(session)
+    agent = session.agent
+    arg = args.strip().lower()
+
+    if not arg:
+        try:
+            name = agent.get_internet_access_provider_name()
+        except Exception:
+            name = None
+        console.print(f"Internet access: [cyan]{name or 'off'}[/cyan]")
+        console.print("Usage: /web on|off|tavily|firecrawl")
+        return
+
+    if arg in ("off", "false", "no", "0"):
+        try:
+            agent.with_internet_access_provider(None)
+            console.print("[yellow]Internet access OFF[/yellow]")
+        except Exception as exc:
+            console.print(f"[red]Failed:[/red] {exc}")
+        return
+
+    try:
+        if arg in ("on", "true", "yes"):
+            from ..internet_access import get_default_internet_access_provider
+
+            provider = get_default_internet_access_provider()
+        else:
+            from ..internet_access import create_internet_access_provider
+
+            key = os.environ.get(f"{arg.upper()}_API_KEY")
+            provider = create_internet_access_provider(
+                arg, {"api_key": key} if key else {}
+            )
+        if provider is None:
+            console.print(f"[red]Unknown or unconfigured provider:[/red] {arg}")
+            return
+        agent.with_internet_access_provider(provider)
+        name = agent.get_internet_access_provider_name() or arg
+        console.print(f"[green]Internet access →[/green] {name}")
+    except Exception as exc:
+        console.print(f"[red]Could not enable internet access:[/red] {exc}")
+        console.print("Add a key first with /login tavily (or /login firecrawl).")
+
+
+# --------------------------------------------------------------------------- #
 # Coding mode
 # --------------------------------------------------------------------------- #
 
@@ -497,6 +547,8 @@ def cmd_login(session, args: str):
         "anthropic": "ANTHROPIC_API_KEY",
         "azure": "AZURE_OPENAI_API_KEY",
         "voyage": "VOYAGE_API_KEY",
+        "tavily": "TAVILY_API_KEY",
+        "firecrawl": "FIRECRAWL_API_KEY",
     }
     key_name = key_map.get(choice, choice.upper() if choice else "OPENAI_API_KEY")
     try:
@@ -527,6 +579,11 @@ def cmd_config(session, args: str):
     console.print(f"  llm model:     {session.model_name}")
     console.print(f"  memory store:  {provider_type}")
     console.print(f"  coding mode:   {'on' if session.code_mode else 'off'}")
+    try:
+        net = session.agent.get_internet_access_provider_name()
+    except Exception:
+        net = None
+    console.print(f"  internet:      {net or 'off'}")
 
 
 _DOCS_BASE = "https://richmondalake.github.io/memorizz"
@@ -661,6 +718,11 @@ COMMANDS: Dict[str, Command] = {
         cmd_ollama,
         "List/pull Ollama models or set host.",
         "/ollama [list|pull <t>|host <u>]",
+    ),
+    "web": Command(
+        cmd_web,
+        "Enable/disable internet access (Tavily/Firecrawl).",
+        "/web [on|off|tavily|firecrawl]",
     ),
     "code": Command(
         cmd_code, "Toggle coding tools (file edits + commands).", "/code [on|off]"

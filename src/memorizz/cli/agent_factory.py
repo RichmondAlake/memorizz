@@ -397,6 +397,21 @@ def build_session_agent(
     if not code_mode:
         _slim_chat_tools(agent)
 
+    # 3c. Attach an internet provider when one is configured (Tavily/Firecrawl
+    # via env), exposing internet_search / open_web_page. Done after slimming —
+    # these are tools the user explicitly opted into by setting a key.
+    try:
+        from ..internet_access import get_default_internet_access_provider
+
+        net_provider = get_default_internet_access_provider()
+    except Exception:
+        net_provider = None
+    if net_provider is not None:
+        try:
+            agent.with_internet_access_provider(net_provider)
+        except Exception:
+            pass
+
     # 4. Reuse the rolling memory id so long-term recall spans sessions.
     memory_id = None if fresh else state.get("memory_id")
 
