@@ -192,6 +192,7 @@ class Anthropic(LLMProvider):
         (``response.choices[0].message.tool_calls``).
         """
         system_text, api_messages = self._split_system(messages)
+        api_messages = self._convert_messages(api_messages)
 
         kwargs: Dict[str, Any] = {
             "model": self.model,
@@ -234,6 +235,7 @@ class Anthropic(LLMProvider):
         - ``{"type": "done", "content": "<accumulated text>"}``
         """
         system_text, api_messages = self._split_system(messages)
+        api_messages = self._convert_messages(api_messages)
 
         kwargs: Dict[str, Any] = {
             "model": self.model,
@@ -386,6 +388,81 @@ class Anthropic(LLMProvider):
             else:
                 remaining.append(msg)
         return ("\n\n".join(system_parts) if system_parts else None, remaining)
+
+    @staticmethod
+    def _convert_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert OpenAI-style tool messages to Anthropic's content-block format.
+
+        memorizz's core loop records tool calls/results in OpenAI's shape::
+
+            {"role": "assistant", "content": ..., "tool_calls": [
+                {"id": ..., "function": {"name": ..., "arguments": "<json>"}}]}
+            {"role": "tool", "tool_call_id": ..., "content": "..."}
+
+        Anthropic has no ``tool`` role: a tool call is a ``tool_use`` block in the
+        assistant message, and its result is a ``tool_result`` block inside the
+        *following user* message. Without this, the follow-up request that carries
+        tool results back 400s with ``Unexpected role "tool"``.
+
+        Consecutive tool results (parallel tool calls) are merged into one user
+        message, as Anthropic requires. Plain text messages pass through.
+        """
+        converted: List[Dict[str, Any]] = []
+        pending_results: List[Dict[str, Any]] = []
+
+        def flush_results():
+            if pending_results:
+                converted.append({"role": "user", "content": list(pending_results)})
+                pending_results.clear()
+
+        for msg in messages:
+            role = msg.get("role")
+
+            if role == "tool":
+                content = msg.get("content")
+                pending_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": msg.get("tool_call_id", ""),
+                        "content": "" if content is None else str(content),
+                    }
+                )
+                continue
+
+            # A non-tool message closes any open run of tool results.
+            flush_results()
+
+            if role == "assistant" and msg.get("tool_calls"):
+                blocks: List[Dict[str, Any]] = []
+                text = msg.get("content")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                for tc in msg["tool_calls"]:
+                    fn = tc.get("function", {}) or {}
+                    raw_args = fn.get("arguments", "")
+                    if isinstance(raw_args, dict):
+                        parsed = raw_args
+                    else:
+                        try:
+                            parsed = json.loads(raw_args) if raw_args else {}
+                        except (json.JSONDecodeError, TypeError):
+                            parsed = {}
+                    if not isinstance(parsed, dict):
+                        parsed = {}
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.get("id", ""),
+                            "name": fn.get("name", ""),
+                            "input": parsed,
+                        }
+                    )
+                converted.append({"role": "assistant", "content": blocks})
+            else:
+                converted.append(msg)
+
+        flush_results()
+        return converted
 
     @staticmethod
     def _convert_tools(

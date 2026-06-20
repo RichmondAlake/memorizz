@@ -106,6 +106,7 @@ dev = [
     "flake8>=6.0",
     "isort>=5.12",
     "pre-commit>=3.0",
+    "httpx>=0.24",
 ]
 all = [
     "anthropic>=0.26.0",
