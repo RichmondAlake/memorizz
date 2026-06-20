@@ -41,6 +41,7 @@ from .._env_io import format_env_value as _shared_format_env_value
 from .._env_io import load_layered_env as _load_layered_env
 from .._env_io import resolve_env_file as _resolve_env_file
 from .._env_io import update_env_file as _shared_update_env_file
+from .routers.huggingface import router as huggingface_router
 from .routers.ollama import router as ollama_router
 
 logger = logging.getLogger(__name__)
@@ -1085,6 +1086,7 @@ def create_app() -> FastAPI:
     # Mount static files
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(ollama_router)
+    app.include_router(huggingface_router)
 
     # Setup templates
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -1439,117 +1441,6 @@ def create_app() -> FastAPI:
         ok, message = _do.create_container(oracle_user, oracle_password, port)
         return JSONResponse(
             {"ok": ok, "message": message}, status_code=200 if ok else 500
-        )
-
-    @app.post("/api/huggingface/pull")
-    async def huggingface_pull(repo_id: str = Form(...)):
-        """Download a HuggingFace repo into the local cache.
-
-        Uses snapshot_download so all repo files (config + tokenizer +
-        weights) are pulled together. Honors HF_TOKEN from the environment
-        for gated repos.
-        """
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError:
-            return JSONResponse(
-                {"ok": False, "error": "huggingface_hub not installed"},
-                status_code=503,
-            )
-        try:
-            path = snapshot_download(repo_id=repo_id)
-        except Exception as exc:  # pragma: no cover - depends on network
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-        return JSONResponse(
-            {"ok": True, "message": f"Downloaded {repo_id}", "path": str(path)}
-        )
-
-    @app.delete("/api/huggingface/models/{repo_id:path}")
-    async def huggingface_delete(repo_id: str):
-        """Delete every revision of a cached HuggingFace model repo."""
-        try:
-            from huggingface_hub import scan_cache_dir
-        except ImportError:
-            return JSONResponse(
-                {"ok": False, "error": "huggingface_hub not installed"},
-                status_code=503,
-            )
-        try:
-            cache_info = scan_cache_dir()
-        except Exception as exc:  # pragma: no cover - defensive
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-
-        revisions = []
-        for repo in cache_info.repos:
-            if repo.repo_id == repo_id and repo.repo_type == "model":
-                for rev in repo.revisions:
-                    revisions.append(rev.commit_hash)
-        if not revisions:
-            return JSONResponse(
-                {"ok": False, "error": f"{repo_id} not found in HF cache"},
-                status_code=404,
-            )
-
-        try:
-            strategy = cache_info.delete_revisions(*revisions)
-            strategy.execute()
-        except Exception as exc:  # pragma: no cover - defensive
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-        return JSONResponse(
-            {
-                "ok": True,
-                "message": f"Removed {repo_id}",
-                "freed_bytes": getattr(strategy, "expected_freed_size", None),
-            }
-        )
-
-    @app.get("/api/huggingface/installed")
-    async def huggingface_installed():
-        """Report which HuggingFace repos are cached locally.
-
-        Powers the same "Not cached locally" / "Available offline" banner
-        as Ollama, but for the `huggingface` provider — by walking the
-        standard HF cache directory via huggingface_hub.scan_cache_dir().
-        Falls back to {available: false} when the SDK isn't installed in
-        this Python env so the UI can render an actionable warning.
-        """
-        try:
-            from huggingface_hub import scan_cache_dir
-            from huggingface_hub.constants import HF_HUB_CACHE
-        except ImportError as exc:
-            return JSONResponse(
-                {
-                    "available": False,
-                    "error": (
-                        "huggingface_hub not installed — run "
-                        "`pip install memorizz[huggingface]` to enable cache scanning."
-                    ),
-                    "detail": str(exc),
-                }
-            )
-
-        try:
-            cache_info = scan_cache_dir()
-        except Exception as exc:  # pragma: no cover - defensive
-            return JSONResponse({"available": False, "error": str(exc)})
-
-        models: List[str] = []
-        for repo in getattr(cache_info, "repos", []) or []:
-            # Only model repos count toward "available LLMs". Datasets and
-            # spaces show up here too but aren't valid HF LLM provider IDs.
-            if getattr(repo, "repo_type", "model") != "model":
-                continue
-            repo_id = getattr(repo, "repo_id", None)
-            if repo_id:
-                models.append(repo_id)
-        models.sort()
-
-        return JSONResponse(
-            {
-                "available": True,
-                "cache_dir": str(HF_HUB_CACHE or ""),
-                "models": models,
-            }
         )
 
     @app.get("/dashboard", response_class=HTMLResponse)
