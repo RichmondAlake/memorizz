@@ -860,8 +860,20 @@ def dispatch(line: str, session) -> bool:
 
     cmd = COMMANDS.get(name)
     if cmd is None:
-        console.print(f"[yellow]Unknown command:[/yellow] /{name}  (try /help)")
-        return True
+        # Resolve unambiguous abbreviations: /lo -> /login, /mo -> /model.
+        matches = sorted(n for n in COMMANDS if n.startswith(name))
+        if len(matches) == 1:
+            name = matches[0]
+            cmd = COMMANDS[name]
+        elif len(matches) > 1:
+            console.print(
+                f"[yellow]Ambiguous command:[/yellow] /{name} → "
+                + ", ".join("/" + m for m in matches)
+            )
+            return True
+        else:
+            console.print(f"[yellow]Unknown command:[/yellow] /{name}  (try /help)")
+            return True
     try:
         result = cmd.handler(session, args)
     except Exception as exc:
