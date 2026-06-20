@@ -34,7 +34,6 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from .._env_io import apply_env_updates as _shared_apply_env_updates
 from .._env_io import format_env_value as _shared_format_env_value
@@ -44,28 +43,16 @@ from .._env_io import update_env_file as _shared_update_env_file
 from .routers.huggingface import router as huggingface_router
 from .routers.ollama import router as ollama_router
 from .routers.oracle_docker import router as oracle_docker_router
+from .state import STATIC_DIR, UI_DIR, _state, templates
 
 logger = logging.getLogger(__name__)
-
-# Global state for the connected memory provider
-_state: Dict[str, Any] = {
-    "provider": None,
-    "provider_type": None,
-    "connection_info": {},
-    "provider_secrets": {},
-    "whatsapp_worker_thread": None,
-    "whatsapp_worker_stop_event": None,
-}
 
 _eval_runs_lock = threading.Lock()
 _eval_runs: Dict[str, Dict[str, Any]] = {}
 _eval_run_processes: Dict[str, subprocess.Popen] = {}
 _EVAL_RUN_MAX_LOG_LINES = 2000
 
-# Paths
-UI_DIR = Path(__file__).parent
-TEMPLATES_DIR = UI_DIR / "templates"
-STATIC_DIR = UI_DIR / "static"
+# Paths (UI_DIR / TEMPLATES_DIR / STATIC_DIR now live in ui.state)
 ROOT_DIR = UI_DIR.parent.parent.parent
 # Canonical env file is resolved centrally (~/.memorizz/.env by default) so the
 # CLI, `memorizz ui`, and this Settings page all read/write the SAME file. The
@@ -1090,8 +1077,7 @@ def create_app() -> FastAPI:
     app.include_router(huggingface_router)
     app.include_router(oracle_docker_router)
 
-    # Setup templates
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # Configure the shared template engine (imported from ui.state)
     templates.env.globals["llm_model_catalog"] = LLM_MODEL_CATALOG
     templates.env.globals["default_llm_provider"] = DEFAULT_LLM_PROVIDER
     templates.env.globals[
