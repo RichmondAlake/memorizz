@@ -41,6 +41,7 @@ from .._env_io import format_env_value as _shared_format_env_value
 from .._env_io import load_layered_env as _load_layered_env
 from .._env_io import resolve_env_file as _resolve_env_file
 from .._env_io import update_env_file as _shared_update_env_file
+from .routers.ollama import router as ollama_router
 
 logger = logging.getLogger(__name__)
 
@@ -1083,6 +1084,7 @@ def create_app() -> FastAPI:
 
     # Mount static files
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.include_router(ollama_router)
 
     # Setup templates
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -1549,116 +1551,6 @@ def create_app() -> FastAPI:
                 "models": models,
             }
         )
-
-    @app.post("/api/ollama/pull")
-    async def ollama_pull(name: str = Form(...)):
-        """Pull an Ollama model. Synchronous — large pulls can take 5–15 min.
-
-        We pass `stream: false` to Ollama so the daemon buffers progress on
-        its side and only returns when the operation finishes; this keeps
-        the FastAPI handler simple (a future improvement is to forward the
-        streaming variant as SSE for a real progress bar).
-        """
-        import urllib.error
-        import urllib.request
-
-        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
-        body = json.dumps({"name": name, "stream": False}).encode("utf-8")
-        req = urllib.request.Request(
-            f"{host}/api/pull",
-            data=body,
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=1800) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            return JSONResponse(
-                {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}"},
-                status_code=exc.code,
-            )
-        except urllib.error.URLError as exc:
-            return JSONResponse(
-                {"ok": False, "error": str(exc.reason)}, status_code=502
-            )
-        except (TimeoutError, OSError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=504)
-
-        if payload.get("status") == "success":
-            return JSONResponse({"ok": True, "message": f"Pulled {name}"})
-        return JSONResponse(
-            {"ok": False, "error": payload.get("error") or json.dumps(payload)},
-            status_code=500,
-        )
-
-    @app.delete("/api/ollama/models/{name:path}")
-    async def ollama_delete(name: str):
-        """Remove a locally pulled Ollama model via Ollama's /api/delete."""
-        import urllib.error
-        import urllib.request
-
-        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
-        body = json.dumps({"name": name}).encode("utf-8")
-        req = urllib.request.Request(
-            f"{host}/api/delete",
-            data=body,
-            method="DELETE",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as _resp:
-                pass
-        except urllib.error.HTTPError as exc:
-            detail = (
-                exc.read().decode("utf-8", "ignore")
-                if hasattr(exc, "read")
-                else exc.reason
-            )
-            return JSONResponse(
-                {"ok": False, "error": f"HTTP {exc.code}: {detail}"},
-                status_code=exc.code,
-            )
-        except urllib.error.URLError as exc:
-            return JSONResponse(
-                {"ok": False, "error": str(exc.reason)}, status_code=502
-            )
-        except (TimeoutError, OSError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=504)
-
-        return JSONResponse({"ok": True, "message": f"Removed {name}"})
-
-    @app.get("/api/ollama/installed")
-    async def ollama_installed():
-        """Report which models the local Ollama daemon has pulled.
-
-        Powers the "Not installed yet" banner under the Default Model picker
-        in Settings. Without this check, picking a model from the dropdown
-        and hitting Save still results in a 404 the first time the agent
-        runs. This endpoint short-circuits that surprise: the user sees
-        a copy-paste `ollama pull <tag>` command (and a deep-link to the
-        model's page) before anything is sent to the LLM.
-        """
-        import urllib.error
-        import urllib.request
-
-        host = (os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
-        try:
-            with urllib.request.urlopen(f"{host}/api/tags", timeout=3) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            return JSONResponse(
-                {"reachable": False, "host": host, "error": str(exc.reason)}
-            )
-        except (TimeoutError, OSError, ValueError) as exc:
-            return JSONResponse({"reachable": False, "host": host, "error": str(exc)})
-
-        models: List[str] = []
-        for entry in payload.get("models", []) or []:
-            name = entry.get("name") or entry.get("model")
-            if name:
-                models.append(name)
-        return JSONResponse({"reachable": True, "host": host, "models": models})
 
     @app.get("/dashboard", response_class=HTMLResponse)
     async def dashboard(request: Request):

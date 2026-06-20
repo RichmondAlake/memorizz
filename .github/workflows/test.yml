@@ -17,8 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install (lean base + dev tools)
-        run: pip install -e ".[dev]"
+      - name: Install (base + dev tools + ui for route tests)
+        run: pip install -e ".[dev,ui]"
       - name: Run tests (offline unit suite)
         run: pytest tests/ -q
 
