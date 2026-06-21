@@ -46,6 +46,11 @@ dependencies = [
     "rich>=13.7.0",
     "prompt_toolkit>=3.0.0",
     "platformdirs>=4.0.0",
+    # Ollama daemon SDK (LLM *and* embeddings via the native client). Kept in
+    # base, not an extra, so the default zero-config local stack works on a bare
+    # `pip install memorizz` with a running Ollama daemon. Small (httpx, already
+    # pulled by openai) — none of the heavy local-ML stack.
+    "ollama>=0.6.0",
     # NOTE: the heavy local-ML stack (transformers / sentence-transformers /
     # accelerate / huggingface-hub) moved OUT of base into the `huggingface`
     # extra so the default install stays lean (no multi-GB torch download).
@@ -62,10 +67,8 @@ cli = []
 # Fully-local stack: Ollama LLM + Ollama embeddings + FAISS filesystem memory.
 local = ["memorizz[ollama]", "memorizz[filesystem]"]
 anthropic = ["anthropic>=0.26.0"]
-# langchain-ollama 1.x dropped the `timeout=` constructor kwarg; the embedding
-# provider has a fallback for it but we still want the ollama daemon SDK at a
-# version that knows about Gemma 4 tags (>=0.6.0).
-ollama = ["langchain_ollama>=1.0.0", "ollama>=0.6.0"]
+# Ollama ships in base now; this alias keeps `pip install memorizz[ollama]` valid.
+ollama = ["ollama>=0.6.0"]
 voyageai = ["voyageai"]
 huggingface = [
     "numpy>=1.21,<2",
@@ -113,7 +116,6 @@ all = [
     "anthropic>=0.26.0",
     "pymongo>=4.0.0",
     "oracledb>=2.0.0",
-    "langchain_ollama>=1.0.0",
     "ollama>=0.6.0",
     "voyageai",
     "faiss-cpu>=1.7.4",

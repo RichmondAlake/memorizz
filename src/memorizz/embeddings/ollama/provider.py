@@ -54,22 +54,30 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
         )
 
     def _init_client(self):
-        """Initialize the Ollama embeddings client."""
+        """Initialize the native Ollama client (no langchain dependency)."""
         try:
-            from langchain_ollama import OllamaEmbeddings
+            import ollama
         except ImportError:
             raise ImportError(
-                "langchain_ollama is required for Ollama embeddings. "
-                "Install it with: pip install langchain-ollama"
+                "The 'ollama' package is required for Ollama embeddings. Install "
+                "it with: pip install ollama (or: pip install memorizz[ollama])"
             )
 
-        # langchain-ollama >=1.0 dropped the `timeout` constructor arg.
+        client_kwargs: Dict[str, Any] = {"host": self.base_url}
+        if self.timeout:
+            client_kwargs["timeout"] = self.timeout
         try:
-            self.embeddings = OllamaEmbeddings(
-                model=self.model, base_url=self.base_url, timeout=self.timeout
-            )
-        except (TypeError, ValueError):
-            self.embeddings = OllamaEmbeddings(model=self.model, base_url=self.base_url)
+            self.client = ollama.Client(**client_kwargs)
+        except TypeError:
+            self.client = ollama.Client(host=self.base_url)
+
+    def _embed_one(self, text: str) -> List[float]:
+        """Embed a single string via the native client (attr- or dict-style resp)."""
+        resp = self.client.embeddings(model=self.model, prompt=text)
+        vector = getattr(resp, "embedding", None)
+        if vector is None and isinstance(resp, dict):
+            vector = resp.get("embedding")
+        return list(vector or [])
 
     def _probe_dimensions(self):
         """Probe the actual dimensions of the model by generating a test embedding."""
@@ -77,7 +85,7 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
             return
 
         try:
-            test_embedding = self.embeddings.embed_query("test")
+            test_embedding = self._embed_one("test")
             if test_embedding:
                 actual_dimensions = len(test_embedding)
                 if actual_dimensions != self.dimensions:
@@ -126,7 +134,7 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
                 self._probe_dimensions()
 
             # Generate embedding
-            embedding = self.embeddings.embed_query(text)
+            embedding = self._embed_one(text)
             return embedding
         except Exception as e:
             logger.error(f"Error generating Ollama embedding: {str(e)}")

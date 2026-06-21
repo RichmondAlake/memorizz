@@ -22,6 +22,12 @@
 
 ### Fixes
 
+* **Default local stack works on a lean install.** Ollama embeddings required
+  `langchain_ollama` (an optional extra) and the `ollama` client wasn't a base
+  dependency, so a plain `pip install memorizz` + `memorizz` crashed with
+  "langchain_ollama is required for Ollama embeddings". Embeddings now use the
+  native `ollama` client, and `ollama` is a base dependency (still no langchain,
+  no torch).
 * Agents executing a scheduled automation no longer wander into managing
   automations — automation-management tools are suppressed for the run (fixes
   off-task / empty outputs from smaller models).
