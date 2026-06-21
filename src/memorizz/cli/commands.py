@@ -803,6 +803,128 @@ def cmd_help(session, args: str):
     )
 
 
+def _automation_print_jobs(console, jobs):
+    for j in jobs:
+        state = "on" if getattr(j, "enabled", False) else "off"
+        console.print(
+            f"  [cyan]{j.job_id}[/cyan]  {j.name}  "
+            f"[dim]({j.schedule_type}, {state}, next {j.next_run_at})[/dim]"
+        )
+
+
+def _automation_run_job(console, store, agent, job):
+    from ..automation.runner import run_job_once
+    from ..automation.schedule import utcnow
+
+    now = utcnow()
+    worker_id = f"cli-run-now:{os.getpid()}"
+    console.print(f"[cyan]Running automation[/cyan] '{job.name}' …")
+    run = None
+    try:
+        run = store.start_run(job, now, worker_id)
+        result = run_job_once(
+            job,
+            run_id=run.run_id,
+            scheduled_for_utc=now,
+            memory_provider=agent.memory_provider,
+            store=store,
+        )
+        store.finish_run(
+            run.run_id,
+            status="succeeded",
+            error=None,
+            result_summary=None,
+            result_payload=result if isinstance(result, dict) else {},
+            attempt=1,
+        )
+        resp = result.get("response") if isinstance(result, dict) else None
+        console.print(resp or "[dim](automation produced no text output)[/dim]")
+        ds = result.get("delivery_summary") if isinstance(result, dict) else None
+        if ds:
+            console.print(
+                f"[dim]deliveries: {ds.get('sent', 0)} sent / "
+                f"{ds.get('failed', 0)} failed[/dim]"
+            )
+    except Exception as exc:
+        console.print(f"[red]Automation failed:[/red] {exc}")
+        if run is not None:
+            try:
+                store.finish_run(
+                    run.run_id,
+                    status="failed",
+                    error=str(exc),
+                    result_summary=None,
+                    result_payload={},
+                    attempt=1,
+                )
+            except Exception:
+                pass
+
+
+def cmd_automation(session, args: str):
+    """List or run an automation attached to the current agent.
+
+    Automations are scheduled ``agent.run(query)`` jobs. They are persisted only
+    by the Oracle backend, so this requires an Oracle-connected agent.
+    """
+    console = _con(session)
+    agent = session.agent
+
+    from ..automation.store.factory import get_automation_store
+
+    store = get_automation_store(getattr(agent, "memory_provider", None))
+    if store is None:
+        console.print(
+            "[yellow]Automations require the Oracle backend.[/yellow] "
+            "This agent's memory provider doesn't support them."
+        )
+        console.print(
+            "Start the CLI with Oracle (MEMORIZZ_BACKEND=oracle + ORACLE_* env "
+            "vars), then create automations via the web UI or SDK."
+        )
+        return
+
+    agent_id = getattr(agent, "agent_id", None)
+    parts = args.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        jobs = store.list_jobs(agent_id=agent_id, enabled=None)
+    except Exception as exc:
+        console.print(f"[red]Could not read automations:[/red] {exc}")
+        return
+
+    if sub == "run":
+        if rest:
+            job = store.get_job(rest)
+            if job is None or job.agent_id != agent_id:
+                console.print(f"[red]No automation '{rest}' on this agent.[/red]")
+                return
+        elif len(jobs) == 1:
+            job = jobs[0]
+        elif not jobs:
+            console.print("[dim]No automations attached to this agent.[/dim]")
+            return
+        else:
+            console.print("Multiple automations — specify one: /automation run <id>")
+            _automation_print_jobs(console, jobs)
+            return
+        _automation_run_job(console, store, agent, job)
+        return
+
+    if not jobs:
+        console.print("[dim]No automations attached to this agent.[/dim]")
+        console.print(
+            "Create one via the web UI (Automations) or the SDK, then: "
+            "/automation run <id>"
+        )
+        return
+    console.print(f"[bold]Automations for this agent[/bold] ({len(jobs)}):")
+    _automation_print_jobs(console, jobs)
+    console.print("Run one now:  [cyan]/automation run <id>[/cyan]")
+
+
 # --------------------------------------------------------------------------- #
 # Registry + dispatch
 # --------------------------------------------------------------------------- #
@@ -835,6 +957,11 @@ COMMANDS: Dict[str, Command] = {
     ),
     "agents": Command(cmd_agents, "List saved agents.", "/agents"),
     "agent": Command(cmd_agent, "Load a saved agent by id.", "/agent <id>"),
+    "automation": Command(
+        cmd_automation,
+        "List/run an automation attached to this agent (Oracle backend).",
+        "/automation [run <id>]",
+    ),
     "new": Command(cmd_new, "Start a fresh conversation thread.", "/new"),
     "tools": Command(cmd_tools, "List the agent's tools.", "/tools"),
     "ingest": Command(
