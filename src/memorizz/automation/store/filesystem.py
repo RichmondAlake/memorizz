@@ -14,6 +14,7 @@ covers the common single-worker case (``memorizz automations run`` or the CLI's
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import uuid
@@ -22,6 +23,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..models import AutomationDelivery, AutomationJob, AutomationRun
+
+try:
+    import fcntl  # POSIX only
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None
 
 _UPDATABLE_FIELDS = {
     "name",
@@ -73,6 +79,28 @@ class FileSystemAutomationStore:
         for d in (self._jobs_dir, self._runs_dir, self._deliveries_dir):
             d.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._lock_path = root / ".claim.lock"
+
+    @contextlib.contextmanager
+    def _file_lock(self):
+        """Cross-process exclusive lock for claim ops (POSIX flock; no-op else).
+
+        Pairs with the in-process RLock so multiple ``memorizz automations run``
+        workers on one root don't double-claim a job. On platforms without fcntl
+        (Windows) this is a no-op and leasing stays best-effort.
+        """
+        if fcntl is None:
+            yield
+            return
+        handle = open(self._lock_path, "w")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
 
     # ------------------------------------------------------------------ io
     @staticmethod
@@ -164,7 +192,7 @@ class FileSystemAutomationStore:
         now = _as_aware(now_utc) or _utcnow()
         lease_expiry = now + timedelta(seconds=int(lease_seconds or 0))
         claimed: List[AutomationJob] = []
-        with self._lock:
+        with self._lock, self._file_lock():
             due = []
             for job in self.list_jobs(enabled=True):
                 nxt = _as_aware(job.next_run_at)
@@ -191,7 +219,7 @@ class FileSystemAutomationStore:
     ) -> Optional[AutomationJob]:
         now = _as_aware(now_utc) or _utcnow()
         lease_expiry = now + timedelta(seconds=int(lease_seconds or 0))
-        with self._lock:
+        with self._lock, self._file_lock():
             job = self.get_job(job_id)
             if job is None:
                 return None

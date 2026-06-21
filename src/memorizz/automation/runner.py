@@ -75,7 +75,19 @@ def execute_job_action(
         query_template, scheduled_for_utc=scheduled_for_utc, tz_name=job.timezone
     )
 
-    agent = MemAgent.load(job.agent_id, memory_provider=memory_provider)
+    # An agent executing a scheduled job should do the task, not create/list/run
+    # other automations. automations_enabled=False skips fresh registration; we
+    # also strip any automation-management tools that persisted on the saved
+    # agent (otherwise smaller models call them mid-task -> off-task/empty runs).
+    agent = MemAgent.load(
+        job.agent_id, memory_provider=memory_provider, automations_enabled=False
+    )
+    if getattr(agent, "tool_manager", None) is not None:
+        from ..memagent.managers.automation_manager import AUTOMATION_TOOL_NAMES
+
+        for _name in AUTOMATION_TOOL_NAMES:
+            agent.tool_manager.remove_tool(_name)
+
     augmented_query = f"[{AUTOMATION_DIRECTIVE}]\n\n{rendered_query}"
     response = agent.run(augmented_query, memory_id=memory_id)
 

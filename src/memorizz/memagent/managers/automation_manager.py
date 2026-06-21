@@ -15,6 +15,18 @@ from ...automation.models import AutomationJob
 from ...automation.schedule import compute_next_run_at, utcnow, validate_timezone_name
 from ...automation.store.factory import get_automation_store
 
+# Tool names registered by ``register_tools``. The automation runner strips these
+# for scheduled runs (an executing agent should do its task, not manage other
+# automations) — keep in sync with the add_tool calls in register_tools.
+AUTOMATION_TOOL_NAMES = (
+    "automation_create_job",
+    "automation_list_jobs",
+    "automation_pause_job",
+    "automation_resume_job",
+    "automation_delete_job",
+    "automation_run_now",
+)
+
 
 class AutomationManager:
     def __init__(self, memory_provider: Any, enabled: bool = True):
