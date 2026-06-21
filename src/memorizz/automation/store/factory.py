@@ -26,4 +26,18 @@ def get_automation_store(memory_provider: Any) -> Optional[AutomationStore]:
 
         return OracleAutomationStore(memory_provider)
 
+    if provider_name == "MongoDBProvider" and provider_module.endswith(
+        "memorizz.memory_provider.mongodb.provider"
+    ):
+        from .mongodb import MongoDBAutomationStore
+
+        return MongoDBAutomationStore(memory_provider)
+
+    if provider_name == "FileSystemProvider" and provider_module.endswith(
+        "memorizz.memory_provider.filesystem.provider"
+    ):
+        from .filesystem import FileSystemAutomationStore
+
+        return FileSystemAutomationStore(memory_provider)
+
     return None
