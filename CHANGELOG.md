@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.1 — 2026-06-21
+
+### Features
+
+* **Automations on every backend.** Scheduled `agent.run()` automations now work
+  on the default FileSystem store and on MongoDB, not just Oracle
+  (`FileSystemAutomationStore` + `MongoDBAutomationStore`).
+* **`/automation` REPL command** — list and run the automations attached to the
+  current agent (`/automation`, `/automation run <id>`).
+* **Automations can search the web.** A scheduled agent restores its internet
+  provider (Tavily / Firecrawl) on load and can call `internet_search` /
+  `open_web_page` during a run.
+* **One-line installers.** `npm i -g memorizz` and
+  `curl -fsSL https://raw.githubusercontent.com/RichmondAlake/memorizz/main/install.sh | sh`
+  (both bootstrap `uv`), alongside `pip install memorizz` / `uvx memorizz`.
+
+### Fixes
+
+* Agents executing a scheduled automation no longer wander into managing
+  automations — automation-management tools are suppressed for the run (fixes
+  off-task / empty outputs from smaller models).
+* `FileSystemAutomationStore` is now multi-worker-safe (POSIX file lock around
+  job claiming).
+
 ## 0.1.0 — 2026-06-18
 
 ### Features
