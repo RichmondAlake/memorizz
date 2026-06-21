@@ -415,7 +415,18 @@ print(report)
 ## CLI
 
 Memorizz ships an interactive, Claude-Code-style terminal agent with **persistent
-memory** — just run `memorizz`:
+memory**.
+
+**Install** (pick one):
+
+```bash
+pip install memorizz                                   # if you have Python 3.10+
+uv tool install --python 3.12 memorizz                 # isolated tool, no system Python needed
+npm install -g memorizz                                # bootstraps uv under the hood
+curl -fsSL https://raw.githubusercontent.com/RichmondAlake/memorizz/main/install.sh | sh
+```
+
+Then just run `memorizz`:
 
 ```bash
 memorizz                       # interactive REPL (memory persists across launches)
