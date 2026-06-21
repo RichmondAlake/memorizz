@@ -595,10 +595,49 @@ _LOGIN_PROVIDERS = [
     ("openai", "OPENAI_API_KEY", "OpenAI — LLM + embeddings"),
     ("anthropic", "ANTHROPIC_API_KEY", "Anthropic — LLM"),
     ("azure", "AZURE_OPENAI_API_KEY", "Azure OpenAI"),
+    ("ollama", "", "Ollama Cloud — sign in for ':cloud' models (e.g. glm-5.2:cloud)"),
     ("tavily", "TAVILY_API_KEY", "Tavily — internet search"),
     ("firecrawl", "FIRECRAWL_API_KEY", "Firecrawl — internet search"),
     ("voyage", "VOYAGE_API_KEY", "Voyage AI — embeddings"),
 ]
+
+
+def _login_ollama(console) -> None:
+    """Authenticate Ollama Cloud for ':cloud' models (e.g. glm-5.2:cloud).
+
+    Local Ollama models need no login. Cloud models are routed by the local
+    daemon using credentials from ``ollama signin`` (a device/browser flow), so
+    this shells out to it rather than storing a pasted key.
+    """
+    import shutil
+    import subprocess
+
+    console.print(
+        "[dim]Local Ollama models need no login. This runs 'ollama signin' so "
+        "you can use ':cloud' models (e.g. glm-5.2:cloud).[/dim]"
+    )
+    if shutil.which("ollama") is None:
+        console.print(
+            "[yellow]The 'ollama' CLI was not found.[/yellow] Install it from "
+            "https://ollama.com/download, then run [cyan]ollama signin[/cyan]."
+        )
+        return
+    console.print("Running [cyan]ollama signin[/cyan] …")
+    try:
+        result = subprocess.run(["ollama", "signin"])
+    except Exception as exc:  # pragma: no cover - environment dependent
+        console.print(f"[yellow]Could not run 'ollama signin':[/yellow] {exc}")
+        return
+    if result.returncode == 0:
+        console.print(
+            "[green]Signed in to Ollama Cloud.[/green] Try "
+            "[cyan]/model glm-5.2:cloud[/cyan]."
+        )
+    else:
+        console.print(
+            "[yellow]'ollama signin' didn't complete.[/yellow] You can run it "
+            "directly in another terminal."
+        )
 
 
 def cmd_login(session, args: str):
@@ -612,7 +651,9 @@ def cmd_login(session, args: str):
     if not choice:
         console.print("[bold]Log in to a platform[/bold]")
         for i, (name, env_var, desc) in enumerate(_LOGIN_PROVIDERS, 1):
-            status = " [green]✓ set[/green]" if os.environ.get(env_var) else ""
+            status = (
+                " [green]✓ set[/green]" if env_var and os.environ.get(env_var) else ""
+            )
             console.print(f"  [cyan]{i}[/cyan]. {name:<10} [dim]{desc}[/dim]{status}")
         try:
             choice = input("Select a platform [number or name]: ").strip().lower()
@@ -624,16 +665,25 @@ def cmd_login(session, args: str):
             return
 
     # Resolve selection: number, known name, or an arbitrary KEY name.
+    selected_name = None
     if choice.isdigit():
         idx = int(choice) - 1
         if not (0 <= idx < len(_LOGIN_PROVIDERS)):
             console.print(f"[yellow]Invalid selection:[/yellow] {choice}")
             return
+        selected_name = _LOGIN_PROVIDERS[idx][0]
         key_name = _LOGIN_PROVIDERS[idx][1]
     elif choice in by_name:
+        selected_name = choice
         key_name = by_name[choice][1]
     else:
         key_name = choice.upper()
+
+    # Ollama Cloud uses `ollama signin` (a device flow), not a pasted key.
+    if selected_name == "ollama":
+        _login_ollama(console)
+        return
+
     try:
         value = getpass.getpass(f"Paste {key_name} (hidden): ").strip()
     except (EOFError, KeyboardInterrupt):
