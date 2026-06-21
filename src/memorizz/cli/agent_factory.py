@@ -96,6 +96,10 @@ def _pick_ollama_model(models: List[str]) -> Optional[str]:
     """Choose a chat model from the daemon's tags, avoiding embedding models."""
     preferred = _env("MEMORIZZ_DEFAULT_LLM_MODEL")
     if preferred:
+        # Ollama Cloud models (e.g. "glm-5.2:cloud") are routed by the daemon and
+        # never appear in local /api/tags — honor an explicit choice as-is.
+        if preferred.endswith(":cloud"):
+            return preferred
         if preferred in models:
             return preferred
         for m in models:

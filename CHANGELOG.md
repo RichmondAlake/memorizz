@@ -15,6 +15,9 @@
 * **One-line installers.** `npm i -g memorizz` and
   `curl -fsSL https://raw.githubusercontent.com/RichmondAlake/memorizz/main/install.sh | sh`
   (both bootstrap `uv`), alongside `pip install memorizz` / `uvx memorizz`.
+* **Ollama Cloud models.** An explicit `:cloud` model (e.g. `glm-5.2:cloud`) is
+  now honored by the CLI instead of being substituted with a local model — run
+  `ollama signin` once to authenticate.
 
 ### Fixes
 
