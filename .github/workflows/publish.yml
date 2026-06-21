@@ -40,8 +40,43 @@ jobs:
           name: dist
           path: dist/
 
-  pypi:
+  # Clean-room install check: a bare `pip install memorizz` (no extras) must run
+  # the default zero-config stack yet stay lean. Guards the dependency closure —
+  # a dev/test env can mask a missing base dep (e.g. the ollama client) or a
+  # heavy one leaking in (e.g. langchain_ollama / torch). Gates the publish.
+  smoke:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the built wheel into a clean venv (base deps only)
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/python -m pip install --quiet --upgrade pip
+          /tmp/clean/bin/python -m pip install --quiet dist/*.whl
+      - name: Dependency closure (default stack present, heavy deps absent)
+        run: |
+          /tmp/clean/bin/python -c "
+          import importlib.util as u
+          has = lambda m: u.find_spec(m) is not None
+          assert has('memorizz') and has('ollama'), 'default zero-config stack deps missing from base'
+          leaked = [m for m in ['langchain_ollama', 'torch', 'transformers', 'faiss'] if has(m)]
+          assert not leaked, f'heavy deps leaked into base install: {leaked}'
+          import memorizz; print('clean-room OK:', memorizz.__version__)
+          "
+      - name: CLI entrypoints work without a daemon
+        run: |
+          /tmp/clean/bin/memorizz --version
+          /tmp/clean/bin/memorizz --help >/dev/null
+
+  pypi:
+    needs: smoke
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
