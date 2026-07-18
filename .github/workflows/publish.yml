@@ -16,7 +16,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -e ".[dev]"
+      # UI routes are part of the release suite; provider SDKs are included by
+      # the dev extra so Oracle/MongoDB/Anthropic tests do not silently skip.
+      - run: pip install -e ".[dev,ui]"
       # Match test.yml: tests/performance is excluded — it's flaky on shared
       # CI runners, and a release gate must not be flakier than CI.
       - run: pytest tests/unit tests/integration -q

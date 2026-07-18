@@ -72,7 +72,9 @@ No changes yet.
   current Starlette signatures without pinning users to an old FastAPI;
   package/UI/npm metadata is synchronized at `0.2.0`; agent edits preserve
   WhatsApp configuration; dashboard automation counts work on every supported
-  backend; and docs use the canonical CLI commands and valid links.
+  backend; release CI installs the UI and optional-provider test dependencies
+  instead of silently skipping those suites; and docs use the canonical CLI
+  commands and valid links.
 
 ### Continual learning: human-in-the-loop UI
 

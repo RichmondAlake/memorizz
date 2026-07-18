@@ -110,6 +110,11 @@ dev = [
     "pre-commit>=3.0",
     "httpx>=0.24",
     "mongomock>=4.1",
+    # Lightweight optional-provider SDKs used by the deterministic unit suite.
+    # Keeping them in dev prevents CI from silently skipping provider coverage.
+    "anthropic>=0.26.0",
+    "pymongo>=4.0.0",
+    "oracledb>=2.0.0",
 ]
 all = [
     "anthropic>=0.26.0",

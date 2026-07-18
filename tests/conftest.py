@@ -19,12 +19,25 @@ from memorizz import embeddings as _embeddings  # noqa: E402
 from memorizz.short_term_memory import semantic_cache as _semantic_cache  # noqa: E402
 
 # Skip provider tests whose modules import an optional DB driver at import time,
-# so a plain offline `pytest` collects cleanly without the mongodb/oracle extras.
+# so a base-only checkout still collects cleanly. The dev extra installs both
+# drivers, so the canonical local/CI suite exercises these tests.
 collect_ignore = []
 try:
     import pymongo  # noqa: F401
 except ImportError:
     collect_ignore.append("unit/test_mongodb_provider_self_aware.py")
+
+try:
+    import oracledb  # noqa: F401
+except ImportError:
+    collect_ignore.extend(
+        [
+            "unit/test_oracle_in_database_embeddings.py",
+            "unit/test_oracle_provider_close.py",
+            "unit/test_oracle_provider_ids.py",
+            "unit/test_oracle_workflow_record_ids.py",
+        ]
+    )
 
 
 def _test_embedding(_text: str, **kwargs):
