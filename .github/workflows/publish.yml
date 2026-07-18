@@ -90,12 +90,38 @@ jobs:
         with:
           name: dist
           path: dist/
+      - name: Check for an existing exact PyPI release
+        id: existing
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          if ! curl -fsS "https://pypi.org/pypi/memorizz/${VER}/json" -o /tmp/pypi.json; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          published = {
+              item["filename"]: item["digests"]["sha256"]
+              for item in json.loads(Path("/tmp/pypi.json").read_text())["urls"]
+          }
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file()
+          }
+          if published != local:
+              raise SystemExit(
+                  "PyPI already has this version, but its artifact hashes do not "
+                  f"match this tag build.\npublished={published}\nlocal={local}"
+              )
+          print("PyPI already contains the exact tag artifacts.")
+          PY
+          echo "present=true" >> "$GITHUB_OUTPUT"
       - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          # Manual fallback uploads use a project-scoped token. A rerun of the
-          # canonical tag workflow must still complete GitHub/npm/tap release
-          # jobs when those exact versioned artifacts already exist on PyPI.
-          skip-existing: true
+        if: steps.existing.outputs.present != 'true'
 
   github-release:
     needs: pypi

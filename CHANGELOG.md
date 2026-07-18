@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-No changes yet.
+### Fixed
+
+* Release automation now verifies and accepts an existing byte-identical PyPI
+  upload before requesting Trusted Publishing credentials, allowing a
+  project-token fallback release to continue to GitHub/npm/Homebrew jobs.
 
 ## 0.2.0 — 2026-07-18
 
