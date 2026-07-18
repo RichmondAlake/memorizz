@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import copy
 import inspect
 import json
 import logging
@@ -15,6 +16,27 @@ logger = logging.getLogger(__name__)
 
 # Suppress httpx logs to reduce noise from API requests
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+_MAX_CACHE_CONTROL_BREAKPOINTS = 4
+_CACHEABLE_CONTENT_BLOCK_TYPES = frozenset(
+    {
+        "bash_code_execution_tool_result",
+        "code_execution_tool_result",
+        "container_upload",
+        "document",
+        "image",
+        "search_result",
+        "server_tool_use",
+        "text",
+        "text_editor_code_execution_tool_result",
+        "tool_reference",
+        "tool_result",
+        "tool_search_tool_result",
+        "tool_use",
+        "web_fetch_tool_result",
+        "web_search_tool_result",
+    }
+)
 
 
 class Anthropic(LLMProvider):
@@ -192,7 +214,7 @@ class Anthropic(LLMProvider):
 
     def generate(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: str = "auto",
     ) -> Any:
@@ -202,21 +224,7 @@ class Anthropic(LLMProvider):
         ``SimpleNamespace`` object that matches the shape MemAgent expects
         (``response.choices[0].message.tool_calls``).
         """
-        system_text, api_messages = self._split_system(messages)
-        api_messages = self._convert_messages(api_messages)
-
-        kwargs: Dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": self._max_tokens,
-            "messages": api_messages,
-        }
-        if system_text:
-            kwargs["system"] = system_text
-        if tools:
-            kwargs["tools"] = self._convert_tools(tools)
-            kwargs["tool_choice"] = self._convert_tool_choice(tool_choice)
-        kwargs.update(self._request_options)
-        self._apply_cache_control(kwargs)
+        kwargs = self._build_request_kwargs(messages, tools, tool_choice)
 
         response = self.client.messages.create(**kwargs)
         self._last_usage = self._extract_usage(response)
@@ -234,7 +242,7 @@ class Anthropic(LLMProvider):
 
     def generate_stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: str = "auto",
     ) -> Generator[Dict[str, Any], None, None]:
@@ -246,21 +254,7 @@ class Anthropic(LLMProvider):
         - ``{"type": "tool_calls", "response": <SimpleNamespace>}``
         - ``{"type": "done", "content": "<accumulated text>"}``
         """
-        system_text, api_messages = self._split_system(messages)
-        api_messages = self._convert_messages(api_messages)
-
-        kwargs: Dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": self._max_tokens,
-            "messages": api_messages,
-        }
-        if system_text:
-            kwargs["system"] = system_text
-        if tools:
-            kwargs["tools"] = self._convert_tools(tools)
-            kwargs["tool_choice"] = self._convert_tool_choice(tool_choice)
-        kwargs.update(self._request_options)
-        self._apply_cache_control(kwargs)
+        kwargs = self._build_request_kwargs(messages, tools, tool_choice)
 
         accumulated_content = ""
         tool_calls_acc: Dict[int, Dict[str, Any]] = {}
@@ -372,11 +366,43 @@ class Anthropic(LLMProvider):
     # Prompt caching
     # ------------------------------------------------------------------
 
+    def _build_request_kwargs(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+    ) -> Dict[str, Any]:
+        """Build one provider-owned Anthropic request.
+
+        Conversion deep-copies all caller-owned message/tool data before
+        prompt-cache metadata is attached. Keeping request assembly here also
+        guarantees that streaming and non-streaming calls apply the same
+        cache-breakpoint policy.
+        """
+        system_content, api_messages = self._split_system(messages)
+        api_messages = self._convert_messages(api_messages)
+
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self._max_tokens,
+            "messages": api_messages,
+        }
+        if system_content:
+            kwargs["system"] = system_content
+        if tools:
+            kwargs["tools"] = self._convert_tools(tools)
+            kwargs["tool_choice"] = self._convert_tool_choice(tool_choice)
+        kwargs.update(copy.deepcopy(self._request_options))
+        self._apply_cache_control(kwargs)
+        self._validate_cache_control_budget(kwargs)
+        return kwargs
+
     def _apply_cache_control(self, kwargs: Dict[str, Any]) -> None:
         """Attach ephemeral ``cache_control`` breakpoints to the request.
 
         Anthropic prompt caching is opt-in and prefix-based (rendered order:
-        tools → system → messages). Three breakpoints cover the agent loop:
+        tools → system → messages). Up to three MemoRizz-managed breakpoints
+        cover the agent loop within Anthropic's four-breakpoint request budget:
 
         1. On the system prompt — caches the tool schemas *and* the system
            text together, so they're read (not re-billed) on every tool-loop
@@ -400,20 +426,37 @@ class Anthropic(LLMProvider):
         if not self._enable_prompt_caching:
             return
 
-        system_text = kwargs.get("system")
-        if isinstance(system_text, str) and system_text.strip():
+        existing = self._count_cache_control_breakpoints(kwargs)
+        if existing > _MAX_CACHE_CONTROL_BREAKPOINTS:
+            self._raise_cache_control_overflow(existing)
+        remaining = _MAX_CACHE_CONTROL_BREAKPOINTS - existing
+
+        def mark_block(block: Dict[str, Any]) -> None:
+            nonlocal remaining
+            if block.get("cache_control") is not None or remaining <= 0:
+                return
+            block["cache_control"] = {"type": "ephemeral"}
+            remaining -= 1
+
+        system_content = kwargs.get("system")
+        if isinstance(system_content, str) and system_content.strip() and remaining > 0:
             kwargs["system"] = [
                 {
                     "type": "text",
-                    "text": system_text,
+                    "text": system_content,
                     "cache_control": {"type": "ephemeral"},
                 }
             ]
+            remaining -= 1
+        elif isinstance(system_content, list):
+            system_block = self._last_cacheable_content_block(system_content)
+            if system_block is not None:
+                mark_block(system_block)
 
         messages = kwargs.get("messages") or []
-        marked = 0
+        selected = 0
         for msg in reversed(messages):
-            if marked >= 2:
+            if selected >= 2:
                 break
             if not isinstance(msg, dict):
                 continue
@@ -421,26 +464,94 @@ class Anthropic(LLMProvider):
             if isinstance(content, str):
                 if not content.strip():
                     continue
-                msg["content"] = [
-                    {
-                        "type": "text",
-                        "text": content,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-                marked += 1
+                selected += 1
+                if remaining > 0:
+                    msg["content"] = [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                    remaining -= 1
             elif isinstance(content, list) and content:
-                last_block = content[-1]
-                if isinstance(last_block, dict) and last_block.get("type") in (
-                    "text",
-                    "tool_result",
-                    "tool_use",
-                    "image",
-                ):
-                    updated = dict(last_block)
-                    updated["cache_control"] = {"type": "ephemeral"}
-                    content[-1] = updated
-                    marked += 1
+                last_block = self._last_cacheable_content_block(content)
+                if last_block is None:
+                    continue
+                selected += 1
+                mark_block(last_block)
+
+        self._validate_cache_control_budget(kwargs)
+
+    @staticmethod
+    def _last_cacheable_content_block(
+        content: List[Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Return the last block that Anthropic permits as a breakpoint."""
+        for block in reversed(content):
+            if (
+                isinstance(block, dict)
+                and block.get("type") in _CACHEABLE_CONTENT_BLOCK_TYPES
+            ):
+                return block
+        return None
+
+    @staticmethod
+    def _count_cache_control_breakpoints(kwargs: Dict[str, Any]) -> int:
+        """Count only API-level cache breakpoints in a request.
+
+        This deliberately does not recurse into tool schemas, ``tool_use``
+        inputs, or document sources: a user payload may legitimately contain
+        a key named ``cache_control`` without it being an Anthropic cache
+        breakpoint.
+        """
+
+        def has_marker(value: Any) -> int:
+            return int(
+                isinstance(value, dict) and value.get("cache_control") is not None
+            )
+
+        def count_content_markers(content: Any) -> int:
+            if not isinstance(content, (list, tuple)):
+                return 0
+            count = 0
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                count += has_marker(block)
+                # Tool results can contain their own typed content blocks.
+                # Follow only the content-block hierarchy, never arbitrary
+                # inputs, schemas, sources, or other user payloads.
+                count += count_content_markers(block.get("content"))
+            return count
+
+        count = int(kwargs.get("cache_control") is not None)
+        count += sum(has_marker(tool) for tool in kwargs.get("tools") or [])
+
+        system_content = kwargs.get("system")
+        count += count_content_markers(system_content)
+
+        for message in kwargs.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            count += count_content_markers(message.get("content"))
+
+        return count
+
+    @classmethod
+    def _validate_cache_control_budget(cls, kwargs: Dict[str, Any]) -> None:
+        count = cls._count_cache_control_breakpoints(kwargs)
+        if count > _MAX_CACHE_CONTROL_BREAKPOINTS:
+            cls._raise_cache_control_overflow(count)
+
+    @staticmethod
+    def _raise_cache_control_overflow(count: int) -> None:
+        raise ValueError(
+            "Anthropic accepts at most "
+            f"{_MAX_CACHE_CONTROL_BREAKPOINTS} cache_control breakpoints; "
+            f"the request contains {count}. Remove caller-supplied breakpoints "
+            "until the request contains four or fewer."
+        )
 
     # ------------------------------------------------------------------
     # Usage tracking
@@ -497,23 +608,37 @@ class Anthropic(LLMProvider):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _split_system(messages: List[Dict[str, str]]):
+    def _split_system(messages: List[Dict[str, Any]]):
         """Separate system messages from the conversation.
 
         Anthropic's API takes ``system`` as a top-level parameter, not as a
         message with ``role='system'``.  This helper pulls out system messages
-        and returns ``(system_text, remaining_messages)``.
+        and returns ``(system_content, remaining_messages)``. System content
+        remains a string when all system messages are text, or becomes an
+        owned content-block list when callers supply structured blocks.
         """
-        system_parts: List[str] = []
-        remaining: List[Dict[str, str]] = []
+        system_parts: List[Any] = []
+        remaining: List[Dict[str, Any]] = []
         for msg in messages:
             if msg.get("role") == "system":
                 content = msg.get("content", "")
                 if content:
-                    system_parts.append(content)
+                    system_parts.append(copy.deepcopy(content))
             else:
                 remaining.append(msg)
-        return ("\n\n".join(system_parts) if system_parts else None, remaining)
+
+        if not system_parts:
+            return None, remaining
+        if all(isinstance(part, str) for part in system_parts):
+            return "\n\n".join(system_parts), remaining
+
+        system_blocks: List[Dict[str, Any]] = []
+        for part in system_parts:
+            if isinstance(part, str):
+                system_blocks.append({"type": "text", "text": part})
+            elif isinstance(part, (list, tuple)):
+                system_blocks.extend(part)
+        return system_blocks or None, remaining
 
     @staticmethod
     def _convert_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -531,7 +656,8 @@ class Anthropic(LLMProvider):
         tool results back 400s with ``Unexpected role "tool"``.
 
         Consecutive tool results (parallel tool calls) are merged into one user
-        message, as Anthropic requires. Plain text messages pass through.
+        message, as Anthropic requires. Plain messages retain their structure
+        but are deep-copied so request metadata cannot mutate caller history.
         """
         converted: List[Dict[str, Any]] = []
         pending_results: List[Dict[str, Any]] = []
@@ -541,7 +667,12 @@ class Anthropic(LLMProvider):
                 converted.append({"role": "user", "content": list(pending_results)})
                 pending_results.clear()
 
-        for msg in messages:
+        for original_msg in messages:
+            # Plain messages must not alias MemAgent's reusable conversation
+            # history; cache annotations are request-specific metadata.
+            msg = copy.deepcopy(original_msg)
+            if isinstance(msg.get("content"), tuple):
+                msg["content"] = list(msg["content"])
             role = msg.get("role")
 
             if role == "tool":
@@ -606,17 +737,20 @@ class Anthropic(LLMProvider):
             {"name": ..., "description": ..., "input_schema": {...}}
         """
         converted = []
-        for tool in tools:
+        for original_tool in tools:
+            tool = copy.deepcopy(original_tool)
             func = tool.get("function", tool)
-            converted.append(
-                {
-                    "name": func.get("name", "unknown"),
-                    "description": func.get("description", ""),
-                    "input_schema": func.get(
-                        "parameters", {"type": "object", "properties": {}}
-                    ),
-                }
-            )
+            converted_tool = {
+                "name": func.get("name", "unknown"),
+                "description": func.get("description", ""),
+                "input_schema": func.get(
+                    "parameters", {"type": "object", "properties": {}}
+                ),
+            }
+            cache_control = func.get("cache_control", tool.get("cache_control"))
+            if cache_control is not None:
+                converted_tool["cache_control"] = cache_control
+            converted.append(converted_tool)
         return converted
 
     @staticmethod

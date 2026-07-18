@@ -56,14 +56,24 @@ automatically (`enable_prompt_caching=True` by default):
 - on the **second-to-last message** — the cross-turn read point that lets
   the growing conversation accrue incremental cache hits.
 
+Request construction is isolated from MemAgent's reusable history: MemoRizz
+annotates provider-owned deep copies, so cache metadata cannot leak into a
+later tool-loop iteration. It also enforces
+[Anthropic's request-wide maximum of four breakpoints](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+across tools, system content, and messages. Existing caller-supplied
+breakpoints are preserved and consume the budget before MemoRizz adds its
+own; an already-invalid request containing more than four fails locally
+before an API call.
+
 In live testing this serves ~99% of the prompt from cache from turn 2
 onward. Reads bill at ~0.1× input price; disable with
 `Anthropic(..., enable_prompt_caching=False)`.
 
 ### OpenAI
 
-OpenAI caches automatically for prompts ≥ 1024 tokens, keyed on the exact
-prefix. MemoRizz maximizes hits by:
+[OpenAI caches automatically](https://developers.openai.com/api/docs/guides/prompt-caching)
+for prompts ≥ 1024 tokens, keyed on the exact prefix. MemoRizz maximizes hits
+by:
 
 - pinning a **`prompt_cache_key`** per conversation thread
   (`memorizz:{agent_id}:{memory_id}:{thread_id}`), so requests route to the
@@ -71,6 +81,15 @@ prefix. MemoRizz maximizes hits by:
 - optional **`prompt_cache_retention="24h"`**
   (`OpenAI(..., prompt_cache_retention="24h")`) for long-lived agents on
   models that support extended retention.
+
+Unlike the Anthropic integration, MemoRizz does not add cache annotations to
+OpenAI message blocks. It relies on OpenAI's default implicit server-side
+breakpoint, so there is no reusable-message mutation or client-side
+breakpoint accumulation. GPT-5.6 and later also support explicit
+`prompt_cache_breakpoint` blocks with a four-write limit, but MemoRizz does
+not currently emit those blocks. `prompt_cache_retention` is the legacy
+control for models before GPT-5.6; newer model families use
+`prompt_cache_options.ttl`.
 
 Cache parameters are only sent to the official endpoint — local
 OpenAI-compatible servers (llama.cpp, LM Studio, vLLM) are left untouched.

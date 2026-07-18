@@ -2,8 +2,16 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-07-18
+
 ### Fixed
 
+* Anthropic prompt caching no longer mutates MemAgent's reusable conversation
+  history or accumulates stale `cache_control` fields across tool-loop
+  iterations. Streaming and non-streaming calls now share one request builder
+  that owns deep copies of message/tool data, preserves caller-supplied
+  breakpoints, and enforces Anthropic's four-breakpoint request-wide limit
+  before any API call.
 * Release automation now verifies and accepts an existing byte-identical PyPI
   upload before requesting Trusted Publishing credentials, allowing a
   project-token fallback release to continue to GitHub/npm/Homebrew jobs. It

@@ -114,12 +114,21 @@ def test_dict_arguments_passed_through():
 
 
 @pytest.mark.unit
-def test_plain_messages_pass_through_unchanged():
+def test_plain_messages_are_equal_but_request_owned():
     msgs = [
-        {"role": "user", "content": "hi"},
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "hi"}],
+        },
         {"role": "assistant", "content": "hello"},
     ]
-    assert convert(msgs) == msgs
+    converted = convert(msgs)
+
+    assert converted == msgs
+    assert converted[0] is not msgs[0]
+    assert converted[0]["content"] is not msgs[0]["content"]
+    assert converted[0]["content"][0] is not msgs[0]["content"][0]
+    assert converted[1] is not msgs[1]
 
 
 @pytest.mark.unit
