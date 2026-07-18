@@ -6,7 +6,9 @@
 
 * Release automation now verifies and accepts an existing byte-identical PyPI
   upload before requesting Trusted Publishing credentials, allowing a
-  project-token fallback release to continue to GitHub/npm/Homebrew jobs.
+  project-token fallback release to continue to GitHub/npm/Homebrew jobs. It
+  also supports resuming an existing immutable tag through manual dispatch and
+  skips npm publication cleanly when its repository token is not configured.
 
 ## 0.2.0 — 2026-07-18
 

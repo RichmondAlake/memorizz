@@ -1,18 +1,30 @@
 name: Publish
 
-# Tag-triggered release: test -> build -> PyPI (OIDC trusted publishing) ->
-# GitHub release -> bump the Homebrew tap + publish the npm shim.
+# Tag-triggered release (or explicit recovery dispatch): test -> build -> PyPI
+# (OIDC trusted publishing) -> GitHub release -> bump the Homebrew tap +
+# publish the npm shim.
 # The pyproject `version` is the source of truth; the vX.Y.Z tag must match it
 # (enforced below) so the wheel, npm shim, and brew formula all agree.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing vX.Y.Z tag to release or resume"
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -28,10 +40,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: astral-sh/setup-uv@v5
       - name: Verify tag matches pyproject version
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${RELEASE_TAG#v}"
           PROJ=$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           echo "tag=$TAG pyproject=$PROJ"
           test "$TAG" = "$PROJ" || { echo "::error::tag v$TAG != pyproject version $PROJ — bump pyproject.toml before tagging"; exit 1; }
@@ -93,7 +107,7 @@ jobs:
       - name: Check for an existing exact PyPI release
         id: existing
         run: |
-          VER="${GITHUB_REF_NAME#v}"
+          VER="${RELEASE_TAG#v}"
           if ! curl -fsS "https://pypi.org/pypi/memorizz/${VER}/json" -o /tmp/pypi.json; then
             echo "present=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -135,6 +149,7 @@ jobs:
           path: dist/
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: dist/*
           generate_release_notes: true
 
@@ -143,18 +158,34 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write # npm provenance
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
+      - name: Check npm token
+        id: gate
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "NPM_TOKEN not configured - skipping npm shim publication."
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/setup-node@v4
+        if: steps.gate.outputs.enabled == 'true'
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
       - name: Sync version + publish shim
+        if: steps.gate.outputs.enabled == 'true'
         working-directory: packaging/npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
         run: |
-          VER="${GITHUB_REF_NAME#v}"
+          VER="${RELEASE_TAG#v}"
           npm version "$VER" --no-git-tag-version --allow-same-version
           npm publish --provenance --access public
 
@@ -183,9 +214,9 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         id: meta
         run: |
-          VER="${GITHUB_REF_NAME#v}"
+          VER="${RELEASE_TAG#v}"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             URL=$(curl -fsSL "https://pypi.org/pypi/memorizz/$VER/json" \
               | python3 -c "import sys,json;print(next(u['url'] for u in json.load(sys.stdin)['urls'] if u['packagetype']=='sdist'))" 2>/dev/null || true)
             [ -n "$URL" ] && break
