@@ -4,6 +4,7 @@
 
 """Memory management functionality for MemAgent."""
 
+import inspect
 import json
 import logging
 import uuid
@@ -13,9 +14,26 @@ from typing import Any, Dict, List, Optional
 from ...enums import MemoryType, Role
 from ...long_term.episodic.conversational_memory_unit import ConversationMemoryUnit
 from ...memory_provider import MemoryProvider
-from ...memory_unit import MemoryUnit
+from ...memory_provider.base import _UNSET as _TL_UNSET
+from ...memory_provider.base import filter_tool_log_rows
 
 logger = logging.getLogger(__name__)
+
+
+def _callable_accepts(fn: Any, name: str) -> bool:
+    """True if ``fn`` accepts a keyword argument ``name`` (or **kwargs).
+
+    Lets ``list_tool_logs`` hand the ``thread_id`` filter to a provider's native
+    query only when that native actually understands it — older / third-party
+    providers fall back to the shared in-memory scan instead of erroring.
+    """
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.name == name or p.kind == inspect.Parameter.VAR_KEYWORD for p in params
+    )
 
 
 class MemoryManager:
@@ -149,7 +167,7 @@ class MemoryManager:
             return []
 
     def save_memory_unit(
-        self, memory_unit: MemoryUnit, memory_id: str
+        self, memory_unit: ConversationMemoryUnit, memory_id: str
     ) -> Optional[str]:
         """
         Save a memory unit to storage.
@@ -222,6 +240,7 @@ class MemoryManager:
         memory_id: str,
         limit: int = 5,
         user_id: Optional[str] = None,
+        include_embedding: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve memories relevant to a query.
@@ -233,6 +252,9 @@ class MemoryManager:
             limit: Maximum number of results.
             user_id: Optional user scope. When set, results are restricted to
                 entries with a matching ``user_id``.
+            include_embedding: When True (and the provider supports it),
+                results carry their stored embedding vectors so callers can
+                run similarity dedup/MMR without re-embedding anything.
 
         Returns:
             List of relevant memory entries. Always a list — providers that
@@ -240,13 +262,20 @@ class MemoryManager:
             cursor are coerced here so callers can rely on the shape.
         """
         try:
-            results = self.memory_provider.retrieve_by_query(
-                query=query,
-                memory_id=memory_id,
-                memory_type=memory_type,
-                limit=limit,
-                user_id=user_id,
-            )
+            kwargs: Dict[str, Any] = {
+                "query": query,
+                "memory_id": memory_id,
+                "memory_type": memory_type,
+                "limit": limit,
+                "user_id": user_id,
+            }
+            # Only forward include_embedding to providers that understand it;
+            # older/third-party providers keep their default projection.
+            if include_embedding and _callable_accepts(
+                self.memory_provider.retrieve_by_query, "include_embedding"
+            ):
+                kwargs["include_embedding"] = True
+            results = self.memory_provider.retrieve_by_query(**kwargs)
 
             # Normalize provider return types:
             # - ``None`` is the legacy "no results" sentinel from some
@@ -309,6 +338,43 @@ class MemoryManager:
             agent_id=agent_id,
             user_id=user_id,
         )
+
+    def is_duplicate_of_recent(
+        self,
+        memory_id: str,
+        role: str,
+        content: str,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        lookback: int = 4,
+    ) -> bool:
+        """True when an identical (role, content) row was just stored.
+
+        Write-path dedup guard: repeated identical queries (semantic-cache
+        hits, client retries) would otherwise accumulate duplicate
+        conversation rows that later bloat the history window. Only the
+        cached tail is inspected — this is a cheap same-session guard, not a
+        full-history scan.
+        """
+        if not content or not str(content).strip():
+            return False
+        cached = self._conversation_memory_cache.get((memory_id, user_id))
+        if not cached:
+            return False
+        target_role = str(role or "").strip().lower()
+        target_content = str(content).strip()
+        for entry in reversed(cached[-max(lookback, 1) :]):
+            if not isinstance(entry, dict):
+                continue
+            nested = entry.get("content")
+            nested = nested if isinstance(nested, dict) else entry
+            if thread_id and str(nested.get("thread_id") or "") != str(thread_id):
+                continue
+            entry_role = str(nested.get("role") or "").strip().lower()
+            entry_content = str(nested.get("content") or "").strip()
+            if entry_role == target_role and entry_content == target_content:
+                return True
+        return False
 
     def clear_conversation_cache(
         self,
@@ -499,6 +565,7 @@ class MemoryManager:
         memory_id: str,
         limit: int = 20,
         user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         List recent tool log entries for a given memory ID.
@@ -507,6 +574,11 @@ class MemoryManager:
             memory_id: The memory ID to list logs for.
             limit: Maximum number of entries to return.
             user_id: Optional user scope.
+            thread_id: Optional thread scope. When set, only tool logs recorded
+                in that conversation thread are returned — this is what keeps the
+                system-prompt tool-log digest from leaking another thread's tool
+                ids or letting one fall off a global last-N window. ``None``
+                preserves the legacy all-threads behaviour.
 
         Returns:
             List of tool log entries, most recent first.
@@ -514,42 +586,37 @@ class MemoryManager:
         try:
             # Prefer the provider's native scoped query when it ships one
             # (MongoDBProvider.list_tool_logs uses an indexed find + sort +
-            # limit aggregate). Falls back to the in-memory scan for
-            # providers without a tuned implementation so MemoryManager
-            # stays provider-agnostic. Wrapped in hasattr rather than
-            # isinstance to avoid pulling the MongoDB provider import
-            # path here.
+            # limit aggregate). Falls back to the shared in-memory scan for
+            # providers without a tuned implementation so MemoryManager stays
+            # provider-agnostic. ``hasattr`` rather than isinstance avoids
+            # pulling the MongoDB provider import path here.
             native = getattr(self.memory_provider, "list_tool_logs", None)
-            if callable(native):
+            # Only delegate the thread filter to the native query when that
+            # native actually accepts it; an older / third-party provider that
+            # predates thread scoping is routed to the fallback so the filter is
+            # still applied (correctness over the indexed fast path).
+            if callable(native) and (
+                thread_id is None or _callable_accepts(native, "thread_id")
+            ):
                 kwargs: Dict[str, Any] = {"memory_id": memory_id, "limit": limit}
                 if user_id is not None:
                     kwargs["user_id"] = user_id
+                if thread_id is not None:
+                    kwargs["thread_id"] = thread_id
                 rows = native(**kwargs) or []
-                # The native implementation already filtered + sorted +
-                # limited, so we just normalize the type and return.
                 return [r for r in rows if isinstance(r, dict)]
 
-            # Fallback: in-memory scan + filter + sort. O(n) in the
-            # provider's tool_log size but correct for any backend.
+            # Fallback: read every row + filter/sort/limit in Python via the
+            # shared helper. O(n) in the provider's tool_log size but correct
+            # for any backend (and identical scoping rules to the natives).
             all_rows = self.memory_provider.list_all(MemoryType.TOOL_LOG) or []
-            filtered: List[Dict[str, Any]] = []
-            for row in all_rows:
-                if not isinstance(row, dict):
-                    continue
-                if memory_id and row.get("memory_id") != memory_id:
-                    continue
-                if user_id is not None and row.get("user_id") != user_id:
-                    continue
-                filtered.append(row)
-
-            # Sort by timestamp descending so "recent" means recent.
-            def _ts(row: Dict[str, Any]) -> str:
-                return str(row.get("timestamp") or "")
-
-            filtered.sort(key=_ts, reverse=True)
-            if limit and limit > 0:
-                filtered = filtered[:limit]
-            return filtered
+            return filter_tool_log_rows(
+                all_rows,
+                memory_id=memory_id,
+                user_id=(user_id if user_id is not None else _TL_UNSET),
+                thread_id=thread_id,
+                limit=limit,
+            )
         except Exception as e:
             logger.error("Failed to list tool logs for %s: %s", memory_id, e)
             return []
@@ -571,7 +638,22 @@ class MemoryManager:
         try:
             from ...enums.memory_type import MemoryType
 
-            documents = self.memory_provider.list_all(MemoryType.SUMMARIES) or []
+            # Prefer a provider-native scoped query (indexed find + sort +
+            # limit) over reading the whole summaries collection and
+            # filtering in Python. Fallback keeps third-party providers
+            # working unchanged.
+            native = getattr(self.memory_provider, "list_summaries", None)
+            if callable(native):
+                kwargs: Dict[str, Any] = {
+                    "memory_id": memory_id,
+                    "agent_id": agent_id,
+                    "limit": max(limit, 1) * 3,  # headroom for python-side OR-match
+                }
+                if _callable_accepts(native, "user_id"):
+                    kwargs["user_id"] = user_id
+                documents = native(**kwargs) or []
+            else:
+                documents = self.memory_provider.list_all(MemoryType.SUMMARIES) or []
         except Exception as exc:
             logger.debug("Failed to list summaries for thread %s: %s", memory_id, exc)
             return []
@@ -748,3 +830,313 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"Error deleting memory: {e}")
             return False
+
+    def generate_summaries(
+        self,
+        *,
+        model: Any,
+        agent_id: Optional[str],
+        memory_ids: Optional[List[str]],
+        current_memory_id: Optional[str],
+        days_back: int = 7,
+        max_memories_per_summary: int = 50,
+        record_context_usage: Optional[Any] = None,
+    ) -> List[str]:
+        """
+        Generate summaries by compressing memory units from a specified time period.
+
+        Implementation moved verbatim from ``MemAgent.generate_summaries`` —
+        the agent's collaborators (LLM model, agent/memory ids, context-usage
+        recorder) are threaded through explicitly.
+
+        Returns:
+        --------
+        List[str]
+            List of summary IDs that were created
+        """
+        try:
+            import time
+
+            from ...embeddings import get_embedding
+
+            # Calculate time range (days_back days ago to now)
+            current_time = time.time()
+            start_time = current_time - (days_back * 24 * 60 * 60)
+
+            logger.info(
+                f"Generating summaries for agent {agent_id} from {days_back} days back"
+            )
+            logger.info(f"Agent memory_ids: {memory_ids}")
+            logger.info(f"Current memory_id: {current_memory_id}")
+            logger.info(f"Time range: {start_time} to {current_time}")
+
+            # Ensure we have memory IDs to search
+            memory_ids_to_search = memory_ids or []
+            if current_memory_id and current_memory_id not in memory_ids_to_search:
+                memory_ids_to_search = [current_memory_id] + memory_ids_to_search
+
+            if not memory_ids_to_search:
+                logger.warning(
+                    f"Agent {agent_id} has no memory_ids to search for summaries"
+                )
+                return []
+
+            logger.info(
+                f"Searching {len(memory_ids_to_search)} memory_ids: {memory_ids_to_search}"
+            )
+
+            # Collect conversation memories from all memory IDs
+            all_memories = []
+            for memory_id in memory_ids_to_search:
+                logger.info(
+                    f"Retrieving conversation history for memory_id: {memory_id}"
+                )
+                try:
+                    # Retrieve all conversation history
+                    memories = self.memory_provider.retrieve_conversation_history_ordered_by_timestamp(
+                        memory_id=memory_id, include_embedding=False
+                    )
+
+                    if memories:
+                        logger.info(
+                            f"Retrieved {len(memories)} raw memories for memory_id: {memory_id}"
+                        )
+
+                        # Filter by time range
+                        filtered = []
+                        for idx, mem in enumerate(memories):
+                            mem_timestamp = mem.get("timestamp")
+                            original_timestamp = mem_timestamp
+
+                            # Convert timestamp to float if needed
+                            if isinstance(mem_timestamp, str):
+                                try:
+                                    from datetime import datetime
+
+                                    # Try multiple timestamp formats
+                                    if "T" in mem_timestamp:
+                                        # ISO format
+                                        mem_timestamp = datetime.fromisoformat(
+                                            mem_timestamp.replace("Z", "+00:00")
+                                        ).timestamp()
+                                    else:
+                                        # Try parsing as float string
+                                        mem_timestamp = float(mem_timestamp)
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Could not parse timestamp '{original_timestamp}' at index {idx}: {e}"
+                                    )
+                                    continue
+                            elif hasattr(mem_timestamp, "timestamp"):
+                                # datetime object
+                                mem_timestamp = mem_timestamp.timestamp()
+                            elif not isinstance(mem_timestamp, (int, float)):
+                                logger.warning(
+                                    f"Unknown timestamp type at index {idx}: {type(mem_timestamp)} = {original_timestamp}"
+                                )
+                                continue
+
+                            # Convert to float
+                            mem_timestamp = float(mem_timestamp)
+
+                            # Debug first few timestamps
+                            if idx < 3:
+                                logger.info(
+                                    f"Memory {idx}: timestamp={mem_timestamp}, start_time={start_time}, current_time={current_time}, in_range={start_time <= mem_timestamp <= current_time}"
+                                )
+
+                            if start_time <= mem_timestamp <= current_time:
+                                filtered.append(mem)
+
+                        logger.info(
+                            f"Found {len(filtered)} memories within time range (out of {len(memories)} total) for memory_id: {memory_id}"
+                        )
+                        all_memories.extend(filtered)
+                    else:
+                        logger.info(f"No memories returned for memory_id: {memory_id}")
+                except Exception as e:
+                    logger.warning(
+                        f"Could not retrieve memories for memory_id {memory_id}: {e}"
+                    )
+                    import traceback
+
+                    logger.debug(traceback.format_exc())
+
+            if not all_memories:
+                logger.info(
+                    f"No memories found for agent {agent_id} in the specified time range"
+                )
+                return []
+
+            # Sort memories by timestamp
+            def get_timestamp(mem):
+                ts = mem.get("timestamp", 0)
+                if isinstance(ts, str):
+                    try:
+                        from datetime import datetime
+
+                        return datetime.fromisoformat(
+                            ts.replace("Z", "+00:00")
+                        ).timestamp()
+                    except (ValueError, Exception):
+                        return 0
+                return float(ts) if isinstance(ts, (int, float)) else 0
+
+            all_memories.sort(key=get_timestamp)
+
+            logger.info(f"Found {len(all_memories)} memory units to summarize")
+
+            # Split memories into chunks and create summaries
+            summary_ids = []
+            for i in range(0, len(all_memories), max_memories_per_summary):
+                memory_chunk = all_memories[i : i + max_memories_per_summary]
+
+                # Generate summary for this chunk
+                summary_content = self.compress_memories_with_llm(
+                    memory_chunk,
+                    model=model,
+                    record_context_usage=record_context_usage,
+                )
+
+                if summary_content:
+                    # Get timestamps for period
+                    period_start = get_timestamp(memory_chunk[0])
+                    period_end = get_timestamp(memory_chunk[-1])
+
+                    # Get the memory_id from the first memory in the chunk
+                    chunk_memory_id = memory_chunk[0].get("memory_id")
+                    if not chunk_memory_id:
+                        # Fallback to current memory_id or first in list
+                        chunk_memory_id = current_memory_id or (
+                            memory_ids[0] if memory_ids else "default"
+                        )
+
+                    # Collect source message IDs for back-reference
+                    source_message_ids = []
+                    for mem in memory_chunk:
+                        msg_id = (
+                            mem.get("id") or mem.get("_id") or mem.get("memory_unit_id")
+                        )
+                        if msg_id:
+                            source_message_ids.append(str(msg_id))
+
+                    # Create summary document with source references
+                    summary_doc = {
+                        "memory_id": chunk_memory_id,
+                        "agent_id": agent_id,
+                        "content": summary_content,
+                        "period_start": period_start,
+                        "period_end": period_end,
+                        "memory_units_count": len(memory_chunk),
+                        "source_message_ids": source_message_ids,
+                        "summary_type": "automatic",
+                        "created_at": current_time,
+                        "embedding": get_embedding(summary_content),
+                    }
+
+                    # Store summary
+                    summary_id = self.memory_provider.store(
+                        summary_doc, MemoryType.SUMMARIES
+                    )
+                    summary_ids.append(summary_id)
+
+                    # Mark original messages as summarized so they are
+                    # excluded from conversation history on future loads
+                    if source_message_ids:
+                        try:
+                            self.mark_messages_as_summarized(
+                                source_message_ids, summary_id
+                            )
+                            # Clear conversation cache so next load reflects changes
+                            self.clear_conversation_cache(chunk_memory_id)
+                        except Exception as mark_exc:
+                            logger.debug(
+                                "Could not mark messages as summarized: %s",
+                                mark_exc,
+                            )
+
+                    logger.info(
+                        f"Created summary {summary_id} for memory_id {chunk_memory_id} covering {len(memory_chunk)} memories"
+                    )
+
+            logger.info(f"Generated {len(summary_ids)} summaries for agent {agent_id}")
+            return summary_ids
+
+        except Exception as e:
+            logger.error(f"Error generating summaries: {e}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+            return []
+
+    def compress_memories_with_llm(
+        self,
+        memories: List[Dict],
+        *,
+        model: Any,
+        record_context_usage: Optional[Any] = None,
+    ) -> str:
+        """
+        Use LLM to compress memory units into an emotionally and situationally relevant summary.
+
+        Implementation moved verbatim from ``MemAgent._compress_memories_with_llm``.
+
+        Parameters:
+        -----------
+        memories : List[Dict]
+            List of memory units to compress
+        model : Any
+            The LLM provider used to generate the summary
+        record_context_usage : Optional[Any]
+            Callback invoked as ``record_context_usage(stage=...)`` after a
+            successful generation (the agent's context-window tracker).
+
+        Returns:
+        --------
+        str
+            Compressed summary content
+        """
+        try:
+            # Extract content from memories
+            memory_contents = []
+            for memory in memories:
+                content = memory.get("content", "")
+                role = memory.get("role", "")
+
+                if content:
+                    if role:
+                        memory_contents.append(f"[{role}]: {content}")
+                    else:
+                        memory_contents.append(content)
+
+            if not memory_contents:
+                return ""
+
+            # Create compression prompt
+            memories_text = "\n".join(memory_contents)
+            compression_prompt = f"""
+Analyze the following memory units and create a concise summary that captures:
+1. Emotionally significant moments and interactions
+2. Situationally relevant context and patterns
+3. Key achievements, challenges, or learning experiences
+4. Important facts and information learned
+
+Memory Units:
+{memories_text}
+
+Provide a comprehensive but concise summary:"""
+
+            # Use the LLM to generate the summary
+            if model:
+                messages = [{"role": "user", "content": compression_prompt}]
+                summary = model.generate(messages)
+                if record_context_usage:
+                    record_context_usage(stage="memory_compression")
+                return summary.strip()
+            else:
+                logger.warning("No LLM model available for memory compression")
+                return ""
+
+        except Exception as e:
+            logger.error(f"Error compressing memories with LLM: {e}")
+            return ""

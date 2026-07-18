@@ -12,9 +12,6 @@ from typing import Any, Dict, List, Optional
 try:
     import numpy as np
 except ImportError:
-    # Fallback to basic Python math if numpy not available
-    import math
-
     np = None
 
 from ..embeddings import EmbeddingManager, get_embedding_manager
@@ -152,7 +149,7 @@ class SemanticCache:
 
                 return float(np.dot(vec1_np, vec2_np) / (norm1 * norm2))
 
-            import math  # noqa: F811
+            import math
 
             dot_product = 0.0
             norm1 = 0.0
@@ -791,32 +788,6 @@ class SemanticCache:
         logger.info(f"Cleared {memory_cleared} filtered cache entries from memory")
         return memory_cleared
 
-    def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics and health information."""
-        if not self.cache:
-            return {
-                "total_entries": 0,
-                "expired_entries": 0,
-                "memory_usage_mb": 0,
-                "hit_rate": 0.0,
-            }
-
-        expired_count = sum(
-            1 for entry in self.cache.values() if self._is_entry_expired(entry)
-        )
-        total_usage = sum(entry.usage_count for entry in self.cache.values())
-
-        return {
-            "total_entries": len(self.cache),
-            "expired_entries": expired_count,
-            "active_entries": len(self.cache) - expired_count,
-            "total_usage_count": total_usage,
-            "average_usage": total_usage / len(self.cache) if self.cache else 0,
-            "config": self.config.__dict__,
-            "agent_id": self.agent_id,
-            "memory_id": self.memory_id,
-        }
-
 
 # Standalone semantic cache for external frameworks
 class StandaloneSemanticCache(SemanticCache):
@@ -891,20 +862,3 @@ class StandaloneSemanticCache(SemanticCache):
     ) -> bool:
         """Simple caching interface for external frameworks."""
         return self.set(query, response, session_id=session_id)
-
-
-# Factory function for easy creation
-def create_semantic_cache(
-    agent_id: Optional[str] = None,
-    memory_id: Optional[str] = None,
-    memory_provider: Optional[MemoryProvider] = None,
-    **config_kwargs,
-) -> SemanticCache:
-    """Factory function to create semantic cache with sensible defaults."""
-    config = SemanticCacheConfig(**config_kwargs)
-    return SemanticCache(
-        config=config,
-        memory_provider=memory_provider,
-        agent_id=agent_id,
-        memory_id=memory_id,
-    )

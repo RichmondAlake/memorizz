@@ -9,7 +9,6 @@ This file maintains backward compatibility for existing code that imports
 from memorizz.memagent.
 
 Now uses the refactored memagent/ module with unified MemoryProvider interface.
-The original implementation is preserved in memagent_original_backup.py for reference.
 """
 
 # Import from the refactored implementation

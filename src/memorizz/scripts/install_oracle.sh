@@ -275,10 +275,7 @@ echo "  Admin Password: $PASSWORD" >&2
 echo "" >&2
 echo "📝 Environment Variables:" >&2
 echo "  To use these credentials in your shell, run:" >&2
-echo "    eval \$(./install_oracle.sh)" >&2
-echo "" >&2
-echo "  Or source the script:" >&2
-echo "    source ./install_oracle.sh" >&2
+echo "    eval \"\$(memorizz oracle install --image lite)\"" >&2
 echo "" >&2
 echo "  Or set manually:" >&2
 echo "    export ORACLE_ADMIN_PASSWORD=\"$PASSWORD\"" >&2

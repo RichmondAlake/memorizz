@@ -137,4 +137,44 @@ If MongoDB connection fails, the script will fall back to the default memory pro
 The evaluation uses GPT-4 for scoring, which may hit rate limits with large evaluations. Consider:
 - Using smaller `num_samples` values
 - Adding delays between API calls
-- Using a higher-tier OpenAI account 
+- Using a higher-tier OpenAI account
+## A/B accuracy testing (long-horizon)
+
+The harness supports paired A/B comparison of two memorizz builds plus the
+knobs that turn the oracle variant into a true long-horizon memory test:
+
+```bash
+# Arm 1 — baseline (any git ref, via a worktree; no need to touch your tree)
+git worktree add /tmp/memorizz-baseline <ref>
+PYTHONPATH=/tmp/memorizz-baseline/src python evaluate_memorizz.py \
+  --num_samples 50 --context_window_tokens 4000 \
+  --config_label baseline --output_filename ab_baseline.json
+
+# Arm 2 — candidate (current tree)
+python evaluate_memorizz.py \
+  --num_samples 50 --context_window_tokens 4000 \
+  --config_label candidate --output_filename ab_candidate.json
+
+# Paired report: per-category deltas, question-level flips, McNemar p-value
+python compare_runs.py results/ab_baseline.json results/ab_candidate.json
+```
+
+Key flags:
+
+- `--ingest_mode direct` (default) writes the dataset's user AND assistant
+  turns into conversation memory verbatim with embeddings — the
+  benchmark-correct method (questions frequently probe what the assistant
+  said). `--ingest_mode run` preserves the legacy replay-through-`agent.run()`
+  behaviour.
+- `--context_window_tokens 4000` constrains the agent's window so haystack
+  history genuinely overflows it. Without this, the oracle variant fits
+  in-window and you're testing reading, not memory.
+- `--judge_model` (default `gpt-4o`) and `--config_label` (recorded in
+  results metadata alongside the memorizz build path and token/cache
+  totals).
+
+Sampling uses evenly-spaced deterministic indices, so two runs with the
+same `--num_samples` always evaluate the same questions (paired
+comparison). Complementary mechanism probes (eviction-boundary recall,
+dedup false-positives, knowledge updates, cache neutrality, repeat-turn
+guard) live in `scripts/memory_accuracy_probes.py`.

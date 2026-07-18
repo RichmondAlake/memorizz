@@ -84,11 +84,12 @@ print(stats)
 ## 5. Optional: Oracle Backend
 
 ```bash
-./install_oracle.sh
-memorizz setup-oracle
+memorizz oracle install
+memorizz oracle setup
 ```
 
-Then swap the provider to `OracleProvider(OracleConfig(...))`. See `docs/memory-providers/oracle.md`.
+Then swap the provider to `OracleProvider(OracleConfig(...))`. See the
+[Oracle Provider guide](../memory-providers/oracle.md).
 
 ## Next Steps
 

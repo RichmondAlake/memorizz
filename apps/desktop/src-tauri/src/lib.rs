@@ -37,9 +37,10 @@ pub fn run() {
             let force_reload = MenuItemBuilder::with_id("force_reload", "Force Reload")
                 .accelerator("CmdOrCtrl+Shift+R")
                 .build(app)?;
-            let toggle_devtools = MenuItemBuilder::with_id("toggle_devtools", "Toggle Developer Tools")
-                .accelerator("CmdOrCtrl+Alt+I")
-                .build(app)?;
+            let toggle_devtools =
+                MenuItemBuilder::with_id("toggle_devtools", "Toggle Developer Tools")
+                    .accelerator("CmdOrCtrl+Alt+I")
+                    .build(app)?;
 
             let view_submenu = SubmenuBuilder::new(app, "View")
                 .item(&reload)

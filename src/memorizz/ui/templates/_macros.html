@@ -1,0 +1,85 @@
+{# Shared Jinja macros for the Memorizz UI.
+
+   agent_card(agent, agent_id, display_name, ...) renders the agent-card
+   shell used by agents.html and playground_select.html. Page-specific
+   pieces plug in through parameters:
+
+     icon          'robot-svg' for the outlined robot icon, anything else
+                   for the plain emoji icon.
+     favorite      none to hide the favorite toggle, otherwise the current
+                   is-favorite boolean (renders the toggle form).
+     favorite_redirect
+                   value for the favorite form's redirect_to field.
+     meta_items    list of {label, value, class?} dicts rendered after the
+                   Mode row ("class" defaults to "meta-value").
+     footer_links  list of {href, class, label} dicts for the card footer.
+
+   Extra trailing card content (e.g. the inline mini-chat on agents.html)
+   can be supplied with {% call %} ... {% endcall %}.
+#}
+{% macro agent_card(agent, agent_id, display_name, icon='emoji', favorite=none, favorite_redirect='', meta_items=[], footer_links=[]) %}
+    <div class="agent-card">
+        <div class="agent-header">
+            {% if icon == 'robot-svg' %}
+            <div class="agent-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="4" y="7" width="16" height="12" rx="3"/>
+                    <path d="M12 3v4"/>
+                    <path d="M9 12h.01"/>
+                    <path d="M15 12h.01"/>
+                    <path d="M8 16h8"/>
+                </svg>
+            </div>
+            {% else %}
+            <div class="agent-icon">🤖</div>
+            {% endif %}
+            <div class="agent-title">
+                <h3>{{ display_name }}</h3>
+                <span class="agent-id" title="{{ agent_id }}">{{ agent_id[:12] }}...</span>
+            </div>
+            {% if favorite is not none %}
+            <form method="post" action="/agents/{{ agent_id }}/favorite" class="agent-favorite-form">
+                <input type="hidden" name="redirect_to" value="{{ favorite_redirect }}">
+                <input type="hidden" name="is_favorite" value="{% if favorite %}0{% else %}1{% endif %}">
+                <button
+                    type="submit"
+                    class="favorite-toggle {% if favorite %}is-active{% endif %}"
+                    title="{% if favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
+                    aria-label="{% if favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
+                >
+                    <span aria-hidden="true">★</span>
+                </button>
+            </form>
+            {% endif %}
+        </div>
+
+        <div class="agent-body">
+            <div class="agent-meta">
+                <div class="meta-item">
+                    <span class="meta-label">Mode:</span>
+                    <span class="meta-value badge">{{ agent.application_mode or 'assistant' }}</span>
+                </div>
+
+                {% for item in meta_items %}
+                <div class="meta-item">
+                    <span class="meta-label">{{ item.label }}</span>
+                    <span class="{{ item.get('class', 'meta-value') }}">{{ item.value }}</span>
+                </div>
+                {% endfor %}
+            </div>
+
+            {% if agent.instruction %}
+            <div class="agent-instruction">
+                <p>{{ agent.instruction[:150] }}{% if agent.instruction|length > 150 %}...{% endif %}</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="agent-footer">
+            {% for link in footer_links %}
+            <a href="{{ link.href }}" class="{{ link.class }}">{{ link.label }}</a>
+            {% endfor %}
+        </div>
+        {{ caller() if caller }}
+    </div>
+{% endmacro %}

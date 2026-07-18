@@ -10,6 +10,49 @@ if TYPE_CHECKING:
     from memorizz.memagent import MemAgent
 
 
+# Sentinel so "user_id not supplied" is distinguishable from an explicit None
+# (matching the MongoDB provider's _MONGO_UNSET convention).
+_UNSET = object()
+
+
+def filter_tool_log_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    memory_id: Optional[str] = None,
+    user_id: Any = _UNSET,
+    thread_id: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Filter + sort + limit raw tool_log rows, most-recent first.
+
+    Shared by ``MemoryManager.list_tool_logs``'s provider-agnostic fallback and
+    by the filesystem / Oracle providers' ``list_tool_logs`` (which read every
+    tool_log row via ``list_all`` and then narrow in Python). Centralising it
+    keeps the scoping rules — crucially the ``thread_id`` filter that keeps the
+    tool-log digest from leaking other threads' tool calls — identical
+    everywhere.
+
+    ``thread_id`` matching is exact against the row's stored ``thread_id``
+    (``store_tool_log`` writes ``thread_id or ""``); when ``thread_id`` is
+    ``None`` the filter is skipped (back-compat: all threads).
+    """
+    out: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if memory_id and row.get("memory_id") != memory_id:
+            continue
+        if user_id is not _UNSET and row.get("user_id") != user_id:
+            continue
+        if thread_id is not None and (row.get("thread_id") or "") != thread_id:
+            continue
+        out.append(row)
+    out.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+    if limit and limit > 0:
+        out = out[:limit]
+    return out
+
+
 class MemoryProvider(ABC):
     """Abstract base class for memory providers."""
 
@@ -139,6 +182,45 @@ class MemoryProvider(ABC):
         self, id: str, data: Dict[str, Any], memory_store_type: str
     ) -> bool:
         """Update a document in a memory store type in the memory provider by id."""
+
+    def clear_semantic_cache(
+        self, agent_id: Optional[str] = None, memory_id: Optional[str] = None
+    ) -> int:
+        """Delete semantic-cache entries, optionally scoped to an agent/memory.
+
+        Generic implementation over ``list_all`` + ``delete_by_id`` so every
+        provider supports it; providers with a native bulk delete (MongoDB)
+        override it. Previously only MongoDB implemented this, and the
+        SemanticCache layer's calls raised (and were swallowed) on the
+        filesystem and Oracle providers.
+
+        Returns the number of entries deleted.
+        """
+        from ..enums.memory_type import MemoryType
+
+        deleted = 0
+        try:
+            rows = self.list_all(memory_store_type=MemoryType.SEMANTIC_CACHE) or []
+        except Exception:
+            return 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if agent_id and row.get("agent_id") != agent_id:
+                continue
+            if memory_id and row.get("memory_id") != memory_id:
+                continue
+            record_id = row.get("_id") or row.get("id") or row.get("cache_key")
+            if record_id is None:
+                continue
+            try:
+                if self.delete_by_id(
+                    str(record_id), memory_store_type=MemoryType.SEMANTIC_CACHE
+                ):
+                    deleted += 1
+            except Exception:
+                continue
+        return deleted
 
     @abstractmethod
     def close(self) -> None:

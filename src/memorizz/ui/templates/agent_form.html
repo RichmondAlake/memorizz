@@ -91,6 +91,12 @@
                     Enable workflow memory
                 </label>
             </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="continual_learning" {% if continual_learning %}checked{% endif %}>
+                    Enable continual learning (promote repeated successful workflows into learned skills)
+                </label>
+            </div>
         </div>
     </div>
 

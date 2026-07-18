@@ -15,7 +15,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 def _normalize_whatsapp_address(value: str, *, field_name: str) -> str:

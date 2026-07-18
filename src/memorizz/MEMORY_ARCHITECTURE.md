@@ -20,12 +20,12 @@ src/memorizz/
 │   │   └── entity_memory/
 │   ├── procedural/
 │   │   ├── toolbox/
-│   │   └── workflow/
+│   │   ├── workflow/
+│   │   └── skillbox/
 │   └── episodic/
 │       ├── conversational_memory_unit.py
 │       └── summary_component.py
 ├── short_term_memory/
-│   ├── working_memory/
 │   └── semantic_cache.py
 ├── coordination/
 │   └── shared_memory/
@@ -43,13 +43,16 @@ src/memorizz/
 `MemoryType` is defined in `src/memorizz/enums/memory_type.py`.
 
 - `KNOWLEDGE_BASE`: semantic facts/knowledge
+- `PERSONAS`: versioned agent identities
 - `ENTITY_MEMORY`: structured entity attributes and updates
 - `TOOLBOX`: executable tools and metadata
 - `WORKFLOW_MEMORY`: process/task state
+- `SKILLBOX`: distilled learned skills and lifecycle state
 - `CONVERSATION_MEMORY`: chat timeline
 - `SUMMARIES`: compressed conversation summaries
 - `SHORT_TERM_MEMORY`: active context scratchpad
 - `SEMANTIC_CACHE`: similar-query response cache
+- `TOOL_LOG`: offloaded tool output
 - `SHARED_MEMORY`: multi-agent blackboard/session coordination
 - `MEMAGENT`: persisted agent configuration/state
 
@@ -78,7 +81,8 @@ These defaults can be overridden by passing explicit `memory_types` to `MemAgent
   `evolution_history`) and registers the `update_persona` / `read_persona`
   tools on every agent that has a persona attached. Changes are traceable
   via a `change_trigger` (reason + source memory/conversation id).
-- `WorkflowManager`
+- `ContinualLearningManager`
+- `AutomationManager`
 - `InternetAccessManager`
 - `SandboxManager` (when configured)
 
@@ -86,7 +90,7 @@ Request lifecycle (high level):
 
 1. Resolve `memory_id` and `thread_id`
 2. Try semantic cache (if enabled)
-3. Build context from active memory types
+3. Retrieve, deduplicate, and assemble active memory into a cache-friendly context
 4. Execute LLM/tool loop
 5. Persist user + assistant interaction
 6. Update context-window stats and summary registry as needed
@@ -96,6 +100,7 @@ Request lifecycle (high level):
 Memorizz includes built-in context-window observability and compression helpers:
 
 - `get_context_window_stats()` for latest token usage snapshot
+- `get_last_usage()` for provider token and cache metrics
 - summary generation (`generate_summaries`) for history compression
 - summary registry helpers for retrieving recent summary metadata
 

@@ -52,7 +52,6 @@ _LAZY = {
     "RoleType": (".long_term.semantic.persona", "RoleType"),
     "Toolbox": (".long_term.procedural.toolbox", "Toolbox"),
     "KnowledgeBase": (".long_term.semantic", "KnowledgeBase"),
-    "CWM": (".short_term_memory.working_memory.cwm", "CWM"),
     "SharedMemory": (".coordination", "SharedMemory"),
     # Internet access
     "InternetAccessProvider": (".internet_access", "InternetAccessProvider"),
@@ -130,7 +129,6 @@ __all__ = [
     "RoleType",
     "Toolbox",
     "KnowledgeBase",
-    "CWM",
     "SharedMemory",
     # Internet access
     "InternetAccessProvider",

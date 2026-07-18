@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 
 {% block title %}Playground - Memorizz{% endblock %}
 
@@ -11,45 +12,19 @@
 {% if agents %}
 <div class="agents-grid">
     {% for agent in agents %}
-    <div class="agent-card">
-        <div class="agent-header">
-            <div class="agent-icon">🤖</div>
-            <div class="agent-title">
-                {% if agent.persona and agent.persona.name %}
-                    <h3>{{ agent.persona.name }}</h3>
-                {% else %}
-                    <h3>Agent</h3>
-                {% endif %}
-                <span class="agent-id" title="{{ agent.agent_id }}">{{ agent.agent_id[:12] }}...</span>
-            </div>
-        </div>
-
-        <div class="agent-body">
-            <div class="agent-meta">
-                <div class="meta-item">
-                    <span class="meta-label">Mode:</span>
-                    <span class="meta-value badge">{{ agent.application_mode or 'assistant' }}</span>
-                </div>
-
-                {% if agent.persona and agent.persona.role %}
-                <div class="meta-item">
-                    <span class="meta-label">Role:</span>
-                    <span class="meta-value">{{ agent.persona.role }}</span>
-                </div>
-                {% endif %}
-            </div>
-
-            {% if agent.instruction %}
-            <div class="agent-instruction">
-                <p>{{ agent.instruction[:150] }}{% if agent.instruction|length > 150 %}...{% endif %}</p>
-            </div>
-            {% endif %}
-        </div>
-
-        <div class="agent-footer">
-            <a href="/agents/{{ agent.agent_id }}/playground" class="btn btn-primary">Open Playground →</a>
-        </div>
-    </div>
+    {% set meta_items = [] %}
+    {% if agent.persona and agent.persona.role %}
+        {% set _ = meta_items.append({'label': 'Role:', 'value': agent.persona.role}) %}
+    {% endif %}
+    {{ macros.agent_card(
+        agent,
+        agent.agent_id,
+        agent.persona.name if agent.persona and agent.persona.name else 'Agent',
+        meta_items=meta_items,
+        footer_links=[
+            {'href': '/agents/' ~ agent.agent_id ~ '/playground', 'class': 'btn btn-primary', 'label': 'Open Playground →'},
+        ]
+    ) }}
     {% endfor %}
 </div>
 {% else %}

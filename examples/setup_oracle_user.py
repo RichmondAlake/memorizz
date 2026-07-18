@@ -2,7 +2,7 @@
 Oracle Database Setup Script (Convenience Wrapper)
 
 ⚠️  RECOMMENDED: For most users, use the CLI command:
-    memorizz setup-oracle
+    memorizz oracle setup
 
 This script is provided as a convenience wrapper for:
 - Users who cloned the repository and prefer running Python scripts directly
@@ -10,9 +10,9 @@ This script is provided as a convenience wrapper for:
 
 Setup Methods (in order of recommendation):
 1. CLI Command (Best for pip-installed users):
-   memorizz setup-oracle
+   memorizz oracle setup
    # or
-   python -m memorizz.cli setup-oracle
+   python -m memorizz oracle setup
 
 2. This Script (Good for repo-cloned users):
    python examples/setup_oracle_user.py
@@ -36,9 +36,9 @@ except ImportError:
     print("\nPlease ensure memorizz[oracle] is installed:")
     print("  pip install memorizz[oracle]")
     print("\nThen use the CLI command (recommended):")
-    print("  memorizz setup-oracle")
+    print("  memorizz oracle setup")
     print("\nOr use the Python module:")
-    print("  python -m memorizz.cli setup-oracle")
+    print("  python -m memorizz oracle setup")
     sys.exit(1)
 
 

@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List
 
 from ..channels.whatsapp.twilio import TwilioWhatsAppSender
 from ..memagent import MemAgent
 from .models import AutomationDelivery, AutomationJob
-from .schedule import render_query_template, utcnow
+from .schedule import render_query_template
 
 AUTOMATION_DIRECTIVE = (
     "IMPORTANT: This is an automated scheduled query running without a human in the loop. "

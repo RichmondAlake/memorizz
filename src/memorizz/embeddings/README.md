@@ -36,7 +36,7 @@ This organization makes it easy to:
 - **Privacy**: Requires API calls to OpenAI
 - **Cost**: Pay per embedding
 
-### Ollama Embeddings  
+### Ollama Embeddings
 - **Models**: `nomic-embed-text`, `mxbai-embed-large`, `snowflake-arctic-embed`, `all-minilm`
 - **Configurable dimensions**: Fixed per model
 - **Quality**: Good (varies by model)
@@ -72,7 +72,7 @@ configure_embeddings(
 
 # Or configure Ollama embeddings
 configure_embeddings(
-    provider="ollama", 
+    provider="ollama",
     config={
         "model": "nomic-embed-text",
         "base_url": "http://localhost:11434"
@@ -120,7 +120,7 @@ agent = MemAgent(
 # Agent with VoyageAI embeddings
 agent = MemAgent(
     instruction="You are a high-quality assistant.",
-    embedding_provider="voyageai", 
+    embedding_provider="voyageai",
     embedding_config={
         "embedding_type": "text",
         "model": "voyage-3.5",
@@ -145,7 +145,7 @@ openai_config = {
 
 **Available Models:**
 - `text-embedding-3-small`: Up to 1536 dimensions, efficient
-- `text-embedding-3-large`: Up to 3072 dimensions, highest quality  
+- `text-embedding-3-large`: Up to 3072 dimensions, highest quality
 - `text-embedding-ada-002`: Fixed 1536 dimensions, legacy model
 
 ### Ollama Configuration Options
@@ -181,7 +181,7 @@ voyageai_config = {
 
 *Text Models:*
 - `voyage-3.5`: 1024 dimensions (default), supports 256/512/1024/2048
-- `voyage-3-large`: 1024 dimensions (default), supports 256/512/1024/2048  
+- `voyage-3-large`: 1024 dimensions (default), supports 256/512/1024/2048
 - `voyage-3.5-lite`: 1024 dimensions (default), supports 256/512/1024/2048
 - `voyage-code-3`: 1024 dimensions (default), supports 256/512/1024/2048
 - `voyage-finance-2`: 1024 dimensions (fixed)
@@ -275,7 +275,7 @@ dimensions = get_embedding_dimensions()
 
 **For OpenAI models:**
 - **128-256**: Very efficient, good for basic similarity
-- **512-1024**: Balanced quality and performance  
+- **512-1024**: Balanced quality and performance
 - **1536+**: Maximum quality for critical applications
 
 **For Ollama models:**
@@ -393,20 +393,20 @@ logger = logging.getLogger(__name__)
 
 class YourProviderEmbeddingProvider(BaseEmbeddingProvider):
     """Your Provider embedding provider implementation."""
-    
+
     def __init__(self, config: Dict[str, Any] = None):
         super().__init__(config)
         # Your initialization code
         self.model = self.config.get("model", "default-model")
         # ... other setup
-    
+
     def get_embedding(self, text: str, **kwargs) -> List[float]:
         # Your implementation
         return [0.1, 0.2, 0.3]  # Example
-    
+
     def get_dimensions(self) -> int:
         return 768  # Your model's dimensions
-    
+
     def get_default_model(self) -> str:
         return self.model
 ```
@@ -487,7 +487,7 @@ vector_index_definition = {
     "fields": [
         {
             "type": "vector",
-            "path": "embedding", 
+            "path": "embedding",
             "numDimensions": 1536,  # Hardcoded!
             "similarity": "cosine"
         }
@@ -512,33 +512,6 @@ configure_embeddings("openai", {
 memory_provider = MongoDBProvider(MongoDBConfig(
     uri="mongodb://localhost:27017"
 ))
-```
-
-### MongoDB Tools Integration
-
-MongoDB tools also respect the embedding configuration:
-
-```python
-from memorizz.database.mongodb.mongodb_tools import MongoDBTools, MongoDBToolsConfig
-
-# Option 1: Use global embedding configuration
-config = MongoDBToolsConfig(
-    mongo_uri="mongodb://localhost:27017"
-    # No get_embedding function - uses global config
-)
-tools = MongoDBTools(config)
-
-# Option 2: Provide specific embedding function
-from memorizz.embeddings import get_embedding
-config = MongoDBToolsConfig(
-    mongo_uri="mongodb://localhost:27017",
-    get_embedding=get_embedding  # Uses configured provider
-)
-tools = MongoDBTools(config)
-
-# Create vector index with correct dimensions
-index_def = tools.create_vector_index_definition()
-# Automatically uses dimensions from your embedding configuration!
 ```
 
 ### Benefits
@@ -571,4 +544,4 @@ print(f"Vector indexes will use {dimensions} dimensions")
 - **Cross-Provider Consistency**: If using multiple embedding providers, ensure they have compatible dimensions
 - **Performance Impact**: Larger dimensions provide better quality but require more storage and compute
 
-This automatic synchronization ensures that your vector database operations work seamlessly regardless of which embedding provider or configuration you choose. 
+This automatic synchronization ensures that your vector database operations work seamlessly regardless of which embedding provider or configuration you choose.

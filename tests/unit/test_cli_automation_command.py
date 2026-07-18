@@ -4,7 +4,7 @@
 
 """Tests for the `/automation` REPL command.
 
-The automation store is Oracle-only, so these mock the store + runner — no DB.
+These mock the provider-selected store and runner, so no database is required.
 """
 
 import types
@@ -65,11 +65,13 @@ class _Store:
 
 
 @pytest.mark.unit
-def test_requires_oracle_backend():
+def test_requires_supported_backend():
     s = _session()
     with patch(STORE, return_value=None):
         commands.cmd_automation(s, "")
-    assert "Oracle backend" in s.console.text()
+    output = s.console.text()
+    assert "does not support automations" in output
+    assert "filesystem, MongoDB, or Oracle" in output
 
 
 @pytest.mark.unit

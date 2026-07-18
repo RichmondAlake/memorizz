@@ -4,141 +4,8 @@
 
 {% block content %}
 <style>
-    /* Local-model status banner + manage-list (Ollama / HuggingFace).
-       Shown below the Default Model picker when those providers are picked. */
-    .local-model-status .model-manager {
-        margin-top: 12px;
-        border: 1px solid var(--border-color, #2a2d36);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.02);
-    }
-    .local-model-status .model-manager > summary {
-        cursor: pointer;
-        padding: 0.55rem 0.85rem;
-        font-size: 0.85rem;
-        color: var(--text-secondary, #aaa);
-        list-style: none;
-        user-select: none;
-    }
-    .local-model-status .model-manager > summary::-webkit-details-marker { display: none; }
-    .local-model-status .model-manager > summary::before {
-        content: '▸ ';
-        display: inline-block;
-        transition: transform 0.15s ease;
-    }
-    .local-model-status .model-manager[open] > summary::before {
-        transform: rotate(90deg);
-    }
-    .local-model-status .model-list {
-        border-top: 1px solid var(--border-color, #2a2d36);
-        padding: 0.4rem 0.5rem 0.5rem;
-    }
-    .local-model-status .model-list-section {
-        font-size: 0.72rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--text-secondary, #888);
-        padding: 0.5rem 0.35rem 0.25rem;
-    }
-    .local-model-status .model-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.5rem;
-        padding: 0.35rem 0.5rem;
-        border-radius: 6px;
-        font-size: 0.85rem;
-    }
-    .local-model-status .model-row + .model-row {
-        border-top: 1px solid rgba(255, 255, 255, 0.04);
-    }
-    .local-model-status .model-row-text { min-width: 0; word-break: break-all; }
-    .local-model-status .model-row-text code,
-    .local-model-status .model-row-select code {
-        background: transparent;
-        padding: 0;
-        font-size: 0.85rem;
-    }
-    /* The clickable "select this model" wrapper around the row text. We
-       style the <button> to look like text — only on hover does it pick
-       up a faint outline so users learn it's interactive. */
-    .local-model-status .model-row-select {
-        flex: 1 1 auto;
-        min-width: 0;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        text-align: left;
-        background: transparent;
-        border: 1px solid transparent;
-        color: inherit;
-        padding: 0.2rem 0.45rem;
-        border-radius: 5px;
-        cursor: pointer;
-        font: inherit;
-        word-break: break-all;
-    }
-    .local-model-status .model-row-select:hover {
-        background: rgba(0, 217, 255, 0.06);
-        border-color: rgba(0, 217, 255, 0.25);
-    }
-    .local-model-status .model-row-select:focus-visible {
-        outline: 2px solid var(--accent-primary, #00d9ff);
-        outline-offset: 1px;
-    }
-    .local-model-status .model-row[data-selected="true"] {
-        background: rgba(0, 217, 255, 0.06);
-        border-left: 2px solid var(--accent-primary, #00d9ff);
-        padding-left: calc(0.5rem - 2px);
-    }
-    .local-model-status .model-row[data-selected="true"] .model-row-select {
-        color: var(--accent-primary, #00d9ff);
-        font-weight: 600;
-    }
-    .local-model-status .model-row-check {
-        color: var(--accent-primary, #00d9ff);
-        font-weight: 700;
-    }
-    .local-model-status .model-row-label { color: var(--text-secondary, #888); }
-    .local-model-status .model-action-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        flex: 0 0 auto;
-        width: 28px;
-        height: 28px;
-        padding: 0;
-        border-radius: 6px;
-        border: 1px solid transparent;
-        background: transparent;
-        color: var(--text-secondary, #aaa);
-        cursor: pointer;
-        transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
-    }
-    .local-model-status .model-row[data-row-action="delete"] .model-action-btn:hover {
-        color: var(--accent-danger, #ff5577);
-        border-color: rgba(255, 85, 119, 0.45);
-        background: rgba(255, 85, 119, 0.08);
-    }
-    .local-model-status .model-row[data-row-action="pull"] .model-action-btn:hover {
-        color: var(--accent-primary, #00d9ff);
-        border-color: rgba(0, 217, 255, 0.45);
-        background: rgba(0, 217, 255, 0.08);
-    }
-    .local-model-status .model-action-btn:disabled {
-        cursor: progress;
-        opacity: 0.7;
-    }
-    .local-model-status .model-action-spinner {
-        display: inline-block;
-        width: 14px;
-        height: 14px;
-        border: 2px solid currentColor;
-        border-right-color: transparent;
-        border-radius: 50%;
-        animation: lm-spin 0.8s linear infinite;
-    }
-    @keyframes lm-spin { to { transform: rotate(360deg); } }
+    /* Local-model manager widget styles are shared in styles.css
+       (.local-model-status .model-manager etc). Below: page-specific rules. */
 
     /* When the manage-list is the active selector for a local provider,
        hide the redundant dropdown + custom input + hint so users only have
@@ -594,58 +461,18 @@
         }
 
         // Single click handler delegated from document, so freshly-rendered
-        // rows after a refresh keep working without re-binding.
-        let _modelActionInFlight = false;
+        // rows after a refresh keep working without re-binding. Pull/delete
+        // plumbing lives in the shared handleLocalModelAction()
+        // (static/js/app.js); this wrapper maps the settings page's data
+        // attributes onto it and refreshes availability afterwards.
         async function handleModelActionClick(button) {
-            if (_modelActionInFlight) return;
-            const action = button.dataset.action;
-            const provider = button.dataset.provider;
-            const model = button.dataset.model;
-            if (!action || !provider || !model) return;
-
-            if (action === 'delete' && !window.confirm('Remove ' + model + ' from local cache?')) {
-                return;
-            }
-            if (action === 'pull') {
-                const ok = window.confirm('Download ' + model + '?\n\n'
-                    + 'Large models can take 5–15 minutes. The page will appear to hang while the download runs in the background.');
-                if (!ok) return;
-            }
-
-            _modelActionInFlight = true;
-            button.disabled = true;
-            button.classList.add('is-busy');
-            const originalHtml = button.innerHTML;
-            button.innerHTML = '<span class="model-action-spinner" aria-hidden="true"></span>';
-
-            try {
-                let res;
-                if (action === 'delete' && provider === 'ollama') {
-                    res = await fetch('/api/ollama/models/' + encodeURIComponent(model), { method: 'DELETE' });
-                } else if (action === 'delete' && provider === 'huggingface') {
-                    res = await fetch('/api/huggingface/models/' + encodeURIComponent(model), { method: 'DELETE' });
-                } else if (action === 'pull') {
-                    const fd = new FormData();
-                    fd.append(provider === 'ollama' ? 'name' : 'repo_id', model);
-                    const url = provider === 'ollama' ? '/api/ollama/pull' : '/api/huggingface/pull';
-                    res = await fetch(url, { method: 'POST', body: fd });
-                } else {
-                    return;
-                }
-                let data = {};
-                try { data = await res.json(); } catch (_) { /* ignore */ }
-                if (!data.ok) {
-                    window.alert('Failed: ' + (data.error || ('HTTP ' + res.status)));
-                }
-            } catch (err) {
-                window.alert('Error: ' + err);
-            } finally {
-                _modelActionInFlight = false;
-                button.disabled = false;
-                button.classList.remove('is-busy');
-                button.innerHTML = originalHtml;
-                checkLocalModelAvailability();
-            }
+            await handleLocalModelAction(
+                button,
+                button.dataset.action,
+                button.dataset.provider,
+                button.dataset.model,
+                checkLocalModelAvailability
+            );
         }
 
         document.addEventListener('click', function(ev) {

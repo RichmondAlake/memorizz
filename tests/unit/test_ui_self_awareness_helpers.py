@@ -3,12 +3,12 @@
 import pytest
 
 from memorizz.memagent.models import MemAgentModel
-from memorizz.ui.app import (
-    _build_agent_form_data,
+from memorizz.ui.helpers import (
     _build_self_aware_config,
     _parse_self_aware_root_paths,
     _validate_self_aware_config,
 )
+from memorizz.ui.routers.agents_crud import _build_agent_form_data
 
 
 @pytest.mark.unit

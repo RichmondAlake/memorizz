@@ -10,7 +10,6 @@ from memorizz.memagent.managers import (
     MemoryManager,
     PersonaManager,
     ToolManager,
-    WorkflowManager,
 )
 from tests.conftest import assert_memory_unit_valid
 
@@ -451,69 +450,3 @@ class TestPersonaManager:
         assert isinstance(prompt, str)
         assert len(prompt) > 0
         assert sample_persona.name in prompt
-
-
-class TestWorkflowManager:
-    """Test WorkflowManager functionality."""
-
-    @pytest.mark.unit
-    def test_workflow_manager_initialization(self):
-        """Test workflow manager initialization."""
-        manager = WorkflowManager()
-
-        assert manager.active_workflows == {}
-        assert manager.workflow_history == []
-        assert manager._workflow_cache == {}
-
-    @pytest.mark.unit
-    def test_execute_workflow(self):
-        """Test executing a workflow."""
-        manager = WorkflowManager()
-
-        # Create a mock workflow
-        mock_workflow = Mock()
-        mock_outcome = Mock()
-        mock_outcome.result = "workflow completed"
-        mock_outcome.status = "success"
-        mock_workflow.execute.return_value = mock_outcome
-        mock_workflow.name = "test_workflow"
-
-        context = {"input": "test data"}
-
-        outcome = manager.execute_workflow(mock_workflow, context)
-
-        assert outcome == mock_outcome
-        mock_workflow.execute.assert_called_once_with(context)
-        assert len(manager.workflow_history) == 1
-
-    @pytest.mark.unit
-    def test_get_workflow_history(self):
-        """Test getting workflow history."""
-        manager = WorkflowManager()
-
-        # Add some mock history
-        manager.workflow_history = [
-            {"id": "workflow_1", "status": "completed"},
-            {"id": "workflow_2", "status": "completed"},
-            {"id": "workflow_3", "status": "completed"},
-        ]
-
-        # Get all history
-        all_history = manager.get_workflow_history()
-        assert len(all_history) == 3
-
-        # Get limited history
-        limited_history = manager.get_workflow_history(limit=2)
-        assert len(limited_history) == 2
-
-    @pytest.mark.unit
-    def test_clear_history(self):
-        """Test clearing workflow history."""
-        manager = WorkflowManager()
-
-        # Add some history
-        manager.workflow_history = [{"id": "test"}]
-
-        manager.clear_history()
-
-        assert len(manager.workflow_history) == 0

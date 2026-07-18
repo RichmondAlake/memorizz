@@ -37,7 +37,7 @@ Use strict mode before merging to catch broken links/nav references.
 
 ```bash
 pip install "memorizz[ui]"
-memorizz run local
+memorizz ui
 ```
 
 Default URL: <http://127.0.0.1:8765>

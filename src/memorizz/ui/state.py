@@ -13,7 +13,7 @@ never rebound), so everyone importing it observes the same object.
 """
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi.templating import Jinja2Templates
 
@@ -32,5 +32,46 @@ _state: Dict[str, Any] = {
     "whatsapp_worker_stop_event": None,
 }
 
+
+class CompatibleJinja2Templates(Jinja2Templates):
+    """Render templates across both legacy and current Starlette signatures."""
+
+    def TemplateResponse(
+        self,
+        name: str,
+        context: Optional[Dict[str, Any]] = None,
+        status_code: int = 200,
+        headers: Optional[Dict[str, str]] = None,
+        media_type: Optional[str] = None,
+        background: Any = None,
+    ):
+        context = context or {}
+        request = context.get("request")
+        try:
+            return super().TemplateResponse(
+                request=request,
+                name=name,
+                context=context,
+                status_code=status_code,
+                headers=headers,
+                media_type=media_type,
+                background=background,
+            )
+        except TypeError as exc:
+            # Starlette before the request-first API does not accept a
+            # ``request=`` keyword. Preserve Memorizz's documented FastAPI
+            # minimum by falling back only for that signature mismatch.
+            if "unexpected keyword argument 'request'" not in str(exc):
+                raise
+            return super().TemplateResponse(
+                name,
+                context,
+                status_code=status_code,
+                headers=headers,
+                media_type=media_type,
+                background=background,
+            )
+
+
 # Shared Jinja2 template engine for all HTML routes.
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates = CompatibleJinja2Templates(directory=str(TEMPLATES_DIR))

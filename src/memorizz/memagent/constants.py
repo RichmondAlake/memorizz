@@ -4,26 +4,12 @@
 
 """Configuration constants for MemAgent."""
 
-import os
 
 # Configuration constants
 DEFAULT_INSTRUCTION = "You are a helpful assistant."
 DEFAULT_MAX_STEPS = 20
 CONTINUOUS_MAX_STEPS = 0  # Sentinel: 0 means continuous (unlimited tool iterations)
 DEFAULT_TOOL_ACCESS = "private"
-
-# Logging configuration
-MEMORIZZ_LOG_LEVEL = os.getenv("MEMORIZZ_LOG_LEVEL", "DEBUG").upper()
-
-# Application modes
-APPLICATION_MODES = {
-    "assistant": "General purpose assistant",
-    "chatbot": "Conversational chatbot",
-    "agent": "Task-oriented agent",
-}
-
-# Memory types
-DEFAULT_MEMORY_TYPES = ["conversation_memory", "knowledge_base"]
 
 # ---------------------------------------------------------------------------
 # Base system prompt — always prepended before the user's custom instruction.

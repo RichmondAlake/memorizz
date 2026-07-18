@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
@@ -40,6 +41,8 @@ class EntityRelation(BaseModel):
 class EntityMemoryRecord(BaseModel):
     """Structured entity record persisted in the memory provider."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     entity_id: str
     name: Optional[str] = None
     entity_type: Optional[str] = None
@@ -51,9 +54,6 @@ class EntityMemoryRecord(BaseModel):
     embedding: Optional[List[float]] = None
     created_at: str
     updated_at: str
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class EntityMemory:
@@ -104,13 +104,22 @@ class EntityMemory:
             timestamp=now,
         )
 
+        # Write-path dedup (NOOP guard): when the merge produced no new
+        # information — the agent re-asserted facts already stored verbatim —
+        # skip the re-embed (an embedding API call) and the re-store
+        # entirely. Timestamp-only churn does not count as new information.
+        if existing and self._stable_snapshot(record) == self._stable_snapshot(
+            existing
+        ):
+            return record["entity_id"]
+
         embedding_payload = self._build_embedding_text(record)
         if embedding_payload:
             record["embedding"] = get_embedding(embedding_payload)
 
         if existing and existing.get("_id") is not None:
             record["_id"] = existing["_id"]
-        stored_id = self.memory_provider.store(
+        self.memory_provider.store(
             data=record,
             memory_store_type=MemoryType.ENTITY_MEMORY,
         )
@@ -146,30 +155,6 @@ class EntityMemory:
             attributes=[attribute],
             memory_id=memory_id,
         )
-
-    def link_entities(
-        self,
-        *,
-        source_entity_id: str,
-        target_entity_id: str,
-        relation_type: str,
-        confidence: float = 0.7,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Attach a relation between two entities."""
-        relation = EntityRelation(
-            entity_id=target_entity_id,
-            relation_type=relation_type,
-            confidence=confidence,
-            metadata=metadata or {},
-            created_at=self._timestamp(),
-            updated_at=self._timestamp(),
-        )
-        self.upsert_entity(
-            entity_id=source_entity_id,
-            relations=[relation],
-        )
-        return True
 
     def get_entity(
         self, entity_id: str, *, user_id: Optional[str] = None
@@ -221,38 +206,6 @@ class EntityMemory:
         )
         return self._ensure_list(results)
 
-    def get_entity_profile(
-        self,
-        entity_id: str,
-        *,
-        include_relations: bool = True,
-        user_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Return a simplified persona/profile-style view for prompting."""
-        record = self.get_entity(entity_id, user_id=user_id)
-        if not record:
-            return None
-
-        profile = {
-            "entity_id": entity_id,
-            "name": record.get("name"),
-            "entity_type": record.get("entity_type"),
-            "attributes": {
-                attr["name"]: attr["value"] for attr in record.get("attributes", [])
-            },
-            "updated_at": record.get("updated_at"),
-        }
-        if include_relations:
-            profile["relations"] = [
-                {
-                    "entity_id": rel["entity_id"],
-                    "relation_type": rel["relation_type"],
-                    "confidence": rel.get("confidence"),
-                }
-                for rel in record.get("relations", [])
-            ]
-        return profile
-
     # ----------------------------------------------------------------------
     # Internal helpers
     # ----------------------------------------------------------------------
@@ -287,6 +240,32 @@ class EntityMemory:
             return list(result)
         except TypeError:
             return []
+
+    @staticmethod
+    def _stable_snapshot(record: Dict[str, Any]) -> str:
+        """Serialize a record with volatile fields stripped, for NOOP checks.
+
+        Timestamps, embeddings, and storage ids churn on every write even
+        when the facts themselves are unchanged; they must not defeat the
+        duplicate-write guard in :meth:`upsert_entity`.
+        """
+        volatile = {"embedding", "_id", "id", "created_at", "updated_at", "score"}
+
+        def _strip(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: _strip(val)
+                    for key, val in sorted(value.items())
+                    if key not in volatile
+                }
+            if isinstance(value, (list, tuple)):
+                return [_strip(item) for item in value]
+            return value
+
+        try:
+            return json.dumps(_strip(record), sort_keys=True, default=str)
+        except Exception:
+            return str(record)
 
     def _merge_record(
         self,
@@ -360,9 +339,9 @@ class EntityMemory:
         timestamp: str,
     ) -> Dict[str, Any]:
         if isinstance(attribute, EntityAttribute):
-            payload = attribute.dict()
+            payload = attribute.model_dump()
         else:
-            payload = EntityAttribute(**attribute).dict()
+            payload = EntityAttribute(**attribute).model_dump()
         payload.setdefault("created_at", timestamp)
         payload["updated_at"] = timestamp
         return payload
@@ -373,9 +352,9 @@ class EntityMemory:
         timestamp: str,
     ) -> Dict[str, Any]:
         if isinstance(relation, EntityRelation):
-            payload = relation.dict()
+            payload = relation.model_dump()
         else:
-            payload = EntityRelation(**relation).dict()
+            payload = EntityRelation(**relation).model_dump()
         payload.setdefault("created_at", timestamp)
         payload["updated_at"] = timestamp
         return payload

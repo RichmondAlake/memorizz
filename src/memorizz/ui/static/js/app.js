@@ -559,6 +559,88 @@ function initializeBenchmarkMonitor({ body, storage, storageKeys }) {
     }
 }
 
+/*
+ * Shared pull/delete action for the local-model manage list rendered by
+ * settings.html and playground.html. Confirms with the user, swaps the
+ * button content for a spinner while the Ollama / HuggingFace API call
+ * runs, alerts on failure, restores the button, then invokes `refresh`
+ * so the caller can re-render its model list. Serialized: while one
+ * action is in flight, further invocations are ignored.
+ */
+let _localModelActionInFlight = false;
+async function handleLocalModelAction(button, action, provider, model, refresh) {
+    if (_localModelActionInFlight) return;
+    if (!action || !provider || !model) return;
+
+    if (action === 'delete' && !window.confirm('Remove ' + model + ' from local cache?')) return;
+    if (action === 'pull') {
+        const ok = window.confirm('Download ' + model + '?\n\n'
+            + 'Large models can take 5–15 minutes. The page will appear to hang while the download runs in the background.');
+        if (!ok) return;
+    }
+
+    _localModelActionInFlight = true;
+    button.disabled = true;
+    button.classList.add('is-busy');
+    const originalHtml = button.innerHTML;
+    button.innerHTML = '<span class="model-action-spinner" aria-hidden="true"></span>';
+
+    try {
+        let res;
+        if (action === 'delete' && provider === 'ollama') {
+            res = await fetch('/api/ollama/models/' + encodeURIComponent(model), { method: 'DELETE' });
+        } else if (action === 'delete' && provider === 'huggingface') {
+            res = await fetch('/api/huggingface/models/' + encodeURIComponent(model), { method: 'DELETE' });
+        } else if (action === 'pull') {
+            const fd = new FormData();
+            fd.append(provider === 'ollama' ? 'name' : 'repo_id', model);
+            const url = provider === 'ollama' ? '/api/ollama/pull' : '/api/huggingface/pull';
+            res = await fetch(url, { method: 'POST', body: fd });
+        } else {
+            return;
+        }
+        let data = {};
+        try { data = await res.json(); } catch (_) { /* ignore */ }
+        if (!data.ok) {
+            window.alert('Failed: ' + (data.error || ('HTTP ' + res.status)));
+        }
+    } catch (err) {
+        window.alert('Error: ' + err);
+    } finally {
+        _localModelActionInFlight = false;
+        button.disabled = false;
+        button.classList.remove('is-busy');
+        button.innerHTML = originalHtml;
+        if (typeof refresh === 'function') refresh();
+    }
+}
+
+/*
+ * Read a fetch() Response whose body is a Server-Sent-Events stream and
+ * invoke `onEvent(payload)` with the raw string payload of every
+ * `data: ` line — including the literal '[DONE]' sentinel, which callers
+ * decide how to handle. Resolves when the stream ends.
+ */
+async function readSseStream(response, onEvent) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            onEvent(line.slice(6));
+        }
+    }
+}
+
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initializeMemorizzUI);
 } else {

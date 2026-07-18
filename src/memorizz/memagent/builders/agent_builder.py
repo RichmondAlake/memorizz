@@ -45,6 +45,9 @@ class MemAgentBuilder:
         self._mcp_servers = []
         self._self_aware_enabled = False
         self._self_aware_config = None
+        self._continual_learning_enabled = False
+        self._continual_learning_config = None
+        self._workflow_outcome_evaluator = None
         self._automations_enabled = True
         self._default_timezone = None
         self._is_favorite = False
@@ -143,6 +146,28 @@ class MemAgentBuilder:
             self._self_aware_config = dict(config)
         elif config is None:
             self._self_aware_config = None
+        return self
+
+    def with_continual_learning(
+        self, enabled: bool = True, config: Dict[str, Any] = None
+    ) -> "MemAgentBuilder":
+        """Enable/disable the workflow→skill continual learning loop.
+
+        ``config`` keys follow ``PromotionConfig`` (e.g. ``min_executions``,
+        ``require_shadow``, ``promotion_every_n_runs``).
+        """
+        self._continual_learning_enabled = bool(enabled)
+        if isinstance(config, dict):
+            self._continual_learning_config = dict(config)
+        elif config is None:
+            self._continual_learning_config = None
+        return self
+
+    def with_workflow_outcome_evaluator(self, evaluator: Any) -> "MemAgentBuilder":
+        """Set a runtime business-success rubric for captured workflows."""
+        if evaluator is not None and not callable(evaluator):
+            raise TypeError("workflow outcome evaluator must be callable or None")
+        self._workflow_outcome_evaluator = evaluator
         return self
 
     def with_automations_enabled(self, enabled: bool = True) -> "MemAgentBuilder":
@@ -247,6 +272,9 @@ class MemAgentBuilder:
                 default_timezone=self._default_timezone,
                 self_aware=self._self_aware_enabled,
                 self_aware_config=self._self_aware_config,
+                continual_learning=self._continual_learning_enabled,
+                continual_learning_config=self._continual_learning_config,
+                workflow_outcome_evaluator=self._workflow_outcome_evaluator,
             )
 
             logger.info(f"MemAgent built successfully with {len(self._tools)} tools")
@@ -297,6 +325,13 @@ class MemAgentBuilder:
         new_builder._self_aware_config = (
             self._self_aware_config.copy() if self._self_aware_config else None
         )
+        new_builder._continual_learning_enabled = self._continual_learning_enabled
+        new_builder._continual_learning_config = (
+            self._continual_learning_config.copy()
+            if self._continual_learning_config
+            else None
+        )
+        new_builder._workflow_outcome_evaluator = self._workflow_outcome_evaluator
         new_builder._automations_enabled = self._automations_enabled
         new_builder._default_timezone = self._default_timezone
 

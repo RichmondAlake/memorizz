@@ -36,7 +36,7 @@ import io
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 

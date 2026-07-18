@@ -46,8 +46,3 @@ def dequeue_message(timeout: float = 1.0) -> Optional[Dict[str, Any]]:
         return _whatsapp_message_queue.get(timeout=timeout)
     except Empty:
         return None
-
-
-def get_queue_size() -> int:
-    """Get the current number of messages in the queue."""
-    return _whatsapp_message_queue.qsize()

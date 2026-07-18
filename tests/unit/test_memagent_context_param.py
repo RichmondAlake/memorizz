@@ -4,13 +4,15 @@ The contract:
 
 1. ``run(query, context={...})`` and ``run_stream(query, context={...})``
    accept an optional dict that's rendered for the LLM as an ephemeral
-   system-role message.
-2. The dict appears in the message list sent to the LLM (between the
-   main system prompt and the conversation history).
+   context block.
+2. The dict appears in the volatile context block at the START of the
+   FINAL USER message (after the system prompt and conversation history).
+   Rationale: the system prompt and history are the stable prompt-cache
+   prefix; anything per-turn must live at the very end of the prompt.
 3. The dict is NOT persisted to ``conversation_memory`` — only the
    original ``query`` string is recorded by ``_record_interaction``.
-4. Omitting the parameter preserves legacy behaviour (no extra system
-   message, callers don't break).
+4. Omitting the parameter preserves legacy behaviour (no context block,
+   callers don't break).
 """
 
 from __future__ import annotations
@@ -28,8 +30,10 @@ from memorizz.enums import MemoryType, Role
 
 
 def test_build_prompt_messages_injects_request_context_block(memagent_with_mocks):
-    """When request_context is provided, a system message is inserted right
-    after the main system prompt and before any history / user turn."""
+    """When request_context is provided, it is rendered in the volatile
+    context block at the start of the final user message — never as a
+    separate system message (that would sit in the prompt-cache prefix and
+    invalidate it every turn)."""
     agent = memagent_with_mocks
 
     request_context = {
@@ -49,22 +53,22 @@ def test_build_prompt_messages_injects_request_context_block(memagent_with_mocks
         request_context=request_context,
     )
 
-    # [0] is the main system prompt, [1] should be the request-context block,
-    # [-1] should be the user turn.
+    # [0] is the (only) system prompt; [-1] is the user turn carrying the
+    # volatile block followed by the raw query.
+    assert len(messages) == 2
     assert messages[0]["role"] == "system"
     assert messages[0]["content"] == "MAIN SYSTEM PROMPT"
 
-    assert messages[1]["role"] == "system"
-    assert "REQUEST CONTEXT" in messages[1]["content"]
+    assert messages[-1]["role"] == "user"
+    body = messages[-1]["content"]
+    assert "REQUEST CONTEXT" in body
     # The JSON for each field of the supplied dict must be present.
-    body = messages[1]["content"]
     assert "analysis-abc" in body
     assert "Sample Podcast" in body
     assert "the pricing point made on slide 12" in body
     assert "internet_search_allowed" in body
-
-    assert messages[-1]["role"] == "user"
-    assert messages[-1]["content"] == "what did we say about pricing?"
+    # The raw query ends the message (volatile block precedes it).
+    assert body.endswith("what did we say about pricing?")
 
 
 def test_build_prompt_messages_without_request_context_is_unchanged(
@@ -118,8 +122,8 @@ def test_build_prompt_messages_request_context_serializes_non_json_safely(
         request_context=request_context,
     )
 
-    assert "REQUEST CONTEXT" in messages[1]["content"]
-    assert "a-1" in messages[1]["content"]
+    assert "REQUEST CONTEXT" in messages[-1]["content"]
+    assert "a-1" in messages[-1]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +152,9 @@ def test_run_accepts_context_kwarg_and_forwards_to_messages(memagent_with_mocks)
     )
 
     assert response == "ok"
-    # The captured messages must include a system block containing page-xyz.
-    sys_messages = [m for m in captured_messages["last"] if m["role"] == "system"]
-    combined = " ".join(m["content"] for m in sys_messages)
+    # The context block rides in the final user message (volatile tail).
+    user_messages = [m for m in captured_messages["last"] if m["role"] == "user"]
+    combined = " ".join(m["content"] for m in user_messages)
     assert "REQUEST CONTEXT" in combined
     assert "page-xyz" in combined
     assert "Doc" in combined
@@ -171,8 +175,7 @@ def test_run_without_context_kwarg_works_unchanged(memagent_with_mocks):
     response = agent.run("legacy call")
 
     assert response == "fine"
-    sys_messages = [m for m in captured["last"] if m["role"] == "system"]
-    combined = " ".join(m["content"] for m in sys_messages)
+    combined = " ".join(str(m.get("content")) for m in captured["last"])
     assert "REQUEST CONTEXT" not in combined
 
 
@@ -197,8 +200,8 @@ def test_run_stream_accepts_context_kwarg(memagent_with_mocks):
     )
 
     assert chunks, "expected at least one chunk yielded"
-    sys_messages = [m for m in captured["last"] if m["role"] == "system"]
-    combined = " ".join(m["content"] for m in sys_messages)
+    user_messages = [m for m in captured["last"] if m["role"] == "user"]
+    combined = " ".join(m["content"] for m in user_messages)
     assert "REQUEST CONTEXT" in combined
     assert "g-1" in combined
 

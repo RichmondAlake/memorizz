@@ -12,7 +12,6 @@ the REPL (any other value continues).
 
 import os
 import sys
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -914,8 +913,8 @@ def _automation_run_job(console, store, agent, job):
 def cmd_automation(session, args: str):
     """List or run an automation attached to the current agent.
 
-    Automations are scheduled ``agent.run(query)`` jobs. They are persisted only
-    by the Oracle backend, so this requires an Oracle-connected agent.
+    Automations are scheduled ``agent.run(query)`` jobs persisted by the
+    configured filesystem, MongoDB, or Oracle provider.
     """
     console = _con(session)
     agent = session.agent
@@ -925,12 +924,11 @@ def cmd_automation(session, args: str):
     store = get_automation_store(getattr(agent, "memory_provider", None))
     if store is None:
         console.print(
-            "[yellow]Automations require the Oracle backend.[/yellow] "
-            "This agent's memory provider doesn't support them."
+            "[yellow]This agent's memory provider does not support automations.[/yellow]"
         )
         console.print(
-            "Start the CLI with Oracle (MEMORIZZ_BACKEND=oracle + ORACLE_* env "
-            "vars), then create automations via the web UI or SDK."
+            "Use the filesystem, MongoDB, or Oracle provider, then create "
+            "automations via the web UI or SDK."
         )
         return
 

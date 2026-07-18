@@ -157,7 +157,7 @@ All inherit from `ExtractorError`, which is also exported from the package.
 
 ### Ingesting from the Local UI
 
-The [Local UI](../../../ui/README.md) playground accepts files two ways:
+The [Local UI](../../ui/README.md) playground accepts files two ways:
 click 📎 **Attach** next to **Send**, or drag-and-drop onto the chat area.
 Internally it calls `KnowledgeBase.ingest_file` for each uploaded file, so
 format support, chunking, and error messages match the SDK exactly.

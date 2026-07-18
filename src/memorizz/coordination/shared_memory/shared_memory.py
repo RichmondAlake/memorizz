@@ -439,24 +439,6 @@ class SharedMemory:
                 results.append(content)
         return results
 
-    def get_latest_status(
-        self, memory_id: str, agent_id: str, command_id: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Retrieve the most recent STATUS message for an agent."""
-        messages = self.list_messages(
-            memory_id, SharedMemoryMessageType.STATUS, agent_id=agent_id
-        )
-        filtered = (
-            [
-                msg
-                for msg in messages
-                if not command_id or msg["payload"].get("command_id") == command_id
-            ]
-            if command_id
-            else messages
-        )
-        return filtered[-1] if filtered else None
-
     def update_session_status(self, memory_id: str, status: str) -> bool:
         """Update the status of a shared session."""
         try:
@@ -472,30 +454,6 @@ class SharedMemory:
         except Exception as e:
             logger.error(f"Error updating session status: {e}")
             return False
-
-    def is_root_agent(self, memory_id: str, agent_id: str) -> bool:
-        """Check if an agent is the root agent for a session."""
-        try:
-            session = self.memory_provider.retrieve_by_id(
-                memory_id, MemoryType.SHARED_MEMORY
-            )
-            if not session:
-                return False
-            payload = self._decode_payload(session)
-            return payload.get("root_agent_id") == agent_id
-        except Exception as e:
-            logger.error(f"Error checking root agent status: {e}")
-            return False
-
-    def get_session_by_root_agent(self, root_agent_id: str) -> Optional[Dict[str, Any]]:
-        """Get active shared session by root agent ID."""
-        try:
-            # This would need to be implemented in the memory provider
-            # For now, we'll need to search through sessions
-            return None
-        except Exception as e:
-            logger.error(f"Error getting session by root agent: {e}")
-            return None
 
     def find_active_session_for_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """

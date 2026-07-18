@@ -84,11 +84,12 @@ class ToolManager:
             self.toolbox = toolbox
             tools_loaded = 0
 
-            # Extract tools from toolbox
-            if hasattr(toolbox, "tools") and toolbox.tools:
-                for tool_id, tool_data in toolbox.tools.items():
-                    if self._register_tool_from_data(tool_id, tool_data):
+            for tool_id, tool_data in toolbox.tools.items():
+                if callable(tool_data):
+                    if self.add_tool(tool_data):
                         tools_loaded += 1
+                elif self._register_tool_from_data(tool_id, tool_data):
+                    tools_loaded += 1
 
             logger.info(f"Loaded {tools_loaded} tools from toolbox")
             return tools_loaded

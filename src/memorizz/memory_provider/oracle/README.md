@@ -7,6 +7,7 @@ This module provides Oracle Database 23ai/26ai support for Memorizz, enabling ve
 - **Native Vector Support**: Leverages Oracle 23ai+ VECTOR datatype for efficient similarity search
 - **Connection Pooling**: Built-in connection pooling for optimal performance
 - **Vector Indexes**: Automatic creation of HNSW vector indexes with configurable accuracy
+- **In-Database Embeddings**: Default ONNX inference with Oracle `VECTOR_EMBEDDING`
 - **Full CRUD Operations**: Complete support for all memory operations
 - **JSON Storage**: Utilizes Oracle's JSON capabilities for flexible document storage
 - **Lazy Index Creation**: Optional deferred index creation for faster startup
@@ -17,7 +18,7 @@ This module provides Oracle Database 23ai/26ai support for Memorizz, enabling ve
 
 - Oracle Database 23ai or later (26ai recommended)
 - Oracle AI Vector Search feature enabled
-- User with appropriate privileges (CREATE TABLE, CREATE INDEX)
+- User with appropriate privileges (`CREATE TABLE`, `CREATE INDEX`, `CREATE MINING MODEL`, and `EXECUTE ON DBMS_VECTOR`)
 
 ### Python Requirements
 
@@ -29,31 +30,17 @@ pip install oracledb
 
 ### 1. Set Up Oracle Schema with Embedding Dimensions
 
-**Before initializing the provider**, set your desired embedding dimension:
+The default in-database model produces 384-dimensional vectors:
 
 ```bash
-# Set embedding dimension (default: 256)
-export ORACLE_EMBEDDING_DIM=256
+# Optional; 384 is already the setup default.
+export ORACLE_EMBEDDING_DIM=384
 
 # Run Oracle setup
 python -m memorizz.memory_provider.oracle.setup
 ```
 
-### 2. Configure Embeddings to Match Schema
-
-```python
-from memorizz.embeddings import configure_embeddings
-
-# IMPORTANT: Dimensions must match ORACLE_EMBEDDING_DIM used during setup
-configure_embeddings('openai', {
-    'model': 'text-embedding-3-small',
-    'dimensions': 256  # Must match the schema dimension
-})
-```
-
-> **Note**: See [Configuring Embedding Dimensions](#configuring-embedding-dimensions) for detailed dimension configuration options.
-
-### 3. Initialize Oracle Provider
+### 2. Initialize Oracle Provider
 
 ```python
 from memorizz.memory_provider.oracle import OracleProvider, OracleConfig
@@ -63,11 +50,31 @@ config = OracleConfig(
     password="secure_password",
     dsn="localhost:1521/FREEPDB1",
     schema="memorizz",
-    lazy_vector_indexes=False
+    lazy_vector_indexes=False,
+    in_database_embedding=True,
 )
 
 provider = OracleProvider(config)
 ```
+
+On first use, MemoRizz installs Oracle's augmented `ALL_MINILM_L12_V2`
+ONNX model when it is absent. Set `embedding_config["onnx_path"]` to install
+from a local file instead of Oracle's public model URL.
+
+### 3. Use an External Embedding Provider (Optional)
+
+```python
+from memorizz.embeddings import configure_embeddings
+
+configure_embeddings("openai", {
+    "model": "text-embedding-3-small",
+    "dimensions": 256,
+})
+```
+
+For this opt-out path, create `OracleConfig` with
+`in_database_embedding=False`, set `ORACLE_EMBEDDING_DIM=256` before schema
+setup, and supply the external provider explicitly.
 
 ### 4. Create Agent with Oracle Backend
 
@@ -94,8 +101,9 @@ response = agent.run("Hello, how can you help me?")
 | `dsn` | str | Required | Data Source Name or connection string |
 | `schema` | str | `user` | Schema name for all tables |
 | `lazy_vector_indexes` | bool | `False` | Defer vector index creation until first use |
-| `embedding_provider` | str/object | `None` | Explicit embedding provider (overrides global) |
-| `embedding_config` | dict | `{}` | Embedding configuration when using string provider |
+| `in_database_embedding` | bool | `True` | Install/use an Oracle ONNX embedding model when no external provider is supplied |
+| `embedding_provider` | str/object | `None` | Explicit external embedding provider; takes precedence over the in-database default |
+| `embedding_config` | dict | `{}` | Model, dimensions, ONNX source, or external-provider options |
 | `pool_min` | int | `1` | Minimum connections in pool |
 | `pool_max` | int | `5` | Maximum connections in pool |
 | `pool_increment` | int | `1` | Connections to add when pool exhausted |
@@ -135,6 +143,7 @@ CREATE USER memorizz_user IDENTIFIED BY secure_password;
 GRANT CREATE SESSION TO memorizz_user;
 GRANT CREATE TABLE TO memorizz_user;
 GRANT CREATE INDEX TO memorizz_user;
+GRANT CREATE MINING MODEL TO memorizz_user;
 GRANT UNLIMITED TABLESPACE TO memorizz_user;
 
 -- For vector operations (Oracle 23ai+)
@@ -339,7 +348,9 @@ export ORACLE_TABLESPACE_SIZE_MB="200"
 export ORACLE_TABLESPACE_AUTOEXTEND_MB="25"
 ```
 
-Rerun `memorizz setup-oracle` (or `python -m memorizz.memory_provider.oracle.setup`) after setting these variables.
+Rerun `memorizz oracle setup` (or
+`python -m memorizz.memory_provider.oracle.setup`) after setting these
+variables.
 
 ### Configuring Embedding Dimensions
 
@@ -363,9 +374,20 @@ export ORACLE_EMBEDDING_DIM=1536
 python -m memorizz.memory_provider.oracle.setup
 ```
 
-**Default**: If `ORACLE_EMBEDDING_DIM` is not set, the schema defaults to **256 dimensions**.
+**Default**: If `ORACLE_EMBEDDING_DIM` is not set, the schema defaults to
+**384 dimensions**, matching `ALL_MINILM_L12_V2`.
 
 #### Supported Embedding Models by Dimension
+
+**384 dimensions (default):**
+```python
+config = OracleConfig(
+    user="memorizz_user",
+    password="password",
+    dsn="localhost:1521/FREEPDB1",
+    in_database_embedding=True,
+)
+```
 
 **256 dimensions:**
 ```python
@@ -524,7 +546,7 @@ ORDER BY elapsed_time DESC;
 ## Best Practices
 
 1. **Use connection pooling** - Don't create new providers for each operation
-2. **Configure embeddings globally** - Set once at application startup
+2. **Keep one embedding space** - Use the Oracle default or configure one external provider consistently
 3. **Use appropriate pool sizes** - Match your concurrency needs
 4. **Monitor index health** - Rebuild indexes periodically for large datasets
 5. **Use lazy indexes for development** - Faster startup, create indexes as needed

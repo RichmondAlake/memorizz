@@ -17,7 +17,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
-      - run: pytest tests/ -q
+      # Match test.yml: tests/performance is excluded — it's flaky on shared
+      # CI runners, and a release gate must not be flakier than CI.
+      - run: pytest tests/unit tests/integration -q
 
   build:
     needs: test
@@ -87,6 +89,11 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Manual fallback uploads use a project-scoped token. A rerun of the
+          # canonical tag workflow must still complete GitHub/npm/tap release
+          # jobs when those exact versioned artifacts already exist on PyPI.
+          skip-existing: true
 
   github-release:
     needs: pypi
@@ -129,9 +136,23 @@ jobs:
   homebrew:
     needs: pypi
     runs-on: ubuntu-latest
-    if: ${{ secrets.TAP_PUSH_TOKEN != '' }}
+    env:
+      TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
     steps:
+      # The secrets context is not available in job-level `if:` expressions,
+      # so the availability gate lives in a step instead — the old job-level
+      # guard meant this job never ran at all.
+      - name: Check tap token
+        id: gate
+        run: |
+          if [ -z "$TAP_PUSH_TOKEN" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "TAP_PUSH_TOKEN not configured - skipping Homebrew tap bump."
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Compute version + sdist sha256
+        if: steps.gate.outputs.enabled == 'true'
         id: meta
         run: |
           VER="${GITHUB_REF_NAME#v}"
@@ -146,6 +167,7 @@ jobs:
           curl -fsSL "$URL" -o sdist.tar.gz
           echo "sha256=$(sha256sum sdist.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Bump formula in tap
+        if: steps.gate.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
           VER: ${{ steps.meta.outputs.version }}

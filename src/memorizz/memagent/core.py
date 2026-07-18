@@ -6,10 +6,12 @@ import json
 import logging
 import os
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import (
@@ -29,6 +31,7 @@ from ..conversation_history import is_trace_bundle_entry
 from ..enums import ApplicationMode, ApplicationModeConfig, MemoryType, Role
 from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
+from . import persistence
 from .constants import (
     BASE_SYSTEM_PROMPT,
     CONTINUOUS_MAX_STEPS,
@@ -48,7 +51,16 @@ from .managers import (
     SandboxManager,
     SelfAwarenessManager,
     ToolManager,
-    WorkflowManager,
+)
+from .utils.context_dedup import dedupe_and_select, filter_skill_covered_workflows
+from .utils.tool_log import (  # noqa: F401  — re-exported for compatibility
+    _TOOL_LOG_PLACEHOLDER_PREFIX,
+    _build_tool_log_placeholder,
+    _extract_identifiers,
+    _is_tool_placeholder_content,
+    _summarize_tool_args,
+    _summarize_tool_result,
+    _to_jsonable,
 )
 
 if TYPE_CHECKING:
@@ -59,182 +71,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _to_jsonable(value: Any) -> Any:
-    """Recursively coerce a value into a JSON-serializable primitive.
-
-    Oracle ``oracledb`` surfaces CLOB/BLOB columns as LOB objects with a
-    ``.read()`` method rather than as strings. These slip through
-    conversation-history, knowledge-base, and summary loads into the
-    message list we hand to the LLM provider, where the streaming path
-    ultimately does ``json.dumps(...)`` and fails with
-    ``Object of type LOB is not JSON serializable``.
-
-    Rather than chase every data path individually, we sanitize at the
-    prompt-assembly boundary. One helper, used everywhere we serialize
-    model input or tool output.
-    """
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    reader = getattr(value, "read", None)
-    if callable(reader):
-        try:
-            read_value = reader()
-        except Exception:
-            return str(value)
-        return _to_jsonable(read_value)
-    if isinstance(value, bytes):
-        try:
-            return value.decode("utf-8")
-        except Exception:
-            return value.decode("utf-8", errors="ignore")
-    if isinstance(value, list):
-        return [_to_jsonable(v) for v in value]
-    if isinstance(value, tuple):
-        return [_to_jsonable(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _to_jsonable(v) for k, v in value.items()}
-    return str(value)
-
-
-# ---------------------------------------------------------------------------
-# Tool-log disambiguation helpers
-# ---------------------------------------------------------------------------
-# The agent-facing tool placeholder needs enough signal for the LLM to pick
-# the right ``tool_log_id`` among multiple calls to the same tool in one
-# session. These helpers centralize the three improvements:
-#   1) args summary so calls to the same tool can be told apart
-#   2) field-aware result summary for common tool output shapes
-#   3) a single builder used by both streaming and non-streaming paths
-_TOOL_LOG_PLACEHOLDER_PREFIX = "[Tool '"
-
-
-def _summarize_tool_args(arguments: Any, limit: int = 200) -> str:
-    """One-line, length-bounded JSON summary of tool arguments.
-
-    Falls back to ``str(arguments)`` for anything non-JSON. Empty mapping
-    returns an empty string so the caller can omit the field cleanly.
-    """
-    if arguments is None:
-        return ""
-    try:
-        if isinstance(arguments, str):
-            # Already serialized — just trim.
-            text = arguments
-        else:
-            text = json.dumps(_to_jsonable(arguments), ensure_ascii=False)
-    except Exception:
-        text = str(arguments)
-    text = text.strip()
-    if not text or text in ("{}", "null"):
-        return ""
-    if len(text) > limit:
-        text = text[: limit - 1].rstrip() + "…"
-    return text
-
-
-def _summarize_tool_result(result: Any, preview_limit: int = 500) -> str:
-    """Field-aware summary of a tool's return value.
-
-    Produces a one-line hint based on common tool output shapes plus a
-    bounded ``Preview:`` of the most content-rich field. Unknown shapes
-    fall through to ``str(result)[:preview_limit]`` so nothing blows up.
-    """
-    if result is None:
-        return ""
-    # Errors first — always useful to surface verbatim
-    if isinstance(result, dict):
-        if "error" in result and result.get("error"):
-            err = str(result["error"])
-            return f"error: {err[:preview_limit]}"
-        # matches = KB lookup, entity lookup, semantic search
-        matches = result.get("matches")
-        if isinstance(matches, list):
-            hints: List[str] = [f"{len(matches)} match(es)"]
-            if matches and isinstance(matches[0], dict):
-                top = matches[0]
-                ns = top.get("namespace") or top.get("name")
-                if ns:
-                    hints.append(f"top namespace: {ns}")
-                first_content = top.get("content") or top.get("text") or ""
-                if isinstance(first_content, str) and first_content.strip():
-                    snippet = first_content.strip().replace("\n", " ")
-                    if len(snippet) > preview_limit:
-                        snippet = snippet[: preview_limit - 1] + "…"
-                    hints.append(f"top content: {snippet}")
-            return " · ".join(hints)
-        # generic list-of-entries return shapes
-        entries = result.get("entries") or result.get("logs") or result.get("items")
-        if isinstance(entries, list):
-            return f"{len(entries)} entr(ies)"
-        # single-result wrappers
-        if "content" in result and isinstance(result["content"], str):
-            content = result["content"].strip().replace("\n", " ")
-            if len(content) > preview_limit:
-                content = content[: preview_limit - 1] + "…"
-            return f"content: {content}"
-        if "ok" in result:
-            return f"ok={result['ok']}"
-
-    text = str(result).strip().replace("\n", " ")
-    if len(text) > preview_limit:
-        text = text[: preview_limit - 1] + "…"
-    return text
-
-
-def _build_tool_log_placeholder(
-    *,
-    tool_name: str,
-    tool_log_id: str,
-    arguments: Any,
-    result: Any,
-    error_message: Optional[str] = None,
-) -> str:
-    """Compose the bracketed placeholder that replaces the raw tool result
-    in the LLM message list and in conversation_memory.
-
-    Includes (in order) the tool name, a short args summary, the
-    tool_log_id + retrieval-call template, and a field-aware preview.
-    That's enough signal for the LLM to pick the right id even among
-    several calls to the same tool in one session.
-    """
-    args_summary = _summarize_tool_args(arguments)
-    result_summary = _summarize_tool_result(result)
-    args_clause = f" args={args_summary}" if args_summary else ""
-    if error_message:
-        header = (
-            f"{_TOOL_LOG_PLACEHOLDER_PREFIX}{tool_name}' failed: {error_message}."
-            f"{args_clause} Full output stored as tool_log:{tool_log_id} — "
-            f"use retrieve_tool_log_entry('{tool_log_id}') for complete data]"
-        )
-    else:
-        header = (
-            f"{_TOOL_LOG_PLACEHOLDER_PREFIX}{tool_name}' executed successfully."
-            f"{args_clause} Full output stored as tool_log:{tool_log_id} — "
-            f"use retrieve_tool_log_entry('{tool_log_id}') for complete data]"
-        )
-    return f"{header}\nSummary: {result_summary}" if result_summary else header
-
-
-def _is_tool_placeholder_content(text: Any) -> bool:
-    """True when a stored conversation row's content is a tool-log placeholder.
-
-    Used to filter these rows out of the message list handed to the LLM
-    (they'd otherwise appear as orphan tool-role messages without a
-    matching tool_call_id and the OpenAI API would reject the batch).
-    The placeholders remain visible in the UI and are surfaced to the
-    agent as a structured digest in the system prompt instead.
-    """
-    if not isinstance(text, str):
-        return False
-    return text.lstrip().startswith(_TOOL_LOG_PLACEHOLDER_PREFIX)
-
-
 _MIN_HISTORY_LIMIT = 24
 _MAX_HISTORY_LIMIT = 120
 _DEFAULT_HISTORY_LIMIT = 60
 _FALLBACK_HISTORY_MESSAGES = 24
 _PROMPT_WINDOW_RATIO = 0.8
 _PROMPT_BUFFER_TOKENS = 200
+# History is evicted in chunks of this many messages (rather than sliding by
+# one or two messages every turn) so the prompt prefix stays byte-identical
+# across turns — the precondition for OpenAI/Anthropic prompt-cache hits.
+# A once-per-N-turns full-price request beats a cache miss on every turn.
+_HISTORY_EVICTION_CHUNK = 20
+# Pre-inference retrieval: candidates fetched per memory source before the
+# dedup/MMR pass, and the max deduped memories injected per turn.
+_RETRIEVAL_CANDIDATE_LIMIT = 5
+_RETRIEVED_MEMORIES_MAX = 4
 
 
 class MemAgent:
@@ -276,6 +127,9 @@ class MemAgent:
         default_timezone: Optional[str] = None,
         self_aware: bool = False,
         self_aware_config: Optional[Dict[str, Any]] = None,
+        continual_learning: bool = False,
+        continual_learning_config: Optional[Dict[str, Any]] = None,
+        workflow_outcome_evaluator: Optional[Callable[[Any], Any]] = None,
         name: Optional[str] = None,
         is_favorite: bool = False,
         streaming: bool = False,
@@ -314,6 +168,22 @@ class MemAgent:
         self.self_aware_config = (
             dict(self_aware_config) if isinstance(self_aware_config, dict) else None
         )
+        self.continual_learning = bool(continual_learning) or (
+            os.getenv("MEMORIZZ_CONTINUAL_LEARNING", "").strip().lower()
+            in ("1", "true", "yes")
+        )
+        self.continual_learning_config = (
+            dict(continual_learning_config)
+            if isinstance(continual_learning_config, dict)
+            else None
+        )
+        if workflow_outcome_evaluator is not None and not callable(
+            workflow_outcome_evaluator
+        ):
+            raise TypeError("workflow_outcome_evaluator must be callable or None")
+        # Runtime-only by design: application business rules are often closures
+        # or service objects and cannot be serialized with the agent config.
+        self.workflow_outcome_evaluator = workflow_outcome_evaluator
 
         (
             self.application_mode,
@@ -326,11 +196,25 @@ class MemAgent:
             memory_types,
         )
 
+        # Continual learning cannot learn without workflow capture, and its
+        # skills live in the SKILLBOX partition — force both on when the
+        # feature is enabled.
+        if self.continual_learning:
+            if MemoryType.WORKFLOW_MEMORY not in self.active_memory_types:
+                if memory_types is not None:
+                    logger.warning(
+                        "continual_learning=True but the configured "
+                        "memory_types omit workflow_memory — enabling it; "
+                        "the learning loop cannot observe runs without it."
+                    )
+                self.active_memory_types.append(MemoryType.WORKFLOW_MEMORY)
+            if MemoryType.SKILLBOX not in self.active_memory_types:
+                self.active_memory_types.append(MemoryType.SKILLBOX)
+
         # Initialize thread state tracking
         self._current_thread_id = None
         self._current_memory_id = None
         self._thread_ids_by_memory: Dict[str, str] = {}
-        self._last_entity_context: List[Dict[str, Any]] = []
 
         # Initialize LLM. We stash any construction error on the instance
         # so the chat endpoints can surface the real cause (e.g. "model not
@@ -366,7 +250,6 @@ class MemAgent:
         self._internet_access_tools_registered = False
         self._internet_access_tool_names = ("internet_search", "open_web_page")
         self._persona_tools_registered = False
-        self._persona_tool_names = ("update_persona", "read_persona")
         self._skills_marketplace_tools_registered = False
         self._skills_marketplace_tool_names = (
             "skills_marketplace_search",
@@ -381,6 +264,17 @@ class MemAgent:
         self._context_summary_trigger = 80.0
         self._context_summary_cooldown = 90.0
         self._last_summary_timestamp = 0.0
+        # Context-summary generation runs off the hot path (daemon thread);
+        # the flag prevents overlapping runs across turns.
+        self._summary_thread_lock = threading.Lock()
+        self._summary_generation_in_flight = False
+        # Conversation rows are written with embedding=None and backfilled by
+        # a single background worker so the hot path never blocks on the
+        # embedding API. Disable via MEMORIZZ_DISABLE_CONVERSATION_EMBEDDINGS.
+        self._conversation_embedding_enabled = os.getenv(
+            "MEMORIZZ_DISABLE_CONVERSATION_EMBEDDINGS", ""
+        ).strip().lower() not in ("1", "true", "yes")
+        self._embedding_backfill_executor: Optional[ThreadPoolExecutor] = None
         self._internet_access_failure_count = 0
         self._internet_access_disabled_reason: Optional[str] = None
         self._sandbox_tools_registered = False
@@ -390,18 +284,7 @@ class MemAgent:
             "sandbox_read_file",
         )
         self._skill_tools_registered = False
-        self._skill_tool_names = (
-            "list_skills",
-            "read_skill",
-            "run_skill_code",
-            "run_skill_script",
-        )
         self._mcp_tools_registered = False
-        self._mcp_tool_names = (
-            "list_mcp_servers",
-            "mcp_list_tools",
-            "mcp_call_tool",
-        )
         self._self_aware_tools_registered = False
         self._self_aware_tool_names = (
             "self_aware_list_roots",
@@ -414,6 +297,10 @@ class MemAgent:
         )
         self._stream_event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
         self._stream_trace_events: Optional[List[Dict[str, Any]]] = None
+        # Learned skills injected into the CURRENT turn's context — reset at
+        # the top of every _build_context so attribution never leaks across
+        # runs. Read by the workflow capture paths (skills_activated).
+        self._activated_skill_ids: List[str] = []
 
         # Initialize manager components
         self._initialize_managers(
@@ -503,7 +390,10 @@ class MemAgent:
             logger.warning("Persona tools registration failed: %s", exc)
 
         self.skills = self._load_skills()
-        if self.skills:
+        # Learned (skillbox) skills surface through the same list_skills /
+        # read_skill tools, so registration is also needed when continual
+        # learning is on even with no file-based skills configured.
+        if self.skills or self.continual_learning_manager:
             try:
                 self._register_skill_tools()
             except Exception as exc:
@@ -659,9 +549,6 @@ class MemAgent:
         # Persona Manager
         self.persona_manager = PersonaManager(memory_provider)
 
-        # Workflow Manager
-        self.workflow_manager = WorkflowManager()
-
         # Internet Access Manager
         self.internet_access_manager = InternetAccessManager(internet_access_provider)
 
@@ -679,6 +566,32 @@ class MemAgent:
         # Self-awareness manager (host codebase awareness and guarded file/CLI ops)
         self.self_awareness_manager = SelfAwarenessManager(config=self_aware_config)
         self.self_aware_config = self.self_awareness_manager.get_config()
+
+        # Continual learning manager (workflow → skill promotion loop).
+        # Only constructed when the feature flag is on AND a provider
+        # exists — the loop is inert without a place to store skills.
+        self.continual_learning_manager = None
+        if self.continual_learning:
+            if memory_provider:
+                try:
+                    from .managers.continual_learning_manager import (
+                        ContinualLearningManager,
+                    )
+
+                    self.continual_learning_manager = ContinualLearningManager(
+                        memory_provider=memory_provider,
+                        llm_provider=self.model,
+                        agent_id=self.agent_id,
+                        config=self.continual_learning_config,
+                        tool_manager=self.tool_manager,
+                    )
+                except Exception as exc:
+                    logger.warning("Continual learning failed to initialize: %s", exc)
+            else:
+                logger.warning(
+                    "continual_learning=True requires a memory provider — "
+                    "feature disabled for this agent."
+                )
 
     def _initialize_context_window_tokens(
         self, explicit_value: Optional[int], llm_config: Optional[Dict[str, Any]]
@@ -863,11 +776,11 @@ class MemAgent:
             return []
 
         history_limit = self._get_conversation_history_limit()
-        normalized = normalized[-history_limit:]
 
         context_window = self._context_window_tokens
         if not context_window or context_window <= 0:
-            return normalized[-_FALLBACK_HISTORY_MESSAGES:]
+            ideal_start = max(0, len(normalized) - _FALLBACK_HISTORY_MESSAGES)
+            return normalized[self._quantize_history_start(ideal_start, normalized) :]
 
         base_tokens = (
             self._estimate_text_tokens(system_prompt)
@@ -877,20 +790,48 @@ class MemAgent:
         prompt_budget = max(512, int(context_window * _PROMPT_WINDOW_RATIO))
         history_budget = max(160, prompt_budget - base_tokens)
 
-        selected_reversed: List[Dict[str, str]] = []
+        # Find the earliest message index whose suffix fits the token budget
+        # (and the message-count limit).
+        total = len(normalized)
+        ideal_start = max(0, total - history_limit)
         consumed = 0
-        for message in reversed(normalized):
-            message_cost = self._estimate_text_tokens(message.get("content")) + 6
-            if selected_reversed and (consumed + message_cost) > history_budget:
+        budget_start = total - 1  # always keep at least the newest message
+        for index in range(total - 1, -1, -1):
+            message_cost = (
+                self._estimate_text_tokens(normalized[index].get("content")) + 6
+            )
+            if index < total - 1 and (consumed + message_cost) > history_budget:
                 break
-            selected_reversed.append(message)
             consumed += message_cost
+            budget_start = index
             if consumed >= history_budget:
                 break
+        ideal_start = max(ideal_start, budget_start)
 
-        if not selected_reversed:
-            return normalized[-1:]
-        return list(reversed(selected_reversed))
+        return normalized[self._quantize_history_start(ideal_start, normalized) :]
+
+    @staticmethod
+    def _quantize_history_start(ideal_start: int, normalized: List[Any]) -> int:
+        """Quantize the history window start to eviction-chunk boundaries.
+
+        Recomputing an exact token-fitted window every turn moves the first
+        history message every turn, which changes the prompt prefix and
+        invalidates the provider prompt cache for the whole conversation.
+        Rounding the start UP to the next multiple of ``_HISTORY_EVICTION_CHUNK``
+        keeps the window byte-stable for ~a chunk's worth of turns (dropping
+        slightly more history than strictly necessary, which the budget's
+        ``_PROMPT_WINDOW_RATIO`` headroom absorbs) and then evicts a whole
+        chunk at once — one cache miss per chunk instead of one per turn.
+        """
+        if ideal_start <= 0:
+            return 0
+        quantized = (
+            (ideal_start + _HISTORY_EVICTION_CHUNK - 1)
+            // _HISTORY_EVICTION_CHUNK
+            * _HISTORY_EVICTION_CHUNK
+        )
+        # Never quantize away the entire window.
+        return min(quantized, max(len(normalized) - 1, 0))
 
     def _build_prompt_messages(
         self,
@@ -899,42 +840,163 @@ class MemAgent:
         context: Dict[str, Any],
         request_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Build model input messages with bounded conversation history.
+        """Build model input messages ordered stable-prefix → volatile-tail.
 
-        ``request_context`` is the M2 per-call ephemeral context: when
-        provided, it's rendered as a system-role message between the main
-        system prompt and the conversation history. It is intentionally
-        NOT persisted by ``_record_interaction`` (which only stores the
-        original ``query`` string), so it does not pollute
-        ``conversation_memory``.
+        Layout (prompt-cache friendly — both OpenAI's automatic prefix cache
+        and Anthropic's cache_control breakpoints require the byte-identical
+        prefix to come first):
+
+        1. Static system prompt — frozen for the session.
+        2. Conversation history — append-only, chunk-evicted.
+        3. Final user message — per-turn volatile block (retrieved memories,
+           entity facts, tool-log digest, ``request_context``) followed by
+           the user's query. Everything that changes per turn lives here, at
+           the very end, where it invalidates nothing.
+
+        ``request_context`` (M2 per-call ephemeral context) is rendered
+        inside the volatile block. It is intentionally NOT persisted by
+        ``_record_interaction`` (which only stores the original ``query``
+        string), so it does not pollute ``conversation_memory``.
         """
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
-        if request_context:
-            try:
-                rendered_context = json.dumps(
-                    request_context, ensure_ascii=False, indent=2, default=str
-                )
-            except Exception:
-                rendered_context = str(request_context)
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "REQUEST CONTEXT (ephemeral, this turn only — do not "
-                        "reference unless directly relevant to the user's "
-                        "current query):\n" + rendered_context
-                    ),
-                }
-            )
-
         history = context.get("conversation_history", [])
         messages.extend(self._prepare_history_messages(history, system_prompt, query))
-        messages.append({"role": "user", "content": query})
+
+        volatile_block = self._build_volatile_context_block(context, request_context)
+        if volatile_block:
+            user_content = (
+                "<memorizz:context>\n"
+                + volatile_block
+                + "\n</memorizz:context>\n\n"
+                + query
+            )
+        else:
+            user_content = query
+        messages.append({"role": "user", "content": user_content})
         # Sanitize once at the boundary so any LOB that slipped through from
         # memory loaders (conversation history, KB retrievals, summaries…)
         # doesn't blow up the LLM provider's json.dumps during streaming.
         return _to_jsonable(messages)
+
+    def _build_volatile_context_block(
+        self,
+        context: Dict[str, Any],
+        request_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Render the per-turn context that must NOT live in the system prompt.
+
+        These sections change turn to turn (retrieved memories, entity facts,
+        the tool-log digest, per-call request context). Injected into the
+        final user message so the stable prefix — system prompt + history —
+        stays byte-identical and prompt caches keep hitting. Content here is
+        never persisted to conversation_memory.
+        """
+        sections: List[str] = []
+
+        # Learned skills lead the volatile block: they carry instruction
+        # authority for this turn, so they render above ordinary retrieved
+        # memories. (They must NOT move into the system prompt — per-turn
+        # variation there would invalidate the prompt cache for the whole
+        # conversation.)
+        activated_skills = context.get("activated_skills") or []
+        rendered_skills = []
+        if activated_skills and self.continual_learning_manager:
+            try:
+                skills_section = (
+                    self.continual_learning_manager.format_skills_prompt_section(
+                        activated_skills
+                    )
+                )
+                if skills_section:
+                    sections.append(skills_section)
+                    rendered_skills = activated_skills
+            except Exception as exc:
+                logger.warning("Failed to render learned skills: %s", exc)
+
+        # Final context-boundary guard: even callers that manually inject
+        # workflow memory cannot co-inject a raw run covered by a skill that
+        # was rendered above.
+        retrieved = filter_skill_covered_workflows(
+            context.get("retrieved_memories") or [],
+            rendered_skills,
+        )
+        if retrieved:
+            lines = []
+            for item in retrieved:
+                source = item.get("source") or "memory"
+                stamp = ""
+                ts = item.get("timestamp")
+                if ts:
+                    try:
+                        stamp = datetime.fromtimestamp(float(ts)).strftime(" %Y-%m-%d")
+                    except Exception:
+                        stamp = ""
+                lines.append(f"• [{source}{stamp}] {item.get('text', '')}")
+            sections.append(
+                "Relevant memories retrieved for this turn (deduplicated; may "
+                "be incomplete — use your memory tools for anything deeper):\n"
+                + "\n".join(lines)
+            )
+
+        entity_profiles = context.get("entity_memory_profiles") or []
+        if (
+            entity_profiles
+            and self.entity_memory_manager
+            and self.entity_memory_manager.is_enabled()
+        ):
+            try:
+                entity_summary = self.entity_memory_manager.summarize_for_prompt(
+                    entity_profiles
+                )
+            except Exception:
+                entity_summary = ""
+            if entity_summary:
+                sections.append(
+                    "Entity memory facts:\n"
+                    + entity_summary
+                    + "\nUse the entity memory tools to keep these facts up to date."
+                )
+
+        summaries = context.get("summaries") or []
+        if summaries:
+            summary_lines = []
+            for entry in summaries[:10]:
+                sid = entry.get("summary_id") or ""
+                desc = entry.get("short_description") or ""
+                if sid:
+                    summary_lines.append(f"• {sid}: {desc}")
+            if summary_lines:
+                sections.append(
+                    "Compressed conversation summaries available via "
+                    "`expand_summary('<summary_id>')`:\n" + "\n".join(summary_lines)
+                )
+
+        # Durable digest of this thread's tool_log entries — the placeholder
+        # rows are filtered out of LLM history, so this is how tool_log_ids
+        # stay pickable across turns.
+        recent_digest = self._format_recent_tool_logs_digest(limit=10)
+        if recent_digest:
+            sections.append(recent_digest)
+
+        if request_context:
+            try:
+                rendered_context = json.dumps(
+                    request_context,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                    sort_keys=True,
+                )
+            except Exception:
+                rendered_context = str(request_context)
+            sections.append(
+                "REQUEST CONTEXT (ephemeral, this turn only — do not "
+                "reference unless directly relevant to the user's "
+                "current query):\n" + rendered_context
+            )
+
+        return "\n\n".join(sections)
 
     def _register_context_monitor_tools(self):
         """Register tools that expose context stats and summaries."""
@@ -1085,7 +1147,9 @@ class MemAgent:
             if not self.memory_manager or not self._current_memory_id:
                 return {"error": "No memory context available.", "logs": []}
             raw_logs = self.memory_manager.list_tool_logs(
-                memory_id=self._current_memory_id, limit=limit
+                memory_id=self._current_memory_id,
+                limit=limit,
+                thread_id=self._current_thread_id,
             )
             enriched: List[Dict[str, Any]] = []
             for row in raw_logs or []:
@@ -1150,7 +1214,12 @@ class MemAgent:
             self._known_summary_ids.add(summary_id)
 
     def _maybe_generate_context_summary(self):
-        """Automatically summarize when context window nears limits."""
+        """Automatically summarize when context window nears limits.
+
+        Summarization is LLM- and DB-heavy, so it runs on a daemon thread
+        ("sleep-time" consolidation) instead of blocking the user-facing
+        turn; the in-flight flag prevents overlapping runs.
+        """
         if not self.memory_provider or not hasattr(
             self.memory_provider, "retrieve_by_id"
         ):
@@ -1168,12 +1237,32 @@ class MemAgent:
         if current_time - self._last_summary_timestamp < self._context_summary_cooldown:
             return
 
-        summary_ids = self.generate_summaries(days_back=1, max_memories_per_summary=20)
-        if not summary_ids:
-            return
+        with self._summary_thread_lock:
+            if self._summary_generation_in_flight:
+                return
+            self._summary_generation_in_flight = True
+            # Stamp inside the lock so a burst of turns can't all pass the
+            # cooldown check before the worker finishes.
+            self._last_summary_timestamp = current_time
 
-        self._last_summary_timestamp = current_time
-        self._track_summary_ids(summary_ids, token_estimate=stats.get("total_tokens"))
+        token_estimate = stats.get("total_tokens")
+
+        def _summarize() -> None:
+            try:
+                summary_ids = self.generate_summaries(
+                    days_back=1, max_memories_per_summary=20
+                )
+                if summary_ids:
+                    self._track_summary_ids(summary_ids, token_estimate=token_estimate)
+            except Exception as exc:
+                logger.warning("Background context summarization failed: %s", exc)
+            finally:
+                with self._summary_thread_lock:
+                    self._summary_generation_in_flight = False
+
+        threading.Thread(
+            target=_summarize, daemon=True, name="memorizz-context-summary"
+        ).start()
 
     def list_context_summaries(self) -> List[Dict[str, Any]]:
         """Return summary registry entries."""
@@ -1438,18 +1527,41 @@ class MemAgent:
         return loaded_skills
 
     def _get_skill(self, skill_name: Optional[str]) -> Optional[Dict[str, Any]]:
-        """Resolve a skill by name or file path."""
-        if not self.skills:
-            return None
-        if not skill_name:
-            return self.skills[0]
-        for skill in self.skills:
-            if skill_name in {
-                skill.get("name"),
-                skill.get("path"),
-                Path(skill.get("path", "")).name,
-            }:
-                return skill
+        """Resolve a skill by name or file path.
+
+        Falls back to learned (skillbox) skills so ``read_skill`` works on
+        promoted skills with zero extra plumbing.
+        """
+        if self.skills:
+            if not skill_name:
+                return self.skills[0]
+            for skill in self.skills:
+                if skill_name in {
+                    skill.get("name"),
+                    skill.get("path"),
+                    Path(skill.get("path", "")).name,
+                }:
+                    return skill
+        if skill_name and self.continual_learning_manager:
+            try:
+                learned = self.continual_learning_manager.skillbox.get_skill_by_name(
+                    skill_name
+                )
+            except Exception:
+                learned = None
+            if learned:
+                return {
+                    "name": learned.name,
+                    "path": None,
+                    "base_dir": None,
+                    "description": learned.description,
+                    "content": learned.content,
+                    "code_blocks": [],
+                    "script_paths": [],
+                    "source": "learned",
+                    "version": learned.version,
+                    "status": learned.status.value,
+                }
         return None
 
     def _execute_code_in_sandbox(
@@ -1482,19 +1594,39 @@ class MemAgent:
             return
 
         def list_skills() -> Dict[str, Any]:
-            """List loaded skill files and executable snippets."""
-            return {
-                "skills": [
-                    {
-                        "name": skill.get("name"),
-                        "path": skill.get("path"),
-                        "description": skill.get("description"),
-                        "snippet_count": len(skill.get("code_blocks", [])),
-                        "script_paths": skill.get("script_paths", []),
-                    }
-                    for skill in self.skills
-                ]
-            }
+            """List loaded skill files, executable snippets, and learned skills."""
+            entries = [
+                {
+                    "name": skill.get("name"),
+                    "path": skill.get("path"),
+                    "description": skill.get("description"),
+                    "snippet_count": len(skill.get("code_blocks", [])),
+                    "script_paths": skill.get("script_paths", []),
+                    "source": "file",
+                }
+                for skill in self.skills
+            ]
+            if self.continual_learning_manager:
+                try:
+                    from ..long_term.procedural.skillbox import SkillStatus
+
+                    for learned in self.continual_learning_manager.skillbox.list_skills(
+                        statuses=(SkillStatus.ACTIVE,)
+                    ):
+                        entries.append(
+                            {
+                                "name": learned.name,
+                                "path": None,
+                                "description": learned.description,
+                                "snippet_count": 0,
+                                "script_paths": [],
+                                "source": "learned",
+                                "version": learned.version,
+                            }
+                        )
+                except Exception as exc:
+                    logger.debug("Listing learned skills failed: %s", exc)
+            return {"skills": entries}
 
         def read_skill(skill_name: str) -> Dict[str, Any]:
             """Read full markdown content for a loaded skill file."""
@@ -2031,8 +2163,8 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         """Internal: raise ValueError if automations unavailable, else return manager."""
         if not self.has_automations():
             raise ValueError(
-                "Automations are not available. Requires an Oracle memory provider "
-                "with automations_enabled=True."
+                "Automations are not available. Use a filesystem, MongoDB, or "
+                "Oracle memory provider with automations_enabled=True."
             )
         return self.automation_manager
 
@@ -2574,36 +2706,6 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
         return resolved_memory_id, resolved_thread_id
 
-    def switch_thread(self, memory_id: str, start_new_thread: bool = False) -> str:
-        """
-        Switch the active thread to a specific memory_id.
-
-        Returns:
-            str: Active thread_id for the selected thread.
-        """
-        normalized_memory_id = str(memory_id or "").strip()
-        if not normalized_memory_id:
-            raise ValueError("memory_id is required to switch threads.")
-
-        thread_id = None
-        if not start_new_thread:
-            thread_id = self._thread_ids_by_memory.get(normalized_memory_id)
-
-        resolved_memory_id, resolved_thread_id = self._resolve_execution_state(
-            normalized_memory_id, thread_id
-        )
-        if start_new_thread:
-            resolved_thread_id = str(uuid.uuid4())
-            self._thread_ids_by_memory[resolved_memory_id] = resolved_thread_id
-            self._current_thread_id = resolved_thread_id
-            logger.info(
-                "Started new thread %s for memory %s",
-                resolved_thread_id,
-                resolved_memory_id,
-            )
-
-        return resolved_thread_id
-
     def run(
         self,
         query: str,
@@ -3071,7 +3173,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             return ""
         try:
             rows = self.memory_manager.list_tool_logs(
-                memory_id=self._current_memory_id, limit=limit
+                memory_id=self._current_memory_id,
+                limit=limit,
+                thread_id=self._current_thread_id,
             )
         except Exception as exc:
             logger.debug("Tool-log digest lookup failed: %s", exc)
@@ -3098,9 +3202,15 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 except Exception:
                     pass
             digest = _summarize_tool_result(raw_result, preview_limit=200)
+            ids = _extract_identifiers(raw_result)
             bits = [f"tool={tname}"]
             if args_text:
                 bits.append(f"args={args_text}")
+            # ``ids`` BEFORE ``digest``: identifiers are the thing the agent
+            # most needs to re-grab next turn, and they must survive even when
+            # the shape-aware digest collapses to e.g. ``ok=true``.
+            if ids:
+                bits.append(f"ids={ids}")
             if digest:
                 bits.append(f"digest={digest}")
             lines.append(f"• {tlid}  " + "  ".join(bits))
@@ -3133,6 +3243,388 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             return f"Error: LLM failed to initialize — {detail}"
         return "Error: No LLM model configured"
 
+    def _build_llm_tools(self) -> Optional[List[Dict[str, Any]]]:
+        """Convert tool metadata to OpenAI function-calling format, sorted.
+
+        Shared by the streaming and non-streaming interaction paths. Tools
+        are sorted by function name so the serialized ``tools`` parameter is
+        byte-identical across requests — tool definitions render at the very
+        front of the prompt on both OpenAI and Anthropic, and an unstable
+        ordering silently invalidates the entire prompt cache.
+        """
+        if not self.tool_manager:
+            return None
+        tool_metadata = self.tool_manager.get_tool_metadata()
+        if not tool_metadata:
+            return None
+
+        tools: List[Dict[str, Any]] = []
+        for meta in tool_metadata:
+            if "type" in meta and meta["type"] == "function" and "function" in meta:
+                function_meta = (
+                    meta.get("function")
+                    if isinstance(meta.get("function"), dict)
+                    else {}
+                )
+                function_name = str(function_meta.get("name", "")).strip()
+                if not function_name:
+                    logger.warning(
+                        "Skipping malformed OpenAI tool metadata without function.name"
+                    )
+                    continue
+                # Already in OpenAI format
+                tools.append(meta)
+            else:
+                tool_name = str(meta.get("name", "")).strip()
+                if not tool_name:
+                    logger.warning(
+                        "Skipping tool metadata without name; it cannot be exposed for tool calling."
+                    )
+                    continue
+                parameters = meta.get("parameters", {})
+                if not isinstance(parameters, dict):
+                    parameters = {}
+                required = meta.get("required", [])
+                if not isinstance(required, list):
+                    required = []
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "description": meta.get("description", "No description"),
+                            "parameters": {
+                                "type": "object",
+                                "properties": parameters,
+                                "required": required,
+                            },
+                        },
+                    }
+                )
+
+        if not tools:
+            return None
+        tools.sort(
+            key=lambda t: str(
+                (t.get("function") or {}).get("name", "") if isinstance(t, dict) else ""
+            )
+        )
+        return tools
+
+    def _set_provider_cache_scope(self) -> None:
+        """Give the LLM provider a stable per-thread prompt-cache key.
+
+        OpenAI routes requests to cache shards by prefix-hash + this key;
+        pinning it to the conversation thread keeps every turn of a thread on
+        the same shard. Providers without ``set_prompt_cache_key`` (Anthropic,
+        Ollama, local servers) are silently skipped.
+        """
+        setter = getattr(self.model, "set_prompt_cache_key", None)
+        if not callable(setter):
+            return
+        try:
+            setter(
+                "memorizz:{agent}:{memory}:{thread}".format(
+                    agent=self.agent_id or "anon",
+                    memory=self._current_memory_id or "default",
+                    thread=self._current_thread_id or "main",
+                )
+            )
+        except Exception as exc:
+            logger.debug("Failed to set prompt cache key: %s", exc)
+
+    def _persist_workflow_run(self, workflow) -> bool:
+        """Store a captured workflow and feed the continual-learning loop.
+
+        Single funnel for BOTH the streaming and non-streaming capture
+        paths, so per-run enrichment (canonical hashing inside
+        ``store_workflow``, skill attribution, promotion scheduling) can
+        never drift between them. Learning hooks are fail-safe: they must
+        never break a user-facing run.
+        """
+        if not (workflow and workflow.steps):
+            return False
+        self._apply_workflow_outcome_evaluator(workflow)
+        try:
+            record_id = workflow.store_workflow(self.memory_provider)
+            logger.info("Stored workflow with %s steps", len(workflow.steps))
+        except Exception as exc:
+            logger.error("Error storing workflow: %s", exc)
+            return False
+        if self.continual_learning_manager:
+            try:
+                self.continual_learning_manager.record_run_outcome(
+                    workflow, record_id=record_id
+                )
+                self.continual_learning_manager.maybe_run_scheduled_cycle()
+            except Exception as exc:
+                logger.error("Continual-learning post-run hook failed: %s", exc)
+        return True
+
+    def _apply_workflow_outcome_evaluator(self, workflow) -> None:
+        """Apply an application business-success rubric before persistence.
+
+        Tool execution only proves that a run completed without raising. A
+        configured evaluator can inspect the complete captured ``Workflow``
+        and return ``True``/``False``, ``WorkflowOutcome``,
+        ``"success"``/``"failure"``, or ``None`` to keep the current outcome.
+        Evaluation is fail-closed for learning, but never interrupts the
+        user-facing run. An execution failure cannot be upgraded to success.
+        """
+        evaluator = self.workflow_outcome_evaluator
+        if evaluator is None:
+            return
+
+        from ..long_term.procedural.workflow.workflow import WorkflowOutcome
+
+        execution_failed = workflow.outcome == WorkflowOutcome.FAILURE
+        try:
+            result = evaluator(workflow)
+        except Exception as exc:
+            workflow.outcome = WorkflowOutcome.FAILURE
+            logger.warning(
+                "Workflow outcome evaluator failed; recording learning failure: %s",
+                exc,
+            )
+            return
+
+        if result is None:
+            return
+        if isinstance(result, WorkflowOutcome):
+            evaluated = result
+        elif isinstance(result, bool):
+            evaluated = WorkflowOutcome.SUCCESS if result else WorkflowOutcome.FAILURE
+        elif isinstance(result, str):
+            try:
+                evaluated = WorkflowOutcome(result.strip().lower())
+            except ValueError:
+                workflow.outcome = WorkflowOutcome.FAILURE
+                logger.warning(
+                    "Workflow outcome evaluator returned unsupported value %r; "
+                    "recording learning failure",
+                    result,
+                )
+                return
+        else:
+            workflow.outcome = WorkflowOutcome.FAILURE
+            logger.warning(
+                "Workflow outcome evaluator returned unsupported type %s; "
+                "recording learning failure",
+                type(result).__name__,
+            )
+            return
+
+        if execution_failed and evaluated == WorkflowOutcome.SUCCESS:
+            logger.warning(
+                "Workflow outcome evaluator attempted to upgrade an execution "
+                "failure; preserving failure"
+            )
+            return
+        workflow.outcome = evaluated
+
+    def _init_workflow_capture(self, query: str, user_id: Optional[str]):
+        """Create the per-run Workflow tracker when workflow memory is active.
+
+        Shared by the streaming and non-streaming loops so per-run
+        enrichment (user scope, skill attribution) can never drift between
+        them.
+        """
+        if MemoryType.WORKFLOW_MEMORY not in self.active_memory_types:
+            return None
+        from ..long_term.procedural.workflow.workflow import Workflow
+
+        workflow = Workflow(
+            name="Tool Execution for Query",
+            description=f"Workflow tracking tool usage for: {query[:100]}",
+            memory_id=self._current_memory_id
+            or (self.memory_ids[0] if self.memory_ids else str(uuid.uuid4())),
+            agent_id=self.agent_id,
+            user_query=query,
+            user_id=user_id,
+            skills_activated=list(self._activated_skill_ids or []),
+        )
+        logger.debug(f"Created workflow for tracking: {workflow.workflow_id}")
+        return workflow
+
+    @staticmethod
+    def _append_assistant_tool_calls(
+        messages: List[Dict[str, Any]], message: Any
+    ) -> None:
+        """Append the assistant's tool-call message to the running history."""
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in message.tool_calls
+                ],
+            }
+        )
+
+    def _execute_and_record_tool_call(
+        self,
+        tool_call: Any,
+        messages: List[Dict[str, Any]],
+        workflow,
+        user_id: Optional[str],
+        streaming: bool = False,
+    ) -> None:
+        """Execute one tool call and record every side effect.
+
+        The single shared body for BOTH the streaming and non-streaming
+        loops: argument parsing, execution, tool-log offload, compact
+        placeholder, message append, placeholder persistence, and workflow
+        step capture. These ~150 lines used to exist twice and had already
+        drifted once; ``streaming`` only toggles the trace-event emission.
+        """
+        from ..long_term.procedural.workflow.workflow import WorkflowOutcome
+
+        tool_name = tool_call.function.name
+        raw_arguments = tool_call.function.arguments
+
+        tool_trace_id = None
+        if streaming:
+            tool_trace_id = (
+                f"{tool_name}:{tool_call.id}"
+                if getattr(tool_call, "id", None)
+                else f"{tool_name}:{uuid.uuid4()}"
+            )
+            self._emit_stream_event(
+                "trace",
+                {
+                    "trace_kind": "tool_call",
+                    "title": f"Tool Call: {tool_name}",
+                    "tool_name": tool_name,
+                    "trace_id": f"call:{tool_trace_id}",
+                    "content": self._preview_stream_payload(
+                        raw_arguments or "{}",
+                        limit=1400,
+                    ),
+                },
+            )
+
+        try:
+            arguments = json.loads(raw_arguments)
+        except (json.JSONDecodeError, Exception):
+            arguments = {}
+
+        logger.info("Executing tool: %s", tool_name)
+        error_message = None
+        if self.tool_manager:
+            try:
+                result, _ = self.tool_manager.execute_tool(tool_name, arguments)
+            except Exception as e:
+                result = f"Error executing tool: {str(e)}"
+                error_message = str(e)
+                logger.error(f"Tool {tool_name} failed: {e}")
+        else:
+            result = "Error: No tool manager available"
+            error_message = "No tool manager available"
+
+        if streaming:
+            self._emit_stream_trace_chunks(
+                "tool_result",
+                f"Tool Result: {tool_name}",
+                result,
+                trace_id=f"result:{tool_trace_id}",
+                chunk_size=420,
+                preview_limit=12000,
+                extra={"tool_name": tool_name},
+            )
+
+        # Offload full tool output to database as a tool log entry
+        tool_log_id = None
+        result_str = str(result)
+        if self.memory_manager and self._current_memory_id:
+            try:
+                tool_log_id = self.memory_manager.store_tool_log(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    result=result,
+                    memory_id=self._current_memory_id,
+                    agent_id=self.agent_id,
+                    tool_call_id=getattr(tool_call, "id", None),
+                    success=(error_message is None),
+                    error=error_message,
+                    thread_id=self._current_thread_id,
+                    user_id=user_id,
+                )
+            except Exception as log_exc:
+                logger.debug("Tool log storage failed: %s", log_exc)
+
+        # Use compact reference in context window instead of full output.
+        # The placeholder includes args + a field-aware summary so the LLM
+        # can disambiguate multiple calls to the same tool.
+        if tool_log_id:
+            compact_result = _build_tool_log_placeholder(
+                tool_name=tool_name,
+                tool_log_id=tool_log_id,
+                arguments=arguments,
+                result=result,
+                error_message=error_message,
+            )
+        else:
+            compact_result = result_str
+
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "name": tool_name,
+                "content": compact_result,
+            }
+        )
+
+        # Persist the placeholder as its own conversation_memory row so it
+        # survives into future turns (UI audit + system-prompt digest).
+        # Filtered from LLM message history via _is_tool_placeholder_content
+        # to avoid orphan tool-role messages without matching tool_call_ids.
+        if tool_log_id and self.memory_manager and self._current_memory_id:
+            try:
+                placeholder_unit = self.memory_manager.create_conversation_memory_unit(
+                    role=Role.TOOL,
+                    content=compact_result,
+                    thread_id=self._current_thread_id,
+                    memory_id=self._current_memory_id,
+                    agent_id=self.agent_id,
+                    user_id=user_id,
+                )
+                self.memory_manager.save_memory_unit(
+                    placeholder_unit, self._current_memory_id
+                )
+            except Exception as persist_exc:
+                logger.debug("Tool placeholder persist failed: %s", persist_exc)
+
+        if workflow:
+            tool_entry = {}
+            if self.tool_manager:
+                tool_metadata = self.tool_manager.get_tool_metadata()
+                tool_entry = next(
+                    (meta for meta in tool_metadata if meta.get("name") == tool_name),
+                    {},
+                )
+
+            workflow.add_step(
+                f"Step {len(workflow.steps) + 1}: {tool_name}",
+                {
+                    "_id": str(tool_entry.get("_id")) if tool_entry else None,
+                    "arguments": arguments,
+                    "result": result,
+                    "timestamp": datetime.now().isoformat(),
+                    "error": error_message,
+                },
+            )
+            if error_message is not None:
+                workflow.outcome = WorkflowOutcome.FAILURE
+
     def _execute_llm_interaction_stream(
         self,
         system_prompt: str,
@@ -3150,31 +3642,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             yield self._no_llm_message()
             return
 
-        workflow = None
-        WorkflowOutcome = None
-        if MemoryType.WORKFLOW_MEMORY in self.active_memory_types:
-            from ..long_term.procedural.workflow.workflow import Workflow
-            from ..long_term.procedural.workflow.workflow import (
-                WorkflowOutcome as _WorkflowOutcome,
-            )
-
-            WorkflowOutcome = _WorkflowOutcome
-            workflow = Workflow(
-                name="Tool Execution for Query",
-                description=f"Workflow tracking tool usage for: {query[:100]}",
-                memory_id=self._current_memory_id
-                or (self.memory_ids[0] if self.memory_ids else str(uuid.uuid4())),
-                agent_id=self.agent_id,
-                user_query=query,
-            )
-            if user_id is not None:
-                try:
-                    setattr(workflow, "user_id", user_id)
-                except Exception:
-                    pass
-            logger.debug(
-                f"Created streaming workflow for tracking: {workflow.workflow_id}"
-            )
+        workflow = self._init_workflow_capture(query, user_id)
 
         workflow_persisted = False
 
@@ -3182,74 +3650,17 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             nonlocal workflow_persisted
             if workflow_persisted:
                 return
-            if workflow and workflow.steps:
-                try:
-                    workflow.store_workflow(self.memory_provider)
-                    workflow_persisted = True
-                    logger.info(
-                        "Stored workflow with %s steps (streaming)",
-                        len(workflow.steps),
-                    )
-                except Exception as exc:
-                    logger.error("Error storing streaming workflow: %s", exc)
+            if self._persist_workflow_run(workflow):
+                workflow_persisted = True
 
         # Build messages (same as _execute_llm_interaction)
         messages = self._build_prompt_messages(
             system_prompt, query, context, request_context=request_context
         )
 
-        # Build tools
-        tools = None
-        if self.tool_manager:
-            tool_metadata = self.tool_manager.get_tool_metadata()
-            if tool_metadata:
-                tools = []
-                for meta in tool_metadata:
-                    if (
-                        "type" in meta
-                        and meta["type"] == "function"
-                        and "function" in meta
-                    ):
-                        function_meta = (
-                            meta.get("function")
-                            if isinstance(meta.get("function"), dict)
-                            else {}
-                        )
-                        function_name = str(function_meta.get("name", "")).strip()
-                        if not function_name:
-                            logger.warning(
-                                "Skipping malformed OpenAI tool metadata without function.name"
-                            )
-                            continue
-                        tools.append(meta)
-                    else:
-                        tool_name = str(meta.get("name", "")).strip()
-                        if not tool_name:
-                            logger.warning(
-                                "Skipping tool metadata without name; it cannot be exposed for tool calling."
-                            )
-                            continue
-                        parameters = meta.get("parameters", {})
-                        if not isinstance(parameters, dict):
-                            parameters = {}
-                        required = meta.get("required", [])
-                        if not isinstance(required, list):
-                            required = []
-                        openai_tool = {
-                            "type": "function",
-                            "function": {
-                                "name": tool_name,
-                                "description": meta.get(
-                                    "description", "No description"
-                                ),
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": parameters,
-                                    "required": required,
-                                },
-                            },
-                        }
-                        tools.append(openai_tool)
+        # Build tools (deterministic order) and pin the prompt-cache scope.
+        tools = self._build_llm_tools()
+        self._set_provider_cache_scope()
 
         # Streaming loop with tool calling
         max_iterations = self._get_tool_iteration_limit()
@@ -3288,189 +3699,15 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                         response = event["response"]
                         message = response.choices[0].message
 
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": message.content,
-                                "tool_calls": [
-                                    {
-                                        "id": tc.id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": tc.function.name,
-                                            "arguments": tc.function.arguments,
-                                        },
-                                    }
-                                    for tc in message.tool_calls
-                                ],
-                            }
-                        )
-
+                        self._append_assistant_tool_calls(messages, message)
                         for tool_call in message.tool_calls:
-                            tool_name = tool_call.function.name
-                            raw_arguments = tool_call.function.arguments
-                            tool_trace_id = (
-                                f"{tool_name}:{tool_call.id}"
-                                if getattr(tool_call, "id", None)
-                                else f"{tool_name}:{uuid.uuid4()}"
+                            self._execute_and_record_tool_call(
+                                tool_call,
+                                messages,
+                                workflow,
+                                user_id,
+                                streaming=True,
                             )
-                            self._emit_stream_event(
-                                "trace",
-                                {
-                                    "trace_kind": "tool_call",
-                                    "title": f"Tool Call: {tool_name}",
-                                    "tool_name": tool_name,
-                                    "trace_id": f"call:{tool_trace_id}",
-                                    "content": self._preview_stream_payload(
-                                        raw_arguments or "{}",
-                                        limit=1400,
-                                    ),
-                                },
-                            )
-                            try:
-                                arguments = json.loads(raw_arguments)
-                            except (json.JSONDecodeError, Exception):
-                                arguments = {}
-
-                            logger.info(f"Streaming: executing tool {tool_name}")
-                            error_message = None
-                            tool_outcome = (
-                                WorkflowOutcome.SUCCESS
-                                if workflow and WorkflowOutcome is not None
-                                else None
-                            )
-                            if self.tool_manager:
-                                try:
-                                    result, _ = self.tool_manager.execute_tool(
-                                        tool_name, arguments
-                                    )
-                                except Exception as e:
-                                    result = f"Error executing tool: {str(e)}"
-                                    error_message = str(e)
-                                    if workflow and WorkflowOutcome is not None:
-                                        tool_outcome = WorkflowOutcome.FAILURE
-                            else:
-                                result = "Error: No tool manager available"
-                                error_message = "No tool manager available"
-                                if workflow and WorkflowOutcome is not None:
-                                    tool_outcome = WorkflowOutcome.FAILURE
-
-                            self._emit_stream_trace_chunks(
-                                "tool_result",
-                                f"Tool Result: {tool_name}",
-                                result,
-                                trace_id=f"result:{tool_trace_id}",
-                                chunk_size=420,
-                                preview_limit=12000,
-                                extra={"tool_name": tool_name},
-                            )
-
-                            # Offload full tool output to database as a tool log entry
-                            tool_log_id = None
-                            result_str = str(result)
-                            if self.memory_manager and self._current_memory_id:
-                                try:
-                                    tool_log_id = self.memory_manager.store_tool_log(
-                                        tool_name=tool_name,
-                                        arguments=arguments,
-                                        result=result,
-                                        memory_id=self._current_memory_id,
-                                        agent_id=self.agent_id,
-                                        tool_call_id=getattr(tool_call, "id", None),
-                                        success=(error_message is None),
-                                        error=error_message,
-                                        thread_id=self._current_thread_id,
-                                        user_id=user_id,
-                                    )
-                                except Exception as log_exc:
-                                    logger.debug("Tool log storage failed: %s", log_exc)
-
-                            # Use compact reference in context window instead of full output.
-                            # The placeholder now includes args + a field-aware summary
-                            # so the LLM can disambiguate multiple calls to the same tool.
-                            if tool_log_id:
-                                compact_result = _build_tool_log_placeholder(
-                                    tool_name=tool_name,
-                                    tool_log_id=tool_log_id,
-                                    arguments=arguments,
-                                    result=result,
-                                    error_message=error_message,
-                                )
-                            else:
-                                compact_result = result_str
-
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "name": tool_name,
-                                    "content": compact_result,
-                                }
-                            )
-
-                            # Persist the placeholder as its own conversation_memory row
-                            # so it survives into future turns (UI audit + system-prompt
-                            # digest). Filtered from LLM message history via
-                            # _is_tool_placeholder_content to avoid orphan tool-role
-                            # messages without matching tool_call_ids.
-                            if (
-                                tool_log_id
-                                and self.memory_manager
-                                and self._current_memory_id
-                            ):
-                                try:
-                                    placeholder_unit = self.memory_manager.create_conversation_memory_unit(
-                                        role=Role.TOOL,
-                                        content=compact_result,
-                                        thread_id=self._current_thread_id,
-                                        memory_id=self._current_memory_id,
-                                        agent_id=self.agent_id,
-                                        user_id=user_id,
-                                    )
-                                    self.memory_manager.save_memory_unit(
-                                        placeholder_unit, self._current_memory_id
-                                    )
-                                except Exception as persist_exc:
-                                    logger.debug(
-                                        "Tool placeholder persist failed: %s",
-                                        persist_exc,
-                                    )
-
-                            if workflow:
-                                tool_entry = {}
-                                if self.tool_manager:
-                                    tool_metadata = (
-                                        self.tool_manager.get_tool_metadata()
-                                    )
-                                    tool_entry = next(
-                                        (
-                                            meta
-                                            for meta in tool_metadata
-                                            if meta.get("name") == tool_name
-                                        ),
-                                        {},
-                                    )
-
-                                workflow.add_step(
-                                    f"Step {len(workflow.steps) + 1}: {tool_name}",
-                                    {
-                                        "_id": (
-                                            str(tool_entry.get("_id"))
-                                            if tool_entry
-                                            else None
-                                        ),
-                                        "arguments": arguments,
-                                        "result": result,
-                                        "timestamp": datetime.now().isoformat(),
-                                        "error": error_message,
-                                    },
-                                )
-                                if (
-                                    tool_outcome is not None
-                                    and WorkflowOutcome is not None
-                                    and tool_outcome == WorkflowOutcome.FAILURE
-                                ):
-                                    workflow.outcome = WorkflowOutcome.FAILURE
 
                         # Continue to next iteration to stream the final response
                         continue
@@ -3506,6 +3743,25 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         """Build context for the query using memory manager."""
         context = {"query": query}
 
+        # Learned-skill retrieval (continual learning). Reset the turn's
+        # attribution first so a retrieval failure — or no match — never
+        # inherits the previous run's skill IDs.
+        self._activated_skill_ids = []
+        if self.continual_learning_manager:
+            try:
+                scored_skills = (
+                    self.continual_learning_manager.retrieve_skills_for_query(
+                        query, user_id=user_id
+                    )
+                )
+                if scored_skills:
+                    context["activated_skills"] = scored_skills
+                    self._activated_skill_ids = [
+                        scored.skill.skill_id for scored in scored_skills
+                    ]
+            except Exception as e:
+                logger.warning(f"Learned-skill retrieval failed: {e}")
+
         if self.memory_manager:
             # Load conversation history
             try:
@@ -3536,26 +3792,64 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             except Exception as e:
                 logger.warning(f"Failed to build memory context: {e}")
 
-            # Retrieve relevant memory snippets across core memory systems.
+            # Pre-inference retrieval across the agent's ACTIVE memory
+            # systems. Only sources this agent has enabled are queried (each
+            # string query costs one embedding lookup — served from the
+            # EmbeddingManager LRU after the first — plus one vector search),
+            # and the merged candidate set is deduplicated before injection.
+            # The TOOLBOX is deliberately not pre-retrieved: tool schemas
+            # already ride along in the request's ``tools`` parameter.
             try:
-                relevant: Dict[str, Any] = {}
-                for memory_type, bucket in (
-                    (MemoryType.KNOWLEDGE_BASE, "semantic_memories"),
-                    (MemoryType.CONVERSATION_MEMORY, "episodic_memories"),
-                    (MemoryType.TOOLBOX, "procedural_memories"),
-                ):
+                active = set(self.active_memory_types or [])
+                candidate_sources = []
+                if MemoryType.KNOWLEDGE_BASE in active:
+                    candidate_sources.append(
+                        (MemoryType.KNOWLEDGE_BASE, "knowledge_base")
+                    )
+                if MemoryType.CONVERSATION_MEMORY in active:
+                    candidate_sources.append(
+                        (MemoryType.CONVERSATION_MEMORY, "episodic")
+                    )
+
+                candidates: List[Tuple[str, Any]] = []
+                for memory_type, source in candidate_sources:
                     snippets = self.memory_manager.retrieve_relevant_memories(
                         query=query,
                         memory_type=memory_type,
                         memory_id=memory_id,
-                        limit=3,
+                        limit=_RETRIEVAL_CANDIDATE_LIMIT,
                         user_id=user_id,
+                        include_embedding=True,
                     )
-                    if snippets:
-                        relevant[bucket] = snippets
+                    for row in snippets or []:
+                        candidates.append((source, row))
 
-                if relevant:
-                    context["relevant_memories"] = relevant
+                if candidates:
+                    history_texts = [
+                        str((item.get("content") or {}).get("content") or "")
+                        if isinstance(item.get("content"), dict)
+                        else str(item.get("content") or "")
+                        for item in context.get("conversation_history", [])
+                        if isinstance(item, dict)
+                    ]
+                    query_embedding = None
+                    try:
+                        from ..embeddings import get_embedding
+
+                        # Served from the LRU cache — the retrieval calls
+                        # above already embedded this exact query text.
+                        query_embedding = get_embedding(query)
+                    except Exception:
+                        query_embedding = None
+
+                    selected = dedupe_and_select(
+                        candidates,
+                        history_texts=history_texts,
+                        query_embedding=query_embedding,
+                        max_items=_RETRIEVED_MEMORIES_MAX,
+                    )
+                    if selected:
+                        context["retrieved_memories"] = selected
             except Exception as e:
                 logger.warning(f"Failed to retrieve relevant memories: {e}")
 
@@ -3570,12 +3864,8 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 )
                 if entity_context:
                     context["entity_memory_profiles"] = entity_context
-                self._last_entity_context = entity_context
             except Exception as e:
                 logger.warning(f"Failed to retrieve entity memory context: {e}")
-                self._last_entity_context = []
-        else:
-            self._last_entity_context = []
 
         # Inject existing summary references so the agent knows what can be expanded
         if self.memory_manager:
@@ -3594,15 +3884,22 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         return context
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt with base preamble, user instruction, and capability sections.
+        """Build the STATIC system prompt (stable prompt-cache prefix).
+
+        Every section here must be stable for the lifetime of a session —
+        the system prompt is the first bytes of the prompt, so any per-turn
+        variation invalidates the provider prompt cache for the entire
+        conversation. Per-turn content (retrieved memories, entity facts,
+        the tool-log digest, request context) is rendered separately by
+        ``_build_volatile_context_block`` at the END of the prompt.
 
         Structure:
         1. Base system prompt (memory substrate awareness)
         2. Active memory types for this agent
         3. User's custom instruction
         4. Persona
-        5. Tool descriptions
-        6. Entity memory instructions (if enabled)
+        5. Tools note (schemas ride in the request's ``tools`` parameter)
+        6. Entity memory usage instructions (if enabled)
         7. Internet access instructions (if enabled)
         8. Skills marketplace instructions (if enabled)
         9. Automations instructions (if enabled)
@@ -3703,18 +4000,42 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                     "summary in this prompt is not enough context."
                 )
 
-        # 5. Tool descriptions
-        tools = self.tool_manager.get_tool_metadata()
-        if tools:
-            tool_descriptions = [
-                f"- {tool.get('name', 'Unknown')}: {tool.get('description', 'No description')}"
-                for tool in tools
-            ]
-            if tool_descriptions:
-                prompt_parts.append(
-                    f"Available tools ({len(tool_descriptions)}):\n"
-                    + chr(10).join(tool_descriptions)
-                )
+        # 4b. Learned-skills contract (continual learning). STATIC framing
+        # only — the retrieved skills themselves ride in the per-turn
+        # volatile block, because injecting them here would re-render the
+        # system prompt every turn and invalidate the prompt cache for the
+        # whole conversation. Sitting above the tools note gives the
+        # contract higher instruction priority than ordinary memory
+        # snippets without sacrificing the stable prefix.
+        if self.continual_learning_manager:
+            prompt_parts.append(
+                "Learned skills (continual learning):\n"
+                "- This agent promotes its own repeatedly-successful tool "
+                "workflows into reusable skills. When a learned skill "
+                "matches the current query it is injected into the per-turn "
+                "context above the retrieved memories.\n"
+                "- Learned skills are strong priors, not mandates. Before "
+                "following one, verify its preconditions against the "
+                "current query; if any precondition fails or the task "
+                "differs in a way that matters, deviate and solve fresh.\n"
+                "- Every run is recorded either way — following a skill, "
+                "deviating from it, and failing with it all feed back into "
+                "whether the skill stays promoted.\n"
+                "- Use 'list_skills' / 'read_skill' to inspect learned "
+                "skills alongside file-based ones."
+            )
+
+        # 5. Tools note. The full name/description/schema of every tool is
+        # already sent in the request's ``tools`` parameter — repeating the
+        # list here paid for every description twice AND re-rendered the
+        # system prompt whenever the tool set changed. Keep a static pointer
+        # instead.
+        if self.tool_manager and self.tool_manager.get_tool_metadata():
+            prompt_parts.append(
+                "Tools: you have function-calling tools available; their "
+                "names, descriptions, and schemas are provided with each "
+                "request. Use them whenever they would improve your answer."
+            )
 
         # Knowledge-base instructions (only when the agent has attached KBs)
         kb_ids = getattr(self, "knowledge_base_ids", None) or []
@@ -3729,39 +4050,28 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 "- Prefer citing retrieved chunks verbatim over summarizing from memory."
             )
 
-        # Recent tool outputs — durable digest of this thread's tool_log entries.
-        # Without this, tool_log_id references from prior turns would be lost:
-        # the placeholder rows are filtered out of LLM message history to avoid
-        # orphan tool-role messages. Exposing a structured digest here lets the
-        # agent pick the right id via ``retrieve_tool_log_entry`` even turns later.
-        recent_digest = self._format_recent_tool_logs_digest(limit=10)
-        if recent_digest:
-            prompt_parts.append(recent_digest)
+        # NOTE: volatile, per-turn content (the recent tool-log digest and
+        # retrieved entity facts) deliberately does NOT live here anymore.
+        # The system prompt is the first bytes of the prompt-cache prefix —
+        # rewriting it every turn re-billed the entire conversation at full
+        # input price. Per-turn content is rendered by
+        # ``_build_volatile_context_block`` into the final user message.
 
-        # 6. Entity memory instructions
+        # 6. Entity memory instructions (static usage guidance only; the
+        # retrieved facts themselves ride in the volatile block).
         if (
             self._entity_memory_enabled
             and self.entity_memory_manager
             and self.entity_memory_manager.is_enabled()
         ):
-            if self._last_entity_context:
-                entity_summary = self.entity_memory_manager.summarize_for_prompt(
-                    self._last_entity_context
-                )
-                if entity_summary:
-                    prompt_parts.append(
-                        "Entity memory facts:\n"
-                        + entity_summary
-                        + "\nUse the entity memory tools to keep these facts up to date."
-                    )
-            else:
-                prompt_parts.append(
-                    "Entity memory usage:\n"
-                    "- Before answering, call 'entity_memory_lookup' when the user references known people or when recalling prior facts might help.\n"
-                    "- After the user shares stable personal info (name, preferences, background, ongoing projects, likes/dislikes), call 'entity_memory_upsert' with the attribute/value pair so it persists.\n"
-                    "- Only store verifiable statements; skip speculative or time-sensitive details.\n"
-                    "- Always keep JSON fields descriptive (e.g., attribute 'favorite_hobby', value 'hiking in the mountains')."
-                )
+            prompt_parts.append(
+                "Entity memory usage:\n"
+                "- Facts about known entities relevant to the current query are provided with the user's message when available.\n"
+                "- Before answering, call 'entity_memory_lookup' when the user references known people or when recalling prior facts might help.\n"
+                "- After the user shares stable personal info (name, preferences, background, ongoing projects, likes/dislikes), call 'entity_memory_upsert' with the attribute/value pair so it persists.\n"
+                "- Only store verifiable statements; skip speculative or time-sensitive details.\n"
+                "- Always keep JSON fields descriptive (e.g., attribute 'favorite_hobby', value 'hiking in the mountains')."
+            )
 
         # 7. Internet access instructions
         if self.has_internet_access():
@@ -3883,89 +4193,16 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
         try:
             # Initialize workflow tracking if workflow memory is active
-            workflow = None
-            if MemoryType.WORKFLOW_MEMORY in self.active_memory_types:
-                from ..long_term.procedural.workflow.workflow import (
-                    Workflow,
-                    WorkflowOutcome,
-                )
-
-                workflow = Workflow(
-                    name="Tool Execution for Query",
-                    description=f"Workflow tracking tool usage for: {query[:100]}",
-                    memory_id=self._current_memory_id
-                    or (self.memory_ids[0] if self.memory_ids else str(uuid.uuid4())),
-                    agent_id=self.agent_id,
-                    user_query=query,
-                )
-                if user_id is not None:
-                    try:
-                        setattr(workflow, "user_id", user_id)
-                    except Exception:
-                        pass
-                logger.debug(f"Created workflow for tracking: {workflow.workflow_id}")
+            workflow = self._init_workflow_capture(query, user_id)
 
             # Build initial messages
             messages = self._build_prompt_messages(
                 system_prompt, query, context, request_context=request_context
             )
 
-            # Get tool metadata if available and convert to OpenAI format
-            tools = None
-            if self.tool_manager:
-                tool_metadata = self.tool_manager.get_tool_metadata()
-                if tool_metadata:
-                    # Convert to OpenAI function calling format
-                    tools = []
-                    for meta in tool_metadata:
-                        # Check if already in correct OpenAI format (has nested 'function' key)
-                        if (
-                            "type" in meta
-                            and meta["type"] == "function"
-                            and "function" in meta
-                        ):
-                            function_meta = (
-                                meta.get("function")
-                                if isinstance(meta.get("function"), dict)
-                                else {}
-                            )
-                            function_name = str(function_meta.get("name", "")).strip()
-                            if not function_name:
-                                logger.warning(
-                                    "Skipping malformed OpenAI tool metadata without function.name"
-                                )
-                                continue
-                            # Already in OpenAI format
-                            tools.append(meta)
-                        else:
-                            tool_name = str(meta.get("name", "")).strip()
-                            if not tool_name:
-                                logger.warning(
-                                    "Skipping tool metadata without name; it cannot be exposed for tool calling."
-                                )
-                                continue
-                            parameters = meta.get("parameters", {})
-                            if not isinstance(parameters, dict):
-                                parameters = {}
-                            required = meta.get("required", [])
-                            if not isinstance(required, list):
-                                required = []
-                            # Convert to OpenAI format
-                            openai_tool = {
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "description": meta.get(
-                                        "description", "No description"
-                                    ),
-                                    "parameters": {
-                                        "type": "object",
-                                        "properties": parameters,
-                                        "required": required,
-                                    },
-                                },
-                            }
-                            tools.append(openai_tool)
+            # Build tools (deterministic order) and pin the prompt-cache scope.
+            tools = self._build_llm_tools()
+            self._set_provider_cache_scope()
 
             # Execute main loop with tool calling
             max_iterations = self._get_tool_iteration_limit()
@@ -3979,15 +4216,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
                 # Check if response is a string (no tool calls)
                 if isinstance(response, str):
-                    # Store workflow before returning (if it exists and has steps)
-                    if workflow and workflow.steps:
-                        try:
-                            workflow.store_workflow(self.memory_provider)
-                            logger.info(
-                                f"Stored workflow with {len(workflow.steps)} steps"
-                            )
-                        except Exception as e:
-                            logger.error(f"Error storing workflow: {str(e)}")
+                    self._persist_workflow_run(workflow)
                     return response
 
                 # Handle tool calls
@@ -4001,191 +4230,25 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                             if message.content
                             else "I couldn't generate a response."
                         )
-                        # Store workflow before returning (if it exists and has steps)
-                        if workflow and workflow.steps:
-                            try:
-                                workflow.store_workflow(self.memory_provider)
-                                logger.info(
-                                    f"Stored workflow with {len(workflow.steps)} steps"
-                                )
-                            except Exception as e:
-                                logger.error(f"Error storing workflow: {str(e)}")
+                        self._persist_workflow_run(workflow)
                         return final_content
 
-                    # Add assistant message with tool calls to history
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": message.content,
-                            "tool_calls": [
-                                {
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.function.name,
-                                        "arguments": tc.function.arguments,
-                                    },
-                                }
-                                for tc in message.tool_calls
-                            ],
-                        }
-                    )
-
-                    # Execute each tool call
+                    self._append_assistant_tool_calls(messages, message)
                     for tool_call in message.tool_calls:
-                        tool_name = tool_call.function.name
-                        try:
-                            import json
-
-                            arguments = json.loads(tool_call.function.arguments)
-                        except (json.JSONDecodeError, Exception):
-                            arguments = {}
-
-                        logger.info(
-                            f"Executing tool: {tool_name} with args: {arguments}"
+                        self._execute_and_record_tool_call(
+                            tool_call,
+                            messages,
+                            workflow,
+                            user_id,
+                            streaming=False,
                         )
-
-                        # Execute the tool
-                        error_message = None
-                        tool_outcome = WorkflowOutcome.SUCCESS if workflow else None
-
-                        if self.tool_manager:
-                            try:
-                                result, _ = self.tool_manager.execute_tool(
-                                    tool_name, arguments
-                                )
-                            except Exception as e:
-                                result = f"Error executing tool: {str(e)}"
-                                error_message = str(e)
-                                if workflow:
-                                    tool_outcome = WorkflowOutcome.FAILURE
-                                logger.error(f"Tool {tool_name} failed: {e}")
-                        else:
-                            result = "Error: No tool manager available"
-                            error_message = "No tool manager available"
-                            if workflow:
-                                tool_outcome = WorkflowOutcome.FAILURE
-
-                        # Offload full tool output to database as a tool log entry
-                        tool_log_id = None
-                        result_str = str(result)
-                        if self.memory_manager and self._current_memory_id:
-                            try:
-                                tool_log_id = self.memory_manager.store_tool_log(
-                                    tool_name=tool_name,
-                                    arguments=arguments,
-                                    result=result,
-                                    memory_id=self._current_memory_id,
-                                    agent_id=self.agent_id,
-                                    tool_call_id=getattr(tool_call, "id", None),
-                                    success=(error_message is None),
-                                    error=error_message,
-                                    thread_id=self._current_thread_id,
-                                    user_id=user_id,
-                                )
-                            except Exception as log_exc:
-                                logger.debug("Tool log storage failed: %s", log_exc)
-
-                        # Use compact reference in context window instead of full output.
-                        # Centralized in ``_build_tool_log_placeholder`` so the
-                        # streaming and non-streaming paths stay in lockstep.
-                        if tool_log_id:
-                            compact_result = _build_tool_log_placeholder(
-                                tool_name=tool_name,
-                                tool_log_id=tool_log_id,
-                                arguments=arguments,
-                                result=result,
-                                error_message=error_message,
-                            )
-                        else:
-                            compact_result = result_str
-
-                        # Add tool result to messages
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "name": tool_name,
-                                "content": compact_result,
-                            }
-                        )
-
-                        # Persist the placeholder as its own conversation_memory row so
-                        # it survives into future turns. Filtered out of LLM history
-                        # via _is_tool_placeholder_content; the agent sees recent logs
-                        # as a digest in the system prompt instead.
-                        if (
-                            tool_log_id
-                            and self.memory_manager
-                            and self._current_memory_id
-                        ):
-                            try:
-                                placeholder_unit = (
-                                    self.memory_manager.create_conversation_memory_unit(
-                                        role=Role.TOOL,
-                                        content=compact_result,
-                                        thread_id=self._current_thread_id,
-                                        memory_id=self._current_memory_id,
-                                        agent_id=self.agent_id,
-                                        user_id=user_id,
-                                    )
-                                )
-                                self.memory_manager.save_memory_unit(
-                                    placeholder_unit, self._current_memory_id
-                                )
-                            except Exception as persist_exc:
-                                logger.debug(
-                                    "Tool placeholder persist failed: %s", persist_exc
-                                )
-
-                        logger.info(f"Tool {tool_name} returned: {result}")
-
-                        # Track workflow step if workflow memory is active
-                        if workflow:
-                            # Get tool metadata for the _id
-                            tool_entry = {}
-                            if self.tool_manager:
-                                tool_metadata = self.tool_manager.get_tool_metadata()
-                                tool_entry = next(
-                                    (
-                                        meta
-                                        for meta in tool_metadata
-                                        if meta.get("name") == tool_name
-                                    ),
-                                    {},
-                                )
-
-                            workflow.add_step(
-                                f"Step {len(workflow.steps) + 1}: {tool_name}",
-                                {
-                                    "_id": (
-                                        str(tool_entry.get("_id"))
-                                        if tool_entry
-                                        else None
-                                    ),
-                                    "arguments": arguments,
-                                    "result": result,
-                                    "timestamp": datetime.now().isoformat(),
-                                    "error": error_message,
-                                },
-                            )
-
-                            # Update workflow outcome if any step failed
-                            if tool_outcome == WorkflowOutcome.FAILURE:
-                                workflow.outcome = WorkflowOutcome.FAILURE
 
                     # Continue loop to get final response
                     continue
 
                 # Fallback: return any content we got
                 fallback_response = "I encountered an unexpected response format."
-                # Store workflow before returning (if it exists and has steps)
-                if workflow and workflow.steps:
-                    try:
-                        workflow.store_workflow(self.memory_provider)
-                        logger.info(f"Stored workflow with {len(workflow.steps)} steps")
-                    except Exception as e:
-                        logger.error(f"Error storing workflow: {str(e)}")
+                self._persist_workflow_run(workflow)
                 return fallback_response
 
             # If we exhausted iterations
@@ -4195,13 +4258,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             )
 
             # Store workflow if it was created and has steps
-            if workflow and workflow.steps:
-                try:
-                    workflow.store_workflow(self.memory_provider)
-                    logger.info(f"Stored workflow with {len(workflow.steps)} steps")
-                except Exception as e:
-                    logger.error(f"Error storing workflow: {str(e)}")
-                    # Continue execution even if workflow storage fails
+            self._persist_workflow_run(workflow)
 
             return final_response
 
@@ -4209,13 +4266,8 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             logger.error(f"LLM interaction failed: {e}")
 
             # Store workflow even on error if it exists
-            if "workflow" in locals() and workflow and workflow.steps:
-                try:
-                    workflow.store_workflow(self.memory_provider)
-                except Exception as workflow_error:
-                    logger.error(
-                        f"Error storing workflow after exception: {str(workflow_error)}"
-                    )
+            if "workflow" in locals():
+                self._persist_workflow_run(workflow)
 
             return f"I encountered an error while processing your request: {str(e)}"
 
@@ -4690,19 +4742,6 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def _run_skills_marketplace_request_in_sandbox(
-        self,
-        endpoint: str,
-        params: Dict[str, Any],
-        timeout: int = 30,
-    ) -> Dict[str, Any]:
-        """Backward-compatible wrapper; marketplace requests now run on the backend."""
-        return self._run_skills_marketplace_request(
-            endpoint=endpoint,
-            params=params,
-            timeout=timeout,
-        )
-
     def _register_skills_marketplace_tools(self):
         """Register tools that expose skills marketplace search."""
         if not self.tool_manager or self._skills_marketplace_tools_registered:
@@ -4960,6 +4999,32 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             return
 
         try:
+            # Write-path dedup: a semantic-cache hit or client retry replays
+            # the exact same (query, response) pair back-to-back. Storing it
+            # again just bloats the history window with rows the dedup pass
+            # then has to filter out — skip the double-write entirely.
+            try:
+                if self.memory_manager.is_duplicate_of_recent(
+                    memory_id,
+                    Role.USER.value,
+                    query,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                ) and self.memory_manager.is_duplicate_of_recent(
+                    memory_id,
+                    Role.ASSISTANT.value,
+                    response,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                ):
+                    logger.debug(
+                        "Skipping duplicate interaction write for memory %s",
+                        memory_id,
+                    )
+                    return
+            except Exception:
+                pass
+
             # Record user query
             user_memory = self.memory_manager.create_conversation_memory_unit(
                 role=Role.USER,
@@ -4969,7 +5034,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 agent_id=self.agent_id,
                 user_id=user_id,
             )
-            self.memory_manager.save_memory_unit(user_memory, memory_id)
+            user_unit_id = self.memory_manager.save_memory_unit(user_memory, memory_id)
 
             # Record assistant response
             assistant_memory = self.memory_manager.create_conversation_memory_unit(
@@ -4980,12 +5045,77 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 agent_id=self.agent_id,
                 user_id=user_id,
             )
-            self.memory_manager.save_memory_unit(assistant_memory, memory_id)
+            assistant_unit_id = self.memory_manager.save_memory_unit(
+                assistant_memory, memory_id
+            )
+
+            # Backfill embeddings off the hot path so episodic semantic
+            # recall (vector search over conversation rows) has vectors to
+            # match — rows are created with embedding=None so the user-facing
+            # turn never blocks on the embedding API.
+            self._schedule_conversation_embedding_backfill(
+                [
+                    (user_unit_id, query),
+                    (assistant_unit_id, response),
+                ]
+            )
 
             logger.debug(f"Recorded interaction in memory: {memory_id}")
 
         except Exception as e:
             logger.warning(f"Failed to record interaction: {e}")
+
+    def _schedule_conversation_embedding_backfill(
+        self, unit_texts: List[Tuple[Optional[str], str]]
+    ) -> None:
+        """Embed stored conversation rows in the background.
+
+        Uses a single-worker executor so backfills never compete with the
+        interactive path and never pile up threads. Failures degrade
+        silently — a row without an embedding simply won't participate in
+        episodic vector recall (the pre-fix status quo for every row).
+        """
+        if not self._conversation_embedding_enabled or not self.memory_provider:
+            return
+        pairs = [
+            (unit_id, text)
+            for unit_id, text in unit_texts
+            if unit_id and text and str(text).strip()
+        ]
+        if not pairs:
+            return
+
+        if self._embedding_backfill_executor is None:
+            self._embedding_backfill_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="memorizz-embed-backfill"
+            )
+
+        provider = self.memory_provider
+
+        def _backfill() -> None:
+            from ..embeddings import get_embedding
+
+            for unit_id, text in pairs:
+                try:
+                    embedding = get_embedding(str(text))
+                    if embedding:
+                        provider.update_by_id(
+                            unit_id,
+                            {"embedding": embedding},
+                            MemoryType.CONVERSATION_MEMORY,
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "Conversation embedding backfill failed for %s: %s",
+                        unit_id,
+                        exc,
+                    )
+
+        try:
+            self._embedding_backfill_executor.submit(_backfill)
+        except RuntimeError:
+            # Executor shut down (interpreter teardown) — skip quietly.
+            pass
 
     # Conversation state management methods
     def start_new_thread(self, memory_id: str = None) -> str:
@@ -5162,28 +5292,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         Returns:
             True if successful, False otherwise.
         """
-        try:
-            for mid in memagent.memory_ids:
-                if mid not in self.memory_ids:
-                    self.memory_ids.append(mid)
-
-            if hasattr(self.memory_provider, "update_memagent_memory_ids"):
-                self.memory_provider.update_memagent_memory_ids(
-                    self.agent_id, self.memory_ids
-                )
-
-            if self.memory_manager:
-                self.memory_manager.clear_conversation_cache()
-
-            logger.info(
-                f"Downloaded memory from agent {memagent.agent_id} to {self.agent_id}"
-            )
-            return True
-        except Exception as e:
-            logger.error(
-                f"Error downloading memory from agent {memagent.agent_id}: {e}"
-            )
-            return False
+        return persistence.download_memory(self, memagent)
 
     def update_memory(self, memory_ids: List[str]) -> bool:
         """
@@ -5195,24 +5304,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         Returns:
             True if successful, False otherwise.
         """
-        try:
-            for mid in memory_ids:
-                if mid not in self.memory_ids:
-                    self.memory_ids.append(mid)
-
-            if hasattr(self.memory_provider, "update_memagent_memory_ids"):
-                self.memory_provider.update_memagent_memory_ids(
-                    self.agent_id, self.memory_ids
-                )
-
-            if self.memory_manager:
-                self.memory_manager.clear_conversation_cache()
-
-            logger.info(f"Updated memory_ids for agent {self.agent_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating memory_ids for agent {self.agent_id}: {e}")
-            return False
+        return persistence.update_memory(self, memory_ids)
 
     def delete_memory(self) -> bool:
         """
@@ -5257,253 +5349,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         Returns:
             MemAgent: Self, for method chaining
         """
-        if not self.memory_provider:
-            raise ValueError("Cannot save MemAgent: no memory provider configured")
-
-        try:
-            # Serialize tools from tool manager
-            tools_to_save = self._serialize_tools_for_save()
-
-            # Convert delegates to agent IDs for persistence
-            delegate_ids = self._serialize_delegates_for_save()
-
-            # Get semantic cache config for saving
-            semantic_cache_config_to_save = self._serialize_semantic_cache_config()
-
-            # Create MemAgentModel with current configuration
-            from .models import MemAgentModel
-
-            memagent_to_save = MemAgentModel(
-                llm_config=(
-                    self.model.get_config()
-                    if self.model and hasattr(self.model, "get_config")
-                    else None
-                ),
-                name=self.name,
-                instruction=self.instruction,
-                max_steps=self.max_steps,
-                application_mode=self._get_application_mode_value(),
-                memory_types=[
-                    memory_type.value
-                    for memory_type in (self.active_memory_types or [])
-                    if hasattr(memory_type, "value")
-                ]
-                or None,
-                memory_ids=self.memory_ids,
-                knowledge_base_ids=getattr(self, "knowledge_base_ids", None) or None,
-                agent_id=self.agent_id,
-                persona=(
-                    self.persona_manager.current_persona
-                    if self.persona_manager
-                    else None
-                ),
-                tools=tools_to_save,
-                delegates=delegate_ids if delegate_ids else None,
-                semantic_cache=(
-                    self.cache_manager.enabled if self.cache_manager else False
-                ),
-                semantic_cache_config=semantic_cache_config_to_save,
-                context_window_tokens=self._context_window_tokens,
-                is_favorite=self.is_favorite,
-                internet_access_provider=self.get_internet_access_provider_name(),
-                internet_access_config=(
-                    self.internet_access_manager.get_provider_config()
-                    if self.has_internet_access()
-                    else None
-                ),
-                skills_marketplace_provider=self.get_skills_marketplace_provider_name(),
-                skills_marketplace_config=self.get_skills_marketplace_config(),
-                sandbox_provider=(
-                    self.sandbox_manager.get_provider_config()
-                    if self.has_sandbox()
-                    else None
-                ),
-                skill_paths=self.skill_paths or None,
-                mcp_servers=self.mcp_servers or None,
-                self_aware=bool(self.self_aware),
-                self_aware_config=self.get_self_aware_config() or None,
-                automations_enabled=bool(getattr(self, "automations_enabled", True)),
-                default_timezone=getattr(self, "default_timezone", None),
-            )
-
-            # Save or update the agent
-            if hasattr(self.memory_provider, "store_memagent"):
-                if self.agent_id and hasattr(self.memory_provider, "retrieve_memagent"):
-                    # Check if agent exists for update vs create
-                    try:
-                        existing = self.memory_provider.retrieve_memagent(self.agent_id)
-                        if existing and hasattr(
-                            self.memory_provider, "update_memagent"
-                        ):
-                            saved_memagent = self.memory_provider.update_memagent(
-                                memagent_to_save
-                            )
-                        else:
-                            saved_memagent = self.memory_provider.store_memagent(
-                                memagent_to_save
-                            )
-                    except Exception:
-                        # Agent doesn't exist, create new
-                        saved_memagent = self.memory_provider.store_memagent(
-                            memagent_to_save
-                        )
-                else:
-                    # New agent
-                    saved_memagent = self.memory_provider.store_memagent(
-                        memagent_to_save
-                    )
-
-                # Update agent_id if it was generated
-                if not self.agent_id and saved_memagent.get("_id"):
-                    self.agent_id = str(saved_memagent["_id"])
-
-                    # Update semantic cache with new agent_id
-                    if self.cache_manager and self.cache_manager.enabled:
-                        if (
-                            hasattr(self.cache_manager, "cache_instance")
-                            and self.cache_manager.cache_instance
-                        ):
-                            self.cache_manager.cache_instance.agent_id = self.agent_id
-                            if self.memory_ids:
-                                self.cache_manager.cache_instance.memory_id = (
-                                    self.memory_ids[0]
-                                )
-
-                self._persist_mcp_servers_to_toolbox_memory()
-
-                logger.info(f"MemAgent {self.agent_id} saved successfully")
-                return self
-            else:
-                raise ValueError("Memory provider does not support saving MemAgent")
-
-        except Exception as e:
-            logger.error(f"Failed to save MemAgent {self.agent_id}: {e}")
-            raise
-
-    def _get_application_mode_value(self) -> str:
-        """Return the application mode value as a string."""
-        if isinstance(self.application_mode, ApplicationMode):
-            return self.application_mode.value
-        if isinstance(self.application_mode, str):
-            return self.application_mode
-        return ApplicationMode.DEFAULT.value
-
-    def _serialize_tools_for_save(self):
-        """Serialize tools for saving."""
-        if not self.tool_manager:
-            return None
-
-        tools_metadata = self.tool_manager.get_tool_metadata()
-        if not tools_metadata:
-            return None
-
-        # Tools are agent-scoped (shared across threads), so stamp agent_id
-        # and leave memory_id unset. The UI toolbox-memory filter treats
-        # rows with agent_id but no memory_id as agent-global, which makes
-        # them visible on every thread for this agent.
-        serializable_tools = []
-        for tool_meta in tools_metadata:
-            if isinstance(tool_meta, dict):
-                serializable_tool = {
-                    "_id": tool_meta.get("_id") or tool_meta.get("name"),
-                    "name": tool_meta.get("name"),
-                    "description": tool_meta.get("description", ""),
-                    "signature": tool_meta.get("signature", ""),
-                    "docstring": tool_meta.get(
-                        "docstring", tool_meta.get("description", "")
-                    ),
-                    "parameters": tool_meta.get("parameters", {}),
-                    "type": tool_meta.get("type", "function"),
-                    "agent_id": self.agent_id,
-                }
-                serializable_tools.append(serializable_tool)
-
-        return serializable_tools if serializable_tools else None
-
-    def _persist_mcp_servers_to_toolbox_memory(self) -> None:
-        """Persist MCP JSON configs into toolbox memory records."""
-        if not self.memory_provider or not self.mcp_servers:
-            return
-
-        try:
-            memory_id = self._current_memory_id or (
-                self.memory_ids[0] if self.memory_ids else None
-            )
-            if not memory_id:
-                memory_id = str(uuid.uuid4())
-                self.memory_ids.append(memory_id)
-                self._current_memory_id = memory_id
-
-            for server in self.mcp_servers:
-                server_name = str(server.get("name", "")).strip()
-                if not server_name:
-                    continue
-                config_doc = {
-                    "_id": f"{self.agent_id}:mcp:{server_name}",
-                    "tool_id": f"{self.agent_id}:mcp:{server_name}",
-                    "name": f"mcp::{server_name}",
-                    "description": f"MCP server config for {server_name}",
-                    "signature": "mcp_server_config(server_json)",
-                    "docstring": "Stored MCP server configuration JSON.",
-                    "tool_type": "mcp_server_config",
-                    "type": "mcp_server_config",
-                    "parameters": server,
-                    "memory_id": memory_id,
-                    "agent_id": self.agent_id,
-                }
-                self.memory_provider.store(
-                    config_doc, memory_store_type=MemoryType.TOOLBOX
-                )
-        except Exception as exc:
-            logger.warning(
-                "Failed to persist MCP configs to toolbox memory for %s: %s",
-                self.agent_id,
-                exc,
-            )
-
-    def _serialize_delegates_for_save(self):
-        """Serialize delegate agents for saving."""
-        # Note: In the new architecture, delegates would be handled differently
-        # This is a placeholder for compatibility
-        if hasattr(self, "delegates") and self.delegates:
-            delegate_ids = []
-            for delegate in self.delegates:
-                if hasattr(delegate, "agent_id") and delegate.agent_id:
-                    delegate_ids.append(delegate.agent_id)
-                    # Ensure delegate is saved
-                    try:
-                        if hasattr(delegate, "save"):
-                            delegate.save()
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to save delegate {delegate.agent_id}: {e}"
-                        )
-            return delegate_ids
-        return None
-
-    def _serialize_semantic_cache_config(self):
-        """Serialize semantic cache configuration for saving."""
-        if not self.cache_manager or not self.cache_manager.enabled:
-            return None
-
-        try:
-            if (
-                hasattr(self.cache_manager, "cache_instance")
-                and self.cache_manager.cache_instance
-            ):
-                if hasattr(self.cache_manager.cache_instance, "config"):
-                    config = self.cache_manager.cache_instance.config
-                    if hasattr(config, "__dict__"):
-                        config_dict = config.__dict__.copy()
-                        # Convert enums to strings for serialization
-                        for key, value in config_dict.items():
-                            if hasattr(value, "value"):  # Enum
-                                config_dict[key] = value.value
-                        return config_dict
-        except Exception as e:
-            logger.warning(f"Failed to serialize semantic cache config: {e}")
-
-        return None
+        return persistence.save_agent(self)
 
     @classmethod
     def load(cls, agent_id: str, memory_provider=None, **overrides):
@@ -5518,237 +5364,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         Returns:
             MemAgent: The loaded agent instance
         """
-        if not memory_provider:
-            # Try to import default memory provider
-            try:
-                from ..memory_provider import MemoryProvider
-
-                memory_provider = MemoryProvider()
-            except ImportError:
-                raise ValueError(
-                    "No memory provider specified and default MemoryProvider not available"
-                )
-
-        if not hasattr(memory_provider, "retrieve_memagent"):
-            raise ValueError("Memory provider does not support loading MemAgent")
-
-        logger.info(f"Loading MemAgent with agent id {agent_id}...")
-
-        # Retrieve the saved agent
-        saved_memagent = memory_provider.retrieve_memagent(agent_id)
-        if not saved_memagent:
-            raise ValueError(
-                f"MemAgent with agent id {agent_id} not found in the memory provider"
-            )
-
-        # Reconstruct LLM model. Stash any construction error so we can
-        # attach it to the new instance below — otherwise chat would
-        # surface a generic "No LLM model configured" instead of the
-        # actual cause (e.g. uncached HF repo, network failure).
-        model_to_load = None
-        load_llm_error: Optional[str] = None
-        if hasattr(saved_memagent, "llm_config") and saved_memagent.llm_config:
-            try:
-                model_to_load = create_llm_provider(saved_memagent.llm_config)
-            except Exception as e:
-                load_llm_error = f"{type(e).__name__}: {e}"
-                logger.warning(
-                    "Could not load model from config: %s. Model will be None.", e
-                )
-        elif hasattr(saved_memagent, "model") and saved_memagent.model:
-            model_to_load = saved_memagent.model
-
-        # Load delegates if they exist
-        loaded_delegates = None
-        if hasattr(saved_memagent, "delegates") and saved_memagent.delegates:
-            loaded_delegates = []
-            for delegate_id in saved_memagent.delegates:
-                try:
-                    delegate_agent = cls.load(delegate_id, memory_provider)
-                    loaded_delegates.append(delegate_agent)
-                except Exception as e:
-                    logger.warning(f"Could not load delegate agent {delegate_id}: {e}")
-
-        # Reconstruct semantic cache config
-        semantic_cache_config_to_load = None
-        if (
-            hasattr(saved_memagent, "semantic_cache_config")
-            and saved_memagent.semantic_cache_config
-        ):
-            try:
-                config_dict = dict(saved_memagent.semantic_cache_config)
-                # Convert string scope back to enum if needed
-                if "scope" in config_dict and isinstance(config_dict["scope"], str):
-                    try:
-                        from ..enums.semantic_cache_scope import SemanticCacheScope
-
-                        scope_str = config_dict["scope"].lower()
-                        if scope_str == "local":
-                            config_dict["scope"] = SemanticCacheScope.LOCAL
-                        elif scope_str == "global":
-                            config_dict["scope"] = SemanticCacheScope.GLOBAL
-                    except ImportError:
-                        # If enum not available, keep as string
-                        pass
-                semantic_cache_config_to_load = config_dict
-            except Exception as e:
-                logger.warning(f"Failed to reconstruct semantic cache config: {e}")
-
-        internet_provider_instance = None
-        if hasattr(saved_memagent, "internet_access_provider"):
-            provider_name = getattr(saved_memagent, "internet_access_provider", None)
-            provider_config = getattr(saved_memagent, "internet_access_config", None)
-            if not isinstance(provider_name, str):
-                provider_name = None
-            if provider_config is not None and not isinstance(provider_config, dict):
-                provider_config = None
-            if provider_name:
-                try:
-                    from ..internet_access import create_internet_access_provider
-
-                    internet_provider_instance = create_internet_access_provider(
-                        provider_name, provider_config
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to restore internet provider '%s': %s",
-                        provider_name,
-                        exc,
-                    )
-
-        application_mode_to_use = overrides.get("application_mode")
-        if not application_mode_to_use:
-            saved_mode = getattr(saved_memagent, "application_mode", None)
-            if isinstance(saved_mode, str) and saved_mode:
-                application_mode_to_use = saved_mode
-            else:
-                application_mode_to_use = ApplicationMode.DEFAULT.value
-
-        saved_sandbox_provider = getattr(saved_memagent, "sandbox_provider", None)
-        if not isinstance(saved_sandbox_provider, (str, dict)):
-            saved_sandbox_provider = None
-
-        saved_skills_marketplace_provider = getattr(
-            saved_memagent, "skills_marketplace_provider", None
-        )
-        if isinstance(saved_skills_marketplace_provider, dict):
-            saved_skills_marketplace_provider = saved_skills_marketplace_provider.get(
-                "provider"
-            ) or saved_skills_marketplace_provider.get("name")
-        if not isinstance(saved_skills_marketplace_provider, str):
-            saved_skills_marketplace_provider = None
-        else:
-            saved_skills_marketplace_provider = (
-                saved_skills_marketplace_provider.strip().lower() or None
-            )
-
-        saved_skills_marketplace_config = getattr(
-            saved_memagent, "skills_marketplace_config", None
-        )
-        if not isinstance(saved_skills_marketplace_config, dict):
-            saved_skills_marketplace_config = None
-
-        saved_skill_paths = getattr(saved_memagent, "skill_paths", None)
-        if isinstance(saved_skill_paths, str):
-            saved_skill_paths = [saved_skill_paths]
-        elif not isinstance(saved_skill_paths, list):
-            saved_skill_paths = None
-
-        saved_mcp_servers = getattr(saved_memagent, "mcp_servers", None)
-        if not isinstance(saved_mcp_servers, list):
-            saved_mcp_servers = None
-
-        saved_self_aware = bool(getattr(saved_memagent, "self_aware", False))
-        saved_self_aware_config = getattr(saved_memagent, "self_aware_config", None)
-        if not isinstance(saved_self_aware_config, dict):
-            saved_self_aware_config = None
-
-        saved_automations_enabled = getattr(saved_memagent, "automations_enabled", True)
-        if saved_automations_enabled is None:
-            saved_automations_enabled = True
-        saved_automations_enabled = bool(saved_automations_enabled)
-
-        saved_default_timezone = getattr(saved_memagent, "default_timezone", None)
-        if not isinstance(saved_default_timezone, str):
-            saved_default_timezone = None
-        else:
-            saved_default_timezone = saved_default_timezone.strip() or None
-
-        # Create new agent instance with loaded configuration
-        agent_instance = cls(
-            model=overrides.get("model", model_to_load),
-            tools=overrides.get("tools", getattr(saved_memagent, "tools", None)),
-            persona=overrides.get("persona", getattr(saved_memagent, "persona", None)),
-            name=overrides.get("name", getattr(saved_memagent, "name", None)),
-            instruction=overrides.get(
-                "instruction", getattr(saved_memagent, "instruction", None)
-            ),
-            max_steps=overrides.get(
-                "max_steps", getattr(saved_memagent, "max_steps", DEFAULT_MAX_STEPS)
-            ),
-            memory_ids=overrides.get(
-                "memory_ids", getattr(saved_memagent, "memory_ids", [])
-            ),
-            agent_id=agent_id,
-            memory_provider=memory_provider,
-            application_mode=application_mode_to_use,
-            memory_types=overrides.get(
-                "memory_types", getattr(saved_memagent, "memory_types", None)
-            ),
-            delegates=overrides.get("delegates", loaded_delegates),
-            semantic_cache=overrides.get(
-                "semantic_cache", getattr(saved_memagent, "semantic_cache", False)
-            ),
-            semantic_cache_config=overrides.get(
-                "semantic_cache_config", semantic_cache_config_to_load
-            ),
-            internet_access_provider=overrides.get(
-                "internet_access_provider", internet_provider_instance
-            ),
-            skills_marketplace_provider=overrides.get(
-                "skills_marketplace_provider", saved_skills_marketplace_provider
-            ),
-            skills_marketplace_config=overrides.get(
-                "skills_marketplace_config", saved_skills_marketplace_config
-            ),
-            sandbox_provider=overrides.get("sandbox_provider", saved_sandbox_provider),
-            skill_paths=overrides.get("skill_paths", saved_skill_paths),
-            mcp_servers=overrides.get("mcp_servers", saved_mcp_servers),
-            automations_enabled=overrides.get(
-                "automations_enabled", saved_automations_enabled
-            ),
-            default_timezone=overrides.get("default_timezone", saved_default_timezone),
-            self_aware=overrides.get("self_aware", saved_self_aware),
-            self_aware_config=overrides.get(
-                "self_aware_config", saved_self_aware_config
-            ),
-            is_favorite=overrides.get(
-                "is_favorite", getattr(saved_memagent, "is_favorite", False)
-            ),
-            streaming=overrides.get("streaming", False),
-        )
-
-        # Hydrate knowledge_base_ids separately — it isn't a constructor arg
-        # (yet) but needs to survive reloads so the `knowledge_base_lookup`
-        # tool can scope retrievals to this agent's ingested documents.
-        _kb_ids = overrides.get(
-            "knowledge_base_ids",
-            getattr(saved_memagent, "knowledge_base_ids", None),
-        )
-        agent_instance.knowledge_base_ids = (
-            list(_kb_ids) if isinstance(_kb_ids, (list, tuple)) else []
-        )
-
-        # Carry the LLM-init failure forward so chat surfaces the real
-        # cause. Constructor sets this when *it* tries to build the LLM;
-        # here we propagate the error from the load-time create_llm_provider
-        # call above (the constructor never sees llm_config in the load
-        # path so its own try/except can't catch this case).
-        if load_llm_error and not getattr(agent_instance, "_llm_init_error", None):
-            agent_instance._llm_init_error = load_llm_error
-
-        logger.info(f"MemAgent loaded successfully with agent_id: {agent_id}")
-        return agent_instance
+        return persistence.load_agent(cls, agent_id, memory_provider, **overrides)
 
     def refresh(self):
         """
@@ -5760,62 +5376,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         Returns:
             MemAgent: Self if successful, False if failed
         """
-        if not self.memory_provider:
-            logger.error("Cannot refresh MemAgent: no memory provider configured")
-            return False
-
-        if not self.agent_id:
-            logger.error("Cannot refresh MemAgent: no agent_id set")
-            return False
-
-        try:
-            # Load fresh configuration from memory provider
-            if hasattr(self.memory_provider, "retrieve_memagent"):
-                saved_memagent = self.memory_provider.retrieve_memagent(self.agent_id)
-                if saved_memagent:
-                    # Update configuration attributes
-                    if hasattr(saved_memagent, "instruction"):
-                        self.instruction = saved_memagent.instruction
-                    if hasattr(saved_memagent, "max_steps"):
-                        self.max_steps = saved_memagent.max_steps
-                    if hasattr(saved_memagent, "memory_ids"):
-                        self.memory_ids = saved_memagent.memory_ids
-                    if hasattr(saved_memagent, "knowledge_base_ids"):
-                        _kb = saved_memagent.knowledge_base_ids
-                        self.knowledge_base_ids = (
-                            list(_kb) if isinstance(_kb, (list, tuple)) else []
-                        )
-                    if hasattr(saved_memagent, "name"):
-                        self.name = saved_memagent.name
-                    if hasattr(saved_memagent, "is_favorite"):
-                        self.is_favorite = bool(saved_memagent.is_favorite)
-                    if hasattr(saved_memagent, "self_aware"):
-                        self.with_self_aware(
-                            bool(getattr(saved_memagent, "self_aware", False)),
-                            config=getattr(saved_memagent, "self_aware_config", None),
-                        )
-
-                    # Update persona if changed. Route through the public
-                    # ``set_persona`` wrapper so persona evolution tools
-                    # (update_persona, read_persona) register when a persona
-                    # is added via refresh(), not just via __init__.
-                    if hasattr(saved_memagent, "persona") and self.persona_manager:
-                        self.set_persona(saved_memagent.persona, save=False)
-
-                    logger.info(f"MemAgent {self.agent_id} refreshed successfully")
-                    return self
-                else:
-                    logger.error(
-                        f"MemAgent {self.agent_id} not found in memory provider"
-                    )
-                    return False
-            else:
-                logger.error("Memory provider does not support retrieving MemAgent")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error refreshing MemAgent {self.agent_id}: {e}")
-            return False
+        return persistence.refresh_agent(self)
 
     def generate_summaries(
         self, days_back: int = 7, max_memories_per_summary: int = 50
@@ -5839,223 +5400,16 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         List[str]
             List of summary IDs that were created
         """
-        try:
-            import time
-
-            from ..embeddings import get_embedding
-
-            # Calculate time range (days_back days ago to now)
-            current_time = time.time()
-            start_time = current_time - (days_back * 24 * 60 * 60)
-
-            logger.info(
-                f"Generating summaries for agent {self.agent_id} from {days_back} days back"
-            )
-            logger.info(f"Agent memory_ids: {self.memory_ids}")
-            logger.info(f"Current memory_id: {self._current_memory_id}")
-            logger.info(f"Time range: {start_time} to {current_time}")
-
-            # Ensure we have memory IDs to search
-            memory_ids_to_search = self.memory_ids or []
-            if (
-                self._current_memory_id
-                and self._current_memory_id not in memory_ids_to_search
-            ):
-                memory_ids_to_search = [self._current_memory_id] + memory_ids_to_search
-
-            if not memory_ids_to_search:
-                logger.warning(
-                    f"Agent {self.agent_id} has no memory_ids to search for summaries"
-                )
-                return []
-
-            logger.info(
-                f"Searching {len(memory_ids_to_search)} memory_ids: {memory_ids_to_search}"
-            )
-
-            # Collect conversation memories from all memory IDs
-            all_memories = []
-            for memory_id in memory_ids_to_search:
-                logger.info(
-                    f"Retrieving conversation history for memory_id: {memory_id}"
-                )
-                try:
-                    # Retrieve all conversation history
-                    memories = self.memory_provider.retrieve_conversation_history_ordered_by_timestamp(
-                        memory_id=memory_id, include_embedding=False
-                    )
-
-                    if memories:
-                        logger.info(
-                            f"Retrieved {len(memories)} raw memories for memory_id: {memory_id}"
-                        )
-
-                        # Filter by time range
-                        filtered = []
-                        for idx, mem in enumerate(memories):
-                            mem_timestamp = mem.get("timestamp")
-                            original_timestamp = mem_timestamp
-
-                            # Convert timestamp to float if needed
-                            if isinstance(mem_timestamp, str):
-                                try:
-                                    from datetime import datetime
-
-                                    # Try multiple timestamp formats
-                                    if "T" in mem_timestamp:
-                                        # ISO format
-                                        mem_timestamp = datetime.fromisoformat(
-                                            mem_timestamp.replace("Z", "+00:00")
-                                        ).timestamp()
-                                    else:
-                                        # Try parsing as float string
-                                        mem_timestamp = float(mem_timestamp)
-                                except Exception as e:
-                                    logger.warning(
-                                        f"Could not parse timestamp '{original_timestamp}' at index {idx}: {e}"
-                                    )
-                                    continue
-                            elif hasattr(mem_timestamp, "timestamp"):
-                                # datetime object
-                                mem_timestamp = mem_timestamp.timestamp()
-                            elif not isinstance(mem_timestamp, (int, float)):
-                                logger.warning(
-                                    f"Unknown timestamp type at index {idx}: {type(mem_timestamp)} = {original_timestamp}"
-                                )
-                                continue
-
-                            # Convert to float
-                            mem_timestamp = float(mem_timestamp)
-
-                            # Debug first few timestamps
-                            if idx < 3:
-                                logger.info(
-                                    f"Memory {idx}: timestamp={mem_timestamp}, start_time={start_time}, current_time={current_time}, in_range={start_time <= mem_timestamp <= current_time}"
-                                )
-
-                            if start_time <= mem_timestamp <= current_time:
-                                filtered.append(mem)
-
-                        logger.info(
-                            f"Found {len(filtered)} memories within time range (out of {len(memories)} total) for memory_id: {memory_id}"
-                        )
-                        all_memories.extend(filtered)
-                    else:
-                        logger.info(f"No memories returned for memory_id: {memory_id}")
-                except Exception as e:
-                    logger.warning(
-                        f"Could not retrieve memories for memory_id {memory_id}: {e}"
-                    )
-                    import traceback
-
-                    logger.debug(traceback.format_exc())
-
-            if not all_memories:
-                logger.info(
-                    f"No memories found for agent {self.agent_id} in the specified time range"
-                )
-                return []
-
-            # Sort memories by timestamp
-            def get_timestamp(mem):
-                ts = mem.get("timestamp", 0)
-                if isinstance(ts, str):
-                    try:
-                        from datetime import datetime
-
-                        return datetime.fromisoformat(
-                            ts.replace("Z", "+00:00")
-                        ).timestamp()
-                    except (ValueError, Exception):
-                        return 0
-                return float(ts) if isinstance(ts, (int, float)) else 0
-
-            all_memories.sort(key=get_timestamp)
-
-            logger.info(f"Found {len(all_memories)} memory units to summarize")
-
-            # Split memories into chunks and create summaries
-            summary_ids = []
-            for i in range(0, len(all_memories), max_memories_per_summary):
-                memory_chunk = all_memories[i : i + max_memories_per_summary]
-
-                # Generate summary for this chunk
-                summary_content = self._compress_memories_with_llm(memory_chunk)
-
-                if summary_content:
-                    # Get timestamps for period
-                    period_start = get_timestamp(memory_chunk[0])
-                    period_end = get_timestamp(memory_chunk[-1])
-
-                    # Get the memory_id from the first memory in the chunk
-                    chunk_memory_id = memory_chunk[0].get("memory_id")
-                    if not chunk_memory_id:
-                        # Fallback to current memory_id or first in list
-                        chunk_memory_id = self._current_memory_id or (
-                            self.memory_ids[0] if self.memory_ids else "default"
-                        )
-
-                    # Collect source message IDs for back-reference
-                    source_message_ids = []
-                    for mem in memory_chunk:
-                        msg_id = (
-                            mem.get("id") or mem.get("_id") or mem.get("memory_unit_id")
-                        )
-                        if msg_id:
-                            source_message_ids.append(str(msg_id))
-
-                    # Create summary document with source references
-                    summary_doc = {
-                        "memory_id": chunk_memory_id,
-                        "agent_id": self.agent_id,
-                        "content": summary_content,
-                        "period_start": period_start,
-                        "period_end": period_end,
-                        "memory_units_count": len(memory_chunk),
-                        "source_message_ids": source_message_ids,
-                        "summary_type": "automatic",
-                        "created_at": current_time,
-                        "embedding": get_embedding(summary_content),
-                    }
-
-                    # Store summary
-                    summary_id = self.memory_provider.store(
-                        summary_doc, MemoryType.SUMMARIES
-                    )
-                    summary_ids.append(summary_id)
-
-                    # Mark original messages as summarized so they are
-                    # excluded from conversation history on future loads
-                    if source_message_ids and self.memory_manager:
-                        try:
-                            self.memory_manager.mark_messages_as_summarized(
-                                source_message_ids, summary_id
-                            )
-                            # Clear conversation cache so next load reflects changes
-                            self.memory_manager.clear_conversation_cache(
-                                chunk_memory_id
-                            )
-                        except Exception as mark_exc:
-                            logger.debug(
-                                "Could not mark messages as summarized: %s",
-                                mark_exc,
-                            )
-
-                    logger.info(
-                        f"Created summary {summary_id} for memory_id {chunk_memory_id} covering {len(memory_chunk)} memories"
-                    )
-
-            logger.info(
-                f"Generated {len(summary_ids)} summaries for agent {self.agent_id}"
-            )
-            return summary_ids
-
-        except Exception as e:
-            logger.error(f"Error generating summaries: {e}")
-            import traceback
-
-            logger.error(traceback.format_exc())
-            return []
+        manager = self.memory_manager or MemoryManager(self.memory_provider)
+        return manager.generate_summaries(
+            model=self.model,
+            agent_id=self.agent_id,
+            memory_ids=self.memory_ids,
+            current_memory_id=self._current_memory_id,
+            days_back=days_back,
+            max_memories_per_summary=max_memories_per_summary,
+            record_context_usage=self._record_context_window_usage,
+        )
 
     def _compress_memories_with_llm(self, memories: List[Dict]) -> str:
         """
@@ -6071,46 +5425,9 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         str
             Compressed summary content
         """
-        try:
-            # Extract content from memories
-            memory_contents = []
-            for memory in memories:
-                content = memory.get("content", "")
-                role = memory.get("role", "")
-
-                if content:
-                    if role:
-                        memory_contents.append(f"[{role}]: {content}")
-                    else:
-                        memory_contents.append(content)
-
-            if not memory_contents:
-                return ""
-
-            # Create compression prompt
-            memories_text = "\n".join(memory_contents)
-            compression_prompt = f"""
-Analyze the following memory units and create a concise summary that captures:
-1. Emotionally significant moments and interactions
-2. Situationally relevant context and patterns
-3. Key achievements, challenges, or learning experiences
-4. Important facts and information learned
-
-Memory Units:
-{memories_text}
-
-Provide a comprehensive but concise summary:"""
-
-            # Use the LLM to generate the summary
-            if self.model:
-                messages = [{"role": "user", "content": compression_prompt}]
-                summary = self.model.generate(messages)
-                self._record_context_window_usage(stage="memory_compression")
-                return summary.strip()
-            else:
-                logger.warning("No LLM model available for memory compression")
-                return ""
-
-        except Exception as e:
-            logger.error(f"Error compressing memories with LLM: {e}")
-            return ""
+        manager = self.memory_manager or MemoryManager(self.memory_provider)
+        return manager.compress_memories_with_llm(
+            memories,
+            model=self.model,
+            record_context_usage=self._record_context_window_usage,
+        )

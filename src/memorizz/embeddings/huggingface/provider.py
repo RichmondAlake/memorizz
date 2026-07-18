@@ -168,8 +168,3 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
     def get_default_model(self) -> str:
         """Return the default model identifier."""
         return self.model_name
-
-    @classmethod
-    def get_available_models(cls) -> List[str]:
-        """Return curated list of common community models."""
-        return list(cls.MODEL_DIMENSIONS.keys())

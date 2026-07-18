@@ -170,6 +170,49 @@ CREATE INDEX idx_toolbox_memory_id ON toolbox(memory_id);
 CREATE INDEX idx_toolbox_agent_id ON toolbox(agent_id);
 
 -- ==============================================================================
+-- SKILLBOX TABLE (Learned skills promoted from workflow trajectories)
+-- ==============================================================================
+CREATE TABLE skillbox (
+    id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+    skill_id VARCHAR2(255) UNIQUE NOT NULL,
+    name VARCHAR2(255) NOT NULL,
+    description CLOB,
+    content CLOB,                             -- SKILL.md document body
+    preconditions CLOB CHECK (preconditions IS JSON),   -- JSON array of applicability conditions
+    tools_used CLOB CHECK (tools_used IS JSON),         -- JSON array of tool names
+    queries CLOB CHECK (queries IS JSON),               -- JSON array of exemplar queries
+    agent_id VARCHAR2(255),
+    user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
+    source_canonical_hash VARCHAR2(255),      -- Trajectory class the skill was distilled from
+    source_workflow_ids CLOB CHECK (source_workflow_ids IS JSON),  -- JSON array of workflow IDs
+    exemplar_workflow_id VARCHAR2(255),
+    status VARCHAR2(50) DEFAULT 'candidate',
+    version NUMBER(10) DEFAULT 1,
+    promoted_at TIMESTAMP,
+    demoted_at TIMESTAMP,
+    demotion_reason CLOB,
+    baseline CLOB CHECK (baseline IS JSON),   -- JSON object of pre-promotion metrics
+    stats CLOB CHECK (stats IS JSON),         -- JSON object of activation stats
+    embedding VECTOR(256, FLOAT32),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    -- Constraints
+    CONSTRAINT chk_skillbox_status CHECK (status IN ('candidate', 'shadow', 'active', 'deprecated', 'demoted')),
+
+    -- Foreign key to agents
+    CONSTRAINT fk_skillbox_agent FOREIGN KEY (agent_id)
+        REFERENCES agents(agent_id) ON DELETE CASCADE
+);
+
+-- Indexes
+CREATE INDEX idx_skillbox_skill_id ON skillbox(skill_id);
+CREATE INDEX idx_skillbox_name ON skillbox(name);
+CREATE INDEX idx_skillbox_agent_id ON skillbox(agent_id);
+CREATE INDEX idx_skillbox_status ON skillbox(status);
+CREATE INDEX idx_skillbox_hash ON skillbox(source_canonical_hash);
+
+-- ==============================================================================
 -- CONVERSATION_MEMORY TABLE (Conversation history)
 -- ==============================================================================
 CREATE TABLE conversation_memory (
@@ -266,6 +309,12 @@ CREATE TABLE workflow_memory (
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
+    user_query CLOB,                          -- Original request for diversity gates and distillation
+    canonical_hash VARCHAR2(255),             -- Trajectory identity (sha256 of canonical signature)
+    canonical_signature CLOB CHECK (canonical_signature IS JSON),  -- JSON array of canonical units
+    step_count NUMBER(10),                    -- len(canonical_signature) after retry collapse
+    promoted_skill_id VARCHAR2(255),          -- Set when covered by an ACTIVE learned skill
+    skills_activated CLOB CHECK (skills_activated IS JSON),  -- JSON array of skill IDs in context
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -280,6 +329,8 @@ CREATE INDEX idx_workflow_status ON workflow_memory(status);
 CREATE INDEX idx_workflow_memory_id ON workflow_memory(memory_id);
 CREATE INDEX idx_workflow_agent_id ON workflow_memory(agent_id);
 CREATE INDEX idx_workflow_user_id ON workflow_memory(user_id);
+CREATE INDEX idx_workflow_canonical_hash ON workflow_memory(canonical_hash);
+CREATE INDEX idx_workflow_promoted_skill ON workflow_memory(promoted_skill_id);
 
 -- ==============================================================================
 -- SHARED_MEMORY TABLE (Multi-agent shared memory)
@@ -500,6 +551,12 @@ ORGANIZATION INMEMORY NEIGHBOR GRAPH
 DISTANCE COSINE
 WITH TARGET ACCURACY 95;
 
+-- Skillbox vector index
+CREATE VECTOR INDEX idx_skillbox_vec ON skillbox(embedding)
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
+DISTANCE COSINE
+WITH TARGET ACCURACY 95;
+
 -- Conversation memory vector index
 CREATE VECTOR INDEX idx_conv_vec ON conversation_memory(embedding)
 ORGANIZATION INMEMORY NEIGHBOR GRAPH
@@ -558,6 +615,7 @@ COMMENT ON TABLE agent_memories IS 'Association between agents and memory IDs';
 COMMENT ON TABLE agent_delegates IS 'Multi-agent delegation relationships';
 COMMENT ON TABLE personas IS 'Agent personas and role configurations';
 COMMENT ON TABLE toolbox IS 'Agent tools and functions';
+COMMENT ON TABLE skillbox IS 'Learned skills promoted from workflow trajectories';
 COMMENT ON TABLE conversation_memory IS 'Conversation history and interactions';
 COMMENT ON TABLE knowledge_base IS 'Persistent facts and knowledge';
 COMMENT ON TABLE short_term_memory IS 'Temporary working memory with TTL';

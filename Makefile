@@ -20,11 +20,12 @@ install:
 
 lint:
 	@echo "Running syntax check..."
-	@find src/memorizz -name "*.py" ! -name "*backup*" ! -name "*original*" -exec python -m py_compile {} \;
+	@find src/memorizz -name "*.py" -exec python -m py_compile {} \;
 	@echo "✓ Syntax check passed"
 	@echo ""
-	@echo "Running flake8..."
-	@flake8 src/memorizz --max-line-length=120 --extend-ignore=E203,E501 --exclude='*backup*,*original*' || true
+	@echo "Running flake8 (Python errors are enforced; style is advisory)..."
+	@flake8 src/memorizz --select=E9,F
+	@flake8 src/memorizz --max-line-length=120 --extend-ignore=E203,E501 || true
 	@echo ""
 
 format:

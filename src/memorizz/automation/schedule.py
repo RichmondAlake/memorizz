@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Optional, Set
 
 try:
     from zoneinfo import ZoneInfo

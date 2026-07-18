@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Skills - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Learned Skills</h1>
+    <p>{{ skills|length }} skill{% if skills|length != 1 %}s{% endif %} distilled from repeated successful workflow trajectories — <a href="/memory/workflows">see trajectory classes</a></p>
+</div>
+
+{% if skills %}
+<div class="memory-items">
+    {% for skill in skills %}
+    <div class="memory-item cl-skill cl-skill--{{ skill.status }}">
+        <div class="memory-item-header">
+            <h3>{{ skill.name }} <span class="cl-skill-version">v{{ skill.version }}</span></h3>
+            <span class="cl-badge cl-badge--{{ skill.status }}">{{ skill.status|upper }}</span>
+        </div>
+        <div class="memory-item-body">
+            <p class="item-content">{{ skill.description }}</p>
+
+            <div class="item-meta">
+                {% if skill.agent_id %}<span class="meta-tag">agent: {{ skill.agent_id|truncate(24) }}</span>{% endif %}
+                {% if skill.source_hash_short %}<span class="meta-tag" title="source trajectory class">class: {{ skill.source_hash_short }}…</span>{% endif %}
+                {% if skill.tools_used %}<span class="meta-tag">tools: {{ skill.tools_used|join(', ') }}</span>{% endif %}
+            </div>
+
+            <div class="item-meta">
+                <span class="meta-tag">{{ skill.activations }} activation{{ 's' if skill.activations != 1 }}</span>
+                <span class="meta-tag">{{ skill.successes }} ✓ / {{ skill.failures }} ✗</span>
+                {% if skill.deviations %}<span class="meta-tag" title="skill was in context but the run took a different path">{{ skill.deviations }} deviation{{ 's' if skill.deviations != 1 }}</span>{% endif %}
+                {% if skill.baseline.success_rate is defined %}<span class="meta-tag" title="success rate frozen at promotion time">baseline {{ '%.0f'|format(skill.baseline.success_rate * 100) }}%</span>{% endif %}
+            </div>
+
+            {% if skill.demotion_reason %}
+            <div class="cl-report-row cl-report-warn">Demoted{% if skill.demoted_at %} {{ skill.demoted_at|truncate(16, true, '') }}{% endif %}: {{ skill.demotion_reason }}</div>
+            {% endif %}
+
+            <div class="cl-skill-actions">
+                {% if skill.can_activate %}
+                <form method="post" action="/continual-learning/skills/{{ skill.skill_id }}/activate" class="cl-inline-form">
+                    <button type="submit" class="btn btn-primary btn-sm" title="Activate: the skill starts injecting into matching runs and its source workflows are suppressed from retrieval">Activate</button>
+                </form>
+                {% endif %}
+                {% if skill.can_demote %}
+                <form method="post" action="/continual-learning/skills/{{ skill.skill_id }}/demote" class="cl-inline-form">
+                    <button type="submit" class="btn btn-sm" title="Demote: stops injection and releases the suppressed workflows back to retrieval">Demote</button>
+                </form>
+                {% endif %}
+            </div>
+
+            {% if skill.preconditions %}
+            <details class="cl-runs">
+                <summary>Preconditions ({{ skill.preconditions|length }})</summary>
+                <ul class="cl-precondition-list">
+                    {% for p in skill.preconditions %}<li>{{ p }}</li>{% endfor %}
+                </ul>
+            </details>
+            {% endif %}
+
+            <details class="cl-runs">
+                <summary>SKILL.md</summary>
+                <pre class="cl-skill-content">{{ skill.content }}</pre>
+            </details>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <div class="empty-icon">🎓</div>
+    <h3>No Learned Skills Yet</h3>
+    <p>Enable continual learning on an agent, let it repeat successful tool workflows, then promote eligible trajectory classes from the <a href="/memory/workflows">Workflows page</a>.</p>
+</div>
+{% endif %}
+{% endblock %}

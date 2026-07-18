@@ -13,7 +13,6 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .runner import run_job_once

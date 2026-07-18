@@ -46,6 +46,8 @@ class MemAgentModel(BaseModel):
     mcp_servers: Optional[List[Dict[str, Any]]] = None
     self_aware: bool = False
     self_aware_config: Optional[Dict[str, Any]] = None
+    continual_learning: bool = False
+    continual_learning_config: Optional[Dict[str, Any]] = None
     automations_enabled: bool = True
     default_timezone: Optional[str] = None
     whatsapp_enabled: bool = False

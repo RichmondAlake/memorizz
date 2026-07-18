@@ -8,14 +8,17 @@ Memorizz composes agent behavior from memory types, storage providers, and appli
 
 | Enum | Purpose | Main Implementation |
 |---|---|---|
+| `PERSONAS` | Versioned agent identity and evolution history | `src/memorizz/long_term/semantic/persona/` |
 | `KNOWLEDGE_BASE` | Semantic facts and reusable knowledge | `src/memorizz/long_term/semantic/` |
 | `ENTITY_MEMORY` | Structured entity profiles and attributes | `src/memorizz/long_term/semantic/entity_memory/` |
 | `TOOLBOX` | Callable tools and tool metadata | `src/memorizz/long_term/procedural/toolbox/` |
 | `WORKFLOW_MEMORY` | Process and task execution traces | `src/memorizz/long_term/procedural/workflow/` |
+| `SKILLBOX` | Distilled learned skills and lifecycle state | `src/memorizz/long_term/procedural/skillbox/` |
 | `CONVERSATION_MEMORY` | User/assistant interaction history | `src/memorizz/long_term/episodic/` |
 | `SUMMARIES` | Compressed conversation summaries | `src/memorizz/long_term/episodic/summary_component.py` |
-| `SHORT_TERM_MEMORY` | Working session context | `src/memorizz/short_term_memory/working_memory/` |
+| `SHORT_TERM_MEMORY` | Provider-backed working-session records | `src/memorizz/memagent/core.py` |
 | `SEMANTIC_CACHE` | Similar-query response caching | `src/memorizz/short_term_memory/semantic_cache.py` |
+| `TOOL_LOG` | Offloaded tool output referenced from prompt context | `src/memorizz/memagent/utils/tool_log.py` |
 | `SHARED_MEMORY` | Multi-agent coordination state | `src/memorizz/coordination/shared_memory/` |
 | `MEMAGENT` | Persisted agent configuration | `src/memorizz/memagent/models.py` |
 

@@ -14,8 +14,6 @@ nav:
       - Python SDK Quickstart: getting-started/python-sdk-quickstart.md
       - CLI Guide: getting-started/cli.md
       - Local UI Guide: getting-started/local-ui.md
-  - CLI: getting-started/cli.md
-  - Local UI: getting-started/local-ui.md
   - Memory Types:
       - Semantic Memory: memory-types/semantic.md
       - Episodic Memory: memory-types/episodic.md
@@ -29,6 +27,8 @@ nav:
       - Bring Your Own Provider: memory-providers/custom.md
   - Guides:
       - Multi-Tenant Applications: guides/multi-tenant.md
+      - Context Efficiency & Prompt Caching: guides/context-efficiency.md
+      - Continual Learning (Workflows → Skills): guides/continual-learning.md
   - Use Cases:
       - Assistant Mode: use-cases/assistant-mode.md
       - Workflow Mode: use-cases/workflow-mode.md
@@ -88,7 +88,12 @@ plugins:
   - search
   - git-revision-date-localized:
       fallback_to_build_date: true
-      enable_creation_date: true
+      enable_creation_date: false
+      enable_git_follow: false
+      # Untracked pages in a release worktree legitimately have no Git date.
+      # Keep MkDocs strict for links/config while allowing the documented
+      # build-date fallback for this metadata-only plugin.
+      strict: false
   - mkdocstrings:
       handlers:
         python:

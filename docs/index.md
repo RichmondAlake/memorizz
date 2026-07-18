@@ -9,7 +9,7 @@ The Memorizz web app UI is separate and runs on `http://127.0.0.1:8765`.
 
 ```bash
 pip install "memorizz[ui]"
-memorizz run local
+memorizz ui
 ```
 
 Open `http://127.0.0.1:8765` after starting the command above.

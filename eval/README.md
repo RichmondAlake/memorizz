@@ -23,7 +23,7 @@ The evaluation framework is designed to assess Memorizz's performance on various
 LongMemEval is a comprehensive benchmark for evaluating long-term memory capabilities of chat assistants. It tests five core memory abilities:
 
 1. **Information Extraction** - Recalling specific information from extensive histories
-2. **Multi-Session Reasoning** - Synthesizing information across multiple conversation sessions  
+2. **Multi-Session Reasoning** - Synthesizing information across multiple conversation sessions
 3. **Knowledge Updates** - Recognizing and updating changed user information over time
 4. **Temporal Reasoning** - Understanding time-aware aspects of information
 5. **Abstention** - Knowing when to refuse answering based on insufficient information
@@ -58,4 +58,4 @@ To add a new evaluation benchmark:
 
 ## Results
 
-Evaluation results will be saved in JSON format with timestamps, allowing for easy tracking of performance improvements over time. 
+Evaluation results will be saved in JSON format with timestamps, allowing for easy tracking of performance improvements over time.

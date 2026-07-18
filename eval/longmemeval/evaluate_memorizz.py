@@ -63,6 +63,12 @@ class LongMemEvalEvaluator:
         agent_template: Optional[Any] = None,
         dataset_dir: Optional[str] = None,
         evaluation_model: Optional[Any] = None,
+        ingest_mode: str = "direct",
+        judge_model: str = "gpt-4o",
+        config_label: str = "",
+        context_window_tokens: Optional[int] = None,
+        disable_auto_summaries: bool = False,
+        checkpoint_path: Optional[str] = None,
     ):
         """
         Initialize the evaluator with Oracle AI Database as the memory provider.
@@ -72,12 +78,31 @@ class LongMemEvalEvaluator:
             application_mode: Memorizz application mode to use
             output_dir: Directory to save results
             verbose: Enable verbose logging
+            ingest_mode: How haystack history enters agent memory:
+                - "direct" (benchmark-correct): the dataset's user AND
+                  assistant turns are written to conversation memory as-is
+                  (with embeddings), exactly as LongMemEval intends. Fast —
+                  no LLM calls during ingestion.
+                - "run": legacy behaviour; each user turn is replayed
+                  through ``agent.run()`` (the dataset's assistant replies
+                  are discarded and regenerated, which loses the evidence
+                  for single-session-assistant questions and costs one LLM
+                  call per turn).
+            judge_model: OpenAI model used for LLM-as-judge scoring.
+            config_label: Free-form label recorded in results metadata —
+                use it to tag A/B arms (e.g. "baseline-HEAD" vs
+                "candidate-context-efficiency").
         """
         self.dataset_variant = dataset_variant
         self.application_mode = application_mode
         self.output_dir = Path(output_dir) if output_dir else Path("./results")
         self.verbose = verbose
         self.agent_template = agent_template
+        self.ingest_mode = ingest_mode
+        self.config_label = config_label
+        self.context_window_tokens = context_window_tokens
+        self.disable_auto_summaries = disable_auto_summaries
+        self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.dataset_dir = (
             Path(dataset_dir) if dataset_dir else Path(__file__).parent / "data"
         )
@@ -89,7 +114,7 @@ class LongMemEvalEvaluator:
         self.memory_provider = memory_provider or self._init_memory_provider()
 
         # Initialize evaluation model for scoring
-        self.eval_model = evaluation_model or OpenAI(model="gpt-4")
+        self.eval_model = evaluation_model or OpenAI(model=judge_model)
 
         # Load dataset
         self.dataset = self._load_dataset()
@@ -306,11 +331,25 @@ class LongMemEvalEvaluator:
             scope = cache_config.get("scope", "local")
             builder.with_semantic_cache(enabled=True, threshold=threshold, scope=scope)
 
-        context_window_tokens = self._get_template_value("context_window_tokens")
+        context_window_tokens = self.context_window_tokens or self._get_template_value(
+            "context_window_tokens"
+        )
         if context_window_tokens:
             builder.config.context_window_tokens = context_window_tokens
 
         agent = builder.build()
+
+        if self.disable_auto_summaries:
+            # Push the auto-summary trigger out of reach. With a constrained
+            # window, usage sits above the default 80% trigger permanently;
+            # on Oracle the summary-marking column doesn't exist, so at HEAD
+            # (synchronous summarization + never-marked messages) this loops
+            # forever re-summarizing the same units. Disabling it in BOTH
+            # arms keeps the A/B focused on assembly+retrieval accuracy.
+            try:
+                agent._context_summary_trigger = 1_000_000.0
+            except Exception:
+                pass
 
         # Save the agent to Oracle
         agent.save()
@@ -321,6 +360,9 @@ class LongMemEvalEvaluator:
     ) -> None:
         """
         Process conversation history session by session to build up agent memory.
+
+        Legacy ("run") ingestion: each USER turn is replayed through
+        ``agent.run()``; the dataset's assistant replies are regenerated.
 
         Args:
             agent: The Memorizz agent
@@ -345,6 +387,99 @@ class LongMemEvalEvaluator:
                     except Exception as e:
                         logger.warning(f"Error processing message: {e}")
                         continue
+
+    @staticmethod
+    def _parse_session_date(raw: Any):
+        """Parse a LongMemEval haystack date like '2023/04/10 (Mon) 17:50'."""
+        if not raw:
+            return None
+        text = str(raw).strip()
+        # Drop the parenthesised weekday.
+        import re
+
+        text = re.sub(r"\s*\([^)]*\)\s*", " ", text).strip()
+        for fmt in ("%Y/%m/%d %H:%M", "%Y/%m/%d", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _ingest_history_direct(
+        self,
+        agent,
+        history: List[List[Dict[str, Any]]],
+        session_dates: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """Write haystack sessions straight into conversation memory.
+
+        Benchmark-correct ingestion: both the user AND assistant turns from
+        the dataset are stored verbatim (LongMemEval questions frequently
+        probe what the ASSISTANT said, which replay-based ingestion loses).
+        Rows are stored with their embedding computed inline so episodic
+        vector recall is ready before the question is asked — no reliance
+        on background backfill timing, and identical behaviour on old and
+        new memorizz code (only public/stable APIs are used).
+
+        Session timestamps come from ``haystack_dates`` (fallback: now),
+        with a per-message second offset to preserve intra-session order.
+
+        Returns {"memory_id", "thread_id"} for the follow-up question turn.
+        """
+        from datetime import timedelta
+
+        from memorizz.embeddings import get_embedding
+        from memorizz.enums import Role
+
+        memory_id, thread_id = agent._resolve_execution_state(None, None)
+        session_dates = session_dates or []
+
+        for session_idx, session in enumerate(history):
+            base_ts = None
+            if session_idx < len(session_dates):
+                base_ts = self._parse_session_date(session_dates[session_idx])
+            if base_ts is None:
+                base_ts = datetime.now()
+
+            for msg_idx, message in enumerate(session):
+                role_raw = str(message.get("role", "")).strip().lower()
+                content = str(message.get("content", "") or "").strip()
+                if not content or role_raw not in ("user", "assistant"):
+                    continue
+                role = Role.USER if role_raw == "user" else Role.ASSISTANT
+
+                unit = agent.memory_manager.create_conversation_memory_unit(
+                    role=role,
+                    content=content,
+                    thread_id=thread_id,
+                    memory_id=memory_id,
+                    timestamp=base_ts + timedelta(seconds=msg_idx),
+                    agent_id=agent.agent_id,
+                )
+                # Embed BEFORE storing (single write, provider-agnostic) so
+                # episodic vector recall is queryable immediately.
+                try:
+                    unit.embedding = get_embedding(content)
+                except Exception as exc:
+                    logger.debug("Inline embedding failed: %s", exc)
+                agent.memory_manager.save_memory_unit(unit, memory_id)
+
+            if self.verbose:
+                logger.info(
+                    "Ingested session %d/%d (%d messages)",
+                    session_idx + 1,
+                    len(history),
+                    len(session),
+                )
+
+        # The direct writes populated the provider behind the in-process
+        # conversation cache; clear it so the question turn reloads fresh.
+        try:
+            agent.memory_manager.clear_conversation_cache(memory_id)
+        except Exception:
+            pass
+
+        return {"memory_id": memory_id, "thread_id": thread_id}
 
     def _evaluate_response(
         self, question: str, agent_response: str, ground_truth: str, category: str
@@ -396,8 +531,15 @@ Only respond with the JSON object.
             # Use the evaluation model - fix method name to generate_text
             eval_response = self.eval_model.generate_text(evaluation_prompt)
 
-            # Parse JSON response
-            eval_result = json.loads(eval_response)
+            # Parse JSON response (tolerate markdown code fences)
+            cleaned = str(eval_response).strip()
+            if cleaned.startswith("```"):
+                cleaned = "\n".join(
+                    line
+                    for line in cleaned.splitlines()
+                    if not line.strip().startswith("```")
+                ).strip()
+            eval_result = json.loads(cleaned)
 
             return {
                 "correct": eval_result.get("correct", False),
@@ -471,11 +613,27 @@ Only respond with the JSON object.
         agent = self._create_fresh_agent()
 
         try:
-            # Process conversation history
-            self._process_conversation_history(agent, history)
+            # Build up agent memory from the haystack history
+            if self.ingest_mode == "direct":
+                scope = self._ingest_history_direct(
+                    agent, history, sample.get("haystack_dates")
+                )
+                agent_response = agent.run(
+                    question,
+                    memory_id=scope["memory_id"],
+                    thread_id=scope["thread_id"],
+                )
+            else:
+                self._process_conversation_history(agent, history)
+                agent_response = agent.run(question)
 
-            # Ask the evaluation question
-            agent_response = agent.run(question)
+            # Capture token/cache usage for the question turn (the metric
+            # the context-efficiency work targets alongside accuracy).
+            usage = {}
+            try:
+                usage = dict(agent.model.get_last_usage() or {})
+            except Exception:
+                usage = {}
 
             # Evaluate the response
             evaluation = self._evaluate_response(
@@ -486,11 +644,13 @@ Only respond with the JSON object.
             processing_time = time.time() - start_time
 
             result = {
+                "question_id": sample.get("question_id"),
                 "question": question,
                 "category": category,
                 "agent_response": agent_response,
                 "ground_truth": ground_truth,
                 "evaluation": evaluation,
+                "usage": usage,
                 "processing_time": processing_time,
                 "history_length": len(history) if history else 0,
             }
@@ -531,19 +691,61 @@ Only respond with the JSON object.
         """
         logger.info(f"Starting evaluation on {num_samples} samples...")
 
-        # Sample from dataset (self.dataset is now a list)
+        # Sample from dataset (self.dataset is now a list). Evenly-spaced
+        # deterministic indices instead of the first N: the dataset is
+        # grouped by question type, so a head-slice would over-represent one
+        # category. Identical index set for every run => paired A/B.
         total_samples = len(self.dataset)
         num_samples = min(num_samples, total_samples)
-        samples = self.dataset[:num_samples]
+        if num_samples >= total_samples:
+            indices = list(range(total_samples))
+        else:
+            stride = total_samples / num_samples
+            indices = sorted({int(i * stride) for i in range(num_samples)})
+        samples = [self.dataset[i] for i in indices]
 
         results = []
         category_scores = {cat: [] for cat in self.categories.keys()}
 
+        # Resume support: reload per-sample results checkpointed by a
+        # previous (interrupted) run and skip those samples.
+        done_ids = {}
+        if self.checkpoint_path and self.checkpoint_path.exists():
+            with open(self.checkpoint_path) as ckpt:
+                for line in ckpt:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("question_id"):
+                        done_ids[row["question_id"]] = row
+            if done_ids:
+                logger.info(
+                    "Resuming: %d samples restored from checkpoint %s",
+                    len(done_ids),
+                    self.checkpoint_path,
+                )
+
         for i, sample in enumerate(samples):
+            cached_row = done_ids.get(sample.get("question_id"))
+            if cached_row is not None:
+                results.append(cached_row)
+                category = cached_row["category"]
+                if category in category_scores:
+                    category_scores[category].append(cached_row["evaluation"]["score"])
+                continue
+
             logger.info(f"Evaluating sample {i+1}/{len(samples)}")
 
             result = self.evaluate_sample(sample)
             results.append(result)
+
+            if self.checkpoint_path:
+                with open(self.checkpoint_path, "a") as ckpt:
+                    ckpt.write(json.dumps(result, default=str) + "\n")
 
             # Track category performance
             category = result["category"]
@@ -576,14 +778,40 @@ Only respond with the JSON object.
                     "num_samples": 0,
                 }
 
+        # Aggregate token/cache usage across question turns.
+        total_prompt = sum(
+            (r.get("usage") or {}).get("prompt_tokens") or 0 for r in results
+        )
+        total_cached = sum(
+            (r.get("usage") or {}).get("cached_tokens") or 0 for r in results
+        )
+
+        # Record which memorizz build produced this run (A/B provenance).
+        try:
+            import memorizz as _memorizz_mod
+
+            memorizz_path = str(getattr(_memorizz_mod, "__file__", "unknown"))
+        except Exception:
+            memorizz_path = "unknown"
+
         # Compile final results
         evaluation_results = {
             "metadata": {
                 "timestamp": datetime.now().isoformat(),
                 "dataset_variant": self.dataset_variant,
                 "application_mode": self.application_mode,
+                "config_label": self.config_label,
+                "ingest_mode": self.ingest_mode,
+                "context_window_tokens": self.context_window_tokens,
+                "disable_auto_summaries": self.disable_auto_summaries,
+                "memorizz_path": memorizz_path,
                 "num_samples": len(results),
                 "total_processing_time": sum(r["processing_time"] for r in results),
+                "total_prompt_tokens": total_prompt,
+                "total_cached_tokens": total_cached,
+                "cache_hit_ratio": (
+                    total_cached / total_prompt if total_prompt else 0.0
+                ),
             },
             "overall_accuracy": overall_accuracy,
             "overall_score": overall_score,
@@ -666,6 +894,59 @@ Environment Variables:
         help="Optional existing MemAgent ID to use as the evaluation template.",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument(
+        "--ingest_mode",
+        choices=["direct", "run"],
+        default="direct",
+        help=(
+            "History ingestion: 'direct' (benchmark-correct; dataset user+"
+            "assistant turns stored verbatim with embeddings, no LLM calls) "
+            "or 'run' (legacy replay of user turns through agent.run())."
+        ),
+    )
+    parser.add_argument(
+        "--judge_model",
+        type=str,
+        default="gpt-4o",
+        help="OpenAI model used for LLM-as-judge scoring.",
+    )
+    parser.add_argument(
+        "--config_label",
+        type=str,
+        default="",
+        help="Label recorded in results metadata (tag A/B arms).",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Path to a per-sample JSONL checkpoint. Each evaluated sample is "
+            "appended immediately; an interrupted run restarted with the "
+            "same checkpoint resumes where it left off."
+        ),
+    )
+    parser.add_argument(
+        "--disable_auto_summaries",
+        action="store_true",
+        help=(
+            "Disable the automatic context-summary trigger in the agent "
+            "(recommended with --context_window_tokens on Oracle: the "
+            "conversation table has no summary_id column, so summarization "
+            "can never mark progress and old builds loop on it)."
+        ),
+    )
+    parser.add_argument(
+        "--context_window_tokens",
+        type=int,
+        default=None,
+        help=(
+            "Constrain the agent's context window so haystack history "
+            "genuinely overflows it — this is what makes the run a "
+            "long-horizon MEMORY test (recall via retrieval/summaries) "
+            "rather than an in-window reading test."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -681,6 +962,12 @@ Environment Variables:
             application_mode=args.application_mode,
             output_dir=args.output_dir,
             verbose=args.verbose,
+            ingest_mode=args.ingest_mode,
+            judge_model=args.judge_model,
+            config_label=args.config_label,
+            context_window_tokens=args.context_window_tokens,
+            disable_auto_summaries=args.disable_auto_summaries,
+            checkpoint_path=args.checkpoint,
         )
 
         selected_agent_id = (args.agent_id or "").strip()
@@ -713,10 +1000,20 @@ Environment Variables:
         print(f"Dataset Variant: {args.dataset_variant}")
         print(f"Application Mode: {evaluator.application_mode}")
         print(f"Memory Provider: Oracle AI Database")
+        print(f"Config Label: {results['metadata'].get('config_label') or '(none)'}")
+        print(f"Ingest Mode: {results['metadata'].get('ingest_mode')}")
+        print(f"Memorizz Build: {results['metadata'].get('memorizz_path')}")
         print(f"Samples Evaluated: {results['metadata']['num_samples']}")
         print(f"Overall Accuracy: {results['overall_accuracy']:.3f}")
         print(f"Overall Score: {results['overall_score']:.3f}")
         print(f"Processing Time: {results['metadata']['total_processing_time']:.2f}s")
+        print(
+            "Question-turn tokens: prompt={p} cached={c} (hit ratio {r:.1%})".format(
+                p=results["metadata"].get("total_prompt_tokens", 0),
+                c=results["metadata"].get("total_cached_tokens", 0),
+                r=results["metadata"].get("cache_hit_ratio", 0.0),
+            )
+        )
         print("\nCategory Performance:")
         for category, metrics in results["category_results"].items():
             print(

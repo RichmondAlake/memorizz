@@ -22,13 +22,10 @@ repos:
       - id: flake8
         args: [
           '--max-line-length=120',
-          '--extend-ignore=E203,E501,E712,F401,F541,F841'
+          '--extend-ignore=E203,E501,E712'
         ]
         exclude: |
           (?x)^(
-            .*_backup\.py|
-            memagent_original_backup\.py|
-            provider_backup\.py|
             eval/.*|
             tests/.*
           )$

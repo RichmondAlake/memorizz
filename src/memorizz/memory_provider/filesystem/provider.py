@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - optional dependency
     faiss = None
 
 from ...enums.memory_type import MemoryType
-from ..base import MemoryProvider
+from ..base import _UNSET, MemoryProvider, filter_tool_log_rows
 
 logger = logging.getLogger(__name__)
 
@@ -80,15 +80,6 @@ class FileSystemProvider(MemoryProvider):
     """
 
     INDEX_VERSION = 1
-    VECTOR_ENABLED_TYPES = {
-        MemoryType.CONVERSATION_MEMORY,
-        MemoryType.KNOWLEDGE_BASE,
-        MemoryType.SHORT_TERM_MEMORY,
-        MemoryType.WORKFLOW_MEMORY,
-        MemoryType.SUMMARIES,
-        MemoryType.SEMANTIC_CACHE,
-        MemoryType.ENTITY_MEMORY,
-    }
 
     def __init__(self, config: FileSystemConfig):
         self.config = config
@@ -278,6 +269,29 @@ class FileSystemProvider(MemoryProvider):
                 documents.append(document)
         return documents
 
+    def list_tool_logs(
+        self,
+        memory_id: Optional[str] = None,
+        user_id: Any = None,
+        limit: int = 20,
+        thread_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Recent tool-log rows for a memory/thread (most-recent first).
+
+        Native counterpart to the MongoDB provider's indexed query: reads every
+        tool_log document and narrows in Python via the shared
+        :func:`filter_tool_log_rows`, so the ``thread_id`` scoping that keeps the
+        digest to one conversation behaves identically across providers.
+        """
+        rows = self.list_all(MemoryType.TOOL_LOG)
+        return filter_tool_log_rows(
+            rows,
+            memory_id=memory_id,
+            user_id=(user_id if user_id is not None else _UNSET),
+            thread_id=thread_id,
+            limit=limit,
+        )
+
     def retrieve_conversation_history_ordered_by_timestamp(
         self,
         memory_id: str,
@@ -443,7 +457,6 @@ class FileSystemProvider(MemoryProvider):
             return agents
 
         from ...long_term.semantic.persona.persona import Persona
-        from ...long_term.semantic.persona.role_type import RoleType
         from ...memagent import MemAgentModel
 
         for doc in documents:
@@ -473,6 +486,8 @@ class FileSystemProvider(MemoryProvider):
                 skill_paths=doc.get("skill_paths"),
                 mcp_servers=doc.get("mcp_servers"),
                 self_aware=bool(doc.get("self_aware", False)),
+                continual_learning=bool(doc.get("continual_learning", False)),
+                continual_learning_config=doc.get("continual_learning_config"),
                 self_aware_config=doc.get("self_aware_config"),
                 automations_enabled=bool(doc.get("automations_enabled", True)),
                 default_timezone=doc.get("default_timezone"),
@@ -493,7 +508,6 @@ class FileSystemProvider(MemoryProvider):
             return None
 
         from ...long_term.semantic.persona.persona import Persona
-        from ...long_term.semantic.persona.role_type import RoleType
         from ...memagent import MemAgentModel
 
         memagent = MemAgentModel(
@@ -522,6 +536,8 @@ class FileSystemProvider(MemoryProvider):
             skill_paths=document.get("skill_paths"),
             mcp_servers=document.get("mcp_servers"),
             self_aware=bool(document.get("self_aware", False)),
+            continual_learning=bool(document.get("continual_learning", False)),
+            continual_learning_config=document.get("continual_learning_config"),
             self_aware_config=document.get("self_aware_config"),
             automations_enabled=bool(document.get("automations_enabled", True)),
             default_timezone=document.get("default_timezone"),
@@ -640,16 +656,21 @@ class FileSystemProvider(MemoryProvider):
     def _write_document(
         self, memory_type: MemoryType, document_id: str, document: Dict[str, Any]
     ) -> None:
-        file_path = self._document_path(memory_type, document_id)
-        tmp_path = file_path.with_suffix(".tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(document, handle, ensure_ascii=False)
-        os.replace(tmp_path, file_path)
+        # Serialize writers per store: ``store()`` runs on the caller's
+        # thread while the conversation-embedding backfill worker calls
+        # ``update_by_id`` concurrently; without the (re-entrant) lock the
+        # two racers clobber each other's index tmp-file rename.
+        with self._locks[memory_type]:
+            file_path = self._document_path(memory_type, document_id)
+            tmp_path = file_path.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(document, handle, ensure_ascii=False)
+            os.replace(tmp_path, file_path)
 
-        metadata = self._indexes[memory_type]
-        metadata[document_id] = self._build_metadata(document)
-        self._save_index(memory_type)
-        self._mark_vector_index_dirty(memory_type)
+            metadata = self._indexes[memory_type]
+            metadata[document_id] = self._build_metadata(document)
+            self._save_index(memory_type)
+            self._mark_vector_index_dirty(memory_type)
 
     def _document_path(self, memory_type: MemoryType, document_id: str) -> Path:
         return self._store_paths[memory_type] / f"{document_id}.json"
@@ -705,7 +726,9 @@ class FileSystemProvider(MemoryProvider):
     def _save_index(self, memory_type: MemoryType) -> None:
         store_path = self._store_paths[memory_type]
         index_path = store_path / "index.json"
-        tmp_path = index_path.with_suffix(".tmp")
+        # Unique tmp name: two threads saving the same index must never race
+        # on one shared tmp path (os.replace of a missing file raises ENOENT).
+        tmp_path = index_path.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         payload = {
             "version": self.INDEX_VERSION,
             "items": self._indexes[memory_type],

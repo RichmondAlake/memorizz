@@ -12,7 +12,6 @@ import base64
 import hashlib
 import hmac
 from typing import Dict
-from urllib.parse import quote
 
 
 def validate_twilio_signature(

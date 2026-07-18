@@ -35,7 +35,7 @@ pip install "memorizz[all]"
 ## 2. Start The UI
 
 ```bash
-memorizz run local
+memorizz ui
 ```
 
 Default URL: `http://127.0.0.1:8765`
@@ -43,7 +43,7 @@ Default URL: `http://127.0.0.1:8765`
 Optional host/port overrides:
 
 ```bash
-memorizz run local --host 0.0.0.0 --port 9000
+memorizz ui --host 0.0.0.0 --port 9000
 ```
 
 ## 3. Connect To A Memory Provider
@@ -132,5 +132,5 @@ Evalground currently requires:
 Start on a different port:
 
 ```bash
-memorizz run local --port 9000
+memorizz ui --port 9000
 ```

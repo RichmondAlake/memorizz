@@ -330,14 +330,6 @@ def agent_builder():
     return MemAgentBuilder()
 
 
-@pytest.fixture
-def config_builder():
-    """Config builder for testing."""
-    from memorizz.memagent.builders import ConfigBuilder
-
-    return ConfigBuilder()
-
-
 # =============================================================================
 # Test Data Fixtures
 # =============================================================================

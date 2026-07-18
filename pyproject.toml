@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.1.1"
+version = "0.2.0"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,7 +45,6 @@ dependencies = [
     "typer>=0.12.0",
     "rich>=13.7.0",
     "prompt_toolkit>=3.0.0",
-    "platformdirs>=4.0.0",
     # Ollama daemon SDK (LLM *and* embeddings via the native client). Kept in
     # base, not an extra, so the default zero-config local stack works on a bare
     # `pip install memorizz` with a running Ollama daemon. Small (httpx, already
@@ -148,17 +147,16 @@ Issues = "https://github.com/RichmondAlake/memorizz/issues"
 [tool.hatch.metadata]
 allow-direct-references = true
 
-[tool.hatch.build.targets.wheel]
-exclude = [
-    "**/*_backup.py",
-]
-
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
 
 [tool.hatch.build.targets.wheel.force-include]
-"eval/longmemeval/evaluate_memorizz.py" = "eval/longmemeval/evaluate_memorizz.py"
-"eval/longmemeval/download_dataset.py" = "eval/longmemeval/download_dataset.py"
+# Ship the evalground scripts INSIDE the memorizz namespace — a top-level
+# eval/ dir in site-packages is unowned and collides with other packages.
+# The UI's candidate-root walk (ui/app.py:_iter_candidate_roots) already
+# searches the package dir, so discovery works unchanged.
+"eval/longmemeval/evaluate_memorizz.py" = "memorizz/eval/longmemeval/evaluate_memorizz.py"
+"eval/longmemeval/download_dataset.py" = "memorizz/eval/longmemeval/download_dataset.py"
 "src/memorizz/py.typed" = "memorizz/py.typed"
 
 [tool.hatch.build.targets.sdist]

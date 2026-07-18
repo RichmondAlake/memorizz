@@ -3,11 +3,19 @@
 # See LICENSE file in the project root for full license information.
 
 import logging
+import threading
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
+
+# Cap for the per-manager embedding memo below. Sized to comfortably hold a
+# session's worth of repeated lookups (the same user query is embedded by the
+# semantic cache, episodic recall, knowledge-base recall, and entity search
+# within a single agent turn) without growing unbounded.
+_EMBEDDING_CACHE_MAX_ENTRIES = 512
 
 
 class EmbeddingProvider(Enum):
@@ -105,6 +113,13 @@ class EmbeddingManager:
         self.provider_type = provider
         self.config = config or {}
         self._provider = self._create_provider()
+        # LRU memo of text → embedding. Embeddings are deterministic for a
+        # fixed provider+model (both pinned per manager instance), so repeated
+        # embeds of the same text within a session are pure waste — one agent
+        # turn used to embed the identical query string up to five times
+        # (semantic cache, episodic recall, KB recall, toolbox, entity search).
+        self._embedding_cache: "OrderedDict[str, List[float]]" = OrderedDict()
+        self._embedding_cache_lock = threading.Lock()
 
     def _create_provider(self) -> BaseEmbeddingProvider:
         """Create and return the appropriate embedding provider instance."""
@@ -147,7 +162,25 @@ class EmbeddingManager:
         List[float]
             The embedding vector
         """
-        return self._provider.get_embedding(text, **kwargs)
+        # Only memoize the plain-text call shape: kwargs may override the
+        # model/dimensions, which would make cached vectors wrong.
+        cacheable = isinstance(text, str) and bool(text) and not kwargs
+        if cacheable:
+            with self._embedding_cache_lock:
+                cached = self._embedding_cache.get(text)
+                if cached is not None:
+                    self._embedding_cache.move_to_end(text)
+                    return list(cached)
+
+        result = self._provider.get_embedding(text, **kwargs)
+
+        if cacheable and isinstance(result, list) and result:
+            with self._embedding_cache_lock:
+                self._embedding_cache[text] = list(result)
+                self._embedding_cache.move_to_end(text)
+                while len(self._embedding_cache) > _EMBEDDING_CACHE_MAX_ENTRIES:
+                    self._embedding_cache.popitem(last=False)
+        return result
 
     def get_dimensions(self) -> int:
         """Get the dimensionality of embeddings from the current provider."""
@@ -278,153 +311,3 @@ def get_embedding_dimensions(model: Optional[str] = None) -> int:
         f"(provider: {provider_info['provider']}, model: {provider_info['model']})"
     )
     return dimensions
-
-
-def infer_embedding_dimensions(
-    provider: Union[str, EmbeddingProvider],
-    model: str,
-    config: Optional[Dict[str, Any]] = None,
-) -> int:
-    """
-    Infer embedding dimensions for a given provider and model without instantiating.
-    This is useful for schema creation and validation.
-
-    Parameters:
-    -----------
-    provider : Union[str, EmbeddingProvider]
-        The embedding provider name or enum
-    model : str
-        The model name
-    config : Optional[Dict[str, Any]]
-        Optional configuration (e.g., dimensions override for OpenAI)
-
-    Returns:
-    --------
-    int
-        The inferred number of dimensions
-
-    Examples:
-    --------
-    >>> infer_embedding_dimensions("openai", "text-embedding-3-small")
-    1536
-    >>> infer_embedding_dimensions("openai", "text-embedding-3-small", {"dimensions": 512})
-    512
-    >>> infer_embedding_dimensions("ollama", "nomic-embed-text")
-    768
-    """
-    provider_str = (
-        provider.value if isinstance(provider, EmbeddingProvider) else provider
-    )
-
-    # OpenAI provider
-    if provider_str in ["openai", "azure"]:
-        from .openai.provider import OpenAIEmbeddingProvider
-
-        # Check if dimensions are explicitly set in config
-        if config and "dimensions" in config:
-            dimensions = config["dimensions"]
-            logger.debug(
-                f"Inferred dimensions from config: {dimensions} "
-                f"(provider: {provider_str}, model: {model})"
-            )
-            return dimensions
-
-        # Use model's default/max dimensions
-        max_dims = OpenAIEmbeddingProvider.MODEL_DIMENSIONS.get(model)
-        if max_dims:
-            # For OpenAI 3-small/3-large, default to max unless specified
-            dimensions = config.get("dimensions", max_dims) if config else max_dims
-            logger.debug(
-                f"Inferred dimensions from model: {dimensions} "
-                f"(provider: {provider_str}, model: {model})"
-            )
-            return dimensions
-        else:
-            # Fallback for unknown models
-            logger.warning(
-                f"Unknown OpenAI model {model}, defaulting to 1536 dimensions"
-            )
-            return 1536
-
-    # Ollama provider
-    elif provider_str == "ollama":
-        from .ollama.provider import OllamaEmbeddingProvider
-
-        dimensions = OllamaEmbeddingProvider.MODEL_DIMENSIONS.get(model, 768)
-        logger.debug(
-            f"Inferred dimensions from model: {dimensions} "
-            f"(provider: {provider_str}, model: {model})"
-        )
-        return dimensions
-
-    # VoyageAI provider
-    elif provider_str == "voyageai":
-        from .voyageai.provider import VoyageAIEmbeddingProvider
-
-        # VoyageAI models have configurable dimensions
-        if config and "output_dimension" in config:
-            dimensions = config["output_dimension"]
-            logger.debug(
-                f"Inferred dimensions from config: {dimensions} "
-                f"(provider: {provider_str}, model: {model})"
-            )
-            return dimensions
-
-        # Use model's default dimensions
-        text_models = VoyageAIEmbeddingProvider.TEXT_MODELS
-        if model in text_models:
-            dimensions = text_models[model]["default_dimensions"]
-            logger.debug(
-                f"Inferred dimensions from model: {dimensions} "
-                f"(provider: {provider_str}, model: {model})"
-            )
-            return dimensions
-        else:
-            logger.warning(
-                f"Unknown VoyageAI model {model}, defaulting to 1024 dimensions"
-            )
-            return 1024
-
-    # Hugging Face provider
-    elif provider_str == "huggingface":
-        from .huggingface.provider import HuggingFaceEmbeddingProvider
-
-        if config and "dimensions" in config:
-            dimensions = config["dimensions"]
-            logger.debug(
-                "Inferred dimensions from config: %s (provider: %s, model: %s)",
-                dimensions,
-                provider_str,
-                model,
-            )
-            return dimensions
-
-        dims = HuggingFaceEmbeddingProvider.MODEL_DIMENSIONS.get(model)
-        if dims:
-            logger.debug(
-                "Inferred dimensions from model metadata: %s (provider: %s, model: %s)",
-                dims,
-                provider_str,
-                model,
-            )
-            return dims
-        else:
-            logger.warning(
-                "Unknown Hugging Face embedding model %s. Defaulting to 768 dimensions.",
-                model,
-            )
-            return 768
-
-    # Unknown provider - try to get from global config or raise
-    else:
-        logger.warning(
-            f"Unknown provider {provider_str}, attempting to infer from global config"
-        )
-        try:
-            return get_embedding_dimensions()
-        except Exception as e:
-            logger.error(f"Could not infer dimensions: {e}")
-            raise ValueError(
-                f"Cannot infer dimensions for provider '{provider_str}' and model '{model}'. "
-                "Please specify dimensions explicitly in config."
-            )

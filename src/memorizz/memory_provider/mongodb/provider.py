@@ -15,7 +15,6 @@ from pymongo.operations import SearchIndexModel
 from ...embeddings import get_embedding
 from ...enums.memory_type import MemoryType
 from ...long_term.semantic.persona.persona import Persona
-from ...long_term.semantic.persona.role_type import RoleType
 from ...memagent import MemAgentModel
 from ..base import MemoryProvider
 
@@ -130,6 +129,7 @@ class MongoDBProvider(MemoryProvider):
         self.db = self.client[config.db_name]
         self.persona_collection = self.db[MemoryType.PERSONAS.value]
         self.toolbox_collection = self.db[MemoryType.TOOLBOX.value]
+        self.skillbox_collection = self.db[MemoryType.SKILLBOX.value]
         self.short_term_memory_collection = self.db[MemoryType.SHORT_TERM_MEMORY.value]
         self.knowledge_base_collection = self.db[MemoryType.KNOWLEDGE_BASE.value]
         self.conversation_memory_collection = self.db[
@@ -284,6 +284,7 @@ class MongoDBProvider(MemoryProvider):
         search_filter: Dict[str, Any] | None = None,
         num_candidates: int | None = None,
         path: str = "embedding",
+        include_embedding: bool = False,
     ) -> List[Dict[str, Any]]:
         """Build the canonical 3-stage vector-search aggregation pipeline.
 
@@ -317,11 +318,13 @@ class MongoDBProvider(MemoryProvider):
         }
         if search_filter:
             stage["$vectorSearch"]["filter"] = search_filter
-        return [
-            stage,
-            {"$project": {"embedding": 0}},
-            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
-        ]
+        pipeline: List[Dict[str, Any]] = [stage]
+        # Callers running assembly-time dedup/MMR ask for the stored vectors
+        # back (include_embedding=True) so they never have to re-embed rows.
+        if not include_embedding:
+            pipeline.append({"$project": {"embedding": 0}})
+        pipeline.append({"$addFields": {"score": {"$meta": "vectorSearchScore"}}})
+        return pipeline
 
     def _run_vector_search(
         self, collection, pipeline: List[Dict[str, Any]], *, label: str
@@ -621,6 +624,21 @@ class MongoDBProvider(MemoryProvider):
                     memory_store=memory_store_present,
                 )
 
+    def _collection(self, memory_store_type: MemoryType):
+        """Resolve the pymongo collection for a memory type.
+
+        Every ``MemoryType`` maps to ``db[<enum value>]`` (the same handles
+        bound in ``__init__``); this replaces three identical
+        collection-mapping dicts and five if/elif chains that had to be
+        extended by hand for every new memory type.
+        """
+        try:
+            if not isinstance(memory_store_type, MemoryType):
+                memory_store_type = MemoryType(memory_store_type)
+        except Exception:
+            return None
+        return self.db[memory_store_type.value]
+
     def store(
         self,
         data: Dict[str, Any] = None,
@@ -691,29 +709,7 @@ class MongoDBProvider(MemoryProvider):
             return str(stored)
 
         # Get the appropriate collection based on memory type
-        collection = None
-        if memory_store_type == MemoryType.PERSONAS:
-            collection = self.persona_collection
-        elif memory_store_type == MemoryType.TOOLBOX:
-            collection = self.toolbox_collection
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            collection = self.workflow_memory_collection
-        elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            collection = self.short_term_memory_collection
-        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
-            collection = self.knowledge_base_collection
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            collection = self.conversation_memory_collection
-        elif memory_store_type == MemoryType.SHARED_MEMORY:
-            collection = self.shared_memory_collection
-        elif memory_store_type == MemoryType.SUMMARIES:
-            collection = self.summaries_collection
-        elif memory_store_type == MemoryType.SEMANTIC_CACHE:
-            collection = self.semantic_cache_collection
-        elif memory_store_type == MemoryType.ENTITY_MEMORY:
-            collection = self.entity_memory_collection
-        elif memory_store_type == MemoryType.TOOL_LOG:
-            collection = self.tool_log_collection
+        collection = self._collection(memory_store_type)
 
         if collection is None:
             raise ValueError(f"Invalid memory store type: {memory_store_type}")
@@ -768,6 +764,27 @@ class MongoDBProvider(MemoryProvider):
                 field
                 for field in custom_id_fields
                 if field not in ("agent_id", "tool_id")
+            ]
+            custom_id_fields.append("memory_id")
+        elif memory_store_type == MemoryType.SKILLBOX:
+            # Learned skills are agent-scoped and addressed by skill_id
+            # (the Skillbox manager updates them across lifecycle
+            # transitions). skill_id isn't in the base strip list, so only
+            # agent_id needs rescuing; memory_id is stripped like TOOLBOX.
+            custom_id_fields = [
+                field for field in custom_id_fields if field != "agent_id"
+            ]
+            custom_id_fields.append("memory_id")
+        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
+            # Workflow docs are the evidence stream for continual learning:
+            # trajectory aggregation groups by agent_id and the promotion
+            # engine stamps rows back via workflow_id, so both must survive
+            # the store. memory_id is still stripped (thread scope lives on
+            # conversation memory).
+            custom_id_fields = [
+                field
+                for field in custom_id_fields
+                if field not in ("agent_id", "workflow_id")
             ]
             custom_id_fields.append("memory_id")
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
@@ -871,6 +888,8 @@ class MongoDBProvider(MemoryProvider):
             return self.retrieve_persona_by_query(query, limit=limit) or []
         elif memory_store_type == MemoryType.TOOLBOX:
             return self.retrieve_toolbox_item(query, limit) or []
+        elif memory_store_type == MemoryType.SKILLBOX:
+            return self.retrieve_skillbox_item(query, limit) or []
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
             return self.retrieve_workflow_by_query(query, limit) or []
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
@@ -907,7 +926,10 @@ class MongoDBProvider(MemoryProvider):
                 )
             if isinstance(query, str):
                 return self.find_similar_knowledge_base_entries(
-                    query, limit=limit, **kwargs
+                    query,
+                    limit=limit,
+                    include_embedding=include_embedding,
+                    **kwargs,
                 )
             return []
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
@@ -921,7 +943,10 @@ class MongoDBProvider(MemoryProvider):
                 ).limit(limit)
             if isinstance(query, str):
                 return self.find_similar_conversation_entries(
-                    query, limit=limit, **kwargs
+                    query,
+                    limit=limit,
+                    include_embedding=include_embedding,
+                    **kwargs,
                 )
             return []
         elif memory_store_type == MemoryType.SHARED_MEMORY:
@@ -982,22 +1007,7 @@ class MongoDBProvider(MemoryProvider):
             The retrieved document, or None if not found.
         """
         # Get the appropriate collection
-        collection_mapping = {
-            MemoryType.PERSONAS: self.persona_collection,
-            MemoryType.TOOLBOX: self.toolbox_collection,
-            MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
-            MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
-            MemoryType.KNOWLEDGE_BASE: self.knowledge_base_collection,
-            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
-            MemoryType.SHARED_MEMORY: self.shared_memory_collection,
-            MemoryType.SUMMARIES: self.summaries_collection,
-            MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
-            MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
-            MemoryType.MEMAGENT: self.memagent_collection,
-            MemoryType.TOOL_LOG: self.tool_log_collection,
-        }
-
-        collection = collection_mapping.get(memory_store_type)
+        collection = self._collection(memory_store_type)
         if collection is None:
             return None
 
@@ -1008,6 +1018,7 @@ class MongoDBProvider(MemoryProvider):
             in [
                 MemoryType.PERSONAS,
                 MemoryType.TOOLBOX,
+                MemoryType.SKILLBOX,
                 MemoryType.WORKFLOW_MEMORY,
                 MemoryType.SUMMARIES,
             ]
@@ -1053,38 +1064,17 @@ class MongoDBProvider(MemoryProvider):
         # Define projection to exclude embeddings by default
         projection = {} if include_embedding else {"embedding": 0}
 
-        if memory_store_type == MemoryType.TOOLBOX:
-            return self.toolbox_collection.find_one({"name": name}, projection)
-        elif memory_store_type == MemoryType.PERSONAS:
-            return self.persona_collection.find_one({"name": name}, projection)
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self.workflow_memory_collection.find_one({"name": name}, projection)
-        elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            return self.short_term_memory_collection.find_one(
-                {"name": name}, projection
-            )
-        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
-            return self.knowledge_base_collection.find_one({"name": name}, projection)
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            return self.conversation_memory_collection.find_one(
-                {"name": name}, projection
-            )
-        elif memory_store_type == MemoryType.SUMMARIES:
-            return self.summaries_collection.find_one({"name": name}, projection)
-        elif memory_store_type == MemoryType.ENTITY_MEMORY:
-            return self.entity_memory_collection.find_one({"name": name}, projection)
-        elif memory_store_type == MemoryType.SHARED_MEMORY:
-            return self.shared_memory_collection.find_one(
-                {"memory_id": name}, projection
-            )
-        elif memory_store_type == MemoryType.SEMANTIC_CACHE:
-            return self.semantic_cache_collection.find_one(
+        collection = self._collection(memory_store_type)
+        if collection is None:
+            return None
+        # Two stores address rows by a non-name key:
+        if memory_store_type == MemoryType.SHARED_MEMORY:
+            return collection.find_one({"memory_id": name}, projection)
+        if memory_store_type == MemoryType.SEMANTIC_CACHE:
+            return collection.find_one(
                 {"$or": [{"cache_key": name}, {"query_text": name}]}, projection
             )
-        elif memory_store_type == MemoryType.MEMAGENT:
-            return self.memagent_collection.find_one({"name": name}, projection)
-        elif memory_store_type == MemoryType.TOOL_LOG:
-            return self.tool_log_collection.find_one({"name": name}, projection)
+        return collection.find_one({"name": name}, projection)
 
     def retrieve_persona_by_query(
         self, query: Dict[str, Any], limit: int = 1
@@ -1145,6 +1135,29 @@ class MongoDBProvider(MemoryProvider):
         pipeline = self._build_vector_search_pipeline(embedding, limit)
         results = self._run_vector_search(
             self.toolbox_collection, pipeline, label="toolbox"
+        )
+        return results if results else None
+
+    def retrieve_skillbox_item(
+        self, query: Union[Dict[str, Any], str], limit: int = 1
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Retrieve learned skills by vector similarity.
+
+        Skill documents embed applicability semantics (when to apply), so
+        this matches query intent rather than tool mechanism. Each result
+        carries the ``score`` field from ``$vectorSearch`` — the Skillbox
+        layer enforces its own (stricter) similarity threshold on it.
+        """
+        try:
+            embedding = get_embedding(query)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding for query: {e}")
+            return []
+
+        pipeline = self._build_vector_search_pipeline(embedding, limit)
+        results = self._run_vector_search(
+            self.skillbox_collection, pipeline, label="skillbox"
         )
         return results if results else None
 
@@ -1279,7 +1292,7 @@ class MongoDBProvider(MemoryProvider):
         Retrieve summaries for a specific memory_id within a time range based on the period they cover.
 
         NOTE: This filters by the time period that the summary covers (period_start/period_end),
-        not when the summary was created. Use get_summaries_by_creation_time() to filter by creation time.
+        not when the summary was created.
 
         Parameters:
         -----------
@@ -1322,66 +1335,6 @@ class MongoDBProvider(MemoryProvider):
                 {"embedding": 0},
             ).sort("period_start", 1)
         )
-
-    def get_summaries_by_creation_time(
-        self, memory_id: str, start_time: float, end_time: float
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve summaries for a specific memory_id created within a time range.
-
-        This filters by when the summary was actually created (created_at timestamp),
-        not the time period that the summary covers.
-
-        Parameters:
-        -----------
-        memory_id : str
-            The memory_id to retrieve summaries for.
-        start_time : float
-            Start timestamp for when summaries were created.
-        end_time : float
-            End timestamp for when summaries were created.
-
-        Returns:
-        --------
-        List[Dict[str, Any]]
-            List of summaries created within the time range.
-        """
-        return list(
-            self.summaries_collection.find(
-                {
-                    "memory_id": memory_id,
-                    "created_at": {"$gte": start_time, "$lte": end_time},
-                },
-                {"embedding": 0},
-            ).sort("created_at", -1)
-        )
-
-    # ===== SEMANTIC CACHE METHODS =====
-
-    def store_semantic_cache_entry(self, cache_entry: Dict[str, Any]) -> str:
-        """
-        Store a semantic cache entry in the semantic_cache collection.
-
-        Short-circuits when the semantic cache's vector index is unavailable
-        (Atlas Search quota exceeded / Search not enabled) — there is no
-        point persisting entries that can never be retrieved, and silent
-        writes would mask a misconfigured deployment. Returns ``""`` in
-        that case so callers can detect the no-op.
-
-        Parameters:
-        -----------
-        cache_entry : Dict[str, Any]
-            The cache entry containing query, response, embedding, and metadata.
-
-        Returns:
-        --------
-        str
-            The ID of the stored cache entry, or ``""`` when the cache is
-            disabled due to a missing vector index.
-        """
-        if self._vector_index_unavailable(self.semantic_cache_collection.name):
-            return ""
-        return self.store(cache_entry, MemoryType.SEMANTIC_CACHE)
 
     def find_similar_conversation_entries(
         self, query: str, limit: int = 5, **kwargs
@@ -1429,7 +1382,10 @@ class MongoDBProvider(MemoryProvider):
             search_filter.update(_mongo_user_id_predicate(user_id_scope))
 
         pipeline = self._build_vector_search_pipeline(
-            embedding, limit, search_filter=search_filter or None
+            embedding,
+            limit,
+            search_filter=search_filter or None,
+            include_embedding=bool(kwargs.get("include_embedding")),
         )
         return self._run_vector_search(
             self.conversation_memory_collection,
@@ -1477,7 +1433,10 @@ class MongoDBProvider(MemoryProvider):
             search_filter["namespace"] = str(namespace)
 
         pipeline = self._build_vector_search_pipeline(
-            embedding, limit, search_filter=search_filter or None
+            embedding,
+            limit,
+            search_filter=search_filter or None,
+            include_embedding=bool(kwargs.get("include_embedding")),
         )
         return self._run_vector_search(
             self.knowledge_base_collection, pipeline, label="knowledge_base"
@@ -1535,36 +1494,6 @@ class MongoDBProvider(MemoryProvider):
             self.semantic_cache_collection, pipeline, label="semantic_cache"
         )
 
-    def update_cache_entry_usage(
-        self, cache_id: str, usage_count: int, last_accessed: float
-    ) -> bool:
-        """
-        Update usage statistics for a cache entry.
-
-        Parameters:
-        -----------
-        cache_id : str
-            The MongoDB _id of the cache entry
-        usage_count : int
-            New usage count
-        last_accessed : float
-            New last accessed timestamp
-
-        Returns:
-        --------
-        bool
-            True if update was successful
-        """
-        try:
-            result = self.semantic_cache_collection.update_one(
-                {"_id": ObjectId(cache_id)},
-                {"$set": {"usage_count": usage_count, "last_accessed": last_accessed}},
-            )
-            return result.modified_count > 0
-        except Exception as e:
-            logger.warning(f"Failed to update cache entry usage: {e}")
-            return False
-
     def clear_semantic_cache(
         self, agent_id: Optional[str] = None, memory_id: Optional[str] = None
     ) -> int:
@@ -1613,22 +1542,7 @@ class MongoDBProvider(MemoryProvider):
             True if deletion was successful, False otherwise.
         """
         # Get the appropriate collection
-        collection_mapping = {
-            MemoryType.PERSONAS: self.persona_collection,
-            MemoryType.TOOLBOX: self.toolbox_collection,
-            MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
-            MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
-            MemoryType.KNOWLEDGE_BASE: self.knowledge_base_collection,
-            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
-            MemoryType.SHARED_MEMORY: self.shared_memory_collection,
-            MemoryType.SUMMARIES: self.summaries_collection,
-            MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
-            MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
-            MemoryType.MEMAGENT: self.memagent_collection,
-            MemoryType.TOOL_LOG: self.tool_log_collection,
-        }
-
-        collection = collection_mapping.get(memory_store_type)
+        collection = self._collection(memory_store_type)
         if collection is None:
             return False
 
@@ -1658,34 +1572,17 @@ class MongoDBProvider(MemoryProvider):
         bool
             True if deletion was successful, False otherwise.
         """
-        if memory_store_type == MemoryType.TOOLBOX:
-            result = self.toolbox_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.PERSONAS:
-            result = self.persona_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            result = self.short_term_memory_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
-            result = self.knowledge_base_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            result = self.conversation_memory_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            result = self.workflow_memory_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.SUMMARIES:
-            result = self.summaries_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.ENTITY_MEMORY:
-            result = self.entity_memory_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.SHARED_MEMORY:
-            result = self.shared_memory_collection.delete_one({"memory_id": name})
+        collection = self._collection(memory_store_type)
+        if collection is None:
+            return False
+        if memory_store_type == MemoryType.SHARED_MEMORY:
+            result = collection.delete_one({"memory_id": name})
         elif memory_store_type == MemoryType.SEMANTIC_CACHE:
-            result = self.semantic_cache_collection.delete_one(
+            result = collection.delete_one(
                 {"$or": [{"cache_key": name}, {"query_text": name}]}
             )
-        elif memory_store_type == MemoryType.MEMAGENT:
-            result = self.memagent_collection.delete_one({"name": name})
-        elif memory_store_type == MemoryType.TOOL_LOG:
-            result = self.tool_log_collection.delete_one({"name": name})
         else:
-            return False
+            result = collection.delete_one({"name": name})
 
         return result.deleted_count > 0
 
@@ -1703,32 +1600,10 @@ class MongoDBProvider(MemoryProvider):
         bool
             True if deletion was successful, False otherwise.
         """
-        if memory_store_type == MemoryType.PERSONAS:
-            result = self.persona_collection.delete_many({})
-        elif memory_store_type == MemoryType.TOOLBOX:
-            result = self.toolbox_collection.delete_many({})
-        elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            result = self.short_term_memory_collection.delete_many({})
-        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
-            result = self.knowledge_base_collection.delete_many({})
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            result = self.conversation_memory_collection.delete_many({})
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            result = self.workflow_memory_collection.delete_many({})
-        elif memory_store_type == MemoryType.SUMMARIES:
-            result = self.summaries_collection.delete_many({})
-        elif memory_store_type == MemoryType.ENTITY_MEMORY:
-            result = self.entity_memory_collection.delete_many({})
-        elif memory_store_type == MemoryType.SHARED_MEMORY:
-            result = self.shared_memory_collection.delete_many({})
-        elif memory_store_type == MemoryType.SEMANTIC_CACHE:
-            result = self.semantic_cache_collection.delete_many({})
-        elif memory_store_type == MemoryType.MEMAGENT:
-            result = self.memagent_collection.delete_many({})
-        elif memory_store_type == MemoryType.TOOL_LOG:
-            result = self.tool_log_collection.delete_many({})
-        else:
+        collection = self._collection(memory_store_type)
+        if collection is None:
             return False
+        result = collection.delete_many({})
 
         return result.deleted_count > 0
 
@@ -1766,45 +1641,20 @@ class MongoDBProvider(MemoryProvider):
         ):
             mongo_filter.update(_mongo_user_id_predicate(user_id))
 
-        if memory_store_type == MemoryType.PERSONAS:
-            return list(self.persona_collection.find(mongo_filter, projection))
-        elif memory_store_type == MemoryType.TOOLBOX:
-            return list(self.toolbox_collection.find(mongo_filter, projection))
-        elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
-            return list(
-                self.short_term_memory_collection.find(mongo_filter, projection)
-            )
-        elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
-            return list(self.knowledge_base_collection.find(mongo_filter, projection))
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            return list(
-                self.conversation_memory_collection.find(mongo_filter, projection)
-            )
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return list(self.workflow_memory_collection.find(mongo_filter, projection))
-        elif memory_store_type == MemoryType.SHARED_MEMORY:
-            return list(self.shared_memory_collection.find(mongo_filter, projection))
-        elif memory_store_type == MemoryType.SUMMARIES:
-            return list(self.summaries_collection.find(mongo_filter, projection))
-        elif memory_store_type == MemoryType.ENTITY_MEMORY:
-            return list(self.entity_memory_collection.find(mongo_filter, projection))
-        elif memory_store_type == MemoryType.SEMANTIC_CACHE:
-            return list(self.semantic_cache_collection.find(mongo_filter, projection))
-        elif memory_store_type == MemoryType.MEMAGENT:
-            return list(self.memagent_collection.find({}, projection))
-        elif memory_store_type == MemoryType.TOOL_LOG:
-            return list(self.tool_log_collection.find(mongo_filter, projection))
-        else:
+        collection = self._collection(memory_store_type)
+        if collection is None:
             logger.warning(
                 f"Unsupported memory store type for list_all: {memory_store_type}"
             )
             return []
+        return list(collection.find(mongo_filter, projection))
 
     def list_tool_logs(
         self,
         memory_id: Optional[str] = None,
         user_id: Any = _MONGO_UNSET,
         limit: int = 20,
+        thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Return recent tool-log rows for a given memory/user, native-side.
 
@@ -1827,6 +1677,11 @@ class MongoDBProvider(MemoryProvider):
             mongo_filter["memory_id"] = str(memory_id)
         if user_id is not _MONGO_UNSET:
             mongo_filter.update(_mongo_user_id_predicate(user_id))
+        # Thread scoping: keep the tool-log digest to THIS conversation so one
+        # thread's tool ids (group_id / doc_id / deck_id …) can't fall off a
+        # global last-N digest or leak into another thread.
+        if thread_id is not None:
+            mongo_filter["thread_id"] = str(thread_id)
 
         try:
             cursor = (
@@ -1837,6 +1692,47 @@ class MongoDBProvider(MemoryProvider):
             return list(cursor)
         except Exception as exc:
             logger.warning("list_tool_logs query failed: %s", exc)
+            return []
+
+    def list_summaries(
+        self,
+        memory_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        user_id: Any = _MONGO_UNSET,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Return recent summary rows scoped to a memory/agent, native-side.
+
+        ``MemoryManager.load_summaries_for_thread`` previously read the whole
+        summaries collection via ``list_all`` on every agent turn and
+        filtered in Python. This runs the equivalent scoped query as one
+        ``find(...).sort("period_end", -1).limit(N)``.
+
+        ``memory_id`` / ``agent_id`` are OR-matched (a summary belongs to the
+        thread if either matches), mirroring the Python-side rule in
+        ``MemoryManager.load_summaries_for_thread``, which still applies its
+        own normalization on top.
+        """
+        mongo_filter: Dict[str, Any] = {}
+        scope_clauses: List[Dict[str, Any]] = []
+        if memory_id:
+            scope_clauses.append({"memory_id": str(memory_id)})
+        if agent_id:
+            scope_clauses.append({"agent_id": str(agent_id)})
+        if scope_clauses:
+            mongo_filter["$or"] = scope_clauses
+        if user_id is not _MONGO_UNSET:
+            mongo_filter.update(_mongo_user_id_predicate(user_id))
+
+        try:
+            cursor = (
+                self.summaries_collection.find(mongo_filter, {"embedding": 0})
+                .sort("period_end", -1)
+                .limit(max(int(limit), 1) if limit else 0)
+            )
+            return list(cursor)
+        except Exception as exc:
+            logger.warning("list_summaries query failed: %s", exc)
             return []
 
     def update_by_id(
@@ -1891,22 +1787,7 @@ class MongoDBProvider(MemoryProvider):
                 return False
 
         # Get the appropriate collection
-        collection_mapping = {
-            MemoryType.PERSONAS: self.persona_collection,
-            MemoryType.TOOLBOX: self.toolbox_collection,
-            MemoryType.WORKFLOW_MEMORY: self.workflow_memory_collection,
-            MemoryType.SHORT_TERM_MEMORY: self.short_term_memory_collection,
-            MemoryType.KNOWLEDGE_BASE: self.knowledge_base_collection,
-            MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
-            MemoryType.SHARED_MEMORY: self.shared_memory_collection,
-            MemoryType.SUMMARIES: self.summaries_collection,
-            MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
-            MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
-            MemoryType.MEMAGENT: self.memagent_collection,
-            MemoryType.TOOL_LOG: self.tool_log_collection,
-        }
-
-        collection = collection_mapping.get(memory_store_type)
+        collection = self._collection(memory_store_type)
         if collection is None:
             logger.error(
                 f"No collection mapping found for memory store type: {memory_store_type}"
@@ -1929,34 +1810,6 @@ class MongoDBProvider(MemoryProvider):
         except Exception as e:
             logger.error(f"Error updating document with id {id}: {e}", exc_info=True)
             return False
-
-    def update_toolbox_item(self, id: str, data: Dict[str, Any]) -> bool:
-        """
-        Update a toolbox item in MongoDB by id using optimized queries.
-        """
-
-        # Update the embedding if the name, docstring or signature has changed
-
-        # Get the old data
-        old_data = self.retrieve_by_id(id, MemoryType.TOOLBOX)
-        if not old_data:
-            return False
-
-        # Concatenate the name, docstring and signature if any of them have changed
-        if old_data.get("name") != data.get("name"):
-            data["name"] = data.get("name", old_data.get("name", ""))
-        if old_data.get("docstring") != data.get("docstring"):
-            data["docstring"] = data.get("docstring", old_data.get("docstring", ""))
-        if old_data.get("signature") != data.get("signature"):
-            data["signature"] = data.get("signature", old_data.get("signature", ""))
-
-        # Update the embedding
-        data["embedding"] = get_embedding(
-            data["name"] + " " + data["docstring"] + " " + data["signature"]
-        )
-
-        # Use the optimized update_by_id method
-        return self.update_by_id(id, data, MemoryType.TOOLBOX)
 
     def retrieve_conversation_history_ordered_by_timestamp(
         self,
@@ -2041,314 +1894,6 @@ class MongoDBProvider(MemoryProvider):
         )
         return results
 
-    def delete_conversation_thread(
-        self,
-        memory_id: str,
-        thread_id: str,
-        user_id: Any = _MONGO_UNSET,
-    ) -> int:
-        """Delete every conversation row for one thread in a single indexed
-        ``delete_many`` — replaces the consumer's load-all-then-per-row delete
-        (an N+1). Returns the number of rows removed.
-
-        Parameters
-        ----------
-        memory_id : str
-            The memory the thread belongs to.
-        thread_id : str
-            The thread to delete.
-        user_id : optional
-            Multi-tenant scope; when provided, restricts the delete to rows
-            whose ``user_id`` matches (defence against cross-tenant deletes).
-        """
-        if not memory_id or not thread_id:
-            return 0
-        flt: Dict[str, Any] = {"memory_id": memory_id, "thread_id": thread_id}
-        if user_id is not _MONGO_UNSET:
-            flt.update(_mongo_user_id_predicate(user_id))
-        try:
-            result = self.conversation_memory_collection.delete_many(flt)
-            deleted = int(getattr(result, "deleted_count", 0) or 0)
-            logger.debug(
-                "Deleted %d conversation rows for thread %s (memory_id=%s)",
-                deleted,
-                thread_id,
-                memory_id,
-            )
-            return deleted
-        except Exception:
-            logger.exception(
-                "delete_conversation_thread failed (memory_id=%s thread_id=%s)",
-                memory_id,
-                thread_id,
-            )
-            return 0
-
-    def retrieve_memory_units_by_query(
-        self,
-        query: str = None,
-        query_embedding: list[float] = None,
-        memory_id: str = None,
-        memory_type: MemoryType = None,
-        limit: int = 5,
-        user_id: Any = _MONGO_UNSET,
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve memory units by query.
-
-        Parameters:
-        -----------
-        query : str
-            The query to use for retrieval.
-        query_embedding : list[float]
-            The embedding of the query.
-        memory_id : str
-            The id of the memory to retrieve the memory units for.
-        memory_type : MemoryType
-            The type of memory to retrieve the memory units for.
-        limit : int
-            The maximum number of memory units to return.
-        user_id : str, optional
-            Multi-tenant scope; forwarded to downstream vector-search helpers.
-
-        Returns:
-        --------
-        List[Dict[str, Any]]
-            The memory units ordered by timestamp.
-        """
-
-        # Detect the memory type
-        if memory_type == MemoryType.CONVERSATION_MEMORY:
-            return self.get_conversation_memory_units(
-                query, query_embedding, memory_id, limit, user_id=user_id
-            )
-        elif memory_type == MemoryType.WORKFLOW_MEMORY:
-            return self.get_workflow_memory_units(
-                query, query_embedding, memory_id, limit, user_id=user_id
-            )
-        elif memory_type == MemoryType.SUMMARIES:
-            return self.get_summaries_memory_units(
-                query, query_embedding, memory_id, limit, user_id=user_id
-            )
-        else:
-            # Return empty list for unsupported memory types
-            return []
-
-    def get_conversation_memory_units(
-        self,
-        query: str = None,
-        query_embedding: list[float] = None,
-        memory_id: str = None,
-        limit: int = 5,
-        user_id: Any = _MONGO_UNSET,
-    ) -> List[Dict[str, Any]]:
-        """
-        Get the conversation memory units.
-
-        Parameters:
-        -----------
-        query : str
-            The query to use for retrieval.
-        query_embedding : list[float]
-            The embedding of the query.
-        memory_id : str
-            The id of the memory to retrieve the memory units for.
-        limit : int
-            The maximum number of memory units to return.
-        user_id : str, optional
-            Multi-tenant scope for tenant-isolated vector search.
-
-        Returns:
-        --------
-        List[Dict[str, Any]]
-            The memory units ordered by timestamp.
-        """
-
-        # Ensure vector index exists for conversation memory (lazy creation)
-        if self.config.lazy_vector_indexes:
-            self._ensure_vector_index_for_collection(
-                self.conversation_memory_collection,
-                "conversation_memory",
-                memory_store=True,
-            )
-
-        # If the query embedding is not provided, then we create it
-        if query_embedding is None and query is not None:
-            try:
-                query_embedding = get_embedding(query)
-            except Exception as e:
-                logger.error(f"Failed to generate embedding for query: {e}")
-                return []
-
-        vs_filter: Dict[str, Any] = {"memory_id": memory_id}
-        if user_id is not _MONGO_UNSET:
-            vs_filter.update(_mongo_user_id_predicate(user_id))
-
-        vector_stage = {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "queryVector": query_embedding,
-                "path": "embedding",
-                "numCandidates": 100,
-                "limit": limit,
-                "filter": vs_filter,
-            }
-        }
-
-        # Add the vector stage to the pipeline
-        pipeline = [
-            vector_stage,
-            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
-            {"$project": {"embedding": 0}},
-            {"$sort": {"score": -1, "timestamp": 1}},
-        ]
-
-        # Execute the pipeline
-        results = list(self.conversation_memory_collection.aggregate(pipeline))
-
-        # Return the results
-        return results
-
-    def get_summaries_memory_units(
-        self,
-        query: str = None,
-        query_embedding: list[float] = None,
-        memory_id: str = None,
-        limit: int = 5,
-        user_id: Any = _MONGO_UNSET,
-    ) -> List[Dict[str, Any]]:
-        """
-        Get the summaries memory units.
-
-        Parameters:
-        -----------
-        query : str
-            The query to use for retrieval.
-        query_embedding : list[float]
-            The embedding of the query.
-        memory_id : str
-            The id of the memory to retrieve the memory units for.
-        limit : int
-            The maximum number of memory units to return.
-        user_id : str, optional
-            Multi-tenant scope for tenant-isolated vector search.
-
-        Returns:
-        --------
-        List[Dict[str, Any]]
-            The memory units ordered by timestamp.
-        """
-
-        # If the query embedding is not provided, then we create it
-        if query_embedding is None and query is not None:
-            try:
-                query_embedding = get_embedding(query)
-            except Exception as e:
-                logger.error(f"Failed to generate embedding for query: {e}")
-                return []
-
-        vs_filter: Dict[str, Any] = {"memory_id": memory_id}
-        if user_id is not _MONGO_UNSET:
-            vs_filter.update(_mongo_user_id_predicate(user_id))
-
-        vector_stage = {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "queryVector": query_embedding,
-                "path": "embedding",
-                "numCandidates": 100,
-                "limit": limit,
-                "filter": vs_filter,
-            }
-        }
-
-        # Add the vector stage to the pipeline
-        pipeline = [
-            vector_stage,
-            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
-            {"$project": {"embedding": 0}},
-            {"$sort": {"score": -1, "created_at": -1}},
-        ]
-
-        # Execute the pipeline
-        results = list(self.summaries_collection.aggregate(pipeline))
-
-        # Return the results
-        return results
-
-    def get_workflow_memory_units(
-        self,
-        query: str = None,
-        query_embedding: list[float] = None,
-        memory_id: str = None,
-        limit: int = 5,
-        user_id: Any = _MONGO_UNSET,
-    ) -> List[Dict[str, Any]]:
-        """
-        Get the workflow memory units.
-
-        Parameters:
-        -----------
-        query : str
-            The query to use for retrieval.
-        query_embedding : list[float]
-            The embedding of the query.
-        memory_id : str
-            The id of the memory to retrieve the memory units for.
-        limit : int
-            The maximum number of memory units to return.
-        user_id : str, optional
-            Multi-tenant scope for tenant-isolated vector search.
-
-        Returns:
-        --------
-        List[Dict[str, Any]]
-            The memory units ordered by timestamp.
-        """
-
-        # Ensure vector index exists for workflow memory (lazy creation)
-        if self.config.lazy_vector_indexes:
-            self._ensure_vector_index_for_collection(
-                self.workflow_memory_collection, "workflow_memory", memory_store=True
-            )
-
-        # If the query embedding is not provided, then we create it
-        if query_embedding is None and query is not None:
-            try:
-                query_embedding = get_embedding(query)
-            except Exception as e:
-                logger.error(f"Failed to generate embedding for query: {e}")
-                return []
-
-        vs_filter: Dict[str, Any] = {"memory_id": memory_id}
-        if user_id is not _MONGO_UNSET:
-            vs_filter.update(_mongo_user_id_predicate(user_id))
-
-        vector_stage = {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "queryVector": query_embedding,
-                "path": "embedding",
-                "numCandidates": 100,
-                "limit": limit,
-                "filter": vs_filter,
-            }
-        }
-
-        # Add the vector stage to the pipeline
-        pipeline = [
-            vector_stage,
-            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
-            {"$project": {"embedding": 0}},
-            {"$sort": {"score": -1, "timestamp": 1}},
-        ]
-
-        # Execute the pipeline
-        results = list(self.workflow_memory_collection.aggregate(pipeline))
-
-        # Return the results
-        return results
-
     def _prepare_memagent_payload(
         self, memagent: Union["MemAgentModel", Dict[str, Any]]
     ) -> Tuple[Dict[str, Any], Optional[str]]:
@@ -2362,7 +1907,12 @@ class MongoDBProvider(MemoryProvider):
             agent_id = getattr(memagent, "agent_id", None)
             persona = getattr(memagent, "persona", None) or memagent_dict.get("persona")
 
+        # Persist the custom agent_id: it used to be stripped here, which
+        # made agents saved under string IDs (the SDK default is a uuid4)
+        # unretrievable — retrieve_memagent only resolved ObjectId _ids.
         memagent_dict.pop("agent_id", None)
+        if agent_id is not None:
+            memagent_dict["agent_id"] = str(agent_id)
 
         if persona:
             if hasattr(persona, "to_dict"):
@@ -2384,6 +1934,13 @@ class MongoDBProvider(MemoryProvider):
 
         return memagent_dict, agent_id
 
+    def _memagent_id_query(self, agent_id: Any) -> Dict[str, Any]:
+        """Query matching an agent by Mongo ``_id`` OR stored ``agent_id``."""
+        clauses: List[Dict[str, Any]] = [{"agent_id": str(agent_id)}]
+        if ObjectId.is_valid(str(agent_id)):
+            clauses.append({"_id": ObjectId(str(agent_id))})
+        return {"$or": clauses}
+
     def store_memagent(self, memagent: "MemAgentModel") -> "MemAgentModel":
         """
         Store a memagent in the MongoDB database using only _id field.
@@ -2398,16 +1955,31 @@ class MongoDBProvider(MemoryProvider):
         MemAgentModel
             The stored memagent.
         """
-        memagent_dict, _ = self._prepare_memagent_payload(memagent)
+        memagent_dict, agent_id = self._prepare_memagent_payload(memagent)
 
-        # Insert the document and let MongoDB generate _id automatically
+        # Upsert by custom agent_id when present so repeated save() calls
+        # update the agent instead of inserting duplicates (matches the
+        # filesystem provider's semantics).
+        if agent_id is not None:
+            existing = self.memagent_collection.find_one(
+                {"agent_id": str(agent_id)}, {"_id": 1}
+            )
+            if existing:
+                self.memagent_collection.replace_one(
+                    {"_id": existing["_id"]}, memagent_dict
+                )
+                memagent_dict["_id"] = existing["_id"]
+                self._sync_agent_tools_to_toolbox(
+                    str(agent_id), memagent_dict.get("tools")
+                )
+                return memagent_dict
+
         result = self.memagent_collection.insert_one(memagent_dict)
-
-        # Add the generated _id to the response
         memagent_dict["_id"] = result.inserted_id
 
         self._sync_agent_tools_to_toolbox(
-            str(result.inserted_id), memagent_dict.get("tools")
+            str(agent_id) if agent_id is not None else str(result.inserted_id),
+            memagent_dict.get("tools"),
         )
 
         return memagent_dict
@@ -2421,14 +1993,9 @@ class MongoDBProvider(MemoryProvider):
         if agent_id is None:
             agent_id = doc_id
 
-        # Update the memagent in the MongoDB database using _id
-        if isinstance(agent_id, ObjectId):
+        if agent_id is not None:
             self.memagent_collection.update_one(
-                {"_id": agent_id}, {"$set": memagent_dict}
-            )
-        elif agent_id and ObjectId.is_valid(str(agent_id)):
-            self.memagent_collection.update_one(
-                {"_id": ObjectId(str(agent_id))}, {"$set": memagent_dict}
+                self._memagent_id_query(agent_id), {"$set": memagent_dict}
             )
 
         if agent_id is not None:
@@ -2504,14 +2071,10 @@ class MongoDBProvider(MemoryProvider):
         MemAgentModel
             The retrieved memagent.
         """
-        # Get the document from MongoDB using _id
         try:
-            if ObjectId.is_valid(agent_id):
-                document = self.memagent_collection.find_one(
-                    {"_id": ObjectId(agent_id)}, {"embedding": 0}
-                )
-            else:
-                return None
+            document = self.memagent_collection.find_one(
+                self._memagent_id_query(agent_id), {"embedding": 0}
+            )
         except Exception:
             return None
 
@@ -2527,7 +2090,7 @@ class MongoDBProvider(MemoryProvider):
             memory_types=document.get("memory_types"),
             max_steps=document.get("max_steps"),
             memory_ids=document.get("memory_ids") or [],
-            agent_id=str(document.get("_id")),
+            agent_id=document.get("agent_id") or str(document.get("_id")),
             is_favorite=bool(document.get("is_favorite", False)),
             tools=document.get("tools"),
             tool_access=document.get("tool_access"),
@@ -2546,6 +2109,8 @@ class MongoDBProvider(MemoryProvider):
             skill_paths=document.get("skill_paths"),
             mcp_servers=document.get("mcp_servers"),
             self_aware=bool(document.get("self_aware", False)),
+            continual_learning=bool(document.get("continual_learning", False)),
+            continual_learning_config=document.get("continual_learning_config"),
             self_aware_config=document.get("self_aware_config"),
             automations_enabled=bool(document.get("automations_enabled", True)),
             default_timezone=document.get("default_timezone"),
@@ -2584,7 +2149,7 @@ class MongoDBProvider(MemoryProvider):
                 memory_types=doc.get("memory_types"),
                 max_steps=doc.get("max_steps"),
                 memory_ids=doc.get("memory_ids") or [],
-                agent_id=str(doc.get("_id")),
+                agent_id=doc.get("agent_id") or str(doc.get("_id")),
                 is_favorite=bool(doc.get("is_favorite", False)),
                 tools=doc.get("tools"),  # Include tools from document
                 tool_access=doc.get("tool_access"),
@@ -2603,6 +2168,8 @@ class MongoDBProvider(MemoryProvider):
                 skill_paths=doc.get("skill_paths"),
                 mcp_servers=doc.get("mcp_servers"),
                 self_aware=bool(doc.get("self_aware", False)),
+                continual_learning=bool(doc.get("continual_learning", False)),
+                continual_learning_config=doc.get("continual_learning_config"),
                 self_aware_config=doc.get("self_aware_config"),
                 automations_enabled=bool(doc.get("automations_enabled", True)),
                 default_timezone=doc.get("default_timezone"),
@@ -2642,13 +2209,11 @@ class MongoDBProvider(MemoryProvider):
             True if update was successful, False otherwise.
         """
         try:
-            if ObjectId.is_valid(agent_id):
-                result = self.memagent_collection.update_one(
-                    {"_id": ObjectId(agent_id)}, {"$set": {"memory_ids": memory_ids}}
-                )
-                return result.modified_count > 0
-            else:
-                return False
+            result = self.memagent_collection.update_one(
+                self._memagent_id_query(agent_id),
+                {"$set": {"memory_ids": memory_ids}},
+            )
+            return result.modified_count > 0
         except Exception:
             return False
 
@@ -2667,13 +2232,11 @@ class MongoDBProvider(MemoryProvider):
             True if deletion was successful, False otherwise.
         """
         try:
-            if ObjectId.is_valid(agent_id):
-                result = self.memagent_collection.update_one(
-                    {"_id": ObjectId(agent_id)}, {"$unset": {"memory_ids": []}}
-                )
-                return result.modified_count > 0
-            else:
-                return False
+            result = self.memagent_collection.update_one(
+                self._memagent_id_query(agent_id),
+                {"$unset": {"memory_ids": []}},
+            )
+            return result.modified_count > 0
         except Exception:
             return False
 
@@ -2707,13 +2270,10 @@ class MongoDBProvider(MemoryProvider):
                     self._delete_memory_units_by_memory_id(memory_id, memory_type)
         else:
             try:
-                if ObjectId.is_valid(agent_id):
-                    result = self.memagent_collection.delete_one(
-                        {"_id": ObjectId(agent_id)}
-                    )
-                    return result.deleted_count > 0
-                else:
-                    return False
+                result = self.memagent_collection.delete_one(
+                    self._memagent_id_query(agent_id)
+                )
+                return result.deleted_count > 0
             except Exception:
                 return False
 

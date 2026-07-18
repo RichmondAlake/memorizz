@@ -1,6 +1,247 @@
 # Changelog
 
-## 0.1.1 — 2026-06-21
+## Unreleased
+
+No changes yet.
+
+## 0.2.0 — 2026-07-18
+
+### Breaking changes
+
+* Removed `MemAgent.switch_thread`, `CWM`, `ConfigBuilder`, and
+  `WorkflowManager`. These surfaces were unreferenced by the maintained docs,
+  examples, and test suite; applications importing them must migrate before
+  upgrading.
+
+### Codebase cleanup & de-bloat
+
+* **Removed ~5,000 lines of verified-dead code.** An abandoned half-refactor
+  in `memagent/` (`handlers/`, `utils/{formatters,helpers,validators}.py`,
+  `builders/config_builder.py`, the never-called `WorkflowManager`), the
+  legacy pre-Toolbox `database/` package, the dead `memory_unit` layer
+  (`MemoryUnit` was never constructed; `summary_component.py` was
+  byte-identical to the episodic copy), ~650 lines of orphaned provider
+  methods, unused `Workflow`/`EntityMemory`/`KnowledgeBase`/semantic-cache
+  methods, the unused `CWM` working-memory class, dead embeddings-provider
+  info methods, and repo orphans (`scenario/`, superseded eval scripts,
+  drifted Homebrew formula, obsolete Oracle thick-client installers).
+* **pytest configuration was silently inert and is now active.**
+  `pytest.ini` used the `[tool:pytest]` header (only valid in `setup.cfg`),
+  so strict markers, timeouts, and warning filters never applied. Fixed the
+  header and registered the three markers tests actually use.
+* **Streaming and non-streaming tool loops now share one body**
+  (`_execute_and_record_tool_call`): ~190 near-verbatim duplicated lines
+  (argument parsing, execution, tool-log offload, placeholder persistence,
+  workflow capture) existed twice and had already drifted once.
+* **MongoDB provider dispatch consolidated**: three identical
+  collection-mapping dicts and five if/elif chains replaced by a single
+  `_collection()` resolver (−520 lines), pinned by a new mongomock dispatch
+  test suite covering every memory type.
+* **MongoDB agents are now addressable by their custom `agent_id`.**
+  `store_memagent` previously stripped the custom id and every lookup
+  resolved only ObjectId `_id`s — agents saved under string ids (the SDK
+  default is a uuid4) were unretrievable, repeated `save()` calls inserted
+  duplicates, and toolbox syncing was scoped to the wrong id. The id is now
+  persisted, all agent operations resolve either identifier, and
+  `store_memagent` upserts (matching the filesystem provider's semantics).
+* **`ui/app.py` fully decomposed**: 9,052 → 1,910 lines. Eight route groups
+  extracted into `ui/routers/` (traces, memory pages, vercel-skills,
+  knowledge-base, whatsapp webhook, evalground, agents CRUD, playground)
+  with shared helpers in `ui/helpers.py`; all 35 routes byte-identical in
+  path/method/response class, gated by a new whole-app smoke suite plus
+  functional tests for the agent-CRUD/playground/evalground flows.
+* **`memagent/core.py` decomposed**: 6,612 → 5,367 lines. Tool-log
+  placeholder helpers → `memagent/utils/tool_log.py`; save/load/refresh and
+  memory download/update → `memagent/persistence.py` (thin delegates keep
+  every public signature); summary generation → `MemoryManager`.
+* **`clear_semantic_cache` now works on every provider** via a generic
+  base-class implementation (previously MongoDB-only; filesystem/Oracle
+  calls raised and were silently swallowed).
+* **Agent persistence bug fixed**: the filesystem and MongoDB
+  `retrieve_memagent`/`list_memagents` reconstruction whitelists dropped
+  `continual_learning`/`continual_learning_config` on load.
+* **Packaging/CI**: the wheel no longer ships an unowned top-level `eval/`
+  directory into site-packages (moved under `memorizz/eval/`); removed the
+  unused `platformdirs` base dependency; the release gate now runs the same
+  test set as CI (performance suite excluded); the Homebrew tap job's
+  token gate moved into a step (the job-level `secrets` condition never
+  evaluated); `make lint` now fails on real errors (F-class/E9) instead of
+  `|| true`-ing everything; fixed the broken `setup_oracle` import in the
+  remote-oracle notebook; UI whole-app smoke tests added (44 routes/pages).
+* **Release hardening**: UI template rendering now supports both legacy and
+  current Starlette signatures without pinning users to an old FastAPI;
+  package/UI/npm metadata is synchronized at `0.2.0`; agent edits preserve
+  WhatsApp configuration; dashboard automation counts work on every supported
+  backend; and docs use the canonical CLI commands and valid links.
+
+### Continual learning: human-in-the-loop UI
+
+* **Trajectory-class view** (`/memory/workflows`): workflow runs are now
+  grouped by canonical hash into classes with per-class executions,
+  success rate, query diversity, recency, and a pass/fail chip per
+  promotion gate; expandable run lists mark skill-suppressed rows.
+* **Promotion controls**: a per-agent **Run promotion cycle** button and a
+  per-class **Distill now** button (backed by the new
+  `PromotionEngine.promote_class` /
+  `ContinualLearningManager.promote_class`) — both still enforce the full
+  eligibility and validation gates; the resulting promotion report renders
+  on the page.
+* **Skill lifecycle page** (`/memory/skills`): status badges, versions,
+  activation stats, baselines, preconditions, and the distilled SKILL.md,
+  with **Activate** (shadow → active + stamp backfill) and **Demote**
+  (new `ContinualLearningManager.demote_skill`; releases suppressed
+  workflows) actions.
+
+### Continual learning (workflows → skills)
+
+* **Trajectory canonicalization** (`long_term/procedural/workflow/canonicalization.py`):
+  every stored workflow now carries a `canonical_hash` — the sha256 of its
+  (tool, argument-shape, error-class) unit sequence with retries collapsed —
+  so runs that are "the same procedure" count together regardless of
+  argument values. Computed inside `Workflow.store_workflow`, shared by both
+  the streaming and non-streaming capture paths. Backfill existing rows with
+  `scripts/backfill_canonical_hashes.py` (aggregation also hashes legacy
+  rows on the fly).
+* **Skillbox memory store** (`MemoryType.SKILLBOX`, `long_term/procedural/skillbox/`):
+  learned skills are SKILL.md documents in the database with a lifecycle
+  (`candidate | shadow | active | deprecated | demoted`), applicability-only
+  embeddings (name + description + preconditions + trigger queries — never
+  the tool sequence), and per-skill stats. Supported by all three providers
+  (MongoDB, filesystem, Oracle — including new Oracle table DDL +
+  migrations).
+* **Promotion engine** (`PromotionEngine` / `PromotionConfig`): trajectory
+  classes clear explicit gates (`min_executions`, `min_success_rate`,
+  `min_distinct_queries`, recency) before LLM distillation; distilled
+  skills must pass a machine validation gate (tool resolution, no
+  hallucinated tools, intent-not-mechanism description, size cap, no
+  literal-value leaks, LLM judge) before gaining any context authority.
+  `require_shadow=True` stores new skills as non-injecting SHADOW for
+  human review.
+* **Cache-safe injection**: a static learned-skills contract in the system
+  prompt (priors-not-mandates, precondition checking) plus per-turn
+  rendering of matching skills at the top of the volatile context block —
+  the prompt-cache stable prefix is never touched. Retrieval threshold
+  0.70, stricter than any other memory retrieval.
+* **Lifecycle monitoring** (`SkillMonitor`): every run records
+  `skills_activated`; skills track successes/failures/deviations and a
+  rolling success window, are demoted on drift below their promotion-time
+  baseline, deprecated when a referenced tool disappears, and release
+  their suppressed workflows back to retrieval on any exit from ACTIVE.
+  Re-qualification (post-demotion runs only) produces a v2 skill informed
+  by the old demotion reason.
+* **Retrieval suppression**: `Workflow.retrieve_workflows_by_query` now
+  excludes trajectories covered by an ACTIVE skill by default
+  (`exclude_promoted=False` opts out); runs are always still *written* —
+  they are the drift-evidence stream.
+* **Agent surface**: `MemAgent(continual_learning=True,
+  continual_learning_config={...})`,
+  `MemAgentBuilder.with_continual_learning(...)`, persisted on
+  `MemAgentModel`, `MEMORIZZ_CONTINUAL_LEARNING=1` env default; learned
+  skills appear in `list_skills` / `read_skill` tagged `source: "learned"`.
+  Promotion cycles run off the hot path (daemon thread, every
+  `promotion_every_n_runs` stored runs; `0` = manual).
+* **Educational notebook + live A/B evaluation**
+  (`examples/continual_learning/continual_learning_guide.ipynb`): walks the
+  full loop programmatically, then benchmarks two real MemAgents — workflow
+  memory only vs. a promoted learned skill — with paired trials, τ-bench-style
+  `pass^2`, trajectory-graded accuracy, token accounting across the whole tool
+  loop, and a McNemar-style exact binomial test on the paired flips (the same
+  convention as `eval/longmemeval/compare_runs.py`). On `gpt-4.1-mini` the
+  skill arm scored 100% vs 55% accuracy (p = 0.0039) for a ~33% prompt-token
+  tax.
+* **Fixes surfaced by the loop**: MongoDB now preserves `workflow_id` and
+  `agent_id` on workflow documents (previously stripped at store time,
+  which broke per-agent trajectory aggregation); `Workflow.from_dict` and
+  `user_id` round-trip stored embeddings/user scope instead of re-embedding
+  on every load; Oracle gained a proper `retrieve_by_id` branch for
+  workflow rows.
+
+### Context efficiency & prompt caching
+
+* **Prompt-cache-friendly context assembly.** Requests are now ordered
+  stable-prefix → volatile-tail: the system prompt is frozen for the session
+  (tool-log digest, entity facts, and per-call request context moved out of
+  it), conversation history is append-only with chunked eviction (window
+  start only moves at 20-message boundaries), and all per-turn content is
+  rendered into a `<memorizz:context>` block at the start of the final user
+  message. Tool definitions are serialized in deterministic (sorted) order.
+* **Anthropic prompt caching.** The `Anthropic` provider attaches
+  `cache_control` breakpoints automatically (system prompt + last two
+  messages) — in live testing ~99% of the prompt is served from cache from
+  turn 2 onward. Opt out with `enable_prompt_caching=False`.
+* **OpenAI cache routing.** The `OpenAI` provider pins a per-thread
+  `prompt_cache_key` and supports `prompt_cache_retention="24h"`; streaming
+  requests now request the final usage chunk (`stream_options`) so cache
+  metrics are reported on streams too.
+* **Cache observability.** `get_last_usage()` now includes `cached_tokens`
+  (plus `cache_read_input_tokens` / `cache_creation_input_tokens` on
+  Anthropic). Anthropic `prompt_tokens` now reports the true prompt size
+  (uncached + cached), fixing under-counted context-window telemetry.
+
+### Pre-inference deduplication
+
+* **Assembly-time dedup pipeline** (`memagent/utils/context_dedup.py`):
+  retrieved memories are exact-hash deduplicated across sources, dropped if
+  already present in the in-window conversation history, near-dup filtered
+  via stored-embedding cosine similarity (>= 0.95), MMR-selected (relevance
+  blended with recency), and rendered in deterministic chronological order.
+* **Write-path guards.** Identical consecutive `(query, response)` pairs
+  (semantic-cache hits, retries) are no longer double-written to
+  conversation memory; entity upserts that add no new information skip the
+  re-embed and re-store (NOOP).
+
+### Retrieval fixes & performance
+
+* **Pre-inference retrieval is now actually used.** Previously every turn ran
+  3 vector searches + 3 embedding calls whose results were silently
+  discarded; retrieval is now gated on the agent's active memory types,
+  returns stored embeddings for dedup (`include_embedding`), and the deduped
+  selection is injected into the prompt. Toolbox pre-retrieval was dropped
+  (tool schemas already ride in the `tools` parameter).
+* **Episodic semantic recall works.** Conversation rows (previously stored
+  with `embedding=None`, making vector recall structurally empty) are now
+  embedded by a background worker after each turn — the hot path never
+  blocks on the embedding API. Oracle gained the missing
+  conversation-memory string-query vector-search branch. Disable via
+  `MEMORIZZ_DISABLE_CONVERSATION_EMBEDDINGS=1`.
+* **Shared embedding memo.** `EmbeddingManager` caches text → vector (LRU),
+  collapsing the up-to-5 identical query embeddings per turn into one API
+  call.
+* **Indexed summaries query.** `load_summaries_for_thread` uses a native
+  scoped MongoDB query (`list_summaries`) instead of scanning the whole
+  summaries collection every turn; other providers keep the shared fallback.
+* **Background summarization.** Automatic context summarization now runs on
+  a daemon thread with an in-flight guard instead of blocking the turn.
+* **Filesystem provider write race fixed.** Document/index writes are now
+  serialized per store and use unique tmp names (concurrent writers could
+  previously fail with ENOENT on the shared `index.tmp`).
+* **Oracle conversation rows are now individually addressable.**
+  `store()` returned the conversation's grouping `memory_id` instead of the
+  row id, and `update_by_id` used `memory_id` as its WHERE key — so any
+  per-row update (embedding backfill, summary marking) silently rewrote
+  EVERY row in the conversation (all rows ended up sharing the last
+  message's embedding, degrading episodic recall to noise), and
+  `retrieve_by_id` fell into a generic fallback that always returned None.
+  Store now returns the RAW(16) row id, updates/reads address rows by it,
+  and episodic vector recall on Oracle returns correctly-ranked matches
+  (verified: planted-fact recall score 0.77 vs 0.02 before).
+
+### Evaluation
+
+* **LongMemEval harness upgrades** (`eval/longmemeval/`): benchmark-correct
+  `--ingest_mode direct` (stores the dataset's user+assistant turns
+  verbatim with embeddings; the legacy replay mode regenerated assistant
+  replies and lost the evidence for single-session-assistant questions),
+  `--context_window_tokens` to force genuine long-horizon memory dependence,
+  `--config_label`/`--judge_model`, deterministic evenly-spaced sampling for
+  paired A/B runs, per-sample token/cache metrics, and a `compare_runs.py`
+  paired-comparison report (per-category deltas, question flips, McNemar).
+* **Mechanism probes** (`scripts/memory_accuracy_probes.py`): live
+  Oracle-backed checks for eviction-boundary recall, dedup false-positives,
+  knowledge updates, prompt-cache neutrality, and the repeat-turn write
+  guard.
+
+## 0.1.1 — 2026-06-21 (repository-only)
 
 ### Features
 

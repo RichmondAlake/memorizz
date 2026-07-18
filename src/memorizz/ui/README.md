@@ -28,7 +28,7 @@ pip install memorizz[all]
 ### 2. Start the UI
 
 ```bash
-memorizz run local
+memorizz ui
 ```
 
 The server will start at `http://127.0.0.1:8765`
@@ -40,7 +40,7 @@ Open your browser and navigate to `http://127.0.0.1:8765`. You'll see a connecti
 ## CLI Options
 
 ```bash
-memorizz run local [OPTIONS]
+memorizz ui [OPTIONS]
 
 Options:
   --port PORT    Port to run the server on (default: 8765)
@@ -51,13 +51,13 @@ Options:
 
 ```bash
 # Start on default port 8765
-memorizz run local
+memorizz ui
 
 # Start on custom port
-memorizz run local --port 9000
+memorizz ui --port 9000
 
 # Make accessible from other machines on your network
-memorizz run local --host 0.0.0.0 --port 8080
+memorizz ui --host 0.0.0.0 --port 8080
 ```
 
 ## Memory Providers
@@ -191,7 +191,7 @@ The UI also exposes JSON API endpoints:
 
 ```bash
 # Use a different port
-memorizz run local --port 9000
+memorizz ui --port 9000
 ```
 
 ### Connection Failed

@@ -5,7 +5,7 @@
 """Offline fallback provider for environments without external access."""
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, List
 
 from ..base import InternetAccessProvider, register_provider
 from ..models import InternetPageContent, InternetSearchResult

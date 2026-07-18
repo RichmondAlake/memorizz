@@ -14,6 +14,8 @@ automation/
 ├── store/
 │   ├── base.py       # AutomationStore protocol (interface)
 │   ├── factory.py    # Provider-aware store resolution
+│   ├── filesystem.py # Filesystem-backed implementation
+│   ├── mongodb.py    # MongoDB-backed implementation
 │   └── oracle.py     # Oracle-backed implementation
 └── README.md         # This file
 ```
@@ -22,7 +24,9 @@ automation/
 
 ## Requirements
 
-- **Oracle Database 23ai+** with automation tables provisioned (`memorizz setup-oracle-schema`)
+- A filesystem, MongoDB, or Oracle memory provider
+- For Oracle, provision the automation tables with
+  `memorizz oracle setup-schema`
 - `automations_enabled=True` on the agent (this is the default)
 
 ## Three Ways to Create Automations
@@ -103,7 +107,9 @@ The agent will call `automation_create_job` internally. This approach requires a
 
 ## SDK Reference
 
-All methods raise `ValueError` if automations are unavailable (no Oracle provider or `automations_enabled=False`). Check availability first with `agent.has_automations()`.
+All methods raise `ValueError` if automations are unavailable (unsupported
+provider or `automations_enabled=False`). Check availability first with
+`agent.has_automations()`.
 
 ### `create_automation(name, schedule_type, *, query_template, ...)`
 
@@ -273,7 +279,7 @@ The worker is a long-running process that polls the store for due jobs and execu
 
 **CLI:**
 ```bash
-memorizz run-automations --poll-interval 5 --lease-seconds 120 --concurrency 2
+memorizz automations run --poll-interval 5 --lease-seconds 120 --concurrency 2
 ```
 
 Required environment variables:
@@ -290,9 +296,9 @@ The web UI can also run an embedded worker when automations are enabled in setti
 ## Troubleshooting
 
 **"Automations are not available"**
-- Ensure you're using an Oracle memory provider
+- Ensure you're using a filesystem, MongoDB, or Oracle memory provider
 - Check that `automations_enabled=True` (this is the default)
-- Run `memorizz setup-oracle-schema` to create automation tables
+- On Oracle, run `memorizz oracle setup-schema` to create automation tables
 
 **"timezone is required"**
 - Pass `timezone` explicitly to `create_automation()`
@@ -305,6 +311,6 @@ The web UI can also run an embedded worker when automations are enabled in setti
 - Check Twilio sandbox status for development numbers
 
 **Jobs not executing**
-- Ensure a worker is running (`memorizz run-automations` or UI embedded worker)
+- Ensure a worker is running (`memorizz automations run` or UI embedded worker)
 - Check that the job is `enabled=True`
 - Verify `next_run_at` is in the past (the worker only picks up due jobs)

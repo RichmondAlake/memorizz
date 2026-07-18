@@ -90,7 +90,6 @@ class OllamaLLM(LLMProvider):
         self._host = host
         self.context_window_tokens = context_window_tokens or 128_000
         self._last_usage: Optional[Dict[str, int]] = None
-        self._num_predict = num_predict
 
         # Build options dict for Ollama requests
         self._options: Dict[str, Any] = {}

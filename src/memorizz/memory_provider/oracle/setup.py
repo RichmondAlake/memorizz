@@ -14,7 +14,6 @@ Supports two modes:
 """
 
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -48,12 +47,13 @@ def _get_embedding_dimension() -> int:
     Get the embedding dimension to use for VECTOR columns.
 
     Reads from ORACLE_EMBEDDING_DIM environment variable.
-    Falls back to 256 if not set or invalid.
+    Falls back to 384, the output size of the default in-database ONNX model,
+    if not set or invalid.
 
     Returns:
         int: Embedding dimension (validated to be positive)
     """
-    default_dim = 256
+    default_dim = 384
     env_dim = os.environ.get("ORACLE_EMBEDDING_DIM")
 
     if env_dim is None:
@@ -263,6 +263,7 @@ def _check_user_privileges(conn) -> Dict[str, bool]:
         "CREATE_VIEW": False,
         "CREATE_SEQUENCE": False,
         "CREATE_TRIGGER": False,
+        "CREATE_MINING_MODEL": False,
         "DBMS_VECTOR": False,
         "SODA_APP": False,
     }
@@ -274,7 +275,8 @@ def _check_user_privileges(conn) -> Dict[str, bool]:
             """
             SELECT privilege FROM user_sys_privs
             WHERE privilege IN ('CREATE TABLE', 'CREATE VIEW',
-                               'CREATE SEQUENCE', 'CREATE TRIGGER')
+                               'CREATE SEQUENCE', 'CREATE TRIGGER',
+                               'CREATE MINING MODEL')
         """
         )
         sys_privs = {row[0] for row in cursor.fetchall()}
@@ -283,6 +285,7 @@ def _check_user_privileges(conn) -> Dict[str, bool]:
         privileges["CREATE_VIEW"] = "CREATE VIEW" in sys_privs
         privileges["CREATE_SEQUENCE"] = "CREATE SEQUENCE" in sys_privs
         privileges["CREATE_TRIGGER"] = "CREATE TRIGGER" in sys_privs
+        privileges["CREATE_MINING_MODEL"] = "CREATE MINING MODEL" in sys_privs
 
         # Check role privileges
         cursor.execute(
@@ -363,14 +366,14 @@ def _print_connection_refused_help(dsn: str):
         print("  2. Oracle container is not running")
         print("     → Check: docker ps -a | grep oracle")
         print("     → Start container: docker start oracle-memorizz")
-        print("     → Or create new: ./install_oracle.sh")
+        print("     → Or create new: memorizz oracle install --image lite")
         print()
         print("  3. Database is still starting up")
         print("     → Check logs: docker logs -f oracle-memorizz")
         print("     → Wait for: 'DATABASE IS READY TO USE!'")
         print()
         print("Quick fix:")
-        print("  ./install_oracle.sh")
+        print("  memorizz oracle install --image lite")
         print("  # Then wait for database to be ready before running setup again")
     else:
         print("The database at the specified DSN is not reachable. Please check:")
@@ -808,6 +811,9 @@ def _create_user_and_grant_privileges(
         # Grant AI Vector Search privileges (Oracle 23ai+)
         print("\nGranting AI Vector Search privileges...")
         try:
+            admin_cursor.execute(f"GRANT CREATE MINING MODEL TO {memorizz_user}")
+            print("  ✓ CREATE MINING MODEL (required to install ONNX models)")
+
             admin_cursor.execute(f"GRANT EXECUTE ON DBMS_VECTOR TO {memorizz_user}")
             print("  ✓ EXECUTE ON DBMS_VECTOR (required for vector operations)")
 
@@ -858,7 +864,7 @@ def _create_schema(user_conn, schema_file: Path) -> Tuple[int, int, int]:
 
     # Get embedding dimension from environment variable
     embedding_dim = _get_embedding_dimension()
-    if embedding_dim != 256:
+    if embedding_dim != 384:
         print(
             f"  ℹ Using custom embedding dimension: {embedding_dim} (from ORACLE_EMBEDDING_DIM)"
         )
@@ -916,7 +922,7 @@ def _verify_setup(user_conn) -> Tuple[list, list, list]:
         """
         SELECT table_name FROM user_tables
         WHERE table_name IN ('AGENTS', 'AGENT_LLM_CONFIGS', 'AGENT_MEMORIES', 'PERSONAS',
-                             'TOOLBOX', 'CONVERSATION_MEMORY', 'KNOWLEDGE_BASE',
+                             'TOOLBOX', 'SKILLBOX', 'CONVERSATION_MEMORY', 'KNOWLEDGE_BASE',
                              'SHORT_TERM_MEMORY', 'WORKFLOW_MEMORY', 'SHARED_MEMORY',
                              'SUMMARIES', 'SEMANTIC_CACHE', 'ENTITY_MEMORY',
                              'AUTOMATION_JOBS', 'AUTOMATION_RUNS', 'AUTOMATION_DELIVERIES')
@@ -1010,14 +1016,14 @@ def setup_oracle_user():
     # If SYSTEM can connect but can't create users, try SYS as SYSDBA
     if can_connect_admin and not admin_capabilities.get("can_create_users", False):
         print(f"  Admin user '{ADMIN_USER}' cannot create users")
-        print(f"  Trying SYS as SYSDBA (has full privileges)...")
+        print("  Trying SYS as SYSDBA (has full privileges)...")
 
         # Try SYS as SYSDBA (SYS password is same as SYSTEM in Oracle Free)
         try:
             # Check if SYSDBA mode is available
             if not hasattr(oracledb, "SYSDBA"):
                 print(
-                    f"  ⚠ oracledb.SYSDBA not available (may need newer oracledb version)"
+                    "  ⚠ oracledb.SYSDBA not available (may need newer oracledb version)"
                 )
                 raise AttributeError("SYSDBA not available")
 
@@ -1035,9 +1041,9 @@ def setup_oracle_user():
                 admin_conn = sys_conn
                 admin_capabilities = sys_capabilities
                 active_admin_user = "sys"  # Update for display
-                print(f"  ✓ Connected as SYS as SYSDBA (has CREATE USER privilege)")
+                print("  ✓ Connected as SYS as SYSDBA (has CREATE USER privilege)")
             else:
-                print(f"  ⚠ SYS as SYSDBA connection failed or cannot create users")
+                print("  ⚠ SYS as SYSDBA connection failed or cannot create users")
         except Exception as e:
             print(f"  ⚠ Could not try SYS as SYSDBA: {e}")
 
@@ -1049,13 +1055,13 @@ def setup_oracle_user():
         setup_mode = "admin"
         print("✓ Admin mode detected: Full setup with user creation")
         print(f"  Connected as: {active_admin_user}")
-        print(f"  Can create users: Yes")
+        print("  Can create users: Yes")
     else:
         # User-only mode: Use existing schema
         setup_mode = "user_only"
         print("ℹ User-only mode detected: Using existing schema")
         if not can_connect_admin:
-            print(f"  Admin connection failed (this is OK for hosted databases)")
+            print("  Admin connection failed (this is OK for hosted databases)")
             if admin_error:
                 # Check if it's a credential error (likely local setup issue)
                 if (
@@ -1063,22 +1069,22 @@ def setup_oracle_user():
                     or "invalid credential" in admin_error.lower()
                 ):
                     print(f"\n  ⚠ Admin credential error: {admin_error}")
-                    print(f"  This suggests the admin password may be incorrect.")
-                    print(f"  For local Docker setup:")
+                    print("  This suggests the admin password may be incorrect.")
+                    print("  For local Docker setup:")
                     print(
-                        f"    1. If you used install_oracle.sh, run: eval $(./install_oracle.sh)"
+                        "    1. If you used `memorizz oracle install`, rerun that command"
                     )
-                    print(f"       This sets ORACLE_ADMIN_PASSWORD automatically")
+                    print("       to display the connection environment variables")
                     print(
-                        f'    2. Or set manually: export ORACLE_ADMIN_PASSWORD="MyPassword123!"'
+                        '    2. Or set manually: export ORACLE_ADMIN_PASSWORD="MyPassword123!"'
                     )
                     print(
-                        f"    3. Ensure the password matches what was used in install_oracle.sh"
+                        "    3. Ensure the password matches the Oracle container password"
                     )
                     print(
                         f"  Current admin password: {'*' * len(ADMIN_PASSWORD) if ADMIN_PASSWORD else '(not set, using default)'}"
                     )
-                    print(f"  Expected default: MyPassword123!")
+                    print("  Expected default: MyPassword123!")
                 elif _is_connection_refused_error(Exception(admin_error)):
                     # Connection refused - already handled by _print_connection_refused_help
                     pass
@@ -1202,6 +1208,7 @@ def setup_oracle_user():
         print("ℹ Setup Mode: User-only (existing schema)")
         print("  Some admin-granted privileges may not be available.")
         print("  Contact your database administrator if you need:")
+        print("    - CREATE MINING MODEL (for in-database ONNX embeddings)")
         print("    - DBMS_VECTOR execute privileges (for vector search)")
         print("    - SODA_APP role (for Memorizz views)")
     else:
@@ -1218,10 +1225,8 @@ def setup_oracle_user():
     print(f'      user="{MEMORIZZ_USER}",')
     print(f'      password="{MEMORIZZ_PASSWORD}",')
     print(f'      dsn="{DSN}",')
-    print('      embedding_provider="openai",')
-    print(
-        '      embedding_config={"model": "text-embedding-3-small", "api_key": "your-key"}'
-    )
+    print("      in_database_embedding=True,")
+    print('      embedding_config={"model": "ALL_MINILM_L12_V2"}')
     print("  )")
     print("  oracle_provider = OracleProvider(oracle_config)")
     print("  ")

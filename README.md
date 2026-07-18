@@ -29,8 +29,11 @@ It provides:
 - **Entity memory** tools for profile-style facts (`entity_memory_lookup` / `entity_memory_upsert`)
 - **Tool calling** with automatic function registration
 - **Semantic cache** to reduce repeat LLM calls
+- **Prompt-cache-friendly context assembly** — stable prefix (frozen system prompt, append-only chunk-evicted history) with all per-turn content at the tail; automatic Anthropic `cache_control` breakpoints and OpenAI `prompt_cache_key` routing serve most of each turn's prompt at cached-input rates (see [docs/guides/context-efficiency.md](docs/guides/context-efficiency.md))
+- **Pre-inference deduplication** — retrieved memories are exact-hash, similarity (cosine ≥ 0.95), and vs-history deduplicated, then MMR-selected before entering the context window
+- **Continual learning** — repeated successful tool workflows are promoted into reusable learned skills (gated by frequency × success × recency × query diversity, LLM-distilled into validated SKILL.md documents, monitored for drift, and demoted when they stop working); enable with `continual_learning=True` (see [docs/guides/continual-learning.md](docs/guides/continual-learning.md))
 - **Multi-agent orchestration** with shared blackboard memory
-- **Context-window telemetry** via `get_context_window_stats()`
+- **Context-window telemetry** via `get_context_window_stats()` and per-turn cache metrics (`cached_tokens`) from `get_last_usage()`
 - **Skills marketplace** with Vercel Agent Skills and SkillsMP providers
 - **Scheduled automations** via SDK, web UI, or agent conversation (see `src/memorizz/automation/README.md`)
 
@@ -255,8 +258,8 @@ LM Studio defaults to `http://127.0.0.1:1234/v1`. vLLM and any other
 If you want Oracle AI Database as the backing store:
 
 ```bash
-./install_oracle.sh
-memorizz setup-oracle
+memorizz oracle install
+memorizz oracle setup
 ```
 
 Then configure `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_DSN`, and your LLM credentials. Full setup details are in `SETUP.md`.
@@ -458,6 +461,7 @@ memorizz oracle setup               # initialize Oracle schema/user
 - `examples/sandbox/memagent_daytona_sandbox.ipynb`
 - `examples/sandbox/memagent_graalpy_sandbox.ipynb`
 - `examples/automations/automations_guide.ipynb`
+- `examples/continual_learning/continual_learning_guide.ipynb`
 - `examples/model_providers/openai_provider.ipynb`
 - `examples/model_providers/anthropic_provider.ipynb`
 - `examples/model_providers/ollama_provider.ipynb`

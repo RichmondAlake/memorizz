@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 
 {% block title %}Agents - Memorizz{% endblock %}
 
@@ -27,92 +28,34 @@
     {% set agent_is_favorite = agent.is_favorite if agent and agent.is_favorite is not none else false %}
     {% set thread_rows = agent_threads.get(agent_id_value, []) %}
     {% set selected_memory_id = agent_default_memory_ids.get(agent_id_value, '') %}
-    <div class="agent-card">
-        <div class="agent-header">
-            <div class="agent-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="4" y="7" width="16" height="12" rx="3"/>
-                    <path d="M12 3v4"/>
-                    <path d="M9 12h.01"/>
-                    <path d="M15 12h.01"/>
-                    <path d="M8 16h8"/>
-                </svg>
-            </div>
-            <div class="agent-title">
-                <h3>{{ agent_display_name }}</h3>
-                <span class="agent-id" title="{{ agent_id_value }}">{{ agent_id_value[:12] }}...</span>
-            </div>
-            <form method="post" action="/agents/{{ agent_id_value }}/favorite" class="agent-favorite-form">
-                <input type="hidden" name="redirect_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
-                <input type="hidden" name="is_favorite" value="{% if agent_is_favorite %}0{% else %}1{% endif %}">
-                <button
-                    type="submit"
-                    class="favorite-toggle {% if agent_is_favorite %}is-active{% endif %}"
-                    title="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
-                    aria-label="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
-                >
-                    <span aria-hidden="true">★</span>
-                </button>
-            </form>
-        </div>
-
-        <div class="agent-body">
-            <div class="agent-meta">
-                <div class="meta-item">
-                    <span class="meta-label">Mode:</span>
-                    <span class="meta-value badge">{{ agent.application_mode or 'assistant' }}</span>
-                </div>
-
-                {% if agent.memory_ids %}
-                <div class="meta-item">
-                    <span class="meta-label">Memories:</span>
-                    <span class="meta-value">{{ agent.memory_ids|length }}</span>
-                </div>
-                {% endif %}
-
-                {% if agent.persona and agent.persona.role %}
-                <div class="meta-item">
-                    <span class="meta-label">Role:</span>
-                    <span class="meta-value">{{ agent.persona.role }}</span>
-                </div>
-                {% endif %}
-
-                {% if agent.max_steps %}
-                <div class="meta-item">
-                    <span class="meta-label">Max Tool Iterations:</span>
-                    <span class="meta-value">{{ agent.max_steps }}</span>
-                </div>
-                {% endif %}
-
-                <div class="meta-item">
-                    <span class="meta-label">Tools:</span>
-                    <span class="meta-value">{{ agent_tool_counts.get(agent_id_value, (agent.tools or [])|length) }}</span>
-                </div>
-
-                {% if agent.whatsapp_enabled %}
-                <div class="meta-item">
-                    <span class="meta-label">WhatsApp:</span>
-                    {% if agent_id_value == active_whatsapp_agent_id %}
-                    <span class="badge badge-success">Active</span>
-                    {% else %}
-                    <span class="badge">Enabled</span>
-                    {% endif %}
-                </div>
-                {% endif %}
-            </div>
-
-            {% if agent.instruction %}
-            <div class="agent-instruction">
-                <p>{{ agent.instruction[:150] }}{% if agent.instruction|length > 150 %}...{% endif %}</p>
-            </div>
-            {% endif %}
-        </div>
-
-        <div class="agent-footer">
-            <a href="/agents/{{ agent_id_value }}/playground" class="btn btn-primary">Playground →</a>
-            <a href="/agents/{{ agent_id_value }}/edit" class="btn">Edit</a>
-        </div>
-
+    {% set meta_items = [] %}
+    {% if agent.memory_ids %}
+        {% set _ = meta_items.append({'label': 'Memories:', 'value': agent.memory_ids|length}) %}
+    {% endif %}
+    {% if agent.persona and agent.persona.role %}
+        {% set _ = meta_items.append({'label': 'Role:', 'value': agent.persona.role}) %}
+    {% endif %}
+    {% if agent.max_steps %}
+        {% set _ = meta_items.append({'label': 'Max Tool Iterations:', 'value': agent.max_steps}) %}
+    {% endif %}
+    {% set _ = meta_items.append({'label': 'Tools:', 'value': agent_tool_counts.get(agent_id_value, (agent.tools or [])|length)}) %}
+    {% if agent.whatsapp_enabled %}
+        {% set whatsapp_active = agent_id_value == active_whatsapp_agent_id %}
+        {% set _ = meta_items.append({'label': 'WhatsApp:', 'value': 'Active' if whatsapp_active else 'Enabled', 'class': 'badge badge-success' if whatsapp_active else 'badge'}) %}
+    {% endif %}
+    {% call macros.agent_card(
+        agent,
+        agent_id_value,
+        agent_display_name,
+        icon='robot-svg',
+        favorite=agent_is_favorite,
+        favorite_redirect=request.url.path ~ (('?' ~ request.url.query) if request.url.query else ''),
+        meta_items=meta_items,
+        footer_links=[
+            {'href': '/agents/' ~ agent_id_value ~ '/playground', 'class': 'btn btn-primary', 'label': 'Playground →'},
+            {'href': '/agents/' ~ agent_id_value ~ '/edit', 'class': 'btn', 'label': 'Edit'},
+        ]
+    ) %}
         <!-- Inline mini-chat -->
         <div class="agent-inline-chat" id="chat-{{ agent_id_value }}">
             <div class="inline-chat-toolbar">
@@ -154,7 +97,7 @@
                 </button>
             </form>
         </div>
-    </div>
+    {% endcall %}
     {% endfor %}
 </div>
 {% else %}
@@ -315,40 +258,26 @@ async function sendInlineChat(e, agentId) {
 
         if (!response.ok) throw new Error('HTTP ' + response.status);
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+        // SSE plumbing lives in the shared readSseStream() (static/js/app.js).
+        await readSseStream(response, function(payload) {
+            if (payload === '[DONE]') return;
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop();
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                const payload = line.slice(6);
-                if (payload === '[DONE]') continue;
-
-                try {
-                    const data = JSON.parse(payload);
-                    if (typeof data === 'string') {
-                        // Error message
-                        fullText += data;
-                    } else if (data.type === 'content' && data.content) {
-                        fullText += data.content;
-                    } else if (data.type === 'done' && data.content) {
-                        fullText = data.content;
-                    } else if (data.type === 'tool_call') {
-                        // skip tool calls in mini-chat
-                    }
-                } catch (_) {}
-            }
+            try {
+                const data = JSON.parse(payload);
+                if (typeof data === 'string') {
+                    // Error message
+                    fullText += data;
+                } else if (data.type === 'content' && data.content) {
+                    fullText += data.content;
+                } else if (data.type === 'done' && data.content) {
+                    fullText = data.content;
+                } else if (data.type === 'tool_call') {
+                    // skip tool calls in mini-chat
+                }
+            } catch (_) {}
             asstBubble.textContent = fullText || '…';
             messagesEl.scrollTop = messagesEl.scrollHeight;
-        }
+        });
 
         if (!fullText.trim()) {
             asstBubble.textContent = '(no response)';

@@ -10,6 +10,9 @@ rust-version = "1.77"
 name = "memorizz_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+devtools = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -11,11 +11,9 @@ from .agent_builder import (
     create_deep_research_agent,
     create_task_agent,
 )
-from .config_builder import ConfigBuilder
 
 __all__ = [
     "MemAgentBuilder",
-    "ConfigBuilder",
     "create_assistant",
     "create_chatbot",
     "create_task_agent",

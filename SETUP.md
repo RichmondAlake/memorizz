@@ -44,7 +44,10 @@ pip install oracledb
 pip install openai
 ```
 
-> **Hugging Face support:** Sentence Transformers + Transformers + Accelerate are bundled with the base `memorizz` wheel, so no extra install command is required before selecting `embedding_provider="huggingface"` or the Hugging Face LLM provider.
+> **Hugging Face support:** Install `memorizz[huggingface]` before selecting
+> `embedding_provider="huggingface"` or the Hugging Face LLM provider. The
+> heavyweight Transformers/PyTorch stack is intentionally excluded from the
+> base install.
 
 ### API Keys
 
@@ -60,32 +63,27 @@ For a quick setup with default settings, follow these steps:
 ### Step 1: Start Oracle Database
 
 ```bash
-# Make the script executable (if needed)
-chmod +x install_oracle.sh
-
-# Start Oracle Database
-./install_oracle.sh
+# Start Oracle Database with the recommended lite image
+memorizz oracle install --image lite
 ```
 
 **For Apple Silicon (M1/M2/M3) users:**
 ```bash
 # Oracle Free may require emulation on ARM64
 export PLATFORM_FLAG="--platform linux/amd64"
-./install_oracle.sh
+memorizz oracle install --image lite
 ```
 
 **Oracle Image Version Selection:**
 ```bash
-# Use lite version (default, 1.78GB - recommended for development)
-./install_oracle.sh
+# Use lite version (1.78GB - recommended for development)
+memorizz oracle install --image lite
 
 # Use full version (9.93GB - includes all features)
-export ORACLE_IMAGE_TAG="latest"
-./install_oracle.sh
+memorizz oracle install --image full
 
-# Use custom tag
-export ORACLE_IMAGE_TAG="custom-tag"
-./install_oracle.sh
+# Use the community image (faster startup)
+memorizz oracle install --image community
 ```
 
 This will:
@@ -98,12 +96,11 @@ This will:
 **Oracle Image Versions:**
 - **Lite version (default)**: `latest-lite` - 1.78GB, faster download, recommended for development
 - **Full version**: `latest` - 9.93GB, includes all features and tools
-- **Custom tag**: Any other tag can be specified via `ORACLE_IMAGE_TAG`
+- **Community version**: `gvenzl/oracle-free:latest` - faster startup for development
 
 To use the full version:
 ```bash
-export ORACLE_IMAGE_TAG="latest"
-./install_oracle.sh
+memorizz oracle install --image full
 ```
 
 **Default Connection Details:**
@@ -121,10 +118,10 @@ export ORACLE_IMAGE_TAG="latest"
 
 ```bash
 # After installing memorizz[oracle]
-memorizz setup-oracle
+memorizz oracle setup
 
 # Or using Python module
-python -m memorizz.cli setup-oracle
+python -m memorizz oracle setup
 ```
 
 **Option B: Using the examples script (Repo-cloned users only)**
@@ -271,12 +268,11 @@ You can customize all credentials using environment variables:
 ```bash
 # Set custom admin password before starting Oracle
 export ORACLE_ADMIN_PASSWORD="YourSecurePassword123!"
-./install_oracle.sh
+memorizz oracle install --image lite
 
 # Or use full version instead of lite (default)
-export ORACLE_IMAGE_TAG="latest"
 export ORACLE_ADMIN_PASSWORD="YourSecurePassword123!"
-./install_oracle.sh
+memorizz oracle install --image full
 ```
 
 #### For Database Schema Setup
@@ -376,7 +372,7 @@ GRANT SELECT ANY TABLE TO memorizz_user;
 
 #### 3. Create Schema
 
-The automated setup script (`memorizz setup-oracle`) handles this automatically. It will:
+The automated setup command (`memorizz oracle setup`) handles this automatically. It will:
 - Detect if you have admin access (admin mode) or need to use existing schema (user-only mode)
 - Create all required tables and views
 - Verify the setup
@@ -411,7 +407,7 @@ MemoRizz works with hosted Oracle databases! The setup automatically adapts to y
 
 3. **Run the setup:**
    ```bash
-   memorizz setup-oracle
+   memorizz oracle setup
    ```
 
    The setup will:
@@ -660,7 +656,7 @@ conn.close()
 1. Use platform flag for emulation:
    ```bash
    export PLATFORM_FLAG="--platform linux/amd64"
-   ./install_oracle.sh
+   memorizz oracle install --image lite
    ```
 
 2. Verify Docker Desktop is using Rosetta 2 (if available):
@@ -705,7 +701,7 @@ conn.close()
    export ORACLE_TABLESPACE_SIZE_MB="200"
    export ORACLE_TABLESPACE_AUTOEXTEND_MB="25"
    ```
-3. Re-run `python -m memorizz.memory_provider.oracle.setup` (or `memorizz setup-oracle`).
+3. Re-run `python -m memorizz.memory_provider.oracle.setup` (or `memorizz oracle setup`).
 
 If you run Oracle outside Docker, update the paths to match the server's filesystem. The script will now reuse that path when creating the tablespace.
 
@@ -788,8 +784,8 @@ If you've already set up MemoRizz and just need to restart Oracle:
 # Start existing Oracle container (data persists via Docker volume)
 docker start oracle-memorizz
 
-# Or use the helper script
-./install_oracle.sh  # Will detect existing container and start it
+# Or use the helper command
+memorizz oracle install --image lite  # Detects and starts the existing container
 
 # Verify it's running
 docker ps | grep oracle-memorizz
@@ -807,8 +803,8 @@ docker rm oracle-memorizz
 docker volume rm oracle-memorizz-data
 
 # Start fresh
-./install_oracle.sh
-python examples/setup_oracle_user.py
+memorizz oracle install --image lite
+memorizz oracle setup
 ```
 
 ---
@@ -818,15 +814,15 @@ python examples/setup_oracle_user.py
 After completing the setup:
 
 1. **Explore Examples:**
-   - [Single Agent Demo](examples/single_agent/memagent_single_agent_demo.ipynb)
-   - [Multi-Agent Example](examples/memagents_multi_agents.ipynb)
-   - [Persona Example](examples/persona.ipynb)
-   - [Toolbox Example](examples/toolbox.ipynb)
+   - [Local Oracle Agent](examples/single_agent/memagent_local_oracle.ipynb)
+   - [Remote Oracle Agent](examples/single_agent/memagent_remote_oracle.ipynb)
+   - [Deep Research](examples/deep_research/deep_research_memagent.ipynb)
+   - [Continual Learning](examples/continual_learning/continual_learning_guide.ipynb)
 
 2. **Read Documentation:**
    - [Main README](README.md)
    - [Oracle Provider README](src/memorizz/memory_provider/oracle/README.md)
-   - [Memory Architecture](MEMORY_ARCHITECTURE.md)
+   - [Memory Architecture](src/memorizz/MEMORY_ARCHITECTURE.md)
 
 3. **Build Your First Agent:**
    ```python

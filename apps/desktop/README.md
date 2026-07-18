@@ -30,7 +30,7 @@ the FastAPI process as a Tauri sidecar.
 ```bash
 # terminal 1 — Memorizz server
 pip install -e "..[ui]"        # from the memorizz repo root
-memorizz run local              # serves http://127.0.0.1:8765
+memorizz ui                     # serves http://127.0.0.1:8765
 
 # terminal 2 — desktop shell
 cd apps/desktop

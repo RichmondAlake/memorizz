@@ -37,7 +37,9 @@ class OpenAI(LLMProvider):
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         seed: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
         response_format: Optional[Any] = None,
+        prompt_cache_retention: Optional[str] = None,
         additional_config: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ):
@@ -57,6 +59,14 @@ class OpenAI(LLMProvider):
             OpenAI-compatible server (e.g. ``http://127.0.0.1:8080/v1``
             for llama.cpp's ``llama-server``, or LM Studio's local URL).
             Falls back to the official OpenAI endpoint when unset.
+        reasoning_effort : str, optional
+            Reasoning effort forwarded to Chat Completions. GPT-5.6
+            function tools on this endpoint can use ``"none"``; Responses
+            API text helpers keep their provider defaults.
+        prompt_cache_retention : str, optional
+            OpenAI prompt-cache retention policy (``"in_memory"`` or
+            ``"24h"``). Only sent to the official OpenAI endpoint; local
+            OpenAI-compatible servers don't understand it.
         """
         # Local OpenAI-compatible servers don't authenticate but the SDK
         # still requires a non-empty api_key. Substitute a placeholder so
@@ -76,7 +86,13 @@ class OpenAI(LLMProvider):
         self.context_window_tokens = (
             context_window_tokens or self._infer_context_window_tokens(model)
         )
+        self.reasoning_effort = reasoning_effort
         self._last_usage: Optional[Dict[str, int]] = None
+        # Prompt-cache routing key (see OpenAI's prompt-caching guide). Set
+        # per conversation thread by MemAgent via ``set_prompt_cache_key`` so
+        # requests sharing a prefix land on the same cache shard.
+        self._prompt_cache_key: Optional[str] = None
+        self._prompt_cache_retention = prompt_cache_retention
         self._request_options: Dict[str, Any] = {}
         request_options = {
             "temperature": temperature,
@@ -85,6 +101,7 @@ class OpenAI(LLMProvider):
             "frequency_penalty": frequency_penalty,
             "presence_penalty": presence_penalty,
             "seed": seed,
+            "reasoning_effort": reasoning_effort,
             "response_format": response_format,
         }
         for key, value in request_options.items():
@@ -99,6 +116,7 @@ class OpenAI(LLMProvider):
                 "frequency_penalty",
                 "presence_penalty",
                 "seed",
+                "reasoning_effort",
                 "response_format",
                 "logprobs",
                 "top_logprobs",
@@ -106,6 +124,12 @@ class OpenAI(LLMProvider):
             for key, value in additional_config.items():
                 if key in allowed_keys and value is not None:
                     self._request_options[key] = value
+            # Cache retention rides its own attribute (not _request_options)
+            # so the base_url guard in _apply_cache_options still applies.
+            if additional_config.get("prompt_cache_retention"):
+                self._prompt_cache_retention = additional_config[
+                    "prompt_cache_retention"
+                ]
 
     def _infer_context_window_tokens(self, model: str) -> int:
         """Best-effort mapping of well-known OpenAI models to their context window."""
@@ -140,7 +164,51 @@ class OpenAI(LLMProvider):
         config: Dict[str, Any] = {"provider": "openai", "model": self.model}
         if self.base_url:
             config["base_url"] = self.base_url
+        if self.reasoning_effort is not None:
+            config["reasoning_effort"] = self.reasoning_effort
         return config
+
+    def set_prompt_cache_key(self, key: Optional[str]) -> None:
+        """Set the prompt-cache routing key for subsequent requests.
+
+        OpenAI routes requests to cache shards by a hash of the prompt prefix
+        combined with this key; keeping it stable per conversation thread
+        maximizes cache hits. ``None`` clears it.
+        """
+        self._prompt_cache_key = key or None
+
+    def _apply_cache_options(self, kwargs: Dict[str, Any]) -> None:
+        """Attach prompt-caching parameters for the official OpenAI endpoint.
+
+        Skipped for custom ``base_url`` targets (llama.cpp, LM Studio, vLLM):
+        those servers don't implement OpenAI's prompt-cache routing and some
+        reject unknown parameters.
+        """
+        if self.base_url:
+            return
+        if self._prompt_cache_key:
+            kwargs["prompt_cache_key"] = self._prompt_cache_key
+        if self._prompt_cache_retention:
+            kwargs["prompt_cache_retention"] = self._prompt_cache_retention
+
+    def _create_chat_completion(self, kwargs: Dict[str, Any]) -> Any:
+        """Call chat.completions.create, dropping cache params on old SDKs.
+
+        Older ``openai`` SDK releases raise ``TypeError`` for the
+        prompt-cache parameters; retry once without them rather than failing
+        the whole request.
+        """
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except TypeError:
+            trimmed = {
+                k: v
+                for k, v in kwargs.items()
+                if k not in ("prompt_cache_key", "prompt_cache_retention")
+            }
+            if len(trimmed) == len(kwargs):
+                raise
+            return self.client.chat.completions.create(**trimmed)
 
     def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
         """
@@ -275,8 +343,9 @@ class OpenAI(LLMProvider):
             kwargs["tool_choice"] = tool_choice
         if self._request_options:
             kwargs.update(self._request_options)
+        self._apply_cache_options(kwargs)
 
-        response = self.client.chat.completions.create(**kwargs)
+        response = self._create_chat_completion(kwargs)
         self._last_usage = self._extract_usage(response)
 
         # If there are tool calls, return the full response object
@@ -396,13 +465,27 @@ class OpenAI(LLMProvider):
             kwargs["tool_choice"] = tool_choice
         if self._request_options:
             kwargs.update(self._request_options)
+        self._apply_cache_options(kwargs)
+        # Ask the official endpoint to append a final usage chunk so
+        # streaming turns report prompt/cached token counts like
+        # non-streaming ones. Skipped for local servers, some of which
+        # reject stream_options.
+        if not self.base_url:
+            kwargs.setdefault("stream_options", {"include_usage": True})
 
-        stream = self.client.chat.completions.create(**kwargs)
+        stream = self._create_chat_completion(kwargs)
 
         accumulated_content = ""
         tool_calls_acc: Dict[int, Dict[str, Any]] = {}
 
         for chunk in stream:
+            # The final usage chunk has an empty choices list — capture it
+            # before the skip below.
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                extracted = self._extract_usage(chunk)
+                if extracted:
+                    self._last_usage = extracted
             if not chunk.choices:
                 continue
 
@@ -439,9 +522,10 @@ class OpenAI(LLMProvider):
                                 "arguments"
                             ] += tc_delta.function.arguments
 
-            # Check for stream finish
+            # Stream finish: keep consuming — the final usage chunk (empty
+            # choices) arrives after the finish_reason chunk.
             if chunk.choices[0].finish_reason:
-                break
+                continue
 
         # If we accumulated tool calls, yield them as a reconstructed response-like object
         if tool_calls_acc:
@@ -476,11 +560,18 @@ class OpenAI(LLMProvider):
         if not usage:
             return None
         try:
-            return {
+            extracted = {
                 "prompt_tokens": getattr(usage, "prompt_tokens", None),
                 "completion_tokens": getattr(usage, "completion_tokens", None),
                 "total_tokens": getattr(usage, "total_tokens", None),
             }
+            # Prompt-cache observability: how much of the prompt was served
+            # from OpenAI's prefix cache (billed at the cached-input rate).
+            details = getattr(usage, "prompt_tokens_details", None)
+            cached = getattr(details, "cached_tokens", None) if details else None
+            if cached is not None:
+                extracted["cached_tokens"] = cached
+            return extracted
         except Exception:
             return None
 

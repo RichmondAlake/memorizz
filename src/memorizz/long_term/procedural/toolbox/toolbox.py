@@ -59,6 +59,11 @@ class Toolbox:
         # In-memory storage of functions
         self._tools: Dict[str, Callable] = {}
 
+    @property
+    def tools(self) -> Dict[str, Callable]:
+        """Return the callables registered in this process, keyed by tool ID."""
+        return dict(self._tools)
+
     def register_tool(
         self, func: Optional[Callable] = None, augment: bool = False
     ) -> Union[str, Callable]:
@@ -85,28 +90,28 @@ class Toolbox:
             object_id_str = str(object_id)
 
             if augment:
-                # Use the configured LLM provider for augmentation
                 augmented_docstring = self._augment_docstring(docstring)
                 queries = self._generate_queries(augmented_docstring)
+                tool_data = self._normalize_tool_metadata(
+                    f,
+                    self._get_tool_metadata(f),
+                    description=augmented_docstring,
+                )
                 embedding = get_embedding(
                     f"{f.__name__} {augmented_docstring} {signature} {queries}"
                 )
-                tool_data = self._get_tool_metadata(f)
-
                 tool_dict = {
                     "_id": object_id,
                     "embedding": embedding,
                     "queries": queries,
-                    **tool_data.model_dump(),
+                    **tool_data,
                 }
             else:
                 embedding = get_embedding(f"{f.__name__} {docstring} {signature}")
-                tool_data = self._get_tool_metadata(f)
-
                 tool_dict = {
                     "_id": object_id,
                     "embedding": embedding,
-                    **tool_data.model_dump(),
+                    **self._metadata_from_callable(f),
                 }
 
             if self.agent_id:
@@ -119,6 +124,86 @@ class Toolbox:
         if func is None:
             return decorator
         return decorator(func)
+
+    @staticmethod
+    def _metadata_from_callable(func: Callable) -> Dict[str, Any]:
+        """Build stable tool metadata without spending an LLM call."""
+        parameters: Dict[str, Dict[str, Any]] = {}
+        required: List[str] = []
+        type_names = {
+            str: "string",
+            int: "integer",
+            float: "number",
+            bool: "boolean",
+            list: "array",
+            dict: "object",
+        }
+        for name, parameter in inspect.signature(func).parameters.items():
+            if name == "self":
+                continue
+            parameters[name] = {
+                "type": type_names.get(parameter.annotation, "string"),
+                "description": f"Parameter {name}",
+            }
+            if parameter.default == inspect.Parameter.empty and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                required.append(name)
+
+        docstring = inspect.getdoc(func) or ""
+        return {
+            "name": func.__name__,
+            "description": docstring,
+            "signature": str(inspect.signature(func)),
+            "docstring": docstring,
+            "tool_type": "function",
+            "parameters": parameters,
+            "required": required,
+        }
+
+    @classmethod
+    def _normalize_tool_metadata(
+        cls,
+        func: Callable,
+        metadata: Any,
+        *,
+        description: str,
+    ) -> Dict[str, Any]:
+        """Flatten provider-specific metadata into the Toolbox store shape."""
+        if hasattr(metadata, "model_dump"):
+            metadata = metadata.model_dump()
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        function_metadata = metadata.get("function")
+        if isinstance(function_metadata, dict):
+            metadata = function_metadata
+
+        normalized = cls._metadata_from_callable(func)
+        normalized["name"] = str(metadata.get("name") or func.__name__)
+        normalized["description"] = str(
+            metadata.get("description") or description or normalized["description"]
+        )
+        normalized["docstring"] = description or normalized["docstring"]
+
+        parameters = metadata.get("parameters")
+        if isinstance(parameters, list):
+            parameters = {
+                str(item.get("name")): {
+                    "type": item.get("type", "string"),
+                    "description": item.get("description", ""),
+                }
+                for item in parameters
+                if isinstance(item, dict) and item.get("name")
+            }
+        if isinstance(parameters, dict):
+            normalized["parameters"] = parameters.get("properties", parameters)
+
+        required = metadata.get("required")
+        if isinstance(required, list):
+            normalized["required"] = [str(name) for name in required]
+        return normalized
 
     def get_tool_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """

@@ -6,136 +6,9 @@
 <!-- marked.js for markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
 <style>
-    /* Pre-flight + manage panel for local providers (mirrors settings.html). */
-    .local-model-status .model-manager {
-        margin-top: 12px;
-        border: 1px solid var(--border-color, #2a2d36);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.02);
-    }
-    .local-model-status .model-manager > summary {
-        cursor: pointer;
-        padding: 0.55rem 0.85rem;
-        font-size: 0.85rem;
-        color: var(--text-secondary, #aaa);
-        list-style: none;
-        user-select: none;
-    }
-    .local-model-status .model-manager > summary::-webkit-details-marker { display: none; }
-    .local-model-status .model-manager > summary::before {
-        content: '▸ ';
-        display: inline-block;
-        transition: transform 0.15s ease;
-    }
-    .local-model-status .model-manager[open] > summary::before { transform: rotate(90deg); }
-    .local-model-status .model-list {
-        border-top: 1px solid var(--border-color, #2a2d36);
-        padding: 0.4rem 0.5rem 0.5rem;
-    }
-    .local-model-status .model-list-section {
-        font-size: 0.72rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--text-secondary, #888);
-        padding: 0.5rem 0.35rem 0.25rem;
-    }
-    .local-model-status .model-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.5rem;
-        padding: 0.35rem 0.5rem;
-        border-radius: 6px;
-        font-size: 0.85rem;
-    }
-    .local-model-status .model-row + .model-row {
-        border-top: 1px solid rgba(255, 255, 255, 0.04);
-    }
-    .local-model-status .model-row-text { min-width: 0; word-break: break-all; }
-    .local-model-status .model-row-text code,
-    .local-model-status .model-row-select code {
-        background: transparent;
-        padding: 0;
-        font-size: 0.85rem;
-    }
-    .local-model-status .model-row-select {
-        flex: 1 1 auto;
-        min-width: 0;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        text-align: left;
-        background: transparent;
-        border: 1px solid transparent;
-        color: inherit;
-        padding: 0.2rem 0.45rem;
-        border-radius: 5px;
-        cursor: pointer;
-        font: inherit;
-        word-break: break-all;
-    }
-    .local-model-status .model-row-select:hover {
-        background: rgba(0, 217, 255, 0.06);
-        border-color: rgba(0, 217, 255, 0.25);
-    }
-    .local-model-status .model-row-select:focus-visible {
-        outline: 2px solid var(--accent-primary, #00d9ff);
-        outline-offset: 1px;
-    }
-    .local-model-status .model-row[data-selected="true"] {
-        background: rgba(0, 217, 255, 0.06);
-        border-left: 2px solid var(--accent-primary, #00d9ff);
-        padding-left: calc(0.5rem - 2px);
-    }
-    .local-model-status .model-row[data-selected="true"] .model-row-select {
-        color: var(--accent-primary, #00d9ff);
-        font-weight: 600;
-    }
-    .local-model-status .model-row-check {
-        color: var(--accent-primary, #00d9ff);
-        font-weight: 700;
-    }
-    .local-model-status .model-row-label { color: var(--text-secondary, #888); }
-    .local-model-status .model-action-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        flex: 0 0 auto;
-        width: 28px;
-        height: 28px;
-        padding: 0;
-        border-radius: 6px;
-        border: 1px solid transparent;
-        background: transparent;
-        color: var(--text-secondary, #aaa);
-        cursor: pointer;
-        transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
-    }
-    .local-model-status .model-row[data-row-action="delete"] .model-action-btn:hover {
-        color: var(--accent-danger, #ff5577);
-        border-color: rgba(255, 85, 119, 0.45);
-        background: rgba(255, 85, 119, 0.08);
-    }
-    .local-model-status .model-row[data-row-action="pull"] .model-action-btn:hover {
-        color: var(--accent-primary, #00d9ff);
-        border-color: rgba(0, 217, 255, 0.45);
-        background: rgba(0, 217, 255, 0.08);
-    }
-    .local-model-status .model-action-btn:disabled {
-        cursor: progress;
-        opacity: 0.7;
-    }
-    .local-model-status .model-action-spinner {
-        display: inline-block;
-        width: 14px;
-        height: 14px;
-        border: 2px solid currentColor;
-        border-right-color: transparent;
-        border-radius: 50%;
-        animation: pg-lm-spin 0.8s linear infinite;
-    }
-    @keyframes pg-lm-spin { to { transform: rotate(360deg); } }
-    /* When the manage panel takes over selection, hide the redundant
+    /* Local-model manager widget styles are shared in styles.css
+       (.local-model-status .model-manager etc). Below: page-specific rules.
+       When the manage panel takes over selection, hide the redundant
        dropdown + custom input on the playground config form. */
     .config-field#cfg-llm-model-field.is-local-provider #cfg-llm-model,
     .config-field#cfg-llm-model-field.is-local-provider #cfg-llm-model-custom {
@@ -1069,6 +942,38 @@
                     </details>
 
                     <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Learned Skills</summary>
+                        <div id="context-skills-container">
+                        {% if skill_memory %}
+                        <div class="context-workflow-list">
+                            {% for item in skill_memory %}
+                            <div class="context-workflow-item">
+                                <div class="context-workflow-header">
+                                    <span class="context-workflow-name">{{ item.name }}</span>
+                                    <span class="context-workflow-meta">{{ item.status }}{% if item.version %} · v{{ item.version }}{% endif %}</span>
+                                </div>
+                                {% if item.description %}
+                                <div class="context-workflow-query">{{ item.description }}</div>
+                                {% endif %}
+                                <div class="context-workflow-state">
+                                    <span>Activations: {{ item.activations }}</span>
+                                    <span>Successes: {{ item.successes }}</span>
+                                    <span>Failures: {{ item.failures }}</span>
+                                    <span>Deviations: {{ item.deviations }}</span>
+                                </div>
+                                {% if item.demotion_reason %}
+                                <div class="context-workflow-steps">Demoted: {{ item.demotion_reason }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No learned skills yet for this agent.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
                         <summary class="context-block-title">Entity Memory</summary>
                         <div id="context-entity-container">
                         {% if entity_memory %}
@@ -1611,55 +1516,17 @@ function pgDownloadIconSvg() {
         + '</svg>';
 }
 
-let _pgActionInFlight = false;
+// Pull/delete plumbing lives in the shared handleLocalModelAction()
+// (static/js/app.js); this wrapper just maps the playground's data
+// attributes onto it and refreshes the pre-flight status afterwards.
 async function pgHandleActionClick(button) {
-    if (_pgActionInFlight) return;
-    const action = button.dataset.pgAction;
-    const provider = button.dataset.pgProvider;
-    const model = button.dataset.pgModel;
-    if (!action || !provider || !model) return;
-
-    if (action === 'delete' && !window.confirm('Remove ' + model + ' from local cache?')) return;
-    if (action === 'pull') {
-        const ok = window.confirm('Download ' + model + '?\n\n'
-            + 'Large models can take 5–15 minutes. The page will appear to hang while the download runs in the background.');
-        if (!ok) return;
-    }
-
-    _pgActionInFlight = true;
-    button.disabled = true;
-    button.classList.add('is-busy');
-    const originalHtml = button.innerHTML;
-    button.innerHTML = '<span class="model-action-spinner" aria-hidden="true"></span>';
-
-    try {
-        let res;
-        if (action === 'delete' && provider === 'ollama') {
-            res = await fetch('/api/ollama/models/' + encodeURIComponent(model), { method: 'DELETE' });
-        } else if (action === 'delete' && provider === 'huggingface') {
-            res = await fetch('/api/huggingface/models/' + encodeURIComponent(model), { method: 'DELETE' });
-        } else if (action === 'pull') {
-            const fd = new FormData();
-            fd.append(provider === 'ollama' ? 'name' : 'repo_id', model);
-            const url = provider === 'ollama' ? '/api/ollama/pull' : '/api/huggingface/pull';
-            res = await fetch(url, { method: 'POST', body: fd });
-        } else {
-            return;
-        }
-        let data = {};
-        try { data = await res.json(); } catch (_) { /* ignore */ }
-        if (!data.ok) {
-            window.alert('Failed: ' + (data.error || ('HTTP ' + res.status)));
-        }
-    } catch (err) {
-        window.alert('Error: ' + err);
-    } finally {
-        _pgActionInFlight = false;
-        button.disabled = false;
-        button.classList.remove('is-busy');
-        button.innerHTML = originalHtml;
-        playgroundCheckLocalModel();
-    }
+    await handleLocalModelAction(
+        button,
+        button.dataset.pgAction,
+        button.dataset.pgProvider,
+        button.dataset.pgModel,
+        playgroundCheckLocalModel
+    );
 }
 
 document.addEventListener('click', function(ev) {
@@ -2182,6 +2049,49 @@ function renderContextWorkflows(entries) {
     container.innerHTML = `<div class="context-workflow-list">${rows}</div>`;
 }
 
+function renderContextSkills(entries) {
+    const container = document.getElementById('context-skills-container');
+    if (!container) return;
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+        container.innerHTML = '<div class="context-log-empty">No learned skills yet for this agent.</div>';
+        return;
+    }
+
+    const rows = entries.map(function(entry) {
+        const name = entry && entry.name ? String(entry.name) : 'unnamed_skill';
+        const status = entry && entry.status ? String(entry.status) : '';
+        const version = entry && entry.version != null ? String(entry.version) : '';
+        const description = entry && entry.description ? String(entry.description) : '';
+        const demotionReason = entry && entry.demotion_reason ? String(entry.demotion_reason) : '';
+        const activations = entry && Number.isFinite(Number(entry.activations)) ? Number(entry.activations) : 0;
+        const successes = entry && Number.isFinite(Number(entry.successes)) ? Number(entry.successes) : 0;
+        const failures = entry && Number.isFinite(Number(entry.failures)) ? Number(entry.failures) : 0;
+        const deviations = entry && Number.isFinite(Number(entry.deviations)) ? Number(entry.deviations) : 0;
+        const metaText = status + (version ? ` · v${version}` : '');
+        const statParts = [
+            `Activations: ${activations}`,
+            `Successes: ${successes}`,
+            `Failures: ${failures}`,
+            `Deviations: ${deviations}`,
+        ];
+
+        return `
+            <div class="context-workflow-item">
+                <div class="context-workflow-header">
+                    <span class="context-workflow-name">${escapeHtml(name)}</span>
+                    <span class="context-workflow-meta">${escapeHtml(metaText)}</span>
+                </div>
+                ${description ? `<div class="context-workflow-query">${escapeHtml(description)}</div>` : ''}
+                <div class="context-workflow-state">${escapeHtml(statParts.join(' • '))}</div>
+                ${demotionReason ? `<div class="context-workflow-steps">${escapeHtml(`Demoted: ${demotionReason}`)}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `<div class="context-workflow-list">${rows}</div>`;
+}
+
 function renderContextEntities(entries) {
     const container = document.getElementById('context-entity-container');
     if (!container) return;
@@ -2345,6 +2255,7 @@ async function loadThreadMessages(memoryId, options = {}) {
         renderContextConversation([]);
         renderContextToolbox([]);
         renderContextWorkflows([]);
+        renderContextSkills([]);
         renderContextEntities([]);
         renderContextSummaries([]);
         renderContextToolLogs([]);
@@ -2377,6 +2288,7 @@ async function loadThreadMessages(memoryId, options = {}) {
         renderContextConversation(messages);
         renderContextToolbox(Array.isArray(payload.toolbox_memory) ? payload.toolbox_memory : []);
         renderContextWorkflows(Array.isArray(payload.workflow_memory) ? payload.workflow_memory : []);
+        renderContextSkills(Array.isArray(payload.skill_memory) ? payload.skill_memory : []);
         renderContextEntities(Array.isArray(payload.entity_memory) ? payload.entity_memory : []);
         renderContextSummaries(Array.isArray(payload.summary_memory) ? payload.summary_memory : []);
         renderContextToolLogs(Array.isArray(payload.tool_log_memory) ? payload.tool_log_memory : []);
@@ -3115,68 +3027,53 @@ async function sendMessage() {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+        // SSE plumbing lives in the shared readSseStream() (static/js/app.js).
+        await readSseStream(response, (payload) => {
+            if (payload === '[DONE]') {
+                const cursor = streamTarget.querySelector('.streaming-cursor');
+                if (cursor) cursor.remove();
+                return;
+            }
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+            try {
+                const parsed = JSON.parse(payload);
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop();
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                const payload = line.slice(6);
-
-                if (payload === '[DONE]') {
-                    const cursor = streamTarget.querySelector('.streaming-cursor');
-                    if (cursor) cursor.remove();
-                    continue;
+                if (typeof parsed === 'string') {
+                    fullText += parsed;
+                    streamTarget.textContent = fullText;
+                    scrollToBottom();
+                    return;
                 }
 
-                try {
-                    const parsed = JSON.parse(payload);
+                if (parsed && typeof parsed === 'object') {
+                    const eventType = String(parsed.type || '').toLowerCase();
 
-                    if (typeof parsed === 'string') {
-                        fullText += parsed;
-                        streamTarget.textContent = fullText;
-                        scrollToBottom();
-                        continue;
+                    if (eventType === 'trace' || eventType === 'reasoning') {
+                        appendTraceBox(streamTraceTimeline, parsed);
+                        return;
                     }
 
-                    if (parsed && typeof parsed === 'object') {
-                        const eventType = String(parsed.type || '').toLowerCase();
-
-                        if (eventType === 'trace' || eventType === 'reasoning') {
-                            appendTraceBox(streamTraceTimeline, parsed);
-                            continue;
-                        }
-
-                        if (eventType === 'warning') {
-                            appendTraceBox(streamTraceTimeline, {
-                                trace_kind: parsed.scope || 'warning',
-                                title: 'Warning',
-                                content: parsed.message || parsed.content || '',
-                            });
-                            continue;
-                        }
-
-                        if (eventType === 'content') {
-                            const textChunk = String(parsed.content || parsed.text || '');
-                            if (textChunk) {
-                                fullText += textChunk;
-                                streamTarget.textContent = fullText;
-                                scrollToBottom();
-                            }
-                            continue;
-                        }
+                    if (eventType === 'warning') {
+                        appendTraceBox(streamTraceTimeline, {
+                            trace_kind: parsed.scope || 'warning',
+                            title: 'Warning',
+                            content: parsed.message || parsed.content || '',
+                        });
+                        return;
                     }
-                } catch (e) {}
-            }
-        }
+
+                    if (eventType === 'content') {
+                        const textChunk = String(parsed.content || parsed.text || '');
+                        if (textChunk) {
+                            fullText += textChunk;
+                            streamTarget.textContent = fullText;
+                            scrollToBottom();
+                        }
+                        return;
+                    }
+                }
+            } catch (e) {}
+        });
 
         const cursor = streamTarget.querySelector('.streaming-cursor');
         if (cursor) cursor.remove();

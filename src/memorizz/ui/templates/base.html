@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Memorizz{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=25">
+    <link rel="stylesheet" href="/static/css/styles.css?v=27">
     <style>
         /* Background accents */
         body::before {
@@ -57,7 +57,7 @@
             </div>
 
             <nav class="sidebar-nav">
-                {% set memory_pages = ['personas', 'toolbox', 'conversations', 'workflows', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
+                {% set memory_pages = ['personas', 'toolbox', 'conversations', 'workflows', 'skills', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
                 <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -159,6 +159,16 @@
                                 </svg>
                             </span>
                             <span>Workflows</span>
+                        </a>
+                        <a href="/memory/skills" class="nav-item nav-item--sub {% if active_page == 'skills' %}active{% endif %}">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="m12 3 9 5-9 5-9-5z"/>
+                                    <path d="m3 13 9 5 9-5"/>
+                                    <path d="m3 17.5 9 5 9-5"/>
+                                </svg>
+                            </span>
+                            <span>Skills</span>
                         </a>
                         <a href="/memory/knowledge-base" class="nav-item nav-item--sub {% if active_page == 'knowledge-base' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">
@@ -372,7 +382,7 @@
     {% endif %}
     {% endblock %}
 
-    <script src="/static/js/app.js?v=17" defer></script>
+    <script src="/static/js/app.js?v=18" defer></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

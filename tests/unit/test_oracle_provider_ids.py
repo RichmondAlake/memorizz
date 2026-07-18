@@ -97,6 +97,7 @@ def test_apply_embedding_defaults_from_env_merges_with_explicit_embedding_config
         user="user",
         password="pass",
         dsn="localhost:1521/FREEPDB1",
+        in_database_embedding=False,
         embedding_provider=None,
         embedding_config={"model": "text-embedding-3-large", "dimensions": 1024},
     )
@@ -107,3 +108,28 @@ def test_apply_embedding_defaults_from_env_merges_with_explicit_embedding_config
     assert config.embedding_config["model"] == "text-embedding-3-large"
     assert config.embedding_config["dimensions"] == 1024
     assert config.embedding_config["api_key"] == "env-key"
+
+
+@pytest.mark.unit
+def test_oracle_config_defaults_to_in_database_embeddings():
+    config = OracleConfig(
+        user="user",
+        password="pass",
+        dsn="localhost:1521/FREEPDB1",
+    )
+
+    assert config.in_database_embedding is True
+
+
+@pytest.mark.unit
+def test_in_database_default_ignores_external_embedding_env(monkeypatch):
+    monkeypatch.setenv("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", "openai")
+    config = OracleConfig(
+        user="user",
+        password="pass",
+        dsn="localhost:1521/FREEPDB1",
+    )
+
+    OracleProvider._apply_embedding_defaults_from_env_if_needed(config)
+
+    assert config.embedding_provider is None

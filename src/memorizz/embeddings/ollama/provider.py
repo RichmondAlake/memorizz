@@ -154,13 +154,3 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
     def get_default_model(self) -> str:
         """Get the default model name for this provider."""
         return self.model
-
-    @classmethod
-    def get_available_models(cls) -> List[str]:
-        """Get list of commonly available Ollama embedding models."""
-        return list(cls.MODEL_DIMENSIONS.keys())
-
-    @classmethod
-    def get_model_dimensions(cls, model: str) -> int:
-        """Get known dimensions for a specific model."""
-        return cls.MODEL_DIMENSIONS.get(model, 768)  # Default fallback

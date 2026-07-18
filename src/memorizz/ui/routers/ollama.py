@@ -77,7 +77,7 @@ async def ollama_delete(name: str):
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as _resp:
+        with urllib.request.urlopen(req, timeout=15):
             pass
     except urllib.error.HTTPError as exc:
         detail = (

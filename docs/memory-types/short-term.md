@@ -11,7 +11,7 @@ Short-term memory is the agent's active workspace. MemoRizz separates it into a 
 ```python
 agent.memory.semantic_cache.save(
     key="oracle_setup_docs",
-    value={"answer": "Install client, run memorizz setup-oracle"},
+    value={"answer": "Install the provider, then run memorizz oracle setup"},
 )
 ```
 

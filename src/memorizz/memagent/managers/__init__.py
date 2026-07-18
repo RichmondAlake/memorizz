@@ -6,6 +6,7 @@
 
 from .automation_manager import AutomationManager
 from .cache_manager import CacheManager
+from .continual_learning_manager import ContinualLearningManager
 from .entity_memory_manager import EntityMemoryManager
 from .internet_access_manager import InternetAccessManager
 from .memory_manager import MemoryManager
@@ -13,7 +14,6 @@ from .persona_manager import PersonaManager
 from .sandbox_manager import SandboxManager
 from .self_awareness_manager import SelfAwarenessManager
 from .tool_manager import ToolManager
-from .workflow_manager import WorkflowManager
 
 __all__ = [
     "MemoryManager",
@@ -21,7 +21,7 @@ __all__ = [
     "CacheManager",
     "AutomationManager",
     "PersonaManager",
-    "WorkflowManager",
+    "ContinualLearningManager",
     "EntityMemoryManager",
     "InternetAccessManager",
     "SandboxManager",

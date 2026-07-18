@@ -281,7 +281,7 @@ function remove_container() {
   echo "Data volume '$VOLUME_NAME' is preserved." >&2
   echo "" >&2
   echo "To recreate the container, run:" >&2
-  echo "  ./install_oracle.sh" >&2
+  echo "  memorizz oracle install --image lite" >&2
 }
 
 # --- Full teardown ---
@@ -316,7 +316,7 @@ function full_teardown() {
   echo "All Oracle data has been permanently deleted." >&2
   echo "" >&2
   echo "To start fresh, run:" >&2
-  echo "  ./install_oracle.sh" >&2
+  echo "  memorizz oracle install --image lite" >&2
 }
 
 # --- Main execution ---

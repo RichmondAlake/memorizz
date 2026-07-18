@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block title %}Workflows - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Workflow Memory</h1>
+    <p>{{ total_workflows }} run{% if total_workflows != 1 %}s{% endif %} grouped into trajectory classes — repeated, successful classes can be distilled into learned skills</p>
+</div>
+
+{% if agent_sections %}
+{% for section in agent_sections %}
+<div class="cl-agent-section">
+    <div class="cl-agent-header">
+        <h2>Agent: <code>{{ section.label }}</code></h2>
+        {% if section.can_act %}
+        <form method="post" action="/continual-learning/{{ section.agent_id }}/cycle" class="cl-inline-form">
+            <button type="submit" class="btn btn-primary" title="Staleness sweep + gated promotion of the top eligible classes">Run promotion cycle</button>
+        </form>
+        {% endif %}
+    </div>
+
+    {% if section.report %}
+    <div class="cl-report">
+        <div class="cl-report-title">Last promotion report <span class="cl-report-time">{{ section.report.at }}</span></div>
+        {% if section.report.promoted %}
+        <div class="cl-report-row cl-report-ok">✓ Promoted skill{{ 's' if section.report.promoted|length != 1 }}: {{ section.report.promoted|join(', ') }} — <a href="/memory/skills">review on the Skills page</a></div>
+        {% endif %}
+        {% for item in section.report.rejected %}
+        <div class="cl-report-row cl-report-bad">✗ Rejected {{ item.hash }}…: {{ item.reasons|join('; ') }}</div>
+        {% endfor %}
+        {% for item in section.report.skipped %}
+        <div class="cl-report-row">– Skipped {{ item.hash }}…: {{ item.reason }}</div>
+        {% endfor %}
+        {% for flag in section.report.review_flags %}
+        <div class="cl-report-row cl-report-warn">⚠ {{ flag }}</div>
+        {% endfor %}
+        {% if not section.report.promoted and not section.report.rejected and not section.report.skipped and not section.report.review_flags %}
+        <div class="cl-report-row">No eligible trajectory classes this cycle.</div>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    {% for cls in section.classes %}
+    <div class="memory-item cl-class{% if cls.promoted %} cl-class--promoted{% endif %}">
+        <div class="memory-item-header">
+            <h3>{{ cls.tools }}</h3>
+            <code class="item-id" title="canonical trajectory hash">{{ cls.hash_short }}…</code>
+        </div>
+        <div class="memory-item-body">
+            <div class="item-meta">
+                <span class="meta-tag">{{ cls.executions }} run{{ 's' if cls.executions != 1 }}</span>
+                <span class="meta-tag">{{ cls.success_rate }} success</span>
+                <span class="meta-tag">{{ cls.distinct_queries }} distinct quer{{ 'y' if cls.distinct_queries == 1 else 'ies' }}</span>
+                <span class="meta-tag">last seen {{ cls.last_seen }}</span>
+            </div>
+
+            <div class="cl-gates">
+                {% if cls.promoted %}
+                <span class="cl-badge cl-badge--promoted">PROMOTED{% if cls.covering_skill_name %} → {{ cls.covering_skill_name }}{% endif %}</span>
+                <a class="cl-gate-link" href="/memory/skills">view skill</a>
+                {% else %}
+                {% for gate in cls.gates %}
+                <span class="cl-gate {% if gate.passed %}cl-gate--pass{% else %}cl-gate--fail{% endif %}" title="{{ gate.detail }}">
+                    {{ '✓' if gate.passed else '✗' }} {{ gate.name }}
+                </span>
+                {% endfor %}
+                {% if cls.eligible and section.can_act %}
+                <form method="post" action="/continual-learning/{{ section.agent_id }}/distill/{{ cls.hash }}" class="cl-inline-form">
+                    <button type="submit" class="btn btn-primary btn-sm" title="Distill this class into a skill (eligibility + validation gates still apply)">Distill now</button>
+                </form>
+                {% elif cls.eligible %}
+                <span class="cl-badge cl-badge--eligible">ELIGIBLE</span>
+                {% endif %}
+                {% endif %}
+            </div>
+
+            <details class="cl-runs">
+                <summary>{{ cls.run_count }} run{{ 's' if cls.run_count != 1 }} (showing {{ cls.runs|length }})</summary>
+                <table class="cl-runs-table">
+                    <thead><tr><th>When</th><th>Outcome</th><th>User query</th><th></th></tr></thead>
+                    <tbody>
+                    {% for run in cls.runs %}
+                    <tr>
+                        <td>{{ run.created_at or '—' }}</td>
+                        <td><span class="cl-badge {% if run.outcome == 'success' %}cl-badge--ok{% else %}cl-badge--bad{% endif %}">{{ run.outcome }}</span></td>
+                        <td class="cl-run-query">{{ run.user_query|truncate(90) }}</td>
+                        <td>{% if run.promoted %}<span class="cl-badge cl-badge--promoted" title="covered by an active skill; hidden from workflow retrieval">suppressed</span>{% endif %}</td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <div class="empty-icon">🛠️</div>
+    <h3>No Workflow Memory Found</h3>
+    <p>Workflow trajectories are captured automatically when agents call tools. Once the same procedure repeats successfully, it becomes eligible for promotion to a learned skill.</p>
+</div>
+{% endif %}
+{% endblock %}

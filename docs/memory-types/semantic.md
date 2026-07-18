@@ -155,9 +155,9 @@ Every `MemAgent` with a persona attached automatically gets two tools:
 The agent system prompt always surfaces the current persona, its version,
 the five most recent evolution entries, and explicit guidance on when to
 call `update_persona` (durable identity shifts only — one-off facts go to
-`entity_memory`). See
-[`src/memorizz/long_term/semantic/persona/README.md`](../../src/memorizz/long_term/semantic/persona/README.md)
-for the full `change_trigger` schema and production notes.
+`entity_memory`). A `change_trigger` records the reason, source type,
+optional source id/conversation id, and agent id so every evolution remains
+auditable.
 
 The Local UI's agent configuration page exposes the evolution model
 through two dropdowns: **Load built-in preset** (from `RoleType` +

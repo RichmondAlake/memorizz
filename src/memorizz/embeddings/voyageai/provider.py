@@ -272,70 +272,6 @@ class VoyageAIEmbeddingProvider(BaseEmbeddingProvider):
             logger.error(f"Error generating VoyageAI embedding: {str(e)}")
             raise
 
-    def get_embeddings(self, texts: List[str], **kwargs) -> List[List[float]]:
-        """
-        Generate embeddings for multiple texts.
-
-        Parameters:
-        -----------
-        texts : List[str]
-            The texts to embed
-        **kwargs
-            Additional parameters (same as get_embedding)
-
-        Returns:
-        --------
-        List[List[float]]
-            List of embedding vectors
-        """
-        # Allow per-call overrides
-        model = kwargs.get("model", self.model)
-        output_dimension = kwargs.get("output_dimension", self.dimensions)
-        output_dtype = kwargs.get("output_dtype", self.output_dtype)
-        input_type = kwargs.get("input_type", self.input_type)
-
-        try:
-            # Prepare parameters for the API call
-            embed_params = {
-                "texts": texts,
-                "model": model,
-                "output_dtype": output_dtype,
-            }
-
-            # Add optional parameters
-            if input_type is not None:
-                embed_params["input_type"] = input_type
-
-            if output_dimension != self._get_model_info()["default_dimensions"]:
-                embed_params["output_dimension"] = output_dimension
-
-            # Generate embeddings
-            if self.embedding_type == "text":
-                result = self.client.embed(**embed_params)
-                return result.embeddings
-            elif self.embedding_type == "multimodal":
-                # For multimodal, convert texts to the expected format
-                inputs = [[text] for text in texts]
-                result = self.client.multimodal_embed(
-                    inputs=inputs, model=model, input_type=input_type
-                )
-                return result.embeddings
-            elif self.embedding_type == "contextualized":
-                # For contextualized, wrap each text in the expected format
-                inputs = [[text] for text in texts]
-                result = self.client.contextualized_embed(
-                    inputs=inputs,
-                    model=model,
-                    input_type=input_type,
-                    output_dimension=output_dimension,
-                    output_dtype=output_dtype,
-                )
-                return [res.embeddings[0] for res in result.results]
-
-        except Exception as e:
-            logger.error(f"Error generating VoyageAI embeddings: {str(e)}")
-            raise
-
     def get_dimensions(self) -> int:
         """Get the dimensionality of embeddings produced by this provider."""
         return self.dimensions
@@ -343,27 +279,6 @@ class VoyageAIEmbeddingProvider(BaseEmbeddingProvider):
     def get_default_model(self) -> str:
         """Get the default model name for this provider."""
         return self.model
-
-    def get_embedding_type(self) -> str:
-        """Get the embedding type (text, multimodal, contextualized)."""
-        return self.embedding_type
-
-    @classmethod
-    def get_available_models(cls, embedding_type: str = "text") -> List[str]:
-        """Get list of available VoyageAI models for a specific embedding type."""
-        if embedding_type == "text":
-            return list(cls.TEXT_MODELS.keys())
-        elif embedding_type == "multimodal":
-            return list(cls.MULTIMODAL_MODELS.keys())
-        elif embedding_type == "contextualized":
-            return list(cls.CONTEXTUALIZED_MODELS.keys())
-        else:
-            # Return all models
-            return (
-                list(cls.TEXT_MODELS.keys())
-                + list(cls.MULTIMODAL_MODELS.keys())
-                + list(cls.CONTEXTUALIZED_MODELS.keys())
-            )
 
     @classmethod
     def get_model_info(cls, model: str) -> Dict[str, Any]:
@@ -374,12 +289,6 @@ class VoyageAIEmbeddingProvider(BaseEmbeddingProvider):
             **cls.CONTEXTUALIZED_MODELS,
         }
         return all_models.get(model, {})
-
-    @classmethod
-    def get_supported_dimensions(cls, model: str) -> List[int]:
-        """Get supported dimensions for a specific model."""
-        model_info = cls.get_model_info(model)
-        return model_info.get("supported_dimensions", [])
 
     def multimodal_embed(self, inputs: List[List[Union[str, Any]]], **kwargs):
         """

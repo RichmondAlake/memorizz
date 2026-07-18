@@ -364,7 +364,6 @@ class TestComponentIntegration:
         # Verify all managers are integrated
         assert agent.persona_manager.current_persona == persona
         assert agent.cache_manager.enabled == True
-        assert agent.workflow_manager is not None
 
         # Verify persona influences responses
         persona_prompt = agent.persona_manager.get_persona_prompt()
@@ -481,7 +480,6 @@ class TestComponentIntegration:
         assert "team_coordinator" in tool_names
         assert agent.cache_manager.enabled == True
         assert agent.memory_manager is not None
-        assert agent.workflow_manager is not None
 
         # Test tool executions
         project_result, _ = agent.tool_manager.execute_tool(

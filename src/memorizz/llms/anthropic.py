@@ -38,6 +38,11 @@ class Anthropic(LLMProvider):
         Nucleus-sampling probability mass.
     top_k : int, optional
         Top-K sampling.
+    enable_prompt_caching : bool
+        Attach ``cache_control`` breakpoints (system prompt + latest message)
+        so repeated prefixes — every tool-loop iteration and every follow-up
+        turn — are billed at Anthropic's cached-input rate instead of full
+        price. Enabled by default; requires no server-side setup.
     additional_config : dict, optional
         Extra keyword arguments forwarded to ``messages.create``.
     """
@@ -51,6 +56,7 @@ class Anthropic(LLMProvider):
         max_tokens: int = 4096,
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
+        enable_prompt_caching: bool = True,
         additional_config: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ):
@@ -72,6 +78,7 @@ class Anthropic(LLMProvider):
         )
         self._last_usage: Optional[Dict[str, int]] = None
         self._max_tokens = max_tokens
+        self._enable_prompt_caching = enable_prompt_caching
 
         # Build optional request parameters
         self._request_options: Dict[str, Any] = {}
@@ -85,6 +92,10 @@ class Anthropic(LLMProvider):
             for key, value in additional_config.items():
                 if key in allowed and value is not None:
                     self._request_options[key] = value
+            if "enable_prompt_caching" in additional_config:
+                self._enable_prompt_caching = bool(
+                    additional_config["enable_prompt_caching"]
+                )
 
     # ------------------------------------------------------------------
     # Context-window inference
@@ -205,6 +216,7 @@ class Anthropic(LLMProvider):
             kwargs["tools"] = self._convert_tools(tools)
             kwargs["tool_choice"] = self._convert_tool_choice(tool_choice)
         kwargs.update(self._request_options)
+        self._apply_cache_control(kwargs)
 
         response = self.client.messages.create(**kwargs)
         self._last_usage = self._extract_usage(response)
@@ -248,17 +260,33 @@ class Anthropic(LLMProvider):
             kwargs["tools"] = self._convert_tools(tools)
             kwargs["tool_choice"] = self._convert_tool_choice(tool_choice)
         kwargs.update(self._request_options)
+        self._apply_cache_control(kwargs)
 
         accumulated_content = ""
         tool_calls_acc: Dict[int, Dict[str, Any]] = {}
         current_block_index = -1
         current_block_type = None
+        # Usage snapshot for THIS stream only — keeps a missing message_start
+        # from merging fresh output tokens into a previous call's usage.
+        stream_usage: Optional[Dict[str, Any]] = None
 
         with self.client.messages.stream(**kwargs) as stream:
             for event in stream:
                 event_type = getattr(event, "type", None)
 
-                if event_type == "content_block_start":
+                if event_type == "message_start":
+                    # message_start carries the authoritative input-side usage
+                    # (including cache_read/cache_creation); output tokens
+                    # arrive later via message_delta.
+                    message_obj = getattr(event, "message", None)
+                    usage = getattr(message_obj, "usage", None)
+                    if usage is not None:
+                        extracted = self._usage_to_dict(usage)
+                        if extracted:
+                            stream_usage = extracted
+                            self._last_usage = extracted
+
+                elif event_type == "content_block_start":
                     current_block_index = getattr(
                         event, "index", current_block_index + 1
                     )
@@ -300,34 +328,33 @@ class Anthropic(LLMProvider):
                             ] += partial_json
 
                 elif event_type == "message_delta":
-                    delta = getattr(event, "delta", None)
                     usage = getattr(event, "usage", None)
                     if usage:
-                        self._last_usage = {
-                            "prompt_tokens": None,
-                            "completion_tokens": getattr(usage, "output_tokens", None),
-                            "total_tokens": None,
-                        }
+                        output_tokens = getattr(usage, "output_tokens", None)
+                        # Merge output tokens into the usage snapshot captured
+                        # at message_start instead of clobbering it.
+                        merged = dict(stream_usage or {})
+                        merged["completion_tokens"] = output_tokens
+                        prompt_tokens = merged.get("prompt_tokens")
+                        if prompt_tokens is not None and output_tokens is not None:
+                            merged["total_tokens"] = prompt_tokens + output_tokens
+                        else:
+                            merged.setdefault("prompt_tokens", None)
+                            merged.setdefault("total_tokens", None)
+                        self._last_usage = merged
 
         # Yield final result
         if tool_calls_acc:
             tool_calls_list = []
             for idx in sorted(tool_calls_acc.keys()):
                 tc = tool_calls_acc[idx]
-                # Parse the accumulated JSON arguments
-                args_str = tc["function"]["arguments"]
-                try:
-                    parsed_args = json.loads(args_str) if args_str else {}
-                except json.JSONDecodeError:
-                    parsed_args = args_str
-
                 tool_calls_list.append(
                     SimpleNamespace(
                         id=tc["id"],
                         type="function",
                         function=SimpleNamespace(
                             name=tc["function"]["name"],
-                            arguments=args_str,
+                            arguments=tc["function"]["arguments"],
                         ),
                     )
                 )
@@ -342,6 +369,80 @@ class Anthropic(LLMProvider):
             yield {"type": "done", "content": accumulated_content}
 
     # ------------------------------------------------------------------
+    # Prompt caching
+    # ------------------------------------------------------------------
+
+    def _apply_cache_control(self, kwargs: Dict[str, Any]) -> None:
+        """Attach ephemeral ``cache_control`` breakpoints to the request.
+
+        Anthropic prompt caching is opt-in and prefix-based (rendered order:
+        tools → system → messages). Three breakpoints cover the agent loop:
+
+        1. On the system prompt — caches the tool schemas *and* the system
+           text together, so they're read (not re-billed) on every tool-loop
+           iteration and every follow-up turn.
+        2. On the last content block of the FINAL message — the read point
+           for the next tool-loop iteration within the same turn (the final
+           user message, volatile block included, is byte-identical across
+           iterations of one turn).
+        3. On the last content block of the SECOND-TO-LAST message — the
+           read point for the NEXT turn. The final message carries the
+           per-turn volatile block, which history re-renders as the raw
+           query on later turns, so a breakpoint there can never match
+           across turns; the second-to-last message is stable history and
+           accrues incremental cross-turn cache hits (Anthropic looks back
+           up to 20 blocks to find the previous entry).
+
+        Reads bill at ~0.1x input price, writes at 1.25x — with the tool loop
+        re-sending the whole prefix every iteration this pays for itself on
+        the very next request. No-ops when ``enable_prompt_caching`` is off.
+        """
+        if not self._enable_prompt_caching:
+            return
+
+        system_text = kwargs.get("system")
+        if isinstance(system_text, str) and system_text.strip():
+            kwargs["system"] = [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+
+        messages = kwargs.get("messages") or []
+        marked = 0
+        for msg in reversed(messages):
+            if marked >= 2:
+                break
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                if not content.strip():
+                    continue
+                msg["content"] = [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+                marked += 1
+            elif isinstance(content, list) and content:
+                last_block = content[-1]
+                if isinstance(last_block, dict) and last_block.get("type") in (
+                    "text",
+                    "tool_result",
+                    "tool_use",
+                    "image",
+                ):
+                    updated = dict(last_block)
+                    updated["cache_control"] = {"type": "ephemeral"}
+                    content[-1] = updated
+                    marked += 1
+
+    # ------------------------------------------------------------------
     # Usage tracking
     # ------------------------------------------------------------------
 
@@ -349,16 +450,41 @@ class Anthropic(LLMProvider):
         usage = getattr(response, "usage", None)
         if not usage:
             return None
+        return self._usage_to_dict(usage)
+
+    @staticmethod
+    def _usage_to_dict(usage: Any) -> Optional[Dict[str, int]]:
+        """Normalize an Anthropic usage object, including cache metrics.
+
+        Anthropic's ``input_tokens`` EXCLUDES cached tokens, so the true
+        prompt size (what context-window accounting needs) is
+        ``input + cache_read + cache_creation``. The raw cache fields are
+        surfaced alongside so callers can compute hit rates.
+        """
         input_tokens = getattr(usage, "input_tokens", None)
         output_tokens = getattr(usage, "output_tokens", None)
+        cache_read = getattr(usage, "cache_read_input_tokens", None) or 0
+        cache_creation = getattr(usage, "cache_creation_input_tokens", None) or 0
+
+        prompt_tokens = input_tokens
+        if input_tokens is not None:
+            prompt_tokens = input_tokens + cache_read + cache_creation
+
         total = None
-        if input_tokens is not None and output_tokens is not None:
-            total = input_tokens + output_tokens
-        return {
-            "prompt_tokens": input_tokens,
+        if prompt_tokens is not None and output_tokens is not None:
+            total = prompt_tokens + output_tokens
+
+        extracted: Dict[str, int] = {
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": output_tokens,
             "total_tokens": total,
         }
+        if cache_read:
+            extracted["cached_tokens"] = cache_read
+            extracted["cache_read_input_tokens"] = cache_read
+        if cache_creation:
+            extracted["cache_creation_input_tokens"] = cache_creation
+        return extracted
 
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage

@@ -28,7 +28,6 @@ This comprehensive test suite covers all aspects of the refactored MemAgent arch
 ### Unit Test Markers
 - `@pytest.mark.unit` - Unit tests for individual components
 - `@pytest.mark.memory` - Memory-related functionality
-- `@pytest.mark.core` - Core MemAgent functionality
 
 ### Functional Test Markers
 - `@pytest.mark.single_agent` - Single agent functionality

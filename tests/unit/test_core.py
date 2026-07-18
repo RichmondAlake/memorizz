@@ -105,7 +105,6 @@ class TestMemAgentCore:
         assert hasattr(agent, "tool_manager")
         assert hasattr(agent, "cache_manager")
         assert hasattr(agent, "persona_manager")
-        assert hasattr(agent, "workflow_manager")
         assert hasattr(agent, "internet_access_manager")
 
         # Check memory manager
@@ -119,7 +118,6 @@ class TestMemAgentCore:
         # Check other managers
         assert agent.tool_manager is not None
         assert agent.persona_manager is not None
-        assert agent.workflow_manager is not None
         assert agent.internet_access_manager is not None
         assert agent.internet_access_manager.is_enabled() is False
 

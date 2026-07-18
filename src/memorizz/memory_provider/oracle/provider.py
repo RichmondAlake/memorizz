@@ -24,7 +24,8 @@ from ...enums.memory_type import MemoryType
 from ...long_term.semantic.persona.persona import Persona
 from ...long_term.semantic.persona.role_type import RoleType
 from ...memagent import MemAgentModel
-from ..base import MemoryProvider
+from ..base import _UNSET as _BASE_UNSET
+from ..base import MemoryProvider, filter_tool_log_rows
 
 if TYPE_CHECKING:
     pass
@@ -70,6 +71,456 @@ def _memory_type_supports_user_id(memory_type: Any) -> bool:
     return memory_type in _USER_SCOPED_MEMORY_TYPES
 
 
+# ---------------------------------------------------------------------------
+# Row→dict registry
+# ---------------------------------------------------------------------------
+#
+# The relational read paths (``retrieve_by_id``, ``_list_all_from_table``,
+# ``_vector_search`` and the agent-tool lookups) all share the same shape:
+# SELECT an explicit column list, then map the positional row into a dict
+# with per-column post-processing (LOB reads, JSON deserialization,
+# timestamp formatting, RAW(16) → uuid strings, ...).  Historically every
+# memory type re-implemented that mapping inline per path, and the copies
+# drifted — e.g. ``retrieve_by_id`` returned raw CLOB locators for
+# ``personas.background`` / ``toolbox.description`` while ``_vector_search``
+# read them into strings.
+#
+# The specs below are now the single source of truth: each ``_Field``
+# couples one SQL column with the dict key(s) it emits and the transform
+# ("kind") applied to the raw value.  ``OracleProvider._apply_row_fields``
+# interprets the kinds; the SELECT lists are built from the same specs so
+# projection and mapping can never drift apart again.  Kinds:
+#
+#   plain          value emitted as-is
+#   plain_or       ``value if value else default``
+#   lob            ``_read_lob_value`` (CLOBs → str) — uniform on every path
+#   lob_or         ``_read_lob_value(value) or default``
+#   json           ``_deserialize_json_field``; falsy → default when given
+#   json_pre       ``_deserialize_json_field(value) if value else default``
+#                  (legacy pre-check variant kept for exact parity)
+#   ts             ``value.isoformat() if value else None``
+#   ts_attr        isoformat when available, otherwise the raw value
+#   ts_str         isoformat when available, else ``str(value)`` if truthy
+#   ts_str_nn      isoformat when available, else ``str(value)`` if not None
+#   ts_opt         key only emitted when truthy (isoformat/str)
+#   uuid           RAW(16) → canonical uuid string (None-safe)
+#   int/float/bool coerce when not None, otherwise default
+#   score          ``float(value)`` (vector-search score column)
+#   epoch_now      ``value.timestamp()`` fallback ``time.time()``
+#   vector         ``list(value)`` or None (always emitted)
+#   vector_or_empty ``list(value)`` or []
+#   vector_opt     emitted only when include_embedding and value is not None
+#   vector_opt_raw as vector_opt but without the ``list()`` conversion
+#
+# Container defaults are passed as factories (``list``/``dict``) so each row
+# gets a fresh instance.
+
+
+class _Field:
+    """One SELECT column and the dict emission(s) derived from it."""
+
+    __slots__ = ("col", "emits")
+
+    def __init__(self, col: str, emits: tuple):
+        self.col = col
+        self.emits = emits
+
+
+def _c(col: str, key: Any = ..., kind: str = "plain", default: Any = None) -> _Field:
+    """Build a field spec. ``key`` defaults to the column name; ``None``
+    means the column is selected but not emitted; a tuple emits the same
+    transformed value under several keys."""
+    if key is ...:
+        key = col
+    if key is None:
+        emits: tuple = ()
+    elif isinstance(key, tuple):
+        emits = tuple((k, kind, default) for k in key)
+    else:
+        emits = ((key, kind, default),)
+    return _Field(col, emits)
+
+
+def _cm(col: str, *emits: tuple) -> _Field:
+    """Field spec emitting several keys with distinct transforms."""
+    return _Field(col, emits)
+
+
+def _select_list(fields: tuple) -> str:
+    return ", ".join(f.col for f in fields)
+
+
+_TS_CREATED = _c("created_at", kind="ts")
+_TS_UPDATED = _c("updated_at", kind="ts")
+_EMB_FULL = _c("embedding", kind="vector")
+_EMB_OPT = _c("embedding", kind="vector_opt")
+_EMB_HIDDEN = _c("embedding", key=None)
+_SCORE_FIELD = _c(
+    "(1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score",
+    key="score",
+    kind="score",
+)
+
+_PERSONA_CORE = (
+    _c("persona_id", key=("_id", "persona_id")),
+    _c("name"),
+    _c("role_type"),
+    _c("background", kind="lob"),
+    _c("traits", kind="json"),
+    _c("expertise", kind="json"),
+    _c("memory_id"),
+    _c("agent_id"),
+)
+
+_TOOLBOX_HEAD = (
+    _c("name"),
+    _c("description", kind="lob"),
+    _c("signature"),
+    _c("docstring", kind="lob"),
+    _c("tool_type"),
+)
+
+_SKILLBOX_CORE = (
+    _c("skill_id", key=("_id", "skill_id")),
+    _c("name"),
+    _c("description", kind="lob"),
+    _c("content", kind="lob"),
+    _c("preconditions", kind="json", default=list),
+    _c("tools_used", kind="json", default=list),
+    _c("queries", kind="json", default=list),
+    _c("agent_id"),
+    _c("user_id"),
+    _c("source_canonical_hash"),
+    _c("source_workflow_ids", kind="json", default=list),
+    _c("exemplar_workflow_id"),
+    _c("status"),
+    _c("version", kind="int", default=1),
+    _c("promoted_at", kind="ts"),
+    _c("demoted_at", kind="ts"),
+    _c("demotion_reason", kind="lob"),
+    _c("baseline", kind="json", default=dict),
+    _c("stats", kind="json", default=dict),
+)
+
+
+def _workflow_body(steps_default: Any) -> tuple:
+    return (
+        _c("name"),
+        _c("description", kind="lob"),
+        _c("steps", kind="json", default=steps_default),
+        _c("current_step"),
+        _c("status"),
+        _c("outcome", kind="json"),
+        _c("memory_id"),
+        _c("agent_id"),
+        _c("user_id"),
+        _c("user_query", kind="lob"),
+    )
+
+
+_WORKFLOW_TAIL = (
+    _c("canonical_hash"),
+    _c("canonical_signature", kind="json"),
+    _c("step_count", kind="int"),
+    _c("promoted_skill_id"),
+    _c("skills_activated", kind="json", default=list),
+)
+
+
+def _tool_log_fields(ts_kind: str) -> tuple:
+    return (
+        _c("id", key="_id", kind="uuid"),
+        _c("tool_log_id"),
+        _c("tool_name"),
+        _c("arguments", kind="lob"),
+        _c("result", kind="lob"),
+        _c("success", kind="bool", default=True),
+        _c("error", kind="lob"),
+        _c("timestamp", kind=ts_kind),
+        _c("agent_id"),
+        _c("tool_call_id"),
+        _c("thread_id"),
+        _c("memory_id"),
+    )
+
+
+_KNOWLEDGE_BASE_HEAD = (
+    _c("id", key="_id", kind="uuid"),
+    _c("memory_id"),
+    _c("content", kind="lob"),
+    _c("memory_type"),
+    _c("importance"),
+    _c("last_accessed", kind="ts_attr"),
+    _c("access_count"),
+    _c("agent_id"),
+)
+
+# Chunking metadata (knowledge_base_id, namespace, chunk_*) is optional on
+# older schemas — ``_knowledge_base_chunk_fields`` swaps in NULL projections
+# when migration 002 hasn't run so the tuple shape stays stable.
+_KB_CHUNK_COLUMNS = (
+    "knowledge_base_id",
+    "namespace",
+    "chunk_index",
+    "chunk_count",
+    "chunking_strategy",
+)
+
+# retrieve_by_id: rows addressed by their logical string id. Workflows,
+# tool logs (and friends) need these dedicated specs because the generic
+# ``SELECT id, data`` fallback has no ``data`` column to read — without
+# them, by-id loads silently returned None.
+_BY_ID_SPECS: Dict[MemoryType, tuple] = {
+    MemoryType.PERSONAS: (
+        "persona_id",
+        _PERSONA_CORE + (_EMB_FULL, _TS_CREATED, _TS_UPDATED),
+    ),
+    MemoryType.TOOLBOX: (
+        "tool_id",
+        (_c("tool_id", key=("_id", "tool_id")),)
+        + _TOOLBOX_HEAD
+        + (
+            _c("parameters", kind="json_pre", default=dict),
+            _c("memory_id"),
+            _c("agent_id"),
+            _EMB_FULL,
+            _TS_CREATED,
+            _TS_UPDATED,
+        ),
+    ),
+    MemoryType.SKILLBOX: (
+        "skill_id",
+        _SKILLBOX_CORE + (_EMB_FULL, _TS_CREATED, _TS_UPDATED),
+    ),
+    MemoryType.WORKFLOW_MEMORY: (
+        "workflow_id",
+        (_c("workflow_id", key=("_id", "workflow_id")),)
+        + _workflow_body(steps_default=dict)
+        + _WORKFLOW_TAIL
+        + (_EMB_FULL, _TS_CREATED, _TS_UPDATED),
+    ),
+    MemoryType.TOOL_LOG: ("tool_log_id", _tool_log_fields("ts_str_nn")),
+}
+
+# _list_all_from_table: full-table scans. (fields, order_by)
+_LIST_SPECS: Dict[MemoryType, tuple] = {
+    MemoryType.ENTITY_MEMORY: (
+        (
+            _c("id", key="_id", kind="uuid"),
+            _c("entity_id"),
+            _c("name"),
+            _c("entity_type"),
+            _c("attributes", kind="json", default=list),
+            _c("relations", kind="json", default=list),
+            _c("metadata", kind="json", default=dict),
+            _c("memory_id"),
+            _c("agent_id"),
+            _c("embedding", kind="vector_opt_raw"),
+            _c("created_at", kind="ts_opt"),
+            _c("updated_at", kind="ts_opt"),
+        ),
+        None,
+    ),
+    MemoryType.CONVERSATION_MEMORY: (
+        (
+            _c("id", key="_id", kind="uuid"),
+            _c("memory_id"),
+            _c("thread_id"),
+            _c("role"),
+            _c("content", kind="lob"),
+            _c("timestamp", kind="ts_str"),
+            _c("agent_id"),
+            _EMB_OPT,
+        ),
+        "timestamp",
+    ),
+    MemoryType.TOOLBOX: (
+        (_c("id", key="_id", kind="uuid"), _c("tool_id"))
+        + _TOOLBOX_HEAD
+        + (
+            _c("parameters", kind="json"),
+            _c("memory_id"),
+            _c("agent_id"),
+            _EMB_OPT,
+            _c("created_at", key=None),
+            _c("updated_at", key=None),
+        ),
+        None,
+    ),
+    MemoryType.SKILLBOX: (
+        _SKILLBOX_CORE + (_EMB_OPT, _TS_CREATED, _TS_UPDATED),
+        None,
+    ),
+    MemoryType.WORKFLOW_MEMORY: (
+        (_c("id", key="_id", kind="uuid"), _c("workflow_id"))
+        + _workflow_body(steps_default=None)
+        + _WORKFLOW_TAIL
+        + (_EMB_OPT, _TS_CREATED, _TS_UPDATED),
+        None,
+    ),
+    MemoryType.SUMMARIES: (
+        (
+            _c("id", key="_id", kind="uuid"),
+            _c("summary_id"),
+            _c("content", kind="lob"),
+            _c("original_memory_ids", kind="json"),
+            _c("summary_type"),
+            _c("memory_id"),
+            _c("agent_id"),
+            _EMB_OPT,
+            _c("created_at", kind="ts_opt"),
+        ),
+        None,
+    ),
+    MemoryType.TOOL_LOG: (_tool_log_fields("ts_str"), "timestamp"),
+    MemoryType.KNOWLEDGE_BASE: (
+        _KNOWLEDGE_BASE_HEAD
+        + (
+            _EMB_OPT,
+            _c("created_at", kind="ts_attr"),
+            _c("updated_at", kind="ts_attr"),
+        ),
+        None,
+    ),
+}
+
+# _vector_search result rows (score column included).
+_VECTOR_SPECS: Dict[MemoryType, tuple] = {
+    MemoryType.SEMANTIC_CACHE: (
+        _c("id", key="_id", kind="uuid"),
+        _c("cache_key"),
+        _c("query_text", kind="lob"),
+        _c("response", kind="lob"),
+        _c("scope"),
+        _c("similarity_threshold", kind="float", default=0.85),
+        # hit_count is also mapped to usage_count for API compatibility.
+        _c("hit_count", key=("hit_count", "usage_count"), kind="int", default=0),
+        _c("agent_id"),
+        _c("embedding", kind="vector_or_empty"),
+        _cm(
+            "created_at",
+            ("timestamp", "epoch_now", None),
+            ("created_at", "plain", None),
+        ),
+        _c("expires_at"),
+        _SCORE_FIELD,
+    ),
+    MemoryType.PERSONAS: _PERSONA_CORE
+    + (_EMB_HIDDEN, _TS_CREATED, _TS_UPDATED, _SCORE_FIELD),
+    MemoryType.TOOLBOX: (_c("tool_id", key=("_id", "tool_id")),)
+    + _TOOLBOX_HEAD
+    + (
+        _c("parameters", kind="json", default=dict),
+        _c("memory_id"),
+        _c("agent_id"),
+        _EMB_HIDDEN,
+        _TS_CREATED,
+        _TS_UPDATED,
+        _SCORE_FIELD,
+    ),
+    MemoryType.SKILLBOX: _SKILLBOX_CORE
+    + (_EMB_HIDDEN, _TS_CREATED, _TS_UPDATED, _SCORE_FIELD),
+    MemoryType.WORKFLOW_MEMORY: (_c("workflow_id", key=("_id", "workflow_id")),)
+    + _workflow_body(steps_default=dict)
+    + _WORKFLOW_TAIL
+    + (_EMB_HIDDEN, _TS_CREATED, _TS_UPDATED, _SCORE_FIELD),
+    MemoryType.SUMMARIES: (
+        _c("summary_id", key=("_id", "summary_id")),
+        _c("content", kind="lob"),
+        _c("original_memory_ids", kind="json", default=list),
+        _c("summary_type"),
+        _c("memory_id"),
+        _c("agent_id"),
+        _EMB_HIDDEN,
+        _TS_CREATED,
+        _SCORE_FIELD,
+    ),
+    MemoryType.ENTITY_MEMORY: (
+        _c("entity_id", key=("_id", "entity_id")),
+        _c("name"),
+        _c("entity_type"),
+        _c("attributes", kind="json", default=list),
+        _c("relations", kind="json", default=list),
+        _c("metadata", kind="json", default=dict),
+        _c("memory_id"),
+        _c("agent_id"),
+        _EMB_HIDDEN,
+        _TS_CREATED,
+        _TS_UPDATED,
+        _SCORE_FIELD,
+    ),
+    MemoryType.CONVERSATION_MEMORY: (
+        _c("id", key="_id", kind="uuid"),
+        _c("memory_id"),
+        _c("thread_id"),
+        _c("role"),
+        _c("content", kind="lob"),
+        _c("timestamp", kind="ts_attr"),
+        _c("agent_id"),
+        _EMB_HIDDEN,
+        _SCORE_FIELD,
+    ),
+    # Chunking metadata is appended at runtime (after the score column) so
+    # the agent-scoped filter in ``knowledge_base_lookup`` has a real
+    # ``knowledge_base_id`` to match against.
+    MemoryType.KNOWLEDGE_BASE: _KNOWLEDGE_BASE_HEAD
+    + (_EMB_HIDDEN, _TS_CREATED, _TS_UPDATED, _SCORE_FIELD),
+    MemoryType.SHORT_TERM_MEMORY: (
+        _c("id", key="_id", kind="uuid"),
+        _c("memory_id"),
+        _c("content", kind="lob"),
+        _c("memory_type"),
+        _c("ttl"),
+        _c("agent_id"),
+        _EMB_HIDDEN,
+        _TS_CREATED,
+        _c("expires_at", kind="ts_attr"),
+        _SCORE_FIELD,
+    ),
+    MemoryType.SHARED_MEMORY: (
+        _c("id", key="_id", kind="uuid"),
+        _c("memory_id"),
+        _c("content", kind="json"),
+        _c("memory_type"),
+        _c("scope"),
+        _c("owner_agent_id"),
+        _c("access_list", kind="json"),
+        _EMB_HIDDEN,
+        _TS_CREATED,
+        _TS_UPDATED,
+        _SCORE_FIELD,
+    ),
+}
+
+# Tool metadata as served to agents (retrieve_tools_for_agent and the
+# semantic tool search): defaulted, LLM-facing key names ("type", not
+# "tool_type").
+_AGENT_TOOL_FIELDS = (
+    _c("tool_id", key="_id", kind="plain_or"),
+    _c("name", kind="plain_or", default="unknown"),
+    _c("description", kind="lob_or", default=""),
+    _c("signature", kind="plain_or", default=""),
+    _c("docstring", kind="lob_or", default=""),
+    _c("tool_type", key="type", kind="plain_or", default="function"),
+    _c("parameters", kind="json", default=dict),
+    _c("memory_id", kind="plain_or"),
+    _c("embedding", kind="vector"),
+)
+
+# Same projection as _AGENT_TOOL_FIELDS minus the embedding, in the column
+# order retrieve_memagent has always used for an agent's private tools.
+_MEMAGENT_TOOL_FIELDS = (
+    _c("tool_id", key="_id"),
+    _c("name"),
+    _c("description", kind="lob_or", default=""),
+    _c("signature", kind="plain_or", default=""),
+    _c("docstring", kind="lob_or", default=""),
+    _c("tool_type", key="type", kind="plain_or", default="function"),
+    _c("memory_id"),
+    _c("parameters", kind="json", default=dict),
+)
+
+
 @dataclass
 class OracleConfig:
     """Configuration for the Oracle provider."""
@@ -81,6 +532,7 @@ class OracleConfig:
         dsn: str,
         schema: Optional[str] = None,
         lazy_vector_indexes: bool = False,
+        in_database_embedding: bool = True,
         embedding_provider=None,
         embedding_config: Dict[str, Any] = None,
         pool_min: int = 1,
@@ -108,11 +560,16 @@ class OracleConfig:
             If True, vector indexes are created only when needed
             If False, vector indexes are created immediately during initialization
             Default: False
+        in_database_embedding : bool
+            Use an ONNX embedding model inside Oracle AI Database when no
+            explicit ``embedding_provider`` is supplied. The default is True.
+            Model, dimensions, ONNX source, and installation behavior can be
+            overridden through ``embedding_config``.
         embedding_provider : str or EmbeddingManager, optional
             Embedding provider to use. Can be:
             - EmbeddingManager instance (explicit injection)
             - String provider name ("openai", "ollama", "voyageai")
-            - None (uses global embedding configuration)
+            - None (uses Oracle in-database embeddings by default)
         embedding_config : Dict[str, Any], optional
             Configuration for the embedding provider
             Example: {"model": "text-embedding-3-small", "dimensions": 512}
@@ -128,6 +585,7 @@ class OracleConfig:
         self.dsn = dsn
         self.schema = schema if schema is not None else user
         self.lazy_vector_indexes = lazy_vector_indexes
+        self.in_database_embedding = bool(in_database_embedding)
         self.embedding_provider = embedding_provider
         self.embedding_config = embedding_config or {}
         self.pool_min = pool_min
@@ -156,6 +614,7 @@ class OracleProvider(MemoryProvider):
     NAME_FILTER_TYPES = {
         MemoryType.PERSONAS,
         MemoryType.TOOLBOX,
+        MemoryType.SKILLBOX,
         MemoryType.WORKFLOW_MEMORY,
         MemoryType.ENTITY_MEMORY,
         MemoryType.MEMAGENT,
@@ -206,6 +665,12 @@ class OracleProvider(MemoryProvider):
         # Create all memory store tables
         self._create_memory_stores()
 
+        # Existing Oracle VECTOR columns have immutable dimensions. Fail
+        # during provider construction instead of advertising a configured
+        # model dimension and surfacing ORA-51803 on the first later write.
+        if config.in_database_embedding:
+            self.validate_vector_schema_dimensions()
+
         # Create vector indexes immediately only if not using lazy initialization
         if not config.lazy_vector_indexes:
             try:
@@ -219,7 +684,26 @@ class OracleProvider(MemoryProvider):
 
     def _setup_embedding_provider(self, config: OracleConfig):
         """Setup the embedding provider based on configuration."""
-        if config.embedding_provider is None:
+        if config.embedding_provider is None and config.in_database_embedding:
+            from ...embeddings import set_global_embedding_manager
+            from .embedding import (
+                OracleInDatabaseEmbeddingProvider,
+                in_database_embedding_options,
+            )
+
+            provider = OracleInDatabaseEmbeddingProvider(
+                self.pool,
+                **in_database_embedding_options(config.embedding_config),
+            )
+            provider.ensure_model()
+            set_global_embedding_manager(provider)
+            logger.info(
+                "Using Oracle in-database embedding model %s (%d dimensions)",
+                provider.get_default_model(),
+                provider.get_dimensions(),
+            )
+            return provider
+        elif config.embedding_provider is None:
             return None
         elif isinstance(config.embedding_provider, str):
             try:
@@ -341,7 +825,7 @@ class OracleProvider(MemoryProvider):
         """
         Apply default embedding provider/config from env when not explicitly provided.
         """
-        if config.embedding_provider is not None:
+        if config.embedding_provider is not None or config.in_database_embedding:
             return
 
         defaults = cls._resolve_embedding_defaults_from_env()
@@ -475,6 +959,96 @@ class OracleProvider(MemoryProvider):
         """Get a connection from the pool."""
         return self.pool.acquire()
 
+    @staticmethod
+    def _vector_dimension_from_ddl(ddl: str, column_name: str) -> Optional[int]:
+        """Extract ``VECTOR(n, ...)`` for one column from Oracle table DDL."""
+        pattern = re.compile(
+            rf'"?{re.escape(str(column_name))}"?\s+VECTOR\s*\(\s*(\d+)\s*,',
+            re.IGNORECASE,
+        )
+        match = pattern.search(str(ddl or ""))
+        return int(match.group(1)) if match else None
+
+    def get_vector_schema_dimensions(self) -> Dict[str, int]:
+        """Return declared dimensions for schema ``EMBEDDING`` columns.
+
+        ``DBMS_METADATA.GET_DDL`` is used instead of ``USER_VECTOR_COLUMNS``
+        because the latter is not available in every Oracle AI Database
+        release that supports the VECTOR type.
+        """
+        owner = str(self.config.schema or self.config.user).strip().upper()
+        dimensions: Dict[str, int] = {}
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT table_name, column_name
+                    FROM all_tab_columns
+                    WHERE owner = :owner
+                      AND data_type = 'VECTOR'
+                      AND column_name = 'EMBEDDING'
+                    ORDER BY table_name, column_name
+                    """,
+                    {"owner": owner},
+                )
+                columns = cursor.fetchall()
+                for table_name, column_name in columns:
+                    cursor.execute(
+                        """
+                        SELECT DBMS_METADATA.GET_DDL(
+                            'TABLE', :table_name, :owner
+                        )
+                        FROM dual
+                        """,
+                        {"table_name": table_name, "owner": owner},
+                    )
+                    row = cursor.fetchone()
+                    ddl_value = row[0] if row else None
+                    ddl = (
+                        ddl_value.read()
+                        if hasattr(ddl_value, "read")
+                        else str(ddl_value or "")
+                    )
+                    dimension = self._vector_dimension_from_ddl(ddl, column_name)
+                    if dimension is not None:
+                        dimensions[f"{table_name}.{column_name}"] = dimension
+                cursor.close()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not inspect Oracle VECTOR dimensions for schema "
+                f"{owner}: {exc}"
+            ) from exc
+        return dimensions
+
+    def validate_vector_schema_dimensions(
+        self, expected_dimensions: Optional[int] = None
+    ) -> Dict[str, int]:
+        """Fail fast when existing VECTOR columns mismatch the embedder."""
+        expected = int(
+            expected_dimensions
+            if expected_dimensions is not None
+            else self._get_embedding_dimensions_safe()
+        )
+        declared = self.get_vector_schema_dimensions()
+        mismatches = {
+            name: dimension
+            for name, dimension in declared.items()
+            if dimension != expected
+        }
+        if mismatches:
+            details = ", ".join(
+                f"{name}={dimension}" for name, dimension in sorted(mismatches.items())
+            )
+            raise RuntimeError(
+                "Oracle VECTOR dimension mismatch: the configured embedding "
+                f"provider outputs {expected} dimensions, but schema "
+                f"{self.config.schema or self.config.user} declares {details}. "
+                "Use a fresh schema or migrate every affected VECTOR column; "
+                "Oracle cannot reshape existing vector columns automatically."
+            )
+        return declared
+
     def _table_has_column(self, cursor: Any, table_name: str, column_name: str) -> bool:
         """Return True when a table column exists in the current schema."""
         try:
@@ -548,7 +1122,7 @@ class OracleProvider(MemoryProvider):
         and a missing Knowledge Base panel in the UI.
 
         The fix: drive table creation from ``schema_relational.sql`` — the
-        same file ``memorizz setup-oracle`` uses. One source of truth.
+        same file ``memorizz oracle setup`` uses. One source of truth.
 
         Existing tables are preserved; Oracle returns ``ORA-00955`` for
         "already exists" which we swallow. Missing objects on a partially-
@@ -680,6 +1254,25 @@ class OracleProvider(MemoryProvider):
             ("tool_type", "VARCHAR2(50)"),
             ("parameters", "CLOB"),
         ],
+        MemoryType.SKILLBOX: [
+            ("skill_id", "VARCHAR2(255)"),
+            ("description", "CLOB"),
+            ("content", "CLOB"),
+            ("preconditions", "CLOB"),
+            ("tools_used", "CLOB"),
+            ("queries", "CLOB"),
+            ("user_id", "VARCHAR2(255)"),
+            ("source_canonical_hash", "VARCHAR2(255)"),
+            ("source_workflow_ids", "CLOB"),
+            ("exemplar_workflow_id", "VARCHAR2(255)"),
+            ("status", "VARCHAR2(50)"),
+            ("version", "NUMBER(10) DEFAULT 1"),
+            ("promoted_at", "TIMESTAMP"),
+            ("demoted_at", "TIMESTAMP"),
+            ("demotion_reason", "CLOB"),
+            ("baseline", "CLOB"),
+            ("stats", "CLOB"),
+        ],
         MemoryType.WORKFLOW_MEMORY: [
             ("workflow_id", "VARCHAR2(255)"),
             ("description", "CLOB"),
@@ -687,6 +1280,13 @@ class OracleProvider(MemoryProvider):
             ("current_step", "VARCHAR2(255)"),
             ("status", "VARCHAR2(50)"),
             ("outcome", "CLOB"),
+            ("user_id", "VARCHAR2(255)"),
+            ("user_query", "CLOB"),
+            ("canonical_hash", "VARCHAR2(255)"),
+            ("canonical_signature", "CLOB"),
+            ("step_count", "NUMBER(10)"),
+            ("promoted_skill_id", "VARCHAR2(255)"),
+            ("skills_activated", "CLOB"),
         ],
         MemoryType.SHARED_MEMORY: [
             ("content", "CLOB"),
@@ -892,12 +1492,6 @@ class OracleProvider(MemoryProvider):
             del result["embedding"]
         return result
 
-    def _dict_to_doc(self, data: Dict[str, Any]) -> str:
-        """Convert dictionary to JSON document."""
-        # Sanitize data to handle JsonId objects before JSON serialization
-        sanitized = self._sanitize_for_json(data)
-        return json.dumps(sanitized)
-
     def _ensure_json_text(self, payload: Any) -> Optional[str]:
         """Convert payloads to JSON strings for storage in ``IS JSON`` columns.
 
@@ -1032,6 +1626,126 @@ class OracleProvider(MemoryProvider):
                 return value
         return value
 
+    def _apply_row_fields(
+        self, fields: tuple, row: tuple, include_embedding: bool = True
+    ) -> Dict[str, Any]:
+        """Map a positional row onto a dict as described by a field spec.
+
+        This is the single row→dict interpreter behind ``retrieve_by_id``,
+        ``_list_all_from_table``, ``_vector_search`` and the agent-tool
+        lookups (see the registry at module level for the kind semantics).
+        ``include_embedding`` only affects ``vector_opt*`` fields.
+        """
+        doc: Dict[str, Any] = {}
+        for value, field in zip(row, fields):
+            for key, kind, default in field.emits:
+                if kind == "plain":
+                    doc[key] = value
+                elif kind == "plain_or":
+                    doc[key] = value if value else default
+                elif kind == "lob":
+                    doc[key] = self._read_lob_value(value)
+                elif kind == "lob_or":
+                    doc[key] = self._read_lob_value(value) or default
+                elif kind == "json":
+                    parsed = self._deserialize_json_field(value)
+                    if default is not None and not parsed:
+                        parsed = default()
+                    doc[key] = parsed
+                elif kind == "json_pre":
+                    doc[key] = (
+                        self._deserialize_json_field(value) if value else default()
+                    )
+                elif kind == "ts":
+                    doc[key] = value.isoformat() if value else None
+                elif kind == "ts_attr":
+                    doc[key] = (
+                        value.isoformat() if hasattr(value, "isoformat") else value
+                    )
+                elif kind == "ts_str":
+                    if hasattr(value, "isoformat"):
+                        doc[key] = value.isoformat()
+                    elif value:
+                        doc[key] = str(value)
+                    else:
+                        doc[key] = value
+                elif kind == "ts_str_nn":
+                    if hasattr(value, "isoformat"):
+                        doc[key] = value.isoformat()
+                    elif value is not None:
+                        doc[key] = str(value)
+                    else:
+                        doc[key] = None
+                elif kind == "ts_opt":
+                    if value:
+                        doc[key] = (
+                            value.isoformat()
+                            if hasattr(value, "isoformat")
+                            else str(value)
+                        )
+                elif kind == "uuid":
+                    doc[key] = str(uuid.UUID(bytes=value)) if value else None
+                elif kind == "int":
+                    doc[key] = int(value) if value is not None else default
+                elif kind == "float":
+                    doc[key] = float(value) if value is not None else default
+                elif kind == "bool":
+                    doc[key] = bool(value) if value is not None else default
+                elif kind == "score":
+                    doc[key] = float(value)
+                elif kind == "epoch_now":
+                    doc[key] = (
+                        value.timestamp()
+                        if hasattr(value, "timestamp")
+                        else time.time()
+                    )
+                elif kind == "vector":
+                    doc[key] = list(value) if value is not None else None
+                elif kind == "vector_or_empty":
+                    doc[key] = list(value) if value is not None else []
+                elif kind == "vector_opt":
+                    if include_embedding and value is not None:
+                        doc[key] = list(value)
+                elif kind == "vector_opt_raw":
+                    if include_embedding and value is not None:
+                        doc[key] = value
+                else:  # pragma: no cover - registry authoring error
+                    raise ValueError(f"Unknown field kind: {kind}")
+        return doc
+
+    def _knowledge_base_chunk_fields(self) -> tuple:
+        """Chunking-metadata fields for knowledge_base projections.
+
+        Gracefully returns NULL projections when migration 002 hasn't run,
+        so pre-migration schemas keep a stable tuple shape.
+        """
+        has_chunking = all(
+            self._memory_type_has_column(MemoryType.KNOWLEDGE_BASE, col)
+            for col in _KB_CHUNK_COLUMNS
+        )
+        if has_chunking:
+            return tuple(_c(col) for col in _KB_CHUNK_COLUMNS)
+        return tuple(_c("NULL", key=col) for col in _KB_CHUNK_COLUMNS)
+
+    @staticmethod
+    def _coerce_timestamp(value: Any) -> Any:
+        """Normalize ISO-8601 strings to datetime for TIMESTAMP binds.
+
+        ``to_dict`` serializers (Skill, Workflow) emit datetimes as ISO
+        strings; Oracle's implicit string→TIMESTAMP conversion depends on
+        the session NLS format, so bind real datetimes instead.
+        """
+        if value is None:
+            return None
+        from datetime import datetime
+
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+
     @staticmethod
     def _prepare_vector_value(embedding: Any) -> Any:
         """Normalize embedding values for VECTOR bindings."""
@@ -1143,6 +1857,8 @@ class OracleProvider(MemoryProvider):
             return self._store_persona(data)
         elif memory_store_type == MemoryType.TOOLBOX:
             return self._store_toolbox(data)
+        elif memory_store_type == MemoryType.SKILLBOX:
+            return self._store_skillbox(data)
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             return self._store_conversation_memory(data)
         elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
@@ -1375,6 +2091,164 @@ class OracleProvider(MemoryProvider):
             conn.commit()
 
         return tool_id
+
+    def _store_skillbox(self, data: Dict[str, Any]) -> str:
+        """Store skillbox entry directly in its base table."""
+        skill_id = (
+            data.get("skill_id")
+            or data.get("skillId")
+            or data.get("_id")
+            or str(uuid.uuid4())
+        )
+        # Callers may hand us a uuid.UUID; oracledb can't bind that type
+        # (DPY-3002), so coerce the id to text.
+        skill_id = str(skill_id)
+
+        status = data.get("status") or "candidate"
+        if hasattr(status, "value"):
+            status = status.value
+
+        name = data.get("name", "unknown_skill")
+        description = data.get("description", "")
+        content = data.get("content", "")
+        preconditions = data.get("preconditions")
+        tools_used = data.get("tools_used")
+        queries = data.get("queries")
+        source_workflow_ids = data.get("source_workflow_ids")
+        baseline = data.get("baseline")
+        stats = data.get("stats")
+        version = data.get("version")
+        agent_id = data.get("agent_id") or data.get("agentId")
+
+        # Skill documents arrive with an applicability embedding computed by
+        # the Skill class (name/description/preconditions/queries — never
+        # ``content``); prefer it and only embed the same applicability text
+        # when it is missing.
+        skill_text = " ".join(
+            [
+                str(name),
+                str(description),
+                " ".join(str(p) for p in (preconditions or [])),
+                " ".join(str(q) for q in (queries or [])),
+            ]
+        ).strip()
+        embedding = self._generate_embedding_if_needed(
+            skill_text, existing_embedding=data.get("embedding")
+        )
+
+        table_name = self._get_table_name(MemoryType.SKILLBOX)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT id FROM {table_name} WHERE skill_id = :skill_id",
+                {"skill_id": skill_id},
+            )
+            existing = cursor.fetchone()
+
+            common_params: Dict[str, Any] = {
+                "skill_id": skill_id,
+                "name": name,
+                "description": description,
+                "content": content,
+                "preconditions": json.dumps(self._sanitize_for_json(preconditions))
+                if preconditions is not None
+                else None,
+                "tools_used": json.dumps(self._sanitize_for_json(tools_used))
+                if tools_used is not None
+                else None,
+                "queries": json.dumps(self._sanitize_for_json(queries))
+                if queries is not None
+                else None,
+                "agent_id": agent_id,
+                "user_id": data.get("user_id"),
+                "source_canonical_hash": data.get("source_canonical_hash"),
+                "source_workflow_ids": json.dumps(
+                    self._sanitize_for_json(source_workflow_ids)
+                )
+                if source_workflow_ids is not None
+                else None,
+                "exemplar_workflow_id": data.get("exemplar_workflow_id"),
+                "status": status,
+                "version": int(version) if version is not None else 1,
+                "promoted_at": self._coerce_timestamp(data.get("promoted_at")),
+                "demoted_at": self._coerce_timestamp(data.get("demoted_at")),
+                "demotion_reason": data.get("demotion_reason"),
+                "baseline": json.dumps(self._sanitize_for_json(baseline))
+                if baseline is not None
+                else None,
+                "stats": json.dumps(self._sanitize_for_json(stats))
+                if stats is not None
+                else None,
+            }
+            if embedding is not None:
+                common_params["embedding"] = self._prepare_vector_value(embedding)
+
+            if existing:
+                set_parts = [
+                    "name = :name",
+                    "description = :description",
+                    "content = :content",
+                    "preconditions = :preconditions",
+                    "tools_used = :tools_used",
+                    "queries = :queries",
+                    "agent_id = :agent_id",
+                    "user_id = :user_id",
+                    "source_canonical_hash = :source_canonical_hash",
+                    "source_workflow_ids = :source_workflow_ids",
+                    "exemplar_workflow_id = :exemplar_workflow_id",
+                    "status = :status",
+                    "version = :version",
+                    "promoted_at = :promoted_at",
+                    "demoted_at = :demoted_at",
+                    "demotion_reason = :demotion_reason",
+                    "baseline = :baseline",
+                    "stats = :stats",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                if embedding is not None:
+                    set_parts.append("embedding = :embedding")
+                cursor.execute(
+                    f"UPDATE {table_name} SET {', '.join(set_parts)} "
+                    "WHERE skill_id = :skill_id",
+                    common_params,
+                )
+            else:
+                cols = [
+                    "id",
+                    "skill_id",
+                    "name",
+                    "description",
+                    "content",
+                    "preconditions",
+                    "tools_used",
+                    "queries",
+                    "agent_id",
+                    "user_id",
+                    "source_canonical_hash",
+                    "source_workflow_ids",
+                    "exemplar_workflow_id",
+                    "status",
+                    "version",
+                    "promoted_at",
+                    "demoted_at",
+                    "demotion_reason",
+                    "baseline",
+                    "stats",
+                ]
+                vals = [f":{c}" for c in cols]
+                params = dict(common_params)
+                params["id"] = uuid.uuid4().bytes
+                if embedding is not None:
+                    cols.append("embedding")
+                    vals.append(":embedding")
+                cursor.execute(
+                    f"INSERT INTO {table_name} ({', '.join(cols)}) "
+                    f"VALUES ({', '.join(vals)})",
+                    params,
+                )
+            conn.commit()
+
+        return skill_id
 
     def _upsert_persona_row(
         self,
@@ -1616,7 +2490,13 @@ class OracleProvider(MemoryProvider):
                 else:
                     raise
             conn.commit()
-            return memory_id
+            # Return the ROW id (matching MongoDB's inserted_id semantics),
+            # not the grouping memory_id. Callers use this as the per-unit
+            # handle — e.g. the conversation-embedding backfill updates the
+            # row by this id; returning memory_id here made that update
+            # match EVERY row in the conversation and overwrite all their
+            # embeddings with the last message's vector.
+            return str(uuid.UUID(bytes=row_id))
 
     def _store_conversation_memory(self, data: Dict[str, Any]) -> str:
         """Store conversation memory directly in the base table."""
@@ -1776,6 +2656,7 @@ class OracleProvider(MemoryProvider):
             embed_text, existing_embedding=data.get("embedding")
         )
 
+        step_count = data.get("step_count")
         self._insert_base_row(
             MemoryType.WORKFLOW_MEMORY,
             required_columns={
@@ -1788,12 +2669,24 @@ class OracleProvider(MemoryProvider):
                 "memory_id": data.get("memory_id"),
                 "agent_id": data.get("agent_id"),
             },
-            optional_columns={"user_id": data.get("user_id")},
+            optional_columns={
+                "user_id": data.get("user_id"),
+                "user_query": data.get("user_query"),
+                "canonical_hash": data.get("canonical_hash"),
+                "step_count": int(step_count) if step_count is not None else None,
+                "promoted_skill_id": data.get("promoted_skill_id"),
+            },
             embedding=embedding,
         )
 
-        # steps/outcome are IS JSON columns and go in a follow-up UPDATE.
-        if data.get("steps") or data.get("outcome"):
+        # steps/outcome/canonical_signature/skills_activated are IS JSON
+        # columns and go in a follow-up UPDATE.
+        if (
+            data.get("steps")
+            or data.get("outcome")
+            or data.get("canonical_signature")
+            or data.get("skills_activated")
+        ):
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 update_parts = []
@@ -1806,6 +2699,18 @@ class OracleProvider(MemoryProvider):
                 if data.get("outcome"):
                     update_parts.append("outcome = :outcome")
                     params["outcome"] = self._ensure_json_text(data["outcome"])
+
+                if data.get("canonical_signature"):
+                    update_parts.append("canonical_signature = :canonical_signature")
+                    params["canonical_signature"] = self._ensure_json_text(
+                        data["canonical_signature"]
+                    )
+
+                if data.get("skills_activated"):
+                    update_parts.append("skills_activated = :skills_activated")
+                    params["skills_activated"] = self._ensure_json_text(
+                        data["skills_activated"]
+                    )
 
                 if update_parts:
                     cursor.execute(
@@ -2236,6 +3141,8 @@ class OracleProvider(MemoryProvider):
             return self.retrieve_persona_by_query(query, limit=limit)
         elif memory_store_type == MemoryType.TOOLBOX:
             return self.retrieve_toolbox_item(query, limit)
+        elif memory_store_type == MemoryType.SKILLBOX:
+            return self.retrieve_skillbox_item(query, limit)
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
             return self.retrieve_workflow_by_query(
                 query, limit, user_id=kwargs.get("user_id", _UNSET)
@@ -2317,6 +3224,32 @@ class OracleProvider(MemoryProvider):
                     if str(r.get("namespace") or "") == namespace_filter
                 ]
             return rows
+        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
+            # Dict → straight filter; string → episodic semantic recall via
+            # VECTOR_DISTANCE over per-turn embeddings (rows without an
+            # embedding are excluded by the ``embedding IS NOT NULL`` guard
+            # in _vector_search, so unmigrated/unbackfilled rows degrade to
+            # "no matches" rather than erroring).
+            if isinstance(query, dict):
+                return self._retrieve_by_filter(
+                    query, memory_store_type, limit, include_embedding
+                )
+            if isinstance(query, str) and query.strip():
+                from ...embeddings import get_embedding
+
+                try:
+                    query_embedding = get_embedding(query)
+                except Exception as exc:
+                    logger.error("Failed to embed conversation_memory query: %s", exc)
+                    return []
+                return self._vector_search(
+                    MemoryType.CONVERSATION_MEMORY,
+                    query_embedding,
+                    limit=limit,
+                    memory_id=kwargs.get("memory_id"),
+                    user_id=kwargs.get("user_id", _UNSET),
+                )
+            return []
         else:
             # Standard query
             if isinstance(query, dict):
@@ -2477,71 +3410,47 @@ class OracleProvider(MemoryProvider):
         # Special handling for MEMAGENT
         if memory_store_type == MemoryType.MEMAGENT:
             return self.retrieve_memagent(id)
-        if memory_store_type == MemoryType.PERSONAS:
+
+        # Registry-driven types are addressed by their logical string id
+        # (persona_id / tool_id / skill_id / workflow_id / tool_log_id).
+        # These need dedicated projections because the generic
+        # ``SELECT id, data`` fallback below has no ``data`` column to read
+        # — without them, by-id loads silently returned None (workflow
+        # skill exemplars and the LLM-facing ``retrieve_tool_log_entry``
+        # compact-reference pattern in particular broke).
+        spec = _BY_ID_SPECS.get(memory_store_type)
+        if spec is not None:
+            id_column, fields = spec
             table_name = self._get_table_name(memory_store_type)
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     f"""
-                    SELECT persona_id, name, role_type, background, traits, expertise,
-                           memory_id, agent_id, embedding, created_at, updated_at
+                    SELECT {_select_list(fields)}
                     FROM {table_name}
-                    WHERE persona_id = :persona_id
+                    WHERE {id_column} = :{id_column}
                     """,
-                    {"persona_id": id},
+                    {id_column: id},
                 )
                 row = cursor.fetchone()
+                if row is None and memory_store_type == MemoryType.WORKFLOW_MEMORY:
+                    try:
+                        row_id = uuid.UUID(str(id)).bytes
+                    except (ValueError, TypeError):
+                        row_id = None
+                    if row_id is not None:
+                        cursor.execute(
+                            f"""
+                            SELECT {_select_list(fields)}
+                            FROM {table_name}
+                            WHERE id = :row_id
+                            """,
+                            {"row_id": row_id},
+                        )
+                        row = cursor.fetchone()
                 if not row:
                     return None
-                return {
-                    "_id": row[0],
-                    "persona_id": row[0],
-                    "name": row[1],
-                    "role_type": row[2],
-                    "background": row[3],
-                    "traits": self._deserialize_json_field(row[4]) if row[4] else None,
-                    "expertise": self._deserialize_json_field(row[5])
-                    if row[5]
-                    else None,
-                    "memory_id": row[6],
-                    "agent_id": row[7],
-                    "embedding": list(row[8]) if row[8] is not None else None,
-                    "created_at": row[9].isoformat() if row[9] else None,
-                    "updated_at": row[10].isoformat() if row[10] else None,
-                }
-        if memory_store_type == MemoryType.TOOLBOX:
-            table_name = self._get_table_name(memory_store_type)
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    f"""
-                    SELECT tool_id, name, description, signature, docstring, tool_type,
-                           parameters, memory_id, agent_id, embedding, created_at, updated_at
-                    FROM {table_name}
-                    WHERE tool_id = :tool_id
-                    """,
-                    {"tool_id": id},
-                )
-                row = cursor.fetchone()
-                if not row:
-                    return None
-                return {
-                    "_id": row[0],
-                    "tool_id": row[0],
-                    "name": row[1],
-                    "description": row[2],
-                    "signature": row[3],
-                    "docstring": row[4],
-                    "tool_type": row[5],
-                    "parameters": self._deserialize_json_field(row[6])
-                    if row[6]
-                    else {},
-                    "memory_id": row[7],
-                    "agent_id": row[8],
-                    "embedding": list(row[9]) if row[9] is not None else None,
-                    "created_at": row[10].isoformat() if row[10] else None,
-                    "updated_at": row[11].isoformat() if row[11] else None,
-                }
+                return self._apply_row_fields(fields, row)
         if memory_store_type == MemoryType.ENTITY_MEMORY:
             table_name = self._get_table_name(memory_store_type)
             with self._get_connection() as conn:
@@ -2562,49 +3471,56 @@ class OracleProvider(MemoryProvider):
                     return record
                 return None
 
-        if memory_store_type == MemoryType.TOOL_LOG:
-            # Query the base table by the logical ``tool_log_id`` string
-            # (the UUID the caller sees), not the RAW(16) primary key.
-            # Without this branch, the fallback path tried
-            # ``SELECT id, data FROM tool_log`` — which fails because the
-            # relational schema has no generic ``data`` column, so the
-            # LLM-facing ``retrieve_tool_log_entry`` always returned
-            # "not found" and the compact-reference pattern broke.
+        # Conversation rows: RAW(16) row id, addressed by canonical uuid str.
+        # Previously fell into the generic ``SELECT id, data`` fallback below
+        # (no ``data`` column exists) and silently returned None — breaking
+        # by-id message reconstruction (summary expansion, tenant checks).
+        if memory_store_type == MemoryType.CONVERSATION_MEMORY:
+            try:
+                row_id = (
+                    bytes(id)
+                    if isinstance(id, (bytes, bytearray))
+                    else uuid.UUID(str(id)).bytes
+                )
+            except (ValueError, TypeError):
+                return None
             table_name = self._get_table_name(memory_store_type)
+            has_user_id = self._memory_type_has_column(
+                MemoryType.CONVERSATION_MEMORY, "user_id"
+            )
+            user_col = ", user_id" if has_user_id else ""
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    f"""
-                    SELECT id, tool_log_id, tool_name, arguments, result,
-                           success, error, timestamp, agent_id, tool_call_id,
-                           thread_id, memory_id
-                    FROM {table_name}
-                    WHERE tool_log_id = :tool_log_id
-                    """,
-                    {"tool_log_id": id},
-                )
+                try:
+                    cursor.execute(
+                        f"""
+                        SELECT id, memory_id, thread_id, role, content,
+                               timestamp, agent_id{user_col}
+                        FROM {table_name}
+                        WHERE id = :id
+                        """,
+                        {"id": row_id},
+                    )
+                except Exception as exc:
+                    logger.debug("retrieve_by_id(conversation_memory) failed: %s", exc)
+                    return None
                 row = cursor.fetchone()
                 if not row:
                     return None
-                timestamp = row[7]
-                if hasattr(timestamp, "isoformat"):
-                    timestamp = timestamp.isoformat()
-                elif timestamp is not None:
-                    timestamp = str(timestamp)
-                return {
-                    "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
-                    "tool_log_id": row[1],
-                    "tool_name": row[2],
-                    "arguments": self._read_lob_value(row[3]),
-                    "result": self._read_lob_value(row[4]),
-                    "success": bool(row[5]) if row[5] is not None else True,
-                    "error": self._read_lob_value(row[6]),
-                    "timestamp": timestamp,
-                    "agent_id": row[8],
-                    "tool_call_id": row[9],
-                    "thread_id": row[10],
-                    "memory_id": row[11],
+                result = {
+                    "_id": str(uuid.UUID(bytes=row[0])),
+                    "memory_id": row[1],
+                    "thread_id": row[2],
+                    "role": row[3],
+                    "content": self._read_lob_value(row[4]),
+                    "timestamp": row[5].isoformat()
+                    if hasattr(row[5], "isoformat")
+                    else row[5],
+                    "agent_id": row[6],
                 }
+                if has_user_id:
+                    result["user_id"] = row[7]
+                return result
 
         # For shared memory, query base table directly
         if memory_store_type == MemoryType.SHARED_MEMORY:
@@ -2737,6 +3653,32 @@ class OracleProvider(MemoryProvider):
                 conn.commit()
                 return cursor.rowcount > 0
 
+            if memory_store_type == MemoryType.SKILLBOX:
+                cursor.execute(
+                    f"DELETE FROM {table_name} WHERE skill_id = :skill_id",
+                    {"skill_id": id},
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+
+            if memory_store_type == MemoryType.WORKFLOW_MEMORY:
+                params = {"workflow_id": str(id)}
+                try:
+                    params["row_id"] = uuid.UUID(str(id)).bytes
+                except (ValueError, TypeError):
+                    cursor.execute(
+                        f"DELETE FROM {table_name} " "WHERE workflow_id = :workflow_id",
+                        params,
+                    )
+                else:
+                    cursor.execute(
+                        f"DELETE FROM {table_name} "
+                        "WHERE workflow_id = :workflow_id OR id = :row_id",
+                        params,
+                    )
+                conn.commit()
+                return cursor.rowcount > 0
+
             if memory_store_type == MemoryType.MEMAGENT:
                 cursor.execute(
                     f"DELETE FROM {table_name} WHERE agent_id = :agent_id",
@@ -2809,6 +3751,29 @@ class OracleProvider(MemoryProvider):
         )
         return self._apply_user_id_filter(base_results, memory_store_type, user_id)
 
+    def list_tool_logs(
+        self,
+        memory_id: Optional[str] = None,
+        user_id: Any = None,
+        limit: int = 20,
+        thread_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Recent tool-log rows for a memory/thread (most-recent first).
+
+        Native counterpart to the MongoDB provider's indexed query. Reads the
+        tool_log rows via :meth:`list_all` and narrows in Python with the shared
+        :func:`filter_tool_log_rows` — behaviour-equivalent to the manager's
+        former fallback, plus the ``thread_id`` scoping the digest relies on.
+        """
+        rows = self.list_all(MemoryType.TOOL_LOG)
+        return filter_tool_log_rows(
+            rows,
+            memory_id=memory_id,
+            user_id=(user_id if user_id is not None else _BASE_UNSET),
+            thread_id=thread_id,
+            limit=limit,
+        )
+
     @staticmethod
     def _apply_user_id_filter(
         rows: List[Dict[str, Any]],
@@ -2832,231 +3797,36 @@ class OracleProvider(MemoryProvider):
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # Build query based on memory type
-            if memory_store_type == MemoryType.ENTITY_MEMORY:
-                # Entity memory has individual columns, not a data column
+            # Registry-driven types: these tables have individual columns,
+            # not a generic ``data`` column, so build the projection and the
+            # row→dict mapping from the shared field specs.
+            spec = _LIST_SPECS.get(memory_store_type)
+            if spec is not None:
+                fields, order_by = spec
+                if memory_store_type == MemoryType.KNOWLEDGE_BASE:
+                    fields = fields + self._knowledge_base_chunk_fields()
                 query = f"""
-                    SELECT
-                        id, entity_id, name, entity_type, attributes, relations,
-                        metadata, memory_id, agent_id, embedding, created_at, updated_at
+                    SELECT {_select_list(fields)}
                     FROM {table_name}
                 """
+                if order_by:
+                    query += f" ORDER BY {order_by}"
                 cursor.execute(query)
-
                 results = []
                 for row in cursor:
                     try:
-                        attributes = self._deserialize_json_field(row[4]) or []
-                        relations = self._deserialize_json_field(row[5]) or []
-                        metadata = self._deserialize_json_field(row[6]) or {}
-
-                        doc = {
-                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
-                            "entity_id": row[1],
-                            "name": row[2],
-                            "entity_type": row[3],
-                            "attributes": attributes,
-                            "relations": relations,
-                            "metadata": metadata,
-                            "memory_id": row[7],
-                            "agent_id": row[8],
-                        }
-
-                        # Handle embedding
-                        if include_embedding and row[9] is not None:
-                            doc["embedding"] = row[9]
-
-                        # Handle timestamps
-                        if row[10]:
-                            doc["created_at"] = (
-                                row[10].isoformat()
-                                if hasattr(row[10], "isoformat")
-                                else str(row[10])
-                            )
-                        if row[11]:
-                            doc["updated_at"] = (
-                                row[11].isoformat()
-                                if hasattr(row[11], "isoformat")
-                                else str(row[11])
-                            )
-
-                        results.append(doc)
-                    except Exception as row_error:
-                        logger.warning(
-                            f"Error processing entity_memory row: {row_error}"
+                        results.append(
+                            self._apply_row_fields(fields, row, include_embedding)
                         )
-                        continue
-
-                return results
-            elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-                # Conversation memory has individual columns, not a data column
-                query = f"""
-                    SELECT id, memory_id, thread_id, role, content, timestamp, agent_id, embedding
-                    FROM {table_name}
-                    ORDER BY timestamp
-                """
-                cursor.execute(query)
-
-                results = []
-                for row in cursor:
-                    try:
-                        content = row[4]
-                        if hasattr(content, "read"):
-                            content = content.read()
-                        timestamp = row[5]
-                        if hasattr(timestamp, "isoformat"):
-                            timestamp = timestamp.isoformat()
-                        elif timestamp:
-                            timestamp = str(timestamp)
-                        doc = {
-                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
-                            "memory_id": row[1],
-                            "thread_id": row[2],
-                            "role": row[3],
-                            "content": content,
-                            "timestamp": timestamp,
-                            "agent_id": row[6],
-                        }
-                        if include_embedding and row[7] is not None:
-                            doc["embedding"] = list(row[7])
-                        results.append(doc)
                     except Exception as row_error:
                         logger.warning(
-                            f"Error processing conversation_memory row: {row_error}"
-                        )
-                        continue
-
-                return results
-            elif memory_store_type == MemoryType.TOOLBOX:
-                query = f"""
-                    SELECT id, tool_id, name, description, signature, docstring,
-                           tool_type, parameters, memory_id, agent_id, embedding,
-                           created_at, updated_at
-                    FROM {table_name}
-                """
-                cursor.execute(query)
-                results = []
-                for row in cursor:
-                    try:
-                        doc = {
-                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
-                            "tool_id": row[1],
-                            "name": row[2],
-                            "description": self._read_lob_value(row[3]),
-                            "signature": row[4],
-                            "docstring": self._read_lob_value(row[5]),
-                            "tool_type": row[6],
-                            "parameters": self._deserialize_json_field(row[7]),
-                            "memory_id": row[8],
-                            "agent_id": row[9],
-                        }
-                        if include_embedding and row[10] is not None:
-                            doc["embedding"] = list(row[10])
-                        results.append(doc)
-                    except Exception as row_error:
-                        logger.warning("Error processing toolbox row: %s", row_error)
-                        continue
-                return results
-            elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-                query = f"""
-                    SELECT id, workflow_id, name, description, steps, current_step,
-                           status, outcome, memory_id, agent_id, embedding,
-                           created_at, updated_at
-                    FROM {table_name}
-                """
-                cursor.execute(query)
-                results = []
-                for row in cursor:
-                    try:
-                        doc = {
-                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
-                            "workflow_id": row[1],
-                            "name": row[2],
-                            "description": self._read_lob_value(row[3]),
-                            "steps": self._deserialize_json_field(row[4]),
-                            "current_step": row[5],
-                            "status": row[6],
-                            "outcome": self._deserialize_json_field(row[7]),
-                            "memory_id": row[8],
-                            "agent_id": row[9],
-                        }
-                        if include_embedding and row[10] is not None:
-                            doc["embedding"] = list(row[10])
-                        results.append(doc)
-                    except Exception as row_error:
-                        logger.warning(
-                            "Error processing workflow_memory row: %s", row_error
+                            "Error processing %s row: %s",
+                            memory_store_type.value,
+                            row_error,
                         )
                         continue
                 return results
-            elif memory_store_type == MemoryType.SUMMARIES:
-                query = f"""
-                    SELECT id, summary_id, content, original_memory_ids,
-                           summary_type, memory_id, agent_id, embedding, created_at
-                    FROM {table_name}
-                """
-                cursor.execute(query)
-                results = []
-                for row in cursor:
-                    try:
-                        doc = {
-                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
-                            "summary_id": row[1],
-                            "content": self._read_lob_value(row[2]),
-                            "original_memory_ids": self._deserialize_json_field(row[3]),
-                            "summary_type": row[4],
-                            "memory_id": row[5],
-                            "agent_id": row[6],
-                        }
-                        if include_embedding and row[7] is not None:
-                            doc["embedding"] = list(row[7])
-                        if row[8]:
-                            doc["created_at"] = (
-                                row[8].isoformat()
-                                if hasattr(row[8], "isoformat")
-                                else str(row[8])
-                            )
-                        results.append(doc)
-                    except Exception as row_error:
-                        logger.warning("Error processing summaries row: %s", row_error)
-                        continue
-                return results
-            elif memory_store_type == MemoryType.TOOL_LOG:
-                query = f"""
-                    SELECT id, tool_log_id, tool_name, arguments, result, success,
-                           error, timestamp, agent_id, tool_call_id, thread_id, memory_id
-                    FROM {table_name}
-                    ORDER BY timestamp
-                """
-                cursor.execute(query)
-                results = []
-                for row in cursor:
-                    try:
-                        timestamp = row[7]
-                        if hasattr(timestamp, "isoformat"):
-                            timestamp = timestamp.isoformat()
-                        elif timestamp:
-                            timestamp = str(timestamp)
-                        doc = {
-                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
-                            "tool_log_id": row[1],
-                            "tool_name": row[2],
-                            "arguments": self._read_lob_value(row[3]),
-                            "result": self._read_lob_value(row[4]),
-                            "success": bool(row[5]) if row[5] is not None else True,
-                            "error": self._read_lob_value(row[6]),
-                            "timestamp": timestamp,
-                            "agent_id": row[8],
-                            "tool_call_id": row[9],
-                            "thread_id": row[10],
-                            "memory_id": row[11],
-                        }
-                        results.append(doc)
-                    except Exception as row_error:
-                        logger.warning("Error processing tool_log row: %s", row_error)
-                        continue
-                return results
-            elif memory_store_type == MemoryType.MEMAGENT:
+            if memory_store_type == MemoryType.MEMAGENT:
                 # Agents are stored across `agents`, `agent_llm_configs`,
                 # `agent_memories`, and `personas`. Reuse ``retrieve_memagent``
                 # per row so every agent comes back fully hydrated instead of
@@ -3087,76 +3857,6 @@ class OracleProvider(MemoryProvider):
                     if not include_embedding:
                         doc.pop("embedding", None)
                     results.append(doc)
-                return results
-            elif memory_store_type == MemoryType.KNOWLEDGE_BASE:
-                # Knowledge base rows have relational columns, not a data column.
-                # Chunking metadata (knowledge_base_id, namespace, chunk_*,
-                # chunking_strategy) is optional on older schemas — gracefully
-                # return NULLs if migration 002 hasn't run.
-                has_chunking = all(
-                    self._memory_type_has_column(memory_store_type, col)
-                    for col in (
-                        "knowledge_base_id",
-                        "namespace",
-                        "chunk_index",
-                        "chunk_count",
-                        "chunking_strategy",
-                    )
-                )
-                select_extra = (
-                    ", knowledge_base_id, namespace, chunk_index, chunk_count, chunking_strategy"
-                    if has_chunking
-                    else ", NULL, NULL, NULL, NULL, NULL"
-                )
-                query = f"""
-                    SELECT id, memory_id, content, memory_type, importance,
-                           last_accessed, access_count, agent_id, embedding,
-                           created_at, updated_at{select_extra}
-                    FROM {table_name}
-                """
-                cursor.execute(query)
-                results = []
-                for row in cursor:
-                    try:
-                        created_at = row[9]
-                        updated_at = row[10]
-                        doc = {
-                            "_id": str(uuid.UUID(bytes=row[0])) if row[0] else None,
-                            "memory_id": row[1],
-                            "content": self._read_lob_value(row[2]),
-                            "memory_type": row[3],
-                            "importance": row[4],
-                            "last_accessed": (
-                                row[5].isoformat()
-                                if hasattr(row[5], "isoformat")
-                                else row[5]
-                            ),
-                            "access_count": row[6],
-                            "agent_id": row[7],
-                            "created_at": (
-                                created_at.isoformat()
-                                if hasattr(created_at, "isoformat")
-                                else created_at
-                            ),
-                            "updated_at": (
-                                updated_at.isoformat()
-                                if hasattr(updated_at, "isoformat")
-                                else updated_at
-                            ),
-                            "knowledge_base_id": row[11],
-                            "namespace": row[12],
-                            "chunk_index": row[13],
-                            "chunk_count": row[14],
-                            "chunking_strategy": row[15],
-                        }
-                        if include_embedding and row[8] is not None:
-                            doc["embedding"] = list(row[8])
-                        results.append(doc)
-                    except Exception as row_error:
-                        logger.warning(
-                            "Error processing knowledge_base row: %s", row_error
-                        )
-                        continue
                 return results
             elif memory_store_type in (
                 MemoryType.PERSONAS,
@@ -3320,7 +4020,13 @@ class OracleProvider(MemoryProvider):
         """Update relational tables directly for memory types that avoid DV updates."""
         update_config = {
             MemoryType.CONVERSATION_MEMORY: {
-                "id_field": "memory_id",
+                # Conversation rows are addressed by their RAW(16) row id —
+                # "memory_id" here is the conversation GROUPING id shared by
+                # every row of a thread, so using it as the WHERE key made
+                # any update (embedding backfill, summary marking) rewrite
+                # the entire conversation.
+                "id_field": "id",
+                "id_is_raw_uuid": True,
                 "fields": {
                     "thread_id",
                     "role",
@@ -3392,8 +4098,24 @@ class OracleProvider(MemoryProvider):
                 "has_updated_at": True,
                 "field_map": {"type": "tool_type"},
             },
+            MemoryType.SKILLBOX: {
+                "id_field": "skill_id",
+                "fields": {
+                    "status",
+                    "version",
+                    "promoted_at",
+                    "demoted_at",
+                    "demotion_reason",
+                    "baseline",
+                    "stats",
+                },
+                "json_fields": {"baseline", "stats"},
+                "timestamp_fields": {"promoted_at", "demoted_at"},
+                "has_updated_at": True,
+            },
             MemoryType.WORKFLOW_MEMORY: {
                 "id_field": "workflow_id",
+                "allow_raw_id": True,
                 "fields": {
                     "name",
                     "description",
@@ -3401,11 +4123,22 @@ class OracleProvider(MemoryProvider):
                     "status",
                     "memory_id",
                     "agent_id",
+                    "user_query",
                     "steps",
                     "outcome",
+                    "canonical_hash",
+                    "canonical_signature",
+                    "step_count",
+                    "promoted_skill_id",
+                    "skills_activated",
                     "embedding",
                 },
-                "json_fields": {"steps", "outcome"},
+                "json_fields": {
+                    "steps",
+                    "outcome",
+                    "canonical_signature",
+                    "skills_activated",
+                },
                 "has_updated_at": True,
             },
             MemoryType.SUMMARIES: {
@@ -3504,6 +4237,7 @@ class OracleProvider(MemoryProvider):
         id_field = config["id_field"]
         allowed_fields = config["fields"]
         json_fields = config["json_fields"]
+        timestamp_fields = config.get("timestamp_fields", set())
         field_map = config.get("field_map", {})
         has_updated_at = config["has_updated_at"]
 
@@ -3516,7 +4250,31 @@ class OracleProvider(MemoryProvider):
             return False
 
         set_clauses = []
-        params = {id_field: id_value}
+        bound_id_value = id_value
+        if config.get("id_is_raw_uuid"):
+            # RAW(16) primary keys bind as bytes; callers hold the row id in
+            # its canonical string form (str(uuid.UUID(bytes=...))).
+            try:
+                if isinstance(id_value, (bytes, bytearray)):
+                    bound_id_value = bytes(id_value)
+                else:
+                    bound_id_value = uuid.UUID(str(id_value)).bytes
+            except (ValueError, AttributeError, TypeError):
+                logger.debug(
+                    "update_by_id: %r is not a valid row uuid for %s — no-op",
+                    id_value,
+                    memory_store_type.value,
+                )
+                return False
+        params = {id_field: bound_id_value}
+        where_clause = f"{id_field} = :{id_field}"
+        if config.get("allow_raw_id"):
+            try:
+                params["row_id"] = uuid.UUID(str(id_value)).bytes
+            except (ValueError, AttributeError, TypeError):
+                pass
+            else:
+                where_clause = f"({where_clause} OR id = :row_id)"
         skip_user_id = "user_id" in sanitized_data and not self._memory_type_has_column(
             memory_store_type, "user_id"
         )
@@ -3532,6 +4290,10 @@ class OracleProvider(MemoryProvider):
                 continue
             if mapped_key in json_fields:
                 value = self._ensure_json_text(value)
+            elif mapped_key in timestamp_fields:
+                # _sanitize_for_json serialized any datetime to an ISO string;
+                # TIMESTAMP columns need a real datetime bind.
+                value = self._coerce_timestamp(value)
             elif mapped_key == "content" and not isinstance(value, str):
                 value = self._ensure_json_text(value)
 
@@ -3560,7 +4322,7 @@ class OracleProvider(MemoryProvider):
                 f"""
                 UPDATE {table_name}
                 SET {', '.join(set_clauses)}
-                WHERE {id_field} = :{id_field}
+                WHERE {where_clause}
                 """,
                 params,
             )
@@ -3594,6 +4356,7 @@ class OracleProvider(MemoryProvider):
             MemoryType.PERSONAS,
             MemoryType.SHORT_TERM_MEMORY,
             MemoryType.TOOLBOX,
+            MemoryType.SKILLBOX,
             MemoryType.WORKFLOW_MEMORY,
             MemoryType.SUMMARIES,
             MemoryType.ENTITY_MEMORY,
@@ -3715,9 +4478,18 @@ class OracleProvider(MemoryProvider):
 
     def close(self) -> None:
         """Close the connection pool."""
-        if hasattr(self, "pool"):
-            self.pool.close()
-            logger.info("Oracle connection pool closed")
+        pool = getattr(self, "pool", None)
+        if pool is None:
+            return
+
+        # Explicit provider shutdown owns the pool lifecycle. A non-forced
+        # python-oracledb close raises DPY-1005 when LOB-backed results or
+        # background work still hold a checked-out connection, which makes
+        # notebook/application teardown fail even though no more work is
+        # expected from this provider.
+        self.pool = None
+        pool.close(force=True)
+        logger.info("Oracle connection pool closed")
 
     # ===== VECTOR SEARCH METHODS =====
 
@@ -3748,6 +4520,20 @@ class OracleProvider(MemoryProvider):
             return []
 
         return self._vector_search(MemoryType.TOOLBOX, embedding, limit=limit)
+
+    def retrieve_skillbox_item(
+        self, query: Dict[str, Any], limit: int = 1
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Retrieve skillbox items using vector search."""
+        from ...embeddings import get_embedding
+
+        try:
+            embedding = get_embedding(query)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding for query: {e}")
+            return []
+
+        return self._vector_search(MemoryType.SKILLBOX, embedding, limit=limit)
 
     def retrieve_workflow_by_query(
         self, query: Dict[str, Any], limit: int = 1, user_id: Any = _UNSET
@@ -3856,6 +4642,7 @@ class OracleProvider(MemoryProvider):
         allowed_filters = {
             MemoryType.PERSONAS: {"memory_id", "agent_id", "name", "role_type"},
             MemoryType.TOOLBOX: {"memory_id", "agent_id", "name", "tool_type"},
+            MemoryType.SKILLBOX: {"agent_id", "name", "status"},
             MemoryType.WORKFLOW_MEMORY: {
                 "memory_id",
                 "agent_id",
@@ -3948,376 +4735,32 @@ class OracleProvider(MemoryProvider):
             params["query_vec"] = array.array("f", query_embedding)
 
             try:
-                if memory_type == MemoryType.SEMANTIC_CACHE:
-                    sql = f"""
-                    SELECT
-                        id, cache_key, query_text, response, scope,
-                        similarity_threshold, hit_count, agent_id, embedding,
-                        created_at, expires_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
-                    cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        created_at = row[9]
-                        timestamp = (
-                            created_at.timestamp()
-                            if hasattr(created_at, "timestamp")
-                            else time.time()
-                        )
-                        query_text = self._read_lob_value(row[2])
-                        response = self._read_lob_value(row[3])
+                fields = _VECTOR_SPECS.get(memory_type)
+                if fields is None:
+                    logger.warning("Vector search not supported for %s", memory_type)
+                    return []
+                if memory_type == MemoryType.KNOWLEDGE_BASE:
+                    fields = fields + self._knowledge_base_chunk_fields()
 
-                        results.append(
-                            {
-                                "_id": str(uuid.UUID(bytes=row[0])),
-                                "cache_key": row[1],
-                                "query_text": query_text,
-                                "response": response,
-                                "scope": row[4],
-                                "similarity_threshold": (
-                                    float(row[5]) if row[5] is not None else 0.85
-                                ),
-                                "hit_count": int(row[6]) if row[6] is not None else 0,
-                                "usage_count": (
-                                    int(row[6]) if row[6] is not None else 0
-                                ),
-                                "agent_id": row[7],
-                                "embedding": (
-                                    list(row[8]) if row[8] is not None else []
-                                ),
-                                "timestamp": timestamp,
-                                "created_at": created_at,
-                                "expires_at": row[10],
-                                "score": float(row[11]),
-                            }
-                        )
-                    return results
-
-                if memory_type == MemoryType.PERSONAS:
-                    sql = f"""
-                    SELECT
-                        persona_id, name, role_type, background, traits, expertise,
-                        memory_id, agent_id, embedding, created_at, updated_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
-                    cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": row[0],
-                                "persona_id": row[0],
-                                "name": row[1],
-                                "role_type": row[2],
-                                "background": self._read_lob_value(row[3]),
-                                "traits": self._deserialize_json_field(row[4]),
-                                "expertise": self._deserialize_json_field(row[5]),
-                                "memory_id": row[6],
-                                "agent_id": row[7],
-                                "created_at": row[9].isoformat() if row[9] else None,
-                                "updated_at": row[10].isoformat() if row[10] else None,
-                                "score": float(row[11]),
-                            }
-                        )
-                    return results
-
-                if memory_type == MemoryType.TOOLBOX:
-                    sql = f"""
-                    SELECT
-                        tool_id, name, description, signature, docstring, tool_type,
-                        parameters, memory_id, agent_id, embedding, created_at, updated_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
-                    cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": row[0],
-                                "tool_id": row[0],
-                                "name": row[1],
-                                "description": self._read_lob_value(row[2]),
-                                "signature": row[3],
-                                "docstring": self._read_lob_value(row[4]),
-                                "tool_type": row[5],
-                                "parameters": self._deserialize_json_field(row[6])
-                                or {},
-                                "memory_id": row[7],
-                                "agent_id": row[8],
-                                "created_at": row[10].isoformat() if row[10] else None,
-                                "updated_at": row[11].isoformat() if row[11] else None,
-                                "score": float(row[12]),
-                            }
-                        )
-                    return results
-
-                if memory_type == MemoryType.WORKFLOW_MEMORY:
-                    sql = f"""
-                    SELECT
-                        workflow_id, name, description, steps, current_step, status,
-                        outcome, memory_id, agent_id, embedding, created_at, updated_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
-                    cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": row[0],
-                                "workflow_id": row[0],
-                                "name": row[1],
-                                "description": self._read_lob_value(row[2]),
-                                "steps": self._deserialize_json_field(row[3]) or {},
-                                "current_step": row[4],
-                                "status": row[5],
-                                "outcome": self._deserialize_json_field(row[6]),
-                                "memory_id": row[7],
-                                "agent_id": row[8],
-                                "created_at": row[10].isoformat() if row[10] else None,
-                                "updated_at": row[11].isoformat() if row[11] else None,
-                                "score": float(row[12]),
-                            }
-                        )
-                    return results
-
-                if memory_type == MemoryType.SUMMARIES:
-                    sql = f"""
-                    SELECT
-                        summary_id, content, original_memory_ids, summary_type,
-                        memory_id, agent_id, embedding, created_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
-                    cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": row[0],
-                                "summary_id": row[0],
-                                "content": self._read_lob_value(row[1]),
-                                "original_memory_ids": self._deserialize_json_field(
-                                    row[2]
-                                )
-                                or [],
-                                "summary_type": row[3],
-                                "memory_id": row[4],
-                                "agent_id": row[5],
-                                "created_at": row[7].isoformat() if row[7] else None,
-                                "score": float(row[8]),
-                            }
-                        )
-                    return results
-
-                if memory_type == MemoryType.ENTITY_MEMORY:
-                    sql = f"""
-                    SELECT
-                        entity_id, name, entity_type, attributes, relations, metadata,
-                        memory_id, agent_id, embedding, created_at, updated_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
-                    cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": row[0],
-                                "entity_id": row[0],
-                                "name": row[1],
-                                "entity_type": row[2],
-                                "attributes": self._deserialize_json_field(row[3])
-                                or [],
-                                "relations": self._deserialize_json_field(row[4]) or [],
-                                "metadata": self._deserialize_json_field(row[5]) or {},
-                                "memory_id": row[6],
-                                "agent_id": row[7],
-                                "created_at": row[9].isoformat() if row[9] else None,
-                                "updated_at": row[10].isoformat() if row[10] else None,
-                                "score": float(row[11]),
-                            }
-                        )
-                    return results
-
+                sql = f"""
+                SELECT
+                    {_select_list(fields)}
+                FROM {table_name}
+                WHERE {where_clause}
+                ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
+                FETCH FIRST :limit ROWS ONLY
+                """
                 if memory_type == MemoryType.CONVERSATION_MEMORY:
-                    sql = f"""
-                    SELECT
-                        id, memory_id, thread_id, role, content, timestamp,
-                        agent_id, embedding,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
                     try:
                         cursor.execute(sql, params)
                     except Exception:
                         # Backward compat: unmigrated schema still has conversation_id
                         sql = sql.replace("thread_id", "conversation_id")
                         cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": str(uuid.UUID(bytes=row[0])),
-                                "memory_id": row[1],
-                                "thread_id": row[2],
-                                "role": row[3],
-                                "content": self._read_lob_value(row[4]),
-                                "timestamp": row[5].isoformat()
-                                if hasattr(row[5], "isoformat")
-                                else row[5],
-                                "agent_id": row[6],
-                                "score": float(row[8]),
-                            }
-                        )
-                    return results
-
-                if memory_type == MemoryType.KNOWLEDGE_BASE:
-                    # Include chunking metadata in the projection so the
-                    # agent-scoped filter in ``knowledge_base_lookup`` has
-                    # a real ``knowledge_base_id`` to match against.
-                    # Tolerate pre-migration schemas: ``NULL`` columns keep
-                    # the tuple shape stable.
-                    has_chunking = all(
-                        self._memory_type_has_column(memory_type, col)
-                        for col in (
-                            "knowledge_base_id",
-                            "namespace",
-                            "chunk_index",
-                            "chunk_count",
-                            "chunking_strategy",
-                        )
-                    )
-                    extra_cols = (
-                        ", knowledge_base_id, namespace, chunk_index, chunk_count, chunking_strategy"
-                        if has_chunking
-                        else ", NULL, NULL, NULL, NULL, NULL"
-                    )
-                    sql = f"""
-                    SELECT
-                        id, memory_id, content, memory_type, importance, last_accessed,
-                        access_count, agent_id, embedding, created_at, updated_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score{extra_cols}
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
+                else:
                     cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": str(uuid.UUID(bytes=row[0])),
-                                "memory_id": row[1],
-                                "content": self._read_lob_value(row[2]),
-                                "memory_type": row[3],
-                                "importance": row[4],
-                                "last_accessed": row[5].isoformat()
-                                if hasattr(row[5], "isoformat")
-                                else row[5],
-                                "access_count": row[6],
-                                "agent_id": row[7],
-                                "created_at": row[9].isoformat() if row[9] else None,
-                                "updated_at": row[10].isoformat() if row[10] else None,
-                                "score": float(row[11]),
-                                "knowledge_base_id": row[12],
-                                "namespace": row[13],
-                                "chunk_index": row[14],
-                                "chunk_count": row[15],
-                                "chunking_strategy": row[16],
-                            }
-                        )
-                    return results
 
-                if memory_type == MemoryType.SHORT_TERM_MEMORY:
-                    sql = f"""
-                    SELECT
-                        id, memory_id, content, memory_type, ttl, agent_id, embedding,
-                        created_at, expires_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
-                    cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": str(uuid.UUID(bytes=row[0])),
-                                "memory_id": row[1],
-                                "content": self._read_lob_value(row[2]),
-                                "memory_type": row[3],
-                                "ttl": row[4],
-                                "agent_id": row[5],
-                                "created_at": row[7].isoformat() if row[7] else None,
-                                "expires_at": row[8].isoformat()
-                                if hasattr(row[8], "isoformat")
-                                else row[8],
-                                "score": float(row[9]),
-                            }
-                        )
-                    return results
-
-                if memory_type == MemoryType.SHARED_MEMORY:
-                    sql = f"""
-                    SELECT
-                        id, memory_id, content, memory_type, scope, owner_agent_id,
-                        access_list, embedding, created_at, updated_at,
-                        (1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE)) as score
-                    FROM {table_name}
-                    WHERE {where_clause}
-                    ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                    FETCH FIRST :limit ROWS ONLY
-                    """
-                    cursor.execute(sql, params)
-                    results = []
-                    for row in cursor:
-                        results.append(
-                            {
-                                "_id": str(uuid.UUID(bytes=row[0])),
-                                "memory_id": row[1],
-                                "content": self._deserialize_json_field(row[2]),
-                                "memory_type": row[3],
-                                "scope": row[4],
-                                "owner_agent_id": row[5],
-                                "access_list": self._deserialize_json_field(row[6]),
-                                "created_at": row[8].isoformat() if row[8] else None,
-                                "updated_at": row[9].isoformat() if row[9] else None,
-                                "score": float(row[10]),
-                            }
-                        )
-                    return results
-
-                logger.warning("Vector search not supported for %s", memory_type)
-                return []
+                return [self._apply_row_fields(fields, row) for row in cursor]
             except Exception as e:
                 error_str = str(e)
                 if self._is_vector_distance_dimension_mismatch_error(error_str):
@@ -4635,6 +5078,18 @@ class OracleProvider(MemoryProvider):
                 else:
                     additional_cfg.pop("self_aware_config", None)
 
+            if "continual_learning" in memagent_dict:
+                additional_cfg["continual_learning"] = bool(
+                    memagent_dict.get("continual_learning", False)
+                )
+
+            if "continual_learning_config" in memagent_dict:
+                cl_cfg_val = memagent_dict.get("continual_learning_config")
+                if isinstance(cl_cfg_val, dict):
+                    additional_cfg["continual_learning_config"] = cl_cfg_val
+                else:
+                    additional_cfg.pop("continual_learning_config", None)
+
             if "automations_enabled" in memagent_dict:
                 additional_cfg["automations_enabled"] = bool(
                     memagent_dict.get("automations_enabled", True)
@@ -4811,224 +5266,6 @@ class OracleProvider(MemoryProvider):
             conn.commit()
             return agent_id_str
 
-    def _persist_agent_tools(
-        self, agent_id: str, agent_uuid: bytes, tools: List[Dict[str, Any]]
-    ):
-        """
-        Persist agent tools to TOOLBOX table.
-
-        Args:
-            agent_id: The agent's string ID
-            agent_uuid: The agent's binary UUID for FK relationships
-            tools: List of tool metadata dictionaries
-        """
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-
-            # First, delete existing tools for this agent (if tool_access is private)
-            cursor.execute(
-                """
-                DELETE FROM toolbox WHERE agent_id = :agent_id
-            """,
-                {"agent_id": agent_id},
-            )
-
-            for tool_meta in tools:
-                tool_description = tool_meta.get("description", "")
-                tool_signature = tool_meta.get("signature", "")
-                tool_text = (
-                    f"{tool_meta.get('name', '')}: {tool_description} {tool_signature}"
-                )
-
-                embedding = None
-                if self._embedding_provider and tool_text.strip():
-                    try:
-                        embedding_result = self._embedding_provider.get_embedding(
-                            tool_text
-                        )
-                        if embedding_result and isinstance(embedding_result, list):
-                            embedding = embedding_result
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to generate embedding for tool {tool_meta.get('name')}: {e}"
-                        )
-
-                tool_id_value = tool_meta.get("_id") or tool_meta.get(
-                    "name", str(uuid.uuid4())
-                )
-
-                try:
-                    self._upsert_toolbox_row(
-                        cursor,
-                        tool_id=tool_id_value,
-                        name=tool_meta.get("name", "unknown_tool"),
-                        description=tool_description,
-                        signature=tool_signature,
-                        docstring=tool_meta.get("docstring", ""),
-                        tool_type=tool_meta.get("type", "function"),
-                        memory_id=tool_meta.get("memory_id"),
-                        agent_id=agent_id,
-                        embedding=embedding,
-                        parameters=tool_meta.get("parameters"),
-                    )
-                    logger.info(
-                        f"Persisted tool '{tool_meta.get('name')}' for agent {agent_id}"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to persist tool {tool_meta.get('name')}: {e}")
-
-            conn.commit()
-
-    def _persist_agent_persona(self, agent_id: str, agent_uuid: bytes, persona: Any):
-        """
-        Persist agent persona to PERSONAS table.
-
-        Args:
-            agent_id: The agent's string ID
-            agent_uuid: The agent's binary UUID for FK relationships
-            persona: Persona object or dictionary
-        """
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-
-            # First, delete existing persona for this agent (one persona per agent)
-            cursor.execute(
-                """
-                DELETE FROM personas WHERE agent_id = :agent_id
-            """,
-                {"agent_id": agent_id},
-            )
-
-            # Convert persona to dict if it's an object
-            if hasattr(persona, "__dict__"):
-                persona_dict = persona.__dict__
-            elif isinstance(persona, dict):
-                persona_dict = persona
-            else:
-                logger.warning(f"Persona has unexpected type: {type(persona)}")
-                return
-
-            # Generate embedding for the persona if embedding provider is available
-            persona_text = f"{persona_dict.get('name', '')}: {persona_dict.get('background', '')} {persona_dict.get('goals', '')}"
-
-            embedding = None
-            if self._embedding_provider and persona_text.strip():
-                try:
-                    embedding_result = self._embedding_provider.get_embedding(
-                        persona_text
-                    )
-                    if embedding_result and isinstance(embedding_result, list):
-                        embedding = embedding_result
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to generate embedding for persona {persona_dict.get('name')}: {e}"
-                    )
-
-            persona_id_value = persona_dict.get("persona_id") or persona_dict.get(
-                "name", str(uuid.uuid4())
-            )
-            role_raw = persona_dict.get("role")
-            if isinstance(role_raw, str):
-                role_type_value = role_raw
-            elif hasattr(role_raw, "value"):
-                role_type_value = role_raw.value
-            else:
-                role_type_value = "general"
-
-            try:
-                self._upsert_persona_row(
-                    cursor,
-                    persona_id=persona_id_value,
-                    name=persona_dict.get("name", "Unnamed Persona"),
-                    role_type=role_type_value,
-                    background=persona_dict.get("background", ""),
-                    memory_id=persona_dict.get("memory_id"),
-                    agent_id=agent_id,
-                    embedding=embedding,
-                    traits=persona_dict.get("traits"),
-                    expertise=persona_dict.get("expertise"),
-                )
-                logger.info(
-                    f"Persisted persona '{persona_dict.get('name')}' for agent {agent_id}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to persist persona {persona_dict.get('name')}: {e}"
-                )
-
-            conn.commit()
-
-    def _retrieve_agent_persona(self, agent_id: str) -> Optional[Any]:
-        """
-        Retrieve the persona for an agent from PERSONAS table.
-
-        Args:
-            agent_id: The agent's string ID
-
-        Returns:
-            Persona object or None if no persona exists
-        """
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-
-            try:
-                # Query persona from personas table
-                cursor.execute(
-                    """
-                    SELECT persona_id, name, role_type, background, traits,
-                           expertise, memory_id, embedding
-                    FROM personas
-                    WHERE agent_id = :agent_id
-                """,
-                    {"agent_id": agent_id},
-                )
-
-                row = cursor.fetchone()
-                if not row:
-                    return None
-
-                # Import Persona class (RoleType already imported at module level)
-                from ...long_term.semantic.persona.persona import Persona
-
-                # Parse the row
-                persona_id = row[0]
-                name = row[1]
-                role_type_str = row[2]
-                background = row[3]
-                traits = self._deserialize_json_field(row[4])
-                expertise = self._deserialize_json_field(row[5])
-                # row[6] = memory_id (unused)
-                # row[7] = embedding (unused)
-
-                # Convert role_type string to RoleType enum
-                role = RoleType.GENERAL  # Default
-                for role_enum in RoleType:
-                    if role_enum.value == role_type_str:
-                        role = role_enum
-                        break
-
-                # Create Persona object
-                persona = Persona(
-                    name=name,
-                    role=role,
-                    goals=background,  # Using background as goals
-                    background=background,
-                    persona_id=persona_id,
-                )
-
-                # Add optional fields if available
-                if traits:
-                    persona.traits = traits
-                if expertise:
-                    persona.expertise = expertise
-
-                logger.info(f"Retrieved persona '{name}' for agent {agent_id}")
-                return persona
-
-            except Exception as e:
-                logger.error(f"Failed to retrieve persona for agent {agent_id}: {e}")
-                return None
-
     def retrieve_tools_for_agent(
         self,
         agent_id: str,
@@ -5055,9 +5292,8 @@ class OracleProvider(MemoryProvider):
             if tool_access == "private":
                 # Retrieve only tools belonging to this agent
                 cursor.execute(
-                    """
-                    SELECT tool_id, name, description, signature, docstring, tool_type,
-                           parameters, memory_id, embedding
+                    f"""
+                    SELECT {_select_list(_AGENT_TOOL_FIELDS)}
                     FROM toolbox
                     WHERE agent_id = :agent_id
                       AND (tool_type IS NULL OR LOWER(tool_type) <> 'mcp_server_config')
@@ -5078,8 +5314,7 @@ class OracleProvider(MemoryProvider):
                     # Otherwise, retrieve all tools (or top_k most recent)
                     cursor.execute(
                         f"""
-                        SELECT tool_id, name, description, signature, docstring, tool_type,
-                               parameters, memory_id, embedding
+                        SELECT {_select_list(_AGENT_TOOL_FIELDS)}
                         FROM toolbox
                         WHERE (tool_type IS NULL OR LOWER(tool_type) <> 'mcp_server_config')
                           AND name IS NOT NULL
@@ -5124,10 +5359,10 @@ class OracleProvider(MemoryProvider):
                 # Use 'f' (float32) to match the VECTOR column format in Oracle
                 query_vec = array.array("f", query_embedding)
 
+                num_tool_cols = len(_AGENT_TOOL_FIELDS)
                 cursor.execute(
                     f"""
-                    SELECT tool_id, name, description, signature, docstring, tool_type,
-                           parameters, memory_id, embedding,
+                    SELECT {_select_list(_AGENT_TOOL_FIELDS)},
                            VECTOR_DISTANCE(embedding, :query_embedding, COSINE) as distance
                     FROM toolbox
                     WHERE embedding IS NOT NULL
@@ -5141,10 +5376,12 @@ class OracleProvider(MemoryProvider):
 
                 tools = []
                 for row in cursor.fetchall():
-                    # Note: row now has 10 elements (9 + distance)
-                    tool_dict = self._toolbox_row_to_dict(row[:9])  # First 9 columns
+                    # The trailing column is the vector distance.
+                    tool_dict = self._toolbox_row_to_dict(row[:num_tool_cols])
                     tool_dict["similarity_distance"] = (
-                        float(row[9]) if row[9] is not None else None
+                        float(row[num_tool_cols])
+                        if row[num_tool_cols] is not None
+                        else None
                     )
                     tools.append(tool_dict)
 
@@ -5158,18 +5395,9 @@ class OracleProvider(MemoryProvider):
             return []
 
     def _toolbox_row_to_dict(self, row: tuple) -> Dict[str, Any]:
-        """Convert a toolbox table row to a dictionary."""
-        return {
-            "_id": row[0] if row[0] else None,  # tool_id
-            "name": row[1] if row[1] else "unknown",
-            "description": row[2] if row[2] else "",
-            "signature": row[3] if row[3] else "",
-            "docstring": row[4] if row[4] else "",
-            "type": row[5] if row[5] else "function",
-            "parameters": self._deserialize_json_field(row[6]) or {},
-            "memory_id": row[7] if row[7] else None,
-            "embedding": list(row[8]) if row[8] is not None else None,
-        }
+        """Convert a toolbox table row (``_AGENT_TOOL_FIELDS`` projection)
+        to an agent-facing tool dictionary."""
+        return self._apply_row_fields(_AGENT_TOOL_FIELDS, row)
 
     def delete_memagent(self, agent_id: str, cascade: bool = False) -> bool:
         """Delete a memagent from the memory provider."""
@@ -5273,6 +5501,10 @@ class OracleProvider(MemoryProvider):
             self_aware_cfg_value = cfg.get("self_aware_config")
             if not isinstance(self_aware_cfg_value, dict):
                 self_aware_cfg_value = None
+            continual_learning_value = bool(cfg.get("continual_learning", False))
+            continual_learning_cfg_value = cfg.get("continual_learning_config")
+            if not isinstance(continual_learning_cfg_value, dict):
+                continual_learning_cfg_value = None
             automations_enabled_value = cfg.get("automations_enabled", True)
             if automations_enabled_value is None:
                 automations_enabled_value = True
@@ -5294,6 +5526,8 @@ class OracleProvider(MemoryProvider):
                 tools=doc.get("tools"),
                 knowledge_base_ids=doc.get("knowledge_base_ids"),
                 self_aware=self_aware_value,
+                continual_learning=continual_learning_value,
+                continual_learning_config=continual_learning_cfg_value,
                 self_aware_config=self_aware_cfg_value,
                 automations_enabled=automations_enabled_value,
                 default_timezone=default_timezone_value,
@@ -5469,11 +5703,12 @@ class OracleProvider(MemoryProvider):
                 traits = self._deserialize_json_field(persona_row[5])
                 expertise = self._deserialize_json_field(persona_row[6])
 
+                background_text = self._read_lob_value(persona_row[3]) or ""
                 persona = Persona(
                     name=persona_row[1],
                     role=role,
-                    goals=persona_row[3] or "",
-                    background=persona_row[3] or "",
+                    goals=background_text,
+                    background=background_text,
                     persona_id=persona_row[0],
                 )
                 if traits:
@@ -5487,8 +5722,8 @@ class OracleProvider(MemoryProvider):
 
             if tool_access == "private":
                 cursor.execute(
-                    """
-                    SELECT tool_id, name, description, signature, docstring, tool_type, memory_id, parameters
+                    f"""
+                    SELECT {_select_list(_MEMAGENT_TOOL_FIELDS)}
                     FROM toolbox
                     WHERE agent_id = :agent_id
                       AND (tool_type IS NULL OR LOWER(tool_type) <> 'mcp_server_config')
@@ -5499,20 +5734,10 @@ class OracleProvider(MemoryProvider):
                 tool_rows = cursor.fetchall()
 
                 if tool_rows:
-                    tools = []
-                    for tool_row in tool_rows:
-                        parameters = self._deserialize_json_field(tool_row[7]) or {}
-                        tool_dict = {
-                            "_id": tool_row[0],
-                            "name": tool_row[1],
-                            "description": tool_row[2] or "",
-                            "signature": tool_row[3] or "",
-                            "docstring": tool_row[4] or "",
-                            "type": tool_row[5] or "function",
-                            "memory_id": tool_row[6],
-                            "parameters": parameters,
-                        }
-                        tools.append(tool_dict)
+                    tools = [
+                        self._apply_row_fields(_MEMAGENT_TOOL_FIELDS, tool_row)
+                        for tool_row in tool_rows
+                    ]
             elif tool_access in ("public", "global"):
                 # For public tools, load from all available tools
                 tools = self.retrieve_tools_for_agent(
@@ -5555,6 +5780,14 @@ class OracleProvider(MemoryProvider):
                 self_aware_config = additional_cfg.pop("self_aware_config", None)
                 if not isinstance(self_aware_config, dict):
                     self_aware_config = None
+                continual_learning = bool(
+                    additional_cfg.pop("continual_learning", False)
+                )
+                continual_learning_config = additional_cfg.pop(
+                    "continual_learning_config", None
+                )
+                if not isinstance(continual_learning_config, dict):
+                    continual_learning_config = None
                 automations_enabled = additional_cfg.pop("automations_enabled", True)
                 if automations_enabled is None:
                     automations_enabled = True
@@ -5596,6 +5829,8 @@ class OracleProvider(MemoryProvider):
                 skills_marketplace_config=skills_marketplace_config,
                 self_aware=self_aware,
                 self_aware_config=self_aware_config,
+                continual_learning=continual_learning,
+                continual_learning_config=continual_learning_config,
                 automations_enabled=automations_enabled,
                 default_timezone=default_timezone,
                 memory_provider=self,

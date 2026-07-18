@@ -38,6 +38,7 @@ class MemoryType(Enum, metaclass=_MemoryTypeMeta):
     KNOWLEDGE_BASE = "knowledge_base"
     CONVERSATION_MEMORY = "conversation_memory"
     WORKFLOW_MEMORY = "workflow_memory"
+    SKILLBOX = "skillbox"
     MEMAGENT = "agents"
     SHARED_MEMORY = "shared_memory"
     SUMMARIES = "summaries"
