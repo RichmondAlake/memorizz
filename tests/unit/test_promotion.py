@@ -7,10 +7,13 @@ contract, and the skill monitor."""
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from memorizz.long_term.procedural.skillbox import (
     PromotionConfig,
     PromotionEngine,
     Skill,
+    SkillInjectionRole,
     SkillMonitor,
     SkillStatus,
 )
@@ -105,6 +108,48 @@ def _engine(skillbox=None, config=None, provider=None):
         agent_id="agent-1",
         resolve_tool=lambda name: True,
     )
+
+
+class TestSkillAuthority:
+    def test_legacy_default_remains_user_authority(self):
+        assert PromotionConfig().skill_injection_role == SkillInjectionRole.USER
+        assert (
+            PromotionConfig.from_dict({}).skill_injection_role
+            == SkillInjectionRole.USER
+        )
+
+    def test_developer_authority_requires_shadow_review(self):
+        with pytest.raises(ValueError, match="require_shadow=True"):
+            PromotionConfig(skill_injection_role="developer")
+
+        config = PromotionConfig(
+            skill_injection_role="developer",
+            require_shadow=True,
+        )
+        assert config.skill_injection_role == SkillInjectionRole.DEVELOPER
+
+    def test_review_activation_can_set_developer_authority(self):
+        skill = Skill(
+            name="review me",
+            description="d",
+            content="c",
+            source_canonical_hash=None,
+            status=SkillStatus.SHADOW,
+            embedding=[],
+        )
+        box = _StubSkillbox([skill])
+        engine = _engine(
+            skillbox=box,
+            config=PromotionConfig(
+                require_shadow=True,
+                skill_injection_role="developer",
+            ),
+            provider=_RecordingProvider(),
+        )
+
+        assert engine.activate_skill(skill.skill_id, injection_role="developer")
+        assert skill.status == SkillStatus.ACTIVE
+        assert skill.injection_role == SkillInjectionRole.DEVELOPER
 
 
 class TestGates:

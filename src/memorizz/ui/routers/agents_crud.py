@@ -65,6 +65,7 @@ router = APIRouter(tags=["agents-crud"])
 AGENT_SORT_LAST_RUN = "last_run"
 AGENT_SORT_LAST_CREATED = "last_created"
 AGENT_SORT_OPTIONS = {AGENT_SORT_LAST_RUN, AGENT_SORT_LAST_CREATED}
+SKILL_INJECTION_ROLES = {"user", "developer"}
 
 
 def _normalize_agent_sort_option(sort_by: Optional[str]) -> str:
@@ -218,6 +219,29 @@ def _parse_llm_config(
             error = f"Invalid LLM config JSON: {exc}"
 
     return config, error
+
+
+def _build_continual_learning_config(
+    skill_injection_role: str,
+    require_shadow: bool,
+    base_config: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Merge and validate the continual-learning controls exposed by the UI."""
+    config = dict(base_config) if isinstance(base_config, dict) else {}
+    raw_role = getattr(skill_injection_role, "value", skill_injection_role)
+    role = _to_text(raw_role).strip().lower() or "user"
+    config["skill_injection_role"] = role
+    config["require_shadow"] = bool(require_shadow)
+
+    if role not in SKILL_INJECTION_ROLES:
+        return config, "Learned skill authority must be user or developer."
+    if role == "developer" and not require_shadow:
+        return (
+            config,
+            "Developer-authority learned skills require shadow review before "
+            "activation.",
+        )
+    return config, None
 
 
 def _build_persona_payload(
@@ -408,6 +432,14 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         for path in self_aware_root_paths
         if _to_text(path).strip()
     )
+    continual_learning_config = getattr(agent, "continual_learning_config", None)
+    if not isinstance(continual_learning_config, dict):
+        continual_learning_config = {}
+    raw_skill_role = continual_learning_config.get("skill_injection_role", "user")
+    raw_skill_role = getattr(raw_skill_role, "value", raw_skill_role)
+    skill_injection_role = _to_text(raw_skill_role).strip().lower()
+    if skill_injection_role not in SKILL_INJECTION_ROLES:
+        skill_injection_role = "user"
 
     return {
         "agent_id": getattr(agent, "agent_id", ""),
@@ -423,6 +455,10 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "tool_access": getattr(agent, "tool_access", None) or "private",
         "semantic_cache": bool(getattr(agent, "semantic_cache", False)),
         "continual_learning": bool(getattr(agent, "continual_learning", False)),
+        "skill_injection_role": skill_injection_role,
+        "continual_learning_require_shadow": bool(
+            continual_learning_config.get("require_shadow", False)
+        ),
         "is_favorite": bool(getattr(agent, "is_favorite", False)),
         "memory_ids_raw": ", ".join(memory_ids),
         "persona_id": persona_id_value,
@@ -618,6 +654,8 @@ async def agent_create_page(request: Request):
             "tool_access": "private",
             "semantic_cache": False,
             "continual_learning": False,
+            "skill_injection_role": "user",
+            "continual_learning_require_shadow": False,
             "memory_ids_raw": "",
             "persona_name": "",
             "persona_role": "",
@@ -657,6 +695,8 @@ async def agent_create_submit(
     tool_access: str = Form("private"),
     semantic_cache: Optional[str] = Form(None),
     continual_learning: Optional[str] = Form(None),
+    skill_injection_role: str = Form("user"),
+    continual_learning_require_shadow: Optional[str] = Form(None),
     memory_ids: str = Form(""),
     agent_name: str = Form(""),
     persona_id: str = Form(""),
@@ -698,6 +738,18 @@ async def agent_create_submit(
     memory_id_list = _parse_memory_ids(memory_ids)
     semantic_cache_enabled = _parse_bool(semantic_cache)
     continual_learning_enabled = _parse_bool(continual_learning)
+    continual_learning_require_shadow_value = _parse_bool(
+        continual_learning_require_shadow
+    )
+    (
+        continual_learning_config_value,
+        continual_learning_config_error,
+    ) = _build_continual_learning_config(
+        skill_injection_role=skill_injection_role,
+        require_shadow=continual_learning_require_shadow_value,
+    )
+    if not error and continual_learning_config_error:
+        error = continual_learning_config_error
     enable_entity_memory_value = _parse_bool(enable_entity_memory)
     enable_workflow_memory_value = _parse_bool(enable_workflow_memory)
     self_aware_enabled = _parse_bool(self_aware)
@@ -758,6 +810,10 @@ async def agent_create_submit(
                 "tool_access": tool_access,
                 "semantic_cache": semantic_cache_enabled,
                 "continual_learning": continual_learning_enabled,
+                "skill_injection_role": skill_injection_role,
+                "continual_learning_require_shadow": (
+                    continual_learning_require_shadow_value
+                ),
                 "memory_ids_raw": memory_ids,
                 "persona_id": persona_id,
                 "persona_name": persona_name,
@@ -829,6 +885,10 @@ async def agent_create_submit(
                 "tool_access": tool_access,
                 "semantic_cache": semantic_cache_enabled,
                 "continual_learning": continual_learning_enabled,
+                "skill_injection_role": skill_injection_role,
+                "continual_learning_require_shadow": (
+                    continual_learning_require_shadow_value
+                ),
                 "memory_ids_raw": memory_ids,
                 "persona_id": persona_id,
                 "persona_name": persona_name,
@@ -882,6 +942,7 @@ async def agent_create_submit(
         self_aware=self_aware_enabled,
         self_aware_config=self_aware_config_value,
         continual_learning=continual_learning_enabled,
+        continual_learning_config=continual_learning_config_value,
         automations_enabled=automations_enabled_value,
         default_timezone=default_timezone_value,
         whatsapp_enabled=whatsapp_enabled_value,
@@ -916,6 +977,10 @@ async def agent_create_submit(
                 "tool_access": tool_access,
                 "semantic_cache": semantic_cache_enabled,
                 "continual_learning": continual_learning_enabled,
+                "skill_injection_role": skill_injection_role,
+                "continual_learning_require_shadow": (
+                    continual_learning_require_shadow_value
+                ),
                 "memory_ids_raw": memory_ids,
                 "persona_id": persona_id,
                 "persona_name": persona_name,
@@ -985,6 +1050,8 @@ async def agent_edit_submit(
     tool_access: str = Form("private"),
     semantic_cache: Optional[str] = Form(None),
     continual_learning: Optional[str] = Form(None),
+    skill_injection_role: str = Form("user"),
+    continual_learning_require_shadow: Optional[str] = Form(None),
     memory_ids: str = Form(""),
     agent_name: str = Form(""),
     persona_id: str = Form(""),
@@ -1030,6 +1097,22 @@ async def agent_edit_submit(
     memory_id_list = _parse_memory_ids(memory_ids)
     semantic_cache_enabled = _parse_bool(semantic_cache)
     continual_learning_enabled = _parse_bool(continual_learning)
+    continual_learning_require_shadow_value = _parse_bool(
+        continual_learning_require_shadow
+    )
+    existing_continual_learning_config = getattr(
+        existing, "continual_learning_config", None
+    )
+    (
+        continual_learning_config_value,
+        continual_learning_config_error,
+    ) = _build_continual_learning_config(
+        skill_injection_role=skill_injection_role,
+        require_shadow=continual_learning_require_shadow_value,
+        base_config=existing_continual_learning_config,
+    )
+    if not error and continual_learning_config_error:
+        error = continual_learning_config_error
     enable_entity_memory_value = _parse_bool(enable_entity_memory)
     enable_workflow_memory_value = _parse_bool(enable_workflow_memory)
     self_aware_enabled_value = _parse_bool(self_aware)
@@ -1107,6 +1190,8 @@ async def agent_edit_submit(
         "tool_access": tool_access,
         "semantic_cache": semantic_cache_enabled,
         "continual_learning": continual_learning_enabled,
+        "skill_injection_role": skill_injection_role,
+        "continual_learning_require_shadow": (continual_learning_require_shadow_value),
         "memory_ids_raw": memory_ids,
         "agent_name": agent_name,
         "persona_id": persona_id,
@@ -1295,7 +1380,7 @@ async def agent_edit_submit(
         self_aware=self_aware_enabled_value,
         self_aware_config=self_aware_config_value,
         continual_learning=continual_learning_enabled,
-        continual_learning_config=getattr(existing, "continual_learning_config", None),
+        continual_learning_config=continual_learning_config_value,
         automations_enabled=automations_enabled_value,
         default_timezone=default_timezone_value,
         whatsapp_enabled=whatsapp_enabled_value,

@@ -950,7 +950,7 @@
                             <div class="context-workflow-item">
                                 <div class="context-workflow-header">
                                     <span class="context-workflow-name">{{ item.name }}</span>
-                                    <span class="context-workflow-meta">{{ item.status }}{% if item.version %} · v{{ item.version }}{% endif %}</span>
+                                    <span class="context-workflow-meta">{{ item.status }} · {{ item.injection_role }} authority{% if item.version %} · v{{ item.version }}{% endif %}</span>
                                 </div>
                                 {% if item.description %}
                                 <div class="context-workflow-query">{{ item.description }}</div>
@@ -2020,6 +2020,7 @@ function renderContextWorkflows(entries) {
         const name = entry && entry.name ? String(entry.name) : 'unnamed_workflow';
         const timestamp = entry && entry.timestamp ? String(entry.timestamp) : '';
         const status = entry && entry.status ? String(entry.status) : '';
+        const injectionRole = entry && entry.injection_role ? String(entry.injection_role) : 'user';
         const outcome = entry && entry.outcome ? String(entry.outcome) : '';
         const stepCount = entry && Number.isFinite(Number(entry.step_count)) ? Number(entry.step_count) : 0;
         const userQuery = entry && entry.user_query ? String(entry.user_query) : '';
@@ -2068,7 +2069,7 @@ function renderContextSkills(entries) {
         const successes = entry && Number.isFinite(Number(entry.successes)) ? Number(entry.successes) : 0;
         const failures = entry && Number.isFinite(Number(entry.failures)) ? Number(entry.failures) : 0;
         const deviations = entry && Number.isFinite(Number(entry.deviations)) ? Number(entry.deviations) : 0;
-        const metaText = status + (version ? ` · v${version}` : '');
+        const metaText = status + ` · ${injectionRole} authority` + (version ? ` · v${version}` : '');
         const statParts = [
             `Activations: ${activations}`,
             `Successes: ${successes}`,

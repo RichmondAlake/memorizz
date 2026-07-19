@@ -11,12 +11,19 @@ from .distiller import (
 )
 from .monitor import SkillMonitor
 from .promotion import PromotionConfig, PromotionEngine, PromotionReport
-from .skill import Skill, SkillStatus
+from .skill import (
+    Skill,
+    SkillInjectionRole,
+    SkillStatus,
+    normalize_skill_injection_role,
+)
 from .skillbox import ScoredSkill, Skillbox
 
 __all__ = [
     "Skill",
+    "SkillInjectionRole",
     "SkillStatus",
+    "normalize_skill_injection_role",
     "Skillbox",
     "ScoredSkill",
     "SkillDistiller",

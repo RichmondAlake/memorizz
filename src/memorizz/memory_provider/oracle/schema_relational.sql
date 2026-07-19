@@ -187,6 +187,7 @@ CREATE TABLE skillbox (
     source_workflow_ids CLOB CHECK (source_workflow_ids IS JSON),  -- JSON array of workflow IDs
     exemplar_workflow_id VARCHAR2(255),
     status VARCHAR2(50) DEFAULT 'candidate',
+    injection_role VARCHAR2(20) DEFAULT 'user' NOT NULL,
     version NUMBER(10) DEFAULT 1,
     promoted_at TIMESTAMP,
     demoted_at TIMESTAMP,
@@ -199,6 +200,7 @@ CREATE TABLE skillbox (
 
     -- Constraints
     CONSTRAINT chk_skillbox_status CHECK (status IN ('candidate', 'shadow', 'active', 'deprecated', 'demoted')),
+    CONSTRAINT chk_skillbox_injection_role CHECK (injection_role IN ('user', 'developer')),
 
     -- Foreign key to agents
     CONSTRAINT fk_skillbox_agent FOREIGN KEY (agent_id)

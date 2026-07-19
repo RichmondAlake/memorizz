@@ -12,7 +12,12 @@ from typing import List
 import pytest
 
 from memorizz.enums import MemoryType
-from memorizz.long_term.procedural.skillbox import Skill, Skillbox, SkillStatus
+from memorizz.long_term.procedural.skillbox import (
+    Skill,
+    Skillbox,
+    SkillInjectionRole,
+    SkillStatus,
+)
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
 
 
@@ -98,6 +103,22 @@ class TestSkillModel:
         assert clone.tools_used == skill.tools_used
         assert clone.embedding == skill.embedding
         assert clone.baseline == skill.baseline
+        assert clone.injection_role == SkillInjectionRole.USER
+
+    def test_developer_role_round_trips_and_legacy_defaults_to_user(
+        self, patched_embeddings
+    ):
+        skill = _skill(injection_role="developer")
+        payload = skill.to_dict()
+        assert payload["injection_role"] == "developer"
+        assert Skill.from_dict(payload).injection_role == SkillInjectionRole.DEVELOPER
+
+        payload.pop("injection_role")
+        assert Skill.from_dict(payload).injection_role == SkillInjectionRole.USER
+
+    def test_invalid_injection_role_is_rejected(self, patched_embeddings):
+        with pytest.raises(ValueError, match="user, developer"):
+            _skill(injection_role="system")
 
     def test_loading_without_embedding_never_regenerates(self, monkeypatch):
         from memorizz.long_term.procedural.skillbox import skill as skill_mod
@@ -166,6 +187,17 @@ class TestSkillboxStore:
         stored = next(d for d in raw if d.get("skill_id") == skill.skill_id)
         assert stored.get("embedding"), "embedding must survive stat updates"
         assert stored["stats"]["activations"] == 3
+
+    def test_update_skill_persists_authority(self, fs_provider, patched_embeddings):
+        box = Skillbox(fs_provider, agent_id="agent-1")
+        skill = _skill()
+        box.add_skill(skill)
+
+        skill.injection_role = SkillInjectionRole.DEVELOPER
+        assert box.update_skill(skill)
+
+        stored = box.get_skill_by_id(skill.skill_id)
+        assert stored.injection_role == SkillInjectionRole.DEVELOPER
 
     def test_get_active_skill_for_hash_and_cache_invalidation(
         self, fs_provider, patched_embeddings

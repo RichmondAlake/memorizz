@@ -111,6 +111,7 @@ Every memory bucket gets its own table plus a VECTOR index:
 - `short_term_memory`
 - `conversation_memory`
 - `workflow_memory`
+- `skillbox` (including persisted `injection_role` for learned skills)
 - `shared_memory`
 - `summaries`
 - `semantic_cache`
@@ -122,5 +123,22 @@ Every memory bucket gets its own table plus a VECTOR index:
 - **Connection refused** – Use Easy Connect Plus (`host:port/service`) or TNS alias strings.
 - **Slow cold start** – Enable `lazy_vector_indexes` or pre-create indexes manually using the SQL files in the provider folder.
 - **Embedding dimension mismatch** – Align provider model/output dimensions with existing table VECTOR dimensions, or use a separate schema per embedding profile.
+- **`OracleProvider._table_has_column()` missing `column_name`** – Upgrade
+  MemoRizz. Older lazy-index code called the helper without its cursor, then
+  skill retrieval failed safely and returned no matches even though promotion
+  writes had succeeded.
+
+## Existing-schema migration for skill authority
+
+Fresh setup and `memorizz oracle setup-schema` include
+`skillbox.injection_role`. For an existing schema managed outside those
+commands, run:
+
+```sql
+@src/memorizz/memory_provider/oracle/migrations/002_add_skill_injection_role.sql
+```
+
+Existing rows receive `user`, preserving the previous behavior. The column
+accepts only `user` or `developer`.
 
 For the full reference, open `src/memorizz/memory_provider/oracle/README.md`.

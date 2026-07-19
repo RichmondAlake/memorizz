@@ -3,8 +3,9 @@
 Learned skills for MemoRizz agents: SKILL.md documents that live in the
 database (`MemoryType.SKILLBOX`) with a lifecycle attached. Skills are
 distilled from repeated successful workflow trajectories by the
-`PromotionEngine`, injected into matching runs as strong priors, monitored
-by the `SkillMonitor`, and demoted when they drift.
+`PromotionEngine`, injected into matching runs at a persisted user or reviewed
+developer authority, monitored by the `SkillMonitor`, and demoted when they
+drift.
 
 ## Quick Start
 
@@ -12,7 +13,8 @@ by the `SkillMonitor`, and demoted when they drift.
 from pathlib import Path
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
 from memorizz.long_term.procedural.skillbox import (
-    Skillbox, PromotionEngine, PromotionConfig, SkillMonitor, SkillStatus,
+    Skillbox, PromotionEngine, PromotionConfig, SkillInjectionRole,
+    SkillMonitor, SkillStatus,
 )
 
 provider = FileSystemProvider(FileSystemConfig(root_path=Path("~/.memorizz").expanduser()))
@@ -21,7 +23,10 @@ skillbox = Skillbox(provider, agent_id="my-agent")
 engine = PromotionEngine(
     provider, skillbox,
     llm_provider=my_llm,                       # anything with .generate_text()
-    config=PromotionConfig(require_shadow=True),
+    config=PromotionConfig(
+        require_shadow=True,
+        skill_injection_role=SkillInjectionRole.DEVELOPER,
+    ),
     agent_id="my-agent",
 )
 report = engine.run_promotion_cycle()
@@ -37,7 +42,10 @@ for hit in skillbox.retrieve_skills_by_query("refund my order", limit=2):
 agent = MemAgent(
     memory_provider=provider,
     continual_learning=True,
-    continual_learning_config={"require_shadow": True},
+    continual_learning_config={
+        "require_shadow": True,
+        "skill_injection_role": "developer",
+    },
 )
 # agent.continual_learning_manager owns the Skillbox/engine/monitor
 ```
@@ -50,6 +58,16 @@ agent = MemAgent(
 - `retrieve_skills_by_query` defaults to `min_similarity=0.70`, stricter
   than any other retrieval in the codebase: skills carry instruction
   authority, so false positives cost more than misses.
+- `injection_role="user"` is the backward-compatible default.
+  `injection_role="developer"` is rejected unless `require_shadow=True`;
+  a reviewer must explicitly activate the shadow skill before it is used.
+  Legacy records without the field load as `user`.
+- Official OpenAI requests preserve the developer role. Anthropic places the
+  reviewed instruction in its top-level system parameter, and providers
+  without a native developer role use a system-equivalent mapping.
+- Filesystem, MongoDB, and Oracle persist the same field. Existing Oracle
+  schemas can run
+  `memory_provider/oracle/migrations/002_add_skill_injection_role.sql`.
 - `update_skill` patches lifecycle/stat fields only; identity and content
   are immutable in place (re-promotion creates a new version).
 - Lifecycle: `candidate | shadow | active | deprecated | demoted`. Every

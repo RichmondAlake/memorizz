@@ -120,6 +120,34 @@ def test_workflow_store_preserves_learning_fields(provider):
 
 
 @pytest.mark.unit
+def test_skillbox_round_trips_reviewed_instruction_authority(provider):
+    """Document providers must preserve the same role contract as Oracle."""
+    from memorizz.long_term.procedural.skillbox import (
+        Skill,
+        Skillbox,
+        SkillInjectionRole,
+    )
+
+    box = Skillbox(provider, agent_id="agent-9")
+    skill = Skill(
+        name="reviewed-refund",
+        description="Refund an eligible order",
+        content="Verify state, refund, then send the receipt.",
+        injection_role="developer",
+        embedding=[],
+    )
+    box.add_skill(skill)
+
+    loaded = box.get_skill_by_id(skill.skill_id)
+    assert loaded is not None
+    assert loaded.injection_role is SkillInjectionRole.DEVELOPER
+
+    loaded.injection_role = SkillInjectionRole.USER
+    assert box.update_skill(loaded)
+    assert box.get_skill_by_id(skill.skill_id).injection_role is SkillInjectionRole.USER
+
+
+@pytest.mark.unit
 def test_clear_semantic_cache_scoped(provider):
     provider.store(
         {"cache_key": "k1", "agent_id": "a1"},

@@ -107,7 +107,13 @@ def _seed_workflows(provider, count, queries=None, promoted_skill_id=None):
     return stored_hash
 
 
-def _seed_skill(provider, status, source_hash="hash-x", skill_id="skill-1"):
+def _seed_skill(
+    provider,
+    status,
+    source_hash="hash-x",
+    skill_id="skill-1",
+    injection_role="user",
+):
     provider.store(
         {
             "skill_id": skill_id,
@@ -119,6 +125,7 @@ def _seed_skill(provider, status, source_hash="hash-x", skill_id="skill-1"):
             "tools_used": ["lookup_order", "issue_refund"],
             "queries": ["refund my order"],
             "status": status,
+            "injection_role": injection_role,
             "version": 1,
             "source_canonical_hash": source_hash,
             "baseline": {"executions": 5, "success_rate": 1.0},
@@ -271,23 +278,36 @@ class TestPromotionActions:
 class TestSkillLifecycleActions:
     @pytest.mark.unit
     def test_skills_page_shows_status_and_actions(self, client, connected):
-        _seed_skill(connected, "shadow", skill_id="skill-shadow")
+        _seed_skill(
+            connected,
+            "shadow",
+            skill_id="skill-shadow",
+            injection_role="developer",
+        )
         page = client.get("/memory/skills").text
         assert "SHADOW" in page
-        assert "Activate" in page
+        assert "authority: developer" in page
+        assert "Activate as developer" in page
         assert "Demote" not in page  # only ACTIVE skills can be demoted
         assert "SKILL.md" in page
 
     @pytest.mark.unit
     def test_activate_shadow_skill_stamps_workflows(self, client, connected):
         stored_hash = _seed_workflows(connected, 5)
-        _seed_skill(connected, "shadow", source_hash=stored_hash, skill_id="s-act")
+        _seed_skill(
+            connected,
+            "shadow",
+            source_hash=stored_hash,
+            skill_id="s-act",
+            injection_role="developer",
+        )
 
         resp = client.post("/continual-learning/skills/s-act/activate")
         assert resp.status_code == 303
 
         skill = connected.list_all(memory_store_type=MemoryType.SKILLBOX)[0]
         assert skill["status"] == "active"
+        assert skill["injection_role"] == "developer"
         workflows = connected.list_all(memory_store_type=MemoryType.WORKFLOW_MEMORY)
         assert all(w.get("promoted_skill_id") == "s-act" for w in workflows)
 

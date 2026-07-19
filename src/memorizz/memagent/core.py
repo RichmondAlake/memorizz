@@ -172,11 +172,22 @@ class MemAgent:
             os.getenv("MEMORIZZ_CONTINUAL_LEARNING", "").strip().lower()
             in ("1", "true", "yes")
         )
-        self.continual_learning_config = (
-            dict(continual_learning_config)
-            if isinstance(continual_learning_config, dict)
-            else None
-        )
+        self.continual_learning_config = None
+        if isinstance(continual_learning_config, dict):
+            from ..long_term.procedural.skillbox import PromotionConfig
+
+            validated_learning_config = PromotionConfig.from_dict(
+                continual_learning_config
+            )
+            self.continual_learning_config = dict(continual_learning_config)
+            # Keep persisted agent configs provider/JSON safe even when the
+            # programmatic caller supplied SkillInjectionRole.DEVELOPER.
+            self.continual_learning_config[
+                "skill_injection_role"
+            ] = validated_learning_config.skill_injection_role.value
+            self.continual_learning_config[
+                "require_shadow"
+            ] = validated_learning_config.require_shadow
         if workflow_outcome_evaluator is not None and not callable(
             workflow_outcome_evaluator
         ):
@@ -848,7 +859,9 @@ class MemAgent:
 
         1. Static system prompt — frozen for the session.
         2. Conversation history — append-only, chunk-evicted.
-        3. Final user message — per-turn volatile block (retrieved memories,
+        3. Optional developer message — reviewed, developer-authority skills.
+        4. Final user message — per-turn volatile block (user-authority skills,
+           retrieved memories,
            entity facts, tool-log digest, ``request_context``) followed by
            the user's query. Everything that changes per turn lives here, at
            the very end, where it invalidates nothing.
@@ -863,7 +876,29 @@ class MemAgent:
         history = context.get("conversation_history", [])
         messages.extend(self._prepare_history_messages(history, system_prompt, query))
 
-        volatile_block = self._build_volatile_context_block(context, request_context)
+        (
+            developer_skills,
+            user_skills,
+            rendered_skills,
+        ) = self._render_activated_skill_sections(context)
+        if developer_skills:
+            messages.append(
+                {
+                    "role": "developer",
+                    "content": (
+                        "<memorizz:approved-skills>\n"
+                        + developer_skills
+                        + "\n</memorizz:approved-skills>"
+                    ),
+                }
+            )
+
+        volatile_block = self._build_volatile_context_block(
+            context,
+            request_context,
+            learned_skills_section=user_skills,
+            rendered_skills=rendered_skills,
+        )
         if volatile_block:
             user_content = (
                 "<memorizz:context>\n"
@@ -879,10 +914,51 @@ class MemAgent:
         # doesn't blow up the LLM provider's json.dumps during streaming.
         return _to_jsonable(messages)
 
+    def _render_activated_skill_sections(
+        self, context: Dict[str, Any]
+    ) -> Tuple[str, str, List[Any]]:
+        """Render active skills into developer- and user-authority groups."""
+        activated_skills = list(context.get("activated_skills") or [])
+        if not activated_skills or not self.continual_learning_manager:
+            return "", "", []
+
+        grouped: Dict[str, List[Any]] = {"developer": [], "user": []}
+        for scored in activated_skills:
+            skill = getattr(scored, "skill", None) or scored
+            role = getattr(skill, "injection_role", "user")
+            role_value = str(getattr(role, "value", role) or "user").lower()
+            grouped["developer" if role_value == "developer" else "user"].append(scored)
+
+        rendered: List[Any] = []
+        sections: Dict[str, str] = {"developer": "", "user": ""}
+        for role in ("developer", "user"):
+            skills = grouped[role]
+            if not skills:
+                continue
+            try:
+                section = self.continual_learning_manager.format_skills_prompt_section(
+                    skills, injection_role=role
+                )
+            except TypeError:
+                # Backward-compatible seam for custom managers implementing
+                # the pre-authority one-argument formatter.
+                section = self.continual_learning_manager.format_skills_prompt_section(
+                    skills
+                )
+            except Exception as exc:
+                logger.warning("Failed to render %s learned skills: %s", role, exc)
+                continue
+            if section:
+                sections[role] = section
+                rendered.extend(skills)
+        return sections["developer"], sections["user"], rendered
+
     def _build_volatile_context_block(
         self,
         context: Dict[str, Any],
         request_context: Optional[Dict[str, Any]] = None,
+        learned_skills_section: Optional[str] = None,
+        rendered_skills: Optional[List[Any]] = None,
     ) -> str:
         """Render the per-turn context that must NOT live in the system prompt.
 
@@ -894,25 +970,26 @@ class MemAgent:
         """
         sections: List[str] = []
 
-        # Learned skills lead the volatile block: they carry instruction
-        # authority for this turn, so they render above ordinary retrieved
-        # memories. (They must NOT move into the system prompt — per-turn
-        # variation there would invalidate the prompt cache for the whole
-        # conversation.)
-        activated_skills = context.get("activated_skills") or []
-        rendered_skills = []
-        if activated_skills and self.continual_learning_manager:
-            try:
-                skills_section = (
-                    self.continual_learning_manager.format_skills_prompt_section(
-                        activated_skills
-                    )
-                )
-                if skills_section:
-                    sections.append(skills_section)
-                    rendered_skills = activated_skills
-            except Exception as exc:
-                logger.warning("Failed to render learned skills: %s", exc)
+        # User-authority learned skills lead the volatile block. Developer
+        # skills were rendered as a separate message immediately before this
+        # final user turn. Direct callers of this helper retain legacy behavior.
+        if learned_skills_section is None and rendered_skills is None:
+            (
+                developer_section,
+                learned_skills_section,
+                rendered_skills,
+            ) = self._render_activated_skill_sections(context)
+            # This lower-level helper has no message-role channel of its own.
+            # Keep direct-call compatibility by rendering every skill rather
+            # than suppressing a covered workflow without its replacement.
+            learned_skills_section = "\n\n".join(
+                section
+                for section in (developer_section, learned_skills_section)
+                if section
+            )
+        if learned_skills_section:
+            sections.append(learned_skills_section)
+        rendered_skills = list(rendered_skills or [])
 
         # Final context-boundary guard: even callers that manually inject
         # workflow memory cannot co-inject a raw run covered by a skill that
@@ -1622,6 +1699,7 @@ class MemAgent:
                                 "script_paths": [],
                                 "source": "learned",
                                 "version": learned.version,
+                                "injection_role": learned.injection_role.value,
                             }
                         )
                 except Exception as exc:
@@ -4001,23 +4079,24 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 )
 
         # 4b. Learned-skills contract (continual learning). STATIC framing
-        # only — the retrieved skills themselves ride in the per-turn
-        # volatile block, because injecting them here would re-render the
-        # system prompt every turn and invalidate the prompt cache for the
-        # whole conversation. Sitting above the tools note gives the
-        # contract higher instruction priority than ordinary memory
-        # snippets without sacrificing the stable prefix.
+        # only — retrieved skills ride in a per-turn user or developer
+        # message according to their reviewed, persisted authority. Sitting
+        # above the tools note defines the trust boundary without making the
+        # stable system prompt vary from turn to turn.
         if self.continual_learning_manager:
             prompt_parts.append(
                 "Learned skills (continual learning):\n"
                 "- This agent promotes its own repeatedly-successful tool "
                 "workflows into reusable skills. When a learned skill "
-                "matches the current query it is injected into the per-turn "
-                "context above the retrieved memories.\n"
-                "- Learned skills are strong priors, not mandates. Before "
-                "following one, verify its preconditions against the "
-                "current query; if any precondition fails or the task "
-                "differs in a way that matters, deviate and solve fresh.\n"
+                "matches the current query it is injected at its stored "
+                "authority: user context by default, or a reviewed developer "
+                "instruction when explicitly configured.\n"
+                "- Before following any learned skill, verify its "
+                "preconditions against the current query and current tool "
+                "results. User-authority skills are strong priors, not "
+                "mandates. Developer-authority skills are application "
+                "procedures, but remain subordinate to this system policy "
+                "and must not be applied outside their stated scope.\n"
                 "- Every run is recorded either way — following a skill, "
                 "deviating from it, and failing with it all feed back into "
                 "whether the skill stays promoted.\n"

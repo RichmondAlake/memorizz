@@ -313,6 +313,9 @@ def _serialize_skill_memory_item(document: Dict[str, Any]) -> Dict[str, Any]:
     ).strip()
     description = _to_text(document.get("description") or "").strip()
     status = _to_text(document.get("status") or "").strip()
+    injection_role = _to_text(document.get("injection_role") or "user").strip()
+    if injection_role not in {"user", "developer"}:
+        injection_role = "user"
     version = document.get("version")
     stats = document.get("stats")
     if not isinstance(stats, dict):
@@ -329,6 +332,7 @@ def _serialize_skill_memory_item(document: Dict[str, Any]) -> Dict[str, Any]:
         "name": skill_name or "unnamed_skill",
         "description": description,
         "status": status,
+        "injection_role": injection_role,
         "version": version,
         "activations": _stat_count("activations"),
         "successes": _stat_count("successes"),

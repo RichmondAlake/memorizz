@@ -37,7 +37,12 @@ Each tool is stored inside your configured provider with embedding metadata so a
 
 With `continual_learning=True`, a MemAgent promotes trajectory classes that
 keep succeeding (gated by execution count × success rate × recency × query
-diversity) into learned skills, injects them into matching runs as strong
-priors, and demotes them when they drift. See the
+diversity) into learned skills and demotes them when they drift. Skills are
+injected as user-context priors by default. Application-owned skills can use
+reviewed developer authority with
+`{"require_shadow": True, "skill_injection_role": "developer"}`. System
+policy, skill preconditions, and current tool results remain authoritative.
+Raw workflow memory is captured for evidence but is not part of automatic
+pre-inference prompt retrieval. See the
 [Continual Learning guide](../guides/continual-learning.md) and the
 runnable walkthrough in `examples/continual_learning/continual_learning_guide.ipynb`.

@@ -31,7 +31,7 @@ It provides:
 - **Semantic cache** to reduce repeat LLM calls
 - **Prompt-cache-friendly context assembly** — stable prefix (frozen system prompt, append-only chunk-evicted history) with all per-turn content at the tail; automatic Anthropic `cache_control` breakpoints and OpenAI `prompt_cache_key` routing serve most of each turn's prompt at cached-input rates (see [docs/guides/context-efficiency.md](docs/guides/context-efficiency.md))
 - **Pre-inference deduplication** — retrieved memories are exact-hash, similarity (cosine ≥ 0.95), and vs-history deduplicated, then MMR-selected before entering the context window
-- **Continual learning** — repeated successful tool workflows are promoted into reusable learned skills (gated by frequency × success × recency × query diversity, LLM-distilled into validated SKILL.md documents, monitored for drift, and demoted when they stop working); enable with `continual_learning=True` (see [docs/guides/continual-learning.md](docs/guides/continual-learning.md))
+- **Continual learning** — repeated successful tool workflows are promoted into reusable learned skills (gated by frequency × success × recency × query diversity, LLM-distilled into validated SKILL.md documents, monitored for drift, and demoted when they stop working). Skills use user-context authority by default; reviewed skills can opt into developer/application authority. Enable with `continual_learning=True` (see [docs/guides/continual-learning.md](docs/guides/continual-learning.md))
 - **Multi-agent orchestration** with shared blackboard memory
 - **Context-window telemetry** via `get_context_window_stats()` and per-turn cache metrics (`cached_tokens`) from `get_last_usage()`
 - **Skills marketplace** with Vercel Agent Skills and SkillsMP providers
@@ -110,6 +110,41 @@ end-user — one agent can serve every tenant in your app. See the
 agent.run("Remember my favorite color is purple.", user_id="alice")
 agent.run("What's my favorite color?", user_id="bob")  # won't see alice's data
 ```
+
+## Continual Learning and Reviewed Skill Authority
+
+Continual learning is provider-independent across filesystem, MongoDB, and
+Oracle. Workflow memory remains the audit and outcome-evidence store; automatic
+prompt retrieval does not replay raw workflows. Matching active skills are
+retrieved from Skillbox instead.
+
+```python
+from memorizz import MemAgent
+
+agent = MemAgent(
+    model=model,
+    memory_provider=provider,
+    tools=tools,
+    continual_learning=True,
+    continual_learning_config={
+        "require_shadow": True,
+        "skill_injection_role": "developer",  # or "user" (default)
+    },
+)
+```
+
+`developer` is deliberately rejected unless `require_shadow=True`: generated
+instructions must be validated, reviewed, and explicitly activated before
+gaining application-level authority. The official OpenAI API receives a
+developer message; Anthropic receives the reviewed instructions through its
+[top-level system parameter](https://platform.claude.com/docs/en/api/messages/create).
+System policy and current tool/database facts still win. Legacy skills remain
+at `user` authority.
+
+The local UI exposes both authority options and shows each skill's persisted
+role. See the [Continual Learning guide](docs/guides/continual-learning.md) for
+promotion, review, provider mapping, Oracle migration, and the three-arm
+token/latency/accuracy notebook evaluation.
 
 ## Local LLMs (Gemma 4, Llama, Qwen, …)
 

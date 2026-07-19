@@ -19,7 +19,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ....enums.memory_type import MemoryType
 from ..workflow.canonicalization import TrajectoryStats, aggregate_trajectory_stats
 from .distiller import SkillDistiller
-from .skill import Skill, SkillStatus
+from .skill import (
+    Skill,
+    SkillInjectionRole,
+    SkillStatus,
+    normalize_skill_injection_role,
+)
 from .skillbox import Skillbox
 
 logger = logging.getLogger(__name__)
@@ -46,6 +51,7 @@ class PromotionConfig:
     # Retrieval / injection
     retrieval_min_similarity: float = 0.70
     max_skills_in_context: int = 2
+    skill_injection_role: SkillInjectionRole = SkillInjectionRole.USER
     # Deprecated compatibility key. Raw exemplars are never co-injected.
     include_exemplar: bool = False
     # Monitoring / demotion
@@ -54,6 +60,20 @@ class PromotionConfig:
     min_activations_before_drift_check: int = 5
     # Scheduling: run a promotion cycle every N stored runs (0 = manual only)
     promotion_every_n_runs: int = 25
+
+    def __post_init__(self) -> None:
+        self.skill_injection_role = normalize_skill_injection_role(
+            self.skill_injection_role
+        )
+        if (
+            self.skill_injection_role == SkillInjectionRole.DEVELOPER
+            and not self.require_shadow
+        ):
+            raise ValueError(
+                "developer-role learned skills require require_shadow=True so "
+                "generated instructions cannot gain application authority "
+                "without an explicit activation review"
+            )
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "PromotionConfig":
@@ -205,6 +225,7 @@ class PromotionEngine:
             status=status,
             version=(previous.version + 1) if previous else 1,
             promoted_at=datetime.now() if status == SkillStatus.ACTIVE else None,
+            injection_role=self.config.skill_injection_role,
             baseline=candidate.baseline_snapshot(),
         )
         self.skillbox.add_skill(skill)
@@ -254,13 +275,23 @@ class PromotionEngine:
             report.rejected.append((canonical_hash, [f"error: {exc}"]))
         return report
 
-    def activate_skill(self, skill_id: str) -> bool:
+    def activate_skill(
+        self,
+        skill_id: str,
+        injection_role: Optional[Any] = None,
+    ) -> bool:
         """SHADOW/CANDIDATE → ACTIVE, with the workflow stamp backfill the
         write-time path can't provide retroactively."""
         skill = self.skillbox.get_skill_by_id(skill_id)
         if not skill:
             return False
-        if not self.skillbox.set_status(skill_id, SkillStatus.ACTIVE):
+        if skill.status not in (SkillStatus.SHADOW, SkillStatus.CANDIDATE):
+            return False
+        if injection_role is not None:
+            skill.injection_role = normalize_skill_injection_role(injection_role)
+        skill.status = SkillStatus.ACTIVE
+        skill.promoted_at = skill.promoted_at or datetime.now()
+        if not self.skillbox.update_skill(skill):
             return False
         if skill.source_canonical_hash:
             stats = aggregate_trajectory_stats(

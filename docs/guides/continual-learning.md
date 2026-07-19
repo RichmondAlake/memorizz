@@ -17,7 +17,7 @@ Agent run ─→ Workflow memory (per-run trajectory, canonical hash)
          Skillbox (SKILL.md documents + applicability embedding)
                  │  vector search against the incoming query
                  ▼
-         Context injection (top of the per-turn context block)
+         Trust-aware injection (user context or reviewed developer instruction)
                  │
                  ▼
          Outcome monitoring → drift detection → demotion
@@ -39,6 +39,7 @@ agent = MemAgent(
         "min_success_rate": 0.80,     # gate: how reliable the procedure must be
         "min_distinct_queries": 2,    # gate: repeated *intent*, not one cached query
         "require_shadow": True,       # recommended initial posture (see below)
+        "skill_injection_role": "user", # "user" (default) or "developer"
         "promotion_every_n_runs": 25, # 0 = only manual run_promotion_cycle()
     },
 )
@@ -58,6 +59,24 @@ agent = (
 `MEMORIZZ_CONTINUAL_LEARNING=1` flips the default on for every agent in the
 process. Enabling the feature force-activates `workflow_memory` (the loop
 cannot observe runs without it) and the `skillbox` store.
+
+### Memory-provider support
+
+The complete capture → canonicalize → promote → retrieve → monitor → demote
+loop uses the `MemoryProvider` contract and works with filesystem, MongoDB,
+and Oracle. Filesystem and MongoDB persist `injection_role` in the skill
+document. Oracle persists it in the relational `skillbox.injection_role`
+column and validates `user | developer`.
+
+Fresh Oracle setup includes the column. For an existing manually managed
+schema, run:
+
+```sql
+@src/memorizz/memory_provider/oracle/migrations/002_add_skill_injection_role.sql
+```
+
+Legacy skill records on every provider default to `user`, preserving the
+pre-upgrade trust level.
 
 ### Define business success
 
@@ -114,12 +133,14 @@ The whole system is governed by five rules:
 2. **Frequency alone never promotes.** Promotion requires executions ×
    success rate × recency × query diversity to clear explicit gates. A
    50×-repeated 60%-success trajectory is a bug report, not a skill.
-3. **No skill gains context authority without passing validation.**
-   Distillation is LLM generalization and can be wrong; a wrong skill with
-   elevated prompt position *authoritatively misleads*.
-4. **Skills are strong priors, not mandates.** Injected skills carry
-   explicit precondition-check framing so the agent deviates on partial
-   matches instead of forcing a near-miss procedure.
+3. **No generated skill gains application authority without validation and
+   review.** Distillation is LLM generalization and can be wrong. MemoRizz
+   rejects `skill_injection_role="developer"` unless `require_shadow=True`;
+   activation is the explicit approval boundary.
+4. **Authority is scoped, not absolute.** User-authority skills are strong
+   priors. Developer-authority skills are reviewed application procedures,
+   but system policy, preconditions, current facts, and tool results still
+   win. A partial match must never force a near-miss procedure.
 5. **Every skill is monitored for life and has a demotion path.**
    Continual learning requires forgetting.
 
@@ -190,21 +211,52 @@ SKILL.md by hand, then activate:
 manager = agent.continual_learning_manager
 for skill in manager.skillbox.list_skills():
     print(skill.status, skill.name, "\n", skill.content)
-manager.activate_skill(skill_id)   # SHADOW → ACTIVE + stamp backfill
+manager.activate_skill(skill_id)   # SHADOW → ACTIVE + stored role + stamp backfill
+
+# Or, instead of the call above, explicitly choose developer authority at review:
+# manager.activate_skill(skill_id, injection_role="developer")
 ```
 
-## Injection is prompt-cache safe
+## Trust-aware instruction authority
 
 MemoRizz assembles prompts stable-prefix → volatile-tail (see
-[Context Efficiency & Prompt Caching](context-efficiency.md)). Learned
-skills respect that:
+[Context Efficiency & Prompt Caching](context-efficiency.md)). Every skill
+stores an `injection_role`:
 
-- The **system prompt** gains one *static* section describing the
-  learned-skills contract (precondition checking, priors-not-mandates).
-  It never changes turn to turn, so the prompt cache keeps hitting.
-- The **retrieved skills themselves** are rendered at the *top of the
-  per-turn volatile block* — above retrieved memories — in the final user
-  message, where per-turn variation invalidates nothing.
+- `user` is the default and the upgrade behavior for legacy skill records. The
+  skill is rendered at the top of the final user's volatile context, above
+  ordinary recalled memories. Treat it as selectively retrieved guidance.
+- `developer` is opt-in and requires `require_shadow=True`. After an explicit
+  activation review, MemoRizz emits the matching skill as a separate
+  developer message. It is application instruction below the system message
+  and above the user's request—not system policy and not trusted database
+  state.
+
+The **system prompt** contains only a static contract explaining these trust
+boundaries, precondition checks, and monitoring. Retrieved skill text never
+changes that system prompt.
+
+Provider mapping is explicit:
+
+- The official OpenAI API receives the native `developer` role. This follows
+  OpenAI's [message-role guidance](https://developers.openai.com/api/docs/guides/text#message-roles-and-instruction-following)
+  and [instruction-hierarchy research](https://openai.com/index/the-instruction-hierarchy/).
+- Anthropic's Messages API has no portable developer role, so MemoRizz maps
+  reviewed developer skills into its
+  [top-level `system` parameter](https://platform.claude.com/docs/en/api/messages/create).
+- Ollama and custom OpenAI-compatible endpoints normalize developer messages
+  into system instructions; Hugging Face and MLX templates use their
+  system-equivalent path.
+
+That compatibility mapping preserves the logical authority distinction as far
+as each provider permits, but it is not a claim that every model implements
+identical instruction precedence. Test the target model. Developer-authority
+skills can also reduce prompt-cache reuse on providers that hoist them into a
+top-level system field; measure the token and latency effect before rollout.
+
+Only application-owned, validated, explicitly reviewed skills should receive
+developer authority. Automatically generated, imported, user-authored,
+shadow, or merely retrieved content should remain at user authority.
 
 Retrieval matches **applicability, not mechanism**: the skill embedding is
 generated only from its name, description, preconditions, and sampled
@@ -271,6 +323,10 @@ manager.demote_skill(skill_id, reason="...")   # manual demotion
 
 The local UI (`memorizz ui`) exposes the whole loop:
 
+- **Create/Edit Agent** exposes **Authority for newly learned skills** with
+  `user` and `developer` options plus **Require shadow review before
+  activation**. Selecting developer checks the review control, and the server
+  rejects an unsafe developer-without-shadow configuration.
 - **Memory → Workflows** groups runs into **trajectory classes** by
   canonical hash, showing per-class executions, success rate, distinct
   queries, and a pass/fail chip for each promotion gate. Eligible classes
@@ -281,9 +337,10 @@ The local UI (`memorizz ui`) exposes the whole loop:
   runs are marked `suppressed`.
 - **Memory → Skills** shows every learned skill with its lifecycle badge
   (candidate / shadow / active / deprecated / demoted), version,
-  activation stats, baseline, preconditions, and the full distilled
-  SKILL.md — plus **Activate** (shadow → active, with workflow stamp
-  backfill) and **Demote** (releases the suppressed workflows) buttons.
+  persisted authority, activation stats, baseline, preconditions, and the
+  full distilled SKILL.md — plus **Activate as user/developer** (shadow →
+  active, with workflow stamp backfill) and **Demote** (releases the
+  suppressed workflows) buttons.
 
 UI promotion is human-*triggered*, never human-*exempted*: "Distill now"
 still runs the full eligibility gates and the distillation validation
@@ -306,6 +363,7 @@ All knobs live in `continual_learning_config` (see `PromotionConfig`):
 | `include_failure_samples` | 2 | Failure runs fed to the LLM |
 | `skill_max_content_chars` | 4000 | SKILL.md size cap |
 | `require_shadow` | False | New skills land as SHADOW |
+| `skill_injection_role` | `"user"` | Injection authority: `"user"` or `"developer"`; developer requires `require_shadow=True` |
 | `retrieval_min_similarity` | 0.70 | Injection threshold |
 | `max_skills_in_context` | 2 | Skills injected per turn |
 | `include_exemplar` | False | Deprecated compatibility key; raw source runs are never co-injected |
@@ -316,27 +374,25 @@ All knobs live in `continual_learning_config` (see `PromotionConfig`):
 
 ## Measuring whether skills help
 
-Don't take the feature's value on faith — measure it. The example notebook
-(`examples/continual_learning/continual_learning_guide.ipynb`) ends with a
-paired primary comparison plus a positive control:
+Don't take the feature's value on faith—measure it. The example notebook
+(`examples/continual_learning/continual_learning_guide.ipynb`) ends with
+three controlled arms:
 
-- `capture_only` and `continual_learning` receive identical coached seed
-  runs and the same later production prompt;
-- only `continual_learning` receives the reviewed learned skill; and
-- `explicit_sop_control` receives the full SOP directly but no learned skill.
+- a baseline that replays three successful raw workflows;
+- the exact same reviewed skill injected at user authority; and
+- that same skill injected at developer authority.
 
-Accuracy is graded from exact tool paths and tool-side business events, never
-by an LLM judge. The notebook reports provider inference and end-to-end
-latency separately, token use, Wilson intervals, and a descriptive paired
-bootstrap interval.
+All arms use the same model, tools, generic production instruction, held-out
+requests, and independently ingested Oracle state. The code asserts that both
+skill arms retrieve zero raw workflows, that only the developer arm contains a
+developer message, and that the two stored skill bodies are byte-identical.
 
-In the saved live GPT-5.6 run, passive capture scored 4/10, the learned
-skill scored 9/10, and the explicit-SOP control scored 9/10. The defensible
-interpretation is that skill compilation recovered a taught SOP that was
-deliberately absent from the production prompt. It is a purpose-built,
-within-domain retention/selection test, not a preregistered or general claim
-that continual learning improves every agent. The notebook records these
-validity limits alongside all case-level outputs.
+Styled pandas DataFrames report each case and aggregate exact workflow
+accuracy, deterministic answer accuracy, combined task accuracy,
+prompt/completion/total tokens, LLM-call count, provider inference latency,
+end-to-end latency, raw-workflow prompt rate, developer-message rate, and each
+treatment's delta from the baseline. It is a small within-domain smoke test,
+not a general claim that higher authority or continual learning always helps.
 
 ## Rollout recommendation
 
@@ -346,4 +402,6 @@ validity limits alongside all case-level outputs.
    canonicalization rules need tuning before trusting promotion).
 3. Review the first `PromotionReport` and every distilled SKILL.md by
    hand.
-4. Loosen to `require_shadow=False` once distillation quality is trusted.
+4. For user-authority skills only, consider loosening to
+   `require_shadow=False` once distillation quality is trusted. Developer
+   authority always requires shadow review and explicit activation.

@@ -609,18 +609,20 @@ class Anthropic(LLMProvider):
 
     @staticmethod
     def _split_system(messages: List[Dict[str, Any]]):
-        """Separate system messages from the conversation.
+        """Separate application-authority messages from the conversation.
 
         Anthropic's API takes ``system`` as a top-level parameter, not as a
-        message with ``role='system'``.  This helper pulls out system messages
-        and returns ``(system_content, remaining_messages)``. System content
-        remains a string when all system messages are text, or becomes an
-        owned content-block list when callers supply structured blocks.
+        portable ``developer`` message role. This helper maps both MemoRizz
+        ``system`` and reviewed ``developer`` instructions into the top-level
+        system parameter and returns ``(system_content, remaining_messages)``.
+        System content remains a string when all instruction messages are
+        text, or becomes an owned content-block list when callers supply
+        structured blocks.
         """
         system_parts: List[Any] = []
         remaining: List[Dict[str, Any]] = []
         for msg in messages:
-            if msg.get("role") == "system":
+            if msg.get("role") in ("system", "developer"):
                 content = msg.get("content", "")
                 if content:
                     system_parts.append(copy.deepcopy(content))

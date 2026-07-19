@@ -303,6 +303,9 @@ async def skills_page(request: Request):
             continue
         stats = doc.get("stats") or {}
         status = str(doc.get("status") or "candidate")
+        injection_role = str(doc.get("injection_role") or "user").strip().lower()
+        if injection_role not in {"user", "developer"}:
+            injection_role = "user"
         skills.append(
             {
                 "skill_id": doc.get("skill_id"),
@@ -311,6 +314,7 @@ async def skills_page(request: Request):
                 "description": doc.get("description") or "",
                 "content": doc.get("content") or "",
                 "status": status,
+                "injection_role": injection_role,
                 "version": doc.get("version", 1),
                 "preconditions": doc.get("preconditions") or [],
                 "tools_used": doc.get("tools_used") or [],

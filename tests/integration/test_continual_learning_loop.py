@@ -306,6 +306,7 @@ def test_shadow_mode_never_stamps_or_injects(provider):
             "min_distinct_queries": 2,
             "promotion_every_n_runs": 0,
             "require_shadow": True,
+            "skill_injection_role": "developer",
             "retrieval_min_similarity": 0.3,
         },
     )
@@ -323,6 +324,7 @@ def test_shadow_mode_never_stamps_or_injects(provider):
     assert len(report.promoted) == 1
     shadow = manager.skillbox.get_skill_by_id(report.promoted[0])
     assert shadow.status == SkillStatus.SHADOW
+    assert shadow.injection_role.value == "developer"
 
     # Shadow skills never suppress workflow retrieval…
     docs = provider.list_all(memory_store_type=MemoryType.WORKFLOW_MEMORY)
@@ -332,6 +334,9 @@ def test_shadow_mode_never_stamps_or_injects(provider):
 
     # Manual activation flips both.
     assert manager.activate_skill(shadow.skill_id)
+    assert manager.skillbox.get_skill_by_id(shadow.skill_id).injection_role.value == (
+        "developer"
+    )
     docs = provider.list_all(memory_store_type=MemoryType.WORKFLOW_MEMORY)
     assert any(d.get("promoted_skill_id") == shadow.skill_id for d in docs)
     assert manager.retrieve_skills_for_query("refund order S1 variant")

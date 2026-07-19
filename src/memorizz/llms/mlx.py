@@ -280,7 +280,7 @@ class MLXLLM(LLMProvider):
         for message in messages:
             role = (message.get("role") or "user").lower()
             content = message.get("content", "")
-            if role == "system":
+            if role in ("system", "developer"):
                 prompt_lines.append(f"[system]\n{content}\n")
             elif role == "assistant":
                 prompt_lines.append(f"[assistant]\n{content}\n")
@@ -300,7 +300,7 @@ class MLXLLM(LLMProvider):
             content = message.get("content") or ""
             if not content:
                 continue
-            if role == "system":
+            if role in ("system", "developer"):
                 pending_system = (
                     f"{pending_system}\n\n{content}" if pending_system else content
                 )

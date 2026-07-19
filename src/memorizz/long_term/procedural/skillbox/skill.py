@@ -5,9 +5,9 @@
 """Skill document model for the Skillbox.
 
 A learned skill is a SKILL.md document that lives in the database with a
-lifecycle attached. It is distilled from repeated successful workflow
-trajectories and injected into agent context as a strong prior — never a
-mandate.
+lifecycle and reviewed instruction authority attached. It is distilled from
+repeated successful workflow trajectories and injected as user context by
+default, or as an application/developer instruction after explicit review.
 """
 
 import uuid
@@ -29,6 +29,27 @@ class SkillStatus(Enum):
     ACTIVE = "active"
     DEPRECATED = "deprecated"
     DEMOTED = "demoted"
+
+
+class SkillInjectionRole(str, Enum):
+    """Authority assigned to a learned skill when it is rendered."""
+
+    USER = "user"
+    DEVELOPER = "developer"
+
+
+def normalize_skill_injection_role(value: Any) -> SkillInjectionRole:
+    """Normalize persisted/configured authority values or reject them."""
+    if isinstance(value, SkillInjectionRole):
+        return value
+    normalized = str(value or SkillInjectionRole.USER.value).strip().lower()
+    try:
+        return SkillInjectionRole(normalized)
+    except ValueError as exc:
+        allowed = ", ".join(role.value for role in SkillInjectionRole)
+        raise ValueError(
+            f"skill injection role must be one of: {allowed}; got {value!r}"
+        ) from exc
 
 
 def _default_stats() -> Dict[str, Any]:
@@ -71,6 +92,7 @@ class Skill:
         promoted_at: Optional[datetime] = None,
         demoted_at: Optional[datetime] = None,
         demotion_reason: Optional[str] = None,
+        injection_role: Any = SkillInjectionRole.USER,
         baseline: Optional[Dict[str, Any]] = None,
         stats: Optional[Dict[str, Any]] = None,
         embedding: Any = _UNSET,
@@ -96,6 +118,7 @@ class Skill:
         self.promoted_at = promoted_at
         self.demoted_at = demoted_at
         self.demotion_reason = demotion_reason
+        self.injection_role = normalize_skill_injection_role(injection_role)
         self.baseline = dict(baseline) if baseline else {}
         self.stats = {**_default_stats(), **(stats or {})}
         # Reuse the stored embedding on round-trip; only embed fresh docs.
@@ -151,6 +174,7 @@ class Skill:
             "promoted_at": (self.promoted_at.isoformat() if self.promoted_at else None),
             "demoted_at": self.demoted_at.isoformat() if self.demoted_at else None,
             "demotion_reason": self.demotion_reason,
+            "injection_role": self.injection_role.value,
             "baseline": self.baseline,
             "stats": self.stats,
             "embedding": self.embedding,
@@ -186,6 +210,9 @@ class Skill:
             promoted_at=_dt(data.get("promoted_at")),
             demoted_at=_dt(data.get("demoted_at")),
             demotion_reason=data.get("demotion_reason"),
+            # Legacy skills pre-date trust-aware injection and must retain the
+            # original user-context authority after upgrade.
+            injection_role=data.get("injection_role", SkillInjectionRole.USER.value),
             baseline=data.get("baseline"),
             stats=data.get("stats"),
             embedding=data.get("embedding"),

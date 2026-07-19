@@ -175,6 +175,8 @@ The provider automatically creates all required tables on first initialization:
 - `knowledge_base` - Knowledge base
 - `conversation_memory` - Chat history
 - `workflow_memory` - Process workflows
+- `skillbox` - Learned SKILL.md documents, lifecycle state, and
+  `injection_role` (`user` or `developer`)
 - `agents` - Agent configurations
 - `shared_memory` - Multi-agent shared state
 - `summaries` - Conversation summaries
@@ -186,6 +188,26 @@ Each table includes:
 - `embedding` (VECTOR) - Vector embeddings
 - `name`, `memory_id`, `agent_id` - Indexed query fields
 - `created_at`, `updated_at` - Timestamps
+
+### 4. Upgrade an Existing Skillbox Schema
+
+Fresh setup includes learned-skill authority. If the schema predates that
+field and is managed manually, execute:
+
+```sql
+@migrations/002_add_skill_injection_role.sql
+```
+
+The additive migration assigns existing skills `user` authority and adds a
+constraint for `user | developer`. Filesystem and MongoDB need no schema
+migration because the role is stored in each skill document.
+
+If an older package logs
+`OracleProvider._table_has_column() missing 1 required positional argument:
+'column_name'`, upgrade before retrying retrieval. Promotion writes could
+appear successful because learned-skill retrieval is fail-safe and converted
+the lazy-index exception into an empty match list. The corrected provider
+passes the active cursor to the column check.
 
 ## Vector Search
 

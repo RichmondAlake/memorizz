@@ -22,6 +22,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from memorizz.enums.memory_type import MemoryType
+from memorizz.long_term.procedural.skillbox import SkillInjectionRole
+from memorizz.memagent import MemAgent
 from memorizz.memagent.managers.continual_learning_manager import (
     ContinualLearningManager,
 )
@@ -225,6 +228,28 @@ def test_skill_covered_workflows_are_removed_at_context_boundary():
 # ---------------------------------------------------------------------------
 
 
+def test_programmatic_agent_config_normalizes_and_validates_skill_authority():
+    agent = MemAgent(
+        model=MagicMock(),
+        continual_learning=False,
+        continual_learning_config={
+            "require_shadow": True,
+            "skill_injection_role": SkillInjectionRole.DEVELOPER,
+        },
+    )
+    assert agent.continual_learning_config["skill_injection_role"] == "developer"
+
+    with pytest.raises(ValueError, match="require_shadow=True"):
+        MemAgent(
+            model=MagicMock(),
+            continual_learning=False,
+            continual_learning_config={
+                "require_shadow": False,
+                "skill_injection_role": "developer",
+            },
+        )
+
+
 def test_system_prompt_is_byte_stable_across_turns(memagent_with_mocks):
     """The static system prompt must not change turn-to-turn — it is the
     prompt-cache prefix."""
@@ -299,6 +324,91 @@ def test_prompt_never_renders_skill_with_its_source_workflow(memagent_with_mocks
     assert "LEARNED REFUND SKILL" in prompt
     assert "customer preference" in prompt
     assert "DUPLICATE RAW WORKFLOW" not in prompt
+
+
+def test_prompt_separates_user_and_developer_skill_authority(memagent_with_mocks):
+    agent = memagent_with_mocks
+    developer_skill = SimpleNamespace(
+        skill_id="skill-dev",
+        injection_role="developer",
+        source_canonical_hash="hash-dev",
+        source_workflow_ids=["workflow-dev"],
+        exemplar_workflow_id=None,
+    )
+    user_skill = SimpleNamespace(
+        skill_id="skill-user",
+        injection_role="user",
+        source_canonical_hash="hash-user",
+        source_workflow_ids=["workflow-user"],
+        exemplar_workflow_id=None,
+    )
+    developer_scored = SimpleNamespace(skill=developer_skill, similarity=0.99)
+    user_scored = SimpleNamespace(skill=user_skill, similarity=0.98)
+    agent.continual_learning_manager = SimpleNamespace(
+        format_skills_prompt_section=lambda skills, injection_role=None: (
+            "DEVELOPER SKILL" if injection_role == "developer" else "USER SKILL"
+        )
+    )
+
+    messages = agent._build_prompt_messages(
+        "SYSTEM POLICY",
+        "refund order",
+        {
+            "conversation_history": [],
+            "activated_skills": [developer_scored, user_scored],
+            "retrieved_memories": [
+                {
+                    "source": "workflow_memory",
+                    "text": "RAW DEV WORKFLOW",
+                    "canonical_hash": "hash-dev",
+                    "workflow_id": "workflow-dev",
+                },
+                {
+                    "source": "workflow_memory",
+                    "text": "RAW USER WORKFLOW",
+                    "canonical_hash": "hash-user",
+                    "workflow_id": "workflow-user",
+                },
+                {
+                    "source": "episodic",
+                    "text": "ordinary memory",
+                    "id": "memory-1",
+                },
+            ],
+        },
+    )
+
+    assert [message["role"] for message in messages] == [
+        "system",
+        "developer",
+        "user",
+    ]
+    assert "DEVELOPER SKILL" in messages[1]["content"]
+    assert "USER SKILL" not in messages[1]["content"]
+    assert "USER SKILL" in messages[2]["content"]
+    assert "DEVELOPER SKILL" not in messages[2]["content"]
+    assert "ordinary memory" in messages[2]["content"]
+    assert "RAW DEV WORKFLOW" not in messages[2]["content"]
+    assert "RAW USER WORKFLOW" not in messages[2]["content"]
+
+
+def test_automatic_context_does_not_retrieve_raw_workflow_memory(
+    memagent_with_mocks,
+):
+    """Workflow memory remains a capture/evidence store, not prompt retrieval."""
+    agent = memagent_with_mocks
+    agent.active_memory_types = [
+        MemoryType.WORKFLOW_MEMORY,
+        MemoryType.SKILLBOX,
+    ]
+    agent.continual_learning_manager = SimpleNamespace(
+        retrieve_skills_for_query=lambda query, user_id=None: []
+    )
+    agent.memory_manager.retrieve_relevant_memories = MagicMock(return_value=[])
+
+    agent._build_context("refund order", "memory-1")
+
+    agent.memory_manager.retrieve_relevant_memories.assert_not_called()
 
 
 def test_legacy_include_exemplar_option_does_not_inject_raw_run():

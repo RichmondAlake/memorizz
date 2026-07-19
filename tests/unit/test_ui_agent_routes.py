@@ -81,6 +81,38 @@ class TestAgentCrud:
         agent = connected.list_memagents()[0]
         assert bool(agent.semantic_cache) is True
         assert bool(agent.continual_learning) is True
+        assert agent.continual_learning_config["skill_injection_role"] == "user"
+
+    @pytest.mark.unit
+    def test_create_with_reviewed_developer_skill_authority(self, client, connected):
+        resp = _create_agent(
+            client,
+            continual_learning="on",
+            skill_injection_role="developer",
+            continual_learning_require_shadow="on",
+        )
+        assert resp.status_code in (302, 303), resp.text[:300]
+
+        agent = connected.list_memagents()[0]
+        assert agent.continual_learning_config["skill_injection_role"] == ("developer")
+        assert agent.continual_learning_config["require_shadow"] is True
+
+        form = client.get(f"/agents/{agent.agent_id}/edit")
+        assert form.status_code == 200
+        assert "Authority for newly learned skills" in form.text
+        assert 'option value="developer" selected' in form.text
+
+    @pytest.mark.unit
+    def test_developer_skill_authority_requires_shadow_review(self, client, connected):
+        resp = _create_agent(
+            client,
+            continual_learning="on",
+            skill_injection_role="developer",
+        )
+
+        assert resp.status_code == 200
+        assert "require shadow review" in resp.text.lower()
+        assert connected.list_memagents() == []
 
     @pytest.mark.unit
     def test_agents_list_page_shows_created_agent(self, client, connected):

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -222,14 +222,17 @@ def test_vector_index_skips_tables_without_embedding_columns():
     provider = OracleProvider.__new__(OracleProvider)
     provider._vector_indexes_created = set()
     provider._table_has_column = Mock(return_value=False)
-    provider._get_connection = Mock(
-        side_effect=AssertionError("database should not be queried")
-    )
+    cursor = Mock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    provider._get_connection = Mock(return_value=connection)
 
     provider._ensure_vector_index(MemoryType.TOOL_LOG)
 
-    provider._table_has_column.assert_called_once_with("tool_log", "embedding")
-    provider._get_connection.assert_not_called()
+    provider._table_has_column.assert_called_once_with(cursor, "tool_log", "embedding")
+    provider._get_connection.assert_called_once_with()
+    cursor.execute.assert_not_called()
     assert "idx_tool_log_vec" in provider._vector_indexes_created
 
 

@@ -8,6 +8,9 @@ The Memorizz local UI gives you a browser-based workflow for connecting to your 
 - Create, edit, favorite, and delete agents.
 - Run agents in Playground with streaming responses.
 - Inspect memory types (personas, toolbox, conversations, workflows, long-term, short-term, entity, summaries, shared, cache).
+- Configure continual learning, choose user or reviewed developer authority
+  for newly promoted skills, inspect trajectory gates, and activate/demote
+  learned skills.
 - Review run traces by agent and thread.
 - Run LongMemEval benchmarks in Evalground.
 - Manage runtime keys and defaults in Settings.
@@ -86,6 +89,7 @@ Once connected, the sidebar is your main navigation.
 | Create Agent | `/agents/new` | Build a new agent with mode, persona, tool/memory options, and provider config. |
 | Playground | `/playground` and `/agents/{id}/playground` | Interactive chat, thread switching, token/context stats, and per-agent runtime config. |
 | Memory Types | `/memory/{type}` | Browse stored memory entries by type (`personas`, `toolbox`, `conversations`, etc.). |
+| Continual Learning | `/memory/workflows` and `/memory/skills` | Review canonical trajectory classes, run gated distillation, inspect persisted skill authority, and activate/demote skills. |
 | Traces | `/traces` | Filter/search agents and inspect thread-level trace timelines. |
 | Evalground | `/evalground` | Run LongMemEval, monitor logs, and review run history/results. |
 | Settings | `/settings` | Save API keys and runtime defaults into the UI session and `.env`. |
@@ -94,10 +98,19 @@ Once connected, the sidebar is your main navigation.
 
 1. Open `Settings` and add at least `OPENAI_API_KEY`.
 2. Create an agent in `Agents -> Create Agent`.
+   To evaluate learned procedures, enable **Continual learning**, choose
+   **User context** or **Developer instructions**, and keep **Require shadow
+   review** enabled. Developer authority cannot be saved without review.
 3. Open that agent in `Playground`.
 4. Send a message and confirm streaming response.
 5. Switch to `Traces` to inspect events for that run.
 6. Review memory entries under `Memory Types` (especially conversations/summaries/cache).
+
+For developer authority, an activated skill is sent as a native developer
+message to OpenAI and through Anthropic's top-level system parameter. Only
+application-owned, reviewed skills should use it; system policy and live tool
+results remain higher-trust inputs. See the
+[Continual Learning guide](../guides/continual-learning.md).
 
 ## Evalground Requirements
 

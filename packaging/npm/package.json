@@ -1,6 +1,6 @@
 {
   "name": "memorizz",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "npm bootstrapper for the memorizz Python CLI — installs the real tool via uv.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "homepage": "https://github.com/RichmondAlake/memorizz",

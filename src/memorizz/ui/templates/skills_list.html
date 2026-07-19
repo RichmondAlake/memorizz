@@ -21,6 +21,7 @@
 
             <div class="item-meta">
                 {% if skill.agent_id %}<span class="meta-tag">agent: {{ skill.agent_id|truncate(24) }}</span>{% endif %}
+                <span class="meta-tag" title="instruction authority used when this active skill is injected">authority: {{ skill.injection_role }}</span>
                 {% if skill.source_hash_short %}<span class="meta-tag" title="source trajectory class">class: {{ skill.source_hash_short }}…</span>{% endif %}
                 {% if skill.tools_used %}<span class="meta-tag">tools: {{ skill.tools_used|join(', ') }}</span>{% endif %}
             </div>
@@ -39,7 +40,7 @@
             <div class="cl-skill-actions">
                 {% if skill.can_activate %}
                 <form method="post" action="/continual-learning/skills/{{ skill.skill_id }}/activate" class="cl-inline-form">
-                    <button type="submit" class="btn btn-primary btn-sm" title="Activate: the skill starts injecting into matching runs and its source workflows are suppressed from retrieval">Activate</button>
+                    <button type="submit" class="btn btn-primary btn-sm" title="Activate at {{ skill.injection_role }} authority: the skill starts injecting into matching runs and its source workflows are suppressed from retrieval">Activate as {{ skill.injection_role }}</button>
                 </form>
                 {% endif %}
                 {% if skill.can_demote %}

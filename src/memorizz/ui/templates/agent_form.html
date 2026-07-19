@@ -97,6 +97,38 @@
                     Enable continual learning (promote repeated successful workflows into learned skills)
                 </label>
             </div>
+            <div class="form-group">
+                <label for="skill_injection_role">Authority for newly learned skills</label>
+                <select id="skill_injection_role" name="skill_injection_role"
+                    onchange="syncSkillAuthorityReview()">
+                    <option value="user" {% if skill_injection_role == 'user' %}selected{% endif %}>
+                        User context (default)
+                    </option>
+                    <option value="developer" {% if skill_injection_role == 'developer' %}selected{% endif %}>
+                        Developer instructions (review required)
+                    </option>
+                </select>
+                <p class="form-hint">
+                    User authority treats a retrieved skill as optional task context.
+                    Developer authority gives an activated skill application-instruction
+                    priority below system policy. OpenAI receives a developer message;
+                    Anthropic receives the same reviewed instructions in its top-level
+                    system parameter.
+                </p>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input id="continual_learning_require_shadow" type="checkbox"
+                        name="continual_learning_require_shadow"
+                        {% if continual_learning_require_shadow %}checked{% endif %}>
+                    Require shadow review before activation
+                </label>
+                <p class="form-hint">
+                    Required for developer authority so generated skills cannot gain
+                    application-level authority without an explicit activation review.
+                    Existing skills keep the authority stored on their own record.
+                </p>
+            </div>
         </div>
     </div>
 
@@ -1015,6 +1047,16 @@ function toggleContinuousMode(checkbox) {
     } else {
         maxStepsInput.disabled = false;
         warning.style.display = 'none';
+    }
+}
+
+function syncSkillAuthorityReview() {
+    var roleSelect = document.getElementById('skill_injection_role');
+    var reviewCheckbox = document.getElementById(
+        'continual_learning_require_shadow'
+    );
+    if (roleSelect && reviewCheckbox && roleSelect.value === 'developer') {
+        reviewCheckbox.checked = true;
     }
 }
 </script>

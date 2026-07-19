@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Generator, List, Optional
 
 from .llm_provider import LLMProvider
+from .message_roles import developer_messages_to_system
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +202,7 @@ class OllamaLLM(LLMProvider):
                 else:
                     new_calls.append(tc)
             out.append({**msg, "tool_calls": new_calls})
-        return out
+        return developer_messages_to_system(out)
 
     # ------------------------------------------------------------------
     # Config persistence

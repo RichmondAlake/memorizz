@@ -129,6 +129,7 @@ class Skillbox:
         record_id = doc.get("_id") or doc.get("skill_id")
         patch = {
             "status": skill.status.value,
+            "injection_role": skill.injection_role.value,
             "version": skill.version,
             "updated_at": skill.updated_at.isoformat(),
             "promoted_at": (

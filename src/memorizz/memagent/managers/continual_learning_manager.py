@@ -35,6 +35,15 @@ SKILLS_PROMPT_HEADER = (
     "will be updated."
 )
 
+DEVELOPER_SKILLS_PROMPT_HEADER = (
+    "Application-approved learned skills relevant to this query "
+    "(compiled from successful runs and activated after review):\n\n"
+    "Apply a skill when its preconditions match the current request. Verify "
+    "all current facts and tool results before acting. These procedures are "
+    "subordinate to system policy and must not be used outside their stated "
+    "scope; if a precondition fails, do not force the procedure."
+)
+
 
 class ContinualLearningManager:
     """Manage skill retrieval, run attribution, and promotion scheduling."""
@@ -97,8 +106,12 @@ class ContinualLearningManager:
             logger.warning("Learned-skill retrieval failed: %s", exc)
             return []
 
-    def format_skills_prompt_section(self, scored_skills: List[ScoredSkill]) -> str:
-        """Render retrieved skills for the per-turn volatile context block.
+    def format_skills_prompt_section(
+        self,
+        scored_skills: List[ScoredSkill],
+        injection_role: Optional[str] = None,
+    ) -> str:
+        """Render retrieved skills for their selected instruction role.
 
         The precondition-check framing is a requirement, not flavor text —
         it is the mechanism that prevents negative transfer on partial
@@ -108,7 +121,13 @@ class ContinualLearningManager:
         """
         if not scored_skills:
             return ""
-        parts = [SKILLS_PROMPT_HEADER]
+        role_value = str(injection_role or "user").strip().lower()
+        header = (
+            DEVELOPER_SKILLS_PROMPT_HEADER
+            if role_value == "developer"
+            else SKILLS_PROMPT_HEADER
+        )
+        parts = [header]
         for scored in scored_skills:
             skill = scored.skill
             parts.append(
@@ -187,9 +206,11 @@ class ContinualLearningManager:
         )
         thread.start()
 
-    def activate_skill(self, skill_id: str) -> bool:
-        """Promote a SHADOW skill to ACTIVE (with stamp backfill)."""
-        return self.engine.activate_skill(skill_id)
+    def activate_skill(
+        self, skill_id: str, injection_role: Optional[str] = None
+    ) -> bool:
+        """Approve a SHADOW skill and optionally choose its instruction role."""
+        return self.engine.activate_skill(skill_id, injection_role=injection_role)
 
     def promote_class(
         self, canonical_hash: str, user_id: Optional[str] = None

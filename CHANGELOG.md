@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-07-19
+
+### Added
+
+* Learned skills now persist a trust-aware `injection_role` (`user` or
+  `developer`) across filesystem, MongoDB, and Oracle. `user` remains the
+  backward-compatible default; developer-authority promotion is rejected
+  unless shadow review is required, and reviewers can choose the role
+  programmatically at activation.
+* MemAgent prompt assembly emits reviewed developer skills as a separate
+  developer message. Official OpenAI requests preserve that native role;
+  Anthropic maps it to the top-level system parameter; Ollama,
+  OpenAI-compatible endpoints, Hugging Face, and MLX use their
+  system-equivalent compatibility path.
+* The agent form exposes learned-skill authority and shadow review, and the
+  skill lifecycle page displays each stored role and the activation authority.
+* Oracle schemas now include `skillbox.injection_role`, with additive
+  migration `002_add_skill_injection_role.sql` for existing deployments.
+* The continual-learning notebook now compares raw workflow replay, the same
+  reviewed skill at user authority, and that skill at developer authority in
+  case-level and aggregate DataFrames covering accuracy, provider tokens,
+  latency, role placement, and raw-workflow isolation.
+
+### Changed
+
+* Continual-learning documentation now defines the workflow-to-skill use case,
+  instruction hierarchy, provider mappings, Oracle-backed order ingestion,
+  role safety boundary, and the invariant that skill agents capture workflows
+  as evidence without automatically retrieving them into prompts.
+
+### Fixed
+
+* Oracle lazy vector-index creation now passes the live cursor to
+  `_table_has_column(cursor, table_name, column_name)`. Previously skill
+  retrieval logged a missing-argument warning and returned no matches even
+  though earlier promotion writes could succeed.
+
 ## 0.2.2 — 2026-07-19
 
 ### Added

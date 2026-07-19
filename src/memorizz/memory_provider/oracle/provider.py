@@ -194,6 +194,7 @@ _SKILLBOX_CORE = (
     _c("source_workflow_ids", kind="json", default=list),
     _c("exemplar_workflow_id"),
     _c("status"),
+    _c("injection_role", default="user"),
     _c("version", kind="int", default=1),
     _c("promoted_at", kind="ts"),
     _c("demoted_at", kind="ts"),
@@ -1266,6 +1267,7 @@ class OracleProvider(MemoryProvider):
             ("source_workflow_ids", "CLOB"),
             ("exemplar_workflow_id", "VARCHAR2(255)"),
             ("status", "VARCHAR2(50)"),
+            ("injection_role", "VARCHAR2(20) DEFAULT 'user' NOT NULL"),
             ("version", "NUMBER(10) DEFAULT 1"),
             ("promoted_at", "TIMESTAMP"),
             ("demoted_at", "TIMESTAMP"),
@@ -1408,19 +1410,19 @@ class OracleProvider(MemoryProvider):
         if index_key in self._vector_indexes_created:
             return
 
-        if not self._table_has_column(memory_type.value, "embedding"):
-            logger.debug(
-                "Skipping vector index %s: %s has no embedding column",
-                index_name,
-                memory_type.value,
-            )
-            self._vector_indexes_created.add(index_key)
-            return
-
-        table_name = self._get_table_name(memory_type)
-
         with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            if not self._table_has_column(cursor, memory_type.value, "embedding"):
+                logger.debug(
+                    "Skipping vector index %s: %s has no embedding column",
+                    index_name,
+                    memory_type.value,
+                )
+                self._vector_indexes_created.add(index_key)
+                return
+
+            table_name = self._get_table_name(memory_type)
 
             # Check if index exists
             cursor.execute(
@@ -2116,6 +2118,9 @@ class OracleProvider(MemoryProvider):
         status = data.get("status") or "candidate"
         if hasattr(status, "value"):
             status = status.value
+        injection_role = data.get("injection_role") or "user"
+        if hasattr(injection_role, "value"):
+            injection_role = injection_role.value
 
         name = data.get("name", "unknown_skill")
         description = data.get("description", "")
@@ -2178,6 +2183,7 @@ class OracleProvider(MemoryProvider):
                 else None,
                 "exemplar_workflow_id": data.get("exemplar_workflow_id"),
                 "status": status,
+                "injection_role": str(injection_role),
                 "version": int(version) if version is not None else 1,
                 "promoted_at": self._coerce_timestamp(data.get("promoted_at")),
                 "demoted_at": self._coerce_timestamp(data.get("demoted_at")),
@@ -2206,6 +2212,7 @@ class OracleProvider(MemoryProvider):
                     "source_workflow_ids = :source_workflow_ids",
                     "exemplar_workflow_id = :exemplar_workflow_id",
                     "status = :status",
+                    "injection_role = :injection_role",
                     "version = :version",
                     "promoted_at = :promoted_at",
                     "demoted_at = :demoted_at",
@@ -2237,6 +2244,7 @@ class OracleProvider(MemoryProvider):
                     "source_workflow_ids",
                     "exemplar_workflow_id",
                     "status",
+                    "injection_role",
                     "version",
                     "promoted_at",
                     "demoted_at",
@@ -4111,6 +4119,7 @@ class OracleProvider(MemoryProvider):
                 "id_field": "skill_id",
                 "fields": {
                     "status",
+                    "injection_role",
                     "version",
                     "promoted_at",
                     "demoted_at",

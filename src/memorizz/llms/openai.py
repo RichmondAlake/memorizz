@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional
 import openai
 
 from .llm_provider import LLMProvider
+from .message_roles import developer_messages_to_system
 
 # Suppress httpx logs to reduce noise from API requests
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -335,7 +336,10 @@ class OpenAI(LLMProvider):
         Returns:
             Any: Either a string (final response) or the full response object (if tool calls are present).
         """
-        kwargs = {"model": self.model, "messages": messages}
+        provider_messages = (
+            developer_messages_to_system(messages) if self.base_url else messages
+        )
+        kwargs = {"model": self.model, "messages": provider_messages}
 
         # Add tools if provided
         if tools:
@@ -458,7 +462,14 @@ class OpenAI(LLMProvider):
                     return text
             return ""
 
-        kwargs = {"model": self.model, "messages": messages, "stream": True}
+        provider_messages = (
+            developer_messages_to_system(messages) if self.base_url else messages
+        )
+        kwargs = {
+            "model": self.model,
+            "messages": provider_messages,
+            "stream": True,
+        }
 
         if tools:
             kwargs["tools"] = tools

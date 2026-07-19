@@ -213,6 +213,12 @@ with at least two distinct queries, then use `memorizz ui` → **Continual
 Learning** to inspect trajectory classes, run a promotion cycle, and review or
 activate learned skills.
 
+The agent form also selects the authority for newly promoted skills. Keep the
+default `user` role for selectively retrieved guidance. Choose `developer`
+only for application-owned procedures; MemoRizz requires shadow review and
+explicit activation before those skills can enter the provider's
+developer/system-equivalent instruction channel.
+
 ## Launch the Local UI
 
 ```bash
