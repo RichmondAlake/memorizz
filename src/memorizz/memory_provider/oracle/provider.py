@@ -57,6 +57,7 @@ _USER_SCOPED_MEMORY_TYPES = frozenset(
         MemoryType.SEMANTIC_CACHE,
         MemoryType.ENTITY_MEMORY,
         MemoryType.TOOL_LOG,
+        MemoryType.SKILLBOX,
     }
 )
 
@@ -225,6 +226,7 @@ _WORKFLOW_TAIL = (
     _c("step_count", kind="int"),
     _c("promoted_skill_id"),
     _c("skills_activated", kind="json", default=list),
+    _c("shadow_evaluations", kind="json", default=list),
 )
 
 
@@ -1289,6 +1291,7 @@ class OracleProvider(MemoryProvider):
             ("step_count", "NUMBER(10)"),
             ("promoted_skill_id", "VARCHAR2(255)"),
             ("skills_activated", "CLOB"),
+            ("shadow_evaluations", "CLOB CHECK (shadow_evaluations IS JSON)"),
         ],
         MemoryType.SHARED_MEMORY: [
             ("content", "CLOB"),
@@ -2696,13 +2699,14 @@ class OracleProvider(MemoryProvider):
             embedding=embedding,
         )
 
-        # steps/outcome/canonical_signature/skills_activated are IS JSON
-        # columns and go in a follow-up UPDATE.
+        # Structured workflow fields are JSON-constrained CLOB columns and
+        # go in a follow-up UPDATE.
         if (
             data.get("steps")
             or data.get("outcome")
             or data.get("canonical_signature")
             or data.get("skills_activated")
+            or data.get("shadow_evaluations")
         ):
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -2727,6 +2731,12 @@ class OracleProvider(MemoryProvider):
                     update_parts.append("skills_activated = :skills_activated")
                     params["skills_activated"] = self._ensure_json_text(
                         data["skills_activated"]
+                    )
+
+                if data.get("shadow_evaluations"):
+                    update_parts.append("shadow_evaluations = :shadow_evaluations")
+                    params["shadow_evaluations"] = self._ensure_json_text(
+                        data["shadow_evaluations"]
                     )
 
                 if update_parts:
@@ -3159,7 +3169,13 @@ class OracleProvider(MemoryProvider):
         elif memory_store_type == MemoryType.TOOLBOX:
             return self.retrieve_toolbox_item(query, limit)
         elif memory_store_type == MemoryType.SKILLBOX:
-            return self.retrieve_skillbox_item(query, limit)
+            return self.retrieve_skillbox_item(
+                query,
+                limit,
+                statuses=kwargs.get("statuses"),
+                agent_id=kwargs.get("agent_id", _UNSET),
+                user_id=kwargs.get("user_id", _UNSET),
+            )
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
             return self.retrieve_workflow_by_query(
                 query, limit, user_id=kwargs.get("user_id", _UNSET)
@@ -4149,6 +4165,7 @@ class OracleProvider(MemoryProvider):
                     "step_count",
                     "promoted_skill_id",
                     "skills_activated",
+                    "shadow_evaluations",
                     "embedding",
                 },
                 "json_fields": {
@@ -4156,6 +4173,7 @@ class OracleProvider(MemoryProvider):
                     "outcome",
                     "canonical_signature",
                     "skills_activated",
+                    "shadow_evaluations",
                 },
                 "has_updated_at": True,
             },
@@ -4540,7 +4558,13 @@ class OracleProvider(MemoryProvider):
         return self._vector_search(MemoryType.TOOLBOX, embedding, limit=limit)
 
     def retrieve_skillbox_item(
-        self, query: Dict[str, Any], limit: int = 1
+        self,
+        query: Dict[str, Any],
+        limit: int = 1,
+        *,
+        statuses: Optional[List[str]] = None,
+        agent_id: Any = _UNSET,
+        user_id: Any = _UNSET,
     ) -> Optional[List[Dict[str, Any]]]:
         """Retrieve skillbox items using vector search."""
         from ...embeddings import get_embedding
@@ -4548,10 +4572,47 @@ class OracleProvider(MemoryProvider):
         try:
             embedding = get_embedding(query)
         except Exception as e:
-            logger.error(f"Failed to generate embedding for query: {e}")
+            logger.error(
+                "Failed to generate a skillbox query embedding (%s)",
+                type(e).__name__,
+            )
             return []
 
-        return self._vector_search(MemoryType.SKILLBOX, embedding, limit=limit)
+        filters: Dict[str, Any] = {}
+        if statuses:
+            # Passive evaluation requests exactly SHADOW. Keep this scalar
+            # so Oracle applies it in SQL before FETCH FIRST top-k.
+            filters["status"] = list(statuses)[0]
+        if agent_id is not _UNSET:
+            filters["agent_id"] = agent_id
+        return self._vector_search(
+            MemoryType.SKILLBOX,
+            embedding,
+            limit=limit,
+            filters=filters,
+            user_id=user_id,
+        )
+
+    def retrieve_skillbox_candidates(
+        self,
+        query: str,
+        *,
+        limit: int,
+        statuses: List[str],
+        agent_id: Optional[str],
+        user_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Oracle vector search with lifecycle and tenant pre-filters."""
+        return list(
+            self.retrieve_skillbox_item(
+                query,
+                limit,
+                statuses=statuses,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            or []
+        )
 
     def retrieve_workflow_by_query(
         self, query: Dict[str, Any], limit: int = 1, user_id: Any = _UNSET
@@ -4660,7 +4721,7 @@ class OracleProvider(MemoryProvider):
         allowed_filters = {
             MemoryType.PERSONAS: {"memory_id", "agent_id", "name", "role_type"},
             MemoryType.TOOLBOX: {"memory_id", "agent_id", "name", "tool_type"},
-            MemoryType.SKILLBOX: {"agent_id", "name", "status"},
+            MemoryType.SKILLBOX: {"agent_id", "user_id", "name", "status"},
             MemoryType.WORKFLOW_MEMORY: {
                 "memory_id",
                 "agent_id",

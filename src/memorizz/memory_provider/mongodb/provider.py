@@ -41,6 +41,7 @@ _MONGO_USER_SCOPED_TYPES = frozenset(
         MemoryType.SEMANTIC_CACHE,
         MemoryType.ENTITY_MEMORY,
         MemoryType.TOOL_LOG,
+        MemoryType.SKILLBOX,
     }
 )
 
@@ -448,8 +449,15 @@ class MongoDBProvider(MemoryProvider):
 
         if index_key not in self._vector_indexes_created:
             try:
-                self._setup_vector_search_index(
-                    collection, "vector_index", memory_store
+                self._ensure_vector_index(
+                    collection,
+                    "vector_index",
+                    memory_store,
+                    filter_fields=(
+                        ["status", "agent_id", "user_id"]
+                        if collection_name == MemoryType.SKILLBOX.value
+                        else None
+                    ),
                 )
                 self._vector_indexes_created.add(index_key)
                 logger.info(f"Created vector index for collection: {collection_name}")
@@ -622,6 +630,11 @@ class MongoDBProvider(MemoryProvider):
                     collection=self.db[memory_store_type.value],
                     index_name="vector_index",
                     memory_store=memory_store_present,
+                    filter_fields=(
+                        ["status", "agent_id", "user_id"]
+                        if memory_store_type == MemoryType.SKILLBOX
+                        else None
+                    ),
                 )
 
     def _collection(self, memory_store_type: MemoryType):
@@ -889,7 +902,16 @@ class MongoDBProvider(MemoryProvider):
         elif memory_store_type == MemoryType.TOOLBOX:
             return self.retrieve_toolbox_item(query, limit) or []
         elif memory_store_type == MemoryType.SKILLBOX:
-            return self.retrieve_skillbox_item(query, limit) or []
+            return (
+                self.retrieve_skillbox_item(
+                    query,
+                    limit,
+                    statuses=kwargs.get("statuses"),
+                    agent_id=kwargs.get("agent_id", _MONGO_UNSET),
+                    user_id=kwargs.get("user_id", _MONGO_UNSET),
+                )
+                or []
+            )
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
             return self.retrieve_workflow_by_query(query, limit) or []
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
@@ -1139,7 +1161,13 @@ class MongoDBProvider(MemoryProvider):
         return results if results else None
 
     def retrieve_skillbox_item(
-        self, query: Union[Dict[str, Any], str], limit: int = 1
+        self,
+        query: Union[Dict[str, Any], str],
+        limit: int = 1,
+        *,
+        statuses: Optional[List[str]] = None,
+        agent_id: Any = _MONGO_UNSET,
+        user_id: Any = _MONGO_UNSET,
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Retrieve learned skills by vector similarity.
@@ -1152,14 +1180,57 @@ class MongoDBProvider(MemoryProvider):
         try:
             embedding = get_embedding(query)
         except Exception as e:
-            logger.error(f"Failed to generate embedding for query: {e}")
+            logger.error(
+                "Failed to generate a skillbox query embedding (%s)",
+                type(e).__name__,
+            )
             return []
 
-        pipeline = self._build_vector_search_pipeline(embedding, limit)
+        if self.lazy_vector_indexes:
+            self._ensure_vector_index_for_collection(
+                self.skillbox_collection,
+                MemoryType.SKILLBOX.value,
+                memory_store=True,
+            )
+
+        filters = []
+        if statuses:
+            filters.append({"status": {"$in": list(statuses)}})
+        if agent_id is not _MONGO_UNSET:
+            filters.append({"agent_id": {"$eq": agent_id}})
+        if user_id is not _MONGO_UNSET:
+            filters.append({"user_id": {"$eq": user_id}})
+        search_filter = (
+            {"$and": filters} if len(filters) > 1 else (filters[0] if filters else None)
+        )
+        pipeline = self._build_vector_search_pipeline(
+            embedding, limit, search_filter=search_filter
+        )
         results = self._run_vector_search(
             self.skillbox_collection, pipeline, label="skillbox"
         )
         return results if results else None
+
+    def retrieve_skillbox_candidates(
+        self,
+        query: str,
+        *,
+        limit: int,
+        statuses: List[str],
+        agent_id: Optional[str],
+        user_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Atlas vector search with lifecycle and tenant pre-filters."""
+        return list(
+            self.retrieve_skillbox_item(
+                query,
+                limit,
+                statuses=statuses,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            or []
+        )
 
     def retrieve_entity_memory_records(
         self,
@@ -2316,7 +2387,11 @@ class MongoDBProvider(MemoryProvider):
             self.tool_log_collection.delete_many({"memory_id": memory_id})
 
     def _setup_vector_search_index(
-        self, collection, index_name="vector_index", memory_store: bool = False
+        self,
+        collection,
+        index_name="vector_index",
+        memory_store: bool = False,
+        filter_fields: Optional[List[str]] = None,
     ):
         """
         Setup a vector search index for a MongoDB collection and wait for it to become queryable.
@@ -2351,6 +2426,16 @@ class MongoDBProvider(MemoryProvider):
                     "path": "memory_id",
                 }
             )
+        existing_filter_paths = {
+            field["path"]
+            for field in vector_index_definition["fields"]
+            if field.get("type") == "filter"
+        }
+        for path in filter_fields or []:
+            if path in existing_filter_paths:
+                continue
+            vector_index_definition["fields"].append({"type": "filter", "path": path})
+            existing_filter_paths.add(path)
 
         new_vector_search_index_model = SearchIndexModel(
             definition=vector_index_definition, name=index_name, type="vectorSearch"
@@ -2423,7 +2508,11 @@ class MongoDBProvider(MemoryProvider):
         )
 
     def _ensure_vector_index(
-        self, collection, index_name="vector_index", memory_store: bool = False
+        self,
+        collection,
+        index_name="vector_index",
+        memory_store: bool = False,
+        filter_fields: Optional[List[str]] = None,
     ):
         """
         Ensure a vector search index exists for the collection. If it doesn't exist, create it and wait for it to be ready.
@@ -2434,15 +2523,64 @@ class MongoDBProvider(MemoryProvider):
         memory_store: Whether to add the memory_id field to the index (default: False)
         """
         search_indexes = list(collection.list_search_indexes())
-        has_vector_index = any(
-            index.get("name") == index_name and index.get("type") == "vectorSearch"
-            for index in search_indexes
+        existing_index = next(
+            (
+                index
+                for index in search_indexes
+                if index.get("name") == index_name
+                and index.get("type") == "vectorSearch"
+            ),
+            None,
         )
 
-        if not has_vector_index:
-            self._setup_vector_search_index(collection, index_name, memory_store)
-        else:
-            pass  # Index already exists
+        if existing_index is None:
+            self._setup_vector_search_index(
+                collection,
+                index_name,
+                memory_store,
+                filter_fields=filter_fields,
+            )
+            return
+
+        required = set(filter_fields or [])
+        if memory_store:
+            required.add("memory_id")
+        current_definition = (
+            existing_index.get("latestDefinition")
+            or existing_index.get("definition")
+            or {}
+        )
+        fields = current_definition.get("fields", [])
+        present = {
+            field.get("path") for field in fields if field.get("type") == "filter"
+        }
+        missing = required - present
+        if not missing:
+            return
+
+        definition = dict(current_definition)
+        updated_fields = list(definition.get("fields") or [])
+        updated_fields.extend(
+            {"type": "filter", "path": path} for path in sorted(missing)
+        )
+        definition["fields"] = updated_fields
+        try:
+            collection.update_search_index(index_name, definition)
+            logger.info(
+                "Updated vector index %s on %s with filters: %s",
+                index_name,
+                collection.name,
+                ", ".join(sorted(missing)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Vector index %s on %s lacks required filters %s and could "
+                "not be reconciled automatically: %s",
+                index_name,
+                collection.name,
+                ", ".join(sorted(missing)),
+                exc,
+            )
 
     def _ensure_semantic_cache_vector_index(self) -> None:
         """

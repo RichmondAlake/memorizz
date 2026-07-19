@@ -308,6 +308,11 @@ def test_shadow_mode_never_stamps_or_injects(provider):
             "require_shadow": True,
             "skill_injection_role": "developer",
             "retrieval_min_similarity": 0.3,
+            "shadow_evaluation_enabled": True,
+            "shadow_evaluation_min_similarity": 0.3,
+            "shadow_readiness_min_observations": 1,
+            "shadow_readiness_min_trajectory_match_rate": 1.0,
+            "shadow_readiness_min_matched_success_rate": 1.0,
         },
     )
     base = datetime.now() - timedelta(hours=2)
@@ -329,8 +334,25 @@ def test_shadow_mode_never_stamps_or_injects(provider):
     # Shadow skills never suppress workflow retrieval…
     docs = provider.list_all(memory_store_type=MemoryType.WORKFLOW_MEMORY)
     assert all(not d.get("promoted_skill_id") for d in docs)
+    assert all(not d.get("shadow_evaluations") for d in docs)
     # …and never inject.
     assert manager.retrieve_skills_for_query("refund order S1 variant") == []
+
+    # A fresh production run is evaluated only after it is stored. Source
+    # workflows remain untouched, and passive evidence is not attribution.
+    fresh = _run(provider, manager, "refund order NEW shadow variant", "NEW")
+    assert manager.drain_shadow_evaluations(timeout=2)
+    docs = provider.list_all(memory_store_type=MemoryType.WORKFLOW_MEMORY)
+    source_ids = set(shadow.source_workflow_ids)
+    source_docs = [doc for doc in docs if str(doc.get("workflow_id")) in source_ids]
+    assert source_docs and all(not doc.get("shadow_evaluations") for doc in source_docs)
+    fresh_doc = next(doc for doc in docs if doc.get("workflow_id") == fresh.workflow_id)
+    assert fresh_doc["skills_activated"] == []
+    assert len(fresh_doc["shadow_evaluations"]) == 1
+    assert fresh_doc["shadow_evaluations"][0]["skill_id"] == shadow.skill_id
+    readiness = manager.get_shadow_readiness(shadow.skill_id)
+    assert readiness["ready"] is True
+    assert readiness["observations"] == 1
 
     # Manual activation flips both.
     assert manager.activate_skill(shadow.skill_id)

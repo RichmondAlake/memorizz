@@ -129,7 +129,21 @@ def _seed_skill(
             "version": 1,
             "source_canonical_hash": source_hash,
             "baseline": {"executions": 5, "success_rate": 1.0},
-            "stats": {"activations": 3, "successes": 3, "failures": 0, "deviations": 0},
+            "stats": {
+                "activations": 3,
+                "successes": 3,
+                "failures": 0,
+                "deviations": 0,
+                "shadow": {
+                    "observations": 12,
+                    "trajectory_matches": 10,
+                    "trajectory_mismatches": 2,
+                    "matched_successes": 9,
+                    "matched_failures": 1,
+                    "last_evaluated_at": "2026-07-19T12:00:00+00:00",
+                    "recent_evaluations": [],
+                },
+            },
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "embedding": [0.0],
@@ -290,6 +304,11 @@ class TestSkillLifecycleActions:
         assert "Activate as developer" in page
         assert "Demote" not in page  # only ACTIVE skills can be demoted
         assert "SKILL.md" in page
+        assert "12 passive observations" in page
+        assert "trajectory match 83%" in page
+        assert "matched success 90%" in page
+        assert "READY TO REVIEW" in page
+        assert "last evaluated 2026-07-19T12:00" in page
 
     @pytest.mark.unit
     def test_activate_shadow_skill_stamps_workflows(self, client, connected):

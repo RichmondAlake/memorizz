@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-07-19
+
+### Added
+
+* Opt-in passive SHADOW-traffic evaluation now observes only new,
+  post-distillation workflows in a bounded background queue. It performs
+  deterministic, tenant-scoped canonical-trajectory and business-outcome
+  comparisons without prompt injection, LLM calls, tool re-execution, a
+  second action-taking agent, or automatic activation.
+* Workflow records persist versioned, idempotent `shadow_evaluations`; skill
+  records expose a bounded derived `stats["shadow"]` aggregate and the
+  advisory `get_shadow_readiness(skill_id)` API.
+* Filesystem, MongoDB, and Oracle apply SHADOW lifecycle and tenant filters
+  before final top-k retrieval. MongoDB reconciles Skillbox vector-index
+  filter fields, and Oracle migration
+  `003_add_shadow_evaluations.sql` adds a JSON-constrained workflow CLOB.
+* The Local UI exposes passive evaluation and displays observation count,
+  trajectory-match rate, matched-trajectory success rate, last evaluation,
+  and readiness reasons while preserving explicit activation.
+
+### Changed
+
+* Active attribution and drift monitoring now accept only ACTIVE skills.
+  SHADOW evidence never enters `skills_activated`, activation counters, or
+  rolling demotion statistics.
+* Parts 5 and 6 of the continual-learning notebook are split into shorter
+  narrated stages while retaining case-level and aggregate DataFrames.
+* Release recovery verifies wheel bytes exactly and compares normalized sdist
+  contents, avoiding false failures caused only by cross-platform gzip/tar
+  metadata.
+
 ## 0.3.0 — 2026-07-19
 
 ### Added

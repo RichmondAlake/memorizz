@@ -4,8 +4,10 @@ MemoRizz agents can **learn from their own successful behavior**. Every
 tool-calling run is captured as a workflow trajectory; when the same
 procedure keeps succeeding across different queries, it is distilled into a
 reusable **skill** — a SKILL.md document stored in the new `skillbox` memory
-store — and injected into future runs that match. Skills are monitored for
-their whole life and demoted when they stop working.
+store — and injected into future runs that match after any required review.
+Active skills are monitored and demoted when they stop working. Shadow skills
+can instead be evaluated passively on later production workflows without
+being injected or executing anything again.
 
 ```
 Agent run ─→ Workflow memory (per-run trajectory, canonical hash)
@@ -15,7 +17,12 @@ Agent run ─→ Workflow memory (per-run trajectory, canonical hash)
                  │
                  ▼
          Skillbox (SKILL.md documents + applicability embedding)
-                 │  vector search against the incoming query
+            ┌────┴─────────────────────────────────────────────┐
+            │ SHADOW (optional passive post-run evaluation)    │
+            │ no prompt injection, LLM judge, or tool call     │
+            └────┬─────────────────────────────────────────────┘
+                 │ explicit activation review
+                 │ vector search against the incoming query
                  ▼
          Trust-aware injection (user context or reviewed developer instruction)
                  │
@@ -40,6 +47,7 @@ agent = MemAgent(
         "min_distinct_queries": 2,    # gate: repeated *intent*, not one cached query
         "require_shadow": True,       # recommended initial posture (see below)
         "skill_injection_role": "user", # "user" (default) or "developer"
+        "shadow_evaluation_enabled": True, # opt-in passive observations
         "promotion_every_n_runs": 25, # 0 = only manual run_promotion_cycle()
     },
 )
@@ -73,10 +81,22 @@ schema, run:
 
 ```sql
 @src/memorizz/memory_provider/oracle/migrations/002_add_skill_injection_role.sql
+@src/memorizz/memory_provider/oracle/migrations/003_add_shadow_evaluations.sql
 ```
 
 Legacy skill records on every provider default to `user`, preserving the
-pre-upgrade trust level.
+pre-upgrade trust level. Migration 003 adds the JSON-constrained
+`workflow_memory.shadow_evaluations` CLOB used as passive evaluation's
+auditable source of truth. Filesystem and MongoDB serialize the same workflow
+field without a schema migration.
+
+Passive retrieval filters lifecycle, agent, and user scope before final top-k
+selection on all first-party providers: filesystem filters documents before
+cosine ranking; MongoDB supplies `status`, `agent_id`, and `user_id` to
+`$vectorSearch` and reconciles those Skillbox index filter fields; Oracle puts
+the same predicates into its vector-search SQL. A third-party provider written
+against the older contract remains compatible through an over-fetch-and-filter
+fallback. This retrieval runs only in the background worker.
 
 ### Define business success
 
@@ -203,9 +223,74 @@ Each cycle (every N stored runs, or manually via
 ### Shadow mode
 
 With `require_shadow=True` (the recommended initial posture), new skills
-land as `SHADOW`: they are stored, monitored, and attributable, but never
-injected and never suppress workflow retrieval. Review the distilled
-SKILL.md by hand, then activate:
+land as `SHADOW`. They are stored but never injected, never written to
+`skills_activated`, never included in active drift statistics, and never
+suppress workflow retrieval.
+
+Passive shadow evaluation is separately opt-in:
+
+```python
+continual_learning_config={
+    "require_shadow": True,
+    "shadow_evaluation_enabled": True,
+    "shadow_evaluation_max_candidates": 3,
+    # None means use retrieval_min_similarity:
+    "shadow_evaluation_min_similarity": None,
+    "shadow_evaluation_queue_size": 100,
+    "shadow_evaluation_recent_window": 50,
+    "shadow_readiness_min_observations": 10,
+    "shadow_readiness_min_trajectory_match_rate": 0.80,
+    "shadow_readiness_min_matched_success_rate": 0.80,
+}
+```
+
+After a tool-calling workflow is stored, the response path performs only a
+bounded `put_nowait()` into an in-process queue. A single daemon worker then:
+
+1. retrieves semantically matching `SHADOW` skills under exact `agent_id` and
+   `user_id` scope;
+2. excludes source workflows and every workflow created at or before the
+   skill;
+3. deterministically compares the expected and observed canonical hashes plus
+   the already-recorded business outcome;
+4. appends a versioned record to `Workflow.shadow_evaluations`; and
+5. reconciles `Skill.stats["shadow"]` from those workflow records.
+
+The worker does not build model context, call an LLM judge, call a tool, invoke
+a second agent, or alter lifecycle status. Semantic retrieval can use the
+configured embedding provider, but that work happens only after the response
+path has enqueued the snapshot. Queue-full, retrieval, persistence, and worker
+failures are logged without raw queries, skill bodies, or tool results and
+never reach the user-facing run. Use the bounded drain only in tests or
+controlled shutdown:
+
+```python
+manager = agent.continual_learning_manager
+manager.drain_shadow_evaluations(timeout=5.0)
+readiness = manager.get_shadow_readiness(skill_id)
+print(readiness)
+```
+
+A readiness response is advisory:
+
+```python
+{
+    "ready": False,
+    "observations": 7,
+    "trajectory_match_rate": 0.86,
+    "matched_success_rate": 1.0,
+    "reasons": ["observations 7 < 10"],
+}
+```
+
+`trajectory_mismatch` is not automatically a skill failure. A different
+successful canonical path may be a valid alternative procedure, so success
+and failure counters apply only when the observed trajectory matches the
+skill's source trajectory. These are observational metrics: they do not prove
+that injecting the skill caused an improvement. Establish causal benefit with
+a reviewed canary or A/B test before broad activation.
+
+Review the distilled SKILL.md and its evidence by hand, then activate:
 
 ```python
 manager = agent.continual_learning_manager
@@ -287,8 +372,9 @@ rather than concatenating it into a prompt.
 
 ## Monitoring, drift, and demotion
 
-Every stored run records `skills_activated` — the skill IDs that were in
-its context. The monitor updates each skill's stats:
+Every stored run records `skills_activated` — ACTIVE skill IDs that were
+actually in its context. The active monitor ignores every other lifecycle
+status, even if application code manually supplies a SHADOW ID. It updates:
 
 - **success / failure** — by run outcome;
 - **deviation** — the skill was in context but the run took a different
@@ -304,6 +390,10 @@ are retrievable again. If the trajectory later re-qualifies — counting
 only post-demotion runs — it is re-distilled as a new version, with the
 old demotion reason fed into the distillation prompt.
 
+Passive evidence never enters these counters or rolling windows. It is stored
+only in `Workflow.shadow_evaluations` and the derived
+`Skill.stats["shadow"]` aggregate.
+
 ## Inspecting learned skills
 
 Learned skills surface through the same tools as file-based skills:
@@ -315,6 +405,8 @@ manager.skillbox.list_skills()                 # all, any status
 manager.last_report                            # most recent PromotionReport
 manager.run_promotion_cycle()                  # manual cycle
 manager.promote_class(canonical_hash)          # gated single-class promotion
+manager.get_shadow_readiness(skill_id)         # advisory passive metrics
+manager.drain_shadow_evaluations(timeout=5.0)  # tests / controlled shutdown
 manager.activate_skill(skill_id)               # SHADOW → ACTIVE (+ stamp backfill)
 manager.demote_skill(skill_id, reason="...")   # manual demotion
 ```
@@ -325,8 +417,9 @@ The local UI (`memorizz ui`) exposes the whole loop:
 
 - **Create/Edit Agent** exposes **Authority for newly learned skills** with
   `user` and `developer` options plus **Require shadow review before
-  activation**. Selecting developer checks the review control, and the server
-  rejects an unsafe developer-without-shadow configuration.
+  activation** and **Passively evaluate shadow skills on new workflows**.
+  Selecting developer checks the review control, and the server rejects an
+  unsafe developer-without-shadow configuration.
 - **Memory → Workflows** groups runs into **trajectory classes** by
   canonical hash, showing per-class executions, success rate, distinct
   queries, and a pass/fail chip for each promotion gate. Eligible classes
@@ -338,9 +431,10 @@ The local UI (`memorizz ui`) exposes the whole loop:
 - **Memory → Skills** shows every learned skill with its lifecycle badge
   (candidate / shadow / active / deprecated / demoted), version,
   persisted authority, activation stats, baseline, preconditions, and the
-  full distilled SKILL.md — plus **Activate as user/developer** (shadow →
-  active, with workflow stamp backfill) and **Demote** (releases the
-  suppressed workflows) buttons.
+  full distilled SKILL.md. SHADOW cards also show passive observation count,
+  trajectory-match rate, matched-trajectory success rate, last evaluation,
+  and advisory readiness reasons — plus the existing explicit **Activate as
+  user/developer** action. ACTIVE cards retain **Demote**.
 
 UI promotion is human-*triggered*, never human-*exempted*: "Distill now"
 still runs the full eligibility gates and the distillation validation
@@ -363,6 +457,14 @@ All knobs live in `continual_learning_config` (see `PromotionConfig`):
 | `include_failure_samples` | 2 | Failure runs fed to the LLM |
 | `skill_max_content_chars` | 4000 | SKILL.md size cap |
 | `require_shadow` | False | New skills land as SHADOW |
+| `shadow_evaluation_enabled` | False | Opt in to passive post-store evaluation of SHADOW skills |
+| `shadow_evaluation_max_candidates` | 3 | Maximum tenant-scoped SHADOW candidates per new workflow |
+| `shadow_evaluation_min_similarity` | None | Passive threshold; `None` uses `retrieval_min_similarity` |
+| `shadow_evaluation_queue_size` | 100 | Bounded non-blocking background queue |
+| `shadow_evaluation_recent_window` | 50 | Maximum recent evaluations cached in skill stats |
+| `shadow_readiness_min_observations` | 10 | Advisory readiness observation floor |
+| `shadow_readiness_min_trajectory_match_rate` | 0.80 | Advisory readiness trajectory-match floor |
+| `shadow_readiness_min_matched_success_rate` | 0.80 | Advisory readiness success floor for matching trajectories |
 | `skill_injection_role` | `"user"` | Injection authority: `"user"` or `"developer"`; developer requires `require_shadow=True` |
 | `retrieval_min_similarity` | 0.70 | Injection threshold |
 | `max_skills_in_context` | 2 | Skills injected per turn |
@@ -396,12 +498,16 @@ not a general claim that higher authority or continual learning always helps.
 
 ## Rollout recommendation
 
-1. Enable behind `require_shadow=True` on one agent.
+1. Enable behind `require_shadow=True` on one agent. Optionally enable passive
+   evaluation, observe fresh (never source) workflows, and review readiness
+   reasons.
 2. Backfill canonical hashes on existing deployments; check that top
    trajectory classes have sane counts (heavy fragmentation means the
    canonicalization rules need tuning before trusting promotion).
 3. Review the first `PromotionReport` and every distilled SKILL.md by
    hand.
-4. For user-authority skills only, consider loosening to
+4. Run a reviewed canary or A/B test; passive observational metrics are not a
+   causal treatment comparison and never activate a skill automatically.
+5. For user-authority skills only, consider loosening to
    `require_shadow=False` once distillation quality is trusted. Developer
    authority always requires shadow review and explicit activation.

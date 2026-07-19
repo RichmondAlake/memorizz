@@ -90,16 +90,19 @@ class TestAgentCrud:
             continual_learning="on",
             skill_injection_role="developer",
             continual_learning_require_shadow="on",
+            continual_learning_shadow_evaluation="on",
         )
         assert resp.status_code in (302, 303), resp.text[:300]
 
         agent = connected.list_memagents()[0]
         assert agent.continual_learning_config["skill_injection_role"] == ("developer")
         assert agent.continual_learning_config["require_shadow"] is True
+        assert agent.continual_learning_config["shadow_evaluation_enabled"] is True
 
         form = client.get(f"/agents/{agent.agent_id}/edit")
         assert form.status_code == 200
         assert "Authority for newly learned skills" in form.text
+        assert "Passively evaluate shadow skills" in form.text
         assert 'option value="developer" selected' in form.text
 
     @pytest.mark.unit

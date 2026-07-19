@@ -113,6 +113,7 @@ def _engine(skillbox=None, config=None, provider=None):
 class TestSkillAuthority:
     def test_legacy_default_remains_user_authority(self):
         assert PromotionConfig().skill_injection_role == SkillInjectionRole.USER
+        assert PromotionConfig().shadow_evaluation_enabled is False
         assert (
             PromotionConfig.from_dict({}).skill_injection_role
             == SkillInjectionRole.USER
@@ -127,6 +128,23 @@ class TestSkillAuthority:
             require_shadow=True,
         )
         assert config.skill_injection_role == SkillInjectionRole.DEVELOPER
+
+    def test_shadow_evaluation_configuration_is_validated(self):
+        config = PromotionConfig.from_dict(
+            {
+                "shadow_evaluation_enabled": True,
+                "shadow_evaluation_max_candidates": 4,
+                "shadow_evaluation_min_similarity": 0.65,
+                "shadow_evaluation_queue_size": 25,
+                "shadow_evaluation_recent_window": 12,
+                "shadow_readiness_min_observations": 8,
+            }
+        )
+        assert config.shadow_evaluation_enabled is True
+        assert config.shadow_evaluation_max_candidates == 4
+        assert config.shadow_evaluation_min_similarity == 0.65
+        with pytest.raises(ValueError, match="queue_size"):
+            PromotionConfig(shadow_evaluation_queue_size=0)
 
     def test_review_activation_can_set_developer_authority(self):
         skill = Skill(
@@ -582,7 +600,7 @@ class TestMonitor:
         # Must not raise into the user-facing run.
         monitor.record_run_outcome(_workflow(WorkflowOutcome.SUCCESS, [skill.skill_id]))
 
-    def test_shadow_skills_tracked_but_never_demoted(self):
+    def test_shadow_ids_never_enter_active_attribution_or_drift(self):
         skill = _monitored_skill(status=SkillStatus.SHADOW)
         monitor, _ = self._monitor(skill)
         for _ in range(10):
@@ -590,7 +608,10 @@ class TestMonitor:
                 _workflow(WorkflowOutcome.FAILURE, [skill.skill_id])
             )
         assert skill.status == SkillStatus.SHADOW
-        assert skill.stats["activations"] == 10
+        assert skill.stats["activations"] == 0
+        assert skill.stats["successes"] == 0
+        assert skill.stats["failures"] == 0
+        assert skill.stats["recent_outcomes"] == []
 
 
 class TestPromoteClass:

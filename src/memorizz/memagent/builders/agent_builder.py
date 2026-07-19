@@ -154,7 +154,8 @@ class MemAgentBuilder:
         """Enable/disable the workflow→skill continual learning loop.
 
         ``config`` keys follow ``PromotionConfig`` (e.g. ``min_executions``,
-        ``require_shadow``, ``promotion_every_n_runs``).
+        ``require_shadow``, ``shadow_evaluation_enabled``,
+        ``promotion_every_n_runs``).
         """
         self._continual_learning_enabled = bool(enabled)
         if isinstance(config, dict):

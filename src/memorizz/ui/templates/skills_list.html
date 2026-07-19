@@ -33,6 +33,29 @@
                 {% if skill.baseline.success_rate is defined %}<span class="meta-tag" title="success rate frozen at promotion time">baseline {{ '%.0f'|format(skill.baseline.success_rate * 100) }}%</span>{% endif %}
             </div>
 
+            {% if skill.status == 'shadow' %}
+            <div class="item-meta">
+                <span class="meta-tag">{{ skill.shadow_observations }} passive observation{{ 's' if skill.shadow_observations != 1 }}</span>
+                <span class="meta-tag">trajectory match {{ '%.0f'|format(skill.shadow_trajectory_match_rate * 100) }}%</span>
+                <span class="meta-tag">matched success {{ '%.0f'|format(skill.shadow_matched_success_rate * 100) }}%</span>
+                {% if skill.shadow_last_evaluated_at %}<span class="meta-tag">last evaluated {{ skill.shadow_last_evaluated_at|truncate(19, true, '') }}</span>{% endif %}
+                <span class="cl-badge cl-badge--{{ 'active' if skill.shadow_ready else 'candidate' }}">
+                    {{ 'READY TO REVIEW' if skill.shadow_ready else 'NOT READY' }}
+                </span>
+            </div>
+            {% if skill.shadow_readiness_reasons %}
+            <div class="cl-report-row cl-report-warn">
+                Advisory readiness: {{ skill.shadow_readiness_reasons|join('; ') }}.
+                Activation remains an explicit reviewer decision.
+            </div>
+            {% endif %}
+            {% if not skill.shadow_evaluation_enabled %}
+            <div class="cl-report-row">
+                Passive shadow evaluation is disabled for this agent.
+            </div>
+            {% endif %}
+            {% endif %}
+
             {% if skill.demotion_reason %}
             <div class="cl-report-row cl-report-warn">Demoted{% if skill.demoted_at %} {{ skill.demoted_at|truncate(16, true, '') }}{% endif %}: {{ skill.demotion_reason }}</div>
             {% endif %}

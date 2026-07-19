@@ -65,7 +65,38 @@ def _default_stats() -> Dict[str, Any]:
         # capped by the monitor's drift window. Avoids re-querying workflow
         # memory to compute the rolling success rate.
         "recent_outcomes": [],
+        # Passive SHADOW evaluation is deliberately separate from active
+        # attribution.  These counters are reconciled from the auditable
+        # ``Workflow.shadow_evaluations`` records, never from
+        # ``skills_activated``.
+        "shadow": {
+            "observations": 0,
+            "trajectory_matches": 0,
+            "trajectory_mismatches": 0,
+            "matched_successes": 0,
+            "matched_failures": 0,
+            "last_evaluated_at": None,
+            "recent_evaluations": [],
+        },
     }
+
+
+def _merge_stats(stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge persisted stats with defaults, including the nested channel.
+
+    Older skill documents have no ``shadow`` key.  A shallow merge would
+    also lose newly added shadow defaults when a partial nested document is
+    loaded, so keep this compatibility normalization in one place.
+    """
+    supplied = dict(stats or {})
+    defaults = _default_stats()
+    supplied_shadow = supplied.pop("shadow", None)
+    defaults.update(supplied)
+    defaults["shadow"] = {
+        **_default_stats()["shadow"],
+        **(supplied_shadow if isinstance(supplied_shadow, dict) else {}),
+    }
+    return defaults
 
 
 class Skill:
@@ -120,7 +151,7 @@ class Skill:
         self.demotion_reason = demotion_reason
         self.injection_role = normalize_skill_injection_role(injection_role)
         self.baseline = dict(baseline) if baseline else {}
-        self.stats = {**_default_stats(), **(stats or {})}
+        self.stats = _merge_stats(stats)
         # Reuse the stored embedding on round-trip; only embed fresh docs.
         # ``None`` (doc loaded under an embedding-excluding projection) is
         # preserved as None — regenerating here would bill the embedding API

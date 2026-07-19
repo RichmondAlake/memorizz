@@ -129,6 +129,7 @@ agent = MemAgent(
     continual_learning_config={
         "require_shadow": True,
         "skill_injection_role": "developer",  # or "user" (default)
+        "shadow_evaluation_enabled": True,    # optional passive evidence
     },
 )
 ```
@@ -141,10 +142,14 @@ developer message; Anthropic receives the reviewed instructions through its
 System policy and current tool/database facts still win. Legacy skills remain
 at `user` authority.
 
-The local UI exposes both authority options and shows each skill's persisted
-role. See the [Continual Learning guide](docs/guides/continual-learning.md) for
-promotion, review, provider mapping, Oracle migration, and the three-arm
-token/latency/accuracy notebook evaluation.
+Passive evaluation observes only new, post-distillation workflows in a bounded
+background queue. It never injects a shadow skill, calls an LLM judge, reruns
+a tool, or activates a skill. Semantic retrieval may still use the configured
+embedding provider. The local UI exposes the opt-in and shows
+observation, trajectory-match, matched-success, and advisory readiness metrics.
+See the [Continual Learning guide](docs/guides/continual-learning.md) for
+promotion, passive evaluation, review, provider mapping, Oracle migrations, and
+the three-arm token/latency/accuracy notebook evaluation.
 
 ## Local LLMs (Gemma 4, Llama, Qwen, …)
 

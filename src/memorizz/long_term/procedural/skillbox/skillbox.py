@@ -8,7 +8,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
@@ -17,6 +17,7 @@ from ....memory_provider import MemoryProvider
 from .skill import Skill, SkillStatus
 
 logger = logging.getLogger(__name__)
+_SCOPE_UNSET = object()
 
 
 @dataclass
@@ -61,7 +62,7 @@ class Skillbox:
         self.agent_id = agent_id
         # hash → skill_id map for write-time stamping; invalidated on any
         # mutation (add/update/set_status).
-        self._active_hash_cache: Optional[Dict[str, str]] = None
+        self._active_hash_cache: Optional[Dict[Tuple[str, Optional[str]], str]] = None
 
     # ------------------------------------------------------------------ CRUD
 
@@ -85,18 +86,41 @@ class Skillbox:
                 return Skill.from_dict(doc)
         return None
 
-    def get_active_skill_for_hash(self, canonical_hash: str) -> Optional[Skill]:
-        """Return the ACTIVE skill covering a trajectory class, if any."""
+    def get_active_skill_for_hash(
+        self,
+        canonical_hash: str,
+        user_id: Any = _SCOPE_UNSET,
+    ) -> Optional[Skill]:
+        """Return the ACTIVE skill covering a trajectory class and user.
+
+        ``user_id`` is exact when supplied, including ``None`` for anonymous
+        workflows. Omitting it preserves the legacy unscoped lookup.
+        """
         if not canonical_hash:
             return None
         if self._active_hash_cache is None:
             self._active_hash_cache = {
-                str(doc.get("source_canonical_hash")): str(doc.get("skill_id"))
+                (
+                    str(doc.get("source_canonical_hash")),
+                    doc.get("user_id"),
+                ): str(doc.get("skill_id"))
                 for doc in self._list_docs()
                 if doc.get("status") == SkillStatus.ACTIVE.value
                 and doc.get("source_canonical_hash")
             }
-        skill_id = self._active_hash_cache.get(str(canonical_hash))
+        if user_id is _SCOPE_UNSET:
+            skill_id = next(
+                (
+                    skill_id
+                    for (stored_hash, _stored_user_id), skill_id in (
+                        self._active_hash_cache.items()
+                    )
+                    if stored_hash == str(canonical_hash)
+                ),
+                None,
+            )
+        else:
+            skill_id = self._active_hash_cache.get((str(canonical_hash), user_id))
         if not skill_id:
             return None
         return self.get_skill_by_id(skill_id)
@@ -146,6 +170,28 @@ class Skillbox:
             )
         )
 
+    def update_shadow_stats(self, skill_id: str, shadow_stats: Dict[str, Any]) -> bool:
+        """Patch only one skill's passive-evaluation aggregate.
+
+        This intentionally avoids :meth:`update_skill`: activation can race
+        a background evaluation, and writing a previously loaded lifecycle
+        status back with the stats could undo an explicit activation.
+        """
+        doc = self._find_doc_by_skill_id(skill_id)
+        if not doc:
+            return False
+        skill = Skill.from_dict(doc)
+        stats = dict(skill.stats)
+        stats["shadow"] = dict(shadow_stats)
+        record_id = doc.get("_id") or doc.get("skill_id")
+        return bool(
+            self.memory_provider.update_by_id(
+                str(record_id),
+                {"stats": stats},
+                memory_store_type=MemoryType.SKILLBOX,
+            )
+        )
+
     def set_status(
         self,
         skill_id: str,
@@ -176,6 +222,7 @@ class Skillbox:
         limit: int = 2,
         min_similarity: float = 0.70,
         statuses: Sequence[SkillStatus] = (SkillStatus.ACTIVE,),
+        user_id: Any = _SCOPE_UNSET,
     ) -> List[ScoredSkill]:
         """Vector-search skills by WHEN-to-apply semantics, with scores.
 
@@ -185,7 +232,6 @@ class Skillbox:
         (negative transfer on partial matches). Configurable — never
         silently lowered.
         """
-        wanted = {status.value for status in statuses}
         try:
             docs = (
                 self.memory_provider.retrieve_by_query(
@@ -199,6 +245,84 @@ class Skillbox:
             logger.warning("Skill retrieval failed: %s", exc)
             return []
 
+        return self._score_documents(
+            query,
+            docs,
+            limit=limit,
+            min_similarity=min_similarity,
+            statuses=statuses,
+            user_id=user_id,
+            exact_agent_scope=False,
+        )
+
+    def retrieve_shadow_skills_by_query(
+        self,
+        query: str,
+        limit: int = 3,
+        min_similarity: float = 0.70,
+        agent_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> List[ScoredSkill]:
+        """Retrieve only SHADOW skills under exact agent/user isolation.
+
+        First-party provider hooks apply all filters before final top-k.
+        Providers without the hook retain a deliberately large
+        over-fetch-and-filter fallback.
+        """
+        provider_hook = getattr(
+            self.memory_provider, "retrieve_skillbox_candidates", None
+        )
+        try:
+            if callable(provider_hook):
+                docs = provider_hook(
+                    query,
+                    limit=limit,
+                    statuses=[SkillStatus.SHADOW.value],
+                    agent_id=agent_id,
+                    user_id=user_id,
+                )
+            else:
+                docs = self.memory_provider.retrieve_by_query(
+                    query,
+                    memory_store_type=MemoryType.SKILLBOX,
+                    limit=max(limit * 10, 30),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Shadow-skill retrieval failed for agent scope %s (%s)",
+                agent_id or "(none)",
+                type(exc).__name__,
+            )
+            return []
+
+        return self._score_documents(
+            query,
+            docs or [],
+            limit=limit,
+            min_similarity=min_similarity,
+            statuses=(SkillStatus.SHADOW,),
+            user_id=user_id,
+            agent_id=agent_id,
+            exact_agent_scope=True,
+        )
+
+    def _score_documents(
+        self,
+        query: str,
+        docs: Sequence[Dict[str, Any]],
+        *,
+        limit: int,
+        min_similarity: float,
+        statuses: Sequence[SkillStatus],
+        user_id: Any = _SCOPE_UNSET,
+        agent_id: Any = _SCOPE_UNSET,
+        exact_agent_scope: bool,
+    ) -> List[ScoredSkill]:
+        """Apply provider-independent score and isolation checks."""
+        wanted = {
+            status.value if isinstance(status, SkillStatus) else str(status)
+            for status in statuses
+        }
         query_embedding = None
         scored: List[ScoredSkill] = []
         for doc in docs:
@@ -206,12 +330,20 @@ class Skillbox:
                 continue
             if doc.get("status") not in wanted:
                 continue
-            if self.agent_id is not None and doc.get("agent_id") not in (
+            expected_agent = self.agent_id if agent_id is _SCOPE_UNSET else agent_id
+            if exact_agent_scope:
+                if doc.get("agent_id") != expected_agent:
+                    continue
+            elif expected_agent is not None and doc.get("agent_id") not in (
                 None,
-                self.agent_id,
+                expected_agent,
             ):
                 continue
-            similarity = doc.get("score") or doc.get("similarity")
+            if user_id is not _SCOPE_UNSET and doc.get("user_id") != user_id:
+                continue
+            similarity = doc.get("score")
+            if similarity is None:
+                similarity = doc.get("similarity")
             if similarity is None:
                 if query_embedding is None:
                     try:

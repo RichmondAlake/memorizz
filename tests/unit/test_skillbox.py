@@ -212,6 +212,25 @@ class TestSkillboxStore:
         box.set_status(skill.skill_id, SkillStatus.DEMOTED, "drift")
         assert box.get_active_skill_for_hash("hash-1") is None
 
+    def test_active_hash_lookup_is_exactly_user_scoped(
+        self, fs_provider, patched_embeddings
+    ):
+        box = Skillbox(fs_provider, agent_id="agent-1")
+        user_a = _skill(user_id="user-a")
+        user_b = _skill(user_id="user-b")
+        box.add_skill(user_a)
+        box.add_skill(user_b)
+
+        assert (
+            box.get_active_skill_for_hash("hash-1", user_id="user-a").skill_id
+            == user_a.skill_id
+        )
+        assert (
+            box.get_active_skill_for_hash("hash-1", user_id="user-b").skill_id
+            == user_b.skill_id
+        )
+        assert box.get_active_skill_for_hash("hash-1", user_id=None) is None
+
     def test_retrieval_is_scored_and_status_filtered(
         self, fs_provider, patched_embeddings
     ):

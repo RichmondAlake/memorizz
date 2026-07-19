@@ -56,6 +56,45 @@ def filter_tool_log_rows(
 class MemoryProvider(ABC):
     """Abstract base class for memory providers."""
 
+    def retrieve_skillbox_candidates(
+        self,
+        query: str,
+        *,
+        limit: int,
+        statuses: List[str],
+        agent_id: Optional[str],
+        user_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Optional filtered semantic-retrieval hook for learned skills.
+
+        First-party providers override this so lifecycle and tenant filters
+        are applied before vector-search top-k selection. Third-party
+        providers inherit this backward-compatible over-fetch path; the
+        :class:`Skillbox` applies the same filters again after retrieval.
+        """
+        overfetch = max(int(limit) * 10, 30)
+        try:
+            result = self.retrieve_by_query(
+                query,
+                memory_store_type="skillbox",
+                limit=overfetch,
+                statuses=list(statuses),
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+        except TypeError:
+            # A provider written against an older MemoRizz contract may not
+            # accept filter kwargs. Preserve compatibility and filter in the
+            # caller after deliberately over-fetching.
+            result = self.retrieve_by_query(
+                query,
+                memory_store_type="skillbox",
+                limit=overfetch,
+            )
+        if isinstance(result, dict):
+            return [result]
+        return list(result or [])
+
     @abstractmethod
     def __init__(self, config: Dict[str, Any]):
         """Initialize the memory provider with configuration settings."""

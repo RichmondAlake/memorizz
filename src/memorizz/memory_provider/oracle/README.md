@@ -189,18 +189,25 @@ Each table includes:
 - `name`, `memory_id`, `agent_id` - Indexed query fields
 - `created_at`, `updated_at` - Timestamps
 
-### 4. Upgrade an Existing Skillbox Schema
+### 4. Upgrade an Existing Continual-Learning Schema
 
 Fresh setup includes learned-skill authority. If the schema predates that
 field and is managed manually, execute:
 
 ```sql
 @migrations/002_add_skill_injection_role.sql
+@migrations/003_add_shadow_evaluations.sql
 ```
 
 The additive migration assigns existing skills `user` authority and adds a
 constraint for `user | developer`. Filesystem and MongoDB need no schema
 migration because the role is stored in each skill document.
+
+Migration 003 adds the JSON-constrained
+`workflow_memory.shadow_evaluations` CLOB used by opt-in passive SHADOW
+evaluation. Workflow records remain the audit source; the worker derives
+bounded skill-level readiness statistics from them without injecting shadow
+content or rerunning tools.
 
 If an older package logs
 `OracleProvider._table_has_column() missing 1 required positional argument:

@@ -317,6 +317,7 @@ CREATE TABLE workflow_memory (
     step_count NUMBER(10),                    -- len(canonical_signature) after retry collapse
     promoted_skill_id VARCHAR2(255),          -- Set when covered by an ACTIVE learned skill
     skills_activated CLOB CHECK (skills_activated IS JSON),  -- JSON array of skill IDs in context
+    shadow_evaluations CLOB CHECK (shadow_evaluations IS JSON),  -- Passive SHADOW evidence
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

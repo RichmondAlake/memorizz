@@ -30,7 +30,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ...enums.memory_type import MemoryType
 from ...llms.llm_factory import create_llm_provider
-from ...long_term.procedural.skillbox import PromotionConfig, SkillStatus
+from ...long_term.procedural.skillbox import (
+    PromotionConfig,
+    SkillStatus,
+    calculate_shadow_readiness,
+)
 from ...long_term.procedural.workflow.canonicalization import (
     TrajectoryStats,
     aggregate_trajectory_stats,
@@ -297,19 +301,47 @@ async def skills_page(request: Request):
     except Exception as exc:
         logger.error("Failed to list skillbox: %s", exc)
 
+    configs_by_agent: Dict[Optional[str], PromotionConfig] = {}
+
+    def _config_for(agent_id: Optional[str]) -> PromotionConfig:
+        if agent_id in configs_by_agent:
+            return configs_by_agent[agent_id]
+        config = PromotionConfig()
+        if agent_id:
+            try:
+                model = provider.retrieve_memagent(agent_id)
+                config = PromotionConfig.from_dict(
+                    getattr(model, "continual_learning_config", None) if model else None
+                )
+            except Exception:
+                pass
+        configs_by_agent[agent_id] = config
+        return config
+
     skills = []
     for doc in documents:
         if not isinstance(doc, dict):
             continue
         stats = doc.get("stats") or {}
         status = str(doc.get("status") or "candidate")
+        agent_id = doc.get("agent_id")
+        config = _config_for(agent_id)
+        shadow_stats = stats.get("shadow") or {}
+        readiness = calculate_shadow_readiness(
+            shadow_stats,
+            min_observations=config.shadow_readiness_min_observations,
+            min_trajectory_match_rate=(
+                config.shadow_readiness_min_trajectory_match_rate
+            ),
+            min_matched_success_rate=(config.shadow_readiness_min_matched_success_rate),
+        )
         injection_role = str(doc.get("injection_role") or "user").strip().lower()
         if injection_role not in {"user", "developer"}:
             injection_role = "user"
         skills.append(
             {
                 "skill_id": doc.get("skill_id"),
-                "agent_id": doc.get("agent_id"),
+                "agent_id": agent_id,
                 "name": doc.get("name") or "(unnamed skill)",
                 "description": doc.get("description") or "",
                 "content": doc.get("content") or "",
@@ -327,6 +359,15 @@ async def skills_page(request: Request):
                 "promoted_at": doc.get("promoted_at") or "",
                 "demoted_at": doc.get("demoted_at") or "",
                 "demotion_reason": doc.get("demotion_reason") or "",
+                "shadow_observations": readiness["observations"],
+                "shadow_trajectory_match_rate": readiness["trajectory_match_rate"],
+                "shadow_matched_success_rate": readiness["matched_success_rate"],
+                "shadow_last_evaluated_at": (
+                    shadow_stats.get("last_evaluated_at") or ""
+                ),
+                "shadow_ready": readiness["ready"],
+                "shadow_readiness_reasons": readiness["reasons"],
+                "shadow_evaluation_enabled": (config.shadow_evaluation_enabled),
                 "can_activate": status
                 in (
                     SkillStatus.SHADOW.value,

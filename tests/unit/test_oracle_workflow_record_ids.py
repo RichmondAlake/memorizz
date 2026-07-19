@@ -127,6 +127,7 @@ def test_workflow_list_rows_emit_query_scope_and_timestamps():
         "user_query": "Refund order R-1001",
         "canonical_signature": "[]",
         "skills_activated": "[]",
+        "shadow_evaluations": '[{"skill_id":"skill-1"}]',
         "created_at": created_at,
         "updated_at": updated_at,
     }
@@ -138,6 +139,32 @@ def test_workflow_list_rows_emit_query_scope_and_timestamps():
     assert document["user_query"] == "Refund order R-1001"
     assert document["created_at"] == created_at.isoformat()
     assert document["updated_at"] == updated_at.isoformat()
+    assert document["shadow_evaluations"] == [{"skill_id": "skill-1"}]
+
+
+@pytest.mark.unit
+def test_update_workflow_serializes_shadow_evaluations_as_json(monkeypatch):
+    cursor = _Cursor()
+    provider, connection = _provider(monkeypatch, cursor)
+    evaluations = [
+        {
+            "skill_id": "skill-1",
+            "trajectory_match": True,
+            "evaluator_version": "v1",
+        }
+    ]
+
+    updated = provider.update_by_id(
+        "workflow-1",
+        {"shadow_evaluations": evaluations},
+        MemoryType.WORKFLOW_MEMORY,
+    )
+
+    sql, params = cursor.executions[-1]
+    assert updated is True
+    assert "shadow_evaluations = :shadow_evaluations" in sql
+    assert '"skill_id": "skill-1"' in params["shadow_evaluations"]
+    assert connection.commits == 1
 
 
 @pytest.mark.unit

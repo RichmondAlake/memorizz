@@ -58,10 +58,11 @@ class SkillMonitor:
 
             for skill_id in skill_ids:
                 skill = self.skillbox.get_skill_by_id(skill_id)
-                if not skill or skill.status not in (
-                    SkillStatus.ACTIVE,
-                    SkillStatus.SHADOW,
-                ):
+                # Passive shadow evidence has its own evaluator and storage
+                # channel.  A shadow ID supplied manually (or by stale
+                # application code) must never contaminate active activation
+                # counts, rolling drift, or demotion decisions.
+                if not skill or skill.status != SkillStatus.ACTIVE:
                     continue
                 stats = skill.stats
                 stats["activations"] = stats.get("activations", 0) + 1

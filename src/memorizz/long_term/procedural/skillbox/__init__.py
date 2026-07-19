@@ -11,6 +11,12 @@ from .distiller import (
 )
 from .monitor import SkillMonitor
 from .promotion import PromotionConfig, PromotionEngine, PromotionReport
+from .shadow_evaluator import (
+    SHADOW_EVALUATOR_VERSION,
+    ShadowEvaluator,
+    ShadowWorkflowSnapshot,
+    calculate_shadow_readiness,
+)
 from .skill import (
     Skill,
     SkillInjectionRole,
@@ -35,4 +41,8 @@ __all__ = [
     "PromotionEngine",
     "PromotionReport",
     "SkillMonitor",
+    "ShadowEvaluator",
+    "ShadowWorkflowSnapshot",
+    "SHADOW_EVALUATOR_VERSION",
+    "calculate_shadow_readiness",
 ]

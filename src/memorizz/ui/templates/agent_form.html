@@ -129,6 +129,21 @@
                     Existing skills keep the authority stored on their own record.
                 </p>
             </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input id="continual_learning_shadow_evaluation" type="checkbox"
+                        name="continual_learning_shadow_evaluation"
+                        {% if continual_learning_shadow_evaluation %}checked{% endif %}>
+                    Passively evaluate shadow skills on new workflows
+                </label>
+                <p class="form-hint">
+                    Runs deterministic comparisons in a background queue after
+                    the response is stored. Shadow skills are not injected, and
+                    no LLM judge or tool is called by this evaluator. Semantic
+                    retrieval may use the configured embedding provider.
+                    Readiness remains advisory; activation is always explicit.
+                </p>
+            </div>
         </div>
     </div>
 

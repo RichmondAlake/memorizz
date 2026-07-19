@@ -48,6 +48,15 @@ class PromotionConfig:
     skill_max_content_chars: int = 4000
     # Validation
     require_shadow: bool = False
+    # Passive post-run SHADOW evaluation (opt-in; never prompt-injected)
+    shadow_evaluation_enabled: bool = False
+    shadow_evaluation_max_candidates: int = 3
+    shadow_evaluation_min_similarity: Optional[float] = None
+    shadow_evaluation_queue_size: int = 100
+    shadow_evaluation_recent_window: int = 50
+    shadow_readiness_min_observations: int = 10
+    shadow_readiness_min_trajectory_match_rate: float = 0.80
+    shadow_readiness_min_matched_success_rate: float = 0.80
     # Retrieval / injection
     retrieval_min_similarity: float = 0.70
     max_skills_in_context: int = 2
@@ -74,6 +83,31 @@ class PromotionConfig:
                 "generated instructions cannot gain application authority "
                 "without an explicit activation review"
             )
+        if self.shadow_evaluation_max_candidates < 1:
+            raise ValueError("shadow_evaluation_max_candidates must be at least 1")
+        if self.shadow_evaluation_queue_size < 1:
+            raise ValueError("shadow_evaluation_queue_size must be at least 1")
+        if self.shadow_evaluation_recent_window < 1:
+            raise ValueError("shadow_evaluation_recent_window must be at least 1")
+        if self.shadow_readiness_min_observations < 1:
+            raise ValueError("shadow_readiness_min_observations must be at least 1")
+        for name, value in (
+            (
+                "shadow_readiness_min_trajectory_match_rate",
+                self.shadow_readiness_min_trajectory_match_rate,
+            ),
+            (
+                "shadow_readiness_min_matched_success_rate",
+                self.shadow_readiness_min_matched_success_rate,
+            ),
+        ):
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1")
+        if (
+            self.shadow_evaluation_min_similarity is not None
+            and not 0.0 <= float(self.shadow_evaluation_min_similarity) <= 1.0
+        ):
+            raise ValueError("shadow_evaluation_min_similarity must be between 0 and 1")
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "PromotionConfig":
@@ -184,6 +218,18 @@ class PromotionEngine:
                 (candidate.canonical_hash, ["no sample runs retrievable"])
             )
             return
+        source_user_scopes = {
+            doc.get("user_id") for doc in success_docs if isinstance(doc, dict)
+        }
+        if len(source_user_scopes) > 1:
+            report.rejected.append(
+                (
+                    candidate.canonical_hash,
+                    ["source workflows cross user scopes; distillation refused"],
+                )
+            )
+            return
+        skill_user_id = next(iter(source_user_scopes), None)
 
         previous = self._latest_retired_skill(
             skills_by_hash.get(candidate.canonical_hash, [])
@@ -213,6 +259,7 @@ class PromotionEngine:
             tools_used=parsed.tools,
             queries=self._skill_queries(candidate),
             agent_id=self.agent_id,
+            user_id=skill_user_id,
             source_canonical_hash=candidate.canonical_hash,
             source_workflow_ids=[
                 str(doc.get("workflow_id") or doc.get("_id")) for doc in success_docs

@@ -115,23 +115,66 @@ jobs:
           python3 - <<'PY'
           import hashlib
           import json
+          import tarfile
+          import tempfile
+          import urllib.request
           from pathlib import Path
 
-          published = {
-              item["filename"]: item["digests"]["sha256"]
-              for item in json.loads(Path("/tmp/pypi.json").read_text())["urls"]
-          }
+          release = json.loads(Path("/tmp/pypi.json").read_text())["urls"]
+          published = {item["filename"]: item for item in release}
           local = {
               path.name: hashlib.sha256(path.read_bytes()).hexdigest()
               for path in Path("dist").iterdir()
               if path.is_file()
           }
-          if published != local:
+          if set(published) != set(local):
               raise SystemExit(
-                  "PyPI already has this version, but its artifact hashes do not "
-                  f"match this tag build.\npublished={published}\nlocal={local}"
+                  "PyPI already has this version, but its artifact filenames do "
+                  f"not match this tag build.\npublished={set(published)}"
+                  f"\nlocal={set(local)}"
               )
-          print("PyPI already contains the exact tag artifacts.")
+
+          def normalized_sdist(path):
+              entries = {}
+              with tarfile.open(path, "r:*") as archive:
+                  for member in archive.getmembers():
+                      if not member.isfile():
+                          continue
+                      # Ignore the versioned root directory, but compare every
+                      # source filename and byte. gzip/tar timestamps, uid/gid,
+                      # and host-specific container metadata are intentionally
+                      # outside the source-equivalence check.
+                      parts = Path(member.name).parts
+                      name = "/".join(parts[1:] if len(parts) > 1 else parts)
+                      handle = archive.extractfile(member)
+                      entries[name] = hashlib.sha256(handle.read()).hexdigest()
+              return entries
+
+          for filename, local_digest in local.items():
+              item = published[filename]
+              published_digest = item["digests"]["sha256"]
+              if item["packagetype"] != "sdist":
+                  if published_digest != local_digest:
+                      raise SystemExit(
+                          f"Published {filename} does not match this tag build: "
+                          f"{published_digest} != {local_digest}"
+                      )
+                  continue
+              if published_digest == local_digest:
+                  continue
+              with tempfile.NamedTemporaryFile(suffix=".tar.gz") as downloaded:
+                  urllib.request.urlretrieve(item["url"], downloaded.name)
+                  if normalized_sdist(downloaded.name) != normalized_sdist(
+                      Path("dist") / filename
+                  ):
+                      raise SystemExit(
+                          f"Published {filename} has different source contents "
+                          "from this tag build."
+                      )
+          print(
+              "PyPI already contains tag-equivalent artifacts "
+              "(wheel bytes exact; sdist source contents exact)."
+          )
           PY
           echo "present=true" >> "$GITHUB_OUTPUT"
       - uses: pypa/gh-action-pypi-publish@release/v1

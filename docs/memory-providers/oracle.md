@@ -128,7 +128,7 @@ Every memory bucket gets its own table plus a VECTOR index:
   skill retrieval failed safely and returned no matches even though promotion
   writes had succeeded.
 
-## Existing-schema migration for skill authority
+## Existing-schema migrations for continual learning
 
 Fresh setup and `memorizz oracle setup-schema` include
 `skillbox.injection_role`. For an existing schema managed outside those
@@ -136,9 +136,15 @@ commands, run:
 
 ```sql
 @src/memorizz/memory_provider/oracle/migrations/002_add_skill_injection_role.sql
+@src/memorizz/memory_provider/oracle/migrations/003_add_shadow_evaluations.sql
 ```
 
 Existing rows receive `user`, preserving the previous behavior. The column
 accepts only `user` or `developer`.
+
+Migration 003 adds the JSON-constrained
+`workflow_memory.shadow_evaluations` CLOB. It stores auditable, passive
+comparisons between new production workflows and tenant-scoped SHADOW skills;
+it is not prompt context and does not execute tools.
 
 For the full reference, open `src/memorizz/memory_provider/oracle/README.md`.

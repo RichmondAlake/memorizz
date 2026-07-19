@@ -175,6 +175,72 @@ class FileSystemProvider(MemoryProvider):
         else:
             raise ValueError("query must be either a dict filter or a string")
 
+    def retrieve_skillbox_candidates(
+        self,
+        query: str,
+        *,
+        limit: int,
+        statuses: List[str],
+        agent_id: Optional[str],
+        user_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Score only lifecycle/tenant-eligible skill documents.
+
+        The generic FAISS index is global to the store. Filtering after its
+        top-k can let ACTIVE or another tenant's skills crowd out a valid
+        SHADOW candidate, so this dedicated background path narrows the
+        documents before final ranking.
+        """
+        wanted = {str(status) for status in statuses}
+        candidates: List[Dict[str, Any]] = []
+        with self._locks[MemoryType.SKILLBOX]:
+            for doc_id in self._indexes[MemoryType.SKILLBOX]:
+                document = self._read_document(MemoryType.SKILLBOX, doc_id)
+                if not document:
+                    continue
+                if document.get("status") not in wanted:
+                    continue
+                if document.get("agent_id") != agent_id:
+                    continue
+                if document.get("user_id") != user_id:
+                    continue
+                candidates.append(document)
+
+        embedding_provider = self._get_embedding_provider()
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        if embedding_provider is not None:
+            query_embedding = embedding_provider.get_embedding(query)
+            for document in candidates:
+                target = document.get("embedding")
+                if not target:
+                    continue
+                similarity = self._cosine_similarity(query_embedding, target)
+                if similarity is None:
+                    continue
+                document["score"] = float(similarity)
+                scored.append((float(similarity), document))
+        else:
+            query_terms = set(str(query).lower().split())
+            for document in candidates:
+                applicability = " ".join(
+                    str(document.get(field) or "")
+                    for field in (
+                        "name",
+                        "description",
+                        "preconditions",
+                        "queries",
+                    )
+                )
+                terms = set(applicability.lower().split())
+                similarity = len(query_terms.intersection(terms)) / max(
+                    len(query_terms.union(terms)), 1
+                )
+                document["score"] = float(similarity)
+                scored.append((float(similarity), document))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [document for _, document in scored[: max(int(limit), 1)]]
+
     def retrieve_by_id(
         self, id: str, memory_store_type: Union[str, MemoryType, None] = None
     ) -> Optional[Dict[str, Any]]:

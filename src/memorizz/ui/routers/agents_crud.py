@@ -224,6 +224,7 @@ def _parse_llm_config(
 def _build_continual_learning_config(
     skill_injection_role: str,
     require_shadow: bool,
+    shadow_evaluation_enabled: bool = False,
     base_config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """Merge and validate the continual-learning controls exposed by the UI."""
@@ -232,6 +233,7 @@ def _build_continual_learning_config(
     role = _to_text(raw_role).strip().lower() or "user"
     config["skill_injection_role"] = role
     config["require_shadow"] = bool(require_shadow)
+    config["shadow_evaluation_enabled"] = bool(shadow_evaluation_enabled)
 
     if role not in SKILL_INJECTION_ROLES:
         return config, "Learned skill authority must be user or developer."
@@ -459,6 +461,9 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "continual_learning_require_shadow": bool(
             continual_learning_config.get("require_shadow", False)
         ),
+        "continual_learning_shadow_evaluation": bool(
+            continual_learning_config.get("shadow_evaluation_enabled", False)
+        ),
         "is_favorite": bool(getattr(agent, "is_favorite", False)),
         "memory_ids_raw": ", ".join(memory_ids),
         "persona_id": persona_id_value,
@@ -656,6 +661,7 @@ async def agent_create_page(request: Request):
             "continual_learning": False,
             "skill_injection_role": "user",
             "continual_learning_require_shadow": False,
+            "continual_learning_shadow_evaluation": False,
             "memory_ids_raw": "",
             "persona_name": "",
             "persona_role": "",
@@ -697,6 +703,7 @@ async def agent_create_submit(
     continual_learning: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
+    continual_learning_shadow_evaluation: Optional[str] = Form(None),
     memory_ids: str = Form(""),
     agent_name: str = Form(""),
     persona_id: str = Form(""),
@@ -741,12 +748,16 @@ async def agent_create_submit(
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
     )
+    continual_learning_shadow_evaluation_value = _parse_bool(
+        continual_learning_shadow_evaluation
+    )
     (
         continual_learning_config_value,
         continual_learning_config_error,
     ) = _build_continual_learning_config(
         skill_injection_role=skill_injection_role,
         require_shadow=continual_learning_require_shadow_value,
+        shadow_evaluation_enabled=continual_learning_shadow_evaluation_value,
     )
     if not error and continual_learning_config_error:
         error = continual_learning_config_error
@@ -813,6 +824,9 @@ async def agent_create_submit(
                 "skill_injection_role": skill_injection_role,
                 "continual_learning_require_shadow": (
                     continual_learning_require_shadow_value
+                ),
+                "continual_learning_shadow_evaluation": (
+                    continual_learning_shadow_evaluation_value
                 ),
                 "memory_ids_raw": memory_ids,
                 "persona_id": persona_id,
@@ -888,6 +902,9 @@ async def agent_create_submit(
                 "skill_injection_role": skill_injection_role,
                 "continual_learning_require_shadow": (
                     continual_learning_require_shadow_value
+                ),
+                "continual_learning_shadow_evaluation": (
+                    continual_learning_shadow_evaluation_value
                 ),
                 "memory_ids_raw": memory_ids,
                 "persona_id": persona_id,
@@ -981,6 +998,9 @@ async def agent_create_submit(
                 "continual_learning_require_shadow": (
                     continual_learning_require_shadow_value
                 ),
+                "continual_learning_shadow_evaluation": (
+                    continual_learning_shadow_evaluation_value
+                ),
                 "memory_ids_raw": memory_ids,
                 "persona_id": persona_id,
                 "persona_name": persona_name,
@@ -1052,6 +1072,7 @@ async def agent_edit_submit(
     continual_learning: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
+    continual_learning_shadow_evaluation: Optional[str] = Form(None),
     memory_ids: str = Form(""),
     agent_name: str = Form(""),
     persona_id: str = Form(""),
@@ -1100,6 +1121,9 @@ async def agent_edit_submit(
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
     )
+    continual_learning_shadow_evaluation_value = _parse_bool(
+        continual_learning_shadow_evaluation
+    )
     existing_continual_learning_config = getattr(
         existing, "continual_learning_config", None
     )
@@ -1109,6 +1133,7 @@ async def agent_edit_submit(
     ) = _build_continual_learning_config(
         skill_injection_role=skill_injection_role,
         require_shadow=continual_learning_require_shadow_value,
+        shadow_evaluation_enabled=continual_learning_shadow_evaluation_value,
         base_config=existing_continual_learning_config,
     )
     if not error and continual_learning_config_error:
@@ -1192,6 +1217,9 @@ async def agent_edit_submit(
         "continual_learning": continual_learning_enabled,
         "skill_injection_role": skill_injection_role,
         "continual_learning_require_shadow": (continual_learning_require_shadow_value),
+        "continual_learning_shadow_evaluation": (
+            continual_learning_shadow_evaluation_value
+        ),
         "memory_ids_raw": memory_ids,
         "agent_name": agent_name,
         "persona_id": persona_id,

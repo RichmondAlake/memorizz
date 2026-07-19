@@ -39,6 +39,7 @@ class Workflow:
         step_count: int = None,
         promoted_skill_id: str = None,
         skills_activated: List[str] = None,
+        shadow_evaluations: List[Dict[str, Any]] = None,
         embedding: List[float] = None,
     ):
         """
@@ -84,6 +85,10 @@ class Workflow:
             Skill IDs that were injected into THIS run's context, whether
             or not the run followed them — the attribution field the
             continual-learning monitor reads.
+        shadow_evaluations : List[Dict[str, Any]], optional
+            Passive, post-response comparisons against matching SHADOW
+            skills. Shadow skills were not injected and these records never
+            count as active attribution.
         embedding : List[float], optional
             Pre-computed embedding. When provided (e.g. loading a stored
             document via ``from_dict``) the embedding API is not called.
@@ -105,6 +110,11 @@ class Workflow:
         self.step_count = step_count
         self.promoted_skill_id = promoted_skill_id
         self.skills_activated = list(skills_activated) if skills_activated else []
+        self.shadow_evaluations = (
+            [dict(item) for item in shadow_evaluations if isinstance(item, dict)]
+            if shadow_evaluations
+            else []
+        )
 
         # Reuse a stored embedding when one is supplied (round-tripping via
         # from_dict) so loading never re-bills the embedding API.
@@ -152,6 +162,7 @@ class Workflow:
             "step_count": self.step_count,
             "promoted_skill_id": self.promoted_skill_id,
             "skills_activated": self.skills_activated,
+            "shadow_evaluations": self.shadow_evaluations,
         }
         if self.user_id is not None:
             data["user_id"] = self.user_id
@@ -197,6 +208,7 @@ class Workflow:
             step_count=data.get("step_count"),
             promoted_skill_id=data.get("promoted_skill_id"),
             skills_activated=data.get("skills_activated"),
+            shadow_evaluations=data.get("shadow_evaluations"),
             embedding=data.get("embedding"),
         )
 
