@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from memorizz.enums.memory_type import MemoryType
 from memorizz.memory_provider.oracle.embedding import (
     DEFAULT_MODEL_DIMENSIONS,
     DEFAULT_MODEL_NAME,
@@ -214,6 +215,22 @@ def test_oracle_dimension_validation_returns_matching_schema():
     provider.get_vector_schema_dimensions = Mock(return_value=declared)
 
     assert provider.validate_vector_schema_dimensions() == declared
+
+
+@pytest.mark.unit
+def test_vector_index_skips_tables_without_embedding_columns():
+    provider = OracleProvider.__new__(OracleProvider)
+    provider._vector_indexes_created = set()
+    provider._table_has_column = Mock(return_value=False)
+    provider._get_connection = Mock(
+        side_effect=AssertionError("database should not be queried")
+    )
+
+    provider._ensure_vector_index(MemoryType.TOOL_LOG)
+
+    provider._table_has_column.assert_called_once_with("tool_log", "embedding")
+    provider._get_connection.assert_not_called()
+    assert "idx_tool_log_vec" in provider._vector_indexes_created
 
 
 @pytest.mark.unit

@@ -24,6 +24,9 @@ from .. import __version__
 from .._env_io import apply_env_updates as _shared_apply_env_updates
 from .._env_io import load_layered_env as _load_layered_env
 from .._env_io import resolve_env_file as _resolve_env_file
+from .._env_io import (
+    resolve_oracle_in_database_embedding_from_env as _resolve_oracle_embedding_mode,
+)
 from .helpers import (
     DEFAULT_LLM_MODEL_BY_PROVIDER,
     DEFAULT_LLM_PROVIDER,
@@ -131,6 +134,17 @@ SETTINGS_SECTIONS = [
                 "label": "Default Embedding Dimensions",
                 "placeholder": "1536",
                 "hint": "Optional output dimension override (must match Oracle VECTOR column dimensions).",
+            },
+            {
+                "env": "MEMORIZZ_ORACLE_IN_DATABASE_EMBEDDING",
+                "label": "Oracle Embedding Mode",
+                "hint": "Use Oracle's ONNX model, or use the external embedding provider configured above.",
+                "field_type": "select",
+                "default_value": "true",
+                "options": [
+                    {"value": "true", "label": "Oracle in-database ONNX"},
+                    {"value": "false", "label": "Configured external provider"},
+                ],
             },
         ],
     },
@@ -581,12 +595,23 @@ def create_app() -> FastAPI:
                     dsn=oracle_dsn,
                     schema=oracle_schema or oracle_user,
                     lazy_vector_indexes=True,
+                    in_database_embedding=_resolve_oracle_embedding_mode(),
                 )
                 provider = OracleProvider(config)
+                if config.in_database_embedding:
+                    embedding_description = "Oracle in-database"
+                elif config.embedding_provider:
+                    dimensions = config.embedding_config.get("dimensions")
+                    embedding_description = str(config.embedding_provider)
+                    if dimensions:
+                        embedding_description += f" ({dimensions} dimensions)"
+                else:
+                    embedding_description = "Disabled"
                 _state["connection_info"] = {
                     "user": oracle_user,
                     "dsn": oracle_dsn,
                     "schema": oracle_schema or oracle_user,
+                    "embedding": embedding_description,
                 }
                 _state["provider_secrets"] = {
                     "oracle_user": oracle_user,

@@ -35,6 +35,7 @@ __all__ = [
     "memory_root",
     "history_file",
     "load_layered_env",
+    "resolve_oracle_in_database_embedding_from_env",
     "format_env_value",
     "update_env_file",
     "apply_env_updates",
@@ -109,6 +110,29 @@ def load_layered_env(extra_paths: Optional[Iterable[Path]] = None) -> List[Path]
             load_dotenv(path, override=False)
             loaded.append(path)
     return loaded
+
+
+def resolve_oracle_in_database_embedding_from_env() -> bool:
+    """Resolve the embedding mode used by first-party Oracle clients.
+
+    The SDK's ``OracleConfig`` default remains in-database embeddings. The UI
+    and CLI call this helper so an explicit mode wins, while legacy external
+    embedding defaults continue to select the provider that created an
+    existing schema.
+    """
+    explicit_mode = os.environ.get("MEMORIZZ_ORACLE_IN_DATABASE_EMBEDDING")
+    if explicit_mode is not None and explicit_mode.strip():
+        normalized = explicit_mode.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError("MEMORIZZ_ORACLE_IN_DATABASE_EMBEDDING must be true or false")
+
+    external_provider = os.environ.get(
+        "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", ""
+    ).strip()
+    return not bool(external_provider)
 
 
 def format_env_value(value: str) -> str:

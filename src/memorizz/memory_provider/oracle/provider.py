@@ -1408,6 +1408,15 @@ class OracleProvider(MemoryProvider):
         if index_key in self._vector_indexes_created:
             return
 
+        if not self._table_has_column(memory_type.value, "embedding"):
+            logger.debug(
+                "Skipping vector index %s: %s has no embedding column",
+                index_name,
+                memory_type.value,
+            )
+            self._vector_indexes_created.add(index_key)
+            return
+
         table_name = self._get_table_name(memory_type)
 
         with self._get_connection() as conn:

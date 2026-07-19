@@ -180,6 +180,16 @@ def _stable_skill_embeddings(monkeypatch):
 
 class TestWorkflowClassesPage:
     @pytest.mark.unit
+    def test_sidebar_exposes_continual_learning_navigation(self, client, connected):
+        page = client.get("/memory/workflows").text
+
+        assert "<span>Continual Learning</span>" in page
+        assert '<a href="/memory/workflows"' in page
+        assert "<span>Workflow Trajectories</span>" in page
+        assert '<a href="/memory/skills"' in page
+        assert "<span>Learned Skills</span>" in page
+
+    @pytest.mark.unit
     def test_groups_runs_into_classes_with_gate_status(self, client, connected):
         _seed_workflows(connected, 5)
         resp = client.get("/memory/workflows")

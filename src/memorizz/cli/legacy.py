@@ -2,7 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-"""Legacy operational commands (Oracle install/setup/teardown, UI, automations).
+"""Operational commands for Oracle setup, the local UI, and automations.
 
 Relocated verbatim from the original ``memorizz/cli.py`` so existing behavior is
 preserved. The only change is the package-relative script anchors: this module
@@ -174,36 +174,65 @@ def run_local(host: str = "127.0.0.1", port: int = 8765):
 def run_automations(
     poll_interval: int = 5, lease_seconds: int = 120, concurrency: int = 2
 ):
-    """Run the always-on automations worker (Oracle-backed)."""
+    """Run the always-on automations worker for the configured backend."""
     try:
         from memorizz.automation.store.factory import get_automation_store
         from memorizz.automation.worker import run_worker
-        from memorizz.memory_provider.oracle.provider import (
-            OracleConfig,
-            OracleProvider,
-        )
+        from memorizz.cli import agent_factory
+        from memorizz.cli import config as cli_config
     except ImportError as e:
         print(f"✗ Failed to import automations dependencies: {e}")
-        print("\nPlease ensure memorizz[oracle] is installed:")
-        print("  pip install memorizz[oracle]")
+        print("\nInstall the optional dependencies for your memory backend.")
         return False
 
-    user = str(os.environ.get("ORACLE_USER", "")).strip()
-    password = str(os.environ.get("ORACLE_PASSWORD", "")).strip()
-    dsn = str(os.environ.get("ORACLE_DSN", "")).strip()
-    schema = str(os.environ.get("ORACLE_SCHEMA", "")).strip() or None
-    if not user or not password or not dsn:
-        print("✗ Missing Oracle env vars for automations worker")
-        print("  Required: ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN")
-        print("  Optional: ORACLE_SCHEMA")
+    cli_config.load_layered_env()
+    backend = str(os.environ.get("MEMORIZZ_BACKEND", "")).strip().lower()
+    if not backend:
+        has_oracle = all(
+            os.environ.get(name)
+            for name in ("ORACLE_USER", "ORACLE_PASSWORD", "ORACLE_DSN")
+        )
+        if has_oracle:
+            backend = "oracle"
+        elif os.environ.get("MONGODB_URI"):
+            backend = "mongodb"
+        else:
+            backend = "filesystem"
+        os.environ["MEMORIZZ_BACKEND"] = backend
+    if backend not in {"filesystem", "mongodb", "oracle"}:
+        print(f"✗ Unsupported MEMORIZZ_BACKEND: {backend}")
+        print("  Supported: filesystem, mongodb, oracle")
         return False
 
-    provider = OracleProvider(
-        OracleConfig(user=user, password=password, dsn=dsn, schema=schema)
-    )
+    if backend == "oracle":
+        required = ("ORACLE_USER", "ORACLE_PASSWORD", "ORACLE_DSN")
+        missing = [name for name in required if not os.environ.get(name)]
+        if missing:
+            print(
+                "✗ Missing Oracle env vars for automations worker: "
+                + ", ".join(missing)
+            )
+            return False
+    elif backend == "mongodb" and not os.environ.get("MONGODB_URI"):
+        print("✗ Missing MONGODB_URI for automations worker")
+        return False
+
+    warnings = []
+    try:
+        provider = agent_factory.detect_memory_provider({}, warnings)
+    except Exception as e:
+        print(f"✗ Failed to configure {backend} memory provider: {e}")
+        return False
+    for warning in warnings:
+        print(f"⚠ {warning}")
+
     store = get_automation_store(provider)
     if store is None:
         print("✗ Automations store unavailable for configured provider")
+        try:
+            provider.close()
+        except Exception:
+            pass
         return False
 
     try:
@@ -219,5 +248,10 @@ def run_automations(
     except Exception as e:
         print(f"✗ Automations worker failed: {e}")
         return False
+    finally:
+        try:
+            provider.close()
+        except Exception:
+            pass
 
     return True

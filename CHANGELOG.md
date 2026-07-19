@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-07-19
+
+### Added
+
+* The interactive CLI banner now shows the installed Memorizz version and the
+  live continual-learning state. `memorizz config` and `/config` also report
+  the selected memory backend, embedding mode, and learning state.
+* The Local UI now gives workflow trajectories and learned skills a dedicated
+  **Continual Learning** navigation group, and its Oracle settings expose an
+  explicit in-database ONNX versus external-provider embedding mode.
+
+### Changed
+
+* The automations worker now uses the configured filesystem, MongoDB, or Oracle
+  memory backend instead of constructing an Oracle provider unconditionally,
+  and closes the provider cleanly when the worker exits.
+* The CLI guide now documents persistent and one-session continual-learning
+  activation, the requirement for tool-calling workflows, and external-vector
+  Oracle configuration.
+
+### Fixed
+
+* First-party CLI and UI Oracle clients now preserve existing external-vector
+  schemas when an external embedding provider is configured, while retaining
+  in-database embeddings as the default for new setups.
+* Oracle vector-index creation now skips legacy or non-vector tables that do
+  not contain an `embedding` column instead of issuing an invalid database
+  operation.
+
 ## 0.2.1 — 2026-07-18
 
 ### Fixed

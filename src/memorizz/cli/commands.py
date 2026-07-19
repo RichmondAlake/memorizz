@@ -725,6 +725,23 @@ def cmd_config(session, args: str):
     console.print(f"  llm model:     {session.model_name}")
     console.print(f"  memory store:  {provider_type}")
     console.print(f"  coding mode:   {'on' if session.code_mode else 'off'}")
+    provider_config = getattr(session.provider, "config", None)
+    if getattr(provider_config, "in_database_embedding", False):
+        embedding_label = "Oracle in-database ONNX"
+    else:
+        embedding_provider = getattr(provider_config, "embedding_provider", None)
+        embedding_config = getattr(provider_config, "embedding_config", None) or {}
+        embedding_label = str(embedding_provider or "not configured")
+        dimensions = embedding_config.get("dimensions")
+        if dimensions:
+            embedding_label += f" ({dimensions} dimensions)"
+    console.print(f"  embedding:      {embedding_label}")
+    continual_learning = bool(
+        getattr(session.agent, "continual_learning_manager", None)
+    )
+    console.print(
+        f"  continual learning: {'enabled' if continual_learning else 'disabled'}"
+    )
     try:
         net = session.agent.get_internet_access_provider_name()
     except Exception:
@@ -1007,7 +1024,7 @@ COMMANDS: Dict[str, Command] = {
     "agent": Command(cmd_agent, "Load a saved agent by id.", "/agent <id>"),
     "automation": Command(
         cmd_automation,
-        "List/run an automation attached to this agent (Oracle backend).",
+        "List/run an automation attached to this agent.",
         "/automation [run <id>]",
     ),
     "new": Command(cmd_new, "Start a fresh conversation thread.", "/new"),

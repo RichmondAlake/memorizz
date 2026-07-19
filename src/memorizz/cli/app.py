@@ -16,6 +16,7 @@ from typing import List, Optional
 
 import typer
 
+from .._env_io import resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
 
 app = typer.Typer(
@@ -100,7 +101,7 @@ def run(
     _run_oneshot(" ".join(prompt), code_mode=code)
 
 
-@app.command(help="Launch the local web UI (requires memorizz[ui]).")
+@app.command(help="Launch the local web UI (requires the optional UI dependencies).")
 def ui(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8765, "--port"),
@@ -169,7 +170,9 @@ automations_app = typer.Typer(help="Automations worker.")
 app.add_typer(automations_app, name="automations")
 
 
-@automations_app.command("run", help="Run the always-on automations worker (Oracle).")
+@automations_app.command(
+    "run", help="Run the always-on worker for the configured memory backend."
+)
 def automations_run(
     poll_interval: int = typer.Option(5, "--poll-interval"),
     lease_seconds: int = typer.Option(120, "--lease-seconds"),
@@ -356,6 +359,47 @@ def _show_config():
     console.print(f"  home:        {cfg.memorizz_home()}")
     console.print(f"  env file:    {cfg.resolve_env_file()}")
     console.print(f"  memory root: {cfg.memory_root()}")
+    backend = os.environ.get("MEMORIZZ_BACKEND", "").strip().lower() or "filesystem"
+    console.print(f"  memory backend: [green]{backend}[/green]")
+
+    embedding_provider = os.environ.get(
+        "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", ""
+    ).strip()
+    embedding_model = os.environ.get("MEMORIZZ_DEFAULT_EMBEDDING_MODEL", "").strip()
+    embedding_dimensions = os.environ.get(
+        "MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS", ""
+    ).strip()
+    oracle_in_database = False
+    oracle_mode_error = None
+    if backend == "oracle":
+        try:
+            oracle_in_database = resolve_oracle_in_database_embedding_from_env()
+        except ValueError as exc:
+            oracle_mode_error = str(exc)
+
+    if oracle_mode_error:
+        console.print(f"  embedding:   [red]{oracle_mode_error}[/red]")
+    elif oracle_in_database:
+        console.print("  embedding:   [green]Oracle in-database ONNX[/green]")
+    elif embedding_provider:
+        embedding_summary = embedding_provider
+        if embedding_model:
+            embedding_summary += f" / {embedding_model}"
+        if embedding_dimensions:
+            embedding_summary += f" ({embedding_dimensions} dimensions)"
+        console.print(f"  embedding:   [green]{embedding_summary}[/green]")
+    elif backend == "oracle":
+        console.print(
+            "  embedding:   [yellow]external provider not configured[/yellow]"
+        )
+    else:
+        console.print("  embedding:   [yellow]auto-detect[/yellow]")
+
+    continual_learning = os.environ.get(
+        "MEMORIZZ_CONTINUAL_LEARNING", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    continual_label = "enabled" if continual_learning else "disabled"
+    console.print(f"  continual learning: {continual_label}")
     try:
         from . import agent_factory
 

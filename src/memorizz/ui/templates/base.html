@@ -57,7 +57,8 @@
             </div>
 
             <nav class="sidebar-nav">
-                {% set memory_pages = ['personas', 'toolbox', 'conversations', 'workflows', 'skills', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
+                {% set memory_pages = ['personas', 'toolbox', 'conversations', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
+                {% set continual_learning_pages = ['workflows', 'skills'] %}
                 <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -149,27 +150,6 @@
                             </span>
                             <span>Conversations</span>
                         </a>
-                        <a href="/memory/workflows" class="nav-item nav-item--sub {% if active_page == 'workflows' %}active{% endif %}">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M14 3h7v7"/>
-                                    <path d="M10 14 21 3"/>
-                                    <path d="M21 14v7h-7"/>
-                                    <path d="m3 10 11 11"/>
-                                </svg>
-                            </span>
-                            <span>Workflows</span>
-                        </a>
-                        <a href="/memory/skills" class="nav-item nav-item--sub {% if active_page == 'skills' %}active{% endif %}">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="m12 3 9 5-9 5-9-5z"/>
-                                    <path d="m3 13 9 5 9-5"/>
-                                    <path d="m3 17.5 9 5 9-5"/>
-                                </svg>
-                            </span>
-                            <span>Skills</span>
-                        </a>
                         <a href="/memory/knowledge-base" class="nav-item nav-item--sub {% if active_page == 'knowledge-base' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -225,6 +205,44 @@
                                 </svg>
                             </span>
                             <span>Cache</span>
+                        </a>
+                    </div>
+                </details>
+
+                <details class="nav-dropdown" {% if active_page in continual_learning_pages %}open{% endif %}>
+                    <summary class="nav-item nav-dropdown-toggle {% if active_page in continual_learning_pages %}active{% endif %}">
+                        <span class="nav-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M20 7h-5V2"/>
+                                <path d="M4 17h5v5"/>
+                                <path d="M5.1 9A8 8 0 0 1 18.7 5.3L20 7"/>
+                                <path d="M18.9 15A8 8 0 0 1 5.3 18.7L4 17"/>
+                            </svg>
+                        </span>
+                        <span>Continual Learning</span>
+                        <span class="nav-caret">▾</span>
+                    </summary>
+                    <div class="nav-dropdown-content">
+                        <a href="/memory/workflows" class="nav-item nav-item--sub {% if active_page == 'workflows' %}active{% endif %}">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M14 3h7v7"/>
+                                    <path d="M10 14 21 3"/>
+                                    <path d="M21 14v7h-7"/>
+                                    <path d="m3 10 11 11"/>
+                                </svg>
+                            </span>
+                            <span>Workflow Trajectories</span>
+                        </a>
+                        <a href="/memory/skills" class="nav-item nav-item--sub {% if active_page == 'skills' %}active{% endif %}">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="m12 3 9 5-9 5-9-5z"/>
+                                    <path d="m3 13 9 5 9-5"/>
+                                    <path d="m3 17.5 9 5 9-5"/>
+                                </svg>
+                            </span>
+                            <span>Learned Skills</span>
                         </a>
                     </div>
                 </details>

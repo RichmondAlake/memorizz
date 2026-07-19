@@ -16,6 +16,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from .._env_io import resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
 from . import ollama_probe
 
@@ -255,6 +256,8 @@ def detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> A
                 password=_env("ORACLE_PASSWORD"),
                 dsn=_env("ORACLE_DSN"),
                 schema=_env("ORACLE_SCHEMA"),
+                lazy_vector_indexes=True,
+                in_database_embedding=resolve_oracle_in_database_embedding_from_env(),
             )
         )
 

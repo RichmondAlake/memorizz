@@ -176,8 +176,42 @@ Useful commands:
 ```bash
 memorizz init           # interactive key wizard
 memorizz init --local   # configure the local Ollama stack
-memorizz config         # show resolved paths + detected provider
+memorizz config         # show paths, providers, embeddings, and learning mode
 ```
+
+To run the CLI against Oracle with an existing external-vector schema, keep
+the embedding mode and dimensions aligned with the schema:
+
+```bash
+export MEMORIZZ_BACKEND=oracle
+export ORACLE_USER=memorizz_user
+export ORACLE_PASSWORD=...
+export ORACLE_DSN=localhost:1521/FREEPDB1
+export MEMORIZZ_ORACLE_IN_DATABASE_EMBEDDING=false
+export MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER=openai
+export MEMORIZZ_DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
+export MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS=256
+```
+
+Enable workflow capture and learned-skill retrieval for one CLI launch:
+
+```bash
+MEMORIZZ_CONTINUAL_LEARNING=1 memorizz chat --code
+```
+
+To keep it enabled, add the setting to `~/.memorizz/.env`, then restart the
+CLI:
+
+```dotenv
+MEMORIZZ_CONTINUAL_LEARNING=1
+```
+
+The startup banner and `/config` report the live learning state. Continual
+learning needs tool-calling runs to produce workflow trajectories; ordinary
+text-only chat has no procedure to promote. Repeat a successful tool workflow
+with at least two distinct queries, then use `memorizz ui` → **Continual
+Learning** to inspect trajectory classes, run a promotion cycle, and review or
+activate learned skills.
 
 ## Launch the Local UI
 
@@ -200,6 +234,7 @@ memorizz config
 memorizz --version
 memorizz oracle install|setup|setup-schema|teardown
 memorizz automations run [--poll-interval N] [--lease-seconds N] [--concurrency N]
+# Uses MEMORIZZ_BACKEND=filesystem|mongodb|oracle (filesystem by default)
 ```
 
 !!! note "Back-compatible commands"

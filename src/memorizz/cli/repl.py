@@ -25,6 +25,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from .. import __version__
 from . import commands
 from . import config as cfg
 
@@ -53,11 +54,18 @@ def _banner(console: Console, session) -> None:
     store = type(session.provider).__name__ if session.provider else "(none)"
     root = getattr(session.provider, "root_path", None)
     store_line = f"{store}" + (f"  [dim]{root}[/dim]" if root else "")
+    continual_learning = bool(
+        getattr(session.agent, "continual_learning_manager", None)
+    )
+    learning_status = (
+        "[green]enabled[/green]" if continual_learning else "[dim]disabled[/dim]"
+    )
     body = (
-        f"[bold]memorizz[/bold] — {mode}\n"
+        f"[bold]memorizz {__version__}[/bold] — {mode}\n"
         f"provider: [cyan]{session.provider_name}[/cyan]   "
         f"model: [cyan]{session.model_name}[/cyan]\n"
         f"memory:   {store_line}\n"
+        f"learning: continual {learning_status}\n"
         f"[dim]Type /help for commands · /code for coding tools · /exit to quit[/dim]"
     )
     console.print(Panel(body, expand=False, border_style="green"))
