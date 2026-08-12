@@ -8,6 +8,7 @@ from io import StringIO
 from types import SimpleNamespace
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from memorizz.approval import ApprovalRequired, SQLiteApprovalStore
@@ -222,8 +223,10 @@ def test_cli_browser_control_is_explicit_and_secret_free(monkeypatch):
     run_help = runner.invoke(app, ["run", "--help"], terminal_width=160)
     assert chat_help.exit_code == 0, chat_help.output
     assert run_help.exit_code == 0, run_help.output
-    assert "--browser-control" in chat_help.output
-    assert "--browser-control" in run_help.output
+    compact_chat_help = "".join(unstyle(chat_help.output).split())
+    compact_run_help = "".join(unstyle(run_help.output).split())
+    assert "--browser-control" in compact_chat_help
+    assert "--browser-control" in compact_run_help
 
 
 @pytest.mark.unit
