@@ -59,8 +59,8 @@ class SandboxProvider(ABC):
         """
         Execute code in the sandbox and return the result.
 
-        Each call is stateless — a fresh sandbox context is created and torn
-        down automatically.
+        Providers may keep one bounded session so file operations and code
+        execution share a filesystem. ``close()`` always ends that session.
 
         Args:
             code: Source code to execute.

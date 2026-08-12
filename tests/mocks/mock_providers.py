@@ -402,7 +402,12 @@ class MockMemoryProvider:
         return relevant_units[:limit]
 
     def retrieve_conversation_history_ordered_by_timestamp(
-        self, memory_id: str, memory_type: Any, limit: int = 10
+        self,
+        memory_id: str,
+        memory_type: Any,
+        limit: int = 10,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Mock conversation history retrieval."""
         self.call_history.append(
@@ -418,6 +423,17 @@ class MockMemoryProvider:
         if not units:
             return []
 
+        def _matches(unit):
+            content = unit.content if isinstance(unit.content, dict) else {}
+            if content.get("user_id") != user_id:
+                return False
+            if thread_id is not None and str(content.get("thread_id") or "") != str(
+                thread_id
+            ):
+                return False
+            return True
+
+        units = [unit for unit in units if _matches(unit)]
         if not limit:
             sorted_units = sorted(units, key=lambda unit: unit.timestamp)
             return [unit.to_dict() for unit in sorted_units]

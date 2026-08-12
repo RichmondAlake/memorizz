@@ -706,6 +706,24 @@
         </div>
     </details>
 
+    <!-- Browser Control — collapsible -->
+    <details class="detail-section collapsible-section" {% if browser_control_provider %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>Browser Control</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-group">
+                <label for="browser_control_provider">Browser Control Provider</label>
+                <select id="browser_control_provider" name="browser_control_provider">
+                    <option value="" {% if not browser_control_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="browseruse" {% if browser_control_provider == 'browseruse' %}selected{% endif %}>Browser Use (isolated tool)</option>
+                </select>
+                <p class="form-hint">Adds the <code>browser_control</code> tool. Every model-initiated task is treated as side-effecting and pauses for durable operator approval. Runtime, model, domain allowlist, headless mode, step limit, and timeout are configured with the <code>MEMORIZZ_BROWSER_USE_*</code> settings.</p>
+            </div>
+        </div>
+    </details>
+
     <!-- Internet Access — collapsible -->
     <details class="detail-section collapsible-section" {% if internet_provider %}open{% endif %}>
         <summary class="section-toggle">

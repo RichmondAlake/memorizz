@@ -142,8 +142,8 @@ class SandboxManager:
             """Execute code in a secure sandbox environment and return the output.
 
             Use this tool to run Python (or other language) code safely in an isolated
-            environment. The code runs in a fresh sandbox — variables do not persist
-            between calls.
+            environment. Stateful providers keep one bounded session, so files
+            written with sandbox_write_file remain available until close().
 
             Args:
                 code: The source code to execute.

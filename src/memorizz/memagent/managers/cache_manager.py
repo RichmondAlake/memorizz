@@ -81,6 +81,8 @@ class CacheManager:
         query: str,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        bypass_reason: Optional[str] = None,
     ) -> Optional[str]:
         """
         Get a cached response for a query.
@@ -99,9 +101,16 @@ class CacheManager:
             return None
 
         try:
-            response = self.cache_instance.get(
-                query=query, session_id=session_id, user_id=user_id
-            )
+            kwargs: Dict[str, Any] = {
+                "query": query,
+                "session_id": session_id,
+                "user_id": user_id,
+            }
+            if metadata is not None:
+                kwargs["lookup_metadata"] = metadata
+            if bypass_reason is not None:
+                kwargs["bypass_reason"] = bypass_reason
+            response = self.cache_instance.get(**kwargs)
 
             if response:
                 logger.debug(f"Cache hit for query: {query[:50]}...")
@@ -120,6 +129,10 @@ class CacheManager:
         response: str,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        deterministic: bool = True,
+        read_only: bool = True,
+        bypass_reason: Optional[str] = None,
     ) -> bool:
         """
         Cache a query-response pair.
@@ -137,15 +150,27 @@ class CacheManager:
             return False
 
         try:
-            self.cache_instance.set(
-                query=query,
-                response=response,
-                session_id=session_id,
-                user_id=user_id,
-            )
+            if bypass_reason:
+                self.cache_instance.record_bypass(bypass_reason)
+                return False
+            kwargs: Dict[str, Any] = {
+                "query": query,
+                "response": response,
+                "session_id": session_id,
+                "user_id": user_id,
+            }
+            if metadata is not None or not deterministic or not read_only:
+                metadata_value = dict(metadata or {})
+                metadata_value["admission"] = {
+                    "deterministic": bool(deterministic),
+                    "read_only": bool(read_only),
+                }
+                kwargs["metadata"] = metadata_value
+            stored = bool(self.cache_instance.set(**kwargs))
 
-            logger.debug(f"Cached response for query: {query[:50]}...")
-            return True
+            if stored:
+                logger.debug(f"Cached response for query: {query[:50]}...")
+            return stored
 
         except Exception as e:
             logger.error(f"Failed to cache response: {e}")
@@ -213,11 +238,17 @@ class CacheManager:
         if not self.cache_instance:
             return {"enabled": False, "hits": 0, "misses": 0, "size": 0}
 
-        # Get stats from cache instance
-        # This would need to be implemented in the SemanticCache class
-        return {
-            "enabled": True,
-            "hits": getattr(self.cache_instance, "hits", 0),
-            "misses": getattr(self.cache_instance, "misses", 0),
-            "size": getattr(self.cache_instance, "size", 0),
-        }
+        return {"enabled": True, **self.cache_instance.statistics()}
+
+    def invalidate(
+        self,
+        *,
+        domains: Optional[list[str]] = None,
+        tags: Optional[list[str]] = None,
+        data_version: Optional[str] = None,
+    ) -> int:
+        if not self.cache_instance:
+            return 0
+        return self.cache_instance.invalidate(
+            domains=domains, tags=tags, data_version=data_version
+        )

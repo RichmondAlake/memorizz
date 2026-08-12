@@ -89,7 +89,7 @@ class Skillbox:
     def get_active_skill_for_hash(
         self,
         canonical_hash: str,
-        user_id: Any = _SCOPE_UNSET,
+        user_id: Optional[str] = None,
     ) -> Optional[Skill]:
         """Return the ACTIVE skill covering a trajectory class and user.
 
@@ -232,15 +232,28 @@ class Skillbox:
         (negative transfer on partial matches). Configurable — never
         silently lowered.
         """
+        provider_hook = getattr(
+            self.memory_provider, "retrieve_skillbox_candidates", None
+        )
+        effective_user_id = None if user_id is _SCOPE_UNSET else user_id
         try:
-            docs = (
-                self.memory_provider.retrieve_by_query(
+            if callable(provider_hook):
+                docs = provider_hook(
+                    query,
+                    limit=limit,
+                    statuses=[
+                        status.value if isinstance(status, SkillStatus) else str(status)
+                        for status in statuses
+                    ],
+                    agent_id=self.agent_id,
+                    user_id=effective_user_id,
+                )
+            else:
+                docs = self.memory_provider.retrieve_by_query(
                     query,
                     memory_store_type=MemoryType.SKILLBOX,
-                    limit=max(limit * 3, 6),
+                    limit=max(limit * 10, 30),
                 )
-                or []
-            )
         except Exception as exc:
             logger.warning("Skill retrieval failed: %s", exc)
             return []
@@ -251,8 +264,9 @@ class Skillbox:
             limit=limit,
             min_similarity=min_similarity,
             statuses=statuses,
-            user_id=user_id,
-            exact_agent_scope=False,
+            user_id=effective_user_id,
+            agent_id=self.agent_id,
+            exact_agent_scope=True,
         )
 
     def retrieve_shadow_skills_by_query(

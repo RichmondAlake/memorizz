@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from ...long_term.procedural.toolbox.toolbox import Toolbox
 from ...long_term.procedural.workflow.workflow import Workflow, WorkflowOutcome
+from ...tooling import callable_json_schema, policy_for_callable
 
 logger = logging.getLogger(__name__)
 
@@ -164,33 +165,8 @@ class ToolManager:
         try:
             sig = inspect.signature(func)
             doc = inspect.getdoc(func) or "No description available"
-
-            # Build parameter schema
-            parameters = {}
-            for param_name, param in sig.parameters.items():
-                if param_name == "self":
-                    continue
-
-                param_info = {
-                    "type": "string",  # Default type
-                    "description": f"Parameter {param_name}",
-                }
-
-                # Try to infer type from annotation
-                if param.annotation != inspect.Parameter.empty:
-                    param_type = param.annotation
-                    if param_type == int:
-                        param_info["type"] = "integer"
-                    elif param_type == float:
-                        param_info["type"] = "number"
-                    elif param_type == bool:
-                        param_info["type"] = "boolean"
-                    elif param_type == list:
-                        param_info["type"] = "array"
-                    elif param_type == dict:
-                        param_info["type"] = "object"
-
-                parameters[param_name] = param_info
+            input_schema = callable_json_schema(func)
+            policy = policy_for_callable(func)
 
             return {
                 "_id": func.__name__,  # Use function name as ID
@@ -198,20 +174,12 @@ class ToolManager:
                 "description": doc,
                 "signature": str(sig),  # Add function signature
                 "docstring": doc,  # Add docstring explicitly
-                "parameters": parameters,
-                # Only parameters without defaults are required. This keeps tool
-                # schemas sane for LLM tool calling.
-                "required": [
-                    param_name
-                    for param_name, param in sig.parameters.items()
-                    if param_name != "self"
-                    and param.default == inspect.Parameter.empty
-                    and param.kind
-                    in (
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.KEYWORD_ONLY,
-                    )
-                ],
+                "parameters": input_schema["properties"],
+                "required": input_schema.get("required", []),
+                "input_schema": input_schema,
+                "tool_policy": policy.to_dict(),
+                "aliases": list(policy.aliases),
+                "deprecated_arguments": dict(policy.deprecated_arguments),
                 "type": "function",
             }
 
@@ -225,6 +193,11 @@ class ToolManager:
                 "docstring": "",
                 "parameters": {},
                 "required": [],
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
                 "type": "function",
             }
 
@@ -273,6 +246,9 @@ class ToolManager:
             if tool_type == "function":
                 func = tool_data.get("function")
                 if func:
+                    # Bind before calling so unknown/missing arguments cannot be
+                    # silently accepted by a compatibility wrapper.
+                    inspect.signature(func).bind(**normalized_arguments)
                     result = func(**normalized_arguments)
                     return result, None
                 else:
@@ -370,6 +346,22 @@ class ToolManager:
             List of tool names.
         """
         return list(self.tools.keys())
+
+    def get_tool_callable(self, tool_name: str) -> Optional[Callable[..., Any]]:
+        """Return the trusted in-process callable for a registered tool."""
+        value = self.tools.get(str(tool_name))
+        if not isinstance(value, dict):
+            return None
+        function = value.get("function")
+        return function if callable(function) else None
+
+    def get_tool_policy(self, tool_name: str) -> Dict[str, Any]:
+        """Return explicit governance metadata for one tool."""
+        metadata = self.get_tool_metadata(str(tool_name))
+        if isinstance(metadata, dict) and isinstance(metadata.get("tool_policy"), dict):
+            return dict(metadata["tool_policy"])
+        function = self.get_tool_callable(str(tool_name))
+        return policy_for_callable(function).to_dict()
 
     def _register_tool_from_data(self, tool_id: str, tool_data: Dict) -> bool:
         """Register a tool from raw data.

@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 from ...enums import MemoryType, Role
 from ...long_term.episodic.conversational_memory_unit import ConversationMemoryUnit
 from ...memory_provider import MemoryProvider
-from ...memory_provider.base import _UNSET as _TL_UNSET
 from ...memory_provider.base import filter_tool_log_rows
 
 logger = logging.getLogger(__name__)
@@ -102,11 +101,39 @@ class MemoryManager:
             return True
         return False
 
+    @staticmethod
+    def _entry_thread_id(entry: Any) -> str:
+        """Read a thread id from provider rows and cached nested rows."""
+        if not isinstance(entry, dict):
+            return ""
+        content = entry.get("content")
+        nested = content if isinstance(content, dict) else {}
+        return str(
+            entry.get("thread_id")
+            or entry.get("conversation_id")
+            or nested.get("thread_id")
+            or nested.get("conversation_id")
+            or ""
+        )
+
+    @staticmethod
+    def _entry_user_id(entry: Any) -> Optional[str]:
+        """Read user scope from provider rows and cached nested rows."""
+        if not isinstance(entry, dict):
+            return None
+        if "user_id" in entry:
+            return entry.get("user_id")
+        content = entry.get("content")
+        if isinstance(content, dict):
+            return content.get("user_id")
+        return None
+
     def load_conversation_history(
         self,
         memory_id: str,
         limit: int = 10,
         user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Load conversation history for a given memory ID.
@@ -117,6 +144,8 @@ class MemoryManager:
             user_id: Optional user scope. When set, history is restricted to
                 entries with a matching ``user_id``. When ``None``, only
                 legacy/unscoped entries are returned.
+            thread_id: Optional exact conversation thread. When omitted,
+                history from every thread in the memory scope is returned.
 
         Returns:
             List of conversation history entries.
@@ -124,7 +153,12 @@ class MemoryManager:
         try:
             logger.debug(f"Loading conversation history for memory_id: {memory_id}")
 
-            cache_key = (memory_id, user_id)
+            thread_scope = str(thread_id) if thread_id is not None else None
+            cache_key = (
+                (memory_id, user_id, thread_scope)
+                if thread_scope is not None
+                else (memory_id, user_id)
+            )
             if cache_key in self._conversation_memory_cache:
                 cached = self._conversation_memory_cache[cache_key]
                 if limit and limit > 0 and len(cached) < limit:
@@ -136,18 +170,46 @@ class MemoryManager:
                     return cached[-limit:]
 
             # Load from memory provider
-            fetch_limit = None
-            if limit and limit > 0:
-                fetch_limit = int(limit)
-            history = (
-                self.memory_provider.retrieve_conversation_history_ordered_by_timestamp(
-                    memory_id=memory_id,
-                    memory_type=MemoryType.CONVERSATION_MEMORY,
-                    limit=fetch_limit,
-                    user_id=user_id,
-                )
+            provider_retrieve = (
+                self.memory_provider.retrieve_conversation_history_ordered_by_timestamp
             )
+            provider_filters_thread = thread_id is None or _callable_accepts(
+                provider_retrieve, "thread_id"
+            )
+            provider_filters_user = _callable_accepts(provider_retrieve, "user_id")
+            fetch_limit = None
+            if (
+                limit
+                and limit > 0
+                and provider_filters_thread
+                and provider_filters_user
+            ):
+                fetch_limit = int(limit)
+            retrieve_kwargs: Dict[str, Any] = {
+                "memory_id": memory_id,
+                "memory_type": MemoryType.CONVERSATION_MEMORY,
+                "limit": fetch_limit,
+            }
+            if provider_filters_user:
+                retrieve_kwargs["user_id"] = user_id
+            if thread_id is not None and provider_filters_thread:
+                retrieve_kwargs["thread_id"] = str(thread_id)
+            history = provider_retrieve(**retrieve_kwargs)
             history = [row for row in (history or []) if isinstance(row, dict)]
+            if not provider_filters_user:
+                history = [
+                    row for row in history if self._entry_user_id(row) == user_id
+                ]
+            # Third-party providers may not expose a native thread filter.
+            # Fetch their full memory scope above, then apply the same exact
+            # match here before limiting.
+            if thread_id is not None:
+                wanted_thread_id = str(thread_id)
+                history = [
+                    row
+                    for row in history
+                    if self._entry_thread_id(row) == wanted_thread_id
+                ]
             # Exclude messages that have been compacted into summaries
             history = [row for row in history if not self._is_summarized_message(row)]
             history.sort(key=self._history_timestamp)
@@ -188,43 +250,53 @@ class MemoryManager:
             # Update conversation cache in-place when we can, so hot paths don't
             # re-load and re-sort large histories on every message.
             unit_user_id = getattr(memory_unit, "user_id", None)
-            cache_key = (memory_id, unit_user_id)
-            cached = self._conversation_memory_cache.get(cache_key)
-            if (
-                cached is not None
-                and hasattr(memory_unit, "role")
-                and hasattr(memory_unit, "thread_id")
-            ):
-                try:
-                    timestamp = getattr(memory_unit, "timestamp", None)
-                    entry = {
-                        "id": unit_id,
-                        "memory_type": MemoryType.CONVERSATION_MEMORY,
+            unit_thread_id = str(getattr(memory_unit, "thread_id", None) or "")
+            matching_cache_keys = []
+            for key in self._conversation_memory_cache:
+                if not isinstance(key, tuple) or len(key) < 2:
+                    continue
+                if key[0] != memory_id or key[1] != unit_user_id:
+                    continue
+                cached_thread_id = key[2] if len(key) >= 3 else None
+                if cached_thread_id is None or str(cached_thread_id) == unit_thread_id:
+                    matching_cache_keys.append(key)
+
+            if hasattr(memory_unit, "role") and hasattr(memory_unit, "thread_id"):
+                timestamp = getattr(memory_unit, "timestamp", None)
+                entry = {
+                    "id": unit_id,
+                    "memory_type": MemoryType.CONVERSATION_MEMORY,
+                    "timestamp": timestamp,
+                    "memory_id": memory_id,
+                    "user_id": unit_user_id,
+                    "content": {
+                        "role": getattr(memory_unit, "role", None),
+                        "content": getattr(memory_unit, "content", None),
+                        "thread_id": getattr(memory_unit, "thread_id", None),
                         "timestamp": timestamp,
-                        "memory_id": memory_id,
                         "user_id": unit_user_id,
-                        "content": {
-                            "role": getattr(memory_unit, "role", None),
-                            "content": getattr(memory_unit, "content", None),
-                            "thread_id": getattr(memory_unit, "thread_id", None),
-                            "timestamp": timestamp,
-                            "user_id": unit_user_id,
-                        },
-                    }
-                    cached.append(entry)
-                    if (
-                        self._conversation_memory_cache_max_entries
-                        and len(cached) > self._conversation_memory_cache_max_entries
-                    ):
-                        self._conversation_memory_cache[cache_key] = cached[
-                            -self._conversation_memory_cache_max_entries :
-                        ]
-                except Exception:
-                    # Fall back to invalidation if cache update fails.
+                    },
+                }
+                for cache_key in matching_cache_keys:
+                    try:
+                        cached = self._conversation_memory_cache.get(cache_key)
+                        if cached is None:
+                            continue
+                        cached.append(entry)
+                        if (
+                            self._conversation_memory_cache_max_entries
+                            and len(cached)
+                            > self._conversation_memory_cache_max_entries
+                        ):
+                            self._conversation_memory_cache[cache_key] = cached[
+                                -self._conversation_memory_cache_max_entries :
+                            ]
+                    except Exception:
+                        self._conversation_memory_cache.pop(cache_key, None)
+            else:
+                # Unknown memory unit shape; safest to invalidate matching slots.
+                for cache_key in matching_cache_keys:
                     self._conversation_memory_cache.pop(cache_key, None)
-            elif cache_key in self._conversation_memory_cache:
-                # Unknown memory unit shape; safest to invalidate.
-                self._conversation_memory_cache.pop(cache_key, None)
 
             logger.debug(f"Saved memory unit {unit_id} for memory_id: {memory_id}")
             return unit_id
@@ -358,7 +430,13 @@ class MemoryManager:
         """
         if not content or not str(content).strip():
             return False
-        cached = self._conversation_memory_cache.get((memory_id, user_id))
+        thread_scope = str(thread_id) if thread_id is not None else None
+        cached = self._conversation_memory_cache.get((memory_id, user_id, thread_scope))
+        if not cached:
+            cached = self._conversation_memory_cache.get((memory_id, user_id, None))
+        if not cached:
+            # Backward-compatible cache shape from before thread scoping.
+            cached = self._conversation_memory_cache.get((memory_id, user_id))
         if not cached:
             return False
         target_role = str(role or "").strip().lower()
@@ -394,7 +472,18 @@ class MemoryManager:
         """
         if memory_id:
             if user_id is not None:
-                self._conversation_memory_cache.pop((memory_id, user_id), None)
+                keys_to_remove = [
+                    key
+                    for key in self._conversation_memory_cache
+                    if (
+                        isinstance(key, tuple)
+                        and len(key) >= 2
+                        and key[0] == memory_id
+                        and key[1] == user_id
+                    )
+                ]
+                for key in keys_to_remove:
+                    self._conversation_memory_cache.pop(key, None)
                 logger.debug(
                     "Cleared conversation cache for memory_id=%s user_id=%s",
                     memory_id,
@@ -573,7 +662,8 @@ class MemoryManager:
         Args:
             memory_id: The memory ID to list logs for.
             limit: Maximum number of entries to return.
-            user_id: Optional user scope.
+            user_id: User scope. ``None`` selects only anonymous/legacy rows;
+                it never disables tenant filtering.
             thread_id: Optional thread scope. When set, only tool logs recorded
                 in that conversation thread are returned — this is what keeps the
                 system-prompt tool-log digest from leaking another thread's tool
@@ -598,9 +688,16 @@ class MemoryManager:
             if callable(native) and (
                 thread_id is None or _callable_accepts(native, "thread_id")
             ):
-                kwargs: Dict[str, Any] = {"memory_id": memory_id, "limit": limit}
-                if user_id is not None:
-                    kwargs["user_id"] = user_id
+                kwargs: Dict[str, Any] = {
+                    "memory_id": memory_id,
+                    "limit": limit,
+                    # Always forward the scope. Omitting it lets first-party
+                    # providers interpret their sentinel default as an
+                    # unscoped administrative query, which is unsafe for the
+                    # model-visible tool-log digest when the active user is
+                    # the anonymous/legacy tenant (``None``).
+                    "user_id": user_id,
+                }
                 if thread_id is not None:
                     kwargs["thread_id"] = thread_id
                 rows = native(**kwargs) or []
@@ -613,7 +710,7 @@ class MemoryManager:
             return filter_tool_log_rows(
                 all_rows,
                 memory_id=memory_id,
-                user_id=(user_id if user_id is not None else _TL_UNSET),
+                user_id=user_id,
                 thread_id=thread_id,
                 limit=limit,
             )
@@ -689,7 +786,9 @@ class MemoryManager:
             period_start = doc.get("period_start")
             period_end = doc.get("period_end")
             units_count = doc.get("memory_units_count", 0)
-            message_ids = doc.get("source_message_ids") or []
+            message_ids = (
+                doc.get("source_message_ids") or doc.get("original_memory_ids") or []
+            )
 
             # Build a short description (first 200 chars of content)
             short_desc = content[:200] + ("..." if len(content) > 200 else "")
@@ -838,6 +937,7 @@ class MemoryManager:
         agent_id: Optional[str],
         memory_ids: Optional[List[str]],
         current_memory_id: Optional[str],
+        user_id: Optional[str] = None,
         days_back: int = 7,
         max_memories_per_summary: int = 50,
         record_context_usage: Optional[Any] = None,
@@ -894,7 +994,9 @@ class MemoryManager:
                 try:
                     # Retrieve all conversation history
                     memories = self.memory_provider.retrieve_conversation_history_ordered_by_timestamp(
-                        memory_id=memory_id, include_embedding=False
+                        memory_id=memory_id,
+                        include_embedding=False,
+                        user_id=user_id,
                     )
 
                     if memories:
@@ -945,7 +1047,10 @@ class MemoryManager:
                                     f"Memory {idx}: timestamp={mem_timestamp}, start_time={start_time}, current_time={current_time}, in_range={start_time <= mem_timestamp <= current_time}"
                                 )
 
-                            if start_time <= mem_timestamp <= current_time:
+                            if (
+                                start_time <= mem_timestamp <= current_time
+                                and not self._is_summarized_message(mem)
+                            ):
                                 filtered.append(mem)
 
                         logger.info(
@@ -986,11 +1091,25 @@ class MemoryManager:
 
             logger.info(f"Found {len(all_memories)} memory units to summarize")
 
+            # Keep each summary inside one memory/thread/tenant boundary.
+            grouped: Dict[tuple, List[Dict[str, Any]]] = {}
+            for memory in all_memories:
+                key = (
+                    memory.get("memory_id"),
+                    memory.get("thread_id"),
+                    memory.get("user_id"),
+                )
+                grouped.setdefault(key, []).append(memory)
+            chunks: List[List[Dict[str, Any]]] = []
+            for group in grouped.values():
+                group.sort(key=get_timestamp)
+                for offset in range(0, len(group), max_memories_per_summary):
+                    chunks.append(group[offset : offset + max_memories_per_summary])
+            chunks.sort(key=lambda chunk: get_timestamp(chunk[0]))
+
             # Split memories into chunks and create summaries
             summary_ids = []
-            for i in range(0, len(all_memories), max_memories_per_summary):
-                memory_chunk = all_memories[i : i + max_memories_per_summary]
-
+            for memory_chunk in chunks:
                 # Generate summary for this chunk
                 summary_content = self.compress_memories_with_llm(
                     memory_chunk,
@@ -1024,6 +1143,7 @@ class MemoryManager:
                     summary_doc = {
                         "memory_id": chunk_memory_id,
                         "agent_id": agent_id,
+                        "user_id": user_id,
                         "content": summary_content,
                         "period_start": period_start,
                         "period_end": period_end,
@@ -1035,14 +1155,20 @@ class MemoryManager:
                     }
 
                     # Store summary
-                    summary_id = self.memory_provider.store(
-                        summary_doc, MemoryType.SUMMARIES
+                    atomic_store = getattr(
+                        self.memory_provider, "store_summary_with_links", None
                     )
+                    if callable(atomic_store):
+                        summary_id = atomic_store(summary_doc)
+                    else:
+                        summary_id = self.memory_provider.store(
+                            summary_doc, MemoryType.SUMMARIES
+                        )
                     summary_ids.append(summary_id)
 
                     # Mark original messages as summarized so they are
                     # excluded from conversation history on future loads
-                    if source_message_ids:
+                    if source_message_ids and not callable(atomic_store):
                         try:
                             self.mark_messages_as_summarized(
                                 source_message_ids, summary_id

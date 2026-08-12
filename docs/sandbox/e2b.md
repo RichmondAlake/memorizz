@@ -1,175 +1,122 @@
-# E2B Provider
+# E2B provider
 
-E2B is the **default sandbox provider** for MemoRizz. It is purpose-built for AI agent code execution, using **Firecracker microVMs** for secure isolation with fast cold starts.
+The E2B adapter owns one bounded Code Interpreter session for the lifetime of
+the provider. A write, execution, and subsequent read therefore share one
+remote filesystem.
 
-## Overview
+## Install and configure
 
-| Feature | Details |
-|---------|---------|
-| **Type** | Cloud-hosted |
-| **Isolation** | Firecracker microVMs |
-| **Cold Start** | ~150ms |
-| **Session Limit** | 24 hours |
-| **Languages** | Python (default), JavaScript, R, and more |
-| **GPU** | Not supported |
-| **Filesystem** | Full read/write inside sandbox |
-| **Internet** | Available from inside sandbox |
-| **Pricing** | ~$0.08/hour, $100 free credits |
-| **Website** | [e2b.dev](https://e2b.dev) |
-
-## Setup
-
-### 1. Install the SDK
+MemoRizz 0.5 pins a tested SDK pair because newer `e2b` transport releases are
+not compatible with the current `e2b-code-interpreter` 2.9 client:
 
 ```bash
 pip install "memorizz[sandbox-e2b]"
+export E2B_API_KEY="<secret>"
 ```
 
-### 2. Get an API Key
+Supported bounds are:
 
-1. Sign up at [e2b.dev](https://e2b.dev)
-2. Navigate to your dashboard
-3. Copy your API key
-
-### 3. Set the Environment Variable
-
-```bash
-export E2B_API_KEY="your-api-key"
+```text
+e2b>=2.26.0,<2.38.0
+e2b-code-interpreter>=2.9.0,<2.10.0
 ```
 
-## Usage
+Construction fails immediately when `E2B_API_KEY` is missing or the installed
+SDK pair is outside that range.
 
-### Basic
+## Agent configuration
 
 ```python
-from memorizz.memagent.core import MemAgent
+from memorizz import MemAgentBuilder
 
-agent = MemAgent(
-    model=my_llm,
-    sandbox_provider="e2b",
-    instruction="You are a data analyst. Execute code to answer questions.",
-)
-
-response = agent.run("Calculate the standard deviation of [4, 8, 15, 16, 23, 42]")
-```
-
-### With Explicit Configuration
-
-```python
-agent = MemAgent(
-    model=my_llm,
-    sandbox_provider={
-        "provider": "e2b",
-        "api_key": "your-api-key",
-        "template": "code-interpreter",
-    },
-    instruction="You are a helpful coding assistant.",
+agent = (
+    MemAgentBuilder()
+    .with_llm(my_llm)
+    .with_sandbox(
+        {
+            "provider": "e2b",
+            "template": "my-bounded-template",
+            "session_timeout": 300,
+            "max_execution_timeout": 60,
+            "allow_internet_access": False,
+            "cpu_count": 2,
+            "memory_mb": 1024,
+        }
+    )
+    .build()
 )
 ```
 
-### Direct Provider Usage
+CPU and memory are properties of the selected E2B template. MemoRizz requires
+an explicit template whenever those policy declarations are supplied; deployers
+must build and validate that template with the matching resources. The session
+timeout is clamped to 30–3600 seconds, and every execution is capped by
+`max_execution_timeout`.
 
-You can also use the E2B provider directly outside of MemAgent:
+Outbound internet access defaults to `False` and is sent to the E2B create API.
+
+## Coherent session lifecycle
 
 ```python
 from memorizz.sandbox.providers.e2b_provider import E2BSandboxProvider
 
-provider = E2BSandboxProvider(api_key="your-api-key")
-result = provider.execute_code("print('hello from E2B!')")
-print(result.output)     # "hello from E2B!"
-print(result.success)    # True
+with E2BSandboxProvider(api_key="<secret>") as sandbox:
+    assert sandbox.write_file("/workspace/input.txt", "41")
+    result = sandbox.execute_code(
+        "print(int(open('/workspace/input.txt').read()) + 1)"
+    )
+    assert result.stdout == ["42"]
+    assert sandbox.read_file("/workspace/input.txt") == "41"
 ```
 
-## How It Works
+The session is created lazily through `Sandbox.create(...)`, reused for file
+and code operations, and killed by `close()` or context-manager exit. Older SDK
+constructor/result shapes are normalized only through the compatibility path.
 
-Each `execute_code` call follows this lifecycle:
-
-1. **Create** — A new E2B sandbox is created using the Firecracker microVM backend (~150ms)
-2. **Execute** — The code is sent to the sandbox's Jupyter kernel for execution
-3. **Capture** — stdout, stderr, execution results, and any errors are collected
-4. **Destroy** — The sandbox is torn down immediately after execution
-
-This ensures every call is stateless and isolated.
-
-## Execution Result
-
-The `execute_code` tool returns a JSON string with:
+## Result and audit metadata
 
 ```json
 {
-    "stdout": ["line1", "line2"],
-    "stderr": [],
-    "error": null,
-    "exit_code": 0,
-    "results": ["output representations"],
-    "success": true
+  "stdout": ["42"],
+  "stderr": [],
+  "error": null,
+  "exit_code": 0,
+  "results": [],
+  "success": true,
+  "metadata": {
+    "provider": "e2b",
+    "stateful_session": true,
+    "execution_timeout": 30,
+    "egress_allowed": false,
+    "resource_policy_enforcement": "e2b_template"
+  }
 }
 ```
 
-If the code produces an error:
+MemoRizz normalizes dictionary and object variants of stdout, stderr, results,
+and errors. It never includes the E2B API key in persisted provider config or
+execution metadata.
 
-```json
-{
-    "stdout": [],
-    "stderr": ["Traceback (most recent call last):"],
-    "error": "NameError: name 'undefined_var' is not defined\n...",
-    "exit_code": 1,
-    "results": [],
-    "success": false
-}
-```
+## Configuration reference
 
-## File Operations
-
-E2B supports reading and writing files inside the sandbox:
-
-```python
-# Through the agent (as tool calls)
-# The LLM can call sandbox_write_file and sandbox_read_file automatically
-
-# Through direct execution
-result = agent.execute_code("""
-with open('/home/user/data.txt', 'w') as f:
-    f.write('hello from sandbox!')
-
-with open('/home/user/data.txt', 'r') as f:
-    print(f.read())
-""")
-```
-
-## Configuration Reference
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `api_key` | `str` | `E2B_API_KEY` env var | E2B API key |
-| `template` | `str` | `"code-interpreter"` | Sandbox template to use |
-
-## Limitations
-
-- **24-hour session limit** — Sandboxes are automatically destroyed after 24 hours
-- **No GPU support** — Use Daytona if you need GPU access
-- **Cloud-only** — Requires internet connectivity and an API key
-- **Stateless** — Variables do not persist between `execute_code` calls
+| Setting | Default | Meaning |
+|---|---|---|
+| `api_key` | `E2B_API_KEY` | Credential; required and never persisted. |
+| `template` | E2B Code Interpreter default | Explicit template name/ID. |
+| `session_timeout` | `300` | Bounded provider-session lifetime in seconds. |
+| `max_execution_timeout` | `120` | Maximum time for one execution. |
+| `allow_internet_access` | `False` | Outbound-network policy passed at sandbox creation. |
+| `cpu_count` | unset | Declared CPU policy; requires an explicit template. |
+| `memory_mb` | unset | Declared memory policy; requires an explicit template. |
 
 ## Troubleshooting
 
-### "e2b-code-interpreter is not installed"
+Use the package extra to get the compatible pair:
 
 ```bash
-pip install e2b-code-interpreter
+pip install --upgrade --force-reinstall "memorizz[sandbox-e2b]"
 ```
 
-### "E2B API key not provided"
-
-Set the environment variable:
-```bash
-export E2B_API_KEY="your-api-key"
-```
-
-Or pass it explicitly:
-```python
-agent = MemAgent(
-    model=llm,
-    sandbox_provider={"provider": "e2b", "api_key": "your-key"},
-)
-```
+Run `memorizz capabilities` to see both installed SDK versions and whether the
+credential is configured. An execution failure is returned as a failed
+`ExecutionResult`; provider construction/configuration errors fail earlier.

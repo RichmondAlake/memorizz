@@ -52,6 +52,49 @@ class TestMemoryManager:
 
     @pytest.mark.unit
     @pytest.mark.memory
+    def test_load_conversation_history_is_thread_scoped(self):
+        class Provider:
+            def retrieve_conversation_history_ordered_by_timestamp(
+                self,
+                memory_id,
+                memory_type=None,
+                limit=None,
+                user_id=None,
+            ):
+                # Deliberately lacks a native thread_id parameter: the manager
+                # must fetch the whole scope and apply its compatibility filter.
+                return [
+                    {
+                        "memory_id": memory_id,
+                        "thread_id": "thread-a",
+                        "role": "user",
+                        "content": "from a",
+                        "user_id": user_id,
+                        "timestamp": "2026-01-01T12:00:00",
+                    },
+                    {
+                        "memory_id": memory_id,
+                        "thread_id": "thread-b",
+                        "role": "user",
+                        "content": "from b",
+                        "user_id": user_id,
+                        "timestamp": "2026-01-01T12:00:01",
+                    },
+                ]
+
+        manager = MemoryManager(Provider())
+
+        history = manager.load_conversation_history(
+            "memory-1",
+            limit=10,
+            user_id=None,
+            thread_id="thread-b",
+        )
+
+        assert [row["content"] for row in history] == ["from b"]
+
+    @pytest.mark.unit
+    @pytest.mark.memory
     def test_save_memory_unit(self, mock_memory_provider):
         """Test saving memory units."""
         manager = MemoryManager(mock_memory_provider)
@@ -63,6 +106,27 @@ class TestMemoryManager:
         mock_memory_provider.store.assert_called_once_with(
             memory_id="test_memory", memory_unit=memory_unit
         )
+
+    @pytest.mark.unit
+    @pytest.mark.memory
+    def test_list_tool_logs_forwards_anonymous_scope_to_native_provider(self):
+        sentinel = object()
+
+        class Provider:
+            def __init__(self):
+                self.received_user_id = sentinel
+
+            def list_tool_logs(
+                self, memory_id=None, user_id=sentinel, limit=20, thread_id=None
+            ):
+                self.received_user_id = user_id
+                return []
+
+        provider = Provider()
+        manager = MemoryManager(provider)
+
+        assert manager.list_tool_logs("memory-1", user_id=None) == []
+        assert provider.received_user_id is None
 
     @pytest.mark.unit
     @pytest.mark.memory

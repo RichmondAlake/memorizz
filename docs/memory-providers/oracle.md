@@ -1,150 +1,230 @@
-# Oracle Provider
+# Oracle AI Database Provider
 
-The Oracle AI Database provider offers fully managed JSON + vector storage for every MemoRizz memory type. It targets Oracle 23ai/26ai and lives in `src/memorizz/memory_provider/oracle/`.
+The Oracle provider stores every MemoRizz memory partition in relational
+tables, supports Oracle AI Vector Search, and can generate embeddings inside
+the database with an ONNX model. MemoRizz 0.5 adds structured bootstrap and
+preflight, explicit index policies, exact-search fallback, summary-compaction
+parity, governed cache metadata, and transactional scoped cleanup.
 
-## Highlights
-
-- Native VECTOR datatype with automatic HNSW indexes
-- Connection pooling + lazy schema creation
-- Works with JSON Relational Duality Views for structured + vector queries
-
-## Installation
+## Install and configure
 
 ```bash
-pip install -e ".[oracle]"
+pip install "memorizz[oracle]"
+cp .env.example .env
+```
+
+Set unique secrets; MemoRizz has no database-password defaults:
+
+```dotenv
+MEMORIZZ_BACKEND=oracle
+ORACLE_USER=memorizz_user
+ORACLE_PASSWORD=<application-password>
+ORACLE_DSN=localhost:1521/FREEPDB1
+```
+
+For local bootstrap and schema creation, also set
+`ORACLE_ADMIN_PASSWORD=<admin-password>` and follow the root
+[`SETUP.md`](https://github.com/RichmondAlake/memorizz/blob/main/SETUP.md).
+
+## Recommended construction
+
+```python
+from memorizz.memory_provider.oracle import OracleProvider
+
+provider = OracleProvider.from_env(
+    provision_if_missing=False,
+    index_policy="lazy",
+)
+
+report = provider.preflight()
+if not report["ok"]:
+    raise RuntimeError(report["diagnostics"])
+```
+
+`OracleProvider.from_env(provision_if_missing=True)` can create/start the local
+package-owned Docker runtime before connecting. For explicit control:
+
+```python
+from memorizz.memory_provider.oracle import LocalOracleRuntime
+
+runtime = LocalOracleRuntime.from_env(provision_if_missing=True)
+runtime.ensure_ready()
 ```
 
 ## Configuration
 
 ```python
-from memorizz.memory_provider.oracle import OracleProvider, OracleConfig
+import os
 
-provider = OracleProvider(OracleConfig(
-    user="memorizz_user",
-    password="SecurePass123!",
-    dsn="localhost:1521/FREEPDB1",
-    schema="MEMORIZZ",
-    in_database_embedding=True,
-    lazy_vector_indexes=False,
-))
+from memorizz.enums import MemoryType
+from memorizz.memory_provider.oracle import OracleConfig, OracleProvider
+
+provider = OracleProvider(
+    OracleConfig(
+        user=os.environ["ORACLE_USER"],
+        password=os.environ["ORACLE_PASSWORD"],
+        dsn=os.environ["ORACLE_DSN"],
+        schema=os.environ.get("ORACLE_SCHEMA"),
+        in_database_embedding=True,
+        index_policy="selected",
+        selected_vector_indexes=[
+            MemoryType.CONVERSATION_MEMORY,
+            MemoryType.KNOWLEDGE_BASE,
+        ],
+        pool_min=1,
+        pool_max=8,
+        pool_increment=1,
+    )
+)
 ```
 
-Set `lazy_vector_indexes=True` if you want faster cold starts and are ok with indexes being created on demand.
+| Setting | Default | Meaning |
+|---|---:|---|
+| `schema` | application user | Owner of MemoRizz tables |
+| `in_database_embedding` | `True` | Use Oracle ONNX embedding when no external provider is supplied |
+| `embedding_provider` | `None` | Optional external provider or injected embedding manager |
+| `embedding_config` | `{}` | Model, dimensions, and provider options |
+| `index_policy` | `lazy` | `none`, `lazy`, `selected`, or `eager` |
+| `selected_vector_indexes` | `[]` | Memory types indexed under `selected` policy |
+| `pool_min` / `pool_max` | `1` / `5` | Connection-pool bounds |
 
-### In-Database Embeddings (Default)
+`lazy_vector_indexes` remains a compatibility argument; use `index_policy` in
+new code.
 
-Oracle connections default to `in_database_embedding=True`. MemoRizz checks for
-the augmented `ALL_MINILM_L12_V2` ONNX model, installs it from Oracle's public
-model bucket when it is missing, and uses `VECTOR_EMBEDDING` for writes and
-queries. The default model produces 384-dimensional vectors.
+## Embeddings and vector search
 
-The database user needs `CREATE MINING MODEL` and `EXECUTE ON DBMS_VECTOR`.
-`memorizz oracle setup` grants both in admin mode.
+In-database embedding is the default. The standard local setup uses the
+`ALL_MINILM_L12_V2` ONNX model with 384 dimensions. Override model and
+dimension only when the installed model and every vector column match.
+
+For an external provider:
 
 ```python
-provider = OracleProvider(OracleConfig(
-    user="memorizz_user",
-    password="SecurePass123!",
-    dsn="localhost:1521/FREEPDB1",
-    in_database_embedding=True,
-    embedding_config={
-        "model": "ALL_MINILM_L12_V2",
-        "dimensions": 384,
-        # Optional: use a local augmented ONNX file instead of the public URL.
-        # "onnx_path": "/models/all_MiniLM_L12_v2.onnx",
-        "install_if_missing": True,
-    },
-))
+provider = OracleProvider(
+    OracleConfig(
+        user=os.environ["ORACLE_USER"],
+        password=os.environ["ORACLE_PASSWORD"],
+        dsn=os.environ["ORACLE_DSN"],
+        in_database_embedding=False,
+        embedding_provider="openai",
+        embedding_config={
+            "model": "text-embedding-3-small",
+            "dimensions": 1536,
+        },
+        index_policy="lazy",
+    )
+)
 ```
 
-Set `in_database_embedding=False` to disable this behavior. An explicitly
-supplied `embedding_provider` still takes precedence, which preserves existing
-OpenAI, Ollama, Voyage AI, Azure, and Hugging Face configurations:
+Index behavior:
 
-```python
-provider = OracleProvider(OracleConfig(
-    user="memorizz_user",
-    password="SecurePass123!",
-    dsn="localhost:1521/FREEPDB1",
-    in_database_embedding=False,
-    embedding_provider="openai",
-    embedding_config={"model": "text-embedding-3-small"},
-))
-```
+- `none` never creates HNSW indexes and uses exact vector distance;
+- `lazy` creates an index only when the associated memory type is used;
+- `selected` limits indexes to configured memory types;
+- `eager` attempts all enabled indexes at initialization.
 
-Oracle documents both
-[`DBMS_VECTOR.LOAD_ONNX_MODEL`](https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/load_onnx_model-procedure.html)
-and
-[`VECTOR_EMBEDDING`](https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/vector_embedding.html)
-in the AI Vector Search guide.
+An unavailable vector pool or index does not disable semantic retrieval:
+MemoRizz falls back to exact search and emits one concise diagnostic.
 
-### External Embedding Defaults
-
-When in-database embeddings are explicitly disabled, clients can share an
-external embedding configuration through environment variables:
+## Structured preflight
 
 ```bash
-export MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER=openai
-export MEMORIZZ_DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
-export MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS=1536
+memorizz oracle preflight --index-policy lazy --json
 ```
 
-These defaults are read when `in_database_embedding=False` and
-`OracleConfig.embedding_provider` is omitted.
+```python
+report = provider.preflight()
+```
 
-## Database Prep
+The report covers the DSN/service, database product and version, PDB/open
+state, schema privileges, embedding model/dimensions, vector-column
+dimensions, `VECTOR_MEMORY_SIZE`, index status, exact-search fallback, and a
+recommended vector-memory size.
 
-1. Create a dedicated user with `CREATE SESSION`, `CREATE TABLE`, `CREATE INDEX`, `CREATE MINING MODEL`, `UNLIMITED TABLESPACE`.
-2. Grant `EXECUTE ON DBMS_VECTOR` for model loading and vector search.
-3. Run `memorizz oracle setup` to create the user and tables, or
-   `memorizz oracle setup-schema` to apply schema updates without dropping
-   an existing user.
+An authorized administrator can request a persistent vector-memory change:
 
-## Tables
+```python
+provider.set_vector_memory_size(
+    "1G",
+    admin_user=os.environ["ORACLE_ADMIN_USER"],
+    admin_password=os.environ["ORACLE_ADMIN_PASSWORD"],
+)
+# Restart Oracle after the SPFILE change.
+```
 
-Every memory bucket gets its own table plus a VECTOR index:
+Do not pass administrator credentials to the normal application process.
 
-- `personas`
-- `toolbox`
-- `knowledge_base`
-- `entity_memory`
-- `short_term_memory`
-- `conversation_memory`
-- `workflow_memory`
-- `skillbox` (including persisted `injection_role` for learned skills)
-- `shared_memory`
-- `summaries`
-- `semantic_cache`
+## 0.5 data parity
+
+Oracle persists the same production metadata as the document providers:
+
+- complete Toolbox JSON Schema, including `required`, defaults, enums, nested
+  types, aliases, deprecated arguments, policy, and trusted import reference;
+- summary `source_message_ids`, period bounds, unit count, conversation
+  `summary_id`, and normalized ordered summary/message links;
+- semantic-cache tenant/session/memory scope, fingerprints, freshness,
+  provenance, tags, and invalidation metadata;
+- workflow, skill, shared-memory, tool-log, and first-party MCP data required by
+  the 0.5 runtime.
+
+Summary creation and original-message marking are transactional. Retrieval by
+`summary_id` and `expand_summary()` reconstruct the linked source messages.
+
+## Upgrade an existing schema
+
+Back up first, then apply the migrations in numeric order. The 0.5 migration
+is:
+
+```text
+src/memorizz/memory_provider/oracle/migrations/004_production_governance_050.sql
+```
+
+The provider performs additive startup checks for availability, but the SQL
+file is the recommended review/change-control artifact.
+
+## Scoped cleanup
+
+```python
+result = provider.delete_scope(
+    memory_id="course-run-17",
+    user_id="student-42",
+    agent_ids=["planner", "executor"],
+)
+print(result["counts"], result["total_deleted"])
+```
+
+At least one exact scope is required. Conversations, caches, workflows,
+tool logs, skills, summaries/links, shared memory, automations, and selected
+agent records are deleted in one transaction, with per-table counts. A failure
+rolls the transaction back.
+
+## Operations
+
+- pass `user_id` on every multi-tenant call;
+- keep the provider pool process-local;
+- monitor preflight diagnostics and cache/tool-log metrics;
+- use `index_policy="none"` for small data sets or constrained vector memory;
+- use `selected` for the memory partitions that actually require approximate
+  search;
+- close the provider during application shutdown.
+
+```python
+try:
+    agent.run("Remember this", user_id="tenant-a")
+finally:
+    provider.close()
+```
 
 ## Troubleshooting
 
-- **Vector datatype missing** – Ensure you're running 23ai+ and have `DBMS_VECTOR` privileges.
-- **ONNX model installation fails** – Grant `CREATE MINING MODEL` and `EXECUTE ON DBMS_VECTOR`, or set `embedding_config["onnx_path"]` to an augmented ONNX file readable by the notebook process.
-- **Connection refused** – Use Easy Connect Plus (`host:port/service`) or TNS alias strings.
-- **Slow cold start** – Enable `lazy_vector_indexes` or pre-create indexes manually using the SQL files in the provider folder.
-- **Embedding dimension mismatch** – Align provider model/output dimensions with existing table VECTOR dimensions, or use a separate schema per embedding profile.
-- **`OracleProvider._table_has_column()` missing `column_name`** – Upgrade
-  MemoRizz. Older lazy-index code called the helper without its cursor, then
-  skill retrieval failed safely and returned no matches even though promotion
-  writes had succeeded.
+**Connection fails:** confirm the mapped Docker port, service name, PDB state,
+and application credentials. MemoRizz does not guess a default password.
 
-## Existing-schema migrations for continual learning
+**Dimension mismatch:** compare `preflight()["vector_dimensions"]` with the
+embedding report. Align the model and schema before writing more vectors.
 
-Fresh setup and `memorizz oracle setup-schema` include
-`skillbox.injection_role`. For an existing schema managed outside those
-commands, run:
+**ORA-51962:** inspect `VECTOR_MEMORY_SIZE`, switch to `none`/`lazy`, or have an
+authorized DBA increase vector memory and restart the database.
 
-```sql
-@src/memorizz/memory_provider/oracle/migrations/002_add_skill_injection_role.sql
-@src/memorizz/memory_provider/oracle/migrations/003_add_shadow_evaluations.sql
-```
-
-Existing rows receive `user`, preserving the previous behavior. The column
-accepts only `user` or `developer`.
-
-Migration 003 adds the JSON-constrained
-`workflow_memory.shadow_evaluations` CLOB. It stores auditable, passive
-comparisons between new production workflows and tenant-scoped SHADOW skills;
-it is not prompt context and does not execute tools.
-
-For the full reference, open `src/memorizz/memory_provider/oracle/README.md`.
+**Missing summary/cache fields:** apply migration 004, then restart the
+provider and rerun preflight/tests.

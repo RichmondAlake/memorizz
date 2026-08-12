@@ -35,6 +35,12 @@ class MemAgentModel(BaseModel):
     semantic_cache_config: Optional[
         Union[Any, Dict[str, Any]]
     ] = None  # Semantic cache configuration
+    tool_result_policy: Optional[Dict[str, Any]] = None
+    context_policy: Optional[Dict[str, Any]] = None
+    delegation_config: Optional[Dict[str, Any]] = None
+    skill_retrieval: bool = False
+    skill_retrieval_config: Optional[Dict[str, Any]] = None
+    semantic_layer_config: Optional[Dict[str, Any]] = None
     context_window_tokens: Optional[int] = None
     is_favorite: bool = False
     internet_access_provider: Optional[str] = None
@@ -42,6 +48,7 @@ class MemAgentModel(BaseModel):
     skills_marketplace_provider: Optional[str] = None
     skills_marketplace_config: Optional[Dict[str, Any]] = None
     sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    browser_control: Optional[Union[str, Dict[str, Any]]] = None
     skill_paths: Optional[List[str]] = None
     mcp_servers: Optional[List[Dict[str, Any]]] = None
     self_aware: bool = False

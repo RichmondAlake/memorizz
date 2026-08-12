@@ -10,6 +10,7 @@ prompt_toolkit completer. Each handler has the signature
 the REPL (any other value continues).
 """
 
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from typing import Callable, Dict, List, Optional
 
 from . import agent_factory
 from . import config as cfg
-from . import ollama_probe
+from . import conversations, ollama_probe
 
 
 @dataclass
@@ -243,6 +244,132 @@ def cmd_web(session, args: str):
 
 
 # --------------------------------------------------------------------------- #
+# Browser control
+# --------------------------------------------------------------------------- #
+
+
+def _save_live_agent(session) -> None:
+    agent = getattr(session, "agent", None)
+    if agent is not None and getattr(agent, "memory_provider", None) is not None:
+        agent.save()
+
+
+def cmd_browser(session, args: str):
+    """Configure or directly invoke the governed Browser Use provider."""
+    console = _con(session)
+    agent = session.agent
+    parts = args.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts else "status"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in {"status", "show"}:
+        name = agent.get_browser_control_provider_name()
+        configured = getattr(agent, "browser_control_config", None)
+        error = getattr(agent, "_browser_control_init_error", None)
+        console.print(f"Browser control: [cyan]{name or 'off'}[/cyan]")
+        if configured:
+            console.print_json(json.dumps(configured, default=str))
+        if error:
+            console.print(f"[yellow]Configuration error:[/yellow] {error}")
+        console.print(
+            "Usage: /browser on | off | status | run <task>  "
+            "[dim](model calls still require durable approval)[/dim]"
+        )
+        return
+
+    if sub in {"off", "false", "no", "0"}:
+        agent.with_browser_control(None)
+        _save_live_agent(session)
+        console.print("[yellow]Browser control OFF[/yellow]")
+        return
+
+    if sub == "run":
+        if not rest:
+            console.print("Usage: /browser run <complete browser task>")
+            return
+        if not agent.has_browser_control():
+            console.print("[yellow]Enable browser control first:[/yellow] /browser on")
+            return
+        console.print("[cyan]Running approved host browser task…[/cyan]")
+        result = json.loads(agent.run_browser_task(rest))
+        console.print_json(json.dumps(result, ensure_ascii=False, default=str))
+        return
+
+    provider_name = "browseruse" if sub in {"on", "true", "yes", "1"} else sub
+    try:
+        config = agent_factory.make_browser_control_config(provider_name)
+        if config is None:
+            raise ValueError("Browser-control provider is disabled")
+        agent.with_browser_control(config)
+        _save_live_agent(session)
+        console.print(
+            "[green]Browser control →[/green] "
+            f"{agent.get_browser_control_provider_name()}"
+        )
+        console.print(
+            "[dim]The browser_control tool is side-effecting and pauses for "
+            "durable host approval before every model-initiated task.[/dim]"
+        )
+    except Exception as exc:
+        console.print(f"[red]Could not enable browser control:[/red] {exc}")
+
+
+def cmd_approvals(session, args: str):
+    """Operate the generic durable approval lifecycle for this agent."""
+    console = _con(session)
+    agent = session.agent
+    parts = args.strip().split()
+    sub = parts[0].lower() if parts else "pending"
+
+    if sub in {"pending", "approved", "rejected", "expired", "consumed", "all"}:
+        status = None if sub == "all" else sub
+        proposals = agent.list_approval_proposals(status=status, limit=100)
+        console.print_json(
+            json.dumps(
+                {"ok": True, "status": status or "all", "approvals": proposals},
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        return
+
+    if sub == "resume":
+        if len(parts) != 2:
+            console.print("Usage: /approvals resume <proposal-id>")
+            return
+        result = agent.resume_approval(parts[1])
+        try:
+            console.print_json(result)
+        except Exception:
+            console.print(result)
+        return
+
+    if sub in {"approve", "reject", "cancel"}:
+        if len(parts) < 3:
+            console.print(
+                f"Usage: /approvals {sub} <proposal-id> <approver-id> [reason]"
+            )
+            return
+        proposal_id, approver_id = parts[1], parts[2]
+        reason = " ".join(parts[3:]).strip() or None
+        if sub == "approve":
+            result = agent.approve(proposal_id, approver_id=approver_id, reason=reason)
+        elif sub == "reject":
+            result = agent.reject(proposal_id, approver_id=approver_id, reason=reason)
+        else:
+            result = agent.cancel_approval(
+                proposal_id, approver_id=approver_id, reason=reason
+            )
+        console.print_json(json.dumps(result, ensure_ascii=False, default=str))
+        return
+
+    console.print(
+        "Usage: /approvals [pending|approved|rejected|expired|consumed|all] "
+        "| approve|reject|cancel <id> <approver-id> [reason] | resume <id>"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Coding mode
 # --------------------------------------------------------------------------- #
 
@@ -285,24 +412,58 @@ def cmd_memory(session, args: str):
         )
         return
     session.memory_id = mid
+    session.thread_id = conversations.latest_thread_id(
+        session.provider,
+        mid,
+        user_id=session.user_id,
+        agent_id=getattr(session.agent, "agent_id", None),
+    )
+    if session.thread_id:
+        try:
+            session.agent.resume_thread(mid, session.thread_id)
+        except Exception:
+            pass
+    else:
+        try:
+            session.thread_id = session.agent.start_new_thread(mid)
+        except Exception:
+            session.thread_id = None
     try:
-        history = session.agent.load_conversation_history(mid) or []
+        history = (
+            session.agent.load_conversation_history(
+                mid,
+                thread_id=session.thread_id,
+                user_id=session.user_id,
+            )
+            or []
+        )
         console.print(
-            f"[green]Switched to memory[/green] {mid}  ({len(history)} entries)"
+            f"[green]Switched to memory[/green] {mid}"
+            + (
+                f"  [dim](thread {session.thread_id}, {len(history)} entries)[/dim]"
+                if session.thread_id
+                else "  [dim](no active thread)[/dim]"
+            )
         )
     except Exception as exc:
         console.print(
             f"[green]Switched to memory[/green] {mid}  (history unavailable: {exc})"
         )
+    try:
+        if session.thread_id:
+            cfg.save_state({"memory_id": mid, "thread_id": session.thread_id})
+        else:
+            cfg.save_state({"memory_id": mid})
+            cfg.clear_state(["thread_id"])
+    except Exception:
+        pass
 
 
 def _render_history_entry(entry) -> Optional[str]:
     if isinstance(entry, dict):
-        role = entry.get("role") or ("user" if entry.get("query") else "assistant")
-        content = (
-            entry.get("content") or entry.get("response") or entry.get("query") or ""
-        )
-        content = str(content).strip().replace("\n", " ")
+        item = conversations.conversation_row_parts(entry)
+        role = item.get("role") or ("user" if entry.get("query") else "assistant")
+        content = item.get("content") or ""
         if not content:
             return None
         return f"[dim]{role}:[/dim] {content[:200]}"
@@ -313,7 +474,14 @@ def _render_history_entry(entry) -> Optional[str]:
 def cmd_history(session, args: str):
     console = _con(session)
     try:
-        history = session.agent.load_conversation_history(session.memory_id) or []
+        history = (
+            session.agent.load_conversation_history(
+                session.memory_id,
+                thread_id=session.thread_id,
+                user_id=session.user_id,
+            )
+            or []
+        )
     except Exception as exc:
         console.print(f"[red]Could not load history:[/red] {exc}")
         return
@@ -325,6 +493,59 @@ def cmd_history(session, args: str):
         line = _render_history_entry(entry)
         if line:
             console.print("  " + line)
+
+
+def cmd_conversations(session, args: str):
+    """Search saved conversation threads and resume the selected pair."""
+    from rich.markup import escape
+
+    console = _con(session)
+    agent = session.agent
+    raw_memory_ids = getattr(agent, "memory_ids", None) or []
+    memory_ids = (
+        [raw_memory_ids] if isinstance(raw_memory_ids, str) else list(raw_memory_ids)
+    )
+    if session.memory_id and session.memory_id not in memory_ids:
+        memory_ids.append(session.memory_id)
+
+    available = conversations.discover_conversations(
+        session.provider,
+        memory_ids,
+        user_id=session.user_id,
+        agent_id=getattr(agent, "agent_id", None),
+    )
+    if not available:
+        console.print("[dim]No saved conversations yet.[/dim]")
+        return
+
+    selected = conversations.pick_conversation(
+        available,
+        current_memory_id=session.memory_id,
+        current_thread_id=session.thread_id,
+        initial_query=args.strip(),
+    )
+    if selected is None:
+        console.print("[dim]Conversation selection cancelled.[/dim]")
+        return
+
+    agent.resume_thread(selected.memory_id, selected.thread_id)
+    session.memory_id = selected.memory_id
+    session.thread_id = selected.thread_id
+    try:
+        cfg.save_state(
+            {
+                "memory_id": selected.memory_id,
+                "thread_id": selected.thread_id,
+            }
+        )
+    except Exception:
+        pass
+    console.print(
+        f"[green]Resumed conversation[/green] {escape(selected.title[:80])}\n"
+        f"[dim]memory {escape(selected.memory_id)} · "
+        f"thread {escape(selected.thread_id)} · "
+        f"{selected.message_count} messages[/dim]"
+    )
 
 
 def cmd_forget(session, args: str):
@@ -484,9 +705,17 @@ def cmd_persona_reset(session, args: str):
 
 def cmd_new(session, args: str):
     console = _con(session)
-    session.agent.reset_thread_state()
-    session.memory_id = None
-    session.thread_id = None
+    session.thread_id = session.agent.start_new_thread(session.memory_id)
+    session.memory_id = session.agent.get_current_memory_id()
+    try:
+        cfg.save_state(
+            {
+                "memory_id": session.memory_id,
+                "thread_id": session.thread_id,
+            }
+        )
+    except Exception:
+        pass
     console.print("[green]Started a fresh conversation thread.[/green]")
 
 
@@ -597,6 +826,7 @@ _LOGIN_PROVIDERS = [
     ("ollama", "", "Ollama Cloud — sign in for ':cloud' models (e.g. glm-5.2:cloud)"),
     ("tavily", "TAVILY_API_KEY", "Tavily — internet search"),
     ("firecrawl", "FIRECRAWL_API_KEY", "Firecrawl — internet search"),
+    ("browseruse", "BROWSER_USE_API_KEY", "Browser Use — browser-control model"),
     ("voyage", "VOYAGE_API_KEY", "Voyage AI — embeddings"),
 ]
 
@@ -747,6 +977,11 @@ def cmd_config(session, args: str):
     except Exception:
         net = None
     console.print(f"  internet:      {net or 'off'}")
+    try:
+        browser = session.agent.get_browser_control_provider_name()
+    except Exception:
+        browser = None
+    console.print(f"  browser control: {browser or 'off'}")
 
 
 _DOCS_BASE = "https://richmondalake.github.io/memorizz"
@@ -829,7 +1064,7 @@ def cmd_clear(session, args: str):
     session.memory_id = None
     session.thread_id = None
     try:
-        cfg.clear_state(["memory_id"])
+        cfg.clear_state(["memory_id", "thread_id"])
     except Exception:
         pass
     console.print(
@@ -841,6 +1076,16 @@ def cmd_clear(session, args: str):
 def cmd_exit(session, args: str):
     console = _con(session)
     agent = getattr(session, "agent", None)
+    try:
+        session.sync_ids()
+        cfg.save_state(
+            {
+                "memory_id": session.memory_id,
+                "thread_id": session.thread_id,
+            }
+        )
+    except Exception:
+        pass
     if agent is not None and getattr(agent, "memory_provider", None) is not None:
         try:
             agent.save()
@@ -1008,6 +1253,16 @@ COMMANDS: Dict[str, Command] = {
         "Enable/disable internet access; open a URL.",
         "/web [on|off|tavily|firecrawl|open <url>]",
     ),
+    "browser": Command(
+        cmd_browser,
+        "Configure or run governed browser control.",
+        "/browser [on|off|status|run <task>]",
+    ),
+    "approvals": Command(
+        cmd_approvals,
+        "List, decide, or resume durable tool approvals.",
+        "/approvals [pending|approve|reject|cancel|resume]",
+    ),
     "code": Command(
         cmd_code, "Toggle coding tools (file edits + commands).", "/code [on|off]"
     ),
@@ -1016,6 +1271,11 @@ COMMANDS: Dict[str, Command] = {
     ),
     "history": Command(
         cmd_history, "Print the current conversation history.", "/history"
+    ),
+    "conversations": Command(
+        cmd_conversations,
+        "Search and resume a saved conversation thread.",
+        "/conversations [search]",
     ),
     "forget": Command(
         cmd_forget, "Delete a single stored memory by id.", "/forget <id>"
@@ -1067,6 +1327,10 @@ ALIASES: Dict[str, str] = {
     "h": "help",
     "?": "help",
     "models": "model",
+    "conversation": "conversations",
+    "converstations": "conversations",
+    "convos": "conversations",
+    "threads": "conversations",
 }
 
 

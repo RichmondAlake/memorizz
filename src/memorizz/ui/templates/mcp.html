@@ -1,0 +1,360 @@
+{% extends "base.html" %}
+
+{% block title %}MCP Connections - Memorizz{% endblock %}
+
+{% block content %}
+<style>
+    .mcp-page { max-width: 1180px; margin: 0 auto; padding: 28px; }
+    .mcp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 22px; }
+    .mcp-head h1 { margin: 0 0 6px; }
+    .mcp-subtitle { color: var(--text-secondary); margin: 0; max-width: 760px; }
+    .mcp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .mcp-toolbar select { min-width: 230px; }
+    .mcp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; }
+    .mcp-server-panel { border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-secondary); padding: 18px; margin-bottom: 22px; }
+    .mcp-server-panel h2 { margin: 0 0 6px; }
+    .mcp-server-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; margin-top: 14px; }
+    .mcp-server-option { background: var(--bg-primary); border-radius: 9px; padding: 14px; min-width: 0; }
+    .mcp-server-option h3 { margin: 0 0 8px; }
+    .mcp-server-code { overflow: auto; white-space: pre; font-size: 12px; margin: 10px 0; padding: 12px; border-radius: 7px; background: var(--bg-tertiary); }
+    .mcp-card { border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-secondary); padding: 18px; }
+    .mcp-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .mcp-card h3 { margin: 0; }
+    .mcp-meta { color: var(--text-secondary); font-size: 13px; margin: 8px 0 14px; word-break: break-all; }
+    .mcp-badge { display: inline-flex; border-radius: 999px; padding: 3px 9px; font-size: 12px; background: var(--bg-tertiary); }
+    .mcp-badge.ready { color: #24b47e; }
+    .mcp-badge.reauth_required { color: #e5a43a; }
+    .mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .mcp-output { margin-top: 14px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-size: 12px; background: var(--bg-primary); border-radius: 8px; padding: 12px; }
+    .mcp-empty { border: 1px dashed var(--border-color); border-radius: 12px; padding: 42px; text-align: center; color: var(--text-secondary); }
+    .mcp-modal { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; background: rgba(0,0,0,.58); padding: 20px; }
+    .mcp-modal[hidden] { display: none; }
+    .mcp-dialog { width: min(760px, 96vw); max-height: 92vh; overflow: auto; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 14px; padding: 22px; }
+    .mcp-dialog-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .mcp-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .mcp-field { display: flex; flex-direction: column; gap: 6px; }
+    .mcp-field.wide { grid-column: 1 / -1; }
+    .mcp-field label { font-size: 13px; font-weight: 600; }
+    .mcp-field small { color: var(--text-secondary); }
+    .mcp-checkbox { display: flex; gap: 8px; align-items: center; }
+    .mcp-form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+    .mcp-alert { border-radius: 8px; padding: 11px 13px; margin-bottom: 16px; }
+    .mcp-alert.success { background: rgba(36,180,126,.14); color: #24b47e; }
+    .mcp-alert.pending { background: rgba(229,164,58,.14); color: #e5a43a; }
+    .mcp-alert.error { background: rgba(220,70,70,.14); color: #dc4646; }
+    @media (max-width: 720px) {
+        .mcp-page { padding: 18px; }
+        .mcp-head { flex-direction: column; }
+        .mcp-form-grid { grid-template-columns: 1fr; }
+        .mcp-field.wide { grid-column: auto; }
+    }
+</style>
+
+<div class="mcp-page">
+    <div class="mcp-head">
+        <div>
+            <h1>MCP Connections</h1>
+            <p class="mcp-subtitle">Connect agents to Notion, Google Calendar, and custom MCP services—or expose MemoRizz memory and agents to other MCP clients.</p>
+        </div>
+        <div class="mcp-toolbar">
+            <select id="mcp-agent-select" aria-label="Select agent">
+                {% for agent in agents %}
+                <option value="{{ agent.agent_id }}" {% if agent.agent_id == selected_agent_id %}selected{% endif %}>{{ agent.name }} · {{ agent.agent_id[:8] }}</option>
+                {% endfor %}
+            </select>
+            {% if selected_agent_id %}<button class="btn btn-primary" type="button" onclick="openMcpDialog()">Add connection</button>{% endif %}
+        </div>
+    </div>
+
+    <section class="mcp-server-panel" aria-labelledby="mcp-server-title">
+        <h2 id="mcp-server-title">Expose MemoRizz as an MCP server</h2>
+        <p class="mcp-subtitle">Server credentials are process-level deployment secrets, so they are configured in the CLI or your platform secret manager—not stored in this browser.</p>
+        <div class="mcp-server-options">
+            <div class="mcp-server-option">
+                <h3>Local MCP host</h3>
+                <p class="mcp-meta">Add this server definition to Claude Desktop, Codex, or another MCP host.</p>
+                <pre id="mcp-local-server-config" class="mcp-server-code">{
+  "mcpServers": {
+    "memorizz": {
+      "command": "memorizz",
+      "args": ["mcp", "serve"]
+    }
+  }
+}</pre>
+                <button class="btn btn-sm" type="button" onclick="copyMcpSetup('mcp-local-server-config', this)">Copy config</button>
+            </div>
+            <div class="mcp-server-option">
+                <h3>Authenticated remote server</h3>
+                <p class="mcp-meta">Remote mode defaults to read-only. Use a long random bearer token and an HTTPS reverse proxy.</p>
+                <pre id="mcp-remote-server-command" class="mcp-server-code">export MEMORIZZ_MCP_SERVER_API_KEYS='{"client":"replace-with-a-long-random-token"}'
+memorizz mcp serve --transport streamable-http --host 0.0.0.0 --public-url https://memory.example.com{% if selected_agent_id %} --agent-id {{ selected_agent_id }}{% endif %}</pre>
+                <button class="btn btn-sm" type="button" onclick="copyMcpSetup('mcp-remote-server-command', this)">Copy command</button>
+                <a class="btn btn-sm" href="https://richmondalake.github.io/memorizz/guides/mcp-server/" target="_blank" rel="noopener">Deployment guide</a>
+            </div>
+        </div>
+    </section>
+
+    {% if oauth_result %}
+    <div class="mcp-alert {{ oauth_result }}">OAuth {{ oauth_result }}{% if oauth_server %} for {{ oauth_server }}{% endif %}. Use Test to verify the connection.</div>
+    {% endif %}
+
+    {% if not selected_agent_id %}
+    <div class="mcp-empty">Create an agent before configuring MCP connections.</div>
+    {% elif not servers %}
+    <div class="mcp-empty">
+        <p>No MCP servers are configured for this agent.</p>
+        <button class="btn btn-primary" type="button" onclick="openMcpDialog('notion')">Connect Notion</button>
+        <button class="btn" type="button" onclick="openMcpDialog('calendar')">Connect Google Calendar</button>
+    </div>
+    {% else %}
+    <div id="mcp-grid" class="mcp-grid"></div>
+    {% endif %}
+</div>
+
+<div id="mcp-modal" class="mcp-modal" hidden>
+    <form id="mcp-form" class="mcp-dialog">
+        <div class="mcp-dialog-head">
+            <h2 id="mcp-dialog-title">Add MCP connection</h2>
+            <button class="btn btn-sm" type="button" onclick="closeMcpDialog()">Close</button>
+        </div>
+        <div class="mcp-toolbar" style="margin-bottom:14px">
+            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('notion')">Notion</button>
+            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('calendar')">Google Calendar</button>
+            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('stdio')">Local stdio</button>
+        </div>
+        <div class="mcp-form-grid">
+            <div class="mcp-field"><label>Name</label><input id="mcp-name" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"></div>
+            <div class="mcp-field"><label>Transport</label><select id="mcp-transport"><option value="streamable_http">Streamable HTTP</option><option value="sse">SSE (legacy)</option><option value="stdio">stdio</option></select></div>
+            <div class="mcp-field wide remote-field"><label>Server URL</label><input id="mcp-url" type="url" placeholder="https://example.com/mcp"></div>
+            <div class="mcp-field stdio-field"><label>Command</label><input id="mcp-command" placeholder="npx"></div>
+            <div class="mcp-field stdio-field"><label>Arguments (JSON array)</label><input id="mcp-args" placeholder='["-y","package"]'></div>
+            <div class="mcp-field wide stdio-field"><label>Environment (JSON object)</label><input id="mcp-env" placeholder='{"API_KEY":"value"}'><small>Values are moved into the encrypted credential store.</small></div>
+            <div class="mcp-field"><label>Authentication</label><select id="mcp-auth-type"><option value="none">None</option><option value="oauth">OAuth 2.0 + PKCE</option><option value="bearer">Bearer token / PAT</option></select></div>
+            <div class="mcp-field"><label>Request timeout (seconds)</label><input id="mcp-timeout" type="number" min="1" max="300" value="30"></div>
+            <div class="mcp-field wide bearer-field"><label>Bearer token / PAT</label><input id="mcp-token" type="password" autocomplete="new-password"><small>Leave blank when editing to retain the existing token.</small></div>
+            <div class="mcp-field oauth-field"><label>OAuth client ID</label><input id="mcp-client-id" autocomplete="off"><small>Required for Google Calendar; Notion can register dynamically.</small></div>
+            <div class="mcp-field oauth-field"><label>OAuth client secret</label><input id="mcp-client-secret" type="password" autocomplete="new-password"></div>
+            <div class="mcp-field wide oauth-field"><label>OAuth redirect URI</label><input id="mcp-redirect-uri" type="url"></div>
+            <div class="mcp-field wide oauth-field"><label>OAuth scopes (space-separated)</label><input id="mcp-scopes"></div>
+            <div class="mcp-field wide remote-field"><label>Custom headers (JSON object)</label><input id="mcp-headers" placeholder='{"X-Tenant":"example"}'><small>Header values are encrypted and never stored in agent memory.</small></div>
+            <div class="mcp-field wide"><label>Allowed tools (comma-separated, blank means all)</label><input id="mcp-allowed-tools"></div>
+            <div class="mcp-field wide"><label>Blocked tools (comma-separated)</label><input id="mcp-blocked-tools"></div>
+            <div class="mcp-field wide"><label>Explicit read-only tools (comma-separated)</label><input id="mcp-read-only-tools"><small>Overrides conservative name classification.</small></div>
+            <div class="mcp-field wide"><label>Explicit mutation tools (comma-separated)</label><input id="mcp-mutation-tools"><small>Always requires durable approval when approval policy is enabled.</small></div>
+            <label class="mcp-checkbox"><input id="mcp-require-approval" type="checkbox" checked> Require approval for mutating tools</label>
+            <label class="mcp-checkbox"><input id="mcp-allow-private" type="checkbox"> Allow HTTP/private network destination</label>
+        </div>
+        <div id="mcp-form-error" class="mcp-alert error" hidden></div>
+        <div class="mcp-form-actions"><button class="btn" type="button" onclick="closeMcpDialog()">Cancel</button><button class="btn btn-primary" type="submit">Save connection</button></div>
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const MCP_AGENT_ID = {{ selected_agent_id|tojson }};
+const MCP_SERVERS = {{ servers|tojson }};
+const MCP_STATUSES = {{ server_statuses|tojson }};
+const MCP_CALLBACK_URL = `${window.location.origin}/api/mcp/oauth/callback`;
+
+async function copyMcpSetup(id, button) {
+    const value = document.getElementById(id).textContent;
+    try {
+        await navigator.clipboard.writeText(value);
+        const previous = button.textContent;
+        button.textContent = 'Copied';
+        window.setTimeout(() => { button.textContent = previous; }, 1400);
+    } catch (_) {
+        window.prompt('Copy this configuration', value);
+    }
+}
+
+function apiError(body) {
+    if (!body) return 'Request failed';
+    const detail = body.detail || body.error || body;
+    if (typeof detail === 'string') return detail;
+    return detail.error || JSON.stringify(detail, null, 2);
+}
+
+async function mcpFetch(url, options = {}) {
+    const response = await fetch(url, options);
+    let body = {};
+    try { body = await response.json(); } catch (_) {}
+    if (!response.ok) throw new Error(apiError(body));
+    return body;
+}
+
+function statusFor(name) { return MCP_STATUSES.find(item => item.name === name) || {}; }
+function endpointFor(server) { return server.url || [server.command].concat(server.args || []).filter(Boolean).join(' '); }
+
+function renderMcpCards() {
+    const grid = document.getElementById('mcp-grid');
+    if (!grid) return;
+    grid.textContent = '';
+    MCP_SERVERS.forEach(server => {
+        const status = statusFor(server.name);
+        const card = document.createElement('section');
+        card.className = 'mcp-card';
+        const head = document.createElement('div');
+        head.className = 'mcp-card-head';
+        const title = document.createElement('div');
+        const h3 = document.createElement('h3'); h3.textContent = server.name;
+        const badges = document.createElement('div');
+        const transport = document.createElement('span'); transport.className = 'mcp-badge'; transport.textContent = server.transport;
+        const state = document.createElement('span'); state.className = `mcp-badge ${status.state || ''}`; state.textContent = status.state || 'configured';
+        badges.append(transport, document.createTextNode(' '), state); title.append(h3, badges);
+        const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'btn btn-sm'; edit.textContent = 'Edit'; edit.onclick = () => openMcpDialog(null, server);
+        head.append(title, edit);
+        const meta = document.createElement('div'); meta.className = 'mcp-meta'; meta.textContent = endpointFor(server) || 'No endpoint';
+        const actions = document.createElement('div'); actions.className = 'mcp-actions';
+        const entries = [
+            ['Test', () => runMcpAction(server.name, 'test')],
+            ['Tools', () => runMcpAction(server.name, 'tools')],
+            ['Resources', () => runMcpAction(server.name, 'resources')],
+            ['Prompts', () => runMcpAction(server.name, 'prompts')],
+        ];
+        if ((server.auth || {}).type === 'oauth') entries.unshift(['Authorize', () => authorizeMcp(server.name)]);
+        entries.forEach(([label, handler]) => { const b=document.createElement('button'); b.type='button'; b.className='btn btn-sm'; b.textContent=label; b.onclick=handler; actions.appendChild(b); });
+        const disconnect = document.createElement('button'); disconnect.type='button'; disconnect.className='btn btn-sm'; disconnect.textContent='Disconnect'; disconnect.onclick=()=>disconnectMcp(server.name);
+        const remove = document.createElement('button'); remove.type='button'; remove.className='btn btn-sm'; remove.textContent='Remove'; remove.onclick=()=>removeMcp(server.name);
+        actions.append(disconnect, remove);
+        const output = document.createElement('pre'); output.id = `mcp-output-${server.name}`; output.className='mcp-output'; output.hidden=true;
+        card.append(head, meta, actions, output); grid.appendChild(card);
+    });
+}
+
+function outputFor(name, value) {
+    const output = document.getElementById(`mcp-output-${name}`);
+    if (!output) return;
+    output.hidden = false;
+    output.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+async function runMcpAction(name, action) {
+    outputFor(name, 'Working…');
+    const method = action === 'test' ? 'POST' : 'GET';
+    const path = action === 'test' ? 'test' : action;
+    try {
+        const body = await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(name)}/${path}`, {method});
+        outputFor(name, body);
+        if (action === 'tools' && body.ok) renderToolButtons(name, body.tools || []);
+    } catch (error) { outputFor(name, {ok:false, error:error.message}); }
+}
+
+function renderToolButtons(name, tools) {
+    const output = document.getElementById(`mcp-output-${name}`);
+    const card = output && output.closest('.mcp-card');
+    if (!card) return;
+    let box = card.querySelector('.mcp-tool-actions');
+    if (box) box.remove();
+    box = document.createElement('div'); box.className='mcp-actions mcp-tool-actions'; box.style.marginTop='10px';
+    tools.forEach(tool => { const button=document.createElement('button'); button.type='button'; button.className='btn btn-sm'; button.textContent=`Call ${tool.name}`; button.onclick=()=>callMcpTool(name,tool.name); box.appendChild(button); });
+    card.appendChild(box);
+}
+
+async function callMcpTool(serverName, toolName) {
+    const raw = window.prompt(`JSON arguments for ${toolName}`, '{}');
+    if (raw === null) return;
+    let args; try { args = JSON.parse(raw); } catch (error) { alert(`Invalid JSON: ${error.message}`); return; }
+    outputFor(serverName, 'Calling tool…');
+    try {
+        let body = await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(serverName)}/call`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tool_name:toolName, arguments:args})});
+        if (body.status === 'approval_required' && body.proposal) {
+            const proposal = body.proposal;
+            const summary = `${proposal.policy_reason}\n\nTool: ${proposal.tool_name}\nArguments hash: ${proposal.argument_hash}\nExpires: ${proposal.expires_at}\n\nApprove this exact call?`;
+            if (!window.confirm(summary)) {
+                const approver = window.prompt('Your approver identity', localStorage.getItem('memorizzApproverId') || 'local-ui-user');
+                if (approver) {
+                    localStorage.setItem('memorizzApproverId', approver);
+                    await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/approvals/${encodeURIComponent(proposal.proposal_id)}/reject`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approver_id:approver, reason:'Rejected in MemoRizz UI'})});
+                }
+                outputFor(serverName, {...body, status:'rejected'});
+                return;
+            }
+            const approver = window.prompt('Your approver identity', localStorage.getItem('memorizzApproverId') || 'local-ui-user');
+            if (!approver) { outputFor(serverName, body); return; }
+            localStorage.setItem('memorizzApproverId', approver);
+            await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/approvals/${encodeURIComponent(proposal.proposal_id)}/approve`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approver_id:approver})});
+            body = await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/approvals/${encodeURIComponent(proposal.proposal_id)}/resume`, {method:'POST'});
+        }
+        outputFor(serverName, body);
+    } catch (error) { outputFor(serverName, {ok:false,error:error.message}); }
+}
+
+async function authorizeMcp(name) {
+    outputFor(name, 'Starting OAuth…');
+    try {
+        const body = await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(name)}/authorize`, {method:'POST'});
+        if (body.already_authenticated) {
+            outputFor(name, {ok:true, state:'already_authenticated'});
+            return;
+        }
+        if (!body.authorization_url) throw new Error('Authorization URL was not returned');
+        window.location.assign(body.authorization_url);
+    } catch (error) { outputFor(name, {ok:false,error:error.message}); }
+}
+
+async function disconnectMcp(name) {
+    if (!window.confirm(`Delete stored credentials for ${name}?`)) return;
+    try { await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(name)}/credentials`, {method:'DELETE'}); window.location.reload(); }
+    catch (error) { outputFor(name, {ok:false,error:error.message}); }
+}
+
+async function removeMcp(name) {
+    if (!window.confirm(`Remove ${name} and its credentials?`)) return;
+    try { await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(name)}`, {method:'DELETE'}); window.location.reload(); }
+    catch (error) { outputFor(name, {ok:false,error:error.message}); }
+}
+
+function setField(id, value) { const element=document.getElementById(id); if (element) element.value = value == null ? '' : value; }
+function csv(values) { return Array.isArray(values) ? values.join(', ') : ''; }
+function syncMcpFields() {
+    const transport=document.getElementById('mcp-transport').value;
+    const auth=document.getElementById('mcp-auth-type').value;
+    document.querySelectorAll('.stdio-field').forEach(el=>el.style.display=transport==='stdio'?'':'none');
+    document.querySelectorAll('.remote-field').forEach(el=>el.style.display=transport==='stdio'?'none':'');
+    document.querySelectorAll('.oauth-field').forEach(el=>el.style.display=auth==='oauth'?'':'none');
+    document.querySelectorAll('.bearer-field').forEach(el=>el.style.display=auth==='bearer'?'':'none');
+}
+
+function applyMcpPreset(preset) {
+    if (preset === 'notion') {
+        setField('mcp-name','notion'); setField('mcp-transport','streamable_http'); setField('mcp-url','https://mcp.notion.com/mcp'); setField('mcp-auth-type','oauth'); setField('mcp-redirect-uri',MCP_CALLBACK_URL); setField('mcp-scopes','');
+    } else if (preset === 'calendar') {
+        setField('mcp-name','calendar'); setField('mcp-transport','streamable_http'); setField('mcp-url','https://calendarmcp.googleapis.com/mcp/v1'); setField('mcp-auth-type','oauth'); setField('mcp-redirect-uri',MCP_CALLBACK_URL); setField('mcp-scopes','https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.events.freebusy https://www.googleapis.com/auth/calendar.events.readonly');
+    } else {
+        setField('mcp-name','local'); setField('mcp-transport','stdio'); setField('mcp-auth-type','none'); setField('mcp-command','npx'); setField('mcp-args','[]');
+    }
+    syncMcpFields();
+}
+
+function openMcpDialog(preset = null, server = null) {
+    document.getElementById('mcp-form').reset();
+    setField('mcp-redirect-uri', MCP_CALLBACK_URL); setField('mcp-timeout','30'); document.getElementById('mcp-require-approval').checked=true;
+    if (server) {
+        setField('mcp-name',server.name); setField('mcp-transport',server.transport); setField('mcp-url',server.url); setField('mcp-command',server.command); setField('mcp-args',JSON.stringify(server.args||[])); setField('mcp-timeout',server.timeout||30); setField('mcp-auth-type',(server.auth||{}).type||'none'); setField('mcp-client-id',(server.auth||{}).client_id||''); setField('mcp-redirect-uri',(server.auth||{}).redirect_uri||MCP_CALLBACK_URL); setField('mcp-scopes',((server.auth||{}).scopes||[]).join(' ')); setField('mcp-allowed-tools',csv(server.allowed_tools)); setField('mcp-blocked-tools',csv(server.blocked_tools)); setField('mcp-read-only-tools',csv(server.read_only_tools)); setField('mcp-mutation-tools',csv(server.mutation_tools)); document.getElementById('mcp-require-approval').checked=server.require_approval!==false; document.getElementById('mcp-allow-private').checked=!!server.allow_private_network;
+    } else if (preset) applyMcpPreset(preset);
+    document.getElementById('mcp-form-error').hidden=true; syncMcpFields(); document.getElementById('mcp-modal').hidden=false;
+}
+function closeMcpDialog() { document.getElementById('mcp-modal').hidden=true; }
+function parseJsonInput(id, fallback) { const raw=document.getElementById(id).value.trim(); return raw ? JSON.parse(raw) : fallback; }
+function commaList(id) { return document.getElementById(id).value.split(',').map(v=>v.trim()).filter(Boolean); }
+
+document.getElementById('mcp-form')?.addEventListener('submit', async event => {
+    event.preventDefault(); const errorBox=document.getElementById('mcp-form-error'); errorBox.hidden=true;
+    try {
+        const transport=document.getElementById('mcp-transport').value; const authType=document.getElementById('mcp-auth-type').value;
+        const payload={name:document.getElementById('mcp-name').value.trim(),transport,timeout:Number(document.getElementById('mcp-timeout').value||30),require_approval:document.getElementById('mcp-require-approval').checked,allow_private_network:document.getElementById('mcp-allow-private').checked,allowed_tools:commaList('mcp-allowed-tools'),blocked_tools:commaList('mcp-blocked-tools'),read_only_tools:commaList('mcp-read-only-tools'),mutation_tools:commaList('mcp-mutation-tools'),auth:{type:authType,redirect_uri:document.getElementById('mcp-redirect-uri').value.trim()||undefined,scopes:document.getElementById('mcp-scopes').value.trim().split(/\s+/).filter(Boolean),client_id:document.getElementById('mcp-client-id').value.trim()||undefined}};
+        if (transport==='stdio') { payload.command=document.getElementById('mcp-command').value.trim(); payload.args=parseJsonInput('mcp-args',[]); payload.env=parseJsonInput('mcp-env',{}); }
+        else { payload.url=document.getElementById('mcp-url').value.trim(); payload.headers=parseJsonInput('mcp-headers',{}); }
+        const token=document.getElementById('mcp-token').value.trim(); const secret=document.getElementById('mcp-client-secret').value.trim(); if(token) payload.auth.token=token; if(secret) payload.auth.client_secret=secret;
+        await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); window.location.reload();
+    } catch (error) { errorBox.textContent=error.message; errorBox.hidden=false; }
+});
+
+document.getElementById('mcp-agent-select')?.addEventListener('change', event => { window.location.assign(`/mcp?agent_id=${encodeURIComponent(event.target.value)}`); });
+document.getElementById('mcp-transport')?.addEventListener('change',syncMcpFields);
+document.getElementById('mcp-auth-type')?.addEventListener('change',syncMcpFields);
+renderMcpCards(); syncMcpFields();
+</script>
+{% endblock %}

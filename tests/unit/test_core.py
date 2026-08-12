@@ -323,11 +323,19 @@ class TestMemAgentCore:
         assert "list_mcp_servers" in tool_names
         assert "mcp_list_tools" in tool_names
         assert "mcp_call_tool" in tool_names
+        assert "mcp_list_resources" in tool_names
+        assert "mcp_list_resource_templates" in tool_names
+        assert "mcp_read_resource" in tool_names
+        assert "mcp_list_prompts" in tool_names
+        assert "mcp_get_prompt" in tool_names
 
         result, _ = agent.tool_manager.execute_tool("list_mcp_servers", {})
         assert isinstance(result, dict)
         assert result.get("servers")
         assert result["servers"][0]["name"] == "filesystem"
+
+        agent.with_mcp_servers([])
+        assert "mcp_call_tool" not in set(agent.tool_manager.list_tools())
 
     @pytest.mark.unit
     def test_memagent_registers_skills_marketplace_tool(self):
@@ -441,6 +449,17 @@ class TestMemAgentRun:
         assert_agent_response_valid(response)
 
     @pytest.mark.unit
+    def test_resume_thread_updates_active_memory_and_thread(self, memagent_with_mocks):
+        agent = memagent_with_mocks
+
+        resumed = agent.resume_thread("memory-resume", "thread-resume")
+
+        assert resumed == "thread-resume"
+        assert agent.get_current_memory_id() == "memory-resume"
+        assert agent.get_current_thread_id() == "thread-resume"
+        assert agent._thread_ids_by_memory["memory-resume"] == "thread-resume"
+
+    @pytest.mark.unit
     def test_run_error_handling(self, mock_memory_provider):
         """Test error handling in run method."""
         # Create agent with failing LLM
@@ -497,6 +516,16 @@ class TestMemAgentRun:
         assert agent.memory_manager.load_conversation_history.called
         _, kwargs = agent.memory_manager.load_conversation_history.call_args
         assert int(kwargs.get("limit", 0)) > 10
+
+    @pytest.mark.unit
+    def test_run_context_uses_only_the_active_thread(self, memagent_with_mocks):
+        agent = memagent_with_mocks
+        agent.resume_thread("memory-resume", "thread-resume")
+
+        agent._build_context("Continue this conversation", "memory-resume")
+
+        _, kwargs = agent.memory_manager.load_conversation_history.call_args
+        assert kwargs["thread_id"] == "thread-resume"
 
     @pytest.mark.unit
     def test_build_prompt_messages_keeps_recent_history_beyond_five(

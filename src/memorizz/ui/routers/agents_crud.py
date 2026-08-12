@@ -30,6 +30,7 @@ from ..helpers import (
     _build_agent_nav_items,
     _build_agent_threads,
     _build_agent_tool_count_map,
+    _build_browser_control_config,
     _build_internet_provider_config,
     _build_memory_types_for_agent,
     _build_self_aware_config,
@@ -41,6 +42,7 @@ from ..helpers import (
     _get_default_llm_provider,
     _load_agent_last_run_map,
     _load_memagent_created_at_map,
+    _normalize_browser_control_provider_name,
     _normalize_internet_provider_name,
     _normalize_llm_provider,
     _normalize_memory_type_values,
@@ -51,6 +53,7 @@ from ..helpers import (
     _retrieve_conversation_history,
     _sort_agents_by_last_run_desc,
     _to_text,
+    _validate_browser_control_choice,
     _validate_internet_provider_choice,
     _validate_sandbox_provider_choice,
     _validate_self_aware_config,
@@ -415,6 +418,9 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
     sandbox_val = getattr(agent, "sandbox_provider", None) or ""
     if isinstance(sandbox_val, dict):
         sandbox_val = sandbox_val.get("provider", "")
+    browser_control_val = _normalize_browser_control_provider_name(
+        getattr(agent, "browser_control", None)
+    )
     internet_val = _normalize_internet_provider_name(
         getattr(agent, "internet_access_provider", None)
     )
@@ -475,6 +481,7 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "llm_model": llm_model,
         "llm_config_json": llm_config_json,
         "sandbox_provider": sandbox_val,
+        "browser_control_provider": browser_control_val,
         "internet_provider": internet_val,
         "skills_marketplace_provider": skills_marketplace_val,
         "skill_paths": getattr(agent, "skill_paths", None) or [],
@@ -601,6 +608,7 @@ async def agent_toggle_favorite(
         skills_marketplace_config=getattr(existing, "skills_marketplace_config", None),
         knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
         sandbox_provider=getattr(existing, "sandbox_provider", None),
+        browser_control=getattr(existing, "browser_control", None),
         skill_paths=getattr(existing, "skill_paths", None),
         mcp_servers=getattr(existing, "mcp_servers", None),
         self_aware=bool(getattr(existing, "self_aware", False)),
@@ -671,6 +679,9 @@ async def agent_create_page(request: Request):
             "llm_model": default_llm_model,
             "llm_config_json": "",
             "sandbox_provider": os.environ.get("MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", ""),
+            "browser_control_provider": os.environ.get(
+                "MEMORIZZ_BROWSER_CONTROL_PROVIDER", ""
+            ),
             "internet_provider": os.environ.get(
                 "MEMORIZZ_DEFAULT_INTERNET_PROVIDER", ""
             ),
@@ -715,6 +726,7 @@ async def agent_create_submit(
     llm_model: str = Form(DEFAULT_LLM_MODEL_BY_PROVIDER[DEFAULT_LLM_PROVIDER]),
     llm_config_json: str = Form(""),
     sandbox_provider: str = Form(""),
+    browser_control_provider: str = Form(""),
     internet_provider: str = Form(""),
     skills_marketplace_provider: str = Form(""),
     self_aware: Optional[str] = Form(None),
@@ -800,6 +812,9 @@ async def agent_create_submit(
     skills_marketplace_provider_value = (
         _normalize_skills_marketplace_provider_name(skills_marketplace_provider) or ""
     )
+    browser_control_provider_value = _normalize_browser_control_provider_name(
+        browser_control_provider
+    )
 
     if error:
         return templates.TemplateResponse(
@@ -838,6 +853,7 @@ async def agent_create_submit(
                 "llm_model": llm_model,
                 "llm_config_json": llm_config_json,
                 "sandbox_provider": sandbox_provider,
+                "browser_control_provider": browser_control_provider_value,
                 "internet_provider": internet_provider,
                 "skills_marketplace_provider": skills_marketplace_provider_value,
                 "enable_entity_memory": enable_entity_memory_value,
@@ -854,6 +870,8 @@ async def agent_create_submit(
 
     instruction_value = instruction.strip() if instruction else ""
     sandbox_value = sandbox_provider.strip() if sandbox_provider else None
+    browser_control_value = browser_control_provider_value or None
+    browser_control_config = _build_browser_control_config(browser_control_value)
     internet_value = _normalize_internet_provider_name(internet_provider) or None
     internet_config = _build_internet_provider_config(internet_value)
     skills_marketplace_value = skills_marketplace_provider_value or None
@@ -862,6 +880,9 @@ async def agent_create_submit(
     )
     self_aware_validation_error = _validate_self_aware_config(self_aware_config_value)
     sandbox_validation_error = _validate_sandbox_provider_choice(sandbox_value)
+    browser_control_validation_error = _validate_browser_control_choice(
+        browser_control_value, browser_control_config
+    )
     internet_validation_error = _validate_internet_provider_choice(
         internet_value, internet_config
     )
@@ -871,6 +892,7 @@ async def agent_create_submit(
     )
     if (
         sandbox_validation_error
+        or browser_control_validation_error
         or internet_validation_error
         or skills_marketplace_validation_error
         or self_aware_validation_error
@@ -887,6 +909,7 @@ async def agent_create_submit(
                 "is_edit": False,
                 "error": (
                     sandbox_validation_error
+                    or browser_control_validation_error
                     or internet_validation_error
                     or skills_marketplace_validation_error
                     or self_aware_validation_error
@@ -916,6 +939,7 @@ async def agent_create_submit(
                 "llm_model": llm_model,
                 "llm_config_json": llm_config_json,
                 "sandbox_provider": sandbox_provider,
+                "browser_control_provider": browser_control_provider_value,
                 "internet_provider": internet_provider,
                 "skills_marketplace_provider": skills_marketplace_provider_value,
                 "enable_entity_memory": enable_entity_memory_value,
@@ -952,6 +976,7 @@ async def agent_create_submit(
         persona=persona_payload,
         llm_config=llm_config,
         sandbox_provider=sandbox_value,
+        browser_control=browser_control_config,
         internet_access_provider=internet_value,
         internet_access_config=internet_config,
         skills_marketplace_provider=skills_marketplace_value,
@@ -1011,6 +1036,7 @@ async def agent_create_submit(
                 "llm_model": llm_model,
                 "llm_config_json": llm_config_json,
                 "sandbox_provider": sandbox_provider,
+                "browser_control_provider": browser_control_provider_value,
                 "internet_provider": internet_provider,
                 "skills_marketplace_provider": skills_marketplace_provider_value,
                 "enable_entity_memory": enable_entity_memory_value,
@@ -1084,6 +1110,7 @@ async def agent_edit_submit(
     llm_model: str = Form(DEFAULT_LLM_MODEL_BY_PROVIDER[DEFAULT_LLM_PROVIDER]),
     llm_config_json: str = Form(""),
     sandbox_provider: str = Form(""),
+    browser_control_provider: str = Form(""),
     internet_provider: str = Form(""),
     skills_marketplace_provider: Optional[str] = Form(None),
     self_aware: Optional[str] = Form(None),
@@ -1208,6 +1235,20 @@ async def agent_edit_submit(
         skills_marketplace_value,
         skills_marketplace_base_config,
     )
+    browser_control_provider_value = _normalize_browser_control_provider_name(
+        browser_control_provider
+    )
+    existing_browser_control = getattr(existing, "browser_control", None)
+    existing_browser_provider = _normalize_browser_control_provider_name(
+        existing_browser_control
+    )
+    browser_control_config_value = _build_browser_control_config(
+        browser_control_provider_value or None,
+        existing_browser_control
+        if browser_control_provider_value == existing_browser_provider
+        and isinstance(existing_browser_control, dict)
+        else None,
+    )
     form_override_data = {
         "instruction": instruction,
         "application_mode": application_mode,
@@ -1231,6 +1272,7 @@ async def agent_edit_submit(
         "llm_model": llm_model,
         "llm_config_json": llm_config_json,
         "sandbox_provider": sandbox_provider,
+        "browser_control_provider": browser_control_provider_value,
         "internet_provider": internet_provider,
         "skills_marketplace_provider": skills_marketplace_provider_value,
         "enable_entity_memory": enable_entity_memory_value,
@@ -1264,6 +1306,32 @@ async def agent_edit_submit(
         )
 
     instruction_value = instruction.strip() if instruction else ""
+    browser_control_changed = (
+        browser_control_provider_value != existing_browser_provider
+    )
+    if browser_control_changed:
+        browser_control_validation_error = _validate_browser_control_choice(
+            browser_control_provider_value, browser_control_config_value
+        )
+        if browser_control_validation_error:
+            form_data = _build_agent_form_data(existing)
+            form_data.update(form_override_data)
+            return templates.TemplateResponse(
+                "agent_form.html",
+                {
+                    "request": request,
+                    "provider_type": _state["provider_type"],
+                    "connection_info": _state["connection_info"],
+                    "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
+                    "active_agent_id": agent_id,
+                    "active_page": "agents",
+                    "form_title": "Edit Agent",
+                    "form_action": f"/agents/{agent_id}/edit",
+                    "is_edit": True,
+                    "error": browser_control_validation_error,
+                    **form_data,
+                },
+            )
     internet_value = _normalize_internet_provider_name(internet_provider) or None
     internet_config = _build_internet_provider_config(internet_value)
     internet_validation_error = _validate_internet_provider_choice(
@@ -1403,6 +1471,7 @@ async def agent_edit_submit(
         skills_marketplace_config=skills_marketplace_config_value,
         knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
         sandbox_provider=sandbox_value,
+        browser_control=browser_control_config_value,
         skill_paths=getattr(existing, "skill_paths", None),
         mcp_servers=getattr(existing, "mcp_servers", None),
         self_aware=self_aware_enabled_value,

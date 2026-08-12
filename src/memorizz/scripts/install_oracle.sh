@@ -8,7 +8,7 @@
 #   ./install_oracle.sh
 #
 #   Or with custom password:
-#   export ORACLE_ADMIN_PASSWORD="YourSecurePassword123!"
+#   export ORACLE_ADMIN_PASSWORD='<generated-strong-admin-password>'
 #   ./install_oracle.sh
 #
 #   For Apple Silicon (M1/M2/M3):
@@ -22,7 +22,7 @@
 #   ./install_oracle.sh
 #
 # Environment Variables:
-#   ORACLE_ADMIN_PASSWORD  - Admin password (default: MyPassword123!)
+#   ORACLE_ADMIN_PASSWORD  - Admin password (required; prompted on a TTY)
 #   ORACLE_IMAGE_CHOICE    - Image selection (1, 2, or 3; default: interactive)
 #   ORACLE_IMAGE_TAG       - Oracle image tag (legacy, use ORACLE_IMAGE_CHOICE instead)
 #   ORACLE_VECTOR_MEMORY_SIZE - Vector memory pool size (default: 512M)
@@ -44,9 +44,9 @@ set -e  # Exit immediately on error
 CONTAINER_NAME="oracle-memorizz"
 VOLUME_NAME="oracle-memorizz-data"
 
-# Use environment variable if set, otherwise use default
-# Set ORACLE_ADMIN_PASSWORD to customize the admin password
-PASSWORD="${ORACLE_ADMIN_PASSWORD:-MyPassword123!}"
+# MemoRizz never supplies a database password. Non-interactive callers must set
+# ORACLE_ADMIN_PASSWORD; interactive callers receive a hidden prompt below.
+PASSWORD="${ORACLE_ADMIN_PASSWORD:-}"
 
 # Platform flag for Apple Silicon compatibility
 # Oracle Free may require emulation on ARM64
@@ -68,6 +68,22 @@ function success() {
 function prompt() {
   echo -e "\033[1;33m$1\033[0m" >&2
 }
+
+if [ -z "$PASSWORD" ]; then
+  if [ -t 0 ]; then
+    prompt "Oracle admin password (input hidden): "
+    read -r -s PASSWORD
+    echo "" >&2
+  else
+    error "ORACLE_ADMIN_PASSWORD is required in non-interactive mode"
+    exit 1
+  fi
+fi
+
+if [ ${#PASSWORD} -lt 12 ]; then
+  error "ORACLE_ADMIN_PASSWORD must contain at least 12 characters"
+  exit 1
+fi
 
 # --- Interactive Image Selection ---
 function select_oracle_image() {
@@ -184,24 +200,28 @@ else
   log "🚀 Creating and starting new container '$CONTAINER_NAME'..."
   log "   Using persistent volume: $VOLUME_NAME"
   # ORACLE_PWD for official images, ORACLE_PASSWORD for gvenzl community image
+  ORACLE_ENV_FILE=$(mktemp "${TMPDIR:-/tmp}/memorizz-oracle-env.XXXXXX")
+  chmod 600 "$ORACLE_ENV_FILE"
+  trap 'rm -f "$ORACLE_ENV_FILE"' EXIT
+  printf 'ORACLE_PWD=%s\nORACLE_PASSWORD=%s\n' "$PASSWORD" "$PASSWORD" > "$ORACLE_ENV_FILE"
   if [ -n "$PLATFORM_FLAG" ]; then
     docker run -d \
       $PLATFORM_FLAG \
-      --name $CONTAINER_NAME \
+      --name "$CONTAINER_NAME" \
       -p 1521:1521 \
-      -e ORACLE_PWD=$PASSWORD \
-      -e ORACLE_PASSWORD=$PASSWORD \
-      -v $VOLUME_NAME:/opt/oracle/oradata \
-      $IMAGE_NAME
+      --env-file "$ORACLE_ENV_FILE" \
+      -v "$VOLUME_NAME:/opt/oracle/oradata" \
+      "$IMAGE_NAME"
   else
     docker run -d \
-      --name $CONTAINER_NAME \
+      --name "$CONTAINER_NAME" \
       -p 1521:1521 \
-      -e ORACLE_PWD=$PASSWORD \
-      -e ORACLE_PASSWORD=$PASSWORD \
-      -v $VOLUME_NAME:/opt/oracle/oradata \
-      $IMAGE_NAME
+      --env-file "$ORACLE_ENV_FILE" \
+      -v "$VOLUME_NAME:/opt/oracle/oradata" \
+      "$IMAGE_NAME"
   fi
+  rm -f "$ORACLE_ENV_FILE"
+  trap - EXIT
 fi
 
 log "⏳ Waiting for Oracle to be ready (this may take 2–3 minutes)..."
@@ -226,7 +246,7 @@ log "🧠 Configuring vector memory pool (${VECTOR_MEMORY_SIZE})..."
 # Fast path: SCOPE=BOTH (works on official Oracle images)
 FAST_RESULT=$(docker exec $CONTAINER_NAME bash -c '
   echo "ALTER SYSTEM SET vector_memory_size='"${VECTOR_MEMORY_SIZE}"' SCOPE=BOTH;" | \
-  sqlplus -s sys/'"${PASSWORD}"'@localhost:1521/FREE as sysdba
+  sqlplus -s / as sysdba
 ' 2>&1)
 
 if echo "$FAST_RESULT" | grep -q "System altered"; then
@@ -235,7 +255,7 @@ else
   # Slow path: create SPFILE, set parameter, restart (needed for gvenzl/community images)
   log "   Setting via SPFILE (requires restart)..."
   docker exec $CONTAINER_NAME bash -c '
-    sqlplus -s sys/'"${PASSWORD}"'@localhost:1521/FREE as sysdba <<EOSQL
+    sqlplus -s / as sysdba <<EOSQL
 CREATE SPFILE FROM PFILE;
 ALTER SYSTEM SET vector_memory_size='"${VECTOR_MEMORY_SIZE}"' SCOPE=SPFILE;
 EOSQL
@@ -254,7 +274,7 @@ EOSQL
   # Verify
   ACTUAL_SIZE=$(docker exec $CONTAINER_NAME bash -c '
     echo "SELECT value FROM v\$parameter WHERE name='"'"'vector_memory_size'"'"';" | \
-    sqlplus -s sys/'"${PASSWORD}"'@localhost:1521/FREE as sysdba
+    sqlplus -s / as sysdba
   ' 2>/dev/null | grep -oE '[0-9]+' | head -1)
 
   if [ -n "$ACTUAL_SIZE" ] && [ "$ACTUAL_SIZE" != "0" ]; then
@@ -271,25 +291,16 @@ echo "  Host: localhost" >&2
 echo "  Port: 1521" >&2
 echo "  Service Name: FREEPDB1" >&2
 echo "  Admin User: system" >&2
-echo "  Admin Password: $PASSWORD" >&2
+echo "  Admin Password: <redacted; value supplied by operator>" >&2
 echo "" >&2
 echo "📝 Environment Variables:" >&2
-echo "  To use these credentials in your shell, run:" >&2
-echo "    eval \"\$(memorizz oracle install --image lite)\"" >&2
-echo "" >&2
-echo "  Or set manually:" >&2
-echo "    export ORACLE_ADMIN_PASSWORD=\"$PASSWORD\"" >&2
+echo "  Keep ORACLE_ADMIN_PASSWORD in your secret manager or local .env." >&2
+echo "  Generate a separate application password, then set:" >&2
 echo "    export ORACLE_USER=\"memorizz_user\"" >&2
-echo "    export ORACLE_PASSWORD=\"SecurePass123!\"" >&2
+echo "    export ORACLE_PASSWORD='<separate-strong-application-password>'" >&2
 echo "    export ORACLE_DSN=\"localhost:1521/FREEPDB1\"" >&2
 echo "" >&2
-# Export variables (useful if script is sourced)
-export ORACLE_ADMIN_PASSWORD="$PASSWORD"
-export ORACLE_USER="memorizz_user"
-export ORACLE_PASSWORD="SecurePass123!"
-export ORACLE_DSN="localhost:1521/FREEPDB1"
-# Output export commands to stdout (for eval) - these must be clean, no colors
-echo "export ORACLE_ADMIN_PASSWORD=\"$PASSWORD\""
+# Only non-secret connection metadata is emitted to stdout. Secret values are
+# never printed or returned for shell evaluation.
 echo "export ORACLE_USER=\"memorizz_user\""
-echo "export ORACLE_PASSWORD=\"SecurePass123!\""
 echo "export ORACLE_DSN=\"localhost:1521/FREEPDB1\""

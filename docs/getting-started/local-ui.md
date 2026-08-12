@@ -7,6 +7,10 @@ The Memorizz local UI gives you a browser-based workflow for connecting to your 
 - Connect to Oracle, MongoDB, or filesystem providers.
 - Create, edit, favorite, and delete agents.
 - Run agents in Playground with streaming responses.
+- Configure Browser Use per agent and approve/reject exact browser tasks in
+  Playground before they execute.
+- Connect agents to Notion, Google Calendar, or custom MCP servers, including
+  OAuth, encrypted credentials, allowlists, and mutation approvals.
 - Inspect memory types (personas, toolbox, conversations, workflows, long-term, short-term, entity, summaries, shared, cache).
 - Configure continual learning, choose user or reviewed developer authority
   for newly promoted skills, inspect trajectory gates, and activate/demote
@@ -88,6 +92,7 @@ Once connected, the sidebar is your main navigation.
 | Agents | `/agents` | Browse agents, sort, quick-chat, and jump into edit/playground. |
 | Create Agent | `/agents/new` | Build a new agent with mode, persona, tool/memory options, and provider config. |
 | Playground | `/playground` and `/agents/{id}/playground` | Interactive chat, thread switching, token/context stats, and per-agent runtime config. |
+| MCP Connections | `/mcp` | Configure/test MCP servers, authorize OAuth, inspect capabilities, and invoke governed tools. |
 | Memory Types | `/memory/{type}` | Browse stored memory entries by type (`personas`, `toolbox`, `conversations`, etc.). |
 | Continual Learning | `/memory/workflows` and `/memory/skills` | Review canonical trajectory classes, run gated distillation, inspect persisted skill authority, and activate/demote skills. |
 | Traces | `/traces` | Filter/search agents and inspect thread-level trace timelines. |
@@ -101,10 +106,49 @@ Once connected, the sidebar is your main navigation.
    To evaluate learned procedures, enable **Continual learning**, choose
    **User context** or **Developer instructions**, and keep **Require shadow
    review** enabled. Developer authority cannot be saved without review.
+   Select **Browser Use** under Browser Control only after installing the
+   isolated `browser-use` CLI and configuring its matching LLM key.
 3. Open that agent in `Playground`.
 4. Send a message and confirm streaming response.
 5. Switch to `Traces` to inspect events for that run.
 6. Review memory entries under `Memory Types` (especially conversations/summaries/cache).
+
+## Browser control in the UI
+
+Install Browser Use outside the MemoRizz environment, then validate it:
+
+```bash
+uv tool install --python 3.12 browser-use
+browser-use install
+browser-use doctor
+```
+
+In **Settings -> Browser Control**, choose the Browser Use LLM provider/model,
+set allowed/prohibited domains, and configure step and wall-clock limits. API
+keys are stored in the shared MemoRizz environment file; agent records retain
+only secret-free policy. Browser control remains disabled for an agent until it
+is selected in the create/edit form or Playground.
+
+When the model requests `browser_control`, Playground renders the exact task,
+arguments, policy reason, and proposal identifier. **Approve & resume** consumes
+that single-use proposal; **Reject** prevents execution. A model-visible
+`approved` or `confirm` field does not exist.
+
+See the [Browser Control guide](../browser-control/index.md).
+
+## MCP in the UI
+
+Open **MCP Connections** and select an agent. Presets are available for Notion,
+Google Calendar, and local stdio servers. Bearer tokens, OAuth client secrets,
+custom header values, and stdio environment secrets move to the encrypted
+credential store rather than agent JSON. Use **Test**, **Tools**, **Resources**,
+and **Prompts** to inspect a connection; mutating tool calls enter the same
+durable approval lifecycle.
+
+The page also shows commands for exposing MemoRizz itself as a local stdio or
+authenticated Streamable HTTP MCP server. See the
+[MCP Connectivity](../guides/mcp-connectivity.md) and
+[MemoRizz MCP Server](../guides/mcp-server.md) guides.
 
 For developer authority, an activated skill is sent as a native developer
 message to OpenAI and through Anthropic's top-level system parameter. Only
@@ -126,6 +170,8 @@ Evalground currently requires:
 - Default bind is localhost (`127.0.0.1`).
 - No built-in authentication is enabled.
 - Avoid exposing the UI directly on public networks.
+- Browser actions can change external systems. Keep approval enabled and use a
+  narrow domain allowlist for production agents.
 
 ## Troubleshooting
 

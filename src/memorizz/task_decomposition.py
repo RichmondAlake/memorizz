@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import inspect
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List
@@ -88,22 +89,64 @@ class TaskDecomposer:
             }
 
             # Extract tool capabilities
-            if agent.tools:
-                if hasattr(agent.tools, "list_tools"):  # Toolbox case
-                    for tool in agent.tools.list_tools():
-                        if "function" in tool:
-                            agent_capabilities["tools"].append(
-                                {
-                                    "name": tool["function"].get("name"),
-                                    "description": tool["function"].get("description"),
-                                }
-                            )
-                elif isinstance(agent.tools, list):  # List case
-                    for tool in agent.tools:
+            manager = getattr(agent, "tool_manager", None)
+            if manager is not None:
+                for tool in manager.get_tool_metadata() or []:
+                    if callable(tool):
                         agent_capabilities["tools"].append(
                             {
-                                "name": tool.get("name"),
-                                "description": tool.get("description"),
+                                "name": getattr(tool, "__name__", "callable"),
+                                "description": inspect.getdoc(tool) or "",
+                            }
+                        )
+                        continue
+                    if hasattr(tool, "model_dump"):
+                        tool = tool.model_dump()
+                    if not isinstance(tool, dict):
+                        logger.debug(
+                            "Ignoring unsupported tool metadata for agent %s: %s",
+                            agent.agent_id,
+                            type(tool).__name__,
+                        )
+                        continue
+                    function = tool.get("function")
+                    agent_capabilities["tools"].append(
+                        {
+                            "name": (
+                                function.get("name")
+                                if isinstance(function, dict)
+                                else tool.get("name")
+                            ),
+                            "description": (
+                                function.get("description")
+                                if isinstance(function, dict)
+                                else tool.get("description")
+                            ),
+                        }
+                    )
+            elif isinstance(agent.tools, list):
+                for tool in agent.tools:
+                    if callable(tool):
+                        agent_capabilities["tools"].append(
+                            {
+                                "name": getattr(tool, "__name__", "callable"),
+                                "description": inspect.getdoc(tool) or "",
+                            }
+                        )
+                    elif isinstance(tool, dict):
+                        function = tool.get("function")
+                        agent_capabilities["tools"].append(
+                            {
+                                "name": (
+                                    function.get("name")
+                                    if isinstance(function, dict)
+                                    else tool.get("name")
+                                ),
+                                "description": (
+                                    function.get("description")
+                                    if isinstance(function, dict)
+                                    else tool.get("description")
+                                ),
                             }
                         )
 
@@ -112,7 +155,10 @@ class TaskDecomposer:
         return capabilities
 
     def decompose_task(
-        self, user_query: str, delegates: List["MemAgent"]
+        self,
+        user_query: str,
+        delegates: List["MemAgent"],
+        plan: Any = None,
     ) -> List[SubTask]:
         """
         Decompose a complex task into sub-tasks aligned with delegate capabilities.
@@ -125,6 +171,11 @@ class TaskDecomposer:
             List[SubTask]: List of decomposed sub-tasks
         """
         try:
+            if callable(plan):
+                plan = plan(user_query, delegates)
+            if plan is not None:
+                capabilities = self.analyze_delegate_capabilities(delegates)
+                return self._coerce_plan(plan, capabilities)
             logger.info(f"Starting task decomposition for query: {user_query}")
             logger.info(f"Number of delegates: {len(delegates)}")
 
@@ -139,7 +190,8 @@ class TaskDecomposer:
                 user_query, capabilities
             )
 
-            # Use the root agent's model to decompose the task
+            # Use the configured LLMProvider/model — never a vendor client or
+            # hard-coded deployment name.
             messages = [
                 {"role": "system", "content": decomposition_prompt},
                 {
@@ -149,21 +201,20 @@ class TaskDecomposer:
             ]
 
             logger.info("Calling LLM for task decomposition...")
-            response = self.root_agent.model.client.responses.create(
-                model="gpt-4.1", input=messages
-            )
+            if not self.root_agent.model:
+                raise ValueError("Root agent has no configured LLMProvider")
+            response = self.root_agent.model.generate(messages, tools=None)
+            response_text = self._response_text(response)
 
             logger.info(
-                f"LLM response received: {response.output_text[:200]}..."
-                if response.output_text
+                f"LLM response received: {response_text[:200]}..."
+                if response_text
                 else "No response text"
             )
 
             # Parse the response to extract sub-tasks
             logger.info("Parsing decomposition response...")
-            sub_tasks = self._parse_decomposition_response(
-                response.output_text, capabilities
-            )
+            sub_tasks = self._parse_decomposition_response(response_text, capabilities)
             logger.info(f"Successfully parsed {len(sub_tasks)} sub-tasks")
 
             return sub_tasks
@@ -171,6 +222,47 @@ class TaskDecomposer:
         except Exception as e:
             logger.error(f"Error decomposing task: {e}", exc_info=True)
             return []
+
+    @staticmethod
+    def _response_text(response: Any) -> str:
+        if isinstance(response, str):
+            return response
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return str(output_text)
+        choices = getattr(response, "choices", None) or []
+        if choices:
+            message = getattr(choices[0], "message", None)
+            return str(getattr(message, "content", "") or "")
+        return str(response or "")
+
+    def _coerce_plan(
+        self, plan: Any, capabilities: Dict[str, Dict[str, Any]]
+    ) -> List[SubTask]:
+        if not isinstance(plan, list):
+            raise TypeError("A deterministic delegation plan must be a list")
+        values: List[SubTask] = []
+        for index, item in enumerate(plan):
+            if isinstance(item, SubTask):
+                task = item
+            elif isinstance(item, dict):
+                task = SubTask(
+                    task_id=str(item.get("task_id") or f"task_{index + 1}"),
+                    description=str(item.get("description") or ""),
+                    assigned_agent_id=str(item.get("assigned_agent_id") or ""),
+                    priority=int(item.get("priority", 1)),
+                    dependencies=list(item.get("dependencies") or []),
+                )
+            else:
+                raise TypeError("Delegation plan entries must be SubTask or dict")
+            if task.assigned_agent_id not in capabilities:
+                raise ValueError(
+                    f"Unknown delegate '{task.assigned_agent_id}' in delegation plan"
+                )
+            if not task.description.strip():
+                raise ValueError("Delegation task descriptions cannot be empty")
+            values.append(task)
+        return values
 
     def _create_decomposition_prompt(
         self, user_query: str, capabilities: Dict[str, Dict[str, Any]]
@@ -234,9 +326,16 @@ Only respond with the JSON array, no additional text.
                 response_text = response_text[:-3]
 
             task_data = json.loads(response_text)
+            if isinstance(task_data, dict):
+                task_data = task_data.get("sub_tasks") or task_data.get("tasks")
+            if not isinstance(task_data, list):
+                raise ValueError("Decomposition response must be a JSON task array")
 
             sub_tasks = []
             for task in task_data:
+                if not isinstance(task, dict):
+                    logger.warning("Ignoring non-object delegation task: %r", task)
+                    continue
                 # Validate that assigned agent exists
                 if task.get("assigned_agent_id") in capabilities:
                     sub_task = SubTask(

@@ -104,6 +104,40 @@
         border-radius: 6px;
     }
 
+    .pg-approval-card {
+        margin-top: 12px;
+        padding: 12px;
+        border: 1px solid rgba(255, 184, 77, 0.45);
+        border-radius: 8px;
+        background: rgba(255, 184, 77, 0.08);
+    }
+    .pg-approval-card-title {
+        color: #ffc46b;
+        font-weight: 650;
+        margin-bottom: 6px;
+    }
+    .pg-approval-card code,
+    .pg-approval-card pre {
+        font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+    .pg-approval-card pre {
+        max-height: 180px;
+        overflow: auto;
+        white-space: pre-wrap;
+        padding: 8px;
+        border-radius: 5px;
+        background: rgba(0, 0, 0, 0.25);
+    }
+    .pg-approval-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+    }
+    .pg-approval-status {
+        margin-top: 8px;
+        color: rgba(255, 255, 255, 0.8);
+    }
+
     /* Compact button styles */
     .compact-btn {
         display: inline-flex;
@@ -306,6 +340,17 @@
                 {% endif %}
             </div>
             <div class="config-field">
+                <label for="cfg-browser-control-provider">Browser Control</label>
+                <select id="cfg-browser-control-provider" name="browser_control_provider">
+                    <option value="" {% if not browser_control_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="browseruse" {% if browser_control_provider == 'browseruse' %}selected{% endif %}>Browser Use (isolated tool)</option>
+                </select>
+                {% if browser_control_status_error %}
+                <p class="form-hint sandbox-error-hint">{{ browser_control_status_error }}</p>
+                {% endif %}
+                <p class="form-hint">Model calls pause for durable operator approval before browser execution.</p>
+            </div>
+            <div class="config-field">
                 <label for="cfg-skills-marketplace-provider">Skills Marketplace</label>
                 <select id="cfg-skills-marketplace-provider" name="skills_marketplace_provider">
                     <option value="" {% if not skills_marketplace_provider %}selected{% endif %}>None (disabled)</option>
@@ -380,12 +425,10 @@
             </div>
             <div class="config-field config-field--wide">
                 <label>MCP Servers</label>
-                <input id="cfg-mcp-servers-json" type="hidden" name="mcp_servers_json" value="[]">
-                <div id="cfg-mcp-server-rows" class="config-dynamic-list"></div>
+                <p class="form-hint">MCP connections, encrypted credentials, OAuth, and tool permissions are managed on the dedicated connections page.</p>
                 <div class="config-dynamic-actions">
-                    <button type="button" class="btn btn-sm" onclick="addMcpServerRow()">Add MCP Server</button>
+                    <a class="btn btn-sm" href="/mcp?agent_id={{ active_agent_id }}">Manage MCP Connections</a>
                 </div>
-                <p class="form-hint">Configure MCP servers for sandboxed stdio/http access. For stdio, provide command + args + env.</p>
             </div>
 
             {% if agent_tools %}
@@ -1732,11 +1775,13 @@ function collectMcpServers() {
 function serializeConfigCollections() {
     const skillPathsHidden = document.getElementById('cfg-skill-paths-json');
     const mcpServersHidden = document.getElementById('cfg-mcp-servers-json');
-    if (!skillPathsHidden || !mcpServersHidden) return true;
+    if (!skillPathsHidden) return true;
 
     try {
         skillPathsHidden.value = JSON.stringify(collectSkillPaths());
-        mcpServersHidden.value = JSON.stringify(collectMcpServers());
+        if (mcpServersHidden) {
+            mcpServersHidden.value = JSON.stringify(collectMcpServers());
+        }
         return true;
     } catch (err) {
         alert(err.message);
@@ -2393,9 +2438,90 @@ function createStreamingMessage() {
     container.appendChild(div);
     scrollToBottom();
     return {
+        container: div,
         textElement: div.querySelector('.pg-message-text'),
         traceTimeline: div.querySelector('.pg-trace-timeline'),
     };
+}
+
+function renderApprovalCard(messageContainer, payload) {
+    const proposal = payload && payload.proposal;
+    const body = messageContainer && messageContainer.querySelector('.pg-message-body');
+    if (!proposal || !body) return;
+
+    const card = document.createElement('div');
+    card.className = 'pg-approval-card';
+    const argsText = JSON.stringify(proposal.arguments || {}, null, 2);
+    card.innerHTML = `
+        <div class="pg-approval-card-title">Human approval required</div>
+        <div><strong>Tool:</strong> <code>${escapeHtml(String(proposal.tool_name || 'unknown'))}</code></div>
+        <div><strong>Policy:</strong> ${escapeHtml(String(proposal.policy_reason || 'Host approval required'))}</div>
+        <div><strong>Expires:</strong> ${escapeHtml(String(proposal.expires_at || 'unknown'))}</div>
+        <details>
+            <summary>Exact arguments and digest</summary>
+            <pre>${escapeHtml(argsText)}</pre>
+            <div><code>${escapeHtml(String(proposal.argument_hash || ''))}</code></div>
+        </details>
+        <div class="pg-approval-actions">
+            <button type="button" class="btn btn-primary pg-approval-approve">Approve &amp; resume</button>
+            <button type="button" class="btn btn-secondary pg-approval-reject">Reject</button>
+        </div>
+        <div class="pg-approval-status" aria-live="polite"></div>
+    `;
+    body.appendChild(card);
+
+    const approveButton = card.querySelector('.pg-approval-approve');
+    const rejectButton = card.querySelector('.pg-approval-reject');
+    const status = card.querySelector('.pg-approval-status');
+    const proposalId = String(proposal.proposal_id || '');
+
+    async function decide(action) {
+        const approverId = window.prompt('Approver identity (email or operator ID):', 'local-ui');
+        if (!approverId || !approverId.trim()) return;
+        approveButton.disabled = true;
+        rejectButton.disabled = true;
+        status.textContent = action === 'approve' ? 'Recording approval…' : 'Rejecting…';
+        try {
+            const decisionResponse = await fetch(
+                `/api/agents/${encodeURIComponent(AGENT_ID)}/approvals/${encodeURIComponent(proposalId)}/${action}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ approver_id: approverId.trim() }),
+                },
+            );
+            const decision = await decisionResponse.json();
+            if (!decisionResponse.ok) {
+                throw new Error(decision.detail || `HTTP ${decisionResponse.status}`);
+            }
+            if (action === 'reject') {
+                status.textContent = `Rejected by ${approverId.trim()}. No tool was executed.`;
+                return;
+            }
+
+            status.textContent = 'Approved. Resuming the saved checkpoint…';
+            const resumeResponse = await fetch(
+                `/api/agents/${encodeURIComponent(AGENT_ID)}/approvals/${encodeURIComponent(proposalId)}/resume`,
+                { method: 'POST' },
+            );
+            const resumed = await resumeResponse.json();
+            if (!resumeResponse.ok) {
+                throw new Error(resumed.detail || `HTTP ${resumeResponse.status}`);
+            }
+            status.textContent = `Approved and consumed by ${approverId.trim()}.`;
+            const resultText = typeof resumed.result === 'string'
+                ? resumed.result
+                : JSON.stringify(resumed.result, null, 2);
+            appendMessage('assistant', resultText || 'The approved action completed.');
+        } catch (err) {
+            status.textContent = `Approval action failed: ${err.message}`;
+            approveButton.disabled = false;
+            rejectButton.disabled = false;
+        }
+    }
+
+    approveButton.addEventListener('click', () => decide('approve'));
+    rejectButton.addEventListener('click', () => decide('reject'));
 }
 
 function closeTokenTooltip() {
@@ -3048,6 +3174,16 @@ async function sendMessage() {
 
                 if (parsed && typeof parsed === 'object') {
                     const eventType = String(parsed.type || '').toLowerCase();
+
+                    if (String(parsed.status || '').toLowerCase() === 'approval_required') {
+                        fullText = String(
+                            parsed.message || 'Execution is paused for human approval.'
+                        );
+                        streamTarget.textContent = fullText;
+                        renderApprovalCard(streamMessage.container, parsed);
+                        scrollToBottom();
+                        return;
+                    }
 
                     if (eventType === 'trace' || eventType === 'reasoning') {
                         appendTraceBox(streamTraceTimeline, parsed);

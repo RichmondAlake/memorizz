@@ -5,9 +5,6 @@
 """Daytona sandbox provider — cloud-based dev environments with unlimited runtime.
 
 Daytona offers full development environments with:
-- ~90ms cold start
-- Unlimited session duration
-- GPU support
 - Git operations built-in
 - process.code_run for multi-language support
 

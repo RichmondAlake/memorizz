@@ -268,7 +268,9 @@ def test_tool_context_omitted_yields_empty_dict_inside_tool(memagent_with_mocks)
 
     agent.model.generate = fake_generate
 
-    agent.run("hello")
+    # Progressive disclosure must select the tool before a direct invocation;
+    # include its intent/name in the turn instead of fabricating a hidden tool.
+    agent.run("trigger my tool")
     assert captured["snapshot"] == {}
 
 

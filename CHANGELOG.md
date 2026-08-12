@@ -1,6 +1,93 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-08-12
+
+### Added
+
+* First-class MCP client connectivity over stdio, Streamable HTTP, and legacy
+  SSE, including Notion and Google Calendar OAuth presets, encrypted
+  credentials, SSRF controls, mutation approval, and CLI/UI management.
+* A first-party MemoRizz MCP server with 11 memory, conversation, and agent
+  tools; resources and a prompt; local stdio; authenticated Streamable HTTP;
+  per-principal tenant isolation; scoped bearer grants; and explicit remote
+  write, execution, and agent-exposure policy.
+* Durable, generic human approval proposals with exact argument hashes,
+  serialized checkpoints, expiry, approver audit fields, atomic single-use
+  consumption, Python/UI decision surfaces, MCP-specific CLI controls, and
+  exact resume semantics. Model-visible `approved` and `confirm` arguments have
+  been removed.
+* First-class progressive tool disclosure through `SemanticToolRouter`, with
+  scoped top-k retrieval, stable discovery/invocation handles, allowlisted
+  dispatch, strict JSON Schema/signature binding, aliases, deprecated-argument
+  migration, and duplicate/retry budgets.
+* Size-aware `ToolResultPolicy`: small responses remain inline, large responses
+  are persisted exactly once behind digest-bearing pointers, and expansion
+  tools are never re-offloaded.
+* Semantic-cache governance with tenant-complete keys, admission/bypass rules,
+  model/prompt/tool/data fingerprints, freshness and provenance, operational
+  counters, and domain/tag/version invalidation APIs.
+* A governed semantic layer with versioned entities, measures, dimensions,
+  relationships, policies, synonyms, lineage, and validated query plans.
+* Oracle local-runtime bootstrap, structured preflight, configurable vector
+  index policies, exact-search fallback, sizing diagnostics, and transactional
+  `delete_scope(...)` cleanup.
+* `memorizz.capabilities()`, `agent.capability_report()`, `memorizz
+  capabilities`, and `memorizz oracle preflight` for feature-level deployment
+  checks.
+* Provider-neutral browser control with an isolated Browser Use provider,
+  bounded natural-language tasks, domain policy, direct-IP blocking, private
+  fixed-worker execution through the isolated tool interpreter, structured
+  results, process-group timeouts, deterministic browser cleanup, builder and
+  persistence support, and CLI/UI configuration. Every model-initiated browser
+  call uses generic durable HITL.
+* Generic `/approvals` and browser-specific `/browser` REPL commands, plus
+  `--browser-control/--no-browser-control` on `chat` and `run`.
+
+### Changed
+
+* E2B uses the current `Sandbox.create(...)` lifecycle with an older-SDK
+  compatibility path, one bounded stateful session, normalized result shapes,
+  fail-fast API-key validation, explicit egress/compute metadata, and reliable
+  context-manager termination.
+* GraalPy subprocess mode is now explicitly a bounded execution provider—not a
+  strong sandbox—with private-path confinement, environment allowlisting,
+  resource limits, and fail-closed network policy. The packaged Java wrapper is
+  mandatory for `UNTRUSTED` mode. The UI now keeps mode selection independent
+  from egress and defaults trusted subprocess execution to network denied.
+* Multi-agent orchestration and decomposition use the configured `LLMProvider`
+  and model, support deterministic plans, make delegates operational, propagate
+  tenant/request/tool/trace context, scope shared memory by workflow, and
+  expose dependency-aware partial failures.
+* `MemAgentBuilder` now covers sandbox, Toolbox, Skillbox/authored skills,
+  skills marketplaces, tool/context policies, approval stores, delegation, the
+  semantic layer, validation, and persistence.
+* Deterministic Toolbox registration no longer constructs an LLM or embedding
+  client. Trusted callables can be rebound after restart only through explicit
+  registries or import references.
+* Authored Skillbox retrieval is independent of continual learning and applies
+  agent/user isolation before vector top-k selection.
+* Browser Use is deliberately invoked through the isolated Python interpreter
+  of a separately installed tool environment because its current package
+  dependency line is incompatible with MemoRizz's MCP 2.x requirement;
+  model-provided code is never executed.
+* Oracle setup and teardown no longer contain, infer, return, or print default
+  database passwords. Non-interactive setup requires explicit credentials and
+  interactive setup uses hidden input. UI-created Docker containers pass
+  credentials through a private short-lived env file rather than process argv.
+
+### Fixed
+
+* Oracle now persists complete Toolbox JSON Schemas and restores required,
+  default, enum, nested-type, alias, policy, and import-reference metadata.
+* Oracle summaries now retain canonical source-message IDs, period boundaries,
+  unit counts, summary-by-ID lookup, normalized message links, atomic original
+  marking, and lossless expansion parity with other providers.
+* Oracle knowledge-base and short-term writes return their physical record IDs,
+  restoring reliable write/read round trips through the first-party MCP server.
+* MCP mutation classification now honors tool annotations and configured
+  metadata before conservative name inference.
+* Tool-log listing now preserves exact anonymous/user scope and cannot leak a
+  tenant's records through an omitted optional argument.
 
 ## 0.4.0 — 2026-07-19
 

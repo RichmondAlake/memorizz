@@ -329,6 +329,94 @@ def make_internet_provider():
 
 
 # --------------------------------------------------------------------------- #
+# Browser control
+# --------------------------------------------------------------------------- #
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = _env(name)
+    if value is None:
+        return default
+    normalized = value.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _env_int(name: str, default: int) -> int:
+    value = _env(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _env_list(name: str) -> List[str]:
+    value = _env(name)
+    if not value:
+        return []
+    return [
+        item.strip()
+        for line in value.splitlines()
+        for item in line.split(",")
+        if item.strip()
+    ]
+
+
+def make_browser_control_config(
+    provider_name: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build a secret-free browser-control config from environment settings.
+
+    Browser control is opt-in. It is enabled by an explicit provider argument
+    or ``MEMORIZZ_BROWSER_CONTROL_PROVIDER=browseruse``; merely setting an LLM
+    API key never exposes browser automation to the model.
+    """
+    provider = (
+        str(provider_name).strip().lower()
+        if provider_name is not None
+        else (_env("MEMORIZZ_BROWSER_CONTROL_PROVIDER") or "").lower()
+    )
+    if not provider or provider in {"none", "off", "disabled"}:
+        return None
+    if provider.replace("-", "") != "browseruse":
+        raise ValueError(
+            f"Unknown browser-control provider '{provider}'. Supported: browseruse"
+        )
+
+    llm_provider = (_env("MEMORIZZ_BROWSER_USE_LLM_PROVIDER") or "openai").lower()
+    config: Dict[str, Any] = {
+        "provider": "browseruse",
+        "command": _env("MEMORIZZ_BROWSER_USE_COMMAND") or "browser-use",
+        "llm_provider": llm_provider,
+        "headless": _env_bool("MEMORIZZ_BROWSER_USE_HEADLESS", True),
+        "use_vision": _env_bool("MEMORIZZ_BROWSER_USE_VISION", True),
+        "allowed_domains": _env_list("MEMORIZZ_BROWSER_USE_ALLOWED_DOMAINS"),
+        "prohibited_domains": _env_list("MEMORIZZ_BROWSER_USE_PROHIBITED_DOMAINS"),
+        "block_ip_addresses": _env_bool(
+            "MEMORIZZ_BROWSER_USE_BLOCK_IP_ADDRESSES", True
+        ),
+        "use_cloud": _env_bool("MEMORIZZ_BROWSER_USE_CLOUD", False),
+        "max_steps": _env_int("MEMORIZZ_BROWSER_USE_MAX_STEPS", 25),
+        "task_timeout": _env_int("MEMORIZZ_BROWSER_USE_TASK_TIMEOUT", 600),
+    }
+    python_command = _env("MEMORIZZ_BROWSER_USE_PYTHON_COMMAND")
+    if python_command:
+        config["python_command"] = python_command
+    model = _env("MEMORIZZ_BROWSER_USE_MODEL")
+    if model:
+        config["model"] = model
+    cdp_url_env = _env("MEMORIZZ_BROWSER_USE_CDP_URL_ENV")
+    if cdp_url_env:
+        config["cdp_url_env"] = cdp_url_env
+    return config
+
+
+# --------------------------------------------------------------------------- #
 # Agent assembly
 # --------------------------------------------------------------------------- #
 
@@ -373,13 +461,14 @@ def build_session_agent(
     memory_provider: Optional[Any] = None,
     instruction: Optional[str] = None,
     fresh: bool = False,
+    browser_control_enabled: Optional[bool] = None,
 ) -> Session:
     """Detect config and return a ready-to-run :class:`Session`.
 
     Reuses ONE persistent MemAgent across launches: the default agent id and the
-    rolling memory id are stored in ``~/.memorizz/state.json`` so memory carries
-    over between `memorizz` invocations. Pass ``fresh=True`` to ignore saved
-    state and start a brand-new agent + memory.
+    active memory/thread pair are stored in ``~/.memorizz/state.json`` so the
+    exact conversation carries over between `memorizz` invocations. Pass
+    ``fresh=True`` to ignore saved state and start a brand-new agent + memory.
     """
     from ..memagent import MemAgent
     from ..memagent.builders.agent_builder import MemAgentBuilder
@@ -455,8 +544,98 @@ def build_session_agent(
     except Exception:
         pass
 
-    # 4. Reuse the rolling memory id so long-term recall spans sessions.
+    # 3d. Browser automation is never inferred from an API key. The CLI flag
+    # or an explicit provider environment setting is required. A persisted
+    # agent configuration is otherwise left intact.
+    browser_setting = _env("MEMORIZZ_BROWSER_CONTROL_PROVIDER")
+    browser_changed = False
+    if browser_control_enabled is False:
+        agent.with_browser_control(None)
+        browser_changed = True
+    elif browser_control_enabled is True or browser_setting is not None:
+        requested_provider = (
+            "browseruse" if browser_control_enabled is True else browser_setting
+        )
+        if str(requested_provider or "").strip().lower() in {
+            "",
+            "none",
+            "off",
+            "disabled",
+        }:
+            agent.with_browser_control(None)
+            browser_changed = True
+        else:
+            try:
+                browser_config = make_browser_control_config(requested_provider)
+                if browser_config:
+                    agent.with_browser_control(browser_config)
+                    browser_changed = True
+            except Exception as exc:
+                if browser_control_enabled is True:
+                    raise
+                warnings.append(f"Browser control could not be enabled: {exc}")
+
+    if browser_changed and not fresh and getattr(agent, "memory_provider", None):
+        try:
+            agent.save()
+        except Exception as exc:
+            warnings.append(f"Browser-control configuration was not saved: {exc}")
+
+    # The CLI and local UI share a secret-free per-agent MCP configuration.
+    # Agent persistence remains the portable source of truth; once the shared
+    # file exists it reflects explicit CLI/UI edits and is applied at startup.
+    try:
+        from . import mcp_config
+
+        owner_id = str(
+            getattr(agent, "agent_id", None) or saved_agent_id or "cli-default"
+        )
+        config_owner = owner_id
+        if (
+            not saved_agent_id
+            and not mcp_config.has_server_config(owner_id)
+            and mcp_config.has_server_config("cli-default")
+        ):
+            # `memorizz mcp add ...` is valid before the very first chat has
+            # created an agent ID. Adopt that bootstrap configuration once the
+            # persistent default agent exists.
+            config_owner = "cli-default"
+        if mcp_config.has_server_config(config_owner):
+            agent.with_mcp_servers(mcp_config.load_servers(config_owner))
+            if config_owner != owner_id:
+                mcp_config.save_servers(agent.mcp_servers, owner_id)
+            if getattr(agent, "memory_provider", None) is not None:
+                agent.save()
+        else:
+            mcp_config.save_servers(
+                list(getattr(agent, "mcp_servers", None) or []), owner_id
+            )
+    except Exception as exc:
+        warnings.append(f"MCP configuration could not be loaded: {exc}")
+
+    # 4. Reuse the exact rolling conversation so a relaunch resumes the same
+    # memory/thread pair. Older state files only stored memory_id; migrate
+    # those to the most recently active stored thread when possible.
     memory_id = None if fresh else state.get("memory_id")
+    thread_id = None if fresh else state.get("thread_id")
+    if memory_id and not thread_id:
+        try:
+            from .conversations import latest_thread_id
+
+            thread_id = latest_thread_id(
+                provider,
+                str(memory_id),
+                user_id=None,
+                agent_id=getattr(agent, "agent_id", None),
+            )
+        except Exception:
+            thread_id = None
+
+    if memory_id and thread_id:
+        try:
+            agent.resume_thread(str(memory_id), str(thread_id))
+        except Exception:
+            pass
 
     return Session(
         agent=agent,
@@ -464,5 +643,6 @@ def build_session_agent(
         llm_config=resolved_llm,
         code_mode=bool(code_mode),
         memory_id=memory_id,
+        thread_id=thread_id,
         warnings=warnings,
     )

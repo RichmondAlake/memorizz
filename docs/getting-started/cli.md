@@ -81,8 +81,11 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/ollama [list\|pull <tag>\|host <url>]` | List/pull Ollama models or set `OLLAMA_HOST`. |
 | `/web [on\|off\|tavily\|firecrawl]` | Enable/disable internet search (Tavily/Firecrawl). |
 | `/code [on\|off]` | Toggle coding tools (file read/write + bounded commands, scoped to cwd). |
+| `/browser [status\|on\|off\|run <task>]` | Inspect/configure Browser Use or run an explicit host browser task. |
+| `/approvals [status/action]` | List, approve, reject, cancel, or resume durable generic tool proposals. |
 | `/memory [id]` | Show or switch the active memory id. |
 | `/history` | Print the current conversation history. |
+| `/conversations [search]` | Open a searchable picker and resume a saved conversation thread. |
 | `/forget <id>` | Delete a single stored memory by id. |
 | `/new` | Start a fresh conversation thread (keeps long-term memory). |
 | `/clear` | **Erase the agent's entire stored memory** (asks to confirm). |
@@ -105,9 +108,15 @@ Running `memorizz` with no arguments launches the interactive loop:
 memory — it remembers facts you share and recalls them in later turns and later
 sessions.
 
-**Coding mode.** Launch with `memorizz --code`, or type `/code` in the REPL, to
+**Coding mode.** Launch with `memorizz chat --code`, or type `/code` in the REPL, to
 enable the agent's self-aware tools: read/write files and run a bounded set of
 commands, scoped to the current working directory (writes on, deletes off).
+
+**Browser-control mode.** Launch with `memorizz chat --browser-control` (or use
+`/browser on`) to attach the configured Browser Use provider. Model-initiated
+browser calls pause as durable proposals; a model cannot set an `approved` or
+`confirm` argument. `/browser run <task>` is a direct, explicit host action and
+therefore does not represent a model approval.
 
 ## Internet access
 
@@ -135,12 +144,13 @@ a 7B+ model for reliable multi-step web use.
 ## Persistent agent & memory
 
 Unlike a stateless chat, the CLI reuses **one** persistent agent across launches.
-The default agent id and the rolling memory id are stored in
-`~/.memorizz/state.json`, so a fact you teach it today is recalled tomorrow.
+The default agent id and active memory/thread pair are stored in
+`~/.memorizz/state.json`, so the selected conversation resumes after relaunch.
 
 | Action | Command | Effect |
 |---|---|---|
 | New conversation, keep long-term memory | `/new` | Starts a fresh thread; past facts still recalled semantically. |
+| Resume a previous conversation | `/conversations` | Search by title, preview, memory ID, or thread ID; select with ↑/↓ and Enter. |
 | Forget one memory | `/forget <id>` | Deletes a single stored entry. |
 | Wipe everything | `/clear` | Erases all stored memory after confirmation; keeps persona + tools. |
 
@@ -151,6 +161,7 @@ Run a single prompt and print the reply (pipe-friendly, no REPL):
 ```bash
 memorizz run "Summarize what you remember about my project."
 memorizz run --code "Add a docstring to utils.py and run the tests."
+memorizz run --browser-control "Read the title of example.com."
 ```
 
 One-shot turns share the same persistent agent + memory as the REPL.
@@ -163,7 +174,7 @@ Memorizz centralizes config under `~/.memorizz/`:
 |---|---|
 | `~/.memorizz/.env` | API keys and `MEMORIZZ_*` defaults. |
 | `~/.memorizz/memory/` | Default filesystem memory store. |
-| `~/.memorizz/state.json` | Persistent agent id + rolling memory id. |
+| `~/.memorizz/state.json` | Persistent agent id + active memory/thread ids. |
 | `~/.memorizz/history` | REPL input history. |
 
 Overrides: `MEMORIZZ_HOME` (the home dir) and `MEMORIZZ_ENV_FILE` (the env file).
@@ -177,7 +188,56 @@ Useful commands:
 memorizz init           # interactive key wizard
 memorizz init --local   # configure the local Ollama stack
 memorizz config         # show paths, providers, embeddings, and learning mode
+memorizz capabilities   # report installed features/provider readiness
+memorizz oracle preflight --index-policy lazy
 ```
+
+### Browser control
+
+Browser control is explicit opt-in; an LLM API key alone never enables it. Keep
+Browser Use in its own tool environment because its MCP dependency line can
+differ from MemoRizz's:
+
+```bash
+uv tool install --python 3.12 browser-use
+browser-use install
+browser-use doctor
+
+export MEMORIZZ_BROWSER_CONTROL_PROVIDER=browseruse
+export MEMORIZZ_BROWSER_USE_COMMAND=browser-use
+# Optional only when the entry point has no discoverable Python shebang:
+# export MEMORIZZ_BROWSER_USE_PYTHON_COMMAND=/opt/browser-use/bin/python
+export MEMORIZZ_BROWSER_USE_LLM_PROVIDER=openai
+export MEMORIZZ_BROWSER_USE_ALLOWED_DOMAINS="example.com,*.notion.so"
+export MEMORIZZ_BROWSER_USE_MAX_STEPS=25
+export MEMORIZZ_BROWSER_USE_TASK_TIMEOUT=600
+```
+
+The provider resolves the isolated interpreter behind the Browser Use entry
+point, runs a private fixed worker for each bounded task, passes only an
+environment allowlist, blocks direct IP navigation by default, and closes the
+worker/browser on success, error, or timeout. Configure the matching
+credential (`BROWSER_USE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+`GOOGLE_API_KEY`) in the environment; credentials are not serialized into the
+agent record.
+
+```text
+/browser status
+/browser on
+/browser run Read the title at https://example.com
+/browser off
+```
+
+For a model-requested task, use the generic approval lifecycle:
+
+```text
+/approvals pending
+/approvals approve PROPOSAL_ID operator@example.com reviewed
+/approvals resume PROPOSAL_ID
+```
+
+See the [Browser Control guide](../browser-control/index.md) for SDK, builder,
+UI, domain-policy, result, and custom-provider details.
 
 To run the CLI against Oracle with an existing external-vector schema, keep
 the embedding mode and dimensions aligned with the schema:
@@ -232,16 +292,56 @@ See the [Local UI Guide](local-ui.md) for details.
 
 ```text
 memorizz                 # launch the interactive REPL (default)
-memorizz chat [--code] [--provider P] [--model M]
-memorizz run "<prompt>"  # one-shot
+memorizz chat [--code] [--browser-control] [--provider P] [--model M]
+memorizz run [--code] [--browser-control] "<prompt>"  # one-shot
 memorizz ui [--host H] [--port N]
 memorizz init [--local]
+memorizz mcp serve [--transport stdio|streamable-http]
 memorizz config
+memorizz mcp --help
 memorizz --version
-memorizz oracle install|setup|setup-schema|teardown
+memorizz oracle install|setup|setup-schema|preflight|teardown
 memorizz automations run [--poll-interval N] [--lease-seconds N] [--concurrency N]
 # Uses MEMORIZZ_BACKEND=filesystem|mongodb|oracle (filesystem by default)
 ```
+
+## MCP connections
+
+Configure, authorize, inspect, and call local or remote MCP servers without
+leaving the terminal:
+
+```bash
+# Notion hosted MCP (OAuth)
+memorizz mcp add notion --preset notion
+memorizz mcp login notion
+
+# Google Calendar hosted MCP (OAuth client from Google Cloud Console)
+memorizz mcp add calendar --preset google-calendar \
+  --client-id "$GOOGLE_OAUTH_CLIENT_ID" \
+  --client-secret "$GOOGLE_OAUTH_CLIENT_SECRET"
+memorizz mcp login calendar
+
+# Inspect or invoke
+memorizz mcp list
+memorizz mcp test notion
+memorizz mcp tools notion --json
+memorizz mcp call notion search --arguments '{"query":"roadmap"}'
+```
+
+Mutating calls return a durable proposal instead of executing immediately:
+
+```bash
+memorizz mcp approvals --status pending
+memorizz mcp approve PROPOSAL_ID --approver operator@example.com
+memorizz mcp resume PROPOSAL_ID
+# Or: memorizz mcp reject PROPOSAL_ID --approver operator@example.com
+```
+
+The proposal binds the exact tool and argument hash, expires, and can be
+consumed once. Secrets supplied to `mcp add` are immediately moved to the
+encrypted credential store and omitted from the public per-agent JSON. See the
+[MCP Connectivity guide](../guides/mcp-connectivity.md) for transports, policy,
+deployment settings, and the UI workflow.
 
 !!! note "Back-compatible commands"
     The earlier forms still work with a deprecation notice: `memorizz run local`

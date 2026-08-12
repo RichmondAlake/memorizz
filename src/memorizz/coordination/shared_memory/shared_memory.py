@@ -54,7 +54,13 @@ class SharedMemory:
         self.memory_provider = memory_provider
 
     def create_shared_session(
-        self, root_agent_id: str, delegate_agent_ids: List[str] = None
+        self,
+        root_agent_id: str,
+        delegate_agent_ids: List[str] = None,
+        *,
+        workflow_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> str:
         """
         Create a new shared memory session for multi-agent coordination.
@@ -75,13 +81,19 @@ class SharedMemory:
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "status": "active",  # active, completed, failed
+            "workflow_id": workflow_id,
+            "user_id": user_id,
+            "trace_id": trace_id,
         }
 
         shared_session = {
             "memory_id": str(uuid.uuid4()),
             "content": json.dumps(payload),
             "owner_agent_id": root_agent_id,
-            "scope": "global",
+            # Keep this inside the portable provider vocabulary. Exact workflow
+            # and tenant isolation is carried in the versioned payload below.
+            "scope": "private",
+            "user_id": user_id,
             "memory_type": MemoryType.SHARED_MEMORY.value,
         }
 
@@ -214,6 +226,9 @@ class SharedMemory:
             "created_at": payload.get("created_at"),
             "updated_at": payload.get("updated_at"),
             "status": payload.get("status", "active"),
+            "workflow_id": payload.get("workflow_id"),
+            "user_id": payload.get("user_id"),
+            "trace_id": payload.get("trace_id"),
         }
 
     @staticmethod
@@ -455,7 +470,13 @@ class SharedMemory:
             logger.error(f"Error updating session status: {e}")
             return False
 
-    def find_active_session_for_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    def find_active_session_for_agent(
+        self,
+        agent_id: str,
+        *,
+        workflow_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Find an active shared memory session where the agent is already participating.
 
@@ -479,6 +500,13 @@ class SharedMemory:
             for session in all_sessions:
                 payload = self._decode_payload(session)
                 if payload.get("status") != "active":
+                    continue
+                if (
+                    workflow_id is not None
+                    and payload.get("workflow_id") != workflow_id
+                ):
+                    continue
+                if user_id is not None and payload.get("user_id") != user_id:
                     continue
 
                 if (

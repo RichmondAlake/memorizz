@@ -60,13 +60,24 @@ def _banner(console: Console, session) -> None:
     learning_status = (
         "[green]enabled[/green]" if continual_learning else "[dim]disabled[/dim]"
     )
+    try:
+        browser_provider = session.agent.get_browser_control_provider_name()
+    except Exception:
+        browser_provider = None
+    browser_status = (
+        f"[green]{browser_provider}[/green]"
+        if browser_provider
+        else "[dim]disabled[/dim]"
+    )
     body = (
         f"[bold]memorizz {__version__}[/bold] — {mode}\n"
         f"provider: [cyan]{session.provider_name}[/cyan]   "
         f"model: [cyan]{session.model_name}[/cyan]\n"
         f"memory:   {store_line}\n"
         f"learning: continual {learning_status}\n"
-        f"[dim]Type /help for commands · /code for coding tools · /exit to quit[/dim]"
+        f"browser:  {browser_status}\n"
+        f"[dim]Type /help for commands · /browser for browser control · "
+        f"/exit to quit[/dim]"
     )
     console.print(Panel(body, expand=False, border_style="green"))
     for warning in session.warnings or []:
@@ -171,7 +182,12 @@ def _stream_turn(session, query: str) -> None:
 
     session.sync_ids()
     try:
-        cfg.save_state({"memory_id": session.memory_id})
+        cfg.save_state(
+            {
+                "memory_id": session.memory_id,
+                "thread_id": session.thread_id,
+            }
+        )
     except Exception:
         pass
 

@@ -29,6 +29,9 @@ nav:
       - Multi-Tenant Applications: guides/multi-tenant.md
       - Context Efficiency & Prompt Caching: guides/context-efficiency.md
       - Continual Learning (Workflows → Skills): guides/continual-learning.md
+      - Production Governance (0.5): guides/production-governance.md
+      - Connect to MCP Servers: guides/mcp-connectivity.md
+      - Expose MemoRizz as an MCP Server: guides/mcp-server.md
   - Use Cases:
       - Assistant Mode: use-cases/assistant-mode.md
       - Workflow Mode: use-cases/workflow-mode.md
@@ -36,6 +39,8 @@ nav:
   - Skills Marketplace:
       - Overview: skills-marketplace/index.md
   - Internet Access Providers: internet-access/providers.md
+  - Browser Control:
+      - Overview & Browser Use: browser-control/index.md
   - Sandbox Providers:
       - Overview: sandbox/index.md
       - E2B Provider: sandbox/e2b.md

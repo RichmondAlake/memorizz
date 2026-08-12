@@ -24,7 +24,9 @@ from memorizz.long_term.procedural.workflow.canonicalization import (
 )
 from memorizz.long_term.procedural.workflow.workflow import Workflow, WorkflowOutcome
 
-NOW = datetime(2026, 7, 4, 12, 0, 0)
+# Keep recency-gate fixtures relative to the test run. A fixed timestamp makes
+# an otherwise deterministic gate test start failing 30 days later.
+NOW = datetime.now()
 
 
 def _stats(

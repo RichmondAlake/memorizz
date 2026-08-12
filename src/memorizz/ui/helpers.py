@@ -461,6 +461,13 @@ def _normalize_internet_provider_name(value: Any) -> str:
     return _to_text(value).strip().lower()
 
 
+def _normalize_browser_control_provider_name(value: Any) -> str:
+    """Normalize browser-control values to a stable provider name."""
+    if isinstance(value, dict):
+        value = value.get("provider") or value.get("name")
+    return _to_text(value).strip().lower().replace("-", "")
+
+
 def _normalize_skills_marketplace_provider_name(value: Any) -> str:
     """Normalize skills marketplace provider values to a stable lowercase name."""
     if isinstance(value, dict):
@@ -621,6 +628,21 @@ def _extract_agent_tools(agent) -> List[Dict[str, str]]:
                 continue
             result.append({"name": tool_name, "description": description})
             seen_names.add(tool_name)
+
+    browser_control = getattr(agent, "browser_control", None)
+    if not browser_control:
+        browser_control = getattr(agent, "browser_control_config", None)
+    browser_provider = _normalize_browser_control_provider_name(browser_control)
+    if browser_provider and "browser_control" not in seen_names:
+        result.append(
+            {
+                "name": "browser_control",
+                "description": (
+                    f"Run an approved, bounded browser task via {browser_provider}."
+                ),
+            }
+        )
+        seen_names.add("browser_control")
 
     skills_marketplace_provider = _normalize_skills_marketplace_provider_name(
         getattr(agent, "skills_marketplace_provider", None)
@@ -1300,6 +1322,144 @@ def _build_internet_provider_config(
     return config or None
 
 
+_BROWSER_CONTROL_CONFIG_KEYS = {
+    "command",
+    "python_command",
+    "llm_provider",
+    "model",
+    "headless",
+    "use_vision",
+    "allowed_domains",
+    "prohibited_domains",
+    "block_ip_addresses",
+    "use_cloud",
+    "cdp_url_env",
+    "max_steps",
+    "task_timeout",
+    "env_allowlist",
+}
+
+
+def _browser_env_list(name: str) -> List[str]:
+    raw = _to_text(os.environ.get(name, "")).strip()
+    return [
+        item.strip()
+        for line in raw.splitlines()
+        for item in line.split(",")
+        if item.strip()
+    ]
+
+
+def _browser_env_bool(name: str, default: bool) -> bool:
+    raw = _to_text(os.environ.get(name, "")).strip()
+    return _parse_bool(raw) if raw else default
+
+
+def _browser_env_int(name: str, default: int) -> int:
+    raw = _to_text(os.environ.get(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _build_browser_control_config(
+    provider_name: Optional[str],
+    base_config: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build a secret-free browser-control policy from UI/env settings."""
+    provider = _normalize_browser_control_provider_name(provider_name)
+    if not provider:
+        return None
+    if provider != "browseruse":
+        return {"provider": provider}
+
+    config: Dict[str, Any] = {"provider": "browseruse"}
+    if isinstance(base_config, dict):
+        for key in _BROWSER_CONTROL_CONFIG_KEYS:
+            value = base_config.get(key)
+            if value is not None and value != "":
+                config[key] = value
+
+    config.setdefault(
+        "command",
+        _to_text(os.environ.get("MEMORIZZ_BROWSER_USE_COMMAND", "")).strip()
+        or "browser-use",
+    )
+    python_command = _to_text(
+        os.environ.get("MEMORIZZ_BROWSER_USE_PYTHON_COMMAND", "")
+    ).strip()
+    if python_command:
+        config.setdefault("python_command", python_command)
+    config.setdefault(
+        "llm_provider",
+        _to_text(os.environ.get("MEMORIZZ_BROWSER_USE_LLM_PROVIDER", "openai"))
+        .strip()
+        .lower()
+        or "openai",
+    )
+    model = _to_text(os.environ.get("MEMORIZZ_BROWSER_USE_MODEL", "")).strip()
+    if model:
+        config.setdefault("model", model)
+    config.setdefault(
+        "headless", _browser_env_bool("MEMORIZZ_BROWSER_USE_HEADLESS", True)
+    )
+    config.setdefault(
+        "use_vision", _browser_env_bool("MEMORIZZ_BROWSER_USE_VISION", True)
+    )
+    config.setdefault(
+        "allowed_domains",
+        _browser_env_list("MEMORIZZ_BROWSER_USE_ALLOWED_DOMAINS"),
+    )
+    config.setdefault(
+        "prohibited_domains",
+        _browser_env_list("MEMORIZZ_BROWSER_USE_PROHIBITED_DOMAINS"),
+    )
+    config.setdefault(
+        "block_ip_addresses",
+        _browser_env_bool("MEMORIZZ_BROWSER_USE_BLOCK_IP_ADDRESSES", True),
+    )
+    config.setdefault(
+        "use_cloud", _browser_env_bool("MEMORIZZ_BROWSER_USE_CLOUD", False)
+    )
+    config.setdefault(
+        "max_steps", _browser_env_int("MEMORIZZ_BROWSER_USE_MAX_STEPS", 25)
+    )
+    config.setdefault(
+        "task_timeout", _browser_env_int("MEMORIZZ_BROWSER_USE_TASK_TIMEOUT", 600)
+    )
+    return config
+
+
+def _validate_browser_control_choice(
+    browser_control: Any,
+    browser_config: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Validate Browser Use CLI and credential readiness for UI feedback."""
+    provider_name = _normalize_browser_control_provider_name(browser_control)
+    if not provider_name:
+        return None
+    if provider_name != "browseruse":
+        return (
+            f"Unknown browser-control provider '{provider_name}'. "
+            "Supported providers: browseruse."
+        )
+    try:
+        from ..browser_control import create_browser_control_provider
+
+        config = _build_browser_control_config(provider_name, browser_config) or {}
+        config.pop("provider", None)
+        provider = create_browser_control_provider(provider_name, config)
+        if provider is None:
+            return "Browser Use provider is not registered."
+        provider.close()
+        return None
+    except Exception as exc:
+        return _to_text(exc).strip() or "Failed to initialize Browser Use."
+
+
 def _validate_internet_provider_choice(
     internet_provider: Any,
     internet_config: Optional[Dict[str, Any]] = None,
@@ -1443,8 +1603,9 @@ def _validate_sandbox_provider_choice(
         wrapper_jar = _to_text(provider_config.get("java_wrapper_jar", "")).strip()
         if mode == "java_wrapper" and not wrapper_jar:
             return (
-                "GraalPy internet access is disabled, but `GRAALPY_JAVA_WRAPPER_JAR` "
-                "is not set. Add the wrapper JAR path in Settings or re-enable internet."
+                "GraalPy java_wrapper mode is selected, but "
+                "`GRAALPY_JAVA_WRAPPER_JAR` is not set. Compile the shipped wrapper "
+                "against the deployment's GraalVM SDK and add its path in Settings."
             )
 
     try:
@@ -1468,7 +1629,7 @@ def _graalpy_internet_access_enabled() -> bool:
     """Return whether GraalPy should run with internet access."""
     raw_value = _to_text(os.environ.get("MEMORIZZ_GRAALPY_INTERNET_ACCESS", "")).strip()
     if not raw_value:
-        return True
+        return False
     return _parse_bool(raw_value)
 
 
@@ -1476,8 +1637,8 @@ def _build_graalpy_default_sandbox_config() -> Dict[str, Any]:
     """
     Build GraalPy provider config from UI settings.
 
-    - Internet enabled  -> subprocess mode
-    - Internet disabled -> java_wrapper mode with UNTRUSTED policy
+    Subprocess mode is for trusted code and denies network by default. The
+    Java wrapper is selected independently and always requires UNTRUSTED policy.
     """
     config: Dict[str, Any] = {"provider": "graalpy"}
 
@@ -1485,15 +1646,18 @@ def _build_graalpy_default_sandbox_config() -> Dict[str, Any]:
     if graalpy_path:
         config["graalpy_path"] = graalpy_path
 
-    if _graalpy_internet_access_enabled():
+    mode = (
+        _to_text(os.environ.get("MEMORIZZ_GRAALPY_MODE", "subprocess")).strip().lower()
+    )
+    if mode == "java_wrapper":
+        config["mode"] = "java_wrapper"
+        config["sandbox_policy"] = "UNTRUSTED"
+        wrapper_jar = _to_text(os.environ.get("GRAALPY_JAVA_WRAPPER_JAR", "")).strip()
+        if wrapper_jar:
+            config["java_wrapper_jar"] = wrapper_jar
+    else:
         config["mode"] = "subprocess"
-        return config
-
-    config["mode"] = "java_wrapper"
-    config["sandbox_policy"] = "UNTRUSTED"
-    wrapper_jar = _to_text(os.environ.get("GRAALPY_JAVA_WRAPPER_JAR", "")).strip()
-    if wrapper_jar:
-        config["java_wrapper_jar"] = wrapper_jar
+        config["allow_network"] = _graalpy_internet_access_enabled()
     return config
 
 

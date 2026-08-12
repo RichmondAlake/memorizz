@@ -230,6 +230,10 @@ jobs:
         run: |
           VER="${RELEASE_TAG#v}"
           npm version "$VER" --no-git-tag-version --allow-same-version
+          if npm view "memorizz@$VER" version >/dev/null 2>&1; then
+            echo "npm already contains memorizz@$VER; skipping duplicate publish."
+            exit 0
+          fi
           npm publish --provenance --access public
 
   # Bumping the Homebrew tap requires the published sdist's sha256. This job

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from ...automation.models import AutomationJob
 from ...automation.schedule import compute_next_run_at, utcnow, validate_timezone_name
 from ...automation.store.factory import get_automation_store
+from ...tooling import governed_tool
 
 # Tool names registered by ``register_tools``. The automation runner strips these
 # for scheduled runs (an executing agent should do its task, not manage other
@@ -88,6 +89,13 @@ class AutomationManager:
                 normalized.append(to_val)
             return normalized
 
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=True,
+            approval_reason="Create a durable scheduled automation",
+            domains=("automations",),
+        )
         def automation_create_job(
             name: str,
             schedule_type: str,
@@ -97,10 +105,9 @@ class AutomationManager:
             query_template: str = "",
             memory_id: str = "",
             whatsapp_to: List[str] = None,
-            confirm: bool = False,
             client_request_id: str = "",
         ) -> Dict[str, Any]:
-            """Create a scheduled automation job for this agent (requires confirmation)."""
+            """Create a scheduled automation job for this agent."""
             if store is None:
                 return {"ok": False, "error": "Automations are unavailable (no store)."}
 
@@ -162,25 +169,6 @@ class AutomationManager:
                 "delivery_config": {"whatsapp_to": to_list} if to_list else {},
             }
 
-            summary = (
-                f"Create automation '{job_name}' ({schedule}) in timezone '{tz_name}'. "
-                f"Next run: {next_run_at.isoformat()}. "
-                f"WhatsApp recipients: {len(to_list)}."
-            )
-
-            if not confirm:
-                return {
-                    "ok": True,
-                    "created": False,
-                    "confirmation_required": True,
-                    "summary": summary,
-                    "proposed_job": {
-                        **proposed,
-                        "start_at": now_utc.isoformat(),
-                        "next_run_at": next_run_at.isoformat(),
-                    },
-                }
-
             job = AutomationJob(**proposed)
             try:
                 created = store.create_job(job)
@@ -211,6 +199,12 @@ class AutomationManager:
                 "jobs": [job.model_dump() for job in jobs],
             }
 
+        @governed_tool(
+            side_effects=True,
+            requires_approval=True,
+            approval_reason="Pause a durable automation",
+            domains=("automations",),
+        )
         def automation_pause_job(job_id: str) -> Dict[str, Any]:
             """Pause a job by setting enabled=false."""
             if store is None:
@@ -218,6 +212,12 @@ class AutomationManager:
             updated = store.pause_job(str(job_id or "").strip())
             return {"ok": True, "job": updated.model_dump()}
 
+        @governed_tool(
+            side_effects=True,
+            requires_approval=True,
+            approval_reason="Resume a durable automation",
+            domains=("automations",),
+        )
         def automation_resume_job(job_id: str) -> Dict[str, Any]:
             """Resume a paused job by setting enabled=true."""
             if store is None:
@@ -225,23 +225,28 @@ class AutomationManager:
             updated = store.resume_job(str(job_id or "").strip())
             return {"ok": True, "job": updated.model_dump()}
 
-        def automation_delete_job(job_id: str, confirm: bool = False) -> Dict[str, Any]:
-            """Delete a job (requires confirmation)."""
+        @governed_tool(
+            side_effects=True,
+            requires_approval=True,
+            approval_reason="Permanently delete a durable automation",
+            domains=("automations",),
+        )
+        def automation_delete_job(job_id: str) -> Dict[str, Any]:
+            """Delete a job."""
             if store is None:
                 return {"ok": False, "error": "Automations are unavailable (no store)."}
             normalized = str(job_id or "").strip()
             if not normalized:
                 return {"ok": False, "error": "job_id is required."}
-            if not confirm:
-                return {
-                    "ok": True,
-                    "deleted": False,
-                    "confirmation_required": True,
-                    "summary": f"Delete automation job '{normalized}'",
-                }
             deleted = bool(store.delete_job(normalized))
             return {"ok": True, "deleted": deleted}
 
+        @governed_tool(
+            side_effects=True,
+            requires_approval=True,
+            approval_reason="Trigger an automation immediately",
+            domains=("automations",),
+        )
         def automation_run_now(job_id: str) -> Dict[str, Any]:
             """Trigger an immediate run by setting next_run_at to now."""
             if store is None:

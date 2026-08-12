@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - optional dependency
     faiss = None
 
 from ...enums.memory_type import MemoryType
-from ..base import _UNSET, MemoryProvider, filter_tool_log_rows
+from ..base import MemoryProvider, filter_tool_log_rows
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +338,7 @@ class FileSystemProvider(MemoryProvider):
     def list_tool_logs(
         self,
         memory_id: Optional[str] = None,
-        user_id: Any = None,
+        user_id: Any = _FS_UNSET,
         limit: int = 20,
         thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
@@ -353,7 +353,7 @@ class FileSystemProvider(MemoryProvider):
         return filter_tool_log_rows(
             rows,
             memory_id=memory_id,
-            user_id=(user_id if user_id is not None else _UNSET),
+            user_id=user_id,
             thread_id=thread_id,
             limit=limit,
         )
@@ -364,6 +364,7 @@ class FileSystemProvider(MemoryProvider):
         memory_type: Union[str, MemoryType, None] = None,
         limit: Optional[int] = None,
         user_id: Any = _FS_UNSET,
+        thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         resolved_type = self._normalize_memory_type(
             memory_type or MemoryType.CONVERSATION_MEMORY
@@ -378,6 +379,10 @@ class FileSystemProvider(MemoryProvider):
                 if document.get("memory_id") != memory_id:
                     continue
                 if apply_user_filter and document.get("user_id") != user_id:
+                    continue
+                if thread_id is not None and str(
+                    document.get("thread_id") or document.get("conversation_id") or ""
+                ) != str(thread_id):
                     continue
                 timestamp = self._coerce_timestamp(
                     document.get("timestamp") or document.get("created_at")
@@ -543,8 +548,15 @@ class FileSystemProvider(MemoryProvider):
                 embedding_config=doc.get("embedding_config"),
                 semantic_cache=bool(doc.get("semantic_cache", False)),
                 semantic_cache_config=doc.get("semantic_cache_config"),
+                tool_result_policy=doc.get("tool_result_policy"),
+                context_policy=doc.get("context_policy"),
+                delegation_config=doc.get("delegation_config"),
+                skill_retrieval=bool(doc.get("skill_retrieval", False)),
+                skill_retrieval_config=doc.get("skill_retrieval_config"),
+                semantic_layer_config=doc.get("semantic_layer_config"),
                 context_window_tokens=doc.get("context_window_tokens"),
                 sandbox_provider=doc.get("sandbox_provider"),
+                browser_control=doc.get("browser_control"),
                 internet_access_provider=doc.get("internet_access_provider"),
                 internet_access_config=doc.get("internet_access_config"),
                 skills_marketplace_provider=doc.get("skills_marketplace_provider"),
@@ -593,8 +605,15 @@ class FileSystemProvider(MemoryProvider):
             embedding_config=document.get("embedding_config"),
             semantic_cache=bool(document.get("semantic_cache", False)),
             semantic_cache_config=document.get("semantic_cache_config"),
+            tool_result_policy=document.get("tool_result_policy"),
+            context_policy=document.get("context_policy"),
+            delegation_config=document.get("delegation_config"),
+            skill_retrieval=bool(document.get("skill_retrieval", False)),
+            skill_retrieval_config=document.get("skill_retrieval_config"),
+            semantic_layer_config=document.get("semantic_layer_config"),
             context_window_tokens=document.get("context_window_tokens"),
             sandbox_provider=document.get("sandbox_provider"),
+            browser_control=document.get("browser_control"),
             internet_access_provider=document.get("internet_access_provider"),
             internet_access_config=document.get("internet_access_config"),
             skills_marketplace_provider=document.get("skills_marketplace_provider"),

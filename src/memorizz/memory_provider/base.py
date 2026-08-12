@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import json
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -197,7 +198,12 @@ class MemoryProvider(ABC):
 
     @abstractmethod
     def retrieve_conversation_history_ordered_by_timestamp(
-        self, memory_id: str, memory_type: str = None, limit: int = None
+        self,
+        memory_id: str,
+        memory_type: str = None,
+        limit: int = None,
+        user_id: Any = _UNSET,
+        thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve the conversation history ordered by timestamp.
@@ -214,6 +220,9 @@ class MemoryProvider(ABC):
             Multi-tenant scope. When provided, results are restricted to rows
             whose stored ``user_id`` equals that value; when omitted/``None``,
             results are restricted to rows whose ``user_id`` is also ``None``.
+        thread_id : str, optional
+            When provided, return only rows from that exact conversation
+            thread. When omitted, return all threads in the memory scope.
         """
 
     @abstractmethod
@@ -248,6 +257,82 @@ class MemoryProvider(ABC):
             if agent_id and row.get("agent_id") != agent_id:
                 continue
             if memory_id and row.get("memory_id") != memory_id:
+                continue
+            record_id = row.get("_id") or row.get("id") or row.get("cache_key")
+            if record_id is None:
+                continue
+            try:
+                if self.delete_by_id(
+                    str(record_id), memory_store_type=MemoryType.SEMANTIC_CACHE
+                ):
+                    deleted += 1
+            except Exception:
+                continue
+        return deleted
+
+    def invalidate_semantic_cache(
+        self,
+        *,
+        agent_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        domains: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,
+        data_version: Optional[str] = None,
+    ) -> int:
+        """Delete persistent cache entries matching governance metadata.
+
+        This provider-neutral fallback keeps domain/tag/data-version
+        invalidation operational on filesystem, MongoDB, Oracle, and custom
+        providers. Native providers may override it with a bulk predicate.
+        """
+        from ..enums.memory_type import MemoryType
+
+        wanted_domains = {str(item) for item in (domains or [])}
+        wanted_tags = {str(item) for item in (tags or [])}
+        if not wanted_domains and not wanted_tags and data_version is None:
+            return 0
+        try:
+            rows = self.list_all(memory_store_type=MemoryType.SEMANTIC_CACHE) or []
+        except Exception:
+            return 0
+
+        deleted = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if agent_id is not None and row.get("agent_id") != agent_id:
+                continue
+            if memory_id is not None and row.get("memory_id") != memory_id:
+                continue
+            metadata = row.get("metadata") or {}
+            if hasattr(metadata, "read"):
+                metadata = metadata.read()
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except (TypeError, ValueError):
+                    metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            entry_domains = {
+                str(item)
+                for item in [
+                    metadata.get("domain"),
+                    *(metadata.get("domains") or []),
+                ]
+                if item is not None
+            }
+            entry_tags = {str(item) for item in (metadata.get("tags") or [])}
+            fingerprints = dict(metadata.get("fingerprints") or {})
+            matches = (
+                bool(wanted_domains.intersection(entry_domains))
+                or bool(wanted_tags.intersection(entry_tags))
+                or (
+                    data_version is not None
+                    and fingerprints.get("data_version") == str(data_version)
+                )
+            )
+            if not matches:
                 continue
             record_id = row.get("_id") or row.get("id") or row.get("cache_key")
             if record_id is None:

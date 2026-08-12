@@ -2,14 +2,16 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import importlib
 import inspect
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Union
 
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
 from ....llms.llm_provider import LLMProvider
 from ....memory_provider import MemoryProvider
+from ....tooling import callable_json_schema, policy_for_callable
 from .tool_schema import ToolSchemaType
 
 
@@ -32,15 +34,15 @@ class Toolbox:
         """
         Initialize the toolbox.
 
-        This constructor is backward-compatible. If `llm_provider` is not specified,
-        it defaults to using the OpenAI client.
+        The LLM provider is optional and is created lazily only when a caller
+        explicitly requests ``augment=True``.
 
         Parameters:
         -----------
         memory_provider : MemoryProvider
             The memory provider for storing and retrieving tools.
         llm_provider : LLMProvider, optional
-            The LLM provider for metadata generation. Defaults to OpenAI if None.
+            Optional LLM provider for augmented metadata generation.
         agent_id : str, optional
             Agent to scope stored tools to. When set, every ``register_tool``
             write stamps ``agent_id`` on the TOOLBOX row so the playground's
@@ -48,16 +50,40 @@ class Toolbox:
         """
         self.memory_provider = memory_provider
 
-        # If no provider is passed, create the default OpenAI client.
-        if llm_provider is None:
-            self.llm_provider = get_openai_default()
-        else:
-            self.llm_provider = llm_provider
+        self.llm_provider = llm_provider
 
         self.agent_id = agent_id
 
         # In-memory storage of functions
         self._tools: Dict[str, Callable] = {}
+        self._tools_by_name: Dict[str, Callable] = {}
+
+    @classmethod
+    def from_functions(
+        cls,
+        functions: Iterable[Callable[..., Any]],
+        *,
+        memory_provider: MemoryProvider,
+        llm_provider: Optional[LLMProvider] = None,
+        agent_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        augment: bool = False,
+        persist: bool = True,
+    ) -> "Toolbox":
+        """Register and bind trusted callables without serializing executable code."""
+        toolbox = cls(
+            memory_provider=memory_provider,
+            llm_provider=llm_provider,
+            agent_id=agent_id,
+        )
+        for function in functions:
+            toolbox.register_tool(
+                function,
+                augment=augment,
+                persist=persist,
+                user_id=user_id,
+            )
+        return toolbox
 
     @property
     def tools(self) -> Dict[str, Callable]:
@@ -65,7 +91,14 @@ class Toolbox:
         return dict(self._tools)
 
     def register_tool(
-        self, func: Optional[Callable] = None, augment: bool = False
+        self,
+        func: Optional[Callable] = None,
+        augment: bool = False,
+        *,
+        persist: bool = True,
+        user_id: Optional[str] = None,
+        aliases: Optional[Iterable[str]] = None,
+        deprecated_arguments: Optional[Mapping[str, str]] = None,
     ) -> Union[str, Callable]:
         """
         Register a function as a tool in the toolbox.
@@ -86,8 +119,7 @@ class Toolbox:
         def decorator(f: Callable) -> str:
             docstring = f.__doc__ or ""
             signature = str(inspect.signature(f))
-            object_id = uuid.uuid4()
-            object_id_str = str(object_id)
+            object_id_str = str(uuid.uuid4())
 
             if augment:
                 augmented_docstring = self._augment_docstring(docstring)
@@ -101,24 +133,39 @@ class Toolbox:
                     f"{f.__name__} {augmented_docstring} {signature} {queries}"
                 )
                 tool_dict = {
-                    "_id": object_id,
+                    "_id": object_id_str,
                     "embedding": embedding,
                     "queries": queries,
                     **tool_data,
                 }
             else:
-                embedding = get_embedding(f"{f.__name__} {docstring} {signature}")
+                # Deterministic registration is metadata-only by default. The
+                # provider may generate an embedding lazily at persistence or
+                # retrieval time; no global LLM/embedding client is constructed
+                # merely to bind trusted Python callables.
                 tool_dict = {
-                    "_id": object_id,
-                    "embedding": embedding,
+                    "_id": object_id_str,
                     **self._metadata_from_callable(f),
                 }
 
             if self.agent_id:
                 tool_dict["agent_id"] = self.agent_id
+            tool_dict["user_id"] = user_id
+            declared_aliases = list(aliases or [])
+            if declared_aliases:
+                tool_dict["aliases"] = [str(item) for item in declared_aliases]
+            if deprecated_arguments:
+                tool_dict["deprecated_arguments"] = dict(deprecated_arguments)
+            import_reference = self._import_reference(f)
+            if import_reference:
+                tool_dict["import_reference"] = import_reference
 
-            self.memory_provider.store(tool_dict, memory_store_type=MemoryType.TOOLBOX)
+            if persist:
+                self.memory_provider.store(
+                    tool_dict, memory_store_type=MemoryType.TOOLBOX
+                )
             self._tools[object_id_str] = f
+            self._tools_by_name[f.__name__] = f
             return object_id_str
 
         if func is None:
@@ -128,39 +175,59 @@ class Toolbox:
     @staticmethod
     def _metadata_from_callable(func: Callable) -> Dict[str, Any]:
         """Build stable tool metadata without spending an LLM call."""
-        parameters: Dict[str, Dict[str, Any]] = {}
-        required: List[str] = []
-        type_names = {
-            str: "string",
-            int: "integer",
-            float: "number",
-            bool: "boolean",
-            list: "array",
-            dict: "object",
-        }
-        for name, parameter in inspect.signature(func).parameters.items():
-            if name == "self":
-                continue
-            parameters[name] = {
-                "type": type_names.get(parameter.annotation, "string"),
-                "description": f"Parameter {name}",
-            }
-            if parameter.default == inspect.Parameter.empty and parameter.kind in (
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            ):
-                required.append(name)
-
+        input_schema = callable_json_schema(func)
         docstring = inspect.getdoc(func) or ""
+        policy = policy_for_callable(func)
         return {
             "name": func.__name__,
             "description": docstring,
             "signature": str(inspect.signature(func)),
             "docstring": docstring,
             "tool_type": "function",
-            "parameters": parameters,
-            "required": required,
+            "parameters": input_schema["properties"],
+            "required": input_schema.get("required", []),
+            "input_schema": input_schema,
+            "tool_policy": policy.to_dict(),
+            "aliases": list(policy.aliases),
+            "deprecated_arguments": dict(policy.deprecated_arguments),
         }
+
+    @staticmethod
+    def _import_reference(func: Callable[..., Any]) -> Optional[str]:
+        module = str(getattr(func, "__module__", "") or "")
+        qualname = str(getattr(func, "__qualname__", "") or "")
+        if not module or not qualname or "<locals>" in qualname:
+            return None
+        return f"{module}:{qualname}"
+
+    @staticmethod
+    def _load_import_reference(reference: str) -> Callable[..., Any]:
+        module_name, separator, qualname = str(reference).partition(":")
+        if not separator or not module_name or not qualname or "<locals>" in qualname:
+            raise ValueError("Trusted tool references must use module:qualified_name")
+        value: Any = importlib.import_module(module_name)
+        for component in qualname.split("."):
+            value = getattr(value, component)
+        if not callable(value):
+            raise TypeError(f"Trusted tool reference '{reference}' is not callable")
+        return value
+
+    def bind_callable(
+        self,
+        *,
+        function: Optional[Callable[..., Any]] = None,
+        import_reference: Optional[str] = None,
+        tool_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+    ) -> Callable[..., Any]:
+        """Rebind persisted metadata through an explicit trusted reference."""
+        bound = function or self._load_import_reference(str(import_reference or ""))
+        if not callable(bound):
+            raise TypeError("function must be callable")
+        if tool_id:
+            self._tools[str(tool_id)] = bound
+        self._tools_by_name[str(tool_name or bound.__name__)] = bound
+        return bound
 
     @classmethod
     def _normalize_tool_metadata(
@@ -198,11 +265,24 @@ class Toolbox:
                 if isinstance(item, dict) and item.get("name")
             }
         if isinstance(parameters, dict):
+            schema = parameters if parameters.get("type") == "object" else None
             normalized["parameters"] = parameters.get("properties", parameters)
+            if schema:
+                normalized["input_schema"] = dict(schema)
 
         required = metadata.get("required")
         if isinstance(required, list):
             normalized["required"] = [str(name) for name in required]
+        normalized.setdefault(
+            "input_schema",
+            {
+                "type": "object",
+                "properties": normalized["parameters"],
+                "required": normalized["required"],
+                "additionalProperties": False,
+            },
+        )
+        normalized["input_schema"]["additionalProperties"] = False
         return normalized
 
     def get_tool_by_name(self, name: str) -> Optional[Dict[str, Any]]:
@@ -244,7 +324,12 @@ class Toolbox:
         )
 
     def get_most_similar_tools(
-        self, query: str, limit: int = 5
+        self,
+        query: str,
+        limit: int = 5,
+        *,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get the most similar tools to a query using vector search.
@@ -261,9 +346,38 @@ class Toolbox:
         List[Dict[str, Any]]
             A list of the most similar tool metadata.
         """
-        return self.memory_provider.retrieve_by_query(
-            query, memory_store_type=MemoryType.TOOLBOX, limit=limit
-        )
+        effective_agent_id = agent_id if agent_id is not None else self.agent_id
+        kwargs = {"user_id": user_id, "agent_id": effective_agent_id}
+        try:
+            rows = self.memory_provider.retrieve_by_query(
+                query,
+                memory_store_type=MemoryType.TOOLBOX,
+                limit=max(int(limit), 1),
+                **kwargs,
+            )
+        except TypeError:
+            # Compatibility providers may not accept scopes. Deliberately
+            # over-fetch, then filter before the final top-k.
+            rows = self.memory_provider.retrieve_by_query(
+                query,
+                memory_store_type=MemoryType.TOOLBOX,
+                limit=max(int(limit) * 5, 25),
+            )
+        filtered = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            if row.get("user_id") != user_id:
+                continue
+            if effective_agent_id is not None and row.get("agent_id") not in {
+                None,
+                effective_agent_id,
+            }:
+                continue
+            filtered.append(row)
+            if len(filtered) >= max(int(limit), 1):
+                break
+        return filtered
 
     def delete_tool_by_name(self, name: str) -> bool:
         """
@@ -367,6 +481,10 @@ class Toolbox:
         """
         return self._tools.get(tool_id)
 
+    def get_function_by_name(self, tool_name: str) -> Optional[Callable]:
+        """Return a callable explicitly bound under a persisted tool name."""
+        return self._tools_by_name.get(str(tool_name))
+
     def update_tool_by_id(self, id: str, data: Dict[str, Any]) -> bool:
         """
         Update a tool's metadata in the memory provider by id.
@@ -391,12 +509,17 @@ class Toolbox:
 
     def _get_tool_metadata(self, func: Callable) -> ToolSchemaType:
         """Get the metadata for a tool using the configured LLM provider."""
-        return self.llm_provider.get_tool_metadata(func)
+        return self._require_llm_provider().get_tool_metadata(func)
 
     def _augment_docstring(self, docstring: str) -> str:
         """Augment the docstring using the configured LLM provider."""
-        return self.llm_provider.augment_docstring(docstring)
+        return self._require_llm_provider().augment_docstring(docstring)
 
     def _generate_queries(self, docstring: str) -> List[str]:
         """Generate queries for the tool using the configured LLM provider."""
-        return self.llm_provider.generate_queries(docstring)
+        return self._require_llm_provider().generate_queries(docstring)
+
+    def _require_llm_provider(self) -> LLMProvider:
+        if self.llm_provider is None:
+            self.llm_provider = get_openai_default()
+        return self.llm_provider

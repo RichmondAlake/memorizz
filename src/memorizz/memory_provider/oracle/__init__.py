@@ -5,12 +5,14 @@
 from ..._env_io import resolve_oracle_in_database_embedding_from_env
 from .embedding import OracleInDatabaseEmbeddingProvider
 from .provider import OracleConfig, OracleProvider
+from .runtime import LocalOracleRuntime
 from .setup import setup_oracle_user
 
 __all__ = [
     "OracleProvider",
     "OracleConfig",
     "OracleInDatabaseEmbeddingProvider",
+    "LocalOracleRuntime",
     "resolve_oracle_in_database_embedding_from_env",
     "setup_oracle_user",
 ]

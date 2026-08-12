@@ -94,11 +94,17 @@ def test_memagent_registers_automation_tools_when_store_available(monkeypatch):
         query_template="Hello {today_iso}",
         memory_id=str(uuid.uuid4()),
         whatsapp_to=[],
-        confirm=False,
     )
     assert resp["ok"] is True
-    assert resp["created"] is False
-    assert resp["confirmation_required"] is True
+    assert resp["created"] is True
+    schema = agent.tool_manager.tools["automation_create_job"]["metadata"][
+        "input_schema"
+    ]
+    assert "confirm" not in schema["properties"]
+    assert (
+        agent.tool_manager.get_tool_policy("automation_create_job")["requires_approval"]
+        is True
+    )
 
 
 # ---------------------------------------------------------------------------

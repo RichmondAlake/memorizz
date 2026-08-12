@@ -5,7 +5,7 @@
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +42,31 @@ class SemanticCacheConfig:
     )  # LOCAL filters by agent_id, GLOBAL searches all entries
     embedding_provider: Optional[str] = None
     embedding_config: Optional[Dict[str, Any]] = None
+    admission_policy: str = "read_only_deterministic"
+    freshness_by_domain: Dict[str, float] = field(
+        default_factory=lambda: {"mcp": 300.0, "inventory": 60.0, "calendar": 60.0}
+    )
+    require_fingerprint_match: bool = True
+
+    def __post_init__(self) -> None:
+        if isinstance(self.scope, str):
+            normalized_scope = self.scope.strip().lower()
+            # ``scope="session"`` was part of the public configuration surface
+            # before scope gained its LOCAL/GLOBAL enum.  Preserve that spelling
+            # and translate it to the two controls that now express the same
+            # policy: local agent isolation plus session isolation.
+            if normalized_scope == "session":
+                self.scope = SemanticCacheScope.LOCAL
+                self.enable_session_scoping = True
+            else:
+                self.scope = SemanticCacheScope(normalized_scope)
+        self.similarity_threshold = max(0.0, min(float(self.similarity_threshold), 1.0))
+        self.max_cache_size = max(1, int(self.max_cache_size))
+        self.ttl_hours = float(self.ttl_hours)
+        self.freshness_by_domain = {
+            str(domain): max(0.0, float(seconds))
+            for domain, seconds in dict(self.freshness_by_domain or {}).items()
+        }
 
 
 class SemanticCache:
@@ -98,6 +123,15 @@ class SemanticCache:
 
         # In-memory cache
         self.cache: Dict[str, SemanticCacheEntry] = {}
+        self._stats: Dict[str, int] = {
+            "hits": 0,
+            "misses": 0,
+            "bypasses": 0,
+            "writes": 0,
+            "evictions": 0,
+        }
+        self._bypass_reasons: Dict[str, int] = {}
+        self.last_hit: Optional[Dict[str, Any]] = None
 
         # Embedding cache to avoid regenerating embeddings for the same query
         self._embedding_cache: Dict[str, List[float]] = {}
@@ -201,6 +235,7 @@ class SemanticCache:
         session_id: Optional[str] = None,
         limit: int = 10,
         user_id: Optional[str] = None,
+        lookup_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[SemanticCacheEntry]:
         """
         Search for similar cache entries using the memory provider's vector search capabilities.
@@ -240,63 +275,54 @@ class SemanticCache:
             if not results or len(results) == 0:
                 return None
 
-            # Vector search returns results sorted by similarity, so take the first (best) match
-            best_result = results[0]
-
-            # Check if the best result meets the similarity threshold
-            result_score = best_result.get("score", 0.0)
-            if result_score < threshold:
-                return None
-
-            # Check session scoping if enabled
-            if (
-                self.config.enable_session_scoping
-                and session_id
-                and best_result.get("session_id") != session_id
-            ):
-                return None
-
-            # Handle both 'query' and 'query_text' field names for compatibility
-            query_text = best_result.get("query") or best_result.get("query_text")
-
-            # Handle timestamp field (Oracle uses 'created_at', cache uses 'timestamp')
-            timestamp = best_result.get("timestamp")
-            if timestamp is None and "created_at" in best_result:
-                # Convert datetime to timestamp if needed
-                created_at = best_result["created_at"]
-                if hasattr(created_at, "timestamp"):
-                    timestamp = created_at.timestamp()
-                else:
+            for candidate in results:
+                result_score = float(candidate.get("score", 0.0) or 0.0)
+                if result_score < threshold:
+                    break
+                if candidate.get("user_id") != user_id:
+                    continue
+                if (
+                    self.config.enable_session_scoping
+                    and session_id
+                    and candidate.get("session_id") != session_id
+                ):
+                    continue
+                query_text = candidate.get("query") or candidate.get("query_text")
+                timestamp = candidate.get("timestamp")
+                if timestamp is None and "created_at" in candidate:
+                    created_at = candidate["created_at"]
+                    timestamp = (
+                        created_at.timestamp()
+                        if hasattr(created_at, "timestamp")
+                        else time.time()
+                    )
+                elif timestamp is None:
                     timestamp = time.time()
-            elif timestamp is None:
-                timestamp = time.time()
-
-            # Convert to SemanticCacheEntry
-            best_match = SemanticCacheEntry(
-                query=query_text,
-                response=best_result["response"],
-                embedding=best_result.get("embedding", []),
-                timestamp=timestamp,
-                session_id=best_result.get("session_id"),
-                memory_id=best_result.get("memory_id"),
-                agent_id=best_result.get("agent_id"),
-                user_id=best_result.get("user_id"),
-                usage_count=best_result.get("usage_count", 0),
-                last_accessed=best_result.get("last_accessed"),
-                metadata=best_result.get("metadata", {}),
-                cache_key=best_result.get("cache_key"),
-            )
-
-            # Store the MongoDB _id for direct updates (following standard pattern)
-            if "_id" in best_result:
-                # Add _id to the cache entry (following MongoDB standard pattern)
-                best_match.metadata["_id"] = str(best_result["_id"])
-
-            # Check if best match is expired
-            if best_match and self._is_entry_expired(best_match):
-                return None
-
-            return best_match
+                best_match = SemanticCacheEntry(
+                    query=query_text,
+                    response=candidate["response"],
+                    embedding=candidate.get("embedding", []),
+                    timestamp=timestamp,
+                    session_id=candidate.get("session_id"),
+                    memory_id=candidate.get("memory_id"),
+                    agent_id=candidate.get("agent_id"),
+                    user_id=candidate.get("user_id"),
+                    usage_count=candidate.get(
+                        "usage_count", candidate.get("hit_count", 0)
+                    ),
+                    last_accessed=candidate.get("last_accessed"),
+                    metadata=candidate.get("metadata", {}),
+                    cache_key=candidate.get("cache_key"),
+                )
+                if "_id" in candidate:
+                    best_match.metadata["_id"] = str(candidate["_id"])
+                if not self._fresh_for_metadata(best_match):
+                    continue
+                if not self._metadata_matches(best_match, lookup_metadata):
+                    continue
+                best_match.metadata["similarity"] = result_score
+                return best_match
+            return None
 
         except Exception as e:
             logger.error(f"Error searching via memory provider: {e}")
@@ -318,6 +344,8 @@ class SemanticCache:
 
         for key in expired_keys:
             del self.cache[key]
+
+        self._stats["evictions"] += len(expired_keys)
 
         if expired_keys:
             logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
@@ -341,11 +369,17 @@ class SemanticCache:
             del self.cache[key]
 
         if evict_count > 0:
+            self._stats["evictions"] += evict_count
             logger.debug(f"Evicted {evict_count} LRU cache entries")
 
         return evict_count
 
-    def _generate_cache_key(self, query: str, session_id: Optional[str] = None) -> str:
+    def _generate_cache_key(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> str:
         """Generate a unique cache key for the query."""
         key_parts = [query]
         if self.agent_id:
@@ -354,8 +388,57 @@ class SemanticCache:
             key_parts.append(f"memory:{self.memory_id}")
         if session_id:
             key_parts.append(f"session:{session_id}")
+        key_parts.append(f"user:{user_id if user_id is not None else '<anonymous>'}")
 
         return str(uuid.uuid5(uuid.NAMESPACE_OID, "|".join(key_parts)))
+
+    def record_bypass(self, reason: str) -> None:
+        normalized = str(reason or "policy").strip() or "policy"
+        self._stats["bypasses"] += 1
+        self._bypass_reasons[normalized] = self._bypass_reasons.get(normalized, 0) + 1
+
+    def _metadata_matches(
+        self,
+        entry: SemanticCacheEntry,
+        lookup_metadata: Optional[Dict[str, Any]],
+    ) -> bool:
+        expected = dict(lookup_metadata or {})
+        stored = dict(entry.metadata or {})
+        if self.config.require_fingerprint_match:
+            expected_fingerprints = dict(expected.get("fingerprints") or {})
+            stored_fingerprints = dict(stored.get("fingerprints") or {})
+            if expected_fingerprints != stored_fingerprints:
+                return False
+        expected_domain = expected.get("domain")
+        if expected_domain is not None and stored.get("domain") != expected_domain:
+            return False
+        expected_tags = set(expected.get("tags") or [])
+        stored_tags = set(stored.get("tags") or [])
+        if expected_tags and not expected_tags.issubset(stored_tags):
+            return False
+        return True
+
+    def _fresh_for_metadata(self, entry: SemanticCacheEntry) -> bool:
+        if self._is_entry_expired(entry):
+            return False
+        metadata = dict(entry.metadata or {})
+        domains = [metadata.get("domain"), *(metadata.get("domains") or [])]
+        limits = [
+            float(self.config.freshness_by_domain[str(domain)])
+            for domain in domains
+            if domain is not None and str(domain) in self.config.freshness_by_domain
+        ]
+        if not limits:
+            return True
+        return (time.time() - float(entry.timestamp)) <= min(limits)
+
+    def statistics(self) -> Dict[str, Any]:
+        return {
+            **self._stats,
+            "size": len(self.cache),
+            "bypass_reasons": dict(self._bypass_reasons),
+            "last_hit": dict(self.last_hit) if self.last_hit else None,
+        }
 
     def get(
         self,
@@ -363,6 +446,8 @@ class SemanticCache:
         session_id: Optional[str] = None,
         similarity_threshold: Optional[float] = None,
         user_id: Optional[str] = None,
+        lookup_metadata: Optional[Dict[str, Any]] = None,
+        bypass_reason: Optional[str] = None,
     ) -> Optional[str]:
         """
         Retrieve cached response for semantically similar queries.
@@ -383,6 +468,10 @@ class SemanticCache:
             Cached response if found, None otherwise
         """
         try:
+            self.last_hit = None
+            if bypass_reason:
+                self.record_bypass(bypass_reason)
+                return None
             threshold = similarity_threshold or self.config.similarity_threshold
             logger.debug(
                 f"Semantic cache query: '{query[:50]}...', threshold={threshold}"
@@ -398,7 +487,11 @@ class SemanticCache:
             if should_use_provider:
                 logger.debug("Using memory provider for semantic cache retrieval")
                 best_match = self._search_via_memory_provider(
-                    query, threshold, session_id, user_id=user_id
+                    query,
+                    threshold,
+                    session_id,
+                    user_id=user_id,
+                    lookup_metadata=lookup_metadata,
                 )
             else:
                 # Generate query embedding for in-memory search (with caching)
@@ -409,6 +502,7 @@ class SemanticCache:
                 self._cleanup_expired_entries()
 
                 if not self.cache:
+                    self._stats["misses"] += 1
                     return None
 
                 # In-memory search (original logic)
@@ -418,6 +512,11 @@ class SemanticCache:
                 for entry in self.cache.values():
                     # Tenant isolation: skip entries from other users.
                     if getattr(entry, "user_id", None) != user_id:
+                        continue
+
+                    if not self._fresh_for_metadata(entry):
+                        continue
+                    if not self._metadata_matches(entry, lookup_metadata):
                         continue
 
                     # Skip entries that don't match scope (only if session scoping is enabled)
@@ -450,13 +549,32 @@ class SemanticCache:
                         self._update_usage_in_memory_provider(best_match)
 
                 logger.debug(f"Cache HIT: query: {query[:50]}...")
+                self._stats["hits"] += 1
+                similarity = None
+                if isinstance(best_match.metadata, dict):
+                    similarity = best_match.metadata.get("similarity")
+                if similarity is None and not should_use_provider:
+                    similarity = best_similarity
+                self.last_hit = {
+                    "cache_key": best_match.cache_key,
+                    "query": best_match.query,
+                    "similarity": similarity,
+                    "age_seconds": max(0.0, time.time() - best_match.timestamp),
+                    "agent_id": best_match.agent_id,
+                    "memory_id": best_match.memory_id,
+                    "session_id": best_match.session_id,
+                    "user_id": best_match.user_id,
+                    "metadata": dict(best_match.metadata or {}),
+                }
                 return best_match.response
             else:
                 logger.debug(f"Cache MISS: no similar query found for: {query[:50]}...")
+                self._stats["misses"] += 1
                 return None
 
         except Exception as e:
             logger.error(f"Error in semantic cache get: {e}")
+            self._stats["misses"] += 1
             return None
 
     def _update_usage_in_memory_provider(self, entry: SemanticCacheEntry) -> bool:
@@ -532,11 +650,19 @@ class SemanticCache:
             True if stored successfully, False otherwise
         """
         try:
+            metadata_value = dict(metadata or {})
+            admission = dict(metadata_value.get("admission") or {})
+            if self.config.admission_policy == "read_only_deterministic" and (
+                admission.get("read_only", True) is not True
+                or admission.get("deterministic", True) is not True
+            ):
+                self.record_bypass("cache_admission_policy")
+                return False
             # Generate embedding for query (with caching to avoid duplication)
             query_embedding = self._get_or_generate_embedding(query)
 
             # Generate cache key
-            cache_key = self._generate_cache_key(query, session_id)
+            cache_key = self._generate_cache_key(query, session_id, user_id)
 
             # Create cache entry
             entry = SemanticCacheEntry(
@@ -548,7 +674,7 @@ class SemanticCache:
                 memory_id=self.memory_id,
                 agent_id=self.agent_id,
                 user_id=user_id,
-                metadata=metadata or {},
+                metadata=metadata_value,
                 cache_key=cache_key,
             )
 
@@ -563,6 +689,7 @@ class SemanticCache:
                 self._sync_to_memory_provider(cache_key, entry)
 
             logger.debug(f"Cache SET: stored query: {query[:50]}...")
+            self._stats["writes"] += 1
             return True
 
         except Exception as e:
@@ -581,6 +708,13 @@ class SemanticCache:
             data["agent_id"] = self.agent_id
             data["memory_id"] = self.memory_id
             data["user_id"] = getattr(entry, "user_id", None)
+            data["scope"] = getattr(self.config.scope, "value", self.config.scope)
+            data["similarity_threshold"] = self.config.similarity_threshold
+            data["hit_count"] = entry.usage_count
+            if self.config.ttl_hours > 0:
+                data["expires_at"] = datetime.fromtimestamp(
+                    entry.timestamp + (self.config.ttl_hours * 3600)
+                )
 
             # Map 'query' to 'query_text' for compatibility with Oracle provider
             if "query" in data:
@@ -671,7 +805,9 @@ class SemanticCache:
                         continue
 
                     cache_key = entry_data.get("cache_key") or self._generate_cache_key(
-                        cache_entry.query, cache_entry.session_id
+                        cache_entry.query,
+                        cache_entry.session_id,
+                        cache_entry.user_id,
                     )
 
                     self.cache[cache_key] = cache_entry
@@ -787,6 +923,58 @@ class SemanticCache:
 
         logger.info(f"Cleared {memory_cleared} filtered cache entries from memory")
         return memory_cleared
+
+    def invalidate(
+        self,
+        *,
+        domains: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,
+        data_version: Optional[str] = None,
+    ) -> int:
+        """Invalidate entries by operational domain, tag, or data version."""
+        wanted_domains = {str(item) for item in (domains or [])}
+        wanted_tags = {str(item) for item in (tags or [])}
+        keys: List[str] = []
+        for key, entry in self.cache.items():
+            metadata = dict(entry.metadata or {})
+            entry_domains = {
+                str(item)
+                for item in [metadata.get("domain"), *(metadata.get("domains") or [])]
+                if item is not None
+            }
+            entry_tags = {str(item) for item in (metadata.get("tags") or [])}
+            fingerprints = dict(metadata.get("fingerprints") or {})
+            if (
+                (wanted_domains and wanted_domains.intersection(entry_domains))
+                or (wanted_tags and wanted_tags.intersection(entry_tags))
+                or (
+                    data_version is not None
+                    and fingerprints.get("data_version") == str(data_version)
+                )
+            ):
+                keys.append(key)
+        for key in keys:
+            self.cache.pop(key, None)
+        self._stats["evictions"] += len(keys)
+        provider_hook = getattr(self.memory_provider, "invalidate_semantic_cache", None)
+        persistent_removed = 0
+        if callable(provider_hook):
+            try:
+                persistent_removed = int(
+                    provider_hook(
+                        agent_id=self.agent_id,
+                        memory_id=self.memory_id,
+                        domains=sorted(wanted_domains),
+                        tags=sorted(wanted_tags),
+                        data_version=data_version,
+                    )
+                    or 0
+                )
+            except Exception as exc:
+                logger.warning("Persistent semantic-cache invalidation failed: %s", exc)
+        if persistent_removed > len(keys):
+            self._stats["evictions"] += persistent_removed - len(keys)
+        return max(len(keys), persistent_removed)
 
 
 # Standalone semantic cache for external frameworks

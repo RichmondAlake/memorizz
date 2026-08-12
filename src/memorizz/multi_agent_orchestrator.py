@@ -4,6 +4,7 @@
 
 import concurrent.futures
 import logging
+import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -26,19 +27,45 @@ class MultiAgentOrchestrator:
       within a single shared memory session for complete visibility and control
     """
 
-    def __init__(self, root_agent: "MemAgent", delegates: List["MemAgent"]):
+    def __init__(
+        self,
+        root_agent: "MemAgent",
+        delegates: List["MemAgent"],
+        *,
+        delegation_plan: Any = None,
+        persist_participants: bool = False,
+        workflow_id: Optional[str] = None,
+    ):
         self.root_agent = root_agent
         self.delegates = delegates
         self.shared_memory = SharedMemory(root_agent.memory_provider)
         self.task_decomposer = TaskDecomposer(root_agent)
         self.shared_memory_id = None
+        self.delegation_plan = delegation_plan
+        self.persist_participants = bool(persist_participants)
+        self.workflow_id = workflow_id or str(uuid.uuid4())
+        self.last_workflow_report: Optional[Dict[str, Any]] = None
+        self._request_user_id: Optional[str] = None
+        self._request_context: Optional[Dict[str, Any]] = None
+        self._tool_context: Optional[Dict[str, Any]] = None
+        self._trace_id: Optional[str] = None
         self.is_nested_orchestrator = (
             False  # Flag to track if this is a sub-level orchestrator
         )
 
     def execute_multi_agent_workflow(
-        self, user_query: str, memory_id: str = None, thread_id: str = None
-    ) -> str:
+        self,
+        user_query: str,
+        memory_id: str = None,
+        thread_id: str = None,
+        *,
+        user_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        tool_context: Optional[Dict[str, Any]] = None,
+        trace_id: Optional[str] = None,
+        delegation_plan: Any = None,
+        return_report: bool = False,
+    ) -> Any:
         """
         Execute a multi-agent workflow with hierarchical coordination support.
 
@@ -61,6 +88,12 @@ class MultiAgentOrchestrator:
         logger.info(f"Root agent ID: {self.root_agent.agent_id}")
         logger.info(f"Number of delegates: {len(self.delegates)}")
         logger.info(f"Delegate IDs: {[agent.agent_id for agent in self.delegates]}")
+        self._request_user_id = user_id
+        self._request_context = dict(context or {})
+        self._tool_context = dict(tool_context or {})
+        self._trace_id = trace_id or str(uuid.uuid4())
+        if self.persist_participants:
+            self._prepare_participants()
 
         try:
             # HIERARCHICAL COORDINATION: Check if we should join an existing session
@@ -100,7 +133,7 @@ class MultiAgentOrchestrator:
                 # Persist the updated memory_ids to the memory provider
                 if hasattr(
                     self.root_agent.memory_provider, "update_memagent_memory_ids"
-                ):
+                ) and self._participant_is_persisted(self.root_agent):
                     update_success = (
                         self.root_agent.memory_provider.update_memagent_memory_ids(
                             self.root_agent.agent_id, self.root_agent.memory_ids
@@ -110,8 +143,8 @@ class MultiAgentOrchestrator:
                         f"Persisted memory_ids to storage: {'success' if update_success else 'failed'}"
                     )
                 else:
-                    logger.warning(
-                        "Memory provider doesn't support update_memagent_memory_ids"
+                    logger.debug(
+                        "Root participant is not persisted; skipping memory-id update"
                     )
 
             # **FIX: Also add shared memory ID to delegate agents' memory_ids arrays**
@@ -133,7 +166,9 @@ class MultiAgentOrchestrator:
                     )
 
                     # Persist the updated memory_ids to the memory provider
-                    if hasattr(delegate.memory_provider, "update_memagent_memory_ids"):
+                    if hasattr(
+                        delegate.memory_provider, "update_memagent_memory_ids"
+                    ) and self._participant_is_persisted(delegate):
                         update_success = (
                             delegate.memory_provider.update_memagent_memory_ids(
                                 delegate.agent_id, delegate.memory_ids
@@ -143,8 +178,9 @@ class MultiAgentOrchestrator:
                             f"Persisted delegate {delegate.agent_id} memory_ids to storage: {'success' if update_success else 'failed'}"
                         )
                     else:
-                        logger.warning(
-                            f"Delegate {delegate.agent_id} memory provider doesn't support update_memagent_memory_ids"
+                        logger.debug(
+                            "Delegate %s is not persisted; skipping memory-id update",
+                            delegate.agent_id,
                         )
 
             # Log the start of multi-agent execution with hierarchy context
@@ -164,20 +200,44 @@ class MultiAgentOrchestrator:
 
             # 2. Decompose task into sub-tasks
             logger.info("Starting task decomposition...")
-            sub_tasks = self._enhance_task_decomposition_with_hierarchy(user_query)
+            sub_tasks = self._enhance_task_decomposition_with_hierarchy(
+                user_query,
+                plan=(
+                    delegation_plan
+                    if delegation_plan is not None
+                    else self.delegation_plan
+                ),
+            )
             logger.info(f"Task decomposition resulted in {len(sub_tasks)} sub-tasks")
 
             if not sub_tasks:
                 # Fallback to single agent execution
                 logger.warning("Task decomposition failed, falling back to root agent")
                 logger.info("Executing fallback with root agent...")
-                result = self.root_agent.run(user_query, memory_id, thread_id)
+                fallback_tool_context = dict(tool_context or {})
+                fallback_tool_context["_memorizz_skip_delegation"] = True
+                result = self.root_agent.run(
+                    user_query,
+                    memory_id,
+                    thread_id,
+                    user_id=user_id,
+                    context=context,
+                    tool_context=fallback_tool_context,
+                )
                 logger.info(
                     f"Root agent returned: {result[:100]}..."
                     if result
                     else "No result from root agent"
                 )
-                return result
+                self.last_workflow_report = {
+                    "ok": True,
+                    "workflow_id": self.workflow_id,
+                    "trace_id": self._trace_id,
+                    "fallback": True,
+                    "response": result,
+                    "tasks": [],
+                }
+                return self.last_workflow_report if return_report else result
 
             # Log task decomposition
             self.shared_memory.add_blackboard_entry(
@@ -223,7 +283,23 @@ class MultiAgentOrchestrator:
             self.shared_memory.update_session_status(self.shared_memory_id, "completed")
 
             logger.info("Multi-agent workflow completed successfully")
-            return consolidated_response
+            failed = [
+                item
+                for item in sub_task_results
+                if item.get("status") not in {"completed"}
+            ]
+            self.last_workflow_report = {
+                "ok": not failed,
+                "partial": bool(failed),
+                "workflow_id": self.workflow_id,
+                "shared_memory_id": self.shared_memory_id,
+                "trace_id": self._trace_id,
+                "user_id": user_id,
+                "response": consolidated_response,
+                "tasks": sub_task_results,
+                "failures": failed,
+            }
+            return self.last_workflow_report if return_report else consolidated_response
 
         except Exception as e:
             logger.error(f"Error in multi-agent workflow: {e}", exc_info=True)
@@ -236,69 +312,138 @@ class MultiAgentOrchestrator:
             # Fallback to single agent execution
             logger.info("Attempting fallback to root agent due to error...")
             try:
-                result = self.root_agent.run(user_query, memory_id, thread_id)
+                fallback_tool_context = dict(tool_context or {})
+                fallback_tool_context["_memorizz_skip_delegation"] = True
+                result = self.root_agent.run(
+                    user_query,
+                    memory_id,
+                    thread_id,
+                    user_id=user_id,
+                    context=context,
+                    tool_context=fallback_tool_context,
+                )
                 logger.info(
                     f"Fallback completed: {result[:100]}..."
                     if result
                     else "No result from fallback"
                 )
-                return result
+                self.last_workflow_report = {
+                    "ok": False,
+                    "fallback": True,
+                    "workflow_id": self.workflow_id,
+                    "trace_id": self._trace_id,
+                    "error": str(e),
+                    "response": result,
+                }
+                return self.last_workflow_report if return_report else result
             except Exception as fallback_error:
                 logger.error(f"Fallback also failed: {fallback_error}", exc_info=True)
                 return f"Multi-agent workflow failed: {str(e)}. Fallback also failed: {str(fallback_error)}"
 
+    def _participant_is_persisted(self, agent: "MemAgent") -> bool:
+        provider = getattr(agent, "memory_provider", None)
+        lookup = getattr(provider, "retrieve_memagent", None)
+        if not callable(lookup):
+            return False
+        try:
+            return lookup(agent.agent_id) is not None
+        except Exception:
+            return False
+
+    def _prepare_participants(self) -> None:
+        """Persist previously unsaved participants when explicitly requested."""
+        for agent in [self.root_agent, *self.delegates]:
+            if self._participant_is_persisted(agent):
+                continue
+            if not getattr(agent, "memory_provider", None):
+                raise ValueError(
+                    f"Participant {agent.agent_id} has no memory provider to persist"
+                )
+            agent.save()
+
     def _execute_sub_tasks_parallel(
         self, sub_tasks: List[SubTask], memory_id: str, thread_id: str
     ) -> List[Dict[str, Any]]:
-        """Execute sub-tasks in parallel using ThreadPoolExecutor."""
-
-        # Create agent mapping for quick lookup
+        """Execute a dependency graph and expose partial/blocked states."""
         agent_map = {agent.agent_id: agent for agent in self.delegates}
+        sorted_tasks = sorted(sub_tasks, key=lambda item: item.priority)
+        results: List[Dict[str, Any]] = []
+        completed_tasks: set[str] = set()
+        failed_tasks: set[str] = set()
 
-        # Sort tasks by priority and handle dependencies
-        sorted_tasks = sorted(sub_tasks, key=lambda x: x.priority)
+        task_ids = [task.task_id for task in sorted_tasks]
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("Delegation plans must use unique task IDs")
+        known_ids = set(task_ids)
 
-        results = []
-        completed_tasks = set()
+        def mark_unrunnable(task: SubTask, status: str, reason: str) -> None:
+            task.status = status
+            task.result = {
+                "error": reason,
+                "dependencies": list(task.dependencies),
+            }
+            failed_tasks.add(task.task_id)
+            results.append(task.to_dict())
 
-        # Use ThreadPoolExecutor for parallel execution
+        for task in sorted_tasks:
+            missing = [dep for dep in task.dependencies if dep not in known_ids]
+            if missing:
+                mark_unrunnable(
+                    task, "blocked", f"Unknown dependencies: {', '.join(missing)}"
+                )
+            elif task.assigned_agent_id not in agent_map:
+                mark_unrunnable(
+                    task,
+                    "failed",
+                    f"Unknown delegate: {task.assigned_agent_id}",
+                )
+
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(self.delegates)
+            max_workers=max(1, len(self.delegates))
         ) as executor:
-            # Submit tasks that have no dependencies first
-            future_to_task = {}
-
-            for task in sorted_tasks:
-                if not task.dependencies:  # No dependencies, can execute immediately
-                    agent = agent_map.get(task.assigned_agent_id)
-                    if agent:
+            future_to_task: Dict[Any, SubTask] = {}
+            while True:
+                for task in sorted_tasks:
+                    if task.status != "pending":
+                        continue
+                    if any(dep in failed_tasks for dep in task.dependencies):
+                        mark_unrunnable(
+                            task, "blocked", "One or more dependencies failed"
+                        )
+                        continue
+                    if all(dep in completed_tasks for dep in task.dependencies):
+                        task.status = "in_progress"
                         future = executor.submit(
                             self._execute_single_task,
                             task,
-                            agent,
+                            agent_map[task.assigned_agent_id],
                             memory_id,
                             thread_id,
                         )
                         future_to_task[future] = task
 
-            # Process completed tasks and submit dependent tasks
-            while future_to_task:
-                # Wait for at least one task to complete
-                done_futures = concurrent.futures.wait(
-                    future_to_task.keys(),
+                if not future_to_task:
+                    for task in sorted_tasks:
+                        if task.status == "pending":
+                            mark_unrunnable(
+                                task,
+                                "blocked",
+                                "Dependency cycle or unsatisfied dependency",
+                            )
+                    break
+
+                done, _ = concurrent.futures.wait(
+                    future_to_task,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
-
-                for future in done_futures.done:
-                    task = future_to_task[future]
+                for future in done:
+                    task = future_to_task.pop(future)
                     try:
                         result = future.result()
                         task.result = result
                         task.status = "completed"
                         completed_tasks.add(task.task_id)
                         results.append(task.to_dict())
-
-                        # Log task completion
                         self.shared_memory.add_blackboard_entry(
                             memory_id=self.shared_memory_id,
                             agent_id=task.assigned_agent_id,
@@ -306,35 +451,15 @@ class MultiAgentOrchestrator:
                             entry_type="task_completion",
                         )
                         self._after_task_completion(task, result)
-
-                    except Exception as e:
-                        logger.error(f"Error executing task {task.task_id}: {e}")
+                    except Exception as exc:
+                        logger.error("Error executing task %s: %s", task.task_id, exc)
                         task.status = "failed"
-                        task.result = f"Error: {str(e)}"
+                        task.result = {"error": str(exc)}
+                        failed_tasks.add(task.task_id)
                         results.append(task.to_dict())
 
-                    del future_to_task[future]
-
-                # Check for new tasks that can be executed (dependencies met)
-                for task in sorted_tasks:
-                    if (
-                        task.status == "pending"
-                        and task.task_id
-                        not in [t.task_id for t in future_to_task.values()]
-                        and all(dep in completed_tasks for dep in task.dependencies)
-                    ):
-                        agent = agent_map.get(task.assigned_agent_id)
-                        if agent:
-                            future = executor.submit(
-                                self._execute_single_task,
-                                task,
-                                agent,
-                                memory_id,
-                                thread_id,
-                            )
-                            future_to_task[future] = task
-
-        return results
+        by_id = {result["task_id"]: result for result in results}
+        return [by_id[task.task_id] for task in sorted_tasks if task.task_id in by_id]
 
     def _execute_single_task(
         self, task: SubTask, agent: "MemAgent", memory_id: str, thread_id: str
@@ -354,8 +479,30 @@ class MultiAgentOrchestrator:
                 entry_type="task_start",
             )
 
-            # Execute the task
-            result = agent.run(task.description, memory_id, thread_id)
+            request_context = dict(self._request_context or {})
+            request_context["delegation"] = {
+                "workflow_id": self.workflow_id,
+                "trace_id": self._trace_id,
+                "task_id": task.task_id,
+                "dependencies": list(task.dependencies),
+            }
+            tool_context = dict(self._tool_context or {})
+            tool_context.update(
+                {
+                    "workflow_id": self.workflow_id,
+                    "trace_id": self._trace_id,
+                    "delegated_task_id": task.task_id,
+                    "delegated_by": self.root_agent.agent_id,
+                }
+            )
+            result = agent.run(
+                task.description,
+                memory_id,
+                thread_id,
+                user_id=self._request_user_id,
+                context=request_context,
+                tool_context=tool_context,
+            )
 
             return result
 
@@ -385,11 +532,10 @@ class MultiAgentOrchestrator:
                 },
             ]
 
-            response = self.root_agent.model.client.responses.create(
-                model="gpt-4.1", input=messages
-            )
-
-            return response.output_text
+            if not self.root_agent.model:
+                raise ValueError("Root agent has no configured LLMProvider")
+            response = self.root_agent.model.generate(messages, tools=None)
+            return self.task_decomposer._response_text(response)
 
         except Exception as e:
             logger.error(f"Error consolidating results: {e}")
@@ -449,7 +595,9 @@ class MultiAgentOrchestrator:
         try:
             # Check if our root agent is already part of an active shared session
             existing_session = self.shared_memory.find_active_session_for_agent(
-                self.root_agent.agent_id
+                self.root_agent.agent_id,
+                workflow_id=self.workflow_id,
+                user_id=self._request_user_id,
             )
 
             if existing_session:
@@ -468,7 +616,11 @@ class MultiAgentOrchestrator:
             delegate_ids = [agent.agent_id for agent in self.delegates]
 
             self.shared_memory_id = self.shared_memory.create_shared_session(
-                root_agent_id=self.root_agent.agent_id, delegate_agent_ids=delegate_ids
+                root_agent_id=self.root_agent.agent_id,
+                delegate_agent_ids=delegate_ids,
+                workflow_id=self.workflow_id,
+                user_id=self._request_user_id,
+                trace_id=self._trace_id,
             )
 
             logger.info(f"Created new shared memory session: {self.shared_memory_id}")
@@ -482,12 +634,16 @@ class MultiAgentOrchestrator:
             # Fallback: create new session
             delegate_ids = [agent.agent_id for agent in self.delegates]
             self.shared_memory_id = self.shared_memory.create_shared_session(
-                root_agent_id=self.root_agent.agent_id, delegate_agent_ids=delegate_ids
+                root_agent_id=self.root_agent.agent_id,
+                delegate_agent_ids=delegate_ids,
+                workflow_id=self.workflow_id,
+                user_id=self._request_user_id,
+                trace_id=self._trace_id,
             )
             return None
 
     def _enhance_task_decomposition_with_hierarchy(
-        self, user_query: str
+        self, user_query: str, *, plan: Any = None
     ) -> List[SubTask]:
         """
         Enhanced task decomposition that considers the complete agent hierarchy.
@@ -509,7 +665,9 @@ class MultiAgentOrchestrator:
             logger.info(f"Task decomposition considering hierarchy: {hierarchy}")
 
             # Standard task decomposition with immediate delegates
-            sub_tasks = self.task_decomposer.decompose_task(user_query, self.delegates)
+            sub_tasks = self.task_decomposer.decompose_task(
+                user_query, self.delegates, plan=plan
+            )
 
             # TODO: Future enhancement - analyze sub_agent capabilities for optimal task assignment
             # This could involve:
@@ -526,7 +684,9 @@ class MultiAgentOrchestrator:
         except Exception as e:
             logger.error(f"Error in enhanced task decomposition: {e}")
             # Fallback to standard decomposition
-            return self.task_decomposer.decompose_task(user_query, self.delegates)
+            return self.task_decomposer.decompose_task(
+                user_query, self.delegates, plan=plan
+            )
 
     # Hook methods for specialized orchestrators ---------------------------------
     def _after_task_decomposition(

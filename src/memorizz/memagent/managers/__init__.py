@@ -5,6 +5,7 @@
 """Manager components for MemAgent functionality."""
 
 from .automation_manager import AutomationManager
+from .browser_control_manager import BrowserControlManager
 from .cache_manager import CacheManager
 from .continual_learning_manager import ContinualLearningManager
 from .entity_memory_manager import EntityMemoryManager
@@ -20,6 +21,7 @@ __all__ = [
     "ToolManager",
     "CacheManager",
     "AutomationManager",
+    "BrowserControlManager",
     "PersonaManager",
     "ContinualLearningManager",
     "EntityMemoryManager",

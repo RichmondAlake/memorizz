@@ -150,9 +150,16 @@ CREATE TABLE toolbox (
     signature VARCHAR2(1000),
     docstring CLOB,
     tool_type VARCHAR2(50),
-    parameters CLOB CHECK (parameters IS JSON),  -- JSON schema of parameters
+    parameters CLOB CHECK (parameters IS JSON),  -- legacy properties projection
+    input_schema CLOB CHECK (input_schema IS JSON), -- complete JSON Schema
+    tool_policy CLOB CHECK (tool_policy IS JSON),
+    aliases CLOB CHECK (aliases IS JSON),
+    deprecated_arguments CLOB CHECK (deprecated_arguments IS JSON),
+    queries CLOB CHECK (queries IS JSON),
+    import_reference VARCHAR2(1000),           -- trusted module:qualified_name only
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
+    user_id VARCHAR2(255),
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -168,6 +175,7 @@ CREATE INDEX idx_toolbox_name ON toolbox(name);
 CREATE INDEX idx_toolbox_tool_type ON toolbox(tool_type);
 CREATE INDEX idx_toolbox_memory_id ON toolbox(memory_id);
 CREATE INDEX idx_toolbox_agent_id ON toolbox(agent_id);
+CREATE INDEX idx_toolbox_user_id ON toolbox(user_id);
 
 -- ==============================================================================
 -- SKILLBOX TABLE (Learned skills promoted from workflow trajectories)
@@ -226,6 +234,7 @@ CREATE TABLE conversation_memory (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     agent_id VARCHAR2(255),
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
+    summary_id VARCHAR2(255),                 -- compaction marker
     embedding VECTOR(256, FLOAT32),
 
     -- Constraints
@@ -239,6 +248,7 @@ CREATE INDEX idx_conv_timestamp ON conversation_memory(timestamp);
 CREATE INDEX idx_conv_agent_id ON conversation_memory(agent_id);
 CREATE INDEX idx_conv_user_id ON conversation_memory(user_id);
 CREATE INDEX idx_conv_memory_user ON conversation_memory(memory_id, user_id);
+CREATE INDEX idx_conv_summary_id ON conversation_memory(summary_id);
 
 -- ==============================================================================
 -- KNOWLEDGE_BASE TABLE (Facts, knowledge)
@@ -366,11 +376,14 @@ CREATE TABLE summaries (
     id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
     summary_id VARCHAR2(255) UNIQUE NOT NULL,
     content CLOB NOT NULL,
-    original_memory_ids CLOB CHECK (original_memory_ids IS JSON),  -- JSON array
+    source_message_ids CLOB CHECK (source_message_ids IS JSON),  -- canonical JSON array
     summary_type VARCHAR2(50),
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
+    period_start NUMBER,
+    period_end NUMBER,
+    memory_units_count NUMBER(10) DEFAULT 0,
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -381,6 +394,20 @@ CREATE INDEX idx_summaries_type ON summaries(summary_type);
 CREATE INDEX idx_summaries_memory_id ON summaries(memory_id);
 CREATE INDEX idx_summaries_agent_id ON summaries(agent_id);
 CREATE INDEX idx_summaries_user_id ON summaries(user_id);
+
+CREATE TABLE summary_message_links (
+    summary_id VARCHAR2(255) NOT NULL,
+    message_id RAW(16) NOT NULL,
+    position NUMBER(10) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (summary_id, message_id),
+    CONSTRAINT fk_summary_link_summary FOREIGN KEY (summary_id)
+        REFERENCES summaries(summary_id) ON DELETE CASCADE,
+    CONSTRAINT fk_summary_link_message FOREIGN KEY (message_id)
+        REFERENCES conversation_memory(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_summary_links_message ON summary_message_links(message_id);
 
 -- ==============================================================================
 -- SEMANTIC_CACHE TABLE (Query response cache)
@@ -397,6 +424,7 @@ CREATE TABLE semantic_cache (
     memory_id VARCHAR2(255),
     session_id VARCHAR2(255),
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
+    metadata CLOB CONSTRAINT chk_cache_metadata_json CHECK (metadata IS JSON),
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP,

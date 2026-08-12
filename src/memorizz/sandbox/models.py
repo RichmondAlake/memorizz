@@ -41,6 +41,7 @@ class ExecutionResult:
             "exit_code": self.exit_code,
             "results": self.results,
             "success": self.success,
+            "metadata": self.metadata,
         }
 
     def to_json(self) -> str:

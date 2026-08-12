@@ -47,6 +47,7 @@ from .routers.evalground import router as evalground_router
 from .routers.evalground import stop_active_eval_run_processes
 from .routers.huggingface import router as huggingface_router
 from .routers.knowledge_base import router as knowledge_base_router
+from .routers.mcp import router as mcp_router
 from .routers.memory_pages import router as memory_pages_router
 from .routers.ollama import router as ollama_router
 from .routers.oracle_docker import router as oracle_docker_router
@@ -66,7 +67,7 @@ ROOT_DIR = UI_DIR.parent.parent.parent
 # nothing ever read it.
 ENV_FILE_PATH = _resolve_env_file()
 
-DEFAULT_GRAALPY_INTERNET_ACCESS = "1"
+DEFAULT_GRAALPY_INTERNET_ACCESS = "0"
 
 SETTINGS_SECTIONS = [
     {
@@ -237,6 +238,106 @@ SETTINGS_SECTIONS = [
         ],
     },
     {
+        "title": "Browser Control",
+        "description": (
+            "Configure the isolated Browser Use provider. Browser tasks are "
+            "always side-effecting and require durable operator approval."
+        ),
+        "fields": [
+            {
+                "env": "MEMORIZZ_BROWSER_CONTROL_PROVIDER",
+                "label": "Default Browser Control Provider",
+                "hint": "Browser automation is opt-in; choose Browser Use or leave disabled.",
+                "field_type": "select",
+                "options": [
+                    {"value": "", "label": "None (disabled)"},
+                    {"value": "browseruse", "label": "Browser Use (isolated tool)"},
+                ],
+            },
+            {
+                "env": "BROWSER_USE_API_KEY",
+                "label": "Browser Use API Key",
+                "placeholder": "bu_...",
+                "hint": "Only required when the Browser Use model provider is selected.",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_COMMAND",
+                "label": "Browser Use Entry Point",
+                "placeholder": "browser-use",
+                "hint": "Entry point from an isolated Python 3.11+ Browser Use installation.",
+                "field_type": "text",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_PYTHON_COMMAND",
+                "label": "Browser Use Python Path",
+                "placeholder": "/absolute/path/to/browser-use/bin/python",
+                "hint": "Optional override when the entry point does not expose an absolute interpreter shebang.",
+                "field_type": "text",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_LLM_PROVIDER",
+                "label": "Browser Use LLM Provider",
+                "field_type": "select",
+                "options": [
+                    {"value": "openai", "label": "OpenAI"},
+                    {"value": "anthropic", "label": "Anthropic"},
+                    {"value": "google", "label": "Google"},
+                    {"value": "browseruse", "label": "Browser Use"},
+                ],
+                "default_value": "openai",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_MODEL",
+                "label": "Browser Use Model",
+                "placeholder": "gpt-4.1-mini",
+                "hint": "Optional model override for the selected provider.",
+                "field_type": "text",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_ALLOWED_DOMAINS",
+                "label": "Allowed Domains",
+                "placeholder": "calendar.google.com, *.notion.so",
+                "hint": "Comma-separated navigation allowlist. Empty permits any public domain.",
+                "field_type": "text",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_PROHIBITED_DOMAINS",
+                "label": "Prohibited Domains",
+                "placeholder": "bank.example, admin.example",
+                "hint": "Comma-separated denylist applied in addition to the allowlist.",
+                "field_type": "text",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_HEADLESS",
+                "label": "Headless Browser",
+                "field_type": "checkbox",
+                "default_value": "1",
+                "checkbox_label": "Run Chromium without a visible window",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_BLOCK_IP_ADDRESSES",
+                "label": "Block Direct IP Navigation",
+                "field_type": "checkbox",
+                "default_value": "1",
+                "checkbox_label": "Reject direct IP-address navigation (recommended)",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_MAX_STEPS",
+                "label": "Maximum Browser Steps",
+                "placeholder": "25",
+                "hint": "Hard upper bound per task (1-100).",
+                "field_type": "text",
+            },
+            {
+                "env": "MEMORIZZ_BROWSER_USE_TASK_TIMEOUT",
+                "label": "Browser Task Timeout (seconds)",
+                "placeholder": "600",
+                "hint": "Hard wall-clock limit per task (10-3600 seconds).",
+                "field_type": "text",
+            },
+        ],
+    },
+    {
         "title": "Sandbox Providers",
         "description": "Configure sandbox code execution providers. The default provider applies globally to all agents unless overridden per-agent in the Playground.",
         "fields": [
@@ -263,13 +364,13 @@ SETTINGS_SECTIONS = [
                 "env": "E2B_API_KEY",
                 "label": "E2B API Key",
                 "placeholder": "e2b_...",
-                "hint": "Required for E2B sandbox. Get one at e2b.dev ($100 free credits).",
+                "hint": "Required for the E2B sandbox provider. Manage it at e2b.dev.",
             },
             {
                 "env": "DAYTONA_API_KEY",
                 "label": "Daytona API Key",
                 "placeholder": "daytona_...",
-                "hint": "Required for Daytona sandbox. Get one at daytona.io ($200 free credits).",
+                "hint": "Required for the Daytona sandbox provider. Manage it at daytona.io.",
             },
             {
                 "env": "GRAALPY_PATH",
@@ -279,11 +380,32 @@ SETTINGS_SECTIONS = [
                 "field_type": "text",
             },
             {
+                "env": "MEMORIZZ_GRAALPY_MODE",
+                "label": "GraalPy Execution Mode",
+                "hint": (
+                    "Subprocess is bounded trusted-code execution, not a security "
+                    "sandbox. Java wrapper is the validated UNTRUSTED boundary."
+                ),
+                "field_type": "select",
+                "default_value": "subprocess",
+                "options": [
+                    {
+                        "value": "subprocess",
+                        "label": "Subprocess (trusted code only)",
+                    },
+                    {
+                        "value": "java_wrapper",
+                        "label": "Java UNTRUSTED wrapper",
+                    },
+                ],
+                "visible_if_sandbox_provider": "graalpy",
+            },
+            {
                 "env": "MEMORIZZ_GRAALPY_INTERNET_ACCESS",
                 "label": "GraalPy Internet Access",
                 "hint": (
-                    "When enabled, GraalPy runs in subprocess mode (full network access). "
-                    "When disabled, GraalPy uses java_wrapper + UNTRUSTED policy and requires GRAALPY_JAVA_WRAPPER_JAR."
+                    "Explicit egress opt-in for trusted subprocess mode. Network is "
+                    "denied by default and Java UNTRUSTED mode always blocks guest IO."
                 ),
                 "field_type": "checkbox",
                 "default_value": DEFAULT_GRAALPY_INTERNET_ACCESS,
@@ -294,7 +416,7 @@ SETTINGS_SECTIONS = [
                 "env": "GRAALPY_JAVA_WRAPPER_JAR",
                 "label": "GraalPy Java Wrapper JAR",
                 "placeholder": "/path/to/graalpy-sandbox.jar",
-                "hint": "Required when GraalPy internet access is disabled (java_wrapper mode).",
+                "hint": "Required only when GraalPy Execution Mode is Java UNTRUSTED wrapper.",
                 "field_type": "text",
                 "visible_if_sandbox_provider": "graalpy",
             },
@@ -510,6 +632,7 @@ def create_app() -> FastAPI:
     app.include_router(traces_router)
     app.include_router(continual_learning_router)
     app.include_router(memory_pages_router)
+    app.include_router(mcp_router)
     app.include_router(vercel_skills_router)
     app.include_router(knowledge_base_router)
     app.include_router(whatsapp_router)

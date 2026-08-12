@@ -84,6 +84,37 @@ class TestAgentCrud:
         assert agent.continual_learning_config["skill_injection_role"] == "user"
 
     @pytest.mark.unit
+    def test_browser_control_can_be_configured_and_persisted(self, client, connected):
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENAI_API_KEY": "unit-test-only",
+                "MEMORIZZ_BROWSER_USE_ALLOWED_DOMAINS": "example.com, *.notion.so",
+            },
+            clear=False,
+        ), patch(
+            "memorizz.browser_control.providers.browser_use.shutil.which",
+            return_value="/isolated/bin/browser-use",
+        ), patch(
+            "memorizz.browser_control.providers.browser_use.BrowserUseProvider._resolved_python_command",
+            return_value=["/isolated/bin/python"],
+        ):
+            resp = _create_agent(client, browser_control_provider="browseruse")
+
+        assert resp.status_code in (302, 303), resp.text[:300]
+        agent = connected.list_memagents()[0]
+        assert agent.browser_control["provider"] == "browseruse"
+        assert agent.browser_control["allowed_domains"] == [
+            "example.com",
+            "*.notion.so",
+        ]
+        assert "api_key" not in agent.browser_control
+
+        form = client.get(f"/agents/{agent.agent_id}/edit")
+        assert form.status_code == 200
+        assert 'option value="browseruse" selected' in form.text
+
+    @pytest.mark.unit
     def test_create_with_reviewed_developer_skill_authority(self, client, connected):
         resp = _create_agent(
             client,

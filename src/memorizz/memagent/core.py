@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import hashlib
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -27,10 +29,25 @@ from typing import (
     Union,
 )
 
+from ..approval import (
+    ApprovalRequired,
+    ApprovalStateError,
+    ApprovalStatus,
+    ApprovalStore,
+    default_approval_store,
+)
 from ..conversation_history import is_trace_bundle_entry
 from ..enums import ApplicationMode, ApplicationModeConfig, MemoryType, Role
 from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
+from ..tooling import (
+    ContextPolicy,
+    SemanticToolRouter,
+    ToolResultPolicy,
+    governed_tool,
+    serialize_tool_result,
+    tool_metadata_to_openai,
+)
 from . import persistence
 from .constants import (
     BASE_SYSTEM_PROMPT,
@@ -43,6 +60,7 @@ from .constants import (
 )
 from .managers import (
     AutomationManager,
+    BrowserControlManager,
     CacheManager,
     EntityMemoryManager,
     InternetAccessManager,
@@ -65,6 +83,7 @@ from .utils.tool_log import (  # noqa: F401  — re-exported for compatibility
 
 if TYPE_CHECKING:
     from ..automation.models import AutomationJob, AutomationRun
+    from ..browser_control import BrowserControlProvider
     from ..internet_access import InternetAccessProvider
     from ..sandbox.base import SandboxProvider
 
@@ -121,6 +140,9 @@ class MemAgent:
         sandbox_provider: Optional[
             Union[str, Dict[str, Any], "SandboxProvider"]
         ] = None,
+        browser_control: Optional[
+            Union[str, Dict[str, Any], "BrowserControlProvider"]
+        ] = None,
         skill_paths: Optional[List[str]] = None,
         mcp_servers: Optional[List[Dict[str, Any]]] = None,
         automations_enabled: bool = True,
@@ -130,6 +152,16 @@ class MemAgent:
         continual_learning: bool = False,
         continual_learning_config: Optional[Dict[str, Any]] = None,
         workflow_outcome_evaluator: Optional[Callable[[Any], Any]] = None,
+        toolbox: Optional[Any] = None,
+        skillbox: Optional[Any] = None,
+        authored_skills: Optional[List[Any]] = None,
+        skill_retrieval: bool = False,
+        skill_retrieval_config: Optional[Dict[str, Any]] = None,
+        tool_result_policy: Optional[Union[ToolResultPolicy, Dict[str, Any]]] = None,
+        context_policy: Optional[Union[ContextPolicy, Dict[str, Any]]] = None,
+        approval_store: Optional[ApprovalStore] = None,
+        delegation: Optional[Dict[str, Any]] = None,
+        semantic_layer: Optional[Any] = None,
         name: Optional[str] = None,
         is_favorite: bool = False,
         streaming: bool = False,
@@ -155,9 +187,34 @@ class MemAgent:
         # always returns a real list rather than AttributeError.
         self.knowledge_base_ids: List[str] = []
         self.tools = tools if tools is not None else []
+        self.toolbox = toolbox
+        self.skillbox = skillbox
+        self.authored_skills = list(authored_skills or [])
+        self.skill_retrieval = bool(skill_retrieval)
+        self.skill_retrieval_config = dict(skill_retrieval_config or {})
+        self.context_policy = ContextPolicy.from_value(context_policy)
+        self.tool_result_policy = ToolResultPolicy.from_value(tool_result_policy)
+        self.approval_store = approval_store
+        self.delegation_config = dict(delegation or {})
+        self.delegates = list(delegates or [])
+        self.semantic_layer = semantic_layer
+        self._approval_execution_active = False
+        self._turn_had_side_effects = False
+        self._turn_had_nondeterministic_tools = False
+        self._turn_cache_domains: Set[str] = set()
+        self._cache_bypass_reason: Optional[str] = None
         self.skill_paths = self._normalize_skill_paths(skill_paths)
         self.skills: List[Dict[str, Any]] = []
-        self.mcp_servers = self._normalize_mcp_servers(mcp_servers)
+        # MCP is a first-class client subsystem. It owns protocol negotiation,
+        # encrypted credentials, OAuth, policies, and transport lifecycles;
+        # only its secret-free public configuration is persisted on the agent.
+        from ..mcp import MCPClientManager
+
+        self.mcp_manager = MCPClientManager(
+            owner_id=self.agent_id,
+            servers=mcp_servers or [],
+        )
+        self.mcp_servers = self.mcp_manager.server_dicts()
         self.automations_enabled = bool(automations_enabled)
         self.default_timezone = (
             default_timezone.strip()
@@ -172,6 +229,8 @@ class MemAgent:
             os.getenv("MEMORIZZ_CONTINUAL_LEARNING", "").strip().lower()
             in ("1", "true", "yes")
         )
+        if self.continual_learning:
+            self.skill_retrieval = True
         self.continual_learning_config = None
         if isinstance(continual_learning_config, dict):
             from ..long_term.procedural.skillbox import PromotionConfig
@@ -225,6 +284,7 @@ class MemAgent:
         # Initialize thread state tracking
         self._current_thread_id = None
         self._current_memory_id = None
+        self._current_user_id: Optional[str] = None
         self._thread_ids_by_memory: Dict[str, str] = {}
 
         # Initialize LLM. We stash any construction error on the instance
@@ -294,6 +354,19 @@ class MemAgent:
             "sandbox_write_file",
             "sandbox_read_file",
         )
+        self._browser_control_tools_registered = False
+        self._browser_control_tool_names = ("browser_control",)
+        self.browser_control_config: Optional[Dict[str, Any]] = None
+        if isinstance(browser_control, str):
+            self.browser_control_config = {"provider": browser_control}
+        elif isinstance(browser_control, dict):
+            self.browser_control_config = dict(browser_control)
+        elif browser_control is not None and hasattr(browser_control, "get_config"):
+            try:
+                self.browser_control_config = dict(browser_control.get_config())
+            except Exception:
+                self.browser_control_config = None
+        self._browser_control_init_error: Optional[str] = None
         self._skill_tools_registered = False
         self._mcp_tools_registered = False
         self._self_aware_tools_registered = False
@@ -322,10 +395,31 @@ class MemAgent:
             embedding_config=embedding_config,
             internet_access_provider=internet_access_provider,
             sandbox_provider=sandbox_provider,
+            browser_control=browser_control,
             self_aware_config=self_aware_config,
+        )
+        if self.toolbox is not None:
+            self.tool_manager.initialize_from_toolbox(self.toolbox)
+        self.semantic_tool_router = SemanticToolRouter(
+            self.tool_manager,
+            toolbox=self.toolbox,
+            agent_id=self.agent_id,
+            top_k=self.context_policy.tool_top_k,
+            enabled=self.context_policy.progressive_tool_disclosure,
+            always_visible={
+                "retrieve_tool_log_entry",
+                "expand_summary",
+                "list_mcp_servers",
+                "mcp_list_tools",
+                "mcp_call_tool",
+                "semantic_list_models",
+            },
+            max_invocations_per_turn=self.context_policy.max_tool_invocations_per_turn,
+            max_attempts_per_call=self.context_policy.max_tool_attempts_per_call,
         )
         self._register_context_monitor_tools()
         self._register_knowledge_base_tools()
+        self._register_semantic_layer_tools()
 
         provider_to_attach = internet_access_provider
         if (
@@ -404,7 +498,7 @@ class MemAgent:
         # Learned (skillbox) skills surface through the same list_skills /
         # read_skill tools, so registration is also needed when continual
         # learning is on even with no file-based skills configured.
-        if self.skills or self.continual_learning_manager:
+        if self.skills or self.skillbox:
             try:
                 self._register_skill_tools()
             except Exception as exc:
@@ -435,6 +529,86 @@ class MemAgent:
         rather than a config dict.
         """
         return self.llm_config.get("provider") if self.llm_config else None
+
+    def validate_configuration(self) -> Dict[str, Any]:
+        """Validate configured optional subsystems and return a stable report."""
+        errors: List[str] = []
+        if self.max_steps < 1:
+            errors.append("max_steps must be at least 1")
+        if self.sandbox_manager and self.sandbox_manager.provider:
+            issue = self.sandbox_manager.provider.validate_configuration()
+            if issue:
+                errors.append(issue)
+        if self.browser_control_manager and self.browser_control_manager.provider:
+            issue = self.browser_control_manager.provider.validate_configuration()
+            if issue:
+                errors.append(issue)
+        elif self.browser_control_config and self._browser_control_init_error:
+            errors.append(self._browser_control_init_error)
+        if self.approval_store is not None and not isinstance(
+            self.approval_store, ApprovalStore
+        ):
+            errors.append("approval_store does not implement ApprovalStore")
+        if self.delegates and not self.memory_provider:
+            errors.append("delegation requires a shared memory provider")
+        report = {"ok": not errors, "errors": errors, "agent_id": self.agent_id}
+        if errors:
+            raise ValueError("; ".join(errors))
+        return report
+
+    def capability_report(self, *, preflight: bool = False) -> Dict[str, Any]:
+        """Return package and configured-agent feature/provider states."""
+        from ..capabilities import capabilities
+
+        provider = self.memory_provider
+        report = capabilities()
+        report["agent"] = {
+            "agent_id": self.agent_id,
+            "llm_provider": self.llm_provider
+            or (type(self.model).__name__ if self.model is not None else None),
+            "llm_model": self.llm_model or getattr(self.model, "model", None),
+            "memory_provider": type(provider).__name__ if provider else None,
+            "sandbox_provider": (
+                type(self.sandbox_manager.provider).__name__
+                if self.sandbox_manager and self.sandbox_manager.provider
+                else None
+            ),
+            "browser_control_provider": (
+                type(self.browser_control_manager.provider).__name__
+                if self.browser_control_manager
+                and self.browser_control_manager.provider
+                else None
+            ),
+            "browser_control_configured": bool(self.browser_control_config),
+            "browser_control_error": self._browser_control_init_error,
+            "mcp_servers": self.mcp_manager.connection_status(),
+            "semantic_cache": self.semantic_cache_stats(),
+            "progressive_tool_disclosure": self.semantic_tool_router.enabled,
+            "visible_tool_limit": (
+                self.semantic_tool_router.top_k
+                + len(self.semantic_tool_router.always_visible)
+                + 2  # stable discovery and invocation meta-tools
+                if self.semantic_tool_router.enabled
+                else len(self.tool_manager.list_tools())
+            ),
+            "registered_tool_count": len(self.tool_manager.list_tools()),
+            "skill_retrieval": bool(self.skill_retrieval),
+            "continual_learning": bool(self.continual_learning),
+            "delegates": [item.agent_id for item in self.delegates],
+            "durable_approval_store": (
+                type(self.approval_store).__name__
+                if self.approval_store is not None
+                else "SQLiteApprovalStore (lazy)"
+            ),
+            "semantic_layer": self.semantic_layer is not None,
+        }
+        if (
+            preflight
+            and provider is not None
+            and callable(getattr(provider, "preflight", None))
+        ):
+            report["agent"]["provider_preflight"] = provider.preflight()
+        return report
 
     @property
     def llm_model(self) -> Optional[str]:
@@ -514,6 +688,7 @@ class MemAgent:
         embedding_config=None,
         internet_access_provider=None,
         sandbox_provider=None,
+        browser_control=None,
         self_aware_config=None,
     ):
         """Initialize all manager components."""
@@ -574,6 +749,25 @@ class MemAgent:
         else:
             self.sandbox_manager = None
 
+        # Browser Control Manager. Its single model-facing tool is explicitly
+        # side-effecting and therefore always enters the durable approval path.
+        if browser_control:
+            try:
+                self.browser_control_manager = BrowserControlManager.from_config(
+                    browser_control
+                )
+                self.browser_control_config = (
+                    self.browser_control_manager.get_provider_config()
+                )
+                self._browser_control_init_error = None
+                self._register_browser_control_tools()
+            except Exception as exc:
+                logger.warning("Browser-control provider failed to initialize: %s", exc)
+                self.browser_control_manager = None
+                self._browser_control_init_error = str(exc)
+        else:
+            self.browser_control_manager = None
+
         # Self-awareness manager (host codebase awareness and guarded file/CLI ops)
         self.self_awareness_manager = SelfAwarenessManager(config=self_aware_config)
         self.self_aware_config = self.self_awareness_manager.get_config()
@@ -603,6 +797,23 @@ class MemAgent:
                     "continual_learning=True requires a memory provider — "
                     "feature disabled for this agent."
                 )
+
+        if self.continual_learning_manager is not None:
+            self.skillbox = self.continual_learning_manager.skillbox
+        elif (
+            self.skillbox is None
+            and (self.skill_retrieval or self.authored_skills)
+            and memory_provider
+        ):
+            from ..long_term.procedural.skillbox import Skillbox
+
+            self.skillbox = Skillbox(
+                memory_provider=memory_provider,
+                llm_provider=self.model,
+                agent_id=self.agent_id,
+            )
+        if self.authored_skills:
+            self._persist_authored_skills()
 
     def _initialize_context_window_tokens(
         self, explicit_value: Optional[int], llm_config: Optional[Dict[str, Any]]
@@ -919,7 +1130,7 @@ class MemAgent:
     ) -> Tuple[str, str, List[Any]]:
         """Render active skills into developer- and user-authority groups."""
         activated_skills = list(context.get("activated_skills") or [])
-        if not activated_skills or not self.continual_learning_manager:
+        if not activated_skills:
             return "", "", []
 
         grouped: Dict[str, List[Any]] = {"developer": [], "user": []}
@@ -936,9 +1147,21 @@ class MemAgent:
             if not skills:
                 continue
             try:
-                section = self.continual_learning_manager.format_skills_prompt_section(
-                    skills, injection_role=role
-                )
+                if self.continual_learning_manager:
+                    section = (
+                        self.continual_learning_manager.format_skills_prompt_section(
+                            skills, injection_role=role
+                        )
+                    )
+                else:
+                    section = "\n\n".join(
+                        "### {name}\nWhen to apply: {description}\n{content}".format(
+                            name=(getattr(item, "skill", item)).name,
+                            description=(getattr(item, "skill", item)).description,
+                            content=(getattr(item, "skill", item)).content,
+                        )
+                        for item in skills
+                    )
             except TypeError:
                 # Backward-compatible seam for custom managers implementing
                 # the pre-authority one-argument formatter.
@@ -1094,6 +1317,7 @@ class MemAgent:
                 memory_id=self._current_memory_id,
                 agent_id=self.agent_id,
                 limit=20,
+                user_id=self._current_user_id,
             )
             return {"summaries": summaries}
 
@@ -1120,9 +1344,15 @@ class MemAgent:
             }
 
             # Reconstruct original messages if source IDs are available
-            source_ids = summary_doc.get("source_message_ids") or []
+            source_ids = (
+                summary_doc.get("source_message_ids")
+                or summary_doc.get("original_memory_ids")
+                or []
+            )
             if source_ids and self.memory_manager:
-                original_msgs = self.memory_manager.get_messages_by_ids(source_ids)
+                original_msgs = self.memory_manager.get_messages_by_ids(
+                    source_ids, user_id=self._current_user_id
+                )
                 if original_msgs:
                     reconstructed = []
                     for msg in original_msgs:
@@ -1210,9 +1440,24 @@ class MemAgent:
             """Retrieve a stored tool log entry by its ID. Use this to access
             full tool output that was offloaded from the context window."""
             if not self.memory_manager:
-                return {"error": "No memory manager available."}
-            result = self.memory_manager.retrieve_tool_log(tool_log_id)
-            return result or {"error": f"Tool log '{tool_log_id}' not found."}
+                return {
+                    "ok": False,
+                    "error_code": "tool_log_unavailable",
+                    "error": "No memory manager available.",
+                    "tool_log_id": tool_log_id,
+                }
+            result = self.memory_manager.retrieve_tool_log(
+                tool_log_id,
+                user_id=self._current_user_id,
+            )
+            if not result:
+                return {
+                    "ok": False,
+                    "error_code": "tool_log_not_found",
+                    "error": f"Tool log '{tool_log_id}' not found.",
+                    "tool_log_id": tool_log_id,
+                }
+            return {"ok": True, "tool_log_id": tool_log_id, "tool_log": result}
 
         def list_recent_tool_logs(limit: int = 10) -> Dict[str, Any]:
             """List recent tool execution logs for the current thread.
@@ -1226,6 +1471,7 @@ class MemAgent:
             raw_logs = self.memory_manager.list_tool_logs(
                 memory_id=self._current_memory_id,
                 limit=limit,
+                user_id=self._current_user_id,
                 thread_id=self._current_thread_id,
             )
             enriched: List[Dict[str, Any]] = []
@@ -1359,6 +1605,14 @@ class MemAgent:
 
     def _initialize_tools(self, tools):
         """Initialize tools using the tool manager."""
+        from ..long_term.procedural.toolbox import Toolbox
+
+        if isinstance(tools, Toolbox):
+            self.toolbox = tools
+            self.tool_manager.initialize_from_toolbox(tools)
+            if getattr(self, "semantic_tool_router", None) is not None:
+                self.semantic_tool_router.toolbox = tools
+            return
         if hasattr(tools, "__iter__") and not isinstance(tools, str):
             # List of tools
             for tool in tools:
@@ -1390,81 +1644,72 @@ class MemAgent:
             normalized.append(path_value)
         return normalized
 
+    def _persist_authored_skills(self, *, strict: bool = False) -> List[str]:
+        """Persist explicitly authored skills without enabling learning machinery."""
+        if self.skillbox is None:
+            message = "Authored skills require a Skillbox or memory provider"
+            if strict:
+                raise RuntimeError(message)
+            logger.warning(message)
+            return []
+        from ..long_term.procedural.skillbox import Skill, SkillStatus
+
+        persisted: List[str] = []
+        failures: List[str] = []
+        for value in self.authored_skills:
+            try:
+                if isinstance(value, Skill):
+                    skill = value
+                elif isinstance(value, dict):
+                    payload = dict(value)
+                    payload.setdefault("status", SkillStatus.ACTIVE.value)
+                    payload.setdefault("agent_id", self.agent_id)
+                    if "embedding" in payload:
+                        skill = Skill.from_dict(payload)
+                    else:
+                        skill = Skill(
+                            name=str(payload.get("name") or ""),
+                            description=str(payload.get("description") or ""),
+                            content=str(payload.get("content") or ""),
+                            preconditions=payload.get("preconditions"),
+                            tools_used=payload.get("tools_used"),
+                            queries=payload.get("queries"),
+                            skill_id=payload.get("skill_id"),
+                            agent_id=payload.get("agent_id"),
+                            user_id=payload.get("user_id"),
+                            status=payload.get("status"),
+                            injection_role=payload.get("injection_role", "user"),
+                        )
+                else:
+                    raise TypeError("Authored skills must be Skill instances or dicts")
+                skill.agent_id = skill.agent_id or self.agent_id
+                skill.status = SkillStatus.ACTIVE
+                existing = self.skillbox.get_skill_by_name(skill.name)
+                if existing is None:
+                    persisted.append(self.skillbox.add_skill(skill))
+                else:
+                    persisted.append(str(existing.skill_id))
+            except Exception as exc:
+                logger.warning("Failed to persist authored skill: %s", exc)
+                failures.append(str(exc))
+        if strict and failures:
+            raise RuntimeError(
+                "One or more authored skills could not be persisted: "
+                + "; ".join(failures)
+            )
+        return persisted
+
     def _normalize_mcp_servers(
         self, mcp_servers: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]
     ) -> List[Dict[str, Any]]:
-        """Normalize and validate MCP server entries."""
-        if not mcp_servers:
-            return []
+        """Normalize MCP entries through the first-class manager."""
+        from ..mcp import MCPClientManager
 
-        raw_entries: List[Any]
-        if isinstance(mcp_servers, dict):
-            raw_entries = [mcp_servers]
-        elif isinstance(mcp_servers, list):
-            raw_entries = mcp_servers
-        else:
-            return []
-
-        normalized: List[Dict[str, Any]] = []
-        seen_names: Set[str] = set()
-
-        for entry in raw_entries:
-            if not isinstance(entry, dict):
-                continue
-
-            name = str(entry.get("name", "")).strip()
-            if not name or name in seen_names:
-                continue
-
-            transport = str(entry.get("transport", "stdio")).strip().lower() or "stdio"
-            if transport not in {"stdio", "http"}:
-                transport = "stdio"
-
-            server: Dict[str, Any] = {"name": name, "transport": transport}
-            timeout = entry.get("timeout")
-            try:
-                timeout_value = int(timeout) if timeout is not None else 30
-            except Exception:
-                timeout_value = 30
-            server["timeout"] = max(1, min(timeout_value, 300))
-
-            if transport == "stdio":
-                command = str(entry.get("command", "")).strip()
-                if not command:
-                    continue
-                server["command"] = command
-                args = entry.get("args", [])
-                if not isinstance(args, list):
-                    args = []
-                server["args"] = [str(arg) for arg in args if str(arg).strip()]
-                env = entry.get("env", {})
-                if not isinstance(env, dict):
-                    env = {}
-                server["env"] = {
-                    str(key): str(value)
-                    for key, value in env.items()
-                    if str(key).strip()
-                }
-                cwd = str(entry.get("cwd", "")).strip()
-                if cwd:
-                    server["cwd"] = cwd
-            else:
-                url = str(entry.get("url", "")).strip()
-                if not url:
-                    continue
-                server["url"] = url
-                headers = entry.get("headers", {})
-                if isinstance(headers, dict) and headers:
-                    server["headers"] = {
-                        str(key): str(value)
-                        for key, value in headers.items()
-                        if str(key).strip()
-                    }
-
-            normalized.append(server)
-            seen_names.add(name)
-
-        return normalized
+        manager = MCPClientManager(
+            owner_id=getattr(self, "agent_id", "default"),
+            servers=mcp_servers or [],
+        )
+        return manager.server_dicts()
 
     def _normalize_skills_marketplace_provider_name(self, value: Any) -> str:
         """Normalize skills marketplace provider values to a stable lowercase name."""
@@ -1619,11 +1864,9 @@ class MemAgent:
                     Path(skill.get("path", "")).name,
                 }:
                     return skill
-        if skill_name and self.continual_learning_manager:
+        if skill_name and self.skillbox:
             try:
-                learned = self.continual_learning_manager.skillbox.get_skill_by_name(
-                    skill_name
-                )
+                learned = self.skillbox.get_skill_by_name(skill_name)
             except Exception:
                 learned = None
             if learned:
@@ -1683,11 +1926,11 @@ class MemAgent:
                 }
                 for skill in self.skills
             ]
-            if self.continual_learning_manager:
+            if self.skillbox:
                 try:
                     from ..long_term.procedural.skillbox import SkillStatus
 
-                    for learned in self.continual_learning_manager.skillbox.list_skills(
+                    for learned in self.skillbox.list_skills(
                         statuses=(SkillStatus.ACTIVE,)
                     ):
                         entries.append(
@@ -1831,241 +2074,129 @@ class MemAgent:
     def _run_mcp_request_in_sandbox(
         self, server_name: str, method: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Call an MCP request inside sandboxed Python."""
-        server = self._get_mcp_server(server_name)
-        if not server:
-            return {"ok": False, "error": f"Unknown MCP server '{server_name}'."}
-        if server.get("transport") != "stdio":
-            return {
-                "ok": False,
-                "error": (
-                    f"MCP server '{server_name}' uses unsupported transport "
-                    f"'{server.get('transport')}'."
-                ),
-            }
-
-        payload = {
-            "server": server,
-            "method": method,
-            "params": params or {},
-        }
-        escaped_payload = json.dumps(payload)
-        sandbox_code = f"""
-import json
-import os
-import select
-import subprocess
-import time
-
-payload = {escaped_payload}
-server = payload["server"]
-method = payload["method"]
-params = payload.get("params") or {{}}
-timeout = int(server.get("timeout", 30))
-command = [server.get("command")] + [str(v) for v in server.get("args", [])]
-env = {{k: str(v) for k, v in (server.get("env") or {{}}).items()}}
-cwd = server.get("cwd") or None
-runtime_env = os.environ.copy()
-runtime_env.update(env)
-
-def _start_process():
-    return subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        env=runtime_env,
-    )
-
-def _read_jsonline(proc, remaining):
-    end = time.time() + remaining
-    while time.time() < end:
-        left = max(0.1, end - time.time())
-        ready, _, _ = select.select([proc.stdout], [], [], left)
-        if not ready:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
-        text = line.decode("utf-8", errors="ignore").strip()
-        if not text:
-            continue
-        try:
-            return json.loads(text)
-        except Exception:
-            continue
-    raise TimeoutError("Timeout waiting for JSON line response")
-
-def _send_jsonline(proc, message):
-    body = (json.dumps(message) + "\\n").encode("utf-8")
-    proc.stdin.write(body)
-    proc.stdin.flush()
-
-def _read_content_length(proc, remaining):
-    end = time.time() + remaining
-    headers = {{}}
-    while time.time() < end:
-        left = max(0.1, end - time.time())
-        ready, _, _ = select.select([proc.stdout], [], [], left)
-        if not ready:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
-        text = line.decode("utf-8", errors="ignore").strip()
-        if not text:
-            break
-        if ":" in text:
-            key, value = text.split(":", 1)
-            headers[key.strip().lower()] = value.strip()
-    length = int(headers.get("content-length", "0"))
-    if length <= 0:
-        raise RuntimeError("Missing Content-Length header in MCP response")
-
-    data = b""
-    while len(data) < length and time.time() < end:
-        left = max(0.1, end - time.time())
-        ready, _, _ = select.select([proc.stdout], [], [], left)
-        if not ready:
-            continue
-        chunk = proc.stdout.read(length - len(data))
-        if not chunk:
-            break
-        data += chunk
-
-    if len(data) < length:
-        raise TimeoutError("Incomplete MCP content-length response")
-    return json.loads(data.decode("utf-8", errors="ignore"))
-
-def _send_content_length(proc, message):
-    raw = json.dumps(message).encode("utf-8")
-    header = f"Content-Length: {{len(raw)}}\\r\\n\\r\\n".encode("utf-8")
-    proc.stdin.write(header + raw)
-    proc.stdin.flush()
-
-def _run_session(mode):
-    send = _send_jsonline if mode == "jsonline" else _send_content_length
-    read = _read_jsonline if mode == "jsonline" else _read_content_length
-    proc = _start_process()
-    try:
-        init_request = {{
-            "jsonrpc": "2.0",
-            "id": "init-1",
-            "method": "initialize",
-            "params": {{
-                "protocolVersion": "2025-06-18",
-                "capabilities": {{}},
-                "clientInfo": {{"name": "memorizz", "version": "0.0.39"}},
-            }},
-        }}
-        send(proc, init_request)
-
-        init_response = read(proc, timeout)
-        if init_response.get("id") != "init-1":
-            raise RuntimeError("Unexpected MCP initialize response")
-
-        send(
-            proc,
-            {{
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {{}},
-            }},
-        )
-
-        request = {{
-            "jsonrpc": "2.0",
-            "id": "req-1",
-            "method": method,
-            "params": params,
-        }}
-        send(proc, request)
-        response = read(proc, timeout)
-        if response.get("id") != "req-1":
-            raise RuntimeError("Unexpected MCP method response")
-        return {{"ok": True, "mode": mode, "response": response}}
-    finally:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-
-attempt_errors = []
-for protocol_mode in ("jsonline", "content-length"):
-    try:
-        result = _run_session(protocol_mode)
-        print(json.dumps(result))
-        raise SystemExit(0)
-    except Exception as exc:
-        attempt_errors.append({{"mode": protocol_mode, "error": str(exc)}})
-
-print(json.dumps({{"ok": False, "errors": attempt_errors}}))
-"""
-        execution = self._execute_code_in_sandbox(sandbox_code, language="python")
-        stdout_lines = execution.get("stdout") or []
-        for line in reversed(stdout_lines):
-            line = str(line).strip()
-            if not line:
-                continue
-            try:
-                parsed = json.loads(line)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                continue
+        """Compatibility dispatcher retained for callers of the old private helper."""
+        params = params or {}
+        if method == "tools/list":
+            return self.mcp_manager.list_tools(server_name)
+        if method == "tools/call":
+            return self.mcp_manager.call_tool(
+                server_name=server_name,
+                tool_name=str(params.get("name") or ""),
+                arguments=params.get("arguments") or {},
+            )
         return {
             "ok": False,
-            "error": "No MCP response returned from sandbox execution.",
-            "execution": execution,
+            "error": f"Unsupported MCP compatibility method '{method}'.",
+            "error_code": "unsupported_method",
         }
 
     def _register_mcp_tools(self):
-        """Register MCP bridge tools."""
+        """Register production MCP discovery and invocation tools."""
         if self._mcp_tools_registered or not self.tool_manager:
             return
 
         def list_mcp_servers() -> Dict[str, Any]:
-            """List configured MCP servers."""
-            return {
-                "servers": [
-                    {
-                        "name": server.get("name"),
-                        "transport": server.get("transport", "stdio"),
-                        "command": server.get("command"),
-                        "args": server.get("args", []),
-                        "url": server.get("url"),
-                    }
-                    for server in self.mcp_servers
-                ]
-            }
+            """List configured MCP servers and their authentication status."""
+            return self.mcp_manager.connection_status()
 
         def mcp_list_tools(server_name: str) -> Dict[str, Any]:
             """List tools available from a configured MCP server."""
-            return self._run_mcp_request_in_sandbox(
+            return self.mcp_manager.list_tools(server_name)
+
+        @governed_tool(deterministic=False, side_effects=False, domains=("mcp",))
+        def mcp_call_tool(
+            server_name: str,
+            tool_name: str,
+            arguments: Optional[Dict[str, Any]] = None,
+        ) -> Dict[str, Any]:
+            """Call an MCP tool through the agent's durable approval policy."""
+            method = (
+                self.mcp_manager._call_tool_authorized
+                if self._approval_execution_active
+                else self.mcp_manager.call_tool
+            )
+            return method(
                 server_name=server_name,
-                method="tools/list",
-                params={},
+                tool_name=tool_name,
+                arguments=arguments or {},
             )
 
-        def mcp_call_tool(
-            server_name: str, tool_name: str, arguments: Optional[Dict[str, Any]] = None
+        def mcp_list_resources(server_name: str) -> Dict[str, Any]:
+            """List resources exposed by a configured MCP server."""
+            return self.mcp_manager.list_resources(server_name)
+
+        def mcp_list_resource_templates(server_name: str) -> Dict[str, Any]:
+            """List parameterized resource templates exposed by an MCP server."""
+            return self.mcp_manager.list_resource_templates(server_name)
+
+        def mcp_read_resource(server_name: str, uri: str) -> Dict[str, Any]:
+            """Read a resource from a configured MCP server."""
+            return self.mcp_manager.read_resource(server_name, uri)
+
+        def mcp_list_prompts(server_name: str) -> Dict[str, Any]:
+            """List prompts exposed by a configured MCP server."""
+            return self.mcp_manager.list_prompts(server_name)
+
+        def mcp_get_prompt(
+            server_name: str,
+            prompt_name: str,
+            arguments: Optional[Dict[str, str]] = None,
         ) -> Dict[str, Any]:
-            """Call a tool on a configured MCP server from the sandbox."""
-            return self._run_mcp_request_in_sandbox(
-                server_name=server_name,
-                method="tools/call",
-                params={"name": tool_name, "arguments": arguments or {}},
+            """Get a prompt template from a configured MCP server."""
+            return self.mcp_manager.get_prompt(
+                server_name, prompt_name, arguments=arguments or {}
             )
 
         list_mcp_servers.__name__ = "list_mcp_servers"
         mcp_list_tools.__name__ = "mcp_list_tools"
         mcp_call_tool.__name__ = "mcp_call_tool"
+        mcp_list_resources.__name__ = "mcp_list_resources"
+        mcp_list_resource_templates.__name__ = "mcp_list_resource_templates"
+        mcp_read_resource.__name__ = "mcp_read_resource"
+        mcp_list_prompts.__name__ = "mcp_list_prompts"
+        mcp_get_prompt.__name__ = "mcp_get_prompt"
 
         self.tool_manager.add_tool(list_mcp_servers)
         self.tool_manager.add_tool(mcp_list_tools)
         self.tool_manager.add_tool(mcp_call_tool)
+        self.tool_manager.add_tool(mcp_list_resources)
+        self.tool_manager.add_tool(mcp_list_resource_templates)
+        self.tool_manager.add_tool(mcp_read_resource)
+        self.tool_manager.add_tool(mcp_list_prompts)
+        self.tool_manager.add_tool(mcp_get_prompt)
         self._mcp_tools_registered = True
+
+    def _unregister_mcp_tools(self) -> None:
+        """Remove the MCP facade tools when no connection remains configured."""
+        if not self.tool_manager:
+            return
+        for tool_name in (
+            "list_mcp_servers",
+            "mcp_list_tools",
+            "mcp_call_tool",
+            "mcp_list_resources",
+            "mcp_list_resource_templates",
+            "mcp_read_resource",
+            "mcp_list_prompts",
+            "mcp_get_prompt",
+        ):
+            try:
+                self.tool_manager.remove_tool(tool_name)
+            except Exception:
+                pass
+        self._mcp_tools_registered = False
+
+    def with_mcp_servers(
+        self,
+        mcp_servers: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]],
+    ):
+        """Replace MCP server configuration at runtime and preserve secrets safely."""
+        self.mcp_servers = self.mcp_manager.configure_servers(mcp_servers or [])
+        if self.mcp_servers:
+            self._register_mcp_tools()
+        else:
+            self._unregister_mcp_tools()
+        return self
 
     def with_entity_memory(self, enabled: bool = True):
         """
@@ -2568,6 +2699,98 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         self._sandbox_tools_registered = False
         logger.info("Unregistered sandbox tools")
 
+    # --- Browser control ---
+
+    def with_browser_control(
+        self,
+        provider: Optional[Union[str, Dict[str, Any], "BrowserControlProvider"]],
+    ):
+        """Attach or detach a browser-control provider.
+
+        The registered ``browser_control`` tool is always governed as
+        nondeterministic, side-effecting, and approval-required because a
+        browser task may click, type, submit, purchase, publish, or delete.
+        """
+        if provider is not None:
+            new_manager = BrowserControlManager.from_config(provider)
+            if self.browser_control_manager is None:
+                self.browser_control_manager = new_manager
+            else:
+                self.browser_control_manager.set_provider(new_manager.provider)
+            self.browser_control_config = new_manager.get_provider_config()
+            self._browser_control_init_error = None
+            self._register_browser_control_tools()
+        else:
+            self._unregister_browser_control_tools()
+            if self.browser_control_manager is not None:
+                self.browser_control_manager.close()
+                self.browser_control_manager = None
+            self.browser_control_config = None
+            self._browser_control_init_error = None
+        return self
+
+    def with_browser_control_provider(
+        self,
+        provider: Optional[Union[str, Dict[str, Any], "BrowserControlProvider"]],
+    ):
+        """Compatibility alias for :meth:`with_browser_control`."""
+        return self.with_browser_control(provider)
+
+    def has_browser_control(self) -> bool:
+        """Return whether a usable browser-control provider is attached."""
+        return bool(
+            self.browser_control_manager and self.browser_control_manager.is_enabled()
+        )
+
+    def get_browser_control_provider_name(self) -> Optional[str]:
+        if self.browser_control_manager is None:
+            return None
+        return self.browser_control_manager.get_provider_name()
+
+    def run_browser_task(
+        self,
+        task: str,
+        *,
+        max_steps: Optional[int] = None,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """Run a browser task directly as trusted host code.
+
+        Model calls use the separately registered ``browser_control`` tool and
+        pass through durable approval. This direct helper is for application
+        hosts that have already made their own authorization decision.
+        """
+        if not self.has_browser_control():
+            raise ValueError("No browser-control provider configured")
+        return self.browser_control_manager.run_task(
+            task, max_steps=max_steps, timeout=timeout
+        ).to_json()
+
+    def _register_browser_control_tools(self) -> None:
+        if not (
+            self.tool_manager
+            and self.browser_control_manager
+            and self.browser_control_manager.is_enabled()
+        ):
+            return
+        if self._browser_control_tools_registered:
+            return
+        for tool_func in self.browser_control_manager.get_tools():
+            self.tool_manager.add_tool(tool_func)
+        self._browser_control_tools_registered = True
+        logger.info(
+            "Registered browser-control tool (provider: %s)",
+            self.browser_control_manager.get_provider_name(),
+        )
+
+    def _unregister_browser_control_tools(self) -> None:
+        if not self._browser_control_tools_registered or not self.tool_manager:
+            return
+        for tool_name in self._browser_control_tool_names:
+            self.tool_manager.remove_tool(tool_name)
+        self._browser_control_tools_registered = False
+        logger.info("Unregistered browser-control tool")
+
     # --- Self-awareness access ---
 
     def with_self_aware(
@@ -2835,6 +3058,21 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         Returns:
             The agent's response
         """
+        if (
+            self.delegates
+            and self.delegation_config.get("enabled", True)
+            and self.delegation_config.get("mode", "auto") in {"auto", "deterministic"}
+            and not (tool_context or {}).get("_memorizz_skip_delegation")
+        ):
+            return self.delegate(
+                query,
+                memory_id=memory_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                context=context,
+                tool_context=tool_context,
+                return_report=bool(self.delegation_config.get("return_report", False)),
+            )
         logger.info(f"MemAgent {self.agent_id} executing query: {query[:50]}...")
 
         # M4: scope per-call tool context for tools reading via get_tool_context().
@@ -2845,12 +3083,25 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         try:
             # 1. Prepare IDs with per-thread state isolation.
             memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
+            self._current_user_id = user_id
+            self._turn_had_side_effects = False
+            self._turn_had_nondeterministic_tools = False
+            self._turn_cache_domains = set()
+            self._cache_bypass_reason = None
+            cache_metadata = self._semantic_cache_metadata(context)
+            cache_lookup_bypass = self._semantic_cache_preflight_bypass(
+                query, user_id=user_id
+            )
 
             # 2. Check semantic cache first
             cached_response = None
             if self.cache_manager.enabled:
                 cached_response = self.cache_manager.get_cached_response(
-                    query, thread_id, user_id=user_id
+                    query,
+                    thread_id,
+                    user_id=user_id,
+                    metadata=cache_metadata,
+                    bypass_reason=cache_lookup_bypass,
                 )
                 if cached_response:
                     logger.info("Returning cached response")
@@ -2879,7 +3130,14 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             # 5. Cache the response
             if self.cache_manager.enabled:
                 self.cache_manager.cache_response(
-                    query, response, thread_id, user_id=user_id
+                    query,
+                    response,
+                    thread_id,
+                    user_id=user_id,
+                    metadata=self._semantic_cache_metadata(context),
+                    deterministic=not self._turn_had_nondeterministic_tools,
+                    read_only=not self._turn_had_side_effects,
+                    bypass_reason=self._cache_bypass_reason,
                 )
 
             # 6. Record interaction in memory
@@ -2897,6 +3155,240 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         finally:
             # M4: always release the per-call tool_context scope.
             reset_tool_context(_tc_token)
+
+    def delegate(
+        self,
+        query: str,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        *,
+        user_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        tool_context: Optional[Dict[str, Any]] = None,
+        plan: Any = None,
+        trace_id: Optional[str] = None,
+        return_report: bool = False,
+    ) -> Any:
+        """Execute a configured deterministic or model-generated delegation plan."""
+        if not self.delegates:
+            raise ValueError("This agent has no configured delegates")
+        if not self.memory_provider:
+            raise ValueError("Delegation requires a shared memory provider")
+
+        from ..multi_agent_orchestrator import MultiAgentOrchestrator
+
+        configured_plan = (
+            plan if plan is not None else self.delegation_config.get("plan")
+        )
+        inherited_workflow_id = (
+            str((tool_context or {}).get("workflow_id") or "").strip() or None
+        )
+        inherited_trace_id = (
+            str((tool_context or {}).get("trace_id") or "").strip() or None
+        )
+        orchestrator = MultiAgentOrchestrator(
+            self,
+            self.delegates,
+            delegation_plan=configured_plan,
+            persist_participants=bool(
+                self.delegation_config.get("persist_participants", False)
+            ),
+            workflow_id=(
+                self.delegation_config.get("workflow_id") or inherited_workflow_id
+            ),
+        )
+        return orchestrator.execute_multi_agent_workflow(
+            query,
+            memory_id,
+            thread_id,
+            user_id=user_id,
+            context=context,
+            tool_context=tool_context,
+            trace_id=trace_id or inherited_trace_id,
+            delegation_plan=configured_plan,
+            return_report=return_report,
+        )
+
+    def list_approval_proposals(
+        self, *, status: Optional[Union[ApprovalStatus, str]] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """List durable approval proposals owned by this agent."""
+        return [
+            proposal.to_dict(include_arguments=True)
+            for proposal in self._get_approval_store().list(
+                owner_id=self.agent_id, status=status, limit=limit
+            )
+        ]
+
+    def approve(
+        self,
+        proposal_id: str,
+        *,
+        approver_id: str,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a host-side approval decision without executing the tool."""
+        proposal = self._get_approval_store().approve(
+            proposal_id,
+            approver_id=approver_id,
+            decision_reason=reason,
+        )
+        return proposal.to_dict(include_arguments=True)
+
+    def reject(
+        self,
+        proposal_id: str,
+        *,
+        approver_id: str,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a host-side rejection decision."""
+        proposal = self._get_approval_store().reject(
+            proposal_id,
+            approver_id=approver_id,
+            decision_reason=reason,
+        )
+        return proposal.to_dict(include_arguments=True)
+
+    def cancel_approval(
+        self,
+        proposal_id: str,
+        *,
+        approver_id: str,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cancel a pending proposal (host-friendly alias for rejection)."""
+        return self.reject(
+            proposal_id,
+            approver_id=approver_id,
+            reason=reason or "Cancelled by host",
+        )
+
+    def resume_approval(self, proposal_id: str) -> str:
+        """Consume an approval and resume its original LLM checkpoint exactly once."""
+        store = self._get_approval_store()
+        proposal = store.get(proposal_id)
+        if proposal is None:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error_code": "approval_not_found",
+                    "error": f"Unknown approval proposal '{proposal_id}'",
+                },
+                sort_keys=True,
+            )
+        if proposal.owner_id != self.agent_id:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error_code": "approval_owner_mismatch",
+                    "error": "This proposal belongs to another agent",
+                },
+                sort_keys=True,
+            )
+        if proposal.status != ApprovalStatus.APPROVED:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error_code": "invalid_approval_state",
+                    "status": proposal.status.value,
+                    "error": "Only an approved proposal can be resumed",
+                },
+                sort_keys=True,
+            )
+
+        checkpoint = dict(proposal.checkpoint or {})
+        logical_tool_name = str(
+            checkpoint.get("logical_tool_name") or proposal.tool_name
+        )
+        logical_arguments = checkpoint.get("logical_arguments") or proposal.arguments
+        if not isinstance(logical_arguments, dict):
+            raise ApprovalStateError("Approval checkpoint arguments are invalid")
+        store.consume(
+            proposal_id,
+            expected_tool_name=logical_tool_name,
+            expected_arguments=logical_arguments,
+        )
+
+        self._current_memory_id = checkpoint.get("memory_id")
+        self._current_thread_id = checkpoint.get("thread_id")
+        user_id = checkpoint.get("user_id")
+        self._current_user_id = user_id
+        query = str(checkpoint.get("query") or "")
+        messages = list(checkpoint.get("messages") or [])
+        router = getattr(self, "semantic_tool_router", None)
+        if router is not None:
+            router.restore_state(checkpoint.get("router_state"))
+
+        model_tool_name = str(checkpoint.get("model_tool_name") or logical_tool_name)
+        model_arguments: Dict[str, Any] = logical_arguments
+        if router is not None and model_tool_name == router.INVOCATION_TOOL:
+            model_arguments = {
+                "tool_name": logical_tool_name,
+                "arguments": logical_arguments,
+            }
+        tool_call = SimpleNamespace(
+            id=str(checkpoint.get("tool_call_id") or f"approval-{proposal_id}"),
+            function=SimpleNamespace(
+                name=model_tool_name,
+                arguments=json.dumps(model_arguments, ensure_ascii=False),
+            ),
+        )
+        workflow = self._init_workflow_capture(query, user_id)
+        self._approval_execution_active = True
+        try:
+            self._execute_and_record_tool_call(
+                tool_call,
+                messages,
+                workflow,
+                user_id,
+                streaming=False,
+                query=query,
+            )
+        finally:
+            self._approval_execution_active = False
+
+        if not self.model:
+            self._persist_workflow_run(workflow)
+            return serialize_tool_result(
+                json.loads(messages[-1]["content"])
+                if messages and str(messages[-1].get("content", "")).startswith("{")
+                else messages[-1].get("content", "")
+            )
+
+        tools = self._build_llm_tools(query, user_id=user_id)
+        self._set_provider_cache_scope()
+        try:
+            for iteration in range(self._get_tool_iteration_limit()):
+                response = self.model.generate(_to_jsonable(messages), tools=tools)
+                self._record_context_window_usage(
+                    stage=f"approval_resume_{iteration + 1}"
+                )
+                if isinstance(response, str):
+                    self._persist_workflow_run(workflow)
+                    return response
+                if hasattr(response, "choices") and response.choices:
+                    message = response.choices[0].message
+                    if not message.tool_calls:
+                        self._persist_workflow_run(workflow)
+                        return message.content or "I couldn't generate a response."
+                    self._append_assistant_tool_calls(messages, message)
+                    for next_call in message.tool_calls:
+                        self._execute_and_record_tool_call(
+                            next_call,
+                            messages,
+                            workflow,
+                            user_id,
+                            streaming=False,
+                            query=query,
+                        )
+                    continue
+                break
+        except ApprovalRequired as approval:
+            self._persist_workflow_run(workflow)
+            return self._approval_required_payload(approval.proposal)
+        self._persist_workflow_run(workflow)
+        return "I reached the maximum number of tool-call iterations while resuming."
 
     def run_stream(
         self,
@@ -2932,6 +3424,23 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         """
         logger.info(f"MemAgent {self.agent_id} streaming query: {query[:50]}...")
 
+        if (
+            self.delegates
+            and self.delegation_config.get("enabled", True)
+            and self.delegation_config.get("mode", "auto") in {"auto", "deterministic"}
+            and not (tool_context or {}).get("_memorizz_skip_delegation")
+        ):
+            result = self.delegate(
+                query,
+                memory_id=memory_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                context=context,
+                tool_context=tool_context,
+            )
+            yield serialize_tool_result(result)
+            return
+
         if not self.model or not hasattr(self.model, "generate_stream"):
             # Fallback: run synchronously and yield the full result
             yield self.run(
@@ -2966,11 +3475,24 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         try:
             # 1. Prepare IDs with per-thread state isolation.
             memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
+            self._current_user_id = user_id
+            self._turn_had_side_effects = False
+            self._turn_had_nondeterministic_tools = False
+            self._turn_cache_domains = set()
+            self._cache_bypass_reason = None
+            cache_metadata = self._semantic_cache_metadata(context)
+            cache_lookup_bypass = self._semantic_cache_preflight_bypass(
+                query, user_id=user_id
+            )
 
             # 2. Check semantic cache first
             if self.cache_manager.enabled:
                 cached = self.cache_manager.get_cached_response(
-                    query, thread_id, user_id=user_id
+                    query,
+                    thread_id,
+                    user_id=user_id,
+                    metadata=cache_metadata,
+                    bypass_reason=cache_lookup_bypass,
                 )
                 if cached:
                     self._record_interaction(
@@ -3002,7 +3524,14 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             # 5. Cache the response
             if self.cache_manager.enabled:
                 self.cache_manager.cache_response(
-                    query, full_response, thread_id, user_id=user_id
+                    query,
+                    full_response,
+                    thread_id,
+                    user_id=user_id,
+                    metadata=self._semantic_cache_metadata(context),
+                    deterministic=not self._turn_had_nondeterministic_tools,
+                    read_only=not self._turn_had_side_effects,
+                    bypass_reason=self._cache_bypass_reason,
                 )
 
             # 6. Record interaction in memory
@@ -3253,6 +3782,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             rows = self.memory_manager.list_tool_logs(
                 memory_id=self._current_memory_id,
                 limit=limit,
+                user_id=self._current_user_id,
                 thread_id=self._current_thread_id,
             )
         except Exception as exc:
@@ -3321,73 +3851,23 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             return f"Error: LLM failed to initialize — {detail}"
         return "Error: No LLM model configured"
 
-    def _build_llm_tools(self) -> Optional[List[Dict[str, Any]]]:
-        """Convert tool metadata to OpenAI function-calling format, sorted.
-
-        Shared by the streaming and non-streaming interaction paths. Tools
-        are sorted by function name so the serialized ``tools`` parameter is
-        byte-identical across requests — tool definitions render at the very
-        front of the prompt on both OpenAI and Anthropic, and an unstable
-        ordering silently invalidates the entire prompt cache.
-        """
+    def _build_llm_tools(
+        self, query: str = "", user_id: Optional[str] = None
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Build a strict, progressively disclosed tool surface for one turn."""
         if not self.tool_manager:
             return None
-        tool_metadata = self.tool_manager.get_tool_metadata()
-        if not tool_metadata:
-            return None
-
-        tools: List[Dict[str, Any]] = []
-        for meta in tool_metadata:
-            if "type" in meta and meta["type"] == "function" and "function" in meta:
-                function_meta = (
-                    meta.get("function")
-                    if isinstance(meta.get("function"), dict)
-                    else {}
-                )
-                function_name = str(function_meta.get("name", "")).strip()
-                if not function_name:
-                    logger.warning(
-                        "Skipping malformed OpenAI tool metadata without function.name"
-                    )
-                    continue
-                # Already in OpenAI format
-                tools.append(meta)
-            else:
-                tool_name = str(meta.get("name", "")).strip()
-                if not tool_name:
-                    logger.warning(
-                        "Skipping tool metadata without name; it cannot be exposed for tool calling."
-                    )
-                    continue
-                parameters = meta.get("parameters", {})
-                if not isinstance(parameters, dict):
-                    parameters = {}
-                required = meta.get("required", [])
-                if not isinstance(required, list):
-                    required = []
-                tools.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "description": meta.get("description", "No description"),
-                            "parameters": {
-                                "type": "object",
-                                "properties": parameters,
-                                "required": required,
-                            },
-                        },
-                    }
-                )
-
-        if not tools:
-            return None
-        tools.sort(
-            key=lambda t: str(
-                (t.get("function") or {}).get("name", "") if isinstance(t, dict) else ""
-            )
-        )
-        return tools
+        router = getattr(self, "semantic_tool_router", None)
+        if router is not None:
+            tools = router.schemas_for_turn(query, user_id=user_id)
+            return tools or None
+        tools = [
+            schema
+            for metadata in (self.tool_manager.get_tool_metadata() or [])
+            if (schema := tool_metadata_to_openai(metadata)) is not None
+        ]
+        tools.sort(key=lambda item: str(item["function"]["name"]))
+        return tools or None
 
     def _set_provider_cache_scope(self) -> None:
         """Give the LLM provider a stable per-thread prompt-cache key.
@@ -3547,6 +4027,69 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             }
         )
 
+    def _get_approval_store(self) -> ApprovalStore:
+        """Create the package-owned durable store only when approval is needed."""
+        if self.approval_store is None:
+            self.approval_store = default_approval_store()
+        return self.approval_store
+
+    def _effective_tool_policy(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Resolve static callable policy plus argument-dependent MCP policy."""
+        policy = (
+            self.tool_manager.get_tool_policy(tool_name) if self.tool_manager else {}
+        )
+        value = dict(policy or {})
+        if tool_name == "mcp_call_tool":
+            try:
+                server = self.mcp_manager.get_server(
+                    str(arguments.get("server_name") or "")
+                )
+                remote_name = str(arguments.get("tool_name") or "")
+                mutating = self.mcp_manager.tool_requires_approval(
+                    server.name, remote_name
+                )
+                value.update(
+                    {
+                        "deterministic": False,
+                        "side_effects": mutating,
+                        "requires_approval": mutating,
+                        "approval_reason": (
+                            f"MCP tool {server.name}.{remote_name} may change external data"
+                            if mutating
+                            else None
+                        ),
+                        "domains": ["mcp", server.name],
+                    }
+                )
+            except Exception:
+                pass
+        return value
+
+    @staticmethod
+    def _approval_required_payload(proposal: Any) -> str:
+        return json.dumps(
+            {
+                "ok": False,
+                "status": "approval_required",
+                "error_code": "approval_required",
+                "proposal": proposal.to_dict(include_arguments=True),
+                "message": (
+                    "Execution is paused. A host user must approve or reject "
+                    "this exact proposal, then resume it by proposal_id."
+                ),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    @staticmethod
+    def _tool_result_failed(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.startswith("Error")
+        return isinstance(value, dict) and value.get("ok") is False
+
     def _execute_and_record_tool_call(
         self,
         tool_call: Any,
@@ -3554,6 +4097,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         workflow,
         user_id: Optional[str],
         streaming: bool = False,
+        query: str = "",
     ) -> None:
         """Execute one tool call and record every side effect.
 
@@ -3564,6 +4108,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         drifted once; ``streaming`` only toggles the trace-event emission.
         """
         from ..long_term.procedural.workflow.workflow import WorkflowOutcome
+
+        # Keep context tools and direct/internal execution paths on the same
+        # tenant boundary as ``run``/``run_stream``.  Approval resumption and
+        # host-driven tool execution both enter through this shared method and
+        # must not rely on a prior model turn having populated the field.
+        self._current_user_id = user_id
 
         tool_name = tool_call.function.name
         raw_arguments = tool_call.function.arguments
@@ -3593,19 +4143,145 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             arguments = json.loads(raw_arguments)
         except (json.JSONDecodeError, Exception):
             arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
 
-        logger.info("Executing tool: %s", tool_name)
-        error_message = None
-        if self.tool_manager:
-            try:
-                result, _ = self.tool_manager.execute_tool(tool_name, arguments)
-            except Exception as e:
-                result = f"Error executing tool: {str(e)}"
-                error_message = str(e)
-                logger.error(f"Tool {tool_name} failed: {e}")
+        model_tool_name = tool_name
+        logical_tool_name = tool_name
+        logical_arguments = arguments
+        routed_warnings: List[str] = []
+        routed_call_hash: Optional[str] = None
+        error_message: Optional[str] = None
+        result: Any = None
+        router = getattr(self, "semantic_tool_router", None)
+
+        if router is not None and model_tool_name == router.DISCOVERY_TOOL:
+            result = router.discover_tools(
+                str(arguments.get("query") or ""),
+                limit=arguments.get("limit", router.top_k),
+                user_id=user_id,
+            )
         else:
-            result = "Error: No tool manager available"
-            error_message = "No tool manager available"
+            if router is not None and model_tool_name == router.INVOCATION_TOOL:
+                try:
+                    (
+                        logical_tool_name,
+                        logical_arguments,
+                        routed_warnings,
+                    ) = router.normalize_invocation(
+                        str(arguments.get("tool_name") or ""),
+                        arguments.get("arguments") or {},
+                    )
+                except (LookupError, PermissionError, TypeError, ValueError) as exc:
+                    result = {
+                        "ok": False,
+                        "error_code": "invalid_tool_invocation",
+                        "error": str(exc),
+                    }
+                    error_message = str(exc)
+            elif router is not None:
+                # Direct calls are accepted only for schemas actually disclosed
+                # this turn. This closes the gap where a provider could invent a
+                # hidden registered function name despite never receiving it.
+                try:
+                    (
+                        logical_tool_name,
+                        logical_arguments,
+                        routed_warnings,
+                    ) = router.normalize_invocation(model_tool_name, arguments)
+                except (LookupError, PermissionError, TypeError, ValueError) as exc:
+                    result = {
+                        "ok": False,
+                        "error_code": "invalid_tool_invocation",
+                        "error": str(exc),
+                    }
+                    error_message = str(exc)
+
+            if result is None:
+                policy = self._effective_tool_policy(
+                    logical_tool_name, logical_arguments
+                )
+                if policy.get("side_effects"):
+                    self._turn_had_side_effects = True
+                    self._cache_bypass_reason = "side_effecting_tool"
+                if policy.get("deterministic") is False:
+                    self._turn_had_nondeterministic_tools = True
+                self._turn_cache_domains.update(
+                    str(item) for item in (policy.get("domains") or []) if item
+                )
+                if (
+                    policy.get("requires_approval")
+                    and not self._approval_execution_active
+                ):
+                    checkpoint = {
+                        "version": 1,
+                        "query": query,
+                        "messages": _to_jsonable(messages),
+                        "model_tool_name": model_tool_name,
+                        "logical_tool_name": logical_tool_name,
+                        "logical_arguments": _to_jsonable(logical_arguments),
+                        "tool_call_id": getattr(tool_call, "id", None),
+                        "memory_id": self._current_memory_id,
+                        "thread_id": self._current_thread_id,
+                        "user_id": user_id,
+                        "streaming": bool(streaming),
+                        "routed_warnings": routed_warnings,
+                        "routed_call_hash": routed_call_hash,
+                        "router_state": (
+                            router.checkpoint_state() if router is not None else {}
+                        ),
+                    }
+                    proposal = self._get_approval_store().propose(
+                        owner_id=self.agent_id,
+                        tool_name=logical_tool_name,
+                        arguments=logical_arguments,
+                        policy_reason=str(
+                            policy.get("approval_reason")
+                            or "Tool policy requires human approval"
+                        ),
+                        checkpoint=checkpoint,
+                        ttl_seconds=self.context_policy.approval_ttl_seconds,
+                    )
+                    self._cache_bypass_reason = "approval_required"
+                    raise ApprovalRequired(proposal)
+
+                if router is not None:
+                    prepared = router.prepare_invocation(
+                        logical_tool_name, logical_arguments
+                    )
+                    if not prepared.get("ok"):
+                        result = prepared
+                        error_message = str(prepared.get("error") or "Routing failed")
+                    else:
+                        routed_call_hash = str(prepared["call_hash"])
+
+                if result is None:
+                    logger.info("Executing tool: %s", logical_tool_name)
+                    if self.tool_manager:
+                        result, _ = self.tool_manager.execute_tool(
+                            logical_tool_name, logical_arguments
+                        )
+                    else:
+                        result = "Error: No tool manager available"
+                        error_message = "No tool manager available"
+
+                failed = self._tool_result_failed(result)
+                if failed and error_message is None:
+                    error_message = (
+                        str(result.get("error"))
+                        if isinstance(result, dict)
+                        else str(result)
+                    )
+                if router is not None and routed_call_hash:
+                    router.record_invocation(routed_call_hash, success=not failed)
+                if router is not None and model_tool_name == router.INVOCATION_TOOL:
+                    result = {
+                        "ok": not failed,
+                        "tool_name": logical_tool_name,
+                        "result": result,
+                        "call_hash": routed_call_hash,
+                        "warnings": routed_warnings,
+                    }
 
         if streaming:
             self._emit_stream_trace_chunks(
@@ -3618,15 +4294,24 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 extra={"tool_name": tool_name},
             )
 
-        # Offload full tool output to database as a tool log entry
+        # Serialize exactly once and decide before persistence. Small results
+        # remain inline and create no tool-log row; expansion tools can never
+        # create pointer-to-pointer loops.
         tool_log_id = None
-        result_str = str(result)
-        if self.memory_manager and self._current_memory_id:
+        result_str = serialize_tool_result(result)
+        is_expansion_tool = (
+            logical_tool_name in self.tool_result_policy.expansion_tool_names
+        )
+        offload_eligible = (
+            not is_expansion_tool
+            and self.tool_result_policy.should_offload(logical_tool_name, result_str)
+        )
+        if offload_eligible and self.memory_manager and self._current_memory_id:
             try:
                 tool_log_id = self.memory_manager.store_tool_log(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    result=result,
+                    tool_name=logical_tool_name,
+                    arguments=logical_arguments,
+                    result=result_str,
                     memory_id=self._current_memory_id,
                     agent_id=self.agent_id,
                     tool_call_id=getattr(tool_call, "id", None),
@@ -3638,16 +4323,15 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             except Exception as log_exc:
                 logger.debug("Tool log storage failed: %s", log_exc)
 
-        # Use compact reference in context window instead of full output.
-        # The placeholder includes args + a field-aware summary so the LLM
-        # can disambiguate multiple calls to the same tool.
-        if tool_log_id:
-            compact_result = _build_tool_log_placeholder(
-                tool_name=tool_name,
+        should_offload = bool(tool_log_id)
+        if should_offload and tool_log_id:
+            compact_result = self.tool_result_policy.pointer(
+                tool_name=logical_tool_name,
                 tool_log_id=tool_log_id,
-                arguments=arguments,
-                result=result,
-                error_message=error_message,
+                serialized_result=result_str,
+                digest=_summarize_tool_result(result, preview_limit=360),
+                identifiers=_extract_identifiers(result),
+                tool_call_id=getattr(tool_call, "id", None),
             )
         else:
             compact_result = result_str
@@ -3665,7 +4349,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         # survives into future turns (UI audit + system-prompt digest).
         # Filtered from LLM message history via _is_tool_placeholder_content
         # to avoid orphan tool-role messages without matching tool_call_ids.
-        if tool_log_id and self.memory_manager and self._current_memory_id:
+        if should_offload and self.memory_manager and self._current_memory_id:
             try:
                 placeholder_unit = self.memory_manager.create_conversation_memory_unit(
                     role=Role.TOOL,
@@ -3686,15 +4370,19 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             if self.tool_manager:
                 tool_metadata = self.tool_manager.get_tool_metadata()
                 tool_entry = next(
-                    (meta for meta in tool_metadata if meta.get("name") == tool_name),
+                    (
+                        meta
+                        for meta in tool_metadata
+                        if meta.get("name") == logical_tool_name
+                    ),
                     {},
                 )
 
             workflow.add_step(
-                f"Step {len(workflow.steps) + 1}: {tool_name}",
+                f"Step {len(workflow.steps) + 1}: {logical_tool_name}",
                 {
                     "_id": str(tool_entry.get("_id")) if tool_entry else None,
-                    "arguments": arguments,
+                    "arguments": logical_arguments,
                     "result": result,
                     "timestamp": datetime.now().isoformat(),
                     "error": error_message,
@@ -3736,8 +4424,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             system_prompt, query, context, request_context=request_context
         )
 
-        # Build tools (deterministic order) and pin the prompt-cache scope.
-        tools = self._build_llm_tools()
+        # Build a scoped progressive tool surface and pin prompt-cache scope.
+        if getattr(self, "semantic_tool_router", None) is not None:
+            self.semantic_tool_router.begin_turn(user_id=user_id)
+        tools = self._build_llm_tools(query, user_id=user_id)
         self._set_provider_cache_scope()
 
         # Streaming loop with tool calling
@@ -3785,6 +4475,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                                 workflow,
                                 user_id,
                                 streaming=True,
+                                query=query,
                             )
 
                         # Continue to next iteration to stream the final response
@@ -3808,6 +4499,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 "\n\nI reached the maximum number of tool-call iterations "
                 f"({max_iterations}). Please try again."
             )
+        except ApprovalRequired as approval:
+            _store_workflow_if_needed()
+            yield self._approval_required_payload(approval.proposal)
+            return
         except Exception:
             _store_workflow_if_needed()
             raise
@@ -3825,13 +4520,23 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         # attribution first so a retrieval failure — or no match — never
         # inherits the previous run's skill IDs.
         self._activated_skill_ids = []
-        if self.continual_learning_manager:
+        if self.skill_retrieval and self.skillbox:
             try:
-                scored_skills = (
-                    self.continual_learning_manager.retrieve_skills_for_query(
-                        query, user_id=user_id
+                if self.continual_learning_manager:
+                    scored_skills = (
+                        self.continual_learning_manager.retrieve_skills_for_query(
+                            query, user_id=user_id
+                        )
                     )
-                )
+                else:
+                    scored_skills = self.skillbox.retrieve_skills_by_query(
+                        query,
+                        limit=max(1, int(self.skill_retrieval_config.get("top_k", 2))),
+                        min_similarity=float(
+                            self.skill_retrieval_config.get("min_similarity", 0.70)
+                        ),
+                        user_id=user_id,
+                    )
                 if scored_skills:
                     context["activated_skills"] = scored_skills
                     self._activated_skill_ids = [
@@ -3845,7 +4550,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             try:
                 history_limit = self._get_conversation_history_limit()
                 history = self.memory_manager.load_conversation_history(
-                    memory_id, limit=history_limit, user_id=user_id
+                    memory_id,
+                    limit=history_limit,
+                    user_id=user_id,
+                    thread_id=self._current_thread_id,
                 )
 
                 # Filter two classes of tool-role rows from the LLM's view:
@@ -4181,8 +4889,8 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 "Automations (scheduling/reminders):\n"
                 "- If the user asks to schedule a reminder, recurring message, or timed task, "
                 "ask clarifying questions: time/frequency, timezone, recipients, and content.\n"
-                "- Use 'automation_create_job' with confirm=false to draft a proposed job and show a concise summary.\n"
-                "- Only create or delete jobs after the user explicitly confirms.\n"
+                "- Mutating automation calls pause as durable approval proposals.\n"
+                "- A host user must approve the exact arguments before execution resumes.\n"
                 "- For WhatsApp delivery, require recipients; accept E.164 numbers with or without the 'whatsapp:' prefix.\n"
                 "- If required capabilities/data are missing, suggest enabling internet access or using "
                 "'skills_marketplace_search' to discover a skill."
@@ -4248,8 +4956,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 "Configured MCP servers:\n"
                 + "\n".join(mcp_lines)
                 + "\nUse 'list_mcp_servers' to inspect servers, 'mcp_list_tools' "
-                "to discover tools, and 'mcp_call_tool' to execute MCP tools "
-                "through the sandbox."
+                "to discover tools, and 'mcp_call_tool' to execute MCP tools. "
+                "Use the resource and prompt MCP helpers when the server exposes "
+                "those capabilities. Mutating calls are paused automatically and "
+                "can only be resumed through a host-approved durable proposal."
             )
 
         return "\n\n".join(prompt_parts)
@@ -4279,8 +4989,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 system_prompt, query, context, request_context=request_context
             )
 
-            # Build tools (deterministic order) and pin the prompt-cache scope.
-            tools = self._build_llm_tools()
+            # Build a scoped progressive tool surface and pin prompt-cache scope.
+            if getattr(self, "semantic_tool_router", None) is not None:
+                self.semantic_tool_router.begin_turn(user_id=user_id)
+            tools = self._build_llm_tools(query, user_id=user_id)
             self._set_provider_cache_scope()
 
             # Execute main loop with tool calling
@@ -4320,6 +5032,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                             workflow,
                             user_id,
                             streaming=False,
+                            query=query,
                         )
 
                     # Continue loop to get final response
@@ -4341,6 +5054,10 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
 
             return final_response
 
+        except ApprovalRequired as approval:
+            if "workflow" in locals():
+                self._persist_workflow_run(workflow)
+            return self._approval_required_payload(approval.proposal)
         except Exception as e:
             logger.error(f"LLM interaction failed: {e}")
 
@@ -4458,6 +5175,64 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         self.tool_manager.add_tool(entity_memory_lookup)
         self.tool_manager.add_tool(entity_memory_upsert)
         self._entity_memory_tools_registered = True
+
+    def _register_semantic_layer_tools(self) -> None:
+        """Expose governed discovery and planning for an attached catalog."""
+        catalog = self.semantic_layer
+        if catalog is None or not self.tool_manager:
+            return
+        required = ("list_models", "describe", "plan")
+        if any(not callable(getattr(catalog, name, None)) for name in required):
+            raise TypeError(
+                "semantic_layer must implement list_models(), describe(), and plan()"
+            )
+
+        @governed_tool(deterministic=True, side_effects=False, domains=("semantic",))
+        def semantic_list_models() -> Dict[str, Any]:
+            """List governed semantic model versions available to this agent."""
+            return {"models": catalog.list_models()}
+
+        @governed_tool(deterministic=True, side_effects=False, domains=("semantic",))
+        def semantic_describe_model(
+            model_name: str, version: Optional[str] = None
+        ) -> Dict[str, Any]:
+            """Describe entities, measures, dimensions, joins, and policies."""
+            return catalog.describe(model_name, version)
+
+        @governed_tool(deterministic=True, side_effects=False, domains=("semantic",))
+        def semantic_plan_query(
+            model_name: str,
+            measures: Optional[List[str]] = None,
+            dimensions: Optional[List[str]] = None,
+            filters: Optional[List[Dict[str, Any]]] = None,
+            order_by: Optional[List[str]] = None,
+            limit: int = 100,
+            version: Optional[str] = None,
+            roles: Optional[List[str]] = None,
+        ) -> Dict[str, Any]:
+            """Create a policy-checked, parameterized semantic query plan.
+
+            This validates semantic names, relationships, role policies,
+            filters, ordering, and limits. It returns a plan; it never executes
+            arbitrary SQL.
+            """
+            plan = catalog.plan(
+                model_name,
+                {
+                    "measures": measures or [],
+                    "dimensions": dimensions or [],
+                    "filters": filters or [],
+                    "order_by": order_by or [],
+                    "limit": limit,
+                    "roles": roles or [],
+                },
+                version=version,
+            )
+            return plan.model_dump(mode="json")
+
+        self.tool_manager.add_tool(semantic_list_models)
+        self.tool_manager.add_tool(semantic_describe_model)
+        self.tool_manager.add_tool(semantic_plan_query)
 
     def _register_knowledge_base_tools(self):
         """Register a semantic-search tool over this agent's knowledge base.
@@ -5221,6 +5996,25 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         )
         return new_thread_id
 
+    def resume_thread(self, memory_id: str, thread_id: str) -> str:
+        """Make an existing memory/thread pair the active conversation.
+
+        The next :meth:`run` / :meth:`run_stream` call may still pass the ids
+        explicitly; this method updates the agent immediately for interactive
+        clients such as the CLI conversation picker.
+        """
+        resolved_memory_id = str(memory_id or "").strip()
+        resolved_thread_id = str(thread_id or "").strip()
+        if not resolved_memory_id or not resolved_thread_id:
+            raise ValueError("memory_id and thread_id are required")
+        self._resolve_execution_state(resolved_memory_id, resolved_thread_id)
+        logger.info(
+            "Resumed thread: %s (memory=%s)",
+            resolved_thread_id,
+            resolved_memory_id,
+        )
+        return resolved_thread_id
+
     def get_current_thread_id(self) -> Optional[str]:
         """
         Get the current thread ID.
@@ -5245,6 +6039,124 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         self._current_memory_id = None
         self._thread_ids_by_memory = {}
         logger.info("Reset thread state")
+
+    @staticmethod
+    def _fingerprint(value: Any) -> str:
+        payload = json.dumps(
+            _to_jsonable(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _semantic_cache_preflight_bypass(
+        self, query: str, *, user_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Fail safe when routing predicts a side-effecting/nondeterministic tool.
+
+        Cache admission after execution already rejects these turns. This
+        preflight closes the other boundary: a semantically similar cached
+        read must not prevent a newly requested mutation from reaching the
+        model and its durable approval gate.
+        """
+        router = getattr(self, "semantic_tool_router", None)
+        manager = getattr(self, "tool_manager", None)
+        if router is None or manager is None:
+            return None
+        try:
+            candidates = router.preview(query, user_id=user_id)
+        except Exception as exc:
+            logger.debug("Semantic-cache routing preflight failed: %s", exc)
+            return None
+        for tool_name in candidates:
+            policy = dict(manager.get_tool_policy(tool_name) or {})
+            if policy.get("side_effects") or policy.get("requires_approval"):
+                return "side_effecting_tool_candidate"
+            if policy.get("deterministic") is False:
+                return "nondeterministic_tool_candidate"
+        return None
+
+    def _semantic_cache_metadata(
+        self, request_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        context = dict(request_context or {})
+        tool_metadata = (
+            self.tool_manager.get_tool_metadata() if self.tool_manager else []
+        )
+        model_value = {
+            "provider": self.llm_provider,
+            "model": self.llm_model or getattr(self.model, "model", None),
+            "config": self.llm_config,
+        }
+        prompt_value = {
+            "instruction": self.instruction,
+            "application_mode": getattr(
+                self.application_mode, "value", self.application_mode
+            ),
+            "persona": str(
+                getattr(self.persona_manager, "current_persona", None)
+                if self.persona_manager
+                else None
+            ),
+        }
+        data_version = context.get("data_version") or context.get(
+            "cache_data_version", "default"
+        )
+        domains = {
+            str(item)
+            for item in (
+                context.get("cache_domains")
+                or (
+                    [context.get("cache_domain")] if context.get("cache_domain") else []
+                )
+            )
+            if item is not None
+        }
+        domains.update(self._turn_cache_domains)
+        tags = [str(item) for item in (context.get("cache_tags") or [])]
+        return {
+            "fingerprints": {
+                "model": self._fingerprint(model_value),
+                "prompt": self._fingerprint(prompt_value),
+                "tool_schema": self._fingerprint(tool_metadata),
+                "data_version": str(data_version),
+            },
+            "domain": sorted(domains)[0] if len(domains) == 1 else None,
+            "domains": sorted(domains),
+            "tags": sorted(set(tags)),
+        }
+
+    def semantic_cache_stats(self) -> Dict[str, Any]:
+        """Return real hit/miss/bypass/write/eviction counters and provenance."""
+        return (
+            self.cache_manager.get_statistics()
+            if self.cache_manager
+            else {
+                "enabled": False,
+                "hits": 0,
+                "misses": 0,
+                "bypasses": 0,
+                "writes": 0,
+                "evictions": 0,
+                "size": 0,
+            }
+        )
+
+    def invalidate_semantic_cache(
+        self,
+        *,
+        domains: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,
+        data_version: Optional[str] = None,
+    ) -> int:
+        """Invalidate semantic cache entries by operational domain or tag."""
+        if not self.cache_manager:
+            return 0
+        return self.cache_manager.invalidate(
+            domains=domains, tags=tags, data_version=data_version
+        )
 
     def enable_semantic_cache(
         self,
@@ -5326,7 +6238,12 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
         return self
 
     # Additional methods for compatibility
-    def load_conversation_history(self, memory_id: str = None):
+    def load_conversation_history(
+        self,
+        memory_id: str = None,
+        thread_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ):
         """Load conversation history (delegated to memory manager)."""
         if self.memory_manager:
             memory_id = (
@@ -5335,7 +6252,11 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
                 or (self.memory_ids[0] if self.memory_ids else None)
             )
             if memory_id:
-                return self.memory_manager.load_conversation_history(memory_id)
+                return self.memory_manager.load_conversation_history(
+                    memory_id,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                )
         return []
 
     def get_context_window_stats(self) -> Optional[Dict[str, Any]]:
@@ -5485,6 +6406,7 @@ print(json.dumps({{"ok": False, "errors": attempt_errors}}))
             agent_id=self.agent_id,
             memory_ids=self.memory_ids,
             current_memory_id=self._current_memory_id,
+            user_id=self._current_user_id,
             days_back=days_back,
             max_memories_per_summary=max_memories_per_summary,
             record_context_usage=self._record_context_window_usage,

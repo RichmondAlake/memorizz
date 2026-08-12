@@ -1,13 +1,17 @@
-# GraalPy Provider
+# GraalPy Execution Provider
 
-GraalPy is a **local sandbox provider** that executes code on your machine using Oracle's GraalVM Python runtime. It requires **no cloud services, no API keys, and no billing** — making it ideal for offline, air-gapped, or cost-sensitive environments.
+GraalPy executes Python locally using Oracle's GraalVM Python runtime. It
+requires no cloud service or API key. The default subprocess mode is a
+**bounded execution provider, not a security sandbox**. Use it only for trusted
+code. The Java wrapper with `SandboxPolicy.UNTRUSTED` is the supported local
+boundary for untrusted code.
 
 ## Overview
 
 | Feature | Details |
 |---------|---------|
 | **Type** | Local (runs on your machine) |
-| **Isolation** | OS process boundaries (subprocess) or JVM sandbox (java_wrapper) |
+| **Isolation** | Bounded host process (trusted code) or JVM `UNTRUSTED` sandbox |
 | **Cold Start** | N/A (local process) |
 | **Session Limit** | Unlimited |
 | **Languages** | Python only |
@@ -66,11 +70,15 @@ export GRAALPY_PATH="/absolute/path/to/graalpy"
 
 In the UI, configure this under **Settings -> Sandbox -> GRAALPY_PATH**.
 
-In the Memorizz UI Sandbox settings, when **Default Sandbox Provider = graalpy**:
+In the MemoRizz UI Sandbox settings, when **Default Sandbox Provider = graalpy**:
 
-- **GraalPy Internet Access** checked: uses `subprocess` mode (network allowed)
-- **GraalPy Internet Access** unchecked: uses `java_wrapper` mode with `UNTRUSTED` policy
-  and requires `GRAALPY_JAVA_WRAPPER_JAR`
+- **GraalPy Execution Mode = Subprocess**: bounded execution for trusted code;
+  egress is denied by default
+- **GraalPy Internet Access** checked: explicit egress for trusted subprocess code
+- **GraalPy Internet Access** unchecked: egress is denied by `sandbox-exec`, a
+  Linux network namespace, or a fail-closed error when neither enforcer exists
+- **GraalPy Execution Mode = Java UNTRUSTED wrapper**: requires a compiled,
+  validated `GRAALPY_JAVA_WRAPPER_JAR`; guest IO remains disabled
 
 ## Two Execution Modes
 
@@ -78,7 +86,12 @@ GraalPy offers two modes with different security/complexity tradeoffs:
 
 ### Subprocess Mode (Default)
 
-Code runs via `graalpy -c "<code>"` in an OS subprocess. Simple to set up, with process-level isolation.
+Code runs via `graalpy -c "<code>"` under a private `0700` directory. MemoRizz
+rejects absolute and parent-traversal file paths, passes only allowlisted
+environment variables, enforces POSIX CPU/address-space/process/file-size
+limits, and denies network access by default. These controls reduce accidents;
+the process still has the host user's OS identity and is not safe for hostile
+code.
 
 ```python
 from memorizz.memagent.core import MemAgent
@@ -93,9 +106,11 @@ agent = MemAgent(
 If the executable cannot be resolved, agent/provider creation fails fast with a
 `ValueError` that includes setup guidance.
 
-**Security**: The code runs in a separate OS process but has the same filesystem and network access as the parent process.
+**Security**: inspect `result.metadata.security_boundary`; subprocess results
+report `bounded_execution_provider_not_strong_sandbox`. Egress must be enabled
+explicitly for trusted workloads.
 
-### Java Wrapper Mode (Production)
+### Java Wrapper Mode (Untrusted Code)
 
 Code runs inside a JVM with GraalVM's `SandboxPolicy.UNTRUSTED`, which restricts:
 
@@ -117,20 +132,29 @@ agent = MemAgent(
 )
 ```
 
-**Requirements**: JVM installed + a wrapper JAR that uses GraalVM's Polyglot API.
+**Requirements**: JVM installed, the package-shipped
+`MemorizzGraalSandbox.java` compiled with the matching GraalVM SDK into an
+executable JAR, and a POSIX host for mandatory resource limits. Provider
+validation refuses a missing/malformed JAR, the wrong wrapper main class, a
+non-`UNTRUSTED` policy, a missing JVM, or unavailable host-limit support.
 
-**Security**: Full JVM-level sandboxing. The `UNTRUSTED` policy is designed for executing code from untrusted sources.
+The shipped wrapper disables host/class/native access, child-process creation,
+environment access, and all guest IO. It sets GraalVM's mandatory CPU, heap,
+AST-depth, stack-frame, thread, stdout, and stderr limits; the host independently
+applies CPU, address-space, process-count, file-size, and wall-clock limits.
+MemoRizz ships source—not a compatibility-fragile prebuilt JAR—so validate the
+compiled wrapper against the exact GraalVM release used in production.
 
 ## Mode Comparison
 
 | Aspect | Subprocess | Java Wrapper |
 |--------|-----------|-------------|
 | **Setup complexity** | Low (just GraalPy) | Medium (JVM + JAR) |
-| **Security** | OS process isolation | JVM SandboxPolicy |
-| **Filesystem access** | Full (same as parent) | Restricted |
-| **Network access** | Full | Restricted |
-| **CPU/memory limits** | OS-level only | JVM-enforced |
-| **Best for** | Development, testing | Production, multi-tenant |
+| **Security** | Not a security boundary | GraalVM `UNTRUSTED` + host limits |
+| **Filesystem access** | MemoRizz API paths confined; guest OS access is not a strong boundary | Guest IO disabled |
+| **Network access** | Denied by default or fails closed; explicit opt-in for trusted code | Guest IO disabled |
+| **CPU/memory limits** | POSIX host limits | POSIX host limits plus JVM policy |
+| **Best for** | Trusted development and batch execution | Validated untrusted-code deployments |
 
 ## Usage
 
@@ -160,9 +184,9 @@ agent = MemAgent(
 )
 ```
 
-### With Working Directory
+### With a Private-Directory Parent
 
-Restrict file operations to a specific directory:
+Choose where MemoRizz creates its private, random per-provider directory:
 
 ```python
 agent = MemAgent(
@@ -194,6 +218,12 @@ print(result.success)    # True
 | `java_wrapper_jar` | `str` | `None` | Path to the Java wrapper JAR (java_wrapper mode only) |
 | `sandbox_policy` | `str` | `"UNTRUSTED"` | GraalVM sandbox policy (java_wrapper mode only) |
 | `working_dir` | `str` | System temp dir | Working directory for execution |
+| `allow_network` | `bool` | `False` | Explicit egress opt-in for trusted subprocess code |
+| `env_allowlist` | sequence | Safe locale/path keys | Only host/guest environment keys passed through |
+| `max_memory_mb` | `int` | `512` | Address-space limit (minimum 128 MB) |
+| `max_cpu_seconds` | `int` | `30` | CPU time limit |
+| `max_processes` | `int` | `32` | Child/process-count limit |
+| `max_file_bytes` | `int` | `10000000` | Per-process output-file size limit |
 
 ### Sandbox Policies (Java Wrapper Mode)
 
@@ -210,7 +240,7 @@ print(result.success)    # True
 | Offline / air-gapped environments | Yes | No cloud dependency |
 | Development and testing | Yes | Free, fast, no setup friction |
 | Cost-sensitive deployments | Yes | No per-hour billing |
-| Multi-tenant production (java_wrapper) | Yes | JVM-level isolation |
+| Multi-tenant production (validated java_wrapper) | Conditional | Requires a compiled/tested wrapper and defense in depth |
 | Need GPU support | No | Use Daytona |
 | Need multi-language execution | No | Use E2B |
 | Need cloud-scale concurrency | No | Use E2B or Daytona |
@@ -218,7 +248,7 @@ print(result.success)    # True
 ## Limitations
 
 - **Python only** — GraalPy is a Python runtime; it doesn't support JavaScript, R, etc.
-- **Subprocess mode has limited isolation** — The code runs as a regular OS process
+- **Subprocess mode is not isolation** — The code retains the host user's OS identity
 - **Java wrapper requires JVM** — Additional setup complexity for the secure mode
 - **No cloud features** — No remote access, no snapshots, no horizontal scaling
 
@@ -261,6 +291,6 @@ Install a JVM with GraalVM support:
 sdk install java 25.0.1-graal
 ```
 
-### Fallback to subprocess mode
-
-If `java_wrapper_jar` is not provided, the provider automatically falls back to subprocess mode with a warning.
+There is no silent fallback from `java_wrapper` to subprocess mode. A missing
+wrapper or invalid policy fails validation so an untrusted workload cannot be
+downgraded accidentally.

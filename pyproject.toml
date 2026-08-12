@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.4.0"
+version = "0.5.0"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,6 +39,12 @@ dependencies = [
     "pydantic>=2.0.0",
     "python-dotenv>=0.19.0",
     "requests>=2.31.0",
+    # First-class MCP client support (stdio, Streamable HTTP, SSE, OAuth).
+    "mcp>=2.0.0,<3.0.0",
+    # Streamable HTTP server runtime used by `memorizz mcp serve`.
+    "uvicorn>=0.24.0",
+    # Encrypt MCP bearer/OAuth credentials in the local credential store.
+    "cryptography>=42.0.0",
     # CLI front-end — tiny, pure-Python. Kept in base (not behind an extra) so
     # `uv tool install memorizz` / `pipx install memorizz` / `npm i -g memorizz`
     # yield a working `memorizz` REPL with no extra install flags.
@@ -89,9 +95,17 @@ docs = [
     "mkdocs-git-revision-date-localized-plugin>=1.2.0",
     "pymdown-extensions>=10.0",
 ]
-sandbox-e2b = ["e2b-code-interpreter>=1.0"]
+sandbox-e2b = [
+    # e2b 2.38 replaced the shared transport signature while the current
+    # code-interpreter 2.9 client still passes its HTTP/1.1 `http2` override.
+    "e2b>=2.26.0,<2.38.0",
+    "e2b-code-interpreter>=2.9.0,<2.10.0",
+]
 sandbox-daytona = ["daytona>=1.0"]
-sandbox = ["e2b-code-interpreter>=1.0"]
+sandbox = [
+    "e2b>=2.26.0,<2.38.0",
+    "e2b-code-interpreter>=2.9.0,<2.10.0",
+]
 ui = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
@@ -132,7 +146,8 @@ all = [
     "uvicorn[standard]>=0.24.0",
     "jinja2>=3.1.0",
     "python-multipart>=0.0.6",
-    "e2b-code-interpreter>=1.0",
+    "e2b>=2.26.0,<2.38.0",
+    "e2b-code-interpreter>=2.9.0,<2.10.0",
     "daytona>=1.0",
     "pypdf>=4.0.0",
     "mlx>=0.18.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
@@ -163,6 +178,7 @@ allow-direct-references = true
 "eval/longmemeval/evaluate_memorizz.py" = "memorizz/eval/longmemeval/evaluate_memorizz.py"
 "eval/longmemeval/download_dataset.py" = "memorizz/eval/longmemeval/download_dataset.py"
 "src/memorizz/py.typed" = "memorizz/py.typed"
+"src/memorizz/sandbox/MemorizzGraalSandbox.java" = "memorizz/sandbox/MemorizzGraalSandbox.java"
 
 [tool.hatch.build.targets.sdist]
 exclude = [

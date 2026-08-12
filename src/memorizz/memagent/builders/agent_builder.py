@@ -5,7 +5,7 @@
 """Builder pattern for MemAgent construction."""
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from ...enums import ApplicationMode
 from ...internet_access import get_default_internet_access_provider
@@ -41,8 +41,22 @@ class MemAgentBuilder:
         self._semantic_cache_config = None
         self._entity_memory_enabled = None
         self._internet_access_provider = None
+        self._skills_marketplace_provider = None
+        self._skills_marketplace_config = None
         self._skill_paths = []
         self._mcp_servers = []
+        self._sandbox_provider = None
+        self._browser_control = None
+        self._toolbox = None
+        self._skillbox = None
+        self._authored_skills = []
+        self._skill_retrieval_enabled = False
+        self._skill_retrieval_config = None
+        self._tool_result_policy = None
+        self._context_policy = None
+        self._approval_store = None
+        self._delegation_config = None
+        self._semantic_layer = None
         self._self_aware_enabled = False
         self._self_aware_config = None
         self._continual_learning_enabled = False
@@ -119,6 +133,24 @@ class MemAgentBuilder:
         self._internet_access_provider = provider
         return self
 
+    def with_skills_marketplace(
+        self,
+        provider: Any,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> "MemAgentBuilder":
+        """Configure a skills marketplace without post-build mutation."""
+        self._skills_marketplace_provider = provider
+        self._skills_marketplace_config = dict(config or {})
+        return self
+
+    def with_skills_marketplace_provider(
+        self,
+        provider: Any,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> "MemAgentBuilder":
+        """Compatibility alias for :meth:`with_skills_marketplace`."""
+        return self.with_skills_marketplace(provider, config)
+
     def with_skill_paths(self, skill_paths: Union[str, List[str]]) -> "MemAgentBuilder":
         """Attach skill markdown file paths to the agent."""
         if isinstance(skill_paths, str):
@@ -135,6 +167,83 @@ class MemAgentBuilder:
             self._mcp_servers.append(mcp_servers)
         elif isinstance(mcp_servers, list):
             self._mcp_servers.extend(mcp_servers)
+        return self
+
+    def with_sandbox(self, provider: Any) -> "MemAgentBuilder":
+        """Attach a sandbox provider instance, name, or provider config."""
+        self._sandbox_provider = provider
+        return self
+
+    def with_sandbox_provider(self, provider: Any) -> "MemAgentBuilder":
+        """Backward-compatible alias for :meth:`with_sandbox`."""
+        return self.with_sandbox(provider)
+
+    def with_browser_control(self, provider: Any) -> "MemAgentBuilder":
+        """Attach a browser-control provider instance, name, or config."""
+        self._browser_control = provider
+        return self
+
+    def with_browser_control_provider(self, provider: Any) -> "MemAgentBuilder":
+        """Compatibility alias for :meth:`with_browser_control`."""
+        return self.with_browser_control(provider)
+
+    def with_toolbox(self, toolbox: Any) -> "MemAgentBuilder":
+        """Attach a progressively retrieved Toolbox and its callable bindings."""
+        self._toolbox = toolbox
+        return self
+
+    def with_skillbox(self, skillbox: Any) -> "MemAgentBuilder":
+        """Attach an authored/learned Skillbox independently of learning."""
+        self._skillbox = skillbox
+        return self
+
+    def with_skills(
+        self, skills: Union[List[Any], Any], *, persistence: str = "skillbox"
+    ) -> "MemAgentBuilder":
+        """Attach authored procedural skills without enabling continual learning."""
+        if persistence != "skillbox":
+            raise ValueError("Authored skill persistence must be 'skillbox'")
+        self._authored_skills.extend(skills if isinstance(skills, list) else [skills])
+        self._skill_retrieval_enabled = True
+        return self
+
+    def with_skill_retrieval(
+        self, enabled: bool = True, top_k: int = 2, min_similarity: float = 0.70
+    ) -> "MemAgentBuilder":
+        """Configure progressive Skillbox retrieval independently of learning."""
+        self._skill_retrieval_enabled = bool(enabled)
+        self._skill_retrieval_config = {
+            "top_k": max(1, int(top_k)),
+            "min_similarity": float(min_similarity),
+        }
+        return self
+
+    def with_tool_result_policy(self, policy: Any) -> "MemAgentBuilder":
+        self._tool_result_policy = policy
+        return self
+
+    def with_context_policy(self, policy: Any) -> "MemAgentBuilder":
+        self._context_policy = policy
+        return self
+
+    def with_approval_store(self, store: Any) -> "MemAgentBuilder":
+        self._approval_store = store
+        return self
+
+    def with_delegation(
+        self,
+        delegates: Union[List[Any], Any] = None,
+        **config: Any,
+    ) -> "MemAgentBuilder":
+        """Make delegates operational and configure orchestration behavior."""
+        if delegates is not None:
+            self._delegates = delegates if isinstance(delegates, list) else [delegates]
+        self._delegation_config = dict(config)
+        return self
+
+    def with_semantic_layer(self, catalog: Any) -> "MemAgentBuilder":
+        """Attach a governed semantic catalog and query planner."""
+        self._semantic_layer = catalog
         return self
 
     def with_self_aware(
@@ -223,8 +332,10 @@ class MemAgentBuilder:
         return self
 
     def with_delegates(self, delegates: List[Any]) -> "MemAgentBuilder":
-        """Set delegate agents for multi-agent mode."""
+        """Set delegates and enable model-generated orchestration by default."""
         self._delegates = delegates
+        if self._delegation_config is None:
+            self._delegation_config = {"enabled": True, "mode": "auto"}
         return self
 
     def with_verbose(self, verbose: bool = True) -> "MemAgentBuilder":
@@ -232,7 +343,7 @@ class MemAgentBuilder:
         self.config.verbose = verbose
         return self
 
-    def build(self) -> "MemAgent":
+    def build(self, validate: bool = True, persist: bool = False) -> "MemAgent":
         """
         Build the MemAgent instance.
 
@@ -242,6 +353,17 @@ class MemAgentBuilder:
         try:
             # Import here to avoid circular imports
             from ..core import MemAgent
+
+            # Oracle's Skillbox rows retain a real foreign key to the owning
+            # agent.  For ``build_and_save`` the parent must therefore be
+            # committed before authored skills are inserted.  Delay only
+            # those writes; ordinary ``build()`` retains its existing eager
+            # authored-skill behavior for provider compatibility.
+            deferred_authored_skills = (
+                list(self._authored_skills)
+                if persist and self._authored_skills and self._memory_provider
+                else []
+            )
 
             # Create the agent with all configured parameters
             agent = MemAgent(
@@ -267,8 +389,26 @@ class MemAgentBuilder:
                     self.config, "context_window_tokens", None
                 ),
                 internet_access_provider=self._internet_access_provider,
+                skills_marketplace_provider=self._skills_marketplace_provider,
+                skills_marketplace_config=self._skills_marketplace_config,
                 skill_paths=self._skill_paths if self._skill_paths else None,
                 mcp_servers=self._mcp_servers if self._mcp_servers else None,
+                sandbox_provider=self._sandbox_provider,
+                browser_control=self._browser_control,
+                toolbox=self._toolbox,
+                skillbox=self._skillbox,
+                authored_skills=(
+                    None
+                    if deferred_authored_skills
+                    else (self._authored_skills if self._authored_skills else None)
+                ),
+                skill_retrieval=self._skill_retrieval_enabled,
+                skill_retrieval_config=self._skill_retrieval_config,
+                tool_result_policy=self._tool_result_policy,
+                context_policy=self._context_policy,
+                approval_store=self._approval_store,
+                delegation=self._delegation_config,
+                semantic_layer=self._semantic_layer,
                 automations_enabled=self._automations_enabled,
                 default_timezone=self._default_timezone,
                 self_aware=self._self_aware_enabled,
@@ -286,11 +426,23 @@ class MemAgentBuilder:
                 except Exception as exc:
                     logger.warning(f"Failed to configure entity memory: {exc}")
 
+            if validate:
+                agent.validate_configuration()
+            if persist:
+                agent.save()
+                if deferred_authored_skills:
+                    agent.authored_skills = deferred_authored_skills
+                    agent._persist_authored_skills(strict=True)
+
             return agent
 
         except Exception as e:
             logger.error(f"Failed to build MemAgent: {e}")
             raise
+
+    def build_and_save(self, validate: bool = True) -> "MemAgent":
+        """Build, validate, and persist the configured agent."""
+        return self.build(validate=validate, persist=True)
 
     def clone(self) -> "MemAgentBuilder":
         """
@@ -307,6 +459,12 @@ class MemAgentBuilder:
         new_builder._llm_config = self._llm_config.copy() if self._llm_config else None
         new_builder._tools = self._tools.copy()
         new_builder._internet_access_provider = self._internet_access_provider
+        new_builder._skills_marketplace_provider = self._skills_marketplace_provider
+        new_builder._skills_marketplace_config = (
+            self._skills_marketplace_config.copy()
+            if self._skills_marketplace_config
+            else None
+        )
         new_builder._is_favorite = self._is_favorite
         new_builder._persona = self._persona
         new_builder._name = self._name
@@ -322,6 +480,24 @@ class MemAgentBuilder:
         )
         new_builder._skill_paths = self._skill_paths.copy()
         new_builder._mcp_servers = self._mcp_servers.copy()
+        new_builder._sandbox_provider = self._sandbox_provider
+        new_builder._browser_control = self._browser_control
+        new_builder._toolbox = self._toolbox
+        new_builder._skillbox = self._skillbox
+        new_builder._authored_skills = self._authored_skills.copy()
+        new_builder._skill_retrieval_enabled = self._skill_retrieval_enabled
+        new_builder._skill_retrieval_config = (
+            self._skill_retrieval_config.copy()
+            if self._skill_retrieval_config
+            else None
+        )
+        new_builder._tool_result_policy = self._tool_result_policy
+        new_builder._context_policy = self._context_policy
+        new_builder._approval_store = self._approval_store
+        new_builder._delegation_config = (
+            self._delegation_config.copy() if self._delegation_config else None
+        )
+        new_builder._semantic_layer = self._semantic_layer
         new_builder._self_aware_enabled = self._self_aware_enabled
         new_builder._self_aware_config = (
             self._self_aware_config.copy() if self._self_aware_config else None

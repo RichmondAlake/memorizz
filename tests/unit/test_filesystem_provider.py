@@ -154,6 +154,34 @@ def test_keyword_search_without_embeddings(tmp_path):
     assert results and results[0]["memory_id"] == "k1"
 
 
+def test_conversation_history_can_be_scoped_to_one_thread(tmp_path):
+    provider = _make_provider(tmp_path)
+    for thread_id, content in (
+        ("thread-a", "message from a"),
+        ("thread-b", "message from b"),
+    ):
+        provider.store(
+            {
+                "memory_id": "shared-memory",
+                "thread_id": thread_id,
+                "role": "user",
+                "content": content,
+                "timestamp": "2026-01-01T12:00:00+00:00",
+                "user_id": None,
+            },
+            memory_store_type=MemoryType.CONVERSATION_MEMORY,
+        )
+
+    rows = provider.retrieve_conversation_history_ordered_by_timestamp(
+        "shared-memory",
+        memory_type=MemoryType.CONVERSATION_MEMORY,
+        user_id=None,
+        thread_id="thread-b",
+    )
+
+    assert [row["content"] for row in rows] == ["message from b"]
+
+
 def test_delete_memagent_cascade_removes_memories(tmp_path):
     provider = _make_provider(tmp_path)
 

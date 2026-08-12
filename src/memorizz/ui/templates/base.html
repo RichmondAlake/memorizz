@@ -260,6 +260,19 @@
                     <span>Playground</span>
                 </a>
 
+                <a href="/mcp{% if active_agent_id %}?agent_id={{ active_agent_id }}{% endif %}" class="nav-item {% if active_page == 'mcp' %}active{% endif %}">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="6" cy="12" r="3"/>
+                            <circle cx="18" cy="6" r="3"/>
+                            <circle cx="18" cy="18" r="3"/>
+                            <path d="m8.7 10.7 6.6-3.4"/>
+                            <path d="m8.7 13.3 6.6 3.4"/>
+                        </svg>
+                    </span>
+                    <span>MCP Connections</span>
+                </a>
+
                 <a href="/vercel-skills" class="nav-item {% if active_page == 'vercel-skills' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

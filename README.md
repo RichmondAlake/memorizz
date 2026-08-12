@@ -18,7 +18,8 @@ It provides:
 - pluggable storage providers (Oracle, MongoDB, filesystem)
 - agent builders and application modes (`assistant`, `workflow`, `deep_research`)
 - scheduled automations (cron, interval, one-shot) with optional WhatsApp delivery
-- optional internet access, sandbox code execution, skills marketplace, and local web UI
+- optional internet access, governed browser control, sandbox code execution, skills marketplace, and local web UI
+- first-class MCP connectivity over stdio, Streamable HTTP, and SSE, including OAuth, encrypted credentials, resources, prompts, and tool approval policy
 - an interactive, Claude-Code-style terminal CLI (`memorizz`) with persistent memory — see [CLI](#cli)
 
 ## Key Capabilities
@@ -36,6 +37,23 @@ It provides:
 - **Context-window telemetry** via `get_context_window_stats()` and per-turn cache metrics (`cached_tokens`) from `get_last_usage()`
 - **Skills marketplace** with Vercel Agent Skills and SkillsMP providers
 - **Scheduled automations** via SDK, web UI, or agent conversation (see `src/memorizz/automation/README.md`)
+- **Production-oriented MCP connectivity** for Notion, Google Calendar, and custom servers, with encrypted OAuth/bearer credentials, SSRF controls, bounded retries/timeouts, mutation approval, and UI/CLI management (see [MCP Connectivity](docs/guides/mcp-connectivity.md))
+- **First-party MCP server** over local stdio or authenticated Streamable HTTP, exposing tenant-scoped memory, conversations, agents, resources, and prompts (see [Expose MemoRizz as an MCP Server](docs/guides/mcp-server.md))
+- **0.5 production governance** with durable host approvals, progressive tool disclosure, size-aware tool results, cache freshness controls, Oracle compaction parity, bounded sandboxes, and provider-neutral orchestration (see [Production Governance](docs/guides/production-governance.md))
+- **Governed browser control** through a provider-neutral capability and an isolated Browser Use provider. Every model-initiated browser task requires a durable, single-use host approval (see [Browser Control](docs/browser-control/index.md))
+
+Expose local MemoRizz functionality to a desktop MCP host:
+
+```json
+{
+  "mcpServers": {
+    "memorizz": {
+      "command": "memorizz",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
 
 ## Installation
 
@@ -298,11 +316,17 @@ LM Studio defaults to `http://127.0.0.1:1234/v1`. vLLM and any other
 If you want Oracle AI Database as the backing store:
 
 ```bash
+# Set unique admin/application passwords in your environment or .env first.
 memorizz oracle install
 memorizz oracle setup
+memorizz oracle preflight --json
 ```
 
-Then configure `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_DSN`, and your LLM credentials. Full setup details are in `SETUP.md`.
+Configure `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_DSN`, and your LLM
+credentials. MemoRizz has no database-password defaults and never prints the
+configured value. Full bootstrap, migration, index-policy, preflight, and
+cleanup details are in [`SETUP.md`](SETUP.md) and the [Oracle provider
+guide](docs/memory-providers/oracle.md).
 
 For multi-client consistency (UI + notebooks), you can set shared embedding defaults:
 
@@ -395,6 +419,49 @@ agent = MemAgent(
 print(agent.execute_code("print(2 ** 16)"))
 ```
 
+## Browser Control
+
+Install [Browser Use](https://github.com/browser-use/browser-use) as a separate
+Python 3.11+ CLI tool. This keeps its dependency environment isolated from
+MemoRizz's MCP 2.x runtime:
+
+```bash
+uv tool install --python 3.12 browser-use
+browser-use install
+browser-use doctor
+```
+
+Attach the provider with the builder, a direct `MemAgent` argument, the agent
+editor UI, or `memorizz chat --browser-control`:
+
+```python
+agent = (
+    MemAgentBuilder()
+    .with_memory_provider(provider)
+    .with_llm_config({"provider": "openai", "model": "gpt-4.1-mini"})
+    .with_browser_control(
+        {
+            "provider": "browseruse",
+            "llm_provider": "openai",
+            "allowed_domains": ["example.com", "*.notion.so"],
+            "max_steps": 25,
+            "task_timeout": 600,
+        }
+    )
+    .build(validate=True)
+)
+```
+
+The model receives one `browser_control(task, max_steps)` tool. It is always
+nondeterministic, side-effecting, and approval-required. MemoRizz stores the
+exact task and argument hash, then the UI/host/CLI can approve and resume the
+original checkpoint exactly once. Model-visible `approved`/`confirm` switches
+are not accepted. Each execution uses a private fixed worker in the isolated
+Browser Use Python environment and closes its browser on success, failure, or
+timeout. See the
+[Browser Control guide](docs/browser-control/index.md) for installation,
+policy, result shape, and security guidance.
+
 ## Skills Marketplace
 
 MemAgents can search and use agent skills from external marketplaces at runtime. Two providers are available:
@@ -473,15 +540,17 @@ Then just run `memorizz`:
 
 ```bash
 memorizz                       # interactive REPL (memory persists across launches)
-memorizz --code                # enable coding tools (read/write files + commands)
+memorizz chat --code           # enable coding tools (read/write files + commands)
 memorizz run "your prompt"     # one-shot, prints the reply
+memorizz chat --browser-control # attach governed Browser Use
+memorizz run --browser-control "read example.com"
 memorizz ui                    # start the local web UI (requires [ui])
 ```
 
 With no API key and a running [Ollama](https://ollama.com) daemon it runs a
 **100% local stack** (Ollama LLM + embeddings + on-disk memory). Inside the REPL,
-`/help` lists 20+ slash commands (`/model`, `/code`, `/persona`, `/memory`,
-`/forget`, `/clear`, `/ingest`, `/ui`, …).
+`/help` lists 20+ slash commands (`/model`, `/code`, `/browser`, `/approvals`, `/persona`, `/memory`,
+`/conversations`, `/forget`, `/clear`, `/ingest`, `/ui`, …).
 
 See the **[CLI Guide](docs/getting-started/cli.md)** for the full reference.
 

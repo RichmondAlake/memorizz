@@ -10,6 +10,7 @@ factory, REPL, providers) is imported inside the command handlers so that
 ``memorizz --help`` / ``--version`` / ``init`` stay sub-second.
 """
 
+import json
 import os
 import sys
 from typing import List, Optional
@@ -18,6 +19,7 @@ import typer
 
 from .._env_io import resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
+from .mcp_commands import mcp_app
 
 app = typer.Typer(
     name="memorizz",
@@ -25,6 +27,8 @@ app = typer.Typer(
     no_args_is_help=False,
     add_completion=True,
 )
+
+app.add_typer(mcp_app, name="mcp")
 
 
 def _eprint(msg: str) -> None:
@@ -84,8 +88,18 @@ def chat(
         None, "--provider", help="Force an LLM provider."
     ),
     model: Optional[str] = typer.Option(None, "--model", help="Force a model."),
+    browser_control: Optional[bool] = typer.Option(
+        None,
+        "--browser-control/--no-browser-control",
+        help="Enable or disable the governed Browser Use tool.",
+    ),
 ):
-    _launch_repl(code_mode=code, provider=provider, model=model)
+    _launch_repl(
+        code_mode=code,
+        provider=provider,
+        model=model,
+        browser_control=browser_control,
+    )
 
 
 @app.command(
@@ -94,11 +108,20 @@ def chat(
 def run(
     prompt: Optional[List[str]] = typer.Argument(None),
     code: bool = typer.Option(False, "--code", help="Enable coding tools."),
+    browser_control: Optional[bool] = typer.Option(
+        None,
+        "--browser-control/--no-browser-control",
+        help="Enable or disable the governed Browser Use tool.",
+    ),
 ):
     if not prompt:
         _eprint('Usage: memorizz run "<prompt>"')
         raise typer.Exit(2)
-    _run_oneshot(" ".join(prompt), code_mode=code)
+    _run_oneshot(
+        " ".join(prompt),
+        code_mode=code,
+        browser_control=browser_control,
+    )
 
 
 @app.command(help="Launch the local web UI (requires the optional UI dependencies).")
@@ -125,6 +148,23 @@ def init(
 @app.command(name="config", help="Show resolved configuration and paths.")
 def config_cmd():
     _show_config()
+
+
+@app.command(help="Print the installed MemoRizz capability report.")
+def capabilities(
+    pretty: bool = typer.Option(True, "--pretty/--compact"),
+    raw_json: bool = typer.Option(False, "--json", help="Emit compact JSON."),
+):
+    """Report feature and optional-provider availability as JSON."""
+    from ..capabilities import capabilities as capability_report
+
+    print(
+        json.dumps(
+            capability_report(),
+            indent=2 if pretty and not raw_json else None,
+            sort_keys=True,
+        )
+    )
 
 
 # --- Oracle sub-app (legacy commands preserved) ---
@@ -163,6 +203,34 @@ def oracle_teardown(
     from .legacy import teardown_oracle
 
     raise typer.Exit(0 if teardown_oracle(mode=mode, force=force) else 1)
+
+
+@oracle_app.command("preflight", help="Inspect Oracle readiness and vector policy.")
+def oracle_preflight(
+    provision_if_missing: bool = typer.Option(False, "--provision-if-missing"),
+    index_policy: str = typer.Option("lazy", "--index-policy"),
+    raw_json: bool = typer.Option(False, "--json", help="Emit compact JSON."),
+):
+    """Run the package-owned structured Oracle preflight report."""
+    from ..memory_provider.oracle import OracleProvider
+
+    provider = OracleProvider.from_env(
+        provision_if_missing=provision_if_missing,
+        index_policy=index_policy,
+    )
+    try:
+        report = provider.preflight()
+    finally:
+        provider.close()
+    print(
+        json.dumps(
+            report,
+            indent=None if raw_json else 2,
+            sort_keys=True,
+            default=str,
+        )
+    )
+    raise typer.Exit(0 if report.get("ok") else 1)
 
 
 # --- Automations sub-app (legacy command preserved) ---
@@ -212,14 +280,22 @@ def _resolve_llm_config(provider, model):
     return None
 
 
-def _build_or_wizard(code_mode, provider=None, model=None, console=None):
+def _build_or_wizard(
+    code_mode,
+    provider=None,
+    model=None,
+    console=None,
+    browser_control=None,
+):
     from . import agent_factory
 
     console = console or _make_console()
     try:
         llm_config = _resolve_llm_config(provider, model)
         session = agent_factory.build_session_agent(
-            code_mode=code_mode, llm_config=llm_config
+            code_mode=code_mode,
+            llm_config=llm_config,
+            browser_control_enabled=browser_control,
         )
         session.console = console
         return session
@@ -230,15 +306,15 @@ def _build_or_wizard(code_mode, provider=None, model=None, console=None):
         console.print(
             f"Run:  [cyan]ollama pull {cfg.DEFAULT_OLLAMA_LLM}[/cyan]  then try again."
         )
-        return _wizard(console, code_mode)
+        return _wizard(console, code_mode, browser_control=browser_control)
     except agent_factory.NoProviderConfigured:
-        return _wizard(console, code_mode)
+        return _wizard(console, code_mode, browser_control=browser_control)
     except Exception as exc:
         console.print(f"[red]Could not start agent:[/red] {exc}")
         return None
 
 
-def _wizard(console, code_mode, depth: int = 0):
+def _wizard(console, code_mode, depth: int = 0, browser_control=None):
     from rich.panel import Panel
 
     from . import agent_factory, ollama_probe
@@ -287,7 +363,10 @@ def _wizard(console, code_mode, depth: int = 0):
         return None
 
     try:
-        session = agent_factory.build_session_agent(code_mode=code_mode)
+        session = agent_factory.build_session_agent(
+            code_mode=code_mode,
+            browser_control_enabled=browser_control,
+        )
         session.console = console
         return session
     except agent_factory.NeedsOllamaPull:
@@ -296,16 +375,32 @@ def _wizard(console, code_mode, depth: int = 0):
         )
         return None
     except agent_factory.NoProviderConfigured:
-        return _wizard(console, code_mode, depth + 1)
+        return _wizard(
+            console,
+            code_mode,
+            depth + 1,
+            browser_control=browser_control,
+        )
     except Exception as exc:
         console.print(f"[red]Could not start agent:[/red] {exc}")
         return None
 
 
-def _launch_repl(code_mode=False, provider=None, model=None):
+def _launch_repl(
+    code_mode=False,
+    provider=None,
+    model=None,
+    browser_control=None,
+):
     _load_env()
     console = _make_console()
-    session = _build_or_wizard(code_mode, provider, model, console)
+    session = _build_or_wizard(
+        code_mode,
+        provider,
+        model,
+        console,
+        browser_control,
+    )
     if session is None:
         raise typer.Exit(1)
     from .repl import run_repl
@@ -313,10 +408,14 @@ def _launch_repl(code_mode=False, provider=None, model=None):
     run_repl(session)
 
 
-def _run_oneshot(text, code_mode=False):
+def _run_oneshot(text, code_mode=False, browser_control=None):
     _load_env()
     console = _make_console()
-    session = _build_or_wizard(code_mode, console=console)
+    session = _build_or_wizard(
+        code_mode,
+        console=console,
+        browser_control=browser_control,
+    )
     if session is None:
         raise typer.Exit(1)
     result = session.agent.run(
@@ -328,7 +427,12 @@ def _run_oneshot(text, code_mode=False):
     print(result)
     session.sync_ids()
     try:
-        cfg.save_state({"memory_id": session.memory_id})
+        cfg.save_state(
+            {
+                "memory_id": session.memory_id,
+                "thread_id": session.thread_id,
+            }
+        )
         if getattr(session.agent, "memory_provider", None) is not None:
             session.agent.save()
     except Exception:

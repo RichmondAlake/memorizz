@@ -106,13 +106,24 @@ def mock_memory_provider():
         return memories[:limit]
 
     def mock_retrieve_conversation_history(
-        memory_id: str, memory_type: Any, limit: int = 10
+        memory_id: str,
+        memory_type: Any,
+        limit: int = 10,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ):
         memories = mock_memory._storage.get(memory_id, [])
-        return [
-            {"content": mem, "timestamp": datetime.now().isoformat()}
-            for mem in memories[:limit]
-        ]
+        rows = []
+        for mem in memories:
+            content = mem if isinstance(mem, dict) else {}
+            if content.get("user_id") != user_id:
+                continue
+            if thread_id is not None and str(content.get("thread_id") or "") != str(
+                thread_id
+            ):
+                continue
+            rows.append({"content": mem, "timestamp": datetime.now().isoformat()})
+        return rows[:limit] if limit else rows
 
     mock_memory.store.side_effect = mock_store
     mock_memory.retrieve_by_id.side_effect = mock_retrieve_by_id

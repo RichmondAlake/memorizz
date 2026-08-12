@@ -10,11 +10,13 @@ the docker CLI so the endpoints in app.py stay thin.
 """
 
 import logging
+import os
 import re
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -264,47 +266,72 @@ def stream_container_logs(name: str, tail: int = 200):
             proc.kill()
 
 
-def create_container(username: str, password: str, host_port: int) -> Tuple[bool, str]:
+def create_container(
+    username: str,
+    password: str,
+    host_port: int,
+    *,
+    name: str = CONTAINER_NAME,
+) -> Tuple[bool, str]:
     """`docker run` a new gvenzl/oracle-free container and wait for health.
 
     Uses the form-supplied username/password for the APP_USER, and reuses the
     password for SYS (ORACLE_PASSWORD) to keep the setup simple for local dev.
-    Binds the requested host port to the container's 1521.
+    Credentials are passed through a private, short-lived Docker env file so
+    they do not appear in the process list. Binds the requested host port to
+    the container's 1521.
     """
-    if get_container_state() != "absent":
-        return False, f"Container '{CONTAINER_NAME}' already exists"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+        return False, "Invalid Oracle container name"
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]{0,127}", str(username or "")):
+        return False, "Invalid Oracle application username"
+    if not password or any(character in password for character in ("\r", "\n", "\x00")):
+        return False, "Oracle password must be non-empty and contain no line breaks"
+    if get_container_state(name) != "absent":
+        return False, f"Container '{name}' already exists"
 
     logger.info("Pulling %s (may take a while on first run)...", IMAGE)
     rc, _, stderr = _run(["docker", "pull", IMAGE], timeout=PULL_TIMEOUT)
     if rc != 0:
         return False, f"docker pull failed: {stderr or 'unknown error'}"
 
-    rc, _, stderr = _run(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            CONTAINER_NAME,
-            "-p",
-            f"{host_port}:{INTERNAL_PORT}",
-            "-e",
-            f"ORACLE_PASSWORD={password}",
-            "-e",
-            f"APP_USER={username}",
-            "-e",
-            f"APP_USER_PASSWORD={password}",
-            "-v",
-            f"{VOLUME_NAME}:/opt/oracle/oradata",
-            IMAGE,
-        ],
-        timeout=60,
-    )
+    env_fd, env_path = tempfile.mkstemp(prefix="memorizz-oracle-", suffix=".env")
+    try:
+        try:
+            os.fchmod(env_fd, 0o600)
+        except OSError:  # pragma: no cover - Windows permissions differ
+            pass
+        with os.fdopen(env_fd, "w", encoding="utf-8") as env_file:
+            env_file.write(f"ORACLE_PASSWORD={password}\n")
+            env_file.write(f"APP_USER={username}\n")
+            env_file.write(f"APP_USER_PASSWORD={password}\n")
+        rc, _, stderr = _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                name,
+                "-p",
+                f"{host_port}:{INTERNAL_PORT}",
+                "--env-file",
+                env_path,
+                "-v",
+                f"{VOLUME_NAME if name == CONTAINER_NAME else name + '_data'}:/opt/oracle/oradata",
+                IMAGE,
+            ],
+            timeout=60,
+        )
+    finally:
+        try:
+            os.unlink(env_path)
+        except OSError:
+            pass
     if rc != 0:
         return False, f"docker run failed: {stderr or 'unknown error'}"
 
     logger.info("Created Oracle container, waiting for first-boot health...")
-    ok, detail = _wait_for_healthy(CONTAINER_NAME, READINESS_TIMEOUT_CREATE)
+    ok, detail = _wait_for_healthy(name, READINESS_TIMEOUT_CREATE)
     if not ok:
         return (
             False,

@@ -73,6 +73,14 @@ def save_agent(agent):
         raise ValueError("Cannot save MemAgent: no memory provider configured")
 
     try:
+        # Re-normalize through the MCP manager before serializing so callers
+        # that assigned configurations directly cannot persist bearer tokens,
+        # OAuth client secrets, custom headers, or stdio environment values.
+        if getattr(agent, "mcp_manager", None) is not None:
+            agent.mcp_servers = agent.mcp_manager.configure_servers(
+                getattr(agent, "mcp_servers", None) or []
+            )
+
         # Serialize tools from tool manager
         tools_to_save = _serialize_tools_for_save(agent)
 
@@ -113,6 +121,17 @@ def save_agent(agent):
                 agent.cache_manager.enabled if agent.cache_manager else False
             ),
             semantic_cache_config=semantic_cache_config_to_save,
+            tool_result_policy=agent.tool_result_policy.to_dict(),
+            context_policy=agent.context_policy.to_dict(),
+            delegation_config=dict(agent.delegation_config or {}),
+            skill_retrieval=bool(agent.skill_retrieval),
+            skill_retrieval_config=dict(agent.skill_retrieval_config or {}),
+            semantic_layer_config=(
+                agent.semantic_layer.to_dict()
+                if agent.semantic_layer is not None
+                and hasattr(agent.semantic_layer, "to_dict")
+                else None
+            ),
             context_window_tokens=agent._context_window_tokens,
             is_favorite=agent.is_favorite,
             internet_access_provider=agent.get_internet_access_provider_name(),
@@ -127,6 +146,11 @@ def save_agent(agent):
                 agent.sandbox_manager.get_provider_config()
                 if agent.has_sandbox()
                 else None
+            ),
+            browser_control=(
+                agent.browser_control_manager.get_provider_config()
+                if agent.has_browser_control()
+                else getattr(agent, "browser_control_config", None)
             ),
             skill_paths=agent.skill_paths or None,
             mcp_servers=agent.mcp_servers or None,
@@ -223,6 +247,19 @@ def _serialize_tools_for_save(agent):
                     "docstring", tool_meta.get("description", "")
                 ),
                 "parameters": tool_meta.get("parameters", {}),
+                "required": tool_meta.get("required", []),
+                "input_schema": tool_meta.get("input_schema")
+                or {
+                    "type": "object",
+                    "properties": tool_meta.get("parameters", {}),
+                    "required": tool_meta.get("required", []),
+                    "additionalProperties": False,
+                },
+                "tool_policy": tool_meta.get("tool_policy", {}),
+                "aliases": tool_meta.get("aliases", []),
+                "deprecated_arguments": tool_meta.get("deprecated_arguments", {}),
+                "queries": tool_meta.get("queries", []),
+                "import_reference": tool_meta.get("import_reference"),
                 "type": tool_meta.get("type", "function"),
                 "agent_id": agent.agent_id,
             }
@@ -435,6 +472,10 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     if not isinstance(saved_sandbox_provider, (str, dict)):
         saved_sandbox_provider = None
 
+    saved_browser_control = getattr(saved_memagent, "browser_control", None)
+    if not isinstance(saved_browser_control, (str, dict)):
+        saved_browser_control = None
+
     saved_skills_marketplace_provider = getattr(
         saved_memagent, "skills_marketplace_provider", None
     )
@@ -465,13 +506,15 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     if not isinstance(saved_mcp_servers, list):
         saved_mcp_servers = None
 
-    saved_self_aware = bool(getattr(saved_memagent, "self_aware", False))
+    raw_self_aware = getattr(saved_memagent, "self_aware", False)
+    saved_self_aware = raw_self_aware if isinstance(raw_self_aware, bool) else False
     saved_self_aware_config = getattr(saved_memagent, "self_aware_config", None)
     if not isinstance(saved_self_aware_config, dict):
         saved_self_aware_config = None
 
-    saved_continual_learning = bool(
-        getattr(saved_memagent, "continual_learning", False)
+    raw_continual_learning = getattr(saved_memagent, "continual_learning", False)
+    saved_continual_learning = (
+        raw_continual_learning if isinstance(raw_continual_learning, bool) else False
     )
     saved_continual_learning_config = getattr(
         saved_memagent, "continual_learning_config", None
@@ -479,16 +522,48 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     if not isinstance(saved_continual_learning_config, dict):
         saved_continual_learning_config = None
 
-    saved_automations_enabled = getattr(saved_memagent, "automations_enabled", True)
-    if saved_automations_enabled is None:
-        saved_automations_enabled = True
-    saved_automations_enabled = bool(saved_automations_enabled)
+    raw_automations_enabled = getattr(saved_memagent, "automations_enabled", True)
+    saved_automations_enabled = (
+        raw_automations_enabled if isinstance(raw_automations_enabled, bool) else True
+    )
 
     saved_default_timezone = getattr(saved_memagent, "default_timezone", None)
     if not isinstance(saved_default_timezone, str):
         saved_default_timezone = None
     else:
         saved_default_timezone = saved_default_timezone.strip() or None
+
+    saved_tool_result_policy = getattr(saved_memagent, "tool_result_policy", None)
+    if not isinstance(saved_tool_result_policy, dict):
+        saved_tool_result_policy = None
+
+    saved_context_policy = getattr(saved_memagent, "context_policy", None)
+    if not isinstance(saved_context_policy, dict):
+        saved_context_policy = None
+
+    raw_skill_retrieval = getattr(saved_memagent, "skill_retrieval", False)
+    saved_skill_retrieval = (
+        raw_skill_retrieval if isinstance(raw_skill_retrieval, bool) else False
+    )
+    saved_skill_retrieval_config = getattr(
+        saved_memagent, "skill_retrieval_config", None
+    )
+    if not isinstance(saved_skill_retrieval_config, dict):
+        saved_skill_retrieval_config = None
+
+    saved_delegation_config = getattr(saved_memagent, "delegation_config", None)
+    if not isinstance(saved_delegation_config, dict):
+        saved_delegation_config = None
+
+    saved_semantic_layer = None
+    semantic_layer_config = getattr(saved_memagent, "semantic_layer_config", None)
+    if isinstance(semantic_layer_config, dict):
+        try:
+            from ..semantic_layer import SemanticCatalog
+
+            saved_semantic_layer = SemanticCatalog.from_dict(semantic_layer_config)
+        except Exception as exc:
+            logger.warning("Failed to restore semantic catalog: %s", exc)
 
     # Create new agent instance with loaded configuration
     agent_instance = cls(
@@ -518,6 +593,18 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         semantic_cache_config=overrides.get(
             "semantic_cache_config", semantic_cache_config_to_load
         ),
+        tool_result_policy=overrides.get(
+            "tool_result_policy",
+            saved_tool_result_policy,
+        ),
+        context_policy=overrides.get("context_policy", saved_context_policy),
+        skill_retrieval=overrides.get("skill_retrieval", saved_skill_retrieval),
+        skill_retrieval_config=overrides.get(
+            "skill_retrieval_config",
+            saved_skill_retrieval_config,
+        ),
+        delegation=overrides.get("delegation", saved_delegation_config),
+        semantic_layer=overrides.get("semantic_layer", saved_semantic_layer),
         internet_access_provider=overrides.get(
             "internet_access_provider", internet_provider_instance
         ),
@@ -528,6 +615,7 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
             "skills_marketplace_config", saved_skills_marketplace_config
         ),
         sandbox_provider=overrides.get("sandbox_provider", saved_sandbox_provider),
+        browser_control=overrides.get("browser_control", saved_browser_control),
         skill_paths=overrides.get("skill_paths", saved_skill_paths),
         mcp_servers=overrides.get("mcp_servers", saved_mcp_servers),
         automations_enabled=overrides.get(

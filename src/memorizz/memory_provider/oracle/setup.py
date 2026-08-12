@@ -482,9 +482,11 @@ def _create_user_and_grant_privileges(
                     reconnect_admin_user = admin_user or os.environ.get(
                         "ORACLE_ADMIN_USER", "system"
                     )
-                    admin_password = os.environ.get(
-                        "ORACLE_ADMIN_PASSWORD", "MyPassword123!"
-                    )
+                    admin_password = os.environ.get("ORACLE_ADMIN_PASSWORD")
+                    if not admin_password:
+                        raise RuntimeError(
+                            "ORACLE_ADMIN_PASSWORD is required to reconnect as admin"
+                        )
                     # Try to reconnect as sys if we were using sys
                     if reconnect_admin_user.lower() == "sys":
                         admin_conn = oracledb.connect(
@@ -837,6 +839,20 @@ def _create_user_and_grant_privileges(
             print(f"  ⚠ Failed to grant view privileges: {e}")
             print("    Some features may not be available")
 
+        # The production preflight reads only two dynamic performance views.
+        # Grant those objects explicitly instead of broad catalog access so it
+        # can report PDB state and VECTOR_MEMORY_SIZE under least privilege.
+        print("\nGranting production preflight diagnostics...")
+        for view_name in ("V_$PDBS", "V_$PARAMETER"):
+            try:
+                admin_cursor.execute(
+                    f"GRANT SELECT ON SYS.{view_name} TO {memorizz_user}"
+                )
+                print(f"  ✓ SELECT ON SYS.{view_name}")
+            except Exception as e:
+                print(f"  ⚠ Could not grant SELECT ON SYS.{view_name}: {e}")
+        print("  ℹ No broad SELECT_CATALOG_ROLE grant is required")
+
         admin_conn.commit()
         print("\n✓ User creation and privilege grants complete!")
         return True
@@ -973,12 +989,16 @@ def setup_oracle_user():
 
     # Configuration - can be overridden via environment variables
     ADMIN_USER = os.environ.get("ORACLE_ADMIN_USER", "system")
-    ADMIN_PASSWORD = os.environ.get("ORACLE_ADMIN_PASSWORD", "MyPassword123!")
+    ADMIN_PASSWORD = str(os.environ.get("ORACLE_ADMIN_PASSWORD", "") or "").strip()
     DSN = os.environ.get("ORACLE_DSN", "localhost:1521/FREEPDB1")
 
     # User to create/use - can be overridden via environment variables
     MEMORIZZ_USER = os.environ.get("ORACLE_USER", "memorizz_user")
-    MEMORIZZ_PASSWORD = os.environ.get("ORACLE_PASSWORD", "SecurePass123!")
+    MEMORIZZ_PASSWORD = str(os.environ.get("ORACLE_PASSWORD", "") or "").strip()
+
+    if not MEMORIZZ_PASSWORD:
+        print("✗ ORACLE_PASSWORD is required; insecure default passwords are not used")
+        return False
 
     # SQL files - resolve paths relative to this package
     PACKAGE_DIR = Path(__file__).parent
@@ -1003,12 +1023,18 @@ def setup_oracle_user():
     print("-" * 70)
 
     # Try to connect as admin first (SYSTEM)
-    (
-        can_connect_admin,
-        admin_conn,
-        admin_capabilities,
-        admin_error,
-    ) = _check_admin_capabilities(ADMIN_USER, ADMIN_PASSWORD, DSN)
+    if ADMIN_PASSWORD:
+        (
+            can_connect_admin,
+            admin_conn,
+            admin_capabilities,
+            admin_error,
+        ) = _check_admin_capabilities(ADMIN_USER, ADMIN_PASSWORD, DSN)
+    else:
+        can_connect_admin = False
+        admin_conn = None
+        admin_capabilities = {}
+        admin_error = None
 
     # Track which admin user we're using (for display purposes)
     active_admin_user = ADMIN_USER
@@ -1076,15 +1102,12 @@ def setup_oracle_user():
                     )
                     print("       to display the connection environment variables")
                     print(
-                        '    2. Or set manually: export ORACLE_ADMIN_PASSWORD="MyPassword123!"'
+                        "    2. Set ORACLE_ADMIN_PASSWORD to the container admin password"
                     )
                     print(
                         "    3. Ensure the password matches the Oracle container password"
                     )
-                    print(
-                        f"  Current admin password: {'*' * len(ADMIN_PASSWORD) if ADMIN_PASSWORD else '(not set, using default)'}"
-                    )
-                    print("  Expected default: MyPassword123!")
+                    print("  MemoRizz never supplies a default database password")
                 elif _is_connection_refused_error(Exception(admin_error)):
                     # Connection refused - already handled by _print_connection_refused_help
                     pass
@@ -1200,7 +1223,7 @@ def setup_oracle_user():
     print()
     print("Connection details for your Memorizz application:")
     print(f"  User:     {MEMORIZZ_USER}")
-    print(f"  Password: {MEMORIZZ_PASSWORD}")
+    print("  Password: <configured in ORACLE_PASSWORD; redacted>")
     print(f"  DSN:      {DSN}")
     print()
 
@@ -1217,13 +1240,14 @@ def setup_oracle_user():
     print()
     print("Example usage in Python:")
     print()
+    print("  import os")
     print("  from memorizz.memory_provider.oracle import OracleProvider, OracleConfig")
     print("  from memorizz.memagent.builders import MemAgentBuilder")
     print("  ")
     print("  # Create Oracle provider")
     print("  oracle_config = OracleConfig(")
     print(f'      user="{MEMORIZZ_USER}",')
-    print(f'      password="{MEMORIZZ_PASSWORD}",')
+    print('      password=os.environ["ORACLE_PASSWORD"],')
     print(f'      dsn="{DSN}",')
     print("      in_database_embedding=True,")
     print('      embedding_config={"model": "ALL_MINILM_L12_V2"}')
@@ -1272,7 +1296,7 @@ def apply_schema_updates() -> bool:
         return False
 
     user = str(os.environ.get("ORACLE_USER", "memorizz_user") or "").strip()
-    password = str(os.environ.get("ORACLE_PASSWORD", "SecurePass123!") or "").strip()
+    password = str(os.environ.get("ORACLE_PASSWORD", "") or "").strip()
     dsn = str(os.environ.get("ORACLE_DSN", "localhost:1521/FREEPDB1") or "").strip()
     if not user or not password or not dsn:
         print("✗ Missing Oracle env vars")

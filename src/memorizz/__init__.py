@@ -13,14 +13,15 @@ import at that point, exactly as before).
 """
 
 import importlib
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _pkg_version
 
-try:
-    __version__ = _pkg_version("memorizz")
-except PackageNotFoundError:  # pragma: no cover - source checkout without install
-    __version__ = "0.0.0"
+# Kept in lockstep with pyproject.toml and asserted by release tests.
+__version__ = "0.5.0"
 
+# ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
+# with the same name as its submodule is not stable under Python's from-list
+# import machinery: ``from memorizz import capabilities`` can otherwise bind
+# the ``memorizz.capabilities`` module instead of the documented callable.
+from .capabilities import capabilities as capabilities
 
 # name -> (submodule, attribute). Imported on first attribute access.
 _LAZY = {
@@ -33,12 +34,23 @@ _LAZY = {
     "create_task_agent": (".memagent.builders", "create_task_agent"),
     "create_deep_research_agent": (".memagent.builders", "create_deep_research_agent"),
     "ApplicationMode": (".enums", "ApplicationMode"),
+    "SemanticCatalog": (".semantic_layer", "SemanticCatalog"),
+    "SemanticModel": (".semantic_layer", "SemanticModel"),
+    "SemanticQuery": (".semantic_layer", "SemanticQuery"),
+    "ApprovalProposal": (".approval", "ApprovalProposal"),
+    "ApprovalStatus": (".approval", "ApprovalStatus"),
+    "SQLiteApprovalStore": (".approval", "SQLiteApprovalStore"),
+    "ToolPolicy": (".tooling", "ToolPolicy"),
+    "ToolResultPolicy": (".tooling", "ToolResultPolicy"),
+    "ContextPolicy": (".tooling", "ContextPolicy"),
+    "governed_tool": (".tooling", "governed_tool"),
     # Memory providers + configs
     "MemoryProvider": (".memory_provider", "MemoryProvider"),
     "MemoryType": (".memory_provider", "MemoryType"),
     "MongoDBProvider": (".memory_provider.mongodb", "MongoDBProvider"),
     "OracleProvider": (".memory_provider.oracle", "OracleProvider"),
     "OracleConfig": (".memory_provider.oracle.provider", "OracleConfig"),
+    "LocalOracleRuntime": (".memory_provider.oracle", "LocalOracleRuntime"),
     "FileSystemProvider": (".memory_provider.filesystem", "FileSystemProvider"),
     "FileSystemConfig": (".memory_provider.filesystem", "FileSystemConfig"),
     # LLM providers
@@ -60,6 +72,14 @@ _LAZY = {
     "create_internet_access_provider": (
         ".internet_access",
         "create_internet_access_provider",
+    ),
+    # Browser control
+    "BrowserControlProvider": (".browser_control", "BrowserControlProvider"),
+    "BrowserControlResult": (".browser_control", "BrowserControlResult"),
+    "BrowserUseProvider": (".browser_control", "BrowserUseProvider"),
+    "create_browser_control_provider": (
+        ".browser_control",
+        "create_browser_control_provider",
     ),
     # Automation
     "AutomationJob": (".automation", "AutomationJob"),
@@ -109,6 +129,17 @@ __all__ = [
     "create_task_agent",
     "create_deep_research_agent",
     "ApplicationMode",
+    "capabilities",
+    "SemanticCatalog",
+    "SemanticModel",
+    "SemanticQuery",
+    "ApprovalProposal",
+    "ApprovalStatus",
+    "SQLiteApprovalStore",
+    "ToolPolicy",
+    "ToolResultPolicy",
+    "ContextPolicy",
+    "governed_tool",
     # Memory providers + configs
     "MemoryProvider",
     "MemoryType",
@@ -116,6 +147,7 @@ __all__ = [
     "MongoDBConfig",
     "OracleProvider",
     "OracleConfig",
+    "LocalOracleRuntime",
     "FileSystemProvider",
     "FileSystemConfig",
     # LLM providers
@@ -135,6 +167,11 @@ __all__ = [
     "FirecrawlProvider",
     "TavilyProvider",
     "create_internet_access_provider",
+    # Browser control
+    "BrowserControlProvider",
+    "BrowserControlResult",
+    "BrowserUseProvider",
+    "create_browser_control_provider",
     # Automation
     "AutomationJob",
     "AutomationRun",

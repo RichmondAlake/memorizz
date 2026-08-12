@@ -38,6 +38,7 @@ from ..helpers import (
     _agent_workflow_memory_enabled,
     _build_agent_nav_items,
     _build_agent_threads,
+    _build_browser_control_config,
     _build_internet_provider_config,
     _build_memory_types_for_agent,
     _build_self_aware_config,
@@ -47,6 +48,7 @@ from ..helpers import (
     _get_default_llm_model,
     _load_agent_knowledge_base,
     _load_thread_messages,
+    _normalize_browser_control_provider_name,
     _normalize_internet_provider_name,
     _normalize_llm_provider,
     _normalize_skills_marketplace_provider_name,
@@ -56,6 +58,7 @@ from ..helpers import (
     _provider_supports_entity_memory,
     _resolve_sandbox_provider_config,
     _to_text,
+    _validate_browser_control_choice,
     _validate_internet_provider_choice,
     _validate_sandbox_provider_choice,
     _validate_self_aware_config,
@@ -1162,6 +1165,22 @@ async def agent_playground(
         sandbox_provider = os.environ.get("MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", "")
     sandbox_status_error = _validate_sandbox_provider_choice(sandbox_provider)
 
+    browser_control_config = getattr(agent, "browser_control", None) if agent else None
+    browser_control_provider = (
+        _normalize_browser_control_provider_name(browser_control_config)
+        or _normalize_browser_control_provider_name(
+            os.environ.get("MEMORIZZ_BROWSER_CONTROL_PROVIDER", "")
+        )
+        or ""
+    )
+    browser_control_config = _build_browser_control_config(
+        browser_control_provider,
+        browser_control_config if isinstance(browser_control_config, dict) else None,
+    )
+    browser_control_status_error = _validate_browser_control_choice(
+        browser_control_provider, browser_control_config
+    )
+
     internet_provider = (
         _normalize_internet_provider_name(
             getattr(agent, "internet_access_provider", None) if agent else None
@@ -1246,6 +1265,8 @@ async def agent_playground(
             "max_steps": max_steps,
             "sandbox_provider": sandbox_provider,
             "sandbox_status_error": sandbox_status_error,
+            "browser_control_provider": browser_control_provider,
+            "browser_control_status_error": browser_control_status_error,
             "internet_provider": internet_provider,
             "internet_status_error": internet_status_error,
             "skills_marketplace_provider": skills_marketplace_provider,
@@ -1410,6 +1431,42 @@ async def agent_playground_stream(request: Request, agent_id: str):
                         agent_instance.with_sandbox_provider(resolved_sandbox_cfg)
                     except Exception as exc:
                         logger.debug(f"Sandbox provider not available: {exc}")
+
+            # Apply internet provider from agent config or global default.
+            browser_apply_error = None
+            browser_config = (
+                getattr(stored_agent, "browser_control", None) if stored_agent else None
+            )
+            stored_browser_config = browser_config
+            if not browser_config:
+                browser_name = _normalize_browser_control_provider_name(
+                    os.environ.get("MEMORIZZ_BROWSER_CONTROL_PROVIDER", "")
+                )
+                browser_config = _build_browser_control_config(browser_name)
+            if browser_config and not agent_instance.has_browser_control():
+                # MemAgent.load already attempted persisted config. Only apply
+                # the global fallback here to avoid retrying the same failure.
+                if not stored_browser_config:
+                    try:
+                        agent_instance.with_browser_control(browser_config)
+                    except Exception as exc:
+                        browser_apply_error = (
+                            "Browser control unavailable: " + _to_text(exc).strip()
+                        )
+                else:
+                    browser_apply_error = getattr(
+                        agent_instance, "_browser_control_init_error", None
+                    )
+
+            if browser_apply_error:
+                escaped_warning = json.dumps(
+                    {
+                        "type": "warning",
+                        "message": browser_apply_error,
+                        "scope": "browser_control",
+                    }
+                )
+                yield f"data: {escaped_warning}\n\n"
 
             # Apply internet provider from agent config or global default.
             internet_apply_error = None
@@ -1774,6 +1831,9 @@ async def agent_playground_config_update(request: Request, agent_id: str):
     new_provider = str(form.get("llm_provider", "")).strip()
     new_max_steps = form.get("max_steps")
     new_sandbox_provider = str(form.get("sandbox_provider", "")).strip()
+    new_browser_control_provider = _normalize_browser_control_provider_name(
+        form.get("browser_control_provider", "")
+    )
     new_internet_provider = _normalize_internet_provider_name(
         form.get("internet_provider", "")
     )
@@ -1947,6 +2007,33 @@ async def agent_playground_config_update(request: Request, agent_id: str):
                 status_code=302,
             )
 
+    existing_browser_control = getattr(existing, "browser_control", None)
+    existing_browser_provider = _normalize_browser_control_provider_name(
+        existing_browser_control
+    )
+    browser_control_value = new_browser_control_provider or None
+    browser_control_config_value = _build_browser_control_config(
+        browser_control_value,
+        existing_browser_control
+        if new_browser_control_provider == existing_browser_provider
+        and isinstance(existing_browser_control, dict)
+        else None,
+    )
+    if new_browser_control_provider != existing_browser_provider:
+        browser_validation_error = _validate_browser_control_choice(
+            browser_control_value, browser_control_config_value
+        )
+        if browser_validation_error:
+            from urllib.parse import quote
+
+            return RedirectResponse(
+                url=(
+                    f"/agents/{agent_id}/playground?config_error="
+                    f"{quote(browser_validation_error[:220])}"
+                ),
+                status_code=302,
+            )
+
     internet_value = new_internet_provider or None
     internet_config_value = _build_internet_provider_config(internet_value)
     internet_validation_error = _validate_internet_provider_choice(
@@ -2015,6 +2102,7 @@ async def agent_playground_config_update(request: Request, agent_id: str):
         skills_marketplace_config=skills_marketplace_config_value,
         knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
         sandbox_provider=sandbox_value,
+        browser_control=browser_control_config_value,
         skill_paths=(
             parsed_skill_paths
             if parsed_skill_paths is not None

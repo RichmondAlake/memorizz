@@ -15,7 +15,7 @@
 #
 # Environment Variables:
 #   ORACLE_ADMIN_USER      - Admin username (default: system)
-#   ORACLE_ADMIN_PASSWORD  - Admin password (default: MyPassword123!)
+#   ORACLE_ADMIN_PASSWORD  - Admin password (required for --drop-user)
 #   ORACLE_USER            - User to drop (default: memorizz_user)
 #   ORACLE_DSN             - Database DSN (default: localhost:1521/FREEPDB1)
 #
@@ -26,9 +26,9 @@ set -e  # Exit immediately on error
 CONTAINER_NAME="oracle-memorizz"
 VOLUME_NAME="oracle-memorizz-data"
 
-# Default credentials
+# Non-secret defaults. Passwords never receive package-owned defaults.
 ADMIN_USER="${ORACLE_ADMIN_USER:-system}"
-ADMIN_PASSWORD="${ORACLE_ADMIN_PASSWORD:-MyPassword123!}"
+ADMIN_PASSWORD="${ORACLE_ADMIN_PASSWORD:-}"
 MEMORIZZ_USER="${ORACLE_USER:-memorizz_user}"
 DSN="${ORACLE_DSN:-localhost:1521/FREEPDB1}"
 
@@ -168,6 +168,17 @@ function select_teardown_mode() {
 function drop_user() {
   log "📋 Dropping user '$MEMORIZZ_USER' and all tables..."
 
+  if [ -z "$ADMIN_PASSWORD" ]; then
+    if [ -t 0 ]; then
+      prompt "Oracle admin password (input hidden): "
+      read -r -s ADMIN_PASSWORD
+      echo "" >&2
+    else
+      error "ORACLE_ADMIN_PASSWORD is required for --drop-user"
+      exit 1
+    fi
+  fi
+
   # Check if oracledb Python package is available
   if ! python3 -c "import oracledb" 2>/dev/null; then
     error "❌ Python oracledb package not found"
@@ -175,8 +186,11 @@ function drop_user() {
     exit 1
   fi
 
-  # Create a temporary Python script to drop the user
-  cat > /tmp/drop_oracle_user.py << 'EOF'
+  # Create a private temporary Python script to drop the user.
+  DROP_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/memorizz-drop-oracle.XXXXXX.py")
+  chmod 600 "$DROP_SCRIPT"
+  trap 'rm -f "$DROP_SCRIPT"' EXIT
+  cat > "$DROP_SCRIPT" << 'EOF'
 import sys
 import os
 
@@ -187,11 +201,13 @@ except ImportError:
     sys.exit(1)
 
 admin_user = os.environ.get("ADMIN_USER", "system")
-admin_password = os.environ.get("ADMIN_PASSWORD", "MyPassword123!")
+admin_password = os.environ.get("ADMIN_PASSWORD", "")
 dsn = os.environ.get("DSN", "localhost:1521/FREEPDB1")
 memorizz_user = os.environ.get("MEMORIZZ_USER", "memorizz_user")
 
 try:
+    if not admin_password:
+        raise RuntimeError("ADMIN_PASSWORD is required")
     # Connect as admin
     print(f"🔌 Connecting as {admin_user}...")
     conn = oracledb.connect(user=admin_user, password=admin_password, dsn=dsn)
@@ -244,10 +260,11 @@ EOF
   export DSN="$DSN"
   export MEMORIZZ_USER="$MEMORIZZ_USER"
 
-  python3 /tmp/drop_oracle_user.py
+  python3 "$DROP_SCRIPT"
 
   # Clean up
-  rm -f /tmp/drop_oracle_user.py
+  rm -f "$DROP_SCRIPT"
+  trap - EXIT
 
   success "✅ User and tables dropped successfully!"
   echo "" >&2

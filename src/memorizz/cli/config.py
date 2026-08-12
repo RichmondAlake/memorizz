@@ -77,18 +77,18 @@ MEMORY_ASSISTANT_INSTRUCTION = (
 )
 
 
-# --- Persistent CLI state (default agent id + memory id) --------------------
-# So that each `memorizz` launch reuses ONE persistent MemAgent and its memory,
-# instead of creating a throwaway agent per session.
+# --- Persistent CLI state (default agent id + memory/thread ids) -------------
+# So that each `memorizz` launch reuses ONE persistent MemAgent and its active
+# conversation, instead of creating a throwaway agent per session.
 
 
 def state_file():
-    """Path to the CLI state file holding the persistent agent + memory ids."""
+    """Path to the CLI state file holding the persistent agent + conversation."""
     return memorizz_home() / "state.json"
 
 
 def load_state():
-    """Load persisted CLI state (agent_id, memory_id). Returns {} if absent."""
+    """Load persisted CLI state (agent/memory/thread ids). Returns {} if absent."""
     path = state_file()
     if path.exists():
         try:
