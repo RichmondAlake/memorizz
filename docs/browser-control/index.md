@@ -112,7 +112,12 @@ agent.approve(
     approver_id="operator@example.com",
     reason="Destination and form values reviewed",
 )
-result_json = agent.resume_approval(proposal_id)
+resume = agent.resume_approval(proposal_id)
+print(resume.tool_result)         # exact BrowserControlResult payload
+print(resume.assistant_response)  # optional model continuation
+
+# Deterministic hosts can omit the model continuation:
+resume = agent.resume_approval(proposal_id, continue_model=False)
 ```
 
 Alternatives are `agent.reject(...)` and `agent.cancel_approval(...)`.

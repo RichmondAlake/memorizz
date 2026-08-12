@@ -41,6 +41,24 @@ if not report["ok"]:
     raise RuntimeError(report["diagnostics"])
 ```
 
+For a complete agent preset that readies the local runtime and retains the
+preflight report:
+
+```python
+from memorizz import MemAgentBuilder
+
+agent = (
+    MemAgentBuilder()
+    .with_oracle_from_env(
+        ensure_ready=True,
+        provision_if_missing=True,
+        index_policy="lazy",
+    )
+    .build()
+)
+report = agent.environment_reports["oracle"]["preflight"]
+```
+
 `OracleProvider.from_env(provision_if_missing=True)` can create/start the local
 package-owned Docker runtime before connecting. For explicit control:
 
@@ -136,10 +154,16 @@ memorizz oracle preflight --index-policy lazy --json
 report = provider.preflight()
 ```
 
-The report covers the DSN/service, database product and version, PDB/open
-state, schema privileges, embedding model/dimensions, vector-column
+The report covers the DSN/service, database product, compatibility
+`database_version`, full Release Update `version_full`, PDB/open state, schema
+privileges, embedding model/dimensions, vector-column
 dimensions, `VECTOR_MEMORY_SIZE`, index status, exact-search fallback, and a
 recommended vector-memory size.
+
+`embedding_dimension_compatible` is `False` and `ok` is set to `False` when
+the configured embedder differs from an existing `VECTOR` column. The report's
+`embedding_dimension_mismatches` map identifies each incompatible column so a
+builder preset fails before any partial write or `ORA-51803`.
 
 An authorized administrator can request a persistent vector-memory change:
 
@@ -206,13 +230,12 @@ rolls the transaction back.
 - use `index_policy="none"` for small data sets or constrained vector memory;
 - use `selected` for the memory partitions that actually require approximate
   search;
-- close the provider during application shutdown.
+- close the provider during application shutdown, or use `with agent:` /
+  `agent.lifecycle(...)` to close the complete runtime.
 
 ```python
-try:
+with agent:
     agent.run("Remember this", user_id="tenant-a")
-finally:
-    provider.close()
 ```
 
 ## Troubleshooting

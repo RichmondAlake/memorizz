@@ -62,10 +62,18 @@ The framework guarantees the following:
    provider only returns rows whose stored `user_id == X`. There is **no
    "match everything" fallback** on the public API.
 
-3. **`None` is a separate scope.** Passing `user_id=None` (or omitting it)
-   means "anonymous/legacy scope" — reads return only rows with no `user_id`.
+3. **`None` is a separate agent scope.** Passing `user_id=None` (or omitting
+   it) to `run()`, `run_stream()`, or other agent APIs means
+   "anonymous/legacy scope" — reads return only rows with no `user_id`.
    Legacy data written before you adopted multi-tenant support does **not**
    silently leak into authenticated sessions.
+
+Low-level provider read APIs that accept `user_id` use a three-state
+administrative contract: omitting the keyword means *unscoped*, explicitly
+passing `None` selects anonymous rows, and passing a string selects that
+tenant. Never omit the provider filter in a request-serving path; the unscoped
+form exists for migration, audit, and maintenance jobs. Agent internals always
+pass their scope explicitly.
 
 ## What is NOT scoped by `user_id`
 

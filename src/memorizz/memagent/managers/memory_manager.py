@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from ...enums import MemoryType, Role
 from ...long_term.episodic.conversational_memory_unit import ConversationMemoryUnit
 from ...memory_provider import MemoryProvider
-from ...memory_provider.base import filter_tool_log_rows
+from ...memory_provider.base import _UNSET, filter_tool_log_rows
 
 logger = logging.getLogger(__name__)
 
@@ -624,15 +624,16 @@ class MemoryManager:
     def retrieve_tool_log(
         self,
         tool_log_id: str,
-        user_id: Optional[str] = None,
+        user_id: Any = _UNSET,
     ) -> Optional[Dict[str, Any]]:
         """
         Retrieve a tool log entry by its ID.
 
         Args:
             tool_log_id: The ID of the tool log to retrieve.
-            user_id: Optional user scope. When set, returns ``None`` if the
-                stored log belongs to a different user.
+            user_id: Optional user scope. Omit for an administrative/unscoped
+                read; pass ``None`` for anonymous rows or a tenant ID for an
+                exact scoped read.
 
         Returns:
             The tool log entry dict, or None if not found.
@@ -641,7 +642,7 @@ class MemoryManager:
             result = self.memory_provider.retrieve_by_id(
                 tool_log_id, MemoryType.TOOL_LOG
             )
-            if result and isinstance(result, dict):
+            if result and isinstance(result, dict) and user_id is not _UNSET:
                 if result.get("user_id") != user_id:
                     return None
             return result
@@ -653,7 +654,7 @@ class MemoryManager:
         self,
         memory_id: str,
         limit: int = 20,
-        user_id: Optional[str] = None,
+        user_id: Any = _UNSET,
         thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
@@ -662,8 +663,9 @@ class MemoryManager:
         Args:
             memory_id: The memory ID to list logs for.
             limit: Maximum number of entries to return.
-            user_id: User scope. ``None`` selects only anonymous/legacy rows;
-                it never disables tenant filtering.
+            user_id: User scope. Omit for an administrative/unscoped read,
+                pass ``None`` for anonymous/legacy rows, or pass a tenant ID
+                for an exact scoped read.
             thread_id: Optional thread scope. When set, only tool logs recorded
                 in that conversation thread are returned — this is what keeps the
                 system-prompt tool-log digest from leaking another thread's tool
@@ -691,13 +693,9 @@ class MemoryManager:
                 kwargs: Dict[str, Any] = {
                     "memory_id": memory_id,
                     "limit": limit,
-                    # Always forward the scope. Omitting it lets first-party
-                    # providers interpret their sentinel default as an
-                    # unscoped administrative query, which is unsafe for the
-                    # model-visible tool-log digest when the active user is
-                    # the anonymous/legacy tenant (``None``).
-                    "user_id": user_id,
                 }
+                if user_id is not _UNSET:
+                    kwargs["user_id"] = user_id
                 if thread_id is not None:
                     kwargs["thread_id"] = thread_id
                 rows = native(**kwargs) or []
@@ -938,6 +936,7 @@ class MemoryManager:
         memory_ids: Optional[List[str]],
         current_memory_id: Optional[str],
         user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
         days_back: int = 7,
         max_memories_per_summary: int = 50,
         record_context_usage: Optional[Any] = None,
@@ -993,11 +992,36 @@ class MemoryManager:
                 )
                 try:
                     # Retrieve all conversation history
-                    memories = self.memory_provider.retrieve_conversation_history_ordered_by_timestamp(
-                        memory_id=memory_id,
-                        include_embedding=False,
-                        user_id=user_id,
+                    retrieve = (
+                        self.memory_provider.retrieve_conversation_history_ordered_by_timestamp
                     )
+                    retrieve_kwargs: Dict[str, Any] = {"memory_id": memory_id}
+                    if _callable_accepts(retrieve, "include_embedding"):
+                        retrieve_kwargs["include_embedding"] = False
+                    if _callable_accepts(retrieve, "user_id"):
+                        # Summarization always uses an explicit tenant scope;
+                        # ``None`` means the anonymous/legacy tenant.
+                        retrieve_kwargs["user_id"] = user_id
+                    if thread_id is not None and _callable_accepts(
+                        retrieve, "thread_id"
+                    ):
+                        retrieve_kwargs["thread_id"] = thread_id
+                    memories = retrieve(**retrieve_kwargs)
+                    memories = [
+                        memory
+                        for memory in (memories or [])
+                        if isinstance(memory, dict)
+                        and memory.get("user_id") == user_id
+                        and (
+                            thread_id is None
+                            or str(
+                                memory.get("thread_id")
+                                or memory.get("conversation_id")
+                                or ""
+                            )
+                            == str(thread_id)
+                        )
+                    ]
 
                     if memories:
                         logger.info(
@@ -1143,7 +1167,7 @@ class MemoryManager:
                     summary_doc = {
                         "memory_id": chunk_memory_id,
                         "agent_id": agent_id,
-                        "user_id": user_id,
+                        "user_id": memory_chunk[0].get("user_id"),
                         "content": summary_content,
                         "period_start": period_start,
                         "period_end": period_end,

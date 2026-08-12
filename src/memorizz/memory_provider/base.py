@@ -150,10 +150,9 @@ class MemoryProvider(ABC):
             Maximum number of results to return
         **kwargs
             Additional provider-specific parameters. Includes ``user_id`` for
-            multi-tenant scoping — when provided, results are restricted to
-            rows whose stored ``user_id`` equals that value; when ``None``
-            (the default), results are restricted to rows whose ``user_id`` is
-            also ``None`` (legacy/anonymous scope).
+            multi-tenant scoping. Omitting it is an administrative/unscoped
+            read, explicitly passing ``None`` selects anonymous/legacy rows,
+            and a string selects that exact tenant.
         """
 
     @abstractmethod
@@ -187,13 +186,14 @@ class MemoryProvider(ABC):
         """Delete all documents within a memory store type in the memory provider."""
 
     @abstractmethod
-    def list_all(self, memory_store_type: str) -> List[Dict[str, Any]]:
+    def list_all(
+        self, memory_store_type: str, user_id: Any = _UNSET
+    ) -> List[Dict[str, Any]]:
         """List all documents within a memory store type in the memory provider.
 
-        Providers should accept an optional ``user_id`` keyword argument for
-        tenant scoping. When provided, only rows matching that scope are
-        returned; when ``None`` (the default), only rows with no ``user_id``
-        are returned.
+        ``user_id`` follows the shared sentinel contract: omitting it performs
+        an administrative/unscoped read, explicitly passing ``None`` selects
+        only anonymous/legacy rows, and a string selects that exact tenant.
         """
 
     @abstractmethod
@@ -217,9 +217,9 @@ class MemoryProvider(ABC):
         limit : int, optional
             Maximum number of entries to return
         user_id : str, optional (keyword)
-            Multi-tenant scope. When provided, results are restricted to rows
-            whose stored ``user_id`` equals that value; when omitted/``None``,
-            results are restricted to rows whose ``user_id`` is also ``None``.
+            Multi-tenant scope. Omitting it is an administrative/unscoped
+            read, explicitly passing ``None`` selects anonymous/legacy rows,
+            and a string selects that exact tenant.
         thread_id : str, optional
             When provided, return only rows from that exact conversation
             thread. When omitted, return all threads in the memory scope.

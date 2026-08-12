@@ -7,7 +7,11 @@
 import logging
 from typing import Any, Dict, Optional, Union
 
-from ...short_term_memory.semantic_cache import SemanticCache, SemanticCacheConfig
+from ...short_term_memory.semantic_cache import (
+    SemanticCache,
+    SemanticCacheConfig,
+    SemanticCacheInspection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +243,30 @@ class CacheManager:
             return {"enabled": False, "hits": 0, "misses": 0, "size": 0}
 
         return {"enabled": True, **self.cache_instance.statistics()}
+
+    def inspect(
+        self,
+        query: str,
+        *,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        bypass_reason: Optional[str] = None,
+    ) -> SemanticCacheInspection:
+        """Return response-free cache-match evidence without counting a hit."""
+        if not self.enabled or not self.cache_instance:
+            return SemanticCacheInspection(
+                lookup_query=str(query),
+                hit=False,
+                bypass_reason="cache_disabled",
+            )
+        return self.cache_instance.inspect(
+            query,
+            session_id=session_id,
+            user_id=user_id,
+            lookup_metadata=metadata,
+            bypass_reason=bypass_reason,
+        )
 
     def invalidate(
         self,

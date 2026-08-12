@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
@@ -33,16 +33,22 @@ _LAZY = {
     "create_chatbot": (".memagent.builders", "create_chatbot"),
     "create_task_agent": (".memagent.builders", "create_task_agent"),
     "create_deep_research_agent": (".memagent.builders", "create_deep_research_agent"),
+    "SubTask": (".task_decomposition", "SubTask"),
     "ApplicationMode": (".enums", "ApplicationMode"),
     "SemanticCatalog": (".semantic_layer", "SemanticCatalog"),
     "SemanticModel": (".semantic_layer", "SemanticModel"),
     "SemanticQuery": (".semantic_layer", "SemanticQuery"),
     "ApprovalProposal": (".approval", "ApprovalProposal"),
+    "ApprovalResumeResult": (".approval", "ApprovalResumeResult"),
     "ApprovalStatus": (".approval", "ApprovalStatus"),
     "SQLiteApprovalStore": (".approval", "SQLiteApprovalStore"),
     "ToolPolicy": (".tooling", "ToolPolicy"),
     "ToolResultPolicy": (".tooling", "ToolResultPolicy"),
     "ContextPolicy": (".tooling", "ContextPolicy"),
+    "SemanticCacheInspection": (
+        ".short_term_memory.semantic_cache",
+        "SemanticCacheInspection",
+    ),
     "governed_tool": (".tooling", "governed_tool"),
     # Memory providers + configs
     "MemoryProvider": (".memory_provider", "MemoryProvider"),
@@ -128,17 +134,20 @@ __all__ = [
     "create_chatbot",
     "create_task_agent",
     "create_deep_research_agent",
+    "SubTask",
     "ApplicationMode",
     "capabilities",
     "SemanticCatalog",
     "SemanticModel",
     "SemanticQuery",
     "ApprovalProposal",
+    "ApprovalResumeResult",
     "ApprovalStatus",
     "SQLiteApprovalStore",
     "ToolPolicy",
     "ToolResultPolicy",
     "ContextPolicy",
+    "SemanticCacheInspection",
     "governed_tool",
     # Memory providers + configs
     "MemoryProvider",

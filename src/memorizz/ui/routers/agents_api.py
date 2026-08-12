@@ -278,12 +278,25 @@ async def api_agent_cancel(agent_id: str, proposal_id: str, request: Request):
 
 
 @router.post("/agents/{agent_id}/approvals/{proposal_id}/resume")
-async def api_agent_resume(agent_id: str, proposal_id: str):
+async def api_agent_resume(
+    agent_id: str,
+    proposal_id: str,
+    continue_model: bool = True,
+):
     """Consume an approval and resume its serialized checkpoint exactly once."""
     agent = await _load_runtime_agent(agent_id)
     try:
-        result = await run_in_threadpool(agent.resume_approval, proposal_id)
-        return {"ok": True, "result": result}
+        result = await (
+            run_in_threadpool(agent.resume_approval, proposal_id)
+            if continue_model
+            else run_in_threadpool(
+                agent.resume_approval,
+                proposal_id,
+                continue_model=False,
+            )
+        )
+        payload = result.to_dict() if hasattr(result, "to_dict") else result
+        return {"ok": bool(getattr(result, "ok", True)), "result": payload}
     except Exception as exc:
         logger.error("Failed to resume proposal %s: %s", proposal_id, exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc

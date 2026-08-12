@@ -2,6 +2,6 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-from .semantic_cache import SemanticCache
+from .semantic_cache import SemanticCache, SemanticCacheInspection
 
-__all__ = ["SemanticCache"]
+__all__ = ["SemanticCache", "SemanticCacheInspection"]

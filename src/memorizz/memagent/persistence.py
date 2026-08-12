@@ -16,6 +16,7 @@ import uuid
 from typing import List, Optional
 
 from ..enums import ApplicationMode, MemoryType
+from ..task_decomposition import normalize_delegation_config
 from .constants import DEFAULT_MAX_STEPS
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,9 @@ def save_agent(agent):
             semantic_cache_config=semantic_cache_config_to_save,
             tool_result_policy=agent.tool_result_policy.to_dict(),
             context_policy=agent.context_policy.to_dict(),
-            delegation_config=dict(agent.delegation_config or {}),
+            delegation_config=normalize_delegation_config(
+                agent.delegation_config, for_persistence=True
+            ),
             skill_retrieval=bool(agent.skill_retrieval),
             skill_retrieval_config=dict(agent.skill_retrieval_config or {}),
             semantic_layer_config=(

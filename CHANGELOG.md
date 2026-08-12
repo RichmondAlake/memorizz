@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.1 — 2026-08-12
+
+### Added
+
+* Structured `ApprovalResumeResult` evidence with the exact consumed proposal,
+  exact tool result, optional assistant continuation, and deterministic
+  `continue_model=False` operation.
+* `MemAgentBuilder.with_oracle_from_env()` and `.with_e2b_from_env()` presets,
+  including local-runtime readiness, Oracle preflight, and secret-free reports.
+* Response-free semantic-cache inspection, tenant-scoped
+  `agent.observability_summary(...)`, and agent lifecycle/context-manager APIs
+  with optional exact-scope cleanup.
+
+### Changed
+
+* Summary generation accepts explicit memory, tenant, and thread scopes and no
+  longer inherits the most recently executed user's identity.
+* Streaming provider/API failures carry typed terminal event fields and may be
+  re-raised with `raise_on_provider_error=True`.
+* Deterministic delegation plans normalize `SubTask` instances into JSON-safe
+  records and round-trip status/results through `SubTask.from_dict()`.
+
+### Fixed
+
+* Optional provider tenant filters consistently distinguish omitted/unscoped
+  reads from explicit `None` anonymous reads.
+* Oracle preflight now reports the database Release Update in `version_full`
+  instead of exposing only the compatibility version.
+* Oracle preflight now fails closed on configured-embedder/schema dimension
+  mismatches before a later write can raise `ORA-51803`.
+
 ## 0.5.0 — 2026-08-12
 
 ### Added

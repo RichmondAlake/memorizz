@@ -47,6 +47,26 @@ agent = (
 )
 ```
 
+When all configuration is environment-driven, use the fluent preset:
+
+```python
+agent = (
+    MemAgentBuilder()
+    .with_e2b_from_env(
+        template="my-bounded-template",
+        session_timeout=300,
+        max_execution_timeout=60,
+        allow_internet_access=False,
+        cpu_count=2,
+        memory_mb=1024,
+    )
+    .build()
+)
+```
+
+The preset validates `E2B_API_KEY` and the supported SDK pair immediately and
+retains only secret-free provider metadata in `agent.environment_reports`.
+
 CPU and memory are properties of the selected E2B template. MemoRizz requires
 an explicit template whenever those policy declarations are supplied; deployers
 must build and validate that template with the matching resources. The session

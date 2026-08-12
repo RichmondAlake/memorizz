@@ -99,10 +99,11 @@ def test_memagent_browser_control_creates_and_resumes_exact_durable_proposal(tmp
     assert provider.tasks == []
 
     agent.approve(proposal.proposal_id, approver_id="operator@example.com")
-    resumed = json.loads(agent.resume_approval(proposal.proposal_id))
+    resumed = agent.resume_approval(proposal.proposal_id, continue_model=False)
 
-    assert resumed["success"] is True
-    assert resumed["output"] == "done"
+    assert resumed.consumed is True
+    assert resumed.tool_result["success"] is True
+    assert resumed.tool_result["output"] == "done"
     assert provider.tasks == [("Open example.com and submit the support form", 8, None)]
 
 
@@ -261,9 +262,11 @@ def test_cli_generic_approvals_can_decide_and_resume_exact_browser_call(tmp_path
     commands.cmd_approvals(
         session, f"approve {proposal_id} operator@example.com reviewed"
     )
-    commands.cmd_approvals(session, f"resume {proposal_id}")
+    commands.cmd_approvals(session, f"resume {proposal_id} --no-model")
 
     assert provider.tasks == [("Open example.com", 25, None)]
+    assert '"tool_result"' in session.console.file.getvalue()
+    assert '"consumed": true' in session.console.file.getvalue()
 
 
 @pytest.mark.unit

@@ -66,6 +66,30 @@ agent = (
 )
 ```
 
+Environment-backed presets reduce that setup further for the standard local
+Oracle + E2B deployment:
+
+```python
+agent = (
+    MemAgentBuilder()
+    .with_oracle_from_env(
+        ensure_ready=True,
+        provision_if_missing=True,
+        index_policy="lazy",
+    )
+    .with_e2b_from_env(
+        template="memorizz-bounded",
+        allow_internet_access=False,
+    )
+    .build(validate=True)
+)
+
+print(agent.environment_reports["oracle"]["preflight"])
+```
+
+The presets read credentials from the documented environment, never place them
+in the report, and fail before build when readiness or validation fails.
+
 `Toolbox.from_functions(..., augment=False)` is deterministic: it does not
 create an LLM or global embedding client. Persisted schemas keep required
 fields, defaults, enums, nested structures, and
@@ -105,7 +129,13 @@ pending = agent.list_approval_proposals(status="pending")
 proposal_id = pending[0]["proposal_id"]
 
 agent.approve(proposal_id, approver_id="operator@example.com")
-result = agent.resume_approval(proposal_id)  # exact stored call, once only
+resume = agent.resume_approval(proposal_id)  # exact stored call, once only
+print(resume.tool_result)         # exact result captured before continuation
+print(resume.assistant_response)  # optional subsequent model response
+print(resume.consumed)            # True
+
+# A deterministic host can skip the subsequent model call:
+resume = agent.resume_approval(proposal_id, continue_model=False)
 
 # Alternatives:
 agent.reject(proposal_id, approver_id="operator@example.com")
@@ -139,6 +169,14 @@ freshness limits and hit provenance.
 stats = agent.semantic_cache_stats()
 # hits, misses, bypasses, writes, evictions, size, last-hit provenance
 
+inspection = agent.inspect_semantic_cache(
+    "How many units are available?",
+    user_id="tenant-a",
+    context={"cache_domain": "inventory", "data_version": "erp-42"},
+)
+# matched_query/cache_key, similarity, TTL/age, hit_count, bypass_reason,
+# invalidation_domains and invalidation_tags; cached response text is omitted.
+
 removed = agent.invalidate_semantic_cache(
     domains=["inventory"],
     tags=["warehouse-7"],
@@ -148,6 +186,24 @@ removed = agent.invalidate_semantic_cache(
 
 Invalidate a domain when its source data changes; do not use a high similarity
 threshold as a substitute for invalidation or a freshness limit.
+
+## Explicit compaction scope
+
+Never let a background task infer its tenant from whichever request happened
+to run most recently. Pass the complete scope:
+
+```python
+summary_ids = agent.generate_summaries(
+    memory_id="course-run-17",
+    user_id="student-42",
+    thread_id="lesson-3",
+    days_back=7,
+)
+```
+
+`user_id=None` explicitly selects anonymous/legacy rows. `thread_id=None`
+allows each thread in the selected memory/tenant scope to be compacted into its
+own summary; chunks never cross tenant, memory, or thread boundaries.
 
 ## Oracle compaction and operations
 
@@ -172,9 +228,14 @@ provider = OracleProvider.from_env(
 report = provider.preflight()
 ```
 
-Preflight reports service/version/PDB state, privileges, embedding models and
-dimensions, vector columns and indexes, `VECTOR_MEMORY_SIZE`, a sizing
+Preflight reports service/version (including `version_full`)/PDB state,
+privileges, embedding models and dimensions, vector columns and indexes,
+`VECTOR_MEMORY_SIZE`, a sizing
 recommendation, and exact-search fallback. Scope cleanup is transactional:
+
+Preflight sets `ok=False` when the configured embedder dimension differs from
+any existing Oracle `VECTOR` column, preventing the first write from failing
+later with `ORA-51803`.
 
 ```python
 counts = provider.delete_scope(
@@ -206,6 +267,48 @@ model; there is no direct OpenAI call or hard-coded model. Deterministic plans
 are supported, delegates are operational, tenant/request/tool/trace context is
 propagated, shared memory is workflow-scoped, and partial/dependency failures
 are returned in the orchestration report.
+
+`SubTask.to_dict()`/`SubTask.from_dict()` preserve status and result fields.
+The builder converts list-based deterministic plans to JSON-safe dictionaries,
+so `.build(validate=True, persist=True)` can store them in Oracle. Callable
+plans remain explicitly runtime-only and persistence rejects them with an
+actionable error.
+
+## Provider failures, observability, and shutdown
+
+`run_stream()` always emits a terminal `error` event containing `error_code`,
+`exception_type`, and optional `provider_status_code`. Hosts that prefer
+exception propagation can opt in:
+
+```python
+for chunk in agent.run_stream(query, raise_on_provider_error=True):
+    ...
+```
+
+Authentication failures such as HTTP 401 are raised after the typed event is
+emitted. Operational summaries avoid notebook-side row deserialization:
+
+```python
+summary = agent.observability_summary(
+    memory_id="course-run-17",
+    user_id="student-42",
+    thread_id="lesson-3",  # optional
+)
+```
+
+Use the agent as a context manager to close sandbox, browser, internet,
+approval, and memory-provider resources. Cleanup is opt-in and exact-scope:
+
+```python
+with agent.lifecycle(
+    cleanup_scope={
+        "memory_id": "course-run-17",
+        "user_id": "student-42",
+        "agent_ids": [agent.agent_id],
+    }
+) as active_agent:
+    active_agent.run("...", user_id="student-42")
+```
 
 ## Governed browser control
 

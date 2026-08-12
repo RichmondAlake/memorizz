@@ -129,6 +129,58 @@ class ApprovalProposal:
         return {key: item for key, item in value.items() if item is not None}
 
 
+@dataclass(frozen=True)
+class ApprovalResumeResult:
+    """Evidence returned after a host resumes one durable approval.
+
+    ``tool_result`` is captured immediately after executing the exact stored
+    call. It remains available even when a subsequent model continuation is
+    irrelevant, fails, or is deliberately disabled by the host.
+    """
+
+    proposal: Optional[ApprovalProposal]
+    tool_result: Any = None
+    assistant_response: Optional[str] = None
+    consumed: bool = False
+    ok: bool = True
+    error_code: Optional[str] = None
+    error: Optional[str] = None
+    requested_proposal_id: Optional[str] = None
+
+    @property
+    def proposal_id(self) -> Optional[str]:
+        return (
+            self.proposal.proposal_id
+            if self.proposal is not None
+            else self.requested_proposal_id
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        value: Dict[str, Any] = {
+            "ok": bool(self.ok),
+            "proposal_id": self.proposal_id,
+            "proposal": (
+                self.proposal.to_dict(
+                    include_arguments=True,
+                    include_checkpoint=False,
+                )
+                if self.proposal is not None
+                else None
+            ),
+            "tool_result": self.tool_result,
+            "assistant_response": self.assistant_response,
+            "consumed": bool(self.consumed),
+            "error_code": self.error_code,
+            "error": self.error,
+        }
+        return {key: item for key, item in value.items() if item is not None}
+
+    def __str__(self) -> str:
+        return json.dumps(
+            self.to_dict(), ensure_ascii=False, sort_keys=True, default=str
+        )
+
+
 @runtime_checkable
 class ApprovalStore(Protocol):
     """Host-side persistence contract for durable approvals."""
@@ -554,6 +606,7 @@ __all__ = [
     "ApprovalMismatch",
     "ApprovalNotFound",
     "ApprovalProposal",
+    "ApprovalResumeResult",
     "ApprovalRequired",
     "ApprovalStateError",
     "ApprovalStatus",

@@ -69,6 +69,40 @@ class SemanticCacheConfig:
         }
 
 
+@dataclass(frozen=True)
+class SemanticCacheInspection:
+    """Structured, response-free evidence for one semantic-cache lookup."""
+
+    lookup_query: str
+    hit: bool
+    matched_query: Optional[str] = None
+    cache_key: Optional[str] = None
+    similarity: Optional[float] = None
+    ttl_seconds: Optional[float] = None
+    expires_in_seconds: Optional[float] = None
+    age_seconds: Optional[float] = None
+    hit_count: int = 0
+    bypass_reason: Optional[str] = None
+    invalidation_domains: List[str] = field(default_factory=list)
+    invalidation_tags: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "lookup_query": self.lookup_query,
+            "hit": self.hit,
+            "matched_query": self.matched_query,
+            "cache_key": self.cache_key,
+            "similarity": self.similarity,
+            "ttl_seconds": self.ttl_seconds,
+            "expires_in_seconds": self.expires_in_seconds,
+            "age_seconds": self.age_seconds,
+            "hit_count": self.hit_count,
+            "bypass_reason": self.bypass_reason,
+            "invalidation_domains": list(self.invalidation_domains),
+            "invalidation_tags": list(self.invalidation_tags),
+        }
+
+
 class SemanticCache:
     """Enhanced semantic cache with vector similarity search and intelligent management."""
 
@@ -132,6 +166,7 @@ class SemanticCache:
         }
         self._bypass_reasons: Dict[str, int] = {}
         self.last_hit: Optional[Dict[str, Any]] = None
+        self.last_inspection: Optional[SemanticCacheInspection] = None
 
         # Embedding cache to avoid regenerating embeddings for the same query
         self._embedding_cache: Dict[str, List[float]] = {}
@@ -438,7 +473,123 @@ class SemanticCache:
             "size": len(self.cache),
             "bypass_reasons": dict(self._bypass_reasons),
             "last_hit": dict(self.last_hit) if self.last_hit else None,
+            "last_inspection": (
+                self.last_inspection.to_dict() if self.last_inspection else None
+            ),
         }
+
+    def _inspection(
+        self,
+        query: str,
+        *,
+        entry: Optional[SemanticCacheEntry] = None,
+        similarity: Optional[float] = None,
+        bypass_reason: Optional[str] = None,
+    ) -> SemanticCacheInspection:
+        metadata = dict(entry.metadata or {}) if entry is not None else {}
+        domains = {
+            str(item)
+            for item in [metadata.get("domain"), *(metadata.get("domains") or [])]
+            if item is not None
+        }
+        tags = {str(item) for item in (metadata.get("tags") or [])}
+        ttl_candidates = []
+        if self.config.ttl_hours > 0:
+            ttl_candidates.append(float(self.config.ttl_hours) * 3600.0)
+        ttl_candidates.extend(
+            float(self.config.freshness_by_domain[domain])
+            for domain in domains
+            if domain in self.config.freshness_by_domain
+        )
+        # Report the effective freshness window, not only the global cache TTL.
+        # Domain-specific limits can deliberately expire operational answers
+        # sooner than the backing cache entry.
+        ttl_seconds = min(ttl_candidates) if ttl_candidates else None
+        age_seconds = (
+            max(0.0, time.time() - float(entry.timestamp))
+            if entry is not None
+            else None
+        )
+        expires_in = (
+            max(0.0, ttl_seconds - age_seconds)
+            if ttl_seconds is not None and age_seconds is not None
+            else None
+        )
+        return SemanticCacheInspection(
+            lookup_query=str(query),
+            hit=entry is not None,
+            matched_query=entry.query if entry is not None else None,
+            cache_key=entry.cache_key if entry is not None else None,
+            similarity=float(similarity) if similarity is not None else None,
+            ttl_seconds=ttl_seconds,
+            expires_in_seconds=expires_in,
+            age_seconds=age_seconds,
+            hit_count=int(entry.usage_count) if entry is not None else 0,
+            bypass_reason=bypass_reason,
+            invalidation_domains=sorted(domains),
+            invalidation_tags=sorted(tags),
+        )
+
+    def inspect(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        similarity_threshold: Optional[float] = None,
+        user_id: Optional[str] = None,
+        lookup_metadata: Optional[Dict[str, Any]] = None,
+        bypass_reason: Optional[str] = None,
+    ) -> SemanticCacheInspection:
+        """Inspect a potential match without returning the cached response.
+
+        Inspection does not increment hit/miss counters or entry hit counts.
+        """
+        if bypass_reason:
+            result = self._inspection(query, bypass_reason=bypass_reason)
+            self.last_inspection = result
+            return result
+        threshold = (
+            self.config.similarity_threshold
+            if similarity_threshold is None
+            else float(similarity_threshold)
+        )
+        best_match: Optional[SemanticCacheEntry] = None
+        best_similarity = 0.0
+        if self._should_use_memory_provider():
+            best_match = self._search_via_memory_provider(
+                query,
+                threshold,
+                session_id,
+                user_id=user_id,
+                lookup_metadata=lookup_metadata,
+            )
+            if best_match is not None and isinstance(best_match.metadata, dict):
+                best_similarity = float(best_match.metadata.get("similarity") or 0.0)
+        else:
+            query_embedding = self._get_or_generate_embedding(query)
+            for entry in self.cache.values():
+                if getattr(entry, "user_id", None) != user_id:
+                    continue
+                if not self._fresh_for_metadata(entry):
+                    continue
+                if not self._metadata_matches(entry, lookup_metadata):
+                    continue
+                if (
+                    self.config.enable_session_scoping
+                    and session_id
+                    and entry.session_id != session_id
+                ):
+                    continue
+                similarity = self._cosine_similarity(query_embedding, entry.embedding)
+                if similarity >= threshold and similarity > best_similarity:
+                    best_match = entry
+                    best_similarity = similarity
+        result = self._inspection(
+            query,
+            entry=best_match,
+            similarity=best_similarity if best_match is not None else None,
+        )
+        self.last_inspection = result
+        return result
 
     def get(
         self,
@@ -469,8 +620,12 @@ class SemanticCache:
         """
         try:
             self.last_hit = None
+            self.last_inspection = None
             if bypass_reason:
                 self.record_bypass(bypass_reason)
+                self.last_inspection = self._inspection(
+                    query, bypass_reason=bypass_reason
+                )
                 return None
             threshold = similarity_threshold or self.config.similarity_threshold
             logger.debug(
@@ -503,6 +658,7 @@ class SemanticCache:
 
                 if not self.cache:
                     self._stats["misses"] += 1
+                    self.last_inspection = self._inspection(query)
                     return None
 
                 # In-memory search (original logic)
@@ -566,15 +722,24 @@ class SemanticCache:
                     "user_id": best_match.user_id,
                     "metadata": dict(best_match.metadata or {}),
                 }
+                self.last_inspection = self._inspection(
+                    query,
+                    entry=best_match,
+                    similarity=similarity,
+                )
                 return best_match.response
             else:
                 logger.debug(f"Cache MISS: no similar query found for: {query[:50]}...")
                 self._stats["misses"] += 1
+                self.last_inspection = self._inspection(query)
                 return None
 
         except Exception as e:
             logger.error(f"Error in semantic cache get: {e}")
             self._stats["misses"] += 1
+            self.last_inspection = self._inspection(
+                query, bypass_reason=f"lookup_error:{type(e).__name__}"
+            )
             return None
 
     def _update_usage_in_memory_provider(self, entry: SemanticCacheEntry) -> bool:

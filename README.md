@@ -40,6 +40,7 @@ It provides:
 - **Production-oriented MCP connectivity** for Notion, Google Calendar, and custom servers, with encrypted OAuth/bearer credentials, SSRF controls, bounded retries/timeouts, mutation approval, and UI/CLI management (see [MCP Connectivity](docs/guides/mcp-connectivity.md))
 - **First-party MCP server** over local stdio or authenticated Streamable HTTP, exposing tenant-scoped memory, conversations, agents, resources, and prompts (see [Expose MemoRizz as an MCP Server](docs/guides/mcp-server.md))
 - **0.5 production governance** with durable host approvals, progressive tool disclosure, size-aware tool results, cache freshness controls, Oracle compaction parity, bounded sandboxes, and provider-neutral orchestration (see [Production Governance](docs/guides/production-governance.md))
+- **Operational runtime APIs** for JSON-safe deterministic delegation, explicitly scoped compaction, structured approval-resume evidence, provider-error propagation, Oracle/E2B environment presets, cache inspection, scoped observability, and context-managed cleanup.
 - **Governed browser control** through a provider-neutral capability and an isolated Browser Use provider. Every model-initiated browser task requires a durable, single-use host approval (see [Browser Control](docs/browser-control/index.md))
 
 Expose local MemoRizz functionality to a desktop MCP host:

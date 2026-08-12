@@ -3,6 +3,7 @@
 # See LICENSE file in the project root for full license information.
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +33,7 @@ from typing import (
 
 from ..approval import (
     ApprovalRequired,
+    ApprovalResumeResult,
     ApprovalStateError,
     ApprovalStatus,
     ApprovalStore,
@@ -40,6 +43,7 @@ from ..conversation_history import is_trace_bundle_entry
 from ..enums import ApplicationMode, ApplicationModeConfig, MemoryType, Role
 from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
+from ..task_decomposition import normalize_delegation_config
 from ..tooling import (
     ContextPolicy,
     SemanticToolRouter,
@@ -86,6 +90,7 @@ if TYPE_CHECKING:
     from ..browser_control import BrowserControlProvider
     from ..internet_access import InternetAccessProvider
     from ..sandbox.base import SandboxProvider
+    from ..short_term_memory.semantic_cache import SemanticCacheInspection
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +110,42 @@ _HISTORY_EVICTION_CHUNK = 20
 # dedup/MMR pass, and the max deduped memories injected per turn.
 _RETRIEVAL_CANDIDATE_LIMIT = 5
 _RETRIEVED_MEMORIES_MAX = 4
+
+
+def _provider_error_details(exc: Exception) -> Tuple[bool, bool, Optional[int]]:
+    """Return ``(is_provider_error, is_auth_error, status_code)`` safely."""
+    current: Optional[BaseException] = exc
+    seen: Set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status_value = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if status_value is None and response is not None:
+            status_value = getattr(response, "status_code", None)
+        try:
+            status_code = int(status_value) if status_value is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+        class_name = type(current).__name__.lower()
+        module_name = type(current).__module__.lower()
+        message = str(current).lower()
+        is_auth = (
+            status_code in {401, 403}
+            or "authentication" in class_name
+            or "unauthorized" in class_name
+            or "invalid api key" in message
+            or "incorrect api key" in message
+        )
+        is_provider = bool(
+            status_code is not None
+            or module_name.startswith(("openai", "anthropic", "google", "cohere"))
+            or class_name.endswith(("apierror", "providererror"))
+            or is_auth
+        )
+        if is_provider:
+            return True, is_auth, status_code
+        current = current.__cause__ or current.__context__
+    return False, False, None
 
 
 class MemAgent:
@@ -168,6 +209,8 @@ class MemAgent:
     ):
         """Initialize the MemAgent with configuration."""
         self.streaming = streaming
+        self.environment_reports: Dict[str, Any] = {}
+        self._last_close_report: Optional[Dict[str, Any]] = None
         # Store configuration
         self.agent_id = agent_id or str(uuid.uuid4())
         self.name = name.strip() if isinstance(name, str) and name.strip() else None
@@ -195,7 +238,7 @@ class MemAgent:
         self.context_policy = ContextPolicy.from_value(context_policy)
         self.tool_result_policy = ToolResultPolicy.from_value(tool_result_policy)
         self.approval_store = approval_store
-        self.delegation_config = dict(delegation or {})
+        self.delegation_config = normalize_delegation_config(delegation)
         self.delegates = list(delegates or [])
         self.semantic_layer = semantic_layer
         self._approval_execution_active = False
@@ -609,6 +652,192 @@ class MemAgent:
         ):
             report["agent"]["provider_preflight"] = provider.preflight()
         return report
+
+    def observability_summary(
+        self,
+        memory_id: str,
+        user_id: Optional[str],
+        *,
+        thread_id: Optional[str] = None,
+        limit: int = 1000,
+    ) -> Dict[str, Any]:
+        """Return tenant-scoped operational counts without exposing row bodies."""
+        if not self.memory_provider:
+            raise ValueError("observability_summary requires a memory provider")
+        resolved_memory_id = str(memory_id or "").strip()
+        if not resolved_memory_id:
+            raise ValueError("memory_id is required")
+        bounded_limit = max(1, min(int(limit), 10_000))
+
+        def _timestamp(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            if hasattr(value, "timestamp"):
+                try:
+                    return float(value.timestamp())
+                except Exception:
+                    return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                try:
+                    return datetime.fromisoformat(
+                        str(value).replace("Z", "+00:00")
+                    ).timestamp()
+                except (TypeError, ValueError):
+                    return None
+
+        def _in_scope(row: Dict[str, Any], *, include_thread: bool = False) -> bool:
+            if row.get("memory_id") != resolved_memory_id:
+                return False
+            if row.get("user_id") != user_id:
+                return False
+            row_agent = row.get("agent_id")
+            if row_agent is not None and str(row_agent) != str(self.agent_id):
+                return False
+            if include_thread and thread_id is not None:
+                row_thread = row.get("thread_id") or row.get("conversation_id") or ""
+                if str(row_thread) != str(thread_id):
+                    return False
+            return True
+
+        retrieve = (
+            self.memory_provider.retrieve_conversation_history_ordered_by_timestamp
+        )
+        conversation_kwargs: Dict[str, Any] = {
+            "memory_id": resolved_memory_id,
+            "limit": bounded_limit,
+        }
+        try:
+            parameters = inspect.signature(retrieve).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "include_embedding" in parameters:
+            conversation_kwargs["include_embedding"] = False
+        if "user_id" in parameters:
+            conversation_kwargs["user_id"] = user_id
+        if thread_id is not None and "thread_id" in parameters:
+            conversation_kwargs["thread_id"] = thread_id
+        conversation_rows = [
+            row
+            for row in (retrieve(**conversation_kwargs) or [])
+            if isinstance(row, dict) and _in_scope(row, include_thread=True)
+        ][:bounded_limit]
+
+        role_counts: Dict[str, int] = {}
+        trace_bundle_count = 0
+        trace_event_count = 0
+        timestamps: List[float] = []
+        for row in conversation_rows:
+            role = str(row.get("role") or "unknown").lower()
+            role_counts[role] = role_counts.get(role, 0) + 1
+            timestamp = _timestamp(row.get("timestamp") or row.get("created_at"))
+            if timestamp is not None:
+                timestamps.append(timestamp)
+            if is_trace_bundle_entry(row):
+                trace_bundle_count += 1
+                try:
+                    payload = json.loads(str(row.get("content") or "{}"))
+                    trace_event_count += len(payload.get("events") or [])
+                except (TypeError, ValueError):
+                    pass
+
+        manager = self.memory_manager or MemoryManager(self.memory_provider)
+        tool_logs = [
+            row
+            for row in manager.list_tool_logs(
+                resolved_memory_id,
+                limit=bounded_limit,
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+            if _in_scope(row, include_thread=True)
+        ]
+
+        def _scoped_rows(memory_type: MemoryType) -> List[Dict[str, Any]]:
+            list_all = self.memory_provider.list_all
+            try:
+                rows = list_all(memory_type, user_id=user_id) or []
+            except TypeError:
+                rows = list_all(memory_type) or []
+            return [row for row in rows if isinstance(row, dict) and _in_scope(row)][
+                :bounded_limit
+            ]
+
+        workflows = _scoped_rows(MemoryType.WORKFLOW_MEMORY)
+        summaries = _scoped_rows(MemoryType.SUMMARIES)
+
+        approval_counts: Dict[str, int] = {}
+        if self.approval_store is not None:
+            for proposal in self.approval_store.list(owner_id=self.agent_id, limit=500):
+                checkpoint = proposal.checkpoint or {}
+                if checkpoint.get("memory_id") != resolved_memory_id:
+                    continue
+                if checkpoint.get("user_id") != user_id:
+                    continue
+                if thread_id is not None and str(
+                    checkpoint.get("thread_id") or ""
+                ) != str(thread_id):
+                    continue
+                status = proposal.status.value
+                approval_counts[status] = approval_counts.get(status, 0) + 1
+
+        workflow_outcomes: Dict[str, int] = {}
+        for workflow in workflows:
+            outcome = str(
+                workflow.get("outcome") or workflow.get("status") or "unknown"
+            )
+            workflow_outcomes[outcome] = workflow_outcomes.get(outcome, 0) + 1
+        tool_failures = sum(
+            1
+            for row in tool_logs
+            if row.get("success") is False or bool(row.get("error"))
+        )
+
+        return {
+            "agent_id": self.agent_id,
+            "memory_id": resolved_memory_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "conversation": {
+                "row_count": len(conversation_rows),
+                "message_count": len(conversation_rows) - trace_bundle_count,
+                "role_counts": role_counts,
+                "thread_count": len(
+                    {
+                        str(row.get("thread_id") or row.get("conversation_id") or "")
+                        for row in conversation_rows
+                    }
+                ),
+                "summarized_count": sum(
+                    1 for row in conversation_rows if row.get("summary_id")
+                ),
+                "trace_bundle_count": trace_bundle_count,
+                "trace_event_count": trace_event_count,
+                "first_timestamp": min(timestamps) if timestamps else None,
+                "last_timestamp": max(timestamps) if timestamps else None,
+            },
+            "tool_logs": {
+                "count": len(tool_logs),
+                "failure_count": tool_failures,
+                "success_count": len(tool_logs) - tool_failures,
+            },
+            "workflows": {
+                "count": len(workflows),
+                "outcomes": workflow_outcomes,
+            },
+            "summaries": {"count": len(summaries)},
+            "approvals": {
+                "count": sum(approval_counts.values()),
+                "statuses": approval_counts,
+            },
+            "semantic_cache": self.semantic_cache_stats(),
+            "context_window": self.get_context_window_stats(),
+            "truncated": any(
+                len(rows) >= bounded_limit
+                for rows in (conversation_rows, tool_logs, workflows, summaries)
+            ),
+        }
 
     @property
     def llm_model(self) -> Optional[str]:
@@ -1412,6 +1641,9 @@ class MemAgent:
                 safe_chunk_size = 20
 
             summary_ids = self.generate_summaries(
+                memory_id=self._current_memory_id,
+                user_id=self._current_user_id,
+                thread_id=self._current_thread_id,
                 days_back=safe_days_back,
                 max_memories_per_summary=safe_chunk_size,
             )
@@ -1569,11 +1801,21 @@ class MemAgent:
             self._last_summary_timestamp = current_time
 
         token_estimate = stats.get("total_tokens")
+        # Capture the complete request scope before starting the worker. A
+        # later concurrent turn may update ``_current_*`` while this thread is
+        # waiting to run.
+        summary_memory_id = self._current_memory_id
+        summary_user_id = self._current_user_id
+        summary_thread_id = self._current_thread_id
 
         def _summarize() -> None:
             try:
                 summary_ids = self.generate_summaries(
-                    days_back=1, max_memories_per_summary=20
+                    memory_id=summary_memory_id,
+                    user_id=summary_user_id,
+                    thread_id=summary_thread_id,
+                    days_back=1,
+                    max_memories_per_summary=20,
                 )
                 if summary_ids:
                     self._track_summary_ids(summary_ids, token_estimate=token_estimate)
@@ -3264,37 +3506,46 @@ class MemAgent:
             reason=reason or "Cancelled by host",
         )
 
-    def resume_approval(self, proposal_id: str) -> str:
-        """Consume an approval and resume its original LLM checkpoint exactly once."""
+    def resume_approval(
+        self,
+        proposal_id: str,
+        *,
+        continue_model: bool = True,
+    ) -> ApprovalResumeResult:
+        """Execute an approved checkpoint once and return structured evidence.
+
+        Set ``continue_model=False`` for deterministic host workflows that need
+        the exact tool result without asking an LLM to comment on it.
+        """
         store = self._get_approval_store()
         proposal = store.get(proposal_id)
         if proposal is None:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error_code": "approval_not_found",
-                    "error": f"Unknown approval proposal '{proposal_id}'",
-                },
-                sort_keys=True,
+            return ApprovalResumeResult(
+                proposal=None,
+                consumed=False,
+                ok=False,
+                error_code="approval_not_found",
+                error=f"Unknown approval proposal '{proposal_id}'",
+                requested_proposal_id=proposal_id,
             )
         if proposal.owner_id != self.agent_id:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error_code": "approval_owner_mismatch",
-                    "error": "This proposal belongs to another agent",
-                },
-                sort_keys=True,
+            return ApprovalResumeResult(
+                proposal=proposal,
+                consumed=False,
+                ok=False,
+                error_code="approval_owner_mismatch",
+                error="This proposal belongs to another agent",
             )
         if proposal.status != ApprovalStatus.APPROVED:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error_code": "invalid_approval_state",
-                    "status": proposal.status.value,
-                    "error": "Only an approved proposal can be resumed",
-                },
-                sort_keys=True,
+            return ApprovalResumeResult(
+                proposal=proposal,
+                consumed=proposal.status == ApprovalStatus.CONSUMED,
+                ok=False,
+                error_code="invalid_approval_state",
+                error=(
+                    "Only an approved proposal can be resumed "
+                    f"(current state: {proposal.status.value})"
+                ),
             )
 
         checkpoint = dict(proposal.checkpoint or {})
@@ -3304,7 +3555,7 @@ class MemAgent:
         logical_arguments = checkpoint.get("logical_arguments") or proposal.arguments
         if not isinstance(logical_arguments, dict):
             raise ApprovalStateError("Approval checkpoint arguments are invalid")
-        store.consume(
+        consumed_proposal = store.consume(
             proposal_id,
             expected_tool_name=logical_tool_name,
             expected_arguments=logical_arguments,
@@ -3336,24 +3587,43 @@ class MemAgent:
         )
         workflow = self._init_workflow_capture(query, user_id)
         self._approval_execution_active = True
+        raw_tool_result: Any = None
         try:
-            self._execute_and_record_tool_call(
-                tool_call,
-                messages,
-                workflow,
-                user_id,
-                streaming=False,
-                query=query,
-            )
+            try:
+                raw_tool_result = self._execute_and_record_tool_call(
+                    tool_call,
+                    messages,
+                    workflow,
+                    user_id,
+                    streaming=False,
+                    query=query,
+                )
+            except Exception as exc:
+                self._persist_workflow_run(workflow)
+                return ApprovalResumeResult(
+                    proposal=consumed_proposal,
+                    consumed=True,
+                    ok=False,
+                    error_code="approved_tool_execution_failed",
+                    error=str(exc),
+                )
         finally:
             self._approval_execution_active = False
 
-        if not self.model:
+        raw_tool_result = _to_jsonable(raw_tool_result)
+        if isinstance(raw_tool_result, str):
+            try:
+                raw_tool_result = json.loads(raw_tool_result)
+            except (TypeError, ValueError):
+                pass
+
+        if not continue_model or not self.model:
             self._persist_workflow_run(workflow)
-            return serialize_tool_result(
-                json.loads(messages[-1]["content"])
-                if messages and str(messages[-1].get("content", "")).startswith("{")
-                else messages[-1].get("content", "")
+            return ApprovalResumeResult(
+                proposal=consumed_proposal,
+                tool_result=raw_tool_result,
+                assistant_response=None,
+                consumed=True,
             )
 
         tools = self._build_llm_tools(query, user_id=user_id)
@@ -3366,12 +3636,24 @@ class MemAgent:
                 )
                 if isinstance(response, str):
                     self._persist_workflow_run(workflow)
-                    return response
+                    return ApprovalResumeResult(
+                        proposal=consumed_proposal,
+                        tool_result=raw_tool_result,
+                        assistant_response=response,
+                        consumed=True,
+                    )
                 if hasattr(response, "choices") and response.choices:
                     message = response.choices[0].message
                     if not message.tool_calls:
                         self._persist_workflow_run(workflow)
-                        return message.content or "I couldn't generate a response."
+                        return ApprovalResumeResult(
+                            proposal=consumed_proposal,
+                            tool_result=raw_tool_result,
+                            assistant_response=(
+                                message.content or "I couldn't generate a response."
+                            ),
+                            consumed=True,
+                        )
                     self._append_assistant_tool_calls(messages, message)
                     for next_call in message.tool_calls:
                         self._execute_and_record_tool_call(
@@ -3386,9 +3668,21 @@ class MemAgent:
                 break
         except ApprovalRequired as approval:
             self._persist_workflow_run(workflow)
-            return self._approval_required_payload(approval.proposal)
+            return ApprovalResumeResult(
+                proposal=consumed_proposal,
+                tool_result=raw_tool_result,
+                assistant_response=self._approval_required_payload(approval.proposal),
+                consumed=True,
+            )
         self._persist_workflow_run(workflow)
-        return "I reached the maximum number of tool-call iterations while resuming."
+        return ApprovalResumeResult(
+            proposal=consumed_proposal,
+            tool_result=raw_tool_result,
+            assistant_response=(
+                "I reached the maximum number of tool-call iterations while resuming."
+            ),
+            consumed=True,
+        )
 
     def run_stream(
         self,
@@ -3398,6 +3692,7 @@ class MemAgent:
         user_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
+        raise_on_provider_error: bool = False,
     ) -> Generator[str, None, None]:
         """
         Run the agent with streaming output, yielding text chunks as they arrive.
@@ -3418,6 +3713,9 @@ class MemAgent:
             tool_context: Optional per-call dict made available to tool
                 functions via ``memorizz.get_tool_context()`` (M4). See
                 ``run()`` for the full semantics. Not sent to the LLM.
+            raise_on_provider_error: Re-raise LLM/provider API failures after
+                emitting typed terminal events. Defaults to ``False`` for
+                compatibility with UI streams that render inline failures.
 
         Yields:
             str: Partial text chunks of the agent's response
@@ -3555,19 +3853,38 @@ class MemAgent:
             logger.exception("MemAgent streaming failed: %s", e)
             # M3: structured error event so SSE translators / UIs can render
             # an inline error banner instead of treating the error as text.
+            is_provider_error, is_auth_error, provider_status = _provider_error_details(
+                e
+            )
+            error_code = (
+                "provider_authentication_failed"
+                if is_auth_error
+                else "provider_error"
+                if is_provider_error
+                else "stream_error"
+            )
             self._emit_stream_event(
                 "error",
                 {
                     "message": str(e),
                     "exception_type": type(e).__name__,
                     "recoverable": False,
+                    "terminal": True,
+                    "error_code": error_code,
+                    "provider_status_code": provider_status,
                     "agent_id": self.agent_id,
                 },
             )
             self._emit_stream_event(
                 "stream_end",
-                {"reason": "error", "agent_id": self.agent_id},
+                {
+                    "reason": "error",
+                    "error_code": error_code,
+                    "agent_id": self.agent_id,
+                },
             )
+            if raise_on_provider_error and is_provider_error:
+                raise
             yield f"I apologize, but I encountered an error: {str(e)}"
         finally:
             self._stream_trace_events = None
@@ -3594,8 +3911,10 @@ class MemAgent:
                       ``tool_call``, ``tool_result``. Plus ``title``, ``content``,
                       ``trace_id``, ``tool_name`` etc. depending on kind.
         error         ``message``, ``exception_type``, ``recoverable``,
-                      ``agent_id``. Fired when run_stream catches an exception
-                      mid-stream — UIs should render an error banner.
+                      ``terminal``, ``error_code``, optional
+                      ``provider_status_code``, and ``agent_id``. Fired when
+                      run_stream catches an exception mid-stream — UIs should
+                      render an error banner.
         stream_end    ``reason`` (``completed``/``cache_hit``/``error``),
                       ``agent_id``, optional ``response_length``. Fired once
                       when the stream terminates.
@@ -4098,7 +4417,7 @@ class MemAgent:
         user_id: Optional[str],
         streaming: bool = False,
         query: str = "",
-    ) -> None:
+    ) -> Any:
         """Execute one tool call and record every side effect.
 
         The single shared body for BOTH the streaming and non-streaming
@@ -4390,6 +4709,12 @@ class MemAgent:
             )
             if error_message is not None:
                 workflow.outcome = WorkflowOutcome.FAILURE
+
+        # Return the complete in-process value. Callers that need deterministic
+        # execution evidence (notably durable approval resumption) must not
+        # reconstruct it from the LLM-facing message, which may deliberately be
+        # a size-aware tool-log pointer.
+        return result
 
     def _execute_llm_interaction_stream(
         self,
@@ -6144,6 +6469,29 @@ class MemAgent:
             }
         )
 
+    def inspect_semantic_cache(
+        self,
+        query: str,
+        *,
+        thread_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        bypass_reason: Optional[str] = None,
+    ) -> "SemanticCacheInspection":
+        """Inspect cache provenance/freshness without returning cached content."""
+        return self.cache_manager.inspect(
+            query,
+            session_id=thread_id,
+            user_id=user_id,
+            metadata=(
+                dict(metadata)
+                if metadata is not None
+                else self._semantic_cache_metadata(context)
+            ),
+            bypass_reason=bypass_reason,
+        )
+
     def invalidate_semantic_cache(
         self,
         *,
@@ -6351,6 +6699,97 @@ class MemAgent:
         """
         return persistence.save_agent(self)
 
+    def close(
+        self,
+        *,
+        cleanup_scope: Optional[Dict[str, Any]] = None,
+        close_memory_provider: bool = True,
+        close_model_provider: bool = False,
+    ) -> Dict[str, Any]:
+        """Close agent-owned runtime resources and optionally delete a scope.
+
+        ``cleanup_scope`` is forwarded to a provider's ``delete_scope`` before
+        connections are closed. It must contain an exact ``memory_id``,
+        ``user_id``, and/or ``agent_ids`` boundary; providers retain their own
+        fail-closed validation.
+        """
+        report: Dict[str, Any] = {
+            "ok": True,
+            "cleanup": None,
+            "closed": {},
+            "errors": [],
+        }
+        provider = self.memory_provider
+        if cleanup_scope is not None:
+            if not isinstance(cleanup_scope, dict):
+                raise TypeError("cleanup_scope must be a dictionary or None")
+            cleanup = getattr(provider, "delete_scope", None)
+            if not callable(cleanup):
+                report["ok"] = False
+                report["errors"].append(
+                    "The configured memory provider does not support delete_scope"
+                )
+            else:
+                try:
+                    report["cleanup"] = cleanup(**dict(cleanup_scope))
+                except Exception as exc:
+                    report["ok"] = False
+                    report["errors"].append(f"scoped cleanup failed: {exc}")
+
+        closed_objects: Set[int] = set()
+
+        def _close(label: str, value: Any) -> None:
+            if value is None or id(value) in closed_objects:
+                return
+            closer = getattr(value, "close", None)
+            if not callable(closer):
+                return
+            try:
+                closer()
+                closed_objects.add(id(value))
+                report["closed"][label] = True
+            except Exception as exc:
+                report["ok"] = False
+                report["closed"][label] = False
+                report["errors"].append(f"{label} close failed: {exc}")
+
+        _close("sandbox", getattr(self, "sandbox_manager", None))
+        _close("browser_control", getattr(self, "browser_control_manager", None))
+        internet_manager = getattr(self, "internet_access_manager", None)
+        _close("internet_access", getattr(internet_manager, "provider", None))
+        _close("approval_store", self.approval_store)
+        if close_model_provider:
+            _close("model_provider", self.model)
+        if close_memory_provider:
+            _close("memory_provider", provider)
+
+        self._last_close_report = report
+        return report
+
+    @contextmanager
+    def lifecycle(
+        self,
+        *,
+        cleanup_scope: Optional[Dict[str, Any]] = None,
+        close_memory_provider: bool = True,
+        close_model_provider: bool = False,
+    ):
+        """Manage the agent lifecycle with optional exact-scope cleanup."""
+        try:
+            yield self
+        finally:
+            self.close(
+                cleanup_scope=cleanup_scope,
+                close_memory_provider=close_memory_provider,
+                close_model_provider=close_model_provider,
+            )
+
+    def __enter__(self) -> "MemAgent":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
     @classmethod
     def load(cls, agent_id: str, memory_provider=None, **overrides):
         """
@@ -6379,7 +6818,13 @@ class MemAgent:
         return persistence.refresh_agent(self)
 
     def generate_summaries(
-        self, days_back: int = 7, max_memories_per_summary: int = 50
+        self,
+        days_back: int = 7,
+        max_memories_per_summary: int = 50,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> List[str]:
         """
         Generate summaries by compressing memory units from a specified time period.
@@ -6394,6 +6839,15 @@ class MemAgent:
             Number of days back to include in the summary (default: 7)
         max_memories_per_summary : int, optional
             Maximum number of memory units to include in each summary (default: 50)
+        memory_id : str, optional
+            Exact memory scope. When omitted, the configured/current memory
+            IDs are considered for backward compatibility.
+        user_id : str, optional
+            Exact tenant scope. ``None`` selects only anonymous/legacy rows;
+            this method never inherits a user from the most recent run.
+        thread_id : str, optional
+            Exact conversation thread. When omitted, all threads in the
+            selected memory/tenant scope may be compacted independently.
 
         Returns:
         --------
@@ -6401,12 +6855,15 @@ class MemAgent:
             List of summary IDs that were created
         """
         manager = self.memory_manager or MemoryManager(self.memory_provider)
+        selected_memory_ids = [memory_id] if memory_id else self.memory_ids
+        current_memory_id = memory_id or self._current_memory_id
         return manager.generate_summaries(
             model=self.model,
             agent_id=self.agent_id,
-            memory_ids=self.memory_ids,
-            current_memory_id=self._current_memory_id,
-            user_id=self._current_user_id,
+            memory_ids=selected_memory_ids,
+            current_memory_id=current_memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
             days_back=days_back,
             max_memories_per_summary=max_memories_per_summary,
             record_context_usage=self._record_context_window_usage,

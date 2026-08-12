@@ -334,12 +334,21 @@ def cmd_approvals(session, args: str):
         return
 
     if sub == "resume":
-        if len(parts) != 2:
-            console.print("Usage: /approvals resume <proposal-id>")
+        if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] != "--no-model"):
+            console.print("Usage: /approvals resume <proposal-id> [--no-model]")
             return
-        result = agent.resume_approval(parts[1])
+        result = (
+            agent.resume_approval(parts[1], continue_model=False)
+            if "--no-model" in parts[2:]
+            else agent.resume_approval(parts[1])
+        )
         try:
-            console.print_json(result)
+            payload = result.to_dict() if hasattr(result, "to_dict") else result
+            console.print_json(
+                payload
+                if isinstance(payload, str)
+                else json.dumps(payload, default=str)
+            )
         except Exception:
             console.print(result)
         return
@@ -365,7 +374,8 @@ def cmd_approvals(session, args: str):
 
     console.print(
         "Usage: /approvals [pending|approved|rejected|expired|consumed|all] "
-        "| approve|reject|cancel <id> <approver-id> [reason] | resume <id>"
+        "| approve|reject|cancel <id> <approver-id> [reason] "
+        "| resume <id> [--no-model]"
     )
 
 

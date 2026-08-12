@@ -984,7 +984,9 @@ class OracleProvider(MemoryProvider):
     @staticmethod
     def _is_embedding_dimension_mismatch_error(error_text: str) -> bool:
         """Return True when Oracle reports VECTOR dimension mismatch."""
-        return "ORA-51932" in error_text or "ORA-42692" in error_text
+        return any(
+            code in error_text for code in ("ORA-51803", "ORA-51932", "ORA-42692")
+        )
 
     @staticmethod
     def _is_vector_distance_dimension_mismatch_error(error_text: str) -> bool:
@@ -5084,17 +5086,49 @@ class OracleProvider(MemoryProvider):
                     return cursor.fetchone()
 
                 try:
-                    product = one(
-                        """
-                        SELECT product, version
-                        FROM product_component_version
-                        WHERE ROWNUM = 1
-                        """
-                    )
+                    try:
+                        product = one(
+                            """
+                            SELECT product, version, version_full
+                            FROM product_component_version
+                            WHERE ROWNUM = 1
+                            """
+                        )
+                    except Exception:
+                        # Older Oracle releases do not project VERSION_FULL.
+                        product = one(
+                            """
+                            SELECT product, version
+                            FROM product_component_version
+                            WHERE ROWNUM = 1
+                            """
+                        )
                     report["database_product"] = product[0] if product else None
                     report["database_version"] = product[1] if product else None
+                    report["version_full"] = (
+                        str(product[2])
+                        if product and len(product) > 2 and product[2]
+                        else None
+                    )
                 except Exception as exc:
                     report["diagnostics"].append(f"database version unavailable: {exc}")
+
+                # PRODUCT_COMPONENT_VERSION may expose only the compatibility
+                # version (for example 23.0.0.0.0). VERSION_FULL retains the
+                # actual Release Update patch level (for example 23.26.0.0.0).
+                if not report.get("version_full"):
+                    try:
+                        full_version = one("SELECT version_full FROM v$instance")
+                        report["version_full"] = (
+                            str(full_version[0])
+                            if full_version and full_version[0]
+                            else None
+                        )
+                    except Exception as exc:
+                        report["version_full"] = report.get("database_version")
+                        report["diagnostics"].append(
+                            f"full database version unavailable: {exc}"
+                        )
 
                 try:
                     pdb = one("SELECT SYS_CONTEXT('USERENV', 'CON_NAME') FROM dual")
@@ -5210,6 +5244,35 @@ class OracleProvider(MemoryProvider):
                 else None
             ),
         }
+        embedding_dimensions = report["embedding"].get("dimensions")
+        vector_dimensions = dict(report.get("vector_dimensions") or {})
+        dimension_mismatches: Dict[str, int] = {}
+        if embedding_dimensions is not None:
+            try:
+                expected_dimensions = int(embedding_dimensions)
+                dimension_mismatches = {
+                    name: int(dimension)
+                    for name, dimension in vector_dimensions.items()
+                    if int(dimension) != expected_dimensions
+                }
+                report["embedding_dimension_compatible"] = not dimension_mismatches
+            except (TypeError, ValueError):
+                report["embedding_dimension_compatible"] = None
+        else:
+            report["embedding_dimension_compatible"] = None
+        report["embedding_dimension_mismatches"] = dimension_mismatches
+        if dimension_mismatches:
+            report["ok"] = False
+            declared = ", ".join(
+                f"{name}={dimension}"
+                for name, dimension in sorted(dimension_mismatches.items())
+            )
+            report["diagnostics"].append(
+                "embedding dimension mismatch: configured provider outputs "
+                f"{embedding_dimensions}, while Oracle declares {declared}; "
+                "align the embedding configuration or migrate the VECTOR columns "
+                "before writes"
+            )
         report["recommended_vector_memory_size"] = self.recommended_vector_memory_size()
         report["exact_search_fallback"] = True
         report["index_acceleration_available"] = bool(report.get("vector_indexes"))

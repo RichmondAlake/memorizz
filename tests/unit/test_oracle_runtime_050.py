@@ -148,7 +148,7 @@ def test_public_capabilities_export_is_a_stable_callable():
     from memorizz import capabilities
 
     assert callable(capabilities)
-    assert capabilities()["version"] == "0.5.0"
+    assert capabilities()["version"] == "0.5.1"
     importlib.import_module("memorizz.capabilities")
     assert callable(memorizz.capabilities)
     assert memorizz.capabilities()["package"] == "memorizz"

@@ -44,6 +44,82 @@ class SubTask:
             "result": self.result,
         }
 
+    @classmethod
+    def from_dict(cls, value: Dict[str, Any]) -> "SubTask":
+        """Restore a sub-task from its JSON-safe persisted representation."""
+        if not isinstance(value, dict):
+            raise TypeError("SubTask.from_dict() requires a dictionary")
+        task_id = str(value.get("task_id") or "").strip()
+        description = str(value.get("description") or "").strip()
+        assigned_agent_id = str(value.get("assigned_agent_id") or "").strip()
+        if not task_id:
+            raise ValueError("A persisted SubTask requires task_id")
+        if not description:
+            raise ValueError("A persisted SubTask requires description")
+        if not assigned_agent_id:
+            raise ValueError("A persisted SubTask requires assigned_agent_id")
+        dependencies = value.get("dependencies") or []
+        if not isinstance(dependencies, list):
+            raise TypeError("SubTask dependencies must be a list")
+        task = cls(
+            task_id=task_id,
+            description=description,
+            assigned_agent_id=assigned_agent_id,
+            priority=int(value.get("priority", 1)),
+            dependencies=[str(item) for item in dependencies],
+        )
+        status = str(value.get("status") or "pending").strip().lower()
+        if status not in {"pending", "in_progress", "completed", "failed"}:
+            raise ValueError(f"Unsupported SubTask status '{status}'")
+        task.status = status
+        task.result = value.get("result")
+        return task
+
+
+def normalize_delegation_plan(plan: Any) -> Any:
+    """Normalize deterministic plans to JSON-safe dictionaries.
+
+    Callable plans remain runtime-only. A list/tuple is copied and every
+    :class:`SubTask` entry is serialized so agent persistence never receives a
+    Python object that Oracle (or another JSON-backed provider) cannot encode.
+    """
+    if plan is None or callable(plan):
+        return plan
+    if not isinstance(plan, (list, tuple)):
+        raise TypeError("A deterministic delegation plan must be a list")
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(plan):
+        if isinstance(item, SubTask):
+            task = item
+        elif isinstance(item, dict):
+            value = dict(item)
+            value.setdefault("task_id", f"task_{index + 1}")
+            task = SubTask.from_dict(value)
+        else:
+            raise TypeError("Delegation plan entries must be SubTask or dict")
+        normalized.append(task.to_dict())
+    return normalized
+
+
+def normalize_delegation_config(
+    config: Any, *, for_persistence: bool = False
+) -> Dict[str, Any]:
+    """Return a copied, JSON-safe delegation configuration."""
+    if config is None:
+        return {}
+    if not isinstance(config, dict):
+        raise TypeError("Delegation configuration must be a dictionary")
+    normalized = dict(config)
+    if "plan" in normalized:
+        plan = normalized["plan"]
+        if callable(plan) and for_persistence:
+            raise TypeError(
+                "Callable delegation plans are runtime-only; provide a list of "
+                "SubTask/dict entries before persisting the agent"
+            )
+        normalized["plan"] = normalize_delegation_plan(plan)
+    return normalized
+
 
 class TaskDecomposer:
     """Handles task decomposition for multi-agent coordination."""
@@ -246,13 +322,9 @@ class TaskDecomposer:
             if isinstance(item, SubTask):
                 task = item
             elif isinstance(item, dict):
-                task = SubTask(
-                    task_id=str(item.get("task_id") or f"task_{index + 1}"),
-                    description=str(item.get("description") or ""),
-                    assigned_agent_id=str(item.get("assigned_agent_id") or ""),
-                    priority=int(item.get("priority", 1)),
-                    dependencies=list(item.get("dependencies") or []),
-                )
+                item_value = dict(item)
+                item_value.setdefault("task_id", f"task_{index + 1}")
+                task = SubTask.from_dict(item_value)
             else:
                 raise TypeError("Delegation plan entries must be SubTask or dict")
             if task.assigned_agent_id not in capabilities:

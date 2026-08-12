@@ -92,7 +92,7 @@ def test_cli_capability_report_identifies_050_mcp_surface():
 
     assert result.exit_code == 0, result.output
     report = json.loads(result.output)
-    assert report["version"] == "0.5.0"
+    assert report["version"] == "0.5.1"
     assert report["features"]["mcp_client"]["available"] is True
     assert report["features"]["mcp_server"]["available"] is True
     assert report["features"]["durable_approvals"]["single_use"] is True

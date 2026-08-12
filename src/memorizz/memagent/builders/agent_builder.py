@@ -65,6 +65,7 @@ class MemAgentBuilder:
         self._automations_enabled = True
         self._default_timezone = None
         self._is_favorite = False
+        self._environment_reports: Dict[str, Any] = {}
 
     def with_instruction(self, instruction: str) -> "MemAgentBuilder":
         """Set the agent instruction."""
@@ -120,6 +121,55 @@ class MemAgentBuilder:
         self._memory_provider = provider
         return self
 
+    def with_oracle_from_env(
+        self,
+        *,
+        ensure_ready: bool = True,
+        provision_if_missing: Optional[bool] = None,
+        preflight: bool = True,
+        require_preflight_ok: bool = True,
+        **provider_overrides: Any,
+    ) -> "MemAgentBuilder":
+        """Attach an Oracle provider using the documented environment.
+
+        By default the local Docker runtime is started/readied first and a
+        provider preflight is retained on the built agent in
+        ``environment_reports["oracle"]``.
+        """
+        from ...memory_provider.oracle import LocalOracleRuntime, OracleProvider
+
+        runtime_report = None
+        if ensure_ready:
+            runtime = LocalOracleRuntime.from_env(
+                provision_if_missing=provision_if_missing
+            )
+            runtime_report = runtime.ensure_ready()
+        provider = OracleProvider.from_env(
+            provision_if_missing=(
+                bool(provision_if_missing) if not ensure_ready else False
+            ),
+            **provider_overrides,
+        )
+        try:
+            preflight_report = provider.preflight() if preflight else None
+        except Exception:
+            provider.close()
+            raise
+        if (
+            require_preflight_ok
+            and preflight_report is not None
+            and not preflight_report.get("ok", False)
+        ):
+            provider.close()
+            diagnostics = "; ".join(preflight_report.get("diagnostics") or [])
+            raise RuntimeError(f"Oracle preflight failed: {diagnostics or 'not ready'}")
+        self._memory_provider = provider
+        self._environment_reports["oracle"] = {
+            "runtime": runtime_report,
+            "preflight": preflight_report,
+        }
+        return self
+
     def with_memory_ids(self, memory_ids: Union[str, List[str]]) -> "MemAgentBuilder":
         """Set memory IDs."""
         if isinstance(memory_ids, str):
@@ -172,6 +222,27 @@ class MemAgentBuilder:
     def with_sandbox(self, provider: Any) -> "MemAgentBuilder":
         """Attach a sandbox provider instance, name, or provider config."""
         self._sandbox_provider = provider
+        return self
+
+    def with_e2b_from_env(
+        self,
+        *,
+        validate: bool = True,
+        **provider_config: Any,
+    ) -> "MemAgentBuilder":
+        """Attach a stateful E2B provider using ``E2B_API_KEY`` by default."""
+        from ...sandbox.providers.e2b_provider import E2BSandboxProvider
+
+        provider = E2BSandboxProvider(**provider_config)
+        validation_error = provider.validate_configuration() if validate else None
+        if validation_error:
+            provider.close()
+            raise ValueError(validation_error)
+        self._sandbox_provider = provider
+        self._environment_reports["e2b"] = {
+            "ok": True,
+            "config": provider.get_config(),
+        }
         return self
 
     def with_sandbox_provider(self, provider: Any) -> "MemAgentBuilder":
@@ -236,9 +307,11 @@ class MemAgentBuilder:
         **config: Any,
     ) -> "MemAgentBuilder":
         """Make delegates operational and configure orchestration behavior."""
+        from ...task_decomposition import normalize_delegation_config
+
         if delegates is not None:
             self._delegates = delegates if isinstance(delegates, list) else [delegates]
-        self._delegation_config = dict(config)
+        self._delegation_config = normalize_delegation_config(config)
         return self
 
     def with_semantic_layer(self, catalog: Any) -> "MemAgentBuilder":
@@ -417,6 +490,10 @@ class MemAgentBuilder:
                 continual_learning_config=self._continual_learning_config,
                 workflow_outcome_evaluator=self._workflow_outcome_evaluator,
             )
+            agent.environment_reports = {
+                key: dict(value) if isinstance(value, dict) else value
+                for key, value in self._environment_reports.items()
+            }
 
             logger.info(f"MemAgent built successfully with {len(self._tools)} tools")
 
@@ -511,6 +588,10 @@ class MemAgentBuilder:
         new_builder._workflow_outcome_evaluator = self._workflow_outcome_evaluator
         new_builder._automations_enabled = self._automations_enabled
         new_builder._default_timezone = self._default_timezone
+        new_builder._environment_reports = {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in self._environment_reports.items()
+        }
 
         return new_builder
 

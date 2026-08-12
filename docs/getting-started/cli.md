@@ -234,6 +234,8 @@ For a model-requested task, use the generic approval lifecycle:
 /approvals pending
 /approvals approve PROPOSAL_ID operator@example.com reviewed
 /approvals resume PROPOSAL_ID
+# Or execute the approved call without a subsequent model continuation:
+/approvals resume PROPOSAL_ID --no-model
 ```
 
 See the [Browser Control guide](../browser-control/index.md) for SDK, builder,

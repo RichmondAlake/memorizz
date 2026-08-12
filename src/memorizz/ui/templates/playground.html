@@ -2509,9 +2509,13 @@ function renderApprovalCard(messageContainer, payload) {
                 throw new Error(resumed.detail || `HTTP ${resumeResponse.status}`);
             }
             status.textContent = `Approved and consumed by ${approverId.trim()}.`;
-            const resultText = typeof resumed.result === 'string'
-                ? resumed.result
-                : JSON.stringify(resumed.result, null, 2);
+            const evidence = resumed.result;
+            const resultValue = evidence && typeof evidence === 'object'
+                ? (evidence.assistant_response ?? evidence.tool_result ?? evidence)
+                : evidence;
+            const resultText = typeof resultValue === 'string'
+                ? resultValue
+                : JSON.stringify(resultValue, null, 2);
             appendMessage('assistant', resultText || 'The approved action completed.');
         } catch (err) {
             status.textContent = `Approval action failed: ${err.message}`;

@@ -208,12 +208,14 @@ def test_durable_approval_resumes_exact_checkpoint_once(tmp_path):
 
     approved = agent.approve(proposal.proposal_id, approver_id="operator@example.com")
     assert approved["approver_id"] == "operator@example.com"
-    resumed = json.loads(agent.resume_approval(proposal.proposal_id))
-    assert resumed == {"deleted": "customer-7"}
+    resumed = agent.resume_approval(proposal.proposal_id, continue_model=False)
+    assert resumed.consumed is True
+    assert resumed.tool_result == {"deleted": "customer-7"}
+    assert resumed.assistant_response is None
     assert executions == ["customer-7"]
     assert store.get(proposal.proposal_id).status == ApprovalStatus.CONSUMED
-    replay = json.loads(agent.resume_approval(proposal.proposal_id))
-    assert replay["error_code"] == "invalid_approval_state"
+    replay = agent.resume_approval(proposal.proposal_id)
+    assert replay.error_code == "invalid_approval_state"
     assert executions == ["customer-7"]
 
 
