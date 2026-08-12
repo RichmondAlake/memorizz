@@ -216,8 +216,10 @@ def test_cli_browser_control_is_explicit_and_secret_free(monkeypatch):
     assert "/approvals" in commands.command_completions()
 
     runner = CliRunner()
-    chat_help = runner.invoke(app, ["chat", "--help"])
-    run_help = runner.invoke(app, ["run", "--help"])
+    # Pin the terminal width so Rich does not split an option name across
+    # columns on narrower Linux CI runners.
+    chat_help = runner.invoke(app, ["chat", "--help"], terminal_width=160)
+    run_help = runner.invoke(app, ["run", "--help"], terminal_width=160)
     assert chat_help.exit_code == 0, chat_help.output
     assert run_help.exit_code == 0, run_help.output
     assert "--browser-control" in chat_help.output
