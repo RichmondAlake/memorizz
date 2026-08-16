@@ -133,6 +133,34 @@ pairs (semantic-cache hits, client retries) are not double-written, and
 entity upserts that add no new information skip the re-embed and re-store
 entirely.
 
+## Choose automatic retrieval explicitly
+
+Memory types describe what an agent can store and expose through tools.
+`RetrievalPolicy` independently controls what semantic matches are injected
+before inference:
+
+```python
+from memorizz import MemAgent, MemoryType, RetrievalPolicy
+
+agent = MemAgent(
+    memory_provider=provider,
+    memory_types=[MemoryType.CONVERSATION_MEMORY, MemoryType.KNOWLEDGE_BASE],
+    retrieval_policy=RetrievalPolicy(
+        conversation_scope="thread",
+        knowledge_base_scope="namespace",
+        knowledge_base_namespaces=("agent-harness",),
+    ),
+)
+```
+
+Use `RetrievalPolicy.disabled()` when the application already has explicit,
+tenant-scoped search tools. Exact current-thread history still loads normally;
+only automatic semantic recall is disabled.
+
+Semantic response caching is session-scoped by default. Its fingerprint also
+includes per-request context, so the same query on a different page or quoted
+selection is a miss rather than a stale replay.
+
 ## Fewer embedding calls
 
 - `EmbeddingManager` memoizes text → vector (LRU): the same query used by

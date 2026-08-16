@@ -199,6 +199,7 @@ _SUMMARY_CORE = (
     _c("memory_id"),
     _c("agent_id"),
     _c("user_id"),
+    _c("thread_id"),
     _c("period_start", kind="float"),
     _c("period_end", kind="float"),
     _c("memory_units_count", kind="int", default=0),
@@ -295,7 +296,8 @@ _SHORT_TERM_CORE = (
 
 # Chunking metadata (knowledge_base_id, namespace, chunk_*) is optional on
 # older schemas — ``_knowledge_base_chunk_fields`` swaps in NULL projections
-# when migration 002 hasn't run so the tuple shape stays stable.
+# until the additive startup migration or migration 005 has run, keeping the
+# tuple shape stable during rolling upgrades.
 _KB_CHUNK_COLUMNS = (
     "knowledge_base_id",
     "namespace",
@@ -1316,10 +1318,20 @@ class OracleProvider(MemoryProvider):
                     created += 1
                 except Exception as exc:
                     msg = str(exc).upper()
+                    statement = stmt.upper()
+                    rolling_scope_index = "ORA-00904" in msg and any(
+                        index_name in statement
+                        for index_name in (
+                            "IDX_SUMMARIES_MEMORY_THREAD",
+                            "IDX_KB_NAMESPACE",
+                        )
+                    )
                     # ORA-00955: object already exists. ORA-01408: index
                     # already on those columns. ORA-02275: dupe fk
-                    # constraint. All three are benign on re-connect.
-                    if any(
+                    # constraint. A scope index can also run before the
+                    # additive column migration on an upgraded schema; the
+                    # migration below creates it after adding the column.
+                    if rolling_scope_index or any(
                         code in msg for code in ("ORA-00955", "ORA-01408", "ORA-02275")
                     ):
                         skipped += 1
@@ -1374,6 +1386,11 @@ class OracleProvider(MemoryProvider):
             ("importance", "NUMBER(3,2)"),
             ("last_accessed", "TIMESTAMP"),
             ("access_count", "NUMBER(10) DEFAULT 0"),
+            ("knowledge_base_id", "VARCHAR2(64)"),
+            ("namespace", "VARCHAR2(255)"),
+            ("chunk_index", "NUMBER(10) DEFAULT 0"),
+            ("chunk_count", "NUMBER(10) DEFAULT 1"),
+            ("chunking_strategy", "VARCHAR2(32)"),
         ],
         MemoryType.SHORT_TERM_MEMORY: [
             ("memory_id", "VARCHAR2(255)"),
@@ -1455,6 +1472,7 @@ class OracleProvider(MemoryProvider):
             ("period_start", "NUMBER"),
             ("period_end", "NUMBER"),
             ("memory_units_count", "NUMBER(10) DEFAULT 0"),
+            ("thread_id", "VARCHAR2(255)"),
         ],
         MemoryType.SEMANTIC_CACHE: [
             ("memory_id", "VARCHAR2(255)"),
@@ -1564,6 +1582,33 @@ class OracleProvider(MemoryProvider):
                 conn.rollback()
                 if "ORA-00955" not in str(exc):
                     logger.warning("Could not create summary link table: %s", exc)
+
+            # Add the exact-scope indexes after additive column migration so
+            # upgraded installations get the same query plan as fresh schemas.
+            for index_name, memory_type, columns in (
+                (
+                    "idx_summaries_memory_thread",
+                    MemoryType.SUMMARIES,
+                    ("memory_id", "thread_id"),
+                ),
+                ("idx_kb_namespace", MemoryType.KNOWLEDGE_BASE, ("namespace",)),
+            ):
+                if not all(
+                    self._table_has_column(cursor, memory_type.value, column)
+                    for column in columns
+                ):
+                    continue
+                try:
+                    cursor.execute(
+                        f"CREATE INDEX {index_name} "
+                        f"ON {self._get_table_name(memory_type)} "
+                        f"({', '.join(columns)})"
+                    )
+                    conn.commit()
+                except Exception as exc:
+                    conn.rollback()
+                    if not any(code in str(exc) for code in ("ORA-00955", "ORA-01408")):
+                        logger.warning("Could not create index %s: %s", index_name, exc)
 
     def _create_standard_indexes(self, cursor, conn):
         """Create standard B-tree indexes on commonly queried fields."""
@@ -3223,6 +3268,7 @@ class OracleProvider(MemoryProvider):
             "memory_id": data.get("memory_id"),
             "agent_id": data.get("agent_id"),
             "user_id": data.get("user_id"),
+            "thread_id": data.get("thread_id"),
             "period_start": data.get("period_start"),
             "period_end": data.get("period_end"),
             "memory_units_count": data.get(
@@ -3624,11 +3670,11 @@ class OracleProvider(MemoryProvider):
             # ``_retrieve_by_filter`` was wrong — it tried to build
             # ``WHERE embedding = :embedding AND limit = :limit`` and
             # Oracle rejected ``limit`` as an unknown column (ORA-00904).
-            namespace_filter: Optional[str] = None
+            namespace_filter: Optional[str] = kwargs.get("namespace") or None
             query_embedding = None
             if isinstance(query, dict):
                 query_embedding = query.get("embedding")
-                namespace_filter = query.get("namespace") or None
+                namespace_filter = query.get("namespace") or namespace_filter
                 # Allow the caller's dict to override the outer limit arg.
                 dict_limit = query.get("limit")
                 if isinstance(dict_limit, int) and dict_limit > 0:
@@ -3650,15 +3696,10 @@ class OracleProvider(MemoryProvider):
                 MemoryType.KNOWLEDGE_BASE,
                 query_embedding,
                 limit=limit,
+                filters=({"namespace": namespace_filter} if namespace_filter else None),
                 memory_id=kwargs.get("memory_id"),
                 user_id=kwargs.get("user_id", _UNSET),
             )
-            if namespace_filter:
-                rows = [
-                    r
-                    for r in (rows or [])
-                    if str(r.get("namespace") or "") == namespace_filter
-                ]
             return rows
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
             # Dict → straight filter; string → episodic semantic recall via
@@ -3682,6 +3723,11 @@ class OracleProvider(MemoryProvider):
                     MemoryType.CONVERSATION_MEMORY,
                     query_embedding,
                     limit=limit,
+                    filters=(
+                        {"thread_id": str(kwargs["thread_id"])}
+                        if kwargs.get("thread_id") is not None
+                        else None
+                    ),
                     memory_id=kwargs.get("memory_id"),
                     user_id=kwargs.get("user_id", _UNSET),
                 )
@@ -5700,6 +5746,7 @@ class OracleProvider(MemoryProvider):
                 "memory_id",
                 "agent_id",
                 "summary_type",
+                "thread_id",
                 "user_id",
             },
             MemoryType.SEMANTIC_CACHE: {
@@ -5728,6 +5775,7 @@ class OracleProvider(MemoryProvider):
                 "memory_id",
                 "agent_id",
                 "memory_type",
+                "namespace",
                 "user_id",
             },
             MemoryType.SHORT_TERM_MEMORY: {
@@ -6107,6 +6155,7 @@ class OracleProvider(MemoryProvider):
                 "semantic_cache_config",
                 "tool_result_policy",
                 "context_policy",
+                "retrieval_policy",
                 "delegation_config",
                 "skill_retrieval_config",
                 "semantic_layer_config",
@@ -6610,6 +6659,7 @@ class OracleProvider(MemoryProvider):
                 semantic_cache_config=cfg.get("semantic_cache_config"),
                 tool_result_policy=cfg.get("tool_result_policy"),
                 context_policy=cfg.get("context_policy"),
+                retrieval_policy=cfg.get("retrieval_policy"),
                 delegation_config=cfg.get("delegation_config"),
                 skill_retrieval=bool(cfg.get("skill_retrieval", False)),
                 skill_retrieval_config=cfg.get("skill_retrieval_config"),
@@ -6855,6 +6905,7 @@ class OracleProvider(MemoryProvider):
             semantic_cache_config = None
             tool_result_policy = None
             context_policy = None
+            retrieval_policy = None
             delegation_config = None
             skill_retrieval = False
             skill_retrieval_config = None
@@ -6884,6 +6935,7 @@ class OracleProvider(MemoryProvider):
                 )
                 tool_result_policy = additional_cfg.pop("tool_result_policy", None)
                 context_policy = additional_cfg.pop("context_policy", None)
+                retrieval_policy = additional_cfg.pop("retrieval_policy", None)
                 delegation_config = additional_cfg.pop("delegation_config", None)
                 skill_retrieval = bool(additional_cfg.pop("skill_retrieval", False))
                 skill_retrieval_config = additional_cfg.pop(
@@ -6941,6 +6993,7 @@ class OracleProvider(MemoryProvider):
                 semantic_cache_config=semantic_cache_config,
                 tool_result_policy=tool_result_policy,
                 context_policy=context_policy,
+                retrieval_policy=retrieval_policy,
                 delegation_config=delegation_config,
                 skill_retrieval=skill_retrieval,
                 skill_retrieval_config=skill_retrieval_config,

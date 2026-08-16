@@ -6,7 +6,8 @@ developers. On `npm install -g memorizz` it:
 
 1. finds or installs [`uv`](https://docs.astral.sh/uv/) (a standalone binary that
    manages its own Python — you do **not** need Python pre-installed), then
-2. runs `uv tool install memorizz`.
+2. runs `uv tool install "memorizz[mcp]"` so the full CLI, including MCP
+   client/server commands, is available.
 
 The `memorizz` command then execs the uv-installed CLI.
 
@@ -15,8 +16,8 @@ The `memorizz` command then execs the uv-installed CLI.
 If you already use Python tooling, prefer these:
 
 ```bash
-uv tool install memorizz     # recommended
-pipx install memorizz
+uv tool install "memorizz[mcp]"     # recommended for the complete CLI
+pipx install "memorizz[mcp]"
 ```
 
 ## Uninstall

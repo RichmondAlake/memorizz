@@ -17,8 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install (base + dev tools + ui for route tests)
-        run: pip install -e ".[dev,ui]"
+      - name: Install (base + dev tools + optional integration surfaces)
+        run: pip install -e ".[dev,ui,mcp]"
       - name: Run tests (deterministic unit suite)
         # tests/unit is offline + deterministic. tests/performance is timing/
         # stress (flaky on shared CI runners) and tests/integration may need

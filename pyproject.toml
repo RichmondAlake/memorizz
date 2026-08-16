@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.5.1"
+version = "0.5.2"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,12 +39,6 @@ dependencies = [
     "pydantic>=2.0.0",
     "python-dotenv>=0.19.0",
     "requests>=2.31.0",
-    # First-class MCP client support (stdio, Streamable HTTP, SSE, OAuth).
-    "mcp>=2.0.0,<3.0.0",
-    # Streamable HTTP server runtime used by `memorizz mcp serve`.
-    "uvicorn>=0.24.0",
-    # Encrypt MCP bearer/OAuth credentials in the local credential store.
-    "cryptography>=42.0.0",
     # CLI front-end — tiny, pure-Python. Kept in base (not behind an extra) so
     # `uv tool install memorizz` / `pipx install memorizz` / `npm i -g memorizz`
     # yield a working `memorizz` REPL with no extra install flags.
@@ -67,6 +61,11 @@ dependencies = [
 mongodb = ["pymongo>=4.0.0"]
 oracle = ["oracledb>=2.0.0"]
 filesystem = ["faiss-cpu>=1.7.4"]
+mcp = [
+    "mcp>=2.0.0,<3.0.0",
+    "uvicorn>=0.24.0",
+    "cryptography>=42.0.0",
+]
 # CLI deps ship in base; this empty alias keeps `pip install memorizz[cli]` valid.
 cli = []
 # Fully-local stack: Ollama LLM + Ollama embeddings + FAISS filesystem memory.
@@ -131,6 +130,8 @@ dev = [
     "oracledb>=2.0.0",
 ]
 all = [
+    "mcp>=2.0.0,<3.0.0",
+    "cryptography>=42.0.0",
     "anthropic>=0.26.0",
     "pymongo>=4.0.0",
     "oracledb>=2.0.0",

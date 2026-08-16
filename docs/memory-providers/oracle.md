@@ -196,15 +196,18 @@ Summary creation and original-message marking are transactional. Retrieval by
 
 ## Upgrade an existing schema
 
-Back up first, then apply the migrations in numeric order. The 0.5 migration
-is:
+Back up first, then apply the migrations in numeric order. The current 0.5
+migrations are:
 
 ```text
 src/memorizz/memory_provider/oracle/migrations/004_production_governance_050.sql
+src/memorizz/memory_provider/oracle/migrations/005_scoped_retrieval_052.sql
 ```
 
-The provider performs additive startup checks for availability, but the SQL
-file is the recommended review/change-control artifact.
+Migration 005 adds/backfills exact summary thread scope and restores indexed
+knowledge-base namespace metadata on older schemas. The provider performs
+additive startup checks for availability, but the SQL files are the recommended
+review/change-control artifacts.
 
 ## Scoped cleanup
 

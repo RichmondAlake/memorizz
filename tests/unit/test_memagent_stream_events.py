@@ -12,6 +12,8 @@ Text chunks remain yielded by the generator, not surfaced via the callback.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -182,3 +184,37 @@ def test_callback_exception_does_not_break_stream(memagent_with_mocks):
     chunks = list(agent.run_stream("hello"))
     # Stream completed; "ok" yielded; no exception bubbled up.
     assert "ok" in "".join(chunks)
+
+
+def test_per_call_callback_and_execution_ids_survive_worker_thread(
+    memagent_with_mocks,
+):
+    """The UI can stream on a worker without losing trace or resolved IDs."""
+    agent = memagent_with_mocks
+    parent_events = []
+    worker_events = []
+    agent.set_stream_event_callback(parent_events.append)
+    agent.model.generate_stream = lambda *_a, **_k: iter(
+        [{"type": "content", "content": "ok"}, {"type": "done", "content": "ok"}]
+    )
+
+    def execute():
+        chunks = list(
+            agent.run_stream(
+                "hello",
+                memory_id="memory-worker",
+                thread_id="thread-worker",
+                event_callback=worker_events.append,
+            )
+        )
+        return chunks, agent.get_current_memory_id(), agent.get_current_thread_id()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        chunks, memory_id, thread_id = executor.submit(execute).result(timeout=60)
+
+    assert "ok" in "".join(chunks)
+    assert memory_id == "memory-worker"
+    assert thread_id == "thread-worker"
+    assert worker_events[0]["type"] == "stream_start"
+    assert worker_events[-1]["type"] == "stream_end"
+    assert parent_events == []

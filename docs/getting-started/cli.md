@@ -26,7 +26,9 @@ uv tool install "memorizz[local]"     # == memorizz[ollama,filesystem]
 ```
 
 Other providers are extras: `memorizz[anthropic]`, `memorizz[mongodb]`,
-`memorizz[oracle]`, `memorizz[ui]`, or everything with `memorizz[all]`.
+`memorizz[oracle]`, `memorizz[ui]`, `memorizz[mcp]`, or everything with
+`memorizz[all]`. The npm bootstrapper installs the MCP extra because it ships
+the complete CLI surface.
 
 !!! note "Homebrew & npm"
     A Homebrew tap (`brew install RichmondAlake/memorizz/memorizz`) and an npm

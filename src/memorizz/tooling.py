@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -384,6 +385,61 @@ class SemanticToolRouter:
     DISCOVERY_TOOL = "discover_tools"
     INVOCATION_TOOL = "invoke_tool"
 
+    @dataclass
+    class _TurnState:
+        selected: set[str] = field(default_factory=set)
+        call_attempts: Dict[str, int] = field(default_factory=dict)
+        successful_calls: set[str] = field(default_factory=set)
+        invocation_count: int = 0
+        active_user_id: Optional[str] = None
+
+    def _state(self) -> "SemanticToolRouter._TurnState":
+        state = self._turn_state_var.get()
+        if state is None:
+            state = self._TurnState()
+            self._turn_state_var.set(state)
+        return state
+
+    @property
+    def _selected(self) -> set[str]:
+        return self._state().selected
+
+    @_selected.setter
+    def _selected(self, value: Iterable[str]) -> None:
+        self._state().selected = set(value)
+
+    @property
+    def _call_attempts(self) -> Dict[str, int]:
+        return self._state().call_attempts
+
+    @_call_attempts.setter
+    def _call_attempts(self, value: Mapping[str, int]) -> None:
+        self._state().call_attempts = dict(value)
+
+    @property
+    def _successful_calls(self) -> set[str]:
+        return self._state().successful_calls
+
+    @_successful_calls.setter
+    def _successful_calls(self, value: Iterable[str]) -> None:
+        self._state().successful_calls = set(value)
+
+    @property
+    def _invocation_count(self) -> int:
+        return self._state().invocation_count
+
+    @_invocation_count.setter
+    def _invocation_count(self, value: int) -> None:
+        self._state().invocation_count = int(value)
+
+    @property
+    def _active_user_id(self) -> Optional[str]:
+        return self._state().active_user_id
+
+    @_active_user_id.setter
+    def _active_user_id(self, value: Optional[str]) -> None:
+        self._state().active_user_id = value
+
     def __init__(
         self,
         tool_manager: Any,
@@ -398,6 +454,9 @@ class SemanticToolRouter:
         max_invocations_per_turn: int = 20,
         max_attempts_per_call: int = 2,
     ) -> None:
+        self._turn_state_var: ContextVar[
+            Optional[SemanticToolRouter._TurnState]
+        ] = ContextVar(f"memorizz_router_turn_{id(self)}", default=None)
         self.tool_manager = tool_manager
         self.toolbox = toolbox
         self.agent_id = agent_id
@@ -418,11 +477,7 @@ class SemanticToolRouter:
         self._active_user_id: Optional[str] = None
 
     def begin_turn(self, *, user_id: Optional[str] = None) -> None:
-        self._selected = set()
-        self._call_attempts = {}
-        self._successful_calls = set()
-        self._invocation_count = 0
-        self._active_user_id = user_id
+        self._turn_state_var.set(self._TurnState(active_user_id=user_id))
 
     def _metadata(self) -> List[Dict[str, Any]]:
         values = self.tool_manager.get_tool_metadata() or []
@@ -609,7 +664,15 @@ class SemanticToolRouter:
         self, tool_name: str, arguments: Mapping[str, Any]
     ) -> tuple[str, Dict[str, Any], List[str]]:
         name = self._resolve_name(tool_name)
-        if name not in self._selected and name not in self.always_visible:
+        # With progressive disclosure disabled, ``schemas_for_turn`` exposes
+        # every registered tool. Invocation must mirror that contract rather
+        # than requiring a selection that can only be made through the hidden
+        # ``discover_tools`` meta-tool.
+        if (
+            self.enabled
+            and name not in self._selected
+            and name not in self.always_visible
+        ):
             raise PermissionError(
                 f"Tool '{name}' was not disclosed for this turn; call discover_tools first"
             )

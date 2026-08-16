@@ -4,6 +4,10 @@ MemoRizz includes a first-party MCP server built on the official Python SDK.
 Any standards-compliant MCP host can use MemoRizz memory, agents, and
 conversations through local `stdio` or remote Streamable HTTP.
 
+Install the server runtime with `pip install "memorizz[mcp]"`. The base package
+keeps these protocol dependencies optional for applications that do not use
+MCP.
+
 ## Local setup (recommended for desktop MCP hosts)
 
 Install MemoRizz in the environment that owns the memory store, then point the

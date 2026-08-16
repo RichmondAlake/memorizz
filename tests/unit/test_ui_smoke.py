@@ -20,9 +20,14 @@ pytest.importorskip("httpx")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from memorizz.memagent.models import MemAgentModel  # noqa: E402
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider  # noqa: E402
 from memorizz.ui import state  # noqa: E402
 from memorizz.ui.app import create_app  # noqa: E402
+from memorizz.ui.routers.traces import (  # noqa: E402
+    _expand_trace_bundle,
+    _thread_row_key,
+)
 
 # Pages that must render for a DISCONNECTED session (200, or a redirect to
 # /connect — never a 5xx).
@@ -124,3 +129,79 @@ def test_unknown_memory_type_is_404(client, fs_provider):
     ):
         resp = client.get("/memory/nonexistent")
     assert resp.status_code == 404
+
+
+@pytest.mark.unit
+def test_trace_bundle_expands_into_timeline_events():
+    events = _expand_trace_bundle(
+        {
+            "role": "tool",
+            "timestamp": "2026-08-12T10:30:00+00:00",
+            "content": (
+                '{"type":"trace_bundle","version":1,"events":['
+                '{"trace_kind":"tool_call","title":"Tool Call · inventory_status",'
+                '"content":"{\\"region\\":\\"London\\"}","trace_id":"call-1"},'
+                '{"trace_kind":"tool_result","title":"Tool Result · inventory_status",'
+                '"content":"{\\"units\\":21}","trace_id":"result:call-1"}'
+                "]}"
+            ),
+        },
+        memory_id="erpa-course",
+        thread_id="thread-1",
+    )
+
+    assert events is not None
+    assert [event["kind"] for event in events] == ["tool_call", "tool_result"]
+    assert events[0]["title"] == "Tool Call · inventory_status"
+    assert events[1]["trace_id"] == "result:call-1"
+    assert all(event["thread_id"] == "thread-1" for event in events)
+
+
+@pytest.mark.unit
+def test_trace_thread_key_keeps_threads_in_one_memory_distinct():
+    assert _thread_row_key("thread-a", "memory-1") != _thread_row_key(
+        "thread-b", "memory-1"
+    )
+
+
+@pytest.mark.unit
+def test_favorite_update_preserves_advanced_agent_configuration(client, fs_provider):
+    agent_id = "advanced-policy-agent"
+    fs_provider.store_memagent(
+        MemAgentModel(
+            agent_id=agent_id,
+            retrieval_policy={
+                "conversation_scope": "thread",
+                "knowledge_base_scope": "namespace",
+                "knowledge_base_namespaces": ["agents"],
+            },
+            tool_result_policy={"offload_above_chars": 4096},
+            context_policy={"progressive_tool_disclosure": True},
+            skill_retrieval=True,
+            whatsapp_enabled=True,
+            whatsapp_config={"phone_number_id": "configured"},
+        )
+    )
+
+    with patch.dict(
+        state._state,
+        {
+            "provider": fs_provider,
+            "provider_type": "filesystem",
+            "connection_info": {"root_path": str(fs_provider.root_path)},
+        },
+    ):
+        response = client.post(
+            f"/agents/{agent_id}/favorite",
+            data={"is_favorite": "true"},
+        )
+
+    assert response.status_code == 302
+    stored = fs_provider.retrieve_memagent(agent_id)
+    assert stored.is_favorite is True
+    assert stored.retrieval_policy["conversation_scope"] == "thread"
+    assert stored.tool_result_policy == {"offload_above_chars": 4096}
+    assert stored.context_policy == {"progressive_tool_disclosure": True}
+    assert stored.skill_retrieval is True
+    assert stored.whatsapp_enabled is True
+    assert stored.whatsapp_config == {"phone_number_id": "configured"}

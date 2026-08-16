@@ -567,6 +567,10 @@ class MongoDBProvider(MemoryProvider):
                 "summaries_memory_period_end",
                 [("memory_id", 1), ("period_end", -1)],
             ),
+            (
+                "summaries_memory_thread_period_end",
+                [("memory_id", 1), ("thread_id", 1), ("period_end", -1)],
+            ),
         ],
     }
 
@@ -1260,7 +1264,6 @@ class MongoDBProvider(MemoryProvider):
         user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
         if user_id_scope is not _MONGO_UNSET:
             search_filter.update(_mongo_user_id_predicate(user_id_scope))
-
         pipeline = self._build_vector_search_pipeline(
             embedding, limit, search_filter=search_filter or None
         )
@@ -1451,6 +1454,9 @@ class MongoDBProvider(MemoryProvider):
         user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
         if user_id_scope is not _MONGO_UNSET:
             search_filter.update(_mongo_user_id_predicate(user_id_scope))
+        thread_id = kwargs.get("thread_id")
+        if thread_id is not None:
+            search_filter["thread_id"] = str(thread_id)
 
         pipeline = self._build_vector_search_pipeline(
             embedding,
@@ -1770,6 +1776,7 @@ class MongoDBProvider(MemoryProvider):
         memory_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         user_id: Any = _MONGO_UNSET,
+        thread_id: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         """Return recent summary rows scoped to a memory/agent, native-side.
@@ -1794,6 +1801,8 @@ class MongoDBProvider(MemoryProvider):
             mongo_filter["$or"] = scope_clauses
         if user_id is not _MONGO_UNSET:
             mongo_filter.update(_mongo_user_id_predicate(user_id))
+        if thread_id is not None:
+            mongo_filter["thread_id"] = str(thread_id)
 
         try:
             cursor = (
@@ -2171,6 +2180,7 @@ class MongoDBProvider(MemoryProvider):
             embedding_config=document.get("embedding_config"),
             semantic_cache=bool(document.get("semantic_cache", False)),
             semantic_cache_config=document.get("semantic_cache_config"),
+            retrieval_policy=document.get("retrieval_policy"),
             context_window_tokens=document.get("context_window_tokens"),
             sandbox_provider=document.get("sandbox_provider"),
             browser_control=document.get("browser_control"),
@@ -2231,6 +2241,7 @@ class MongoDBProvider(MemoryProvider):
                 embedding_config=doc.get("embedding_config"),
                 semantic_cache=bool(doc.get("semantic_cache", False)),
                 semantic_cache_config=doc.get("semantic_cache_config"),
+                retrieval_policy=doc.get("retrieval_policy"),
                 context_window_tokens=doc.get("context_window_tokens"),
                 sandbox_provider=doc.get("sandbox_provider"),
                 browser_control=doc.get("browser_control"),

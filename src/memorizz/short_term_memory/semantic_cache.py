@@ -5,6 +5,7 @@
 import logging
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -36,7 +37,9 @@ class SemanticCacheConfig:
         True  # Enable by default to use memory provider consistently
     )
     enable_usage_tracking: bool = True
-    enable_session_scoping: bool = False  # Allow cache hits across sessions by default
+    # A conversational cache must not replay a response from another thread by
+    # default. Callers can still opt out explicitly for stateless workloads.
+    enable_session_scoping: bool = True
     scope: SemanticCacheScope = (
         SemanticCacheScope.LOCAL
     )  # LOCAL filters by agent_id, GLOBAL searches all entries
@@ -106,6 +109,38 @@ class SemanticCacheInspection:
 class SemanticCache:
     """Enhanced semantic cache with vector similarity search and intelligent management."""
 
+    @property
+    def agent_id(self) -> Optional[str]:
+        return self._agent_id_var.get()
+
+    @agent_id.setter
+    def agent_id(self, value: Optional[str]) -> None:
+        self._agent_id_var.set(value)
+
+    @property
+    def memory_id(self) -> Optional[str]:
+        return self._memory_id_var.get()
+
+    @memory_id.setter
+    def memory_id(self, value: Optional[str]) -> None:
+        self._memory_id_var.set(value)
+
+    @property
+    def last_hit(self) -> Optional[Dict[str, Any]]:
+        return self._last_hit_var.get()
+
+    @last_hit.setter
+    def last_hit(self, value: Optional[Dict[str, Any]]) -> None:
+        self._last_hit_var.set(value)
+
+    @property
+    def last_inspection(self) -> Optional[SemanticCacheInspection]:
+        return self._last_inspection_var.get()
+
+    @last_inspection.setter
+    def last_inspection(self, value: Optional[SemanticCacheInspection]) -> None:
+        self._last_inspection_var.set(value)
+
     def __init__(
         self,
         config: Optional[SemanticCacheConfig] = None,
@@ -132,6 +167,21 @@ class SemanticCache:
         """
         self.config = config or SemanticCacheConfig()
         self.memory_provider = memory_provider
+        # One MemAgent (and therefore one SemanticCache) is often shared by a
+        # threaded web server. Scope is per execution context, not mutable
+        # singleton state.
+        self._agent_id_var: ContextVar[Optional[str]] = ContextVar(
+            f"memorizz_cache_agent_{id(self)}", default=agent_id
+        )
+        self._memory_id_var: ContextVar[Optional[str]] = ContextVar(
+            f"memorizz_cache_memory_{id(self)}", default=memory_id
+        )
+        self._last_hit_var: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+            f"memorizz_cache_last_hit_{id(self)}", default=None
+        )
+        self._last_inspection_var: ContextVar[
+            Optional[SemanticCacheInspection]
+        ] = ContextVar(f"memorizz_cache_inspection_{id(self)}", default=None)
         self.agent_id = agent_id
         self.memory_id = memory_id
 
@@ -569,6 +619,10 @@ class SemanticCache:
             for entry in self.cache.values():
                 if getattr(entry, "user_id", None) != user_id:
                     continue
+                if self.agent_id and entry.agent_id != self.agent_id:
+                    continue
+                if self.memory_id and entry.memory_id != self.memory_id:
+                    continue
                 if not self._fresh_for_metadata(entry):
                     continue
                 if not self._metadata_matches(entry, lookup_metadata):
@@ -668,6 +722,10 @@ class SemanticCache:
                 for entry in self.cache.values():
                     # Tenant isolation: skip entries from other users.
                     if getattr(entry, "user_id", None) != user_id:
+                        continue
+                    if self.agent_id and entry.agent_id != self.agent_id:
+                        continue
+                    if self.memory_id and entry.memory_id != self.memory_id:
                         continue
 
                     if not self._fresh_for_metadata(entry):

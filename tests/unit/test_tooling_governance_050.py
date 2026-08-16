@@ -116,6 +116,27 @@ def test_progressive_router_discloses_top_k_and_allowlists_dispatch():
 
 
 @pytest.mark.unit
+def test_disabled_progressive_router_can_invoke_every_disclosed_tool():
+    manager = ToolManager()
+
+    def ingest_url(url: str) -> dict:
+        """Ingest a URL into the caller's library."""
+        return {"queued": url}
+
+    assert manager.add_tool(ingest_url)
+    router = SemanticToolRouter(manager, enabled=False)
+    router.begin_turn(user_id="alice")
+
+    schemas = router.schemas_for_turn("add this URL", user_id="alice")
+    assert {schema["function"]["name"] for schema in schemas} == {"ingest_url"}
+    assert router._selected == set()
+
+    called = router.invoke_tool("ingest_url", {"url": "https://example.com"})
+    assert called["ok"] is True
+    assert called["result"] == {"queued": "https://example.com"}
+
+
+@pytest.mark.unit
 def test_side_effect_candidate_bypasses_cache_before_a_similar_hit_can_short_circuit():
     @governed_tool(side_effects=True, requires_approval=True)
     def update_inventory(sku: str, quantity: int) -> dict:

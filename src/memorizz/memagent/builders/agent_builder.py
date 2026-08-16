@@ -54,6 +54,7 @@ class MemAgentBuilder:
         self._skill_retrieval_config = None
         self._tool_result_policy = None
         self._context_policy = None
+        self._retrieval_policy = None
         self._approval_store = None
         self._delegation_config = None
         self._semantic_layer = None
@@ -365,15 +366,20 @@ class MemAgentBuilder:
         return self
 
     def with_semantic_cache(
-        self, enabled: bool = True, threshold: float = 0.85, scope: str = "local"
+        self, enabled: bool = True, threshold: float = 0.85, scope: str = "session"
     ) -> "MemAgentBuilder":
-        """Configure semantic caching."""
+        """Configure semantic caching (isolated to a session by default)."""
         self.config.semantic_cache = enabled
         if enabled:
             self._semantic_cache_config = {
                 "similarity_threshold": threshold,
                 "scope": scope,
             }
+        return self
+
+    def with_retrieval_policy(self, policy: Any) -> "MemAgentBuilder":
+        """Set automatic memory-retrieval scope independently of storage."""
+        self._retrieval_policy = policy
         return self
 
     def with_embedding_provider(
@@ -458,6 +464,7 @@ class MemAgentBuilder:
                 embedding_config=self._embedding_config,
                 semantic_cache=self.config.semantic_cache,
                 semantic_cache_config=self._semantic_cache_config,
+                retrieval_policy=self._retrieval_policy,
                 context_window_tokens=getattr(
                     self.config, "context_window_tokens", None
                 ),
@@ -570,6 +577,7 @@ class MemAgentBuilder:
         )
         new_builder._tool_result_policy = self._tool_result_policy
         new_builder._context_policy = self._context_policy
+        new_builder._retrieval_policy = self._retrieval_policy
         new_builder._approval_store = self._approval_store
         new_builder._delegation_config = (
             self._delegation_config.copy() if self._delegation_config else None

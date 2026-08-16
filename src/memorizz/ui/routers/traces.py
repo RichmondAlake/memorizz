@@ -9,6 +9,7 @@ and GET /traces, plus the trace helpers used only by these routes. Route
 paths, response classes, and behavior are unchanged.
 """
 
+import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -192,8 +193,7 @@ def _extract_trace_thread_id(payload: Dict[str, Any], fallback: str = "") -> str
 
 def _thread_row_key(thread_id: str, memory_id: str) -> str:
     """Build a stable key for thread rows."""
-    _ = thread_id
-    return memory_id
+    return f"{memory_id}:{thread_id or memory_id}"
 
 
 def _build_agent_thread_rows(agents: List[Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -223,14 +223,15 @@ def _build_agent_thread_rows(agents: List[Any]) -> Dict[str, List[Dict[str, Any]
                 continue
 
             memory_id = _extract_trace_memory_id(doc)
-            key = _thread_row_key(memory_id, memory_id)
+            thread_id = _extract_trace_thread_id(doc, fallback=memory_id)
+            key = _thread_row_key(thread_id, memory_id)
             ts = _extract_message_timestamp(doc) or 0.0
 
             by_thread = aggregate.setdefault(agent_id, {})
             entry = by_thread.setdefault(
                 key,
                 {
-                    "thread_id": memory_id,
+                    "thread_id": thread_id,
                     "memory_id": memory_id,
                     "event_count": 0,
                     "last_ts": 0.0,
@@ -254,12 +255,13 @@ def _build_agent_thread_rows(agents: List[Any]) -> Dict[str, List[Dict[str, Any]
         for memory_id in _extract_agent_memory_ids(agent):
             history = _retrieve_conversation_history(memory_id=memory_id, limit=None)
             for msg in history:
-                key = _thread_row_key(memory_id, memory_id)
+                thread_id = _extract_trace_thread_id(msg, fallback=memory_id)
+                key = _thread_row_key(thread_id, memory_id)
                 ts = _extract_message_timestamp(msg) or 0.0
                 entry = by_thread.setdefault(
                     key,
                     {
-                        "thread_id": memory_id,
+                        "thread_id": thread_id,
                         "memory_id": memory_id,
                         "event_count": 0,
                         "last_ts": 0.0,
@@ -403,6 +405,114 @@ def _build_trace_agent_rows(
     return rows
 
 
+def _expand_trace_bundle(
+    message: Dict[str, Any], *, memory_id: str, thread_id: str
+) -> Optional[List[Dict[str, Any]]]:
+    """Expand MemAgent.run_stream telemetry into first-class timeline events."""
+    raw = message.get("content") or message.get("text")
+    if not isinstance(raw, str):
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "trace_bundle":
+        return None
+    timestamp = _format_trace_timestamp(message.get("timestamp"))
+    expanded = []
+    for event in payload.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        kind = (
+            _to_text(event.get("trace_kind") or event.get("kind") or "trace")
+            .strip()
+            .lower()
+        )
+        title = _to_text(event.get("title") or kind or "Trace").strip()
+        content = _to_text(event.get("content") or event.get("message")).strip()
+        expanded.append(
+            {
+                "memory_id": memory_id,
+                "thread_id": thread_id,
+                "role": "tool",
+                "kind": kind or "trace",
+                "title": title or "Trace",
+                "trace_id": _to_text(event.get("trace_id")).strip(),
+                "content": content,
+                "timestamp": timestamp,
+            }
+        )
+    return expanded
+
+
+def _load_agent_tool_log_events(
+    agent_id: str,
+    memory_ids: List[str],
+    *,
+    thread_id: str = "",
+    thread_memory_id: str = "",
+) -> List[Dict[str, Any]]:
+    """Load durable TOOL_LOG executions into the observability timeline."""
+    provider = _state.get("provider")
+    if not provider or not agent_id:
+        return []
+    try:
+        from ...enums.memory_type import MemoryType
+
+        documents = provider.list_all(MemoryType.TOOL_LOG) or []
+    except Exception as exc:
+        logger.debug("Failed to load TOOL_LOG events for %s: %s", agent_id, exc)
+        return []
+
+    events = []
+    known_memory_ids = {str(item) for item in memory_ids if item}
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+        doc_agent_id = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
+        if doc_agent_id != agent_id:
+            continue
+        memory_id = _extract_trace_memory_id(doc, fallback="—")
+        event_thread_id = _extract_trace_thread_id(doc, fallback=memory_id)
+        if known_memory_ids and memory_id not in known_memory_ids:
+            continue
+        if thread_id and event_thread_id != thread_id and memory_id != thread_id:
+            continue
+        if thread_memory_id and memory_id != thread_memory_id:
+            continue
+        tool_name = _to_text(doc.get("tool_name") or "tool").strip()
+        arguments = doc.get("arguments")
+        result = doc.get("result")
+        content = json.dumps(
+            {
+                "tool_log_id": doc.get("tool_log_id")
+                or doc.get("id")
+                or doc.get("_id"),
+                "tool_call_id": doc.get("tool_call_id"),
+                "arguments": arguments,
+                "result": result,
+                "success": doc.get("success"),
+                "error": doc.get("error"),
+            },
+            ensure_ascii=False,
+            default=str,
+            indent=2,
+        )
+        events.append(
+            {
+                "memory_id": memory_id,
+                "thread_id": event_thread_id,
+                "role": "tool",
+                "kind": "execution_log",
+                "title": f"Execution Log · {tool_name}",
+                "trace_id": _to_text(doc.get("tool_call_id")).strip(),
+                "content": content,
+                "timestamp": _format_trace_timestamp(doc.get("timestamp")),
+            }
+        )
+    return events
+
+
 def _load_agent_trace_events(
     agent: Any,
     per_memory_limit: int = 100,
@@ -431,15 +541,23 @@ def _load_agent_trace_events(
                 continue
             if selected_thread_memory_id and memory_id != selected_thread_memory_id:
                 continue
-            events.append(
-                {
-                    "memory_id": memory_id,
-                    "thread_id": event_thread_id,
-                    "role": _to_text(msg.get("role")).strip().lower() or "system",
-                    "content": _to_text(msg.get("content") or msg.get("text")),
-                    "timestamp": _format_trace_timestamp(msg.get("timestamp")),
-                }
+            expanded = _expand_trace_bundle(
+                msg, memory_id=memory_id, thread_id=event_thread_id
             )
+            if expanded is not None:
+                events.extend(expanded)
+            else:
+                events.append(
+                    {
+                        "memory_id": memory_id,
+                        "thread_id": event_thread_id,
+                        "role": _to_text(msg.get("role")).strip().lower() or "system",
+                        "kind": "conversation",
+                        "title": "Conversation event",
+                        "content": _to_text(msg.get("content") or msg.get("text")),
+                        "timestamp": _format_trace_timestamp(msg.get("timestamp")),
+                    }
+                )
 
     # Fallback for agents without memory_ids: load directly by agent_id.
     if not events and agent_id:
@@ -472,16 +590,28 @@ def _load_agent_trace_events(
                         and event_memory_id != selected_thread_memory_id
                     ):
                         continue
-                    events.append(
-                        {
-                            "memory_id": event_memory_id,
-                            "thread_id": event_thread_id,
-                            "role": _to_text(doc.get("role")).strip().lower()
-                            or "system",
-                            "content": _to_text(doc.get("content") or doc.get("text")),
-                            "timestamp": _format_trace_timestamp(doc.get("timestamp")),
-                        }
+                    expanded = _expand_trace_bundle(
+                        doc, memory_id=event_memory_id, thread_id=event_thread_id
                     )
+                    if expanded is not None:
+                        events.extend(expanded)
+                    else:
+                        events.append(
+                            {
+                                "memory_id": event_memory_id,
+                                "thread_id": event_thread_id,
+                                "role": _to_text(doc.get("role")).strip().lower()
+                                or "system",
+                                "kind": "conversation",
+                                "title": "Conversation event",
+                                "content": _to_text(
+                                    doc.get("content") or doc.get("text")
+                                ),
+                                "timestamp": _format_trace_timestamp(
+                                    doc.get("timestamp")
+                                ),
+                            }
+                        )
             except Exception as exc:
                 logger.debug(
                     "Failed direct trace fallback for agent %s: %s",
@@ -489,6 +619,14 @@ def _load_agent_trace_events(
                     exc,
                 )
 
+    events.extend(
+        _load_agent_tool_log_events(
+            agent_id,
+            memory_ids,
+            thread_id=selected_thread_id,
+            thread_memory_id=selected_thread_memory_id,
+        )
+    )
     events.sort(key=_trace_sort_key)
     if total_limit > 0 and len(events) > total_limit:
         return events[-total_limit:]

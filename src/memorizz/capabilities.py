@@ -69,6 +69,10 @@ def capabilities() -> Dict[str, Any]:
     e2b_code_interpreter = _dependency("e2b-code-interpreter", "e2b_code_interpreter")
     oracle = _dependency("oracledb")
     mcp = _dependency("mcp")
+    cryptography = _dependency("cryptography")
+    uvicorn = _dependency("uvicorn")
+    mcp_client_ready = bool(mcp["installed"] and cryptography["installed"])
+    mcp_server_ready = bool(mcp_client_ready and uvicorn["installed"])
     configured_browser_command = str(
         os.getenv("MEMORIZZ_BROWSER_USE_COMMAND", "browser-use")
     ).strip()
@@ -96,16 +100,23 @@ def capabilities() -> Dict[str, Any]:
     return {
         "package": "memorizz",
         "version": __version__,
-        "capability_schema": 1,
+        "capability_schema": 2,
         "features": {
             "mcp_client": {
-                "available": True,
+                "available": mcp_client_ready,
                 "transports": ["stdio", "streamable-http", "sse"],
+                "install_extra": "mcp",
             },
             "mcp_server": {
-                "available": True,
+                "available": mcp_server_ready,
                 "transports": ["stdio", "streamable-http"],
+                "install_extra": "mcp",
             },
+            "thread_scoped_summaries": {"available": True},
+            "retrieval_policy": {"available": True},
+            "concurrency_safe_run_state": {"available": True},
+            "logical_tool_trace_names": {"available": True},
+            "semantic_cache_session_default": {"available": True},
             "durable_approvals": {"available": True, "single_use": True},
             "progressive_tool_disclosure": {"available": True},
             "tool_result_offloading": {"available": True, "size_aware": True},
@@ -130,6 +141,8 @@ def capabilities() -> Dict[str, Any]:
         },
         "dependencies": {
             "mcp": mcp,
+            "cryptography": cryptography,
+            "uvicorn": uvicorn,
             "oracledb": oracle,
             "e2b": e2b,
             "e2b_code_interpreter": e2b_code_interpreter,
@@ -147,7 +160,12 @@ def capabilities() -> Dict[str, Any]:
             },
         },
         "providers": {
-            "mcp": {"ready": bool(mcp["installed"]), **mcp},
+            "mcp": {
+                "ready": mcp_client_ready,
+                "server_ready": mcp_server_ready,
+                "install_extra": "mcp",
+                **mcp,
+            },
             "oracle": {"ready": bool(oracle["installed"]), **oracle},
             "e2b": {
                 "ready": bool(

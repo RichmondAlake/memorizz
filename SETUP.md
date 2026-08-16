@@ -92,19 +92,21 @@ assert report["ok"], report["diagnostics"]
 port and container name, and a bounded readiness wait. Set
 `MEMORIZZ_ORACLE_CONTAINER` when reusing a non-default container.
 
-## Upgrade an existing pre-0.5 schema
+## Upgrade an existing schema
 
-Back up the schema, then apply the additive 0.5 migration as the application
-schema owner under your normal change-control process:
+Back up the schema, then apply the additive migrations in numeric order as the
+application schema owner under your normal change-control process:
 
 ```text
 src/memorizz/memory_provider/oracle/migrations/004_production_governance_050.sql
+src/memorizz/memory_provider/oracle/migrations/005_scoped_retrieval_052.sql
 ```
 
-It adds complete Toolbox schemas, canonical summary-source metadata,
-conversation summary markers, normalized summary/message links, and semantic
-cache metadata. The provider also performs idempotent additive checks at
-startup, but the SQL migration is the reviewable deployment artifact.
+These add complete Toolbox schemas, canonical summary-source metadata,
+conversation summary markers, normalized summary/message links, semantic-cache
+metadata, and exact summary-thread/knowledge-namespace retrieval scopes. The
+provider also performs idempotent additive checks at startup, but the SQL
+migrations are the reviewable deployment artifacts.
 
 Earlier installations must also apply migrations `001`, `002`, and `003` in
 numeric order if they have not already done so.

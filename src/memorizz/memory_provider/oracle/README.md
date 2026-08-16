@@ -48,6 +48,10 @@ summary markers, the normalized ordered `summary_message_links` table, and
 semantic-cache metadata. Provider startup checks are additive and idempotent,
 but operators should still apply migration files under change control.
 
+Migration `005_scoped_retrieval_052.sql` adds and backfills the summary
+`thread_id`, restores knowledge-base chunk/namespace columns on older schemas,
+and creates the indexes used by exact thread and namespace retrieval in 0.5.2.
+
 ## Cleanup
 
 `delete_scope(memory_id=..., user_id=..., agent_ids=[...])` requires at least

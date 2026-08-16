@@ -105,7 +105,12 @@ def serve_memorizz(
     from .config import load_layered_env
 
     load_layered_env()
-    from ..mcp_server import MemorizzMCPServerConfig, run_memorizz_mcp_server
+    try:
+        from ..mcp_server import MemorizzMCPServerConfig, run_memorizz_mcp_server
+    except ImportError as exc:
+        raise typer.BadParameter(
+            "The MCP server requires optional dependencies; install " "`memorizz[mcp]`."
+        ) from exc
 
     overrides = {
         "transport": transport,

@@ -381,6 +381,7 @@ CREATE TABLE summaries (
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
+    thread_id VARCHAR2(255),                  -- Exact conversation scope
     period_start NUMBER,
     period_end NUMBER,
     memory_units_count NUMBER(10) DEFAULT 0,
@@ -393,6 +394,7 @@ CREATE INDEX idx_summaries_summary_id ON summaries(summary_id);
 CREATE INDEX idx_summaries_type ON summaries(summary_type);
 CREATE INDEX idx_summaries_memory_id ON summaries(memory_id);
 CREATE INDEX idx_summaries_agent_id ON summaries(agent_id);
+CREATE INDEX idx_summaries_memory_thread ON summaries(memory_id, thread_id);
 CREATE INDEX idx_summaries_user_id ON summaries(user_id);
 
 CREATE TABLE summary_message_links (

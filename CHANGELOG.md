@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.2 — 2026-08-16
+
+### Added
+
+* `RetrievalPolicy` separates automatic episodic/knowledge recall from memory
+  storage and tool availability, with exact thread and KB-namespace scopes.
+* Capability flags for thread-scoped summaries, retrieval policy, shared-agent
+  concurrency safety, logical tool trace names, and session-safe cache defaults.
+* Durable observability timelines that expand streamed trace bundles and tool
+  execution logs by their real memory/thread scope.
+* Oracle migration `005_scoped_retrieval_052.sql` for summary thread markers,
+  knowledge-base namespaces, safe legacy backfill, and exact-scope indexes.
+
+### Changed
+
+* Summary registries, expansion, source-message reconstruction, MongoDB vector
+  lookup, and Oracle summary storage now preserve exact `thread_id` scope.
+* Shared `MemAgent`, progressive router, stream callback, and semantic-cache
+  execution state is context-local for concurrent web requests.
+* Routed stream traces report both `logical_tool_name` and
+  `model_tool_name`; `tool_name` is the application-level logical name.
+* Semantic cache is session-scoped by default and fingerprints request context
+  to prevent stale reuse when page or grounding context changes.
+* MCP client/server dependencies moved to `memorizz[mcp]`; importing and using
+  non-MCP Memorizz features no longer requires MCP, Uvicorn, or cryptography.
+  The npm bridge installs this extra so its complete CLI surface remains intact.
+* The continual-learning guide now makes experimental-arm isolation, outcome
+  grading, and developer-versus-user skill authority explicit.
+
+### Fixed
+
+* Automatic recall can no longer silently broaden a requested thread or
+  namespace when a third-party provider ignores those query parameters.
+* In-memory semantic cache entries cannot cross memory scopes when one agent is
+  shared by multiple concurrent requests.
+* Filesystem and Oracle retrieval apply thread/namespace boundaries before
+  top-k ranking, avoiding false misses caused by out-of-scope candidates.
+* Per-call stream callbacks and resolved execution IDs survive the UI worker
+  boundary, and UI edits preserve persisted retrieval/governance settings.
+* Non-progressive tool routing can invoke every schema it disclosed instead of
+  incorrectly requiring the hidden discovery handle.
+
 ## 0.5.1 — 2026-08-12
 
 ### Added

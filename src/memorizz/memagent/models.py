@@ -37,6 +37,7 @@ class MemAgentModel(BaseModel):
     ] = None  # Semantic cache configuration
     tool_result_policy: Optional[Dict[str, Any]] = None
     context_policy: Optional[Dict[str, Any]] = None
+    retrieval_policy: Optional[Dict[str, Any]] = None
     delegation_config: Optional[Dict[str, Any]] = None
     skill_retrieval: bool = False
     skill_retrieval_config: Optional[Dict[str, Any]] = None

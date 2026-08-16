@@ -402,11 +402,17 @@ class MCPClientManager:
         redirect_handler=None,
         callback_handler=None,
     ):
-        import httpx2
-        from mcp import Client, StdioServerParameters
-        from mcp.client.sse import sse_client
-        from mcp.client.stdio import stdio_client
-        from mcp.client.streamable_http import streamable_http_client
+        try:
+            import httpx2
+            from mcp import Client, StdioServerParameters
+            from mcp.client.sse import sse_client
+            from mcp.client.stdio import stdio_client
+            from mcp.client.streamable_http import streamable_http_client
+        except ImportError as exc:
+            raise MCPConfigurationError(
+                "MCP connections require the optional MCP dependencies. "
+                "Install them with `pip install 'memorizz[mcp]'`."
+            ) from exc
 
         transport = None
         managed_http_client = None

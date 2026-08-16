@@ -15,6 +15,7 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,6 +113,51 @@ _RETRIEVAL_CANDIDATE_LIMIT = 5
 _RETRIEVED_MEMORIES_MAX = 4
 
 
+_CONTEXT_LOCAL_MISSING = object()
+
+
+class _ContextLocal:
+    """Descriptor storing one value per thread/async context and agent.
+
+    MemAgent instances are commonly registered as application singletons. A
+    plain instance attribute therefore becomes a cross-request race under
+    threaded or async servers. This descriptor preserves the existing private
+    attribute API while isolating its value with ``ContextVar``.
+    """
+
+    def __init__(self, factory: Optional[Callable[[], Any]] = None):
+        self.factory = factory or (lambda: None)
+        self.name = ""
+        self.storage_name = ""
+
+    def __set_name__(self, owner: Any, name: str) -> None:
+        self.name = name
+        self.storage_name = f"__context_local_{name}"
+
+    def _var(self, instance: Any) -> ContextVar:
+        variable = instance.__dict__.get(self.storage_name)
+        if variable is None:
+            variable = ContextVar(
+                f"memorizz_{id(instance)}_{self.name}",
+                default=_CONTEXT_LOCAL_MISSING,
+            )
+            instance.__dict__[self.storage_name] = variable
+        return variable
+
+    def __get__(self, instance: Any, owner: Any = None) -> Any:
+        if instance is None:
+            return self
+        variable = self._var(instance)
+        value = variable.get()
+        if value is _CONTEXT_LOCAL_MISSING:
+            value = self.factory()
+            variable.set(value)
+        return value
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        self._var(instance).set(value)
+
+
 def _provider_error_details(exc: Exception) -> Tuple[bool, bool, Optional[int]]:
     """Return ``(is_provider_error, is_auth_error, status_code)`` safely."""
     current: Optional[BaseException] = exc
@@ -149,10 +195,21 @@ def _provider_error_details(exc: Exception) -> Tuple[bool, bool, Optional[int]]:
 
 
 class MemAgent:
-    """
-    MemAgent class that orchestrates manager components.
+    """MemAgent class that orchestrates manager components."""
 
-    """
+    _current_thread_id = _ContextLocal()
+    _current_memory_id = _ContextLocal()
+    _current_user_id = _ContextLocal()
+    _thread_ids_by_memory = _ContextLocal(dict)
+    _stream_event_callback = _ContextLocal()
+    _stream_trace_events = _ContextLocal()
+    _turn_had_side_effects = _ContextLocal(lambda: False)
+    _turn_had_nondeterministic_tools = _ContextLocal(lambda: False)
+    _turn_cache_domains = _ContextLocal(set)
+    _cache_bypass_reason = _ContextLocal()
+    _activated_skill_ids = _ContextLocal(list)
+    _approval_execution_active = _ContextLocal(lambda: False)
+    _last_context_window_stats = _ContextLocal()
 
     def __init__(
         self,
@@ -200,6 +257,7 @@ class MemAgent:
         skill_retrieval_config: Optional[Dict[str, Any]] = None,
         tool_result_policy: Optional[Union[ToolResultPolicy, Dict[str, Any]]] = None,
         context_policy: Optional[Union[ContextPolicy, Dict[str, Any]]] = None,
+        retrieval_policy: Optional[Union[Any, Dict[str, Any], str, bool]] = None,
         approval_store: Optional[ApprovalStore] = None,
         delegation: Optional[Dict[str, Any]] = None,
         semantic_layer: Optional[Any] = None,
@@ -236,6 +294,9 @@ class MemAgent:
         self.skill_retrieval = bool(skill_retrieval)
         self.skill_retrieval_config = dict(skill_retrieval_config or {})
         self.context_policy = ContextPolicy.from_value(context_policy)
+        from ..retrieval import RetrievalPolicy
+
+        self.retrieval_policy = RetrievalPolicy.from_value(retrieval_policy)
         self.tool_result_policy = ToolResultPolicy.from_value(tool_result_policy)
         self.approval_store = approval_store
         self.delegation_config = normalize_delegation_config(delegation)
@@ -1547,6 +1608,7 @@ class MemAgent:
                 agent_id=self.agent_id,
                 limit=20,
                 user_id=self._current_user_id,
+                thread_id=self._current_thread_id,
             )
             return {"summaries": summaries}
 
@@ -1560,7 +1622,12 @@ class MemAgent:
                 return {"error": "No memory provider configured."}
 
             # Load the summary document
-            summary_doc = self.fetch_context_summary(summary_id)
+            summary_doc = self.fetch_context_summary(
+                summary_id,
+                memory_id=self._current_memory_id,
+                user_id=self._current_user_id,
+                thread_id=self._current_thread_id,
+            )
             if not summary_doc:
                 return {"error": f"Summary '{summary_id}' not found."}
 
@@ -1580,7 +1647,9 @@ class MemAgent:
             )
             if source_ids and self.memory_manager:
                 original_msgs = self.memory_manager.get_messages_by_ids(
-                    source_ids, user_id=self._current_user_id
+                    source_ids,
+                    user_id=self._current_user_id,
+                    thread_id=self._current_thread_id,
                 )
                 if original_msgs:
                     reconstructed = []
@@ -1833,14 +1902,36 @@ class MemAgent:
         """Return summary registry entries."""
         return list(self._summary_registry)
 
-    def fetch_context_summary(self, summary_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve a stored summary document by ID."""
+    def fetch_context_summary(
+        self,
+        summary_id: str,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve a summary only inside the requested tenant/thread scope."""
         if not self.memory_provider or not hasattr(
             self.memory_provider, "retrieve_by_id"
         ):
             return None
         try:
-            return self.memory_provider.retrieve_by_id(summary_id, MemoryType.SUMMARIES)
+            document = self.memory_provider.retrieve_by_id(
+                summary_id, MemoryType.SUMMARIES
+            )
+            if not isinstance(document, dict):
+                return None
+            if document.get("user_id") != user_id:
+                return None
+            if memory_id is not None and str(document.get("memory_id") or "") != str(
+                memory_id
+            ):
+                return None
+            if thread_id is not None and self.memory_manager._entry_thread_id(
+                document
+            ) != str(thread_id):
+                return None
+            return document
         except Exception as exc:
             logger.warning("Failed to fetch summary %s: %s", summary_id, exc)
             return None
@@ -3239,7 +3330,11 @@ class MemAgent:
                 resolved_thread_id = str(uuid.uuid4())
                 logger.debug("Started new thread: %s", resolved_thread_id)
 
-        self._thread_ids_by_memory[resolved_memory_id] = resolved_thread_id
+        # ContextVars copy values when an asyncio task is spawned. Copy before
+        # mutation so sibling tasks never share the same inherited dict.
+        thread_ids_by_memory = dict(self._thread_ids_by_memory)
+        thread_ids_by_memory[resolved_memory_id] = resolved_thread_id
+        self._thread_ids_by_memory = thread_ids_by_memory
         self._current_thread_id = resolved_thread_id
 
         if self.cache_manager:
@@ -3693,6 +3788,7 @@ class MemAgent:
         context: Optional[Dict[str, Any]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
         raise_on_provider_error: bool = False,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Generator[str, None, None]:
         """
         Run the agent with streaming output, yielding text chunks as they arrive.
@@ -3716,6 +3812,9 @@ class MemAgent:
             raise_on_provider_error: Re-raise LLM/provider API failures after
                 emitting typed terminal events. Defaults to ``False`` for
                 compatibility with UI streams that render inline failures.
+            event_callback: Optional callback scoped to this stream only. This
+                is concurrency-safe and preferred over mutating a shared agent
+                with ``set_stream_event_callback`` immediately before a run.
 
         Yields:
             str: Partial text chunks of the agent's response
@@ -3755,6 +3854,9 @@ class MemAgent:
         from ..tool_context import reset_tool_context, set_tool_context
 
         _tc_token = set_tool_context(tool_context or {})
+        previous_event_callback = self._stream_event_callback
+        if event_callback is not None:
+            self._stream_event_callback = event_callback
 
         # M3: lifecycle event so the consumer (e.g. an SSE translator) can
         # render "thinking…" indicators immediately, before any text chunk.
@@ -3888,6 +3990,8 @@ class MemAgent:
             yield f"I apologize, but I encountered an error: {str(e)}"
         finally:
             self._stream_trace_events = None
+            if event_callback is not None:
+                self._stream_event_callback = previous_event_callback
             # M4: always release the per-call tool_context scope.
             reset_tool_context(_tc_token)
 
@@ -4437,27 +4541,6 @@ class MemAgent:
         tool_name = tool_call.function.name
         raw_arguments = tool_call.function.arguments
 
-        tool_trace_id = None
-        if streaming:
-            tool_trace_id = (
-                f"{tool_name}:{tool_call.id}"
-                if getattr(tool_call, "id", None)
-                else f"{tool_name}:{uuid.uuid4()}"
-            )
-            self._emit_stream_event(
-                "trace",
-                {
-                    "trace_kind": "tool_call",
-                    "title": f"Tool Call: {tool_name}",
-                    "tool_name": tool_name,
-                    "trace_id": f"call:{tool_trace_id}",
-                    "content": self._preview_stream_payload(
-                        raw_arguments or "{}",
-                        limit=1400,
-                    ),
-                },
-            )
-
         try:
             arguments = json.loads(raw_arguments)
         except (json.JSONDecodeError, Exception):
@@ -4473,6 +4556,41 @@ class MemAgent:
         error_message: Optional[str] = None
         result: Any = None
         router = getattr(self, "semantic_tool_router", None)
+
+        # A routed model call is named ``invoke_tool``, but that transport name
+        # is not useful to application traces. Resolve the requested logical
+        # name before emitting the call event while retaining both fields for
+        # audit/debugging consumers.
+        if router is not None and model_tool_name == router.INVOCATION_TOOL:
+            requested_name = str(arguments.get("tool_name") or "").strip()
+            if requested_name:
+                logical_tool_name = router._resolve_name(requested_name)
+            nested_arguments = arguments.get("arguments")
+            if isinstance(nested_arguments, dict):
+                logical_arguments = nested_arguments
+
+        tool_trace_id = None
+        if streaming:
+            tool_trace_id = (
+                f"{model_tool_name}:{tool_call.id}"
+                if getattr(tool_call, "id", None)
+                else f"{model_tool_name}:{uuid.uuid4()}"
+            )
+            self._emit_stream_event(
+                "trace",
+                {
+                    "trace_kind": "tool_call",
+                    "title": f"Tool Call: {logical_tool_name}",
+                    "tool_name": logical_tool_name,
+                    "logical_tool_name": logical_tool_name,
+                    "model_tool_name": model_tool_name,
+                    "trace_id": f"call:{tool_trace_id}",
+                    "content": self._preview_stream_payload(
+                        logical_arguments,
+                        limit=1400,
+                    ),
+                },
+            )
 
         if router is not None and model_tool_name == router.DISCOVERY_TOOL:
             result = router.discover_tools(
@@ -4605,12 +4723,16 @@ class MemAgent:
         if streaming:
             self._emit_stream_trace_chunks(
                 "tool_result",
-                f"Tool Result: {tool_name}",
+                f"Tool Result: {logical_tool_name}",
                 result,
                 trace_id=f"result:{tool_trace_id}",
                 chunk_size=420,
                 preview_limit=12000,
-                extra={"tool_name": tool_name},
+                extra={
+                    "tool_name": logical_tool_name,
+                    "logical_tool_name": logical_tool_name,
+                    "model_tool_name": model_tool_name,
+                },
             )
 
         # Serialize exactly once and decide before persistence. Small results
@@ -4913,17 +5035,47 @@ class MemAgent:
             try:
                 active = set(self.active_memory_types or [])
                 candidate_sources = []
-                if MemoryType.KNOWLEDGE_BASE in active:
+                policy = self.retrieval_policy
+                if (
+                    MemoryType.KNOWLEDGE_BASE in active
+                    and policy.knowledge_base_scope != "disabled"
+                ):
+                    if policy.knowledge_base_scope == "namespace":
+                        candidate_sources.extend(
+                            (
+                                MemoryType.KNOWLEDGE_BASE,
+                                "knowledge_base",
+                                None,
+                                namespace,
+                            )
+                            for namespace in policy.knowledge_base_namespaces
+                        )
+                    else:
+                        candidate_sources.append(
+                            (MemoryType.KNOWLEDGE_BASE, "knowledge_base", None, None)
+                        )
+                if (
+                    MemoryType.CONVERSATION_MEMORY in active
+                    and policy.conversation_scope != "disabled"
+                ):
                     candidate_sources.append(
-                        (MemoryType.KNOWLEDGE_BASE, "knowledge_base")
-                    )
-                if MemoryType.CONVERSATION_MEMORY in active:
-                    candidate_sources.append(
-                        (MemoryType.CONVERSATION_MEMORY, "episodic")
+                        (
+                            MemoryType.CONVERSATION_MEMORY,
+                            "episodic",
+                            self._current_thread_id
+                            if policy.conversation_scope == "thread"
+                            else None,
+                            None,
+                        )
                     )
 
                 candidates: List[Tuple[str, Any]] = []
-                for memory_type, source in candidate_sources:
+                for (
+                    memory_type,
+                    source,
+                    retrieval_thread_id,
+                    namespace,
+                ) in candidate_sources:
                     snippets = self.memory_manager.retrieve_relevant_memories(
                         query=query,
                         memory_type=memory_type,
@@ -4931,6 +5083,8 @@ class MemAgent:
                         limit=_RETRIEVAL_CANDIDATE_LIMIT,
                         user_id=user_id,
                         include_embedding=True,
+                        thread_id=retrieval_thread_id,
+                        namespace=namespace,
                     )
                     for row in snippets or []:
                         candidates.append((source, row))
@@ -4986,6 +5140,7 @@ class MemAgent:
                     agent_id=self.agent_id,
                     limit=20,
                     user_id=user_id,
+                    thread_id=self._current_thread_id,
                 )
                 if summaries:
                     context["summaries"] = summaries
@@ -6441,12 +6596,18 @@ class MemAgent:
         }
         domains.update(self._turn_cache_domains)
         tags = [str(item) for item in (context.get("cache_tags") or [])]
+        # Include all per-request context in cache admission/lookup identity.
+        # Session scoping prevents cross-thread reuse; this fingerprint also
+        # prevents stale reuse within one thread when page, selection, or other
+        # ephemeral grounding changes between otherwise identical questions.
+        request_context_fingerprint = self._fingerprint(context)
         return {
             "fingerprints": {
                 "model": self._fingerprint(model_value),
                 "prompt": self._fingerprint(prompt_value),
                 "tool_schema": self._fingerprint(tool_metadata),
                 "data_version": str(data_version),
+                "request_context": request_context_fingerprint,
             },
             "domain": sorted(domains)[0] if len(domains) == 1 else None,
             "domains": sorted(domains),

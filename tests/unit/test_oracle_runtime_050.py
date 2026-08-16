@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from memorizz.enums import MemoryType
 from memorizz.memory_provider.oracle.runtime import LocalOracleRuntime
 from memorizz.ui import docker_oracle
 
@@ -141,6 +142,42 @@ def test_oracle_operational_scripts_have_no_default_or_output_passwords():
 
 
 @pytest.mark.unit
+def test_oracle_vector_retrieval_applies_scope_before_top_k(monkeypatch):
+    import memorizz.embeddings as embeddings
+    from memorizz.memory_provider.oracle.provider import OracleProvider
+
+    provider = object.__new__(OracleProvider)
+    calls = []
+
+    def vector_search(memory_type, embedding, **kwargs):
+        calls.append((memory_type, embedding, kwargs))
+        return []
+
+    provider._vector_search = vector_search
+    monkeypatch.setattr(embeddings, "get_embedding", lambda _query: [1.0, 0.0])
+
+    provider.retrieve_by_query(
+        "find policy",
+        memory_type=MemoryType.KNOWLEDGE_BASE,
+        memory_id="memory-1",
+        user_id="alice",
+        namespace="agents",
+    )
+    provider.retrieve_by_query(
+        "what happened",
+        memory_type=MemoryType.CONVERSATION_MEMORY,
+        memory_id="memory-1",
+        user_id="alice",
+        thread_id="thread-a",
+    )
+
+    assert calls[0][0] == MemoryType.KNOWLEDGE_BASE
+    assert calls[0][2]["filters"] == {"namespace": "agents"}
+    assert calls[1][0] == MemoryType.CONVERSATION_MEMORY
+    assert calls[1][2]["filters"] == {"thread_id": "thread-a"}
+
+
+@pytest.mark.unit
 def test_public_capabilities_export_is_a_stable_callable():
     import importlib
 
@@ -148,7 +185,7 @@ def test_public_capabilities_export_is_a_stable_callable():
     from memorizz import capabilities
 
     assert callable(capabilities)
-    assert capabilities()["version"] == "0.5.1"
+    assert capabilities()["version"] == "0.5.2"
     importlib.import_module("memorizz.capabilities")
     assert callable(memorizz.capabilities)
     assert memorizz.capabilities()["package"] == "memorizz"

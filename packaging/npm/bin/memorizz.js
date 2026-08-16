@@ -10,6 +10,8 @@ const { spawnSync } = require("child_process");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
+const VERSION = require("../package.json").version;
+const PACKAGE_SPEC = `memorizz[mcp]==${VERSION}`;
 
 function findExe(name) {
   const finder = process.platform === "win32" ? "where" : "which";
@@ -42,7 +44,7 @@ if (exe) {
     );
     process.exit(127);
   }
-  res = spawnSync(uv, ["tool", "run", "memorizz", ...args], { stdio: "inherit" });
+  res = spawnSync(uv, ["tool", "run", "--from", PACKAGE_SPEC, "memorizz", ...args], { stdio: "inherit" });
 }
 
 process.exit(res.status == null ? 1 : res.status);

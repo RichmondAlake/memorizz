@@ -14,10 +14,25 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Protocol
 
-from cryptography.fernet import Fernet, InvalidToken
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ImportError:  # MCP is an optional ``memorizz[mcp]`` feature.
+    Fernet = None  # type: ignore[assignment]
+
+    class InvalidToken(Exception):
+        pass
+
 
 from .._env_io import memorizz_home
 from .errors import MCPConfigurationError
+
+
+def _require_cryptography() -> None:
+    if Fernet is None:
+        raise MCPConfigurationError(
+            "Encrypted MCP credentials require the optional MCP dependencies. "
+            "Install them with `pip install 'memorizz[mcp]'`."
+        )
 
 
 class CredentialStore(Protocol):
@@ -80,6 +95,7 @@ class EncryptedFileCredentialStore:
             handle.close()
 
     def _key(self, create: bool) -> bytes:
+        _require_cryptography()
         configured = os.environ.get("MEMORIZZ_MCP_ENCRYPTION_KEY", "").strip()
         if configured:
             raw = configured.encode("ascii", errors="strict")

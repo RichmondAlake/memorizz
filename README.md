@@ -64,7 +64,9 @@ Base install:
 pip install memorizz
 ```
 
-The base install also gives you the interactive **`memorizz` CLI** (see [CLI](#cli)) — no extra needed.
+The base install also gives you the interactive **`memorizz` CLI** (see
+[CLI](#cli)). Install the `mcp` extra when the CLI or an agent must connect to,
+or serve, MCP.
 
 Common extras:
 
@@ -72,6 +74,7 @@ Common extras:
 pip install "memorizz[oracle]"          # Oracle provider
 pip install "memorizz[mongodb]"         # MongoDB provider
 pip install "memorizz[filesystem]"      # Local filesystem + FAISS
+pip install "memorizz[mcp]"             # MCP client/server + encrypted credentials
 pip install "memorizz[sandbox-e2b]"     # E2B sandbox
 pip install "memorizz[sandbox-daytona]" # Daytona sandbox
 pip install "memorizz[ui]"              # Local web UI

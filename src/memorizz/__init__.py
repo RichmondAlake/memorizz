@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
@@ -45,6 +45,7 @@ _LAZY = {
     "ToolPolicy": (".tooling", "ToolPolicy"),
     "ToolResultPolicy": (".tooling", "ToolResultPolicy"),
     "ContextPolicy": (".tooling", "ContextPolicy"),
+    "RetrievalPolicy": (".retrieval", "RetrievalPolicy"),
     "SemanticCacheInspection": (
         ".short_term_memory.semantic_cache",
         "SemanticCacheInspection",
@@ -147,6 +148,7 @@ __all__ = [
     "ToolPolicy",
     "ToolResultPolicy",
     "ContextPolicy",
+    "RetrievalPolicy",
     "SemanticCacheInspection",
     "governed_tool",
     # Memory providers + configs

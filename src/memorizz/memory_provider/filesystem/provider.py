@@ -155,6 +155,8 @@ class FileSystemProvider(MemoryProvider):
     ) -> Optional[List[Dict[str, Any]]]:
         resolved_type = self._normalize_memory_type(memory_type or memory_store_type)
         user_id_scope = kwargs.get("user_id", _FS_UNSET)
+        thread_id = kwargs.get("thread_id")
+        namespace = kwargs.get("namespace")
 
         if isinstance(query, dict):
             return self._filter_documents(
@@ -163,6 +165,8 @@ class FileSystemProvider(MemoryProvider):
                 limit,
                 memory_id=memory_id,
                 user_id=user_id_scope,
+                thread_id=thread_id,
+                namespace=namespace,
             )
         elif isinstance(query, str):
             return self._semantic_search(
@@ -171,6 +175,8 @@ class FileSystemProvider(MemoryProvider):
                 limit,
                 memory_id=memory_id,
                 user_id=user_id_scope,
+                thread_id=thread_id,
+                namespace=namespace,
             )
         else:
             raise ValueError("query must be either a dict filter or a string")
@@ -550,6 +556,7 @@ class FileSystemProvider(MemoryProvider):
                 semantic_cache_config=doc.get("semantic_cache_config"),
                 tool_result_policy=doc.get("tool_result_policy"),
                 context_policy=doc.get("context_policy"),
+                retrieval_policy=doc.get("retrieval_policy"),
                 delegation_config=doc.get("delegation_config"),
                 skill_retrieval=bool(doc.get("skill_retrieval", False)),
                 skill_retrieval_config=doc.get("skill_retrieval_config"),
@@ -607,6 +614,7 @@ class FileSystemProvider(MemoryProvider):
             semantic_cache_config=document.get("semantic_cache_config"),
             tool_result_policy=document.get("tool_result_policy"),
             context_policy=document.get("context_policy"),
+            retrieval_policy=document.get("retrieval_policy"),
             delegation_config=document.get("delegation_config"),
             skill_retrieval=bool(document.get("skill_retrieval", False)),
             skill_retrieval_config=document.get("skill_retrieval_config"),
@@ -834,6 +842,28 @@ class FileSystemProvider(MemoryProvider):
             return True
         return document.get("user_id") == user_id
 
+    @staticmethod
+    def _retrieval_scope_matches(
+        document: Dict[str, Any],
+        *,
+        thread_id: Optional[str] = None,
+        namespace: Optional[str] = None,
+    ) -> bool:
+        """Apply exact episodic/knowledge boundaries before ranking."""
+        if thread_id is not None:
+            document_thread_id = document.get("thread_id") or document.get(
+                "conversation_id"
+            )
+            if str(document_thread_id or "") != str(thread_id):
+                return False
+        if namespace is not None:
+            content = document.get("content")
+            nested = content if isinstance(content, dict) else {}
+            document_namespace = document.get("namespace") or nested.get("namespace")
+            if str(document_namespace or "") != str(namespace):
+                return False
+        return True
+
     def _filter_documents(
         self,
         memory_type: MemoryType,
@@ -841,6 +871,8 @@ class FileSystemProvider(MemoryProvider):
         limit: int,
         memory_id: Optional[str],
         user_id: Any = _FS_UNSET,
+        thread_id: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         matches: List[Dict[str, Any]] = []
         with self._locks[memory_type]:
@@ -851,6 +883,10 @@ class FileSystemProvider(MemoryProvider):
                 if memory_id and document.get("memory_id") != memory_id:
                     continue
                 if not self._user_id_scope_matches(document, user_id):
+                    continue
+                if not self._retrieval_scope_matches(
+                    document, thread_id=thread_id, namespace=namespace
+                ):
                     continue
                 if all(document.get(k) == v for k, v in filters.items()):
                     matches.append(document)
@@ -865,6 +901,8 @@ class FileSystemProvider(MemoryProvider):
         limit: int,
         memory_id: Optional[str],
         user_id: Any = _FS_UNSET,
+        thread_id: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         embedding_provider = self._get_embedding_provider()
         if embedding_provider is None:
@@ -872,7 +910,13 @@ class FileSystemProvider(MemoryProvider):
                 "Embedding provider not configured; falling back to keyword search"
             )
             return self._keyword_search(
-                memory_type, query, limit, memory_id, user_id=user_id
+                memory_type,
+                query,
+                limit,
+                memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                namespace=namespace,
             )
 
         if faiss is None or np is None:
@@ -886,6 +930,23 @@ class FileSystemProvider(MemoryProvider):
                 memory_id,
                 embedding_provider,
                 user_id=user_id,
+                thread_id=thread_id,
+                namespace=namespace,
+            )
+
+        # A global FAISS top-k followed by filtering can return a false miss
+        # when another thread/namespace crowds the requested scope. Rank only
+        # eligible documents for explicitly scoped recall.
+        if thread_id is not None or namespace is not None:
+            return self._brute_force_search(
+                memory_type,
+                query,
+                limit,
+                memory_id,
+                embedding_provider,
+                user_id=user_id,
+                thread_id=thread_id,
+                namespace=namespace,
             )
 
         query_embedding = embedding_provider.get_embedding(query)
@@ -913,6 +974,10 @@ class FileSystemProvider(MemoryProvider):
                 continue
             if not self._user_id_scope_matches(document, user_id):
                 continue
+            if not self._retrieval_scope_matches(
+                document, thread_id=thread_id, namespace=namespace
+            ):
+                continue
             document["score"] = float(score)
             matches.append(document)
             if len(matches) >= top_k:
@@ -927,11 +992,19 @@ class FileSystemProvider(MemoryProvider):
         memory_id: Optional[str],
         embedding_provider=None,
         user_id: Any = _FS_UNSET,
+        thread_id: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         embedding_provider = embedding_provider or self._get_embedding_provider()
         if embedding_provider is None:
             return self._keyword_search(
-                memory_type, query, limit, memory_id, user_id=user_id
+                memory_type,
+                query,
+                limit,
+                memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                namespace=namespace,
             )
 
         query_embedding = embedding_provider.get_embedding(query)
@@ -948,6 +1021,10 @@ class FileSystemProvider(MemoryProvider):
                 if memory_id and document.get("memory_id") != memory_id:
                     continue
                 if not self._user_id_scope_matches(document, user_id):
+                    continue
+                if not self._retrieval_scope_matches(
+                    document, thread_id=thread_id, namespace=namespace
+                ):
                     continue
                 target = document["embedding"]
                 similarity = self._cosine_similarity(query_vector, target)
@@ -966,6 +1043,8 @@ class FileSystemProvider(MemoryProvider):
         limit: int,
         memory_id: Optional[str],
         user_id: Any = _FS_UNSET,
+        thread_id: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not query:
             return []
@@ -979,6 +1058,10 @@ class FileSystemProvider(MemoryProvider):
                 if memory_id and document.get("memory_id") != memory_id:
                     continue
                 if not self._user_id_scope_matches(document, user_id):
+                    continue
+                if not self._retrieval_scope_matches(
+                    document, thread_id=thread_id, namespace=namespace
+                ):
                     continue
                 haystacks = [
                     str(document.get("content", "")),

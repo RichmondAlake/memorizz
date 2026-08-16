@@ -30,7 +30,7 @@ jobs:
           python-version: "3.11"
       # UI routes are part of the release suite; provider SDKs are included by
       # the dev extra so Oracle/MongoDB/Anthropic tests do not silently skip.
-      - run: pip install -e ".[dev,ui]"
+      - run: pip install -e ".[dev,ui,mcp]"
       # Match test.yml: tests/performance is excluded — it's flaky on shared
       # CI runners, and a release gate must not be flakier than CI.
       - run: pytest tests/unit tests/integration -q
@@ -86,12 +86,27 @@ jobs:
           assert has('memorizz') and has('ollama'), 'default zero-config stack deps missing from base'
           leaked = [m for m in ['langchain_ollama', 'torch', 'transformers', 'faiss'] if has(m)]
           assert not leaked, f'heavy deps leaked into base install: {leaked}'
+          optional = [m for m in ['mcp', 'cryptography', 'uvicorn'] if has(m)]
+          assert not optional, f'optional MCP dependencies leaked into base: {optional}'
           import memorizz; print('clean-room OK:', memorizz.__version__)
           "
       - name: CLI entrypoints work without a daemon
         run: |
           /tmp/clean/bin/memorizz --version
           /tmp/clean/bin/memorizz --help >/dev/null
+      - name: MCP extra closes the optional dependency set
+        run: |
+          python -m venv /tmp/mcp
+          /tmp/mcp/bin/python -m pip install --quiet --upgrade pip
+          WHEEL_PATH=$(find "$PWD/dist" -name '*.whl' -print -quit)
+          /tmp/mcp/bin/python -m pip install --quiet "${WHEEL_PATH}[mcp]"
+          /tmp/mcp/bin/python -c "
+          import memorizz
+          report = memorizz.capabilities()
+          assert report['features']['mcp_client']['available'], report
+          assert report['features']['mcp_server']['available'], report
+          print('mcp extra OK:', memorizz.__version__)
+          "
 
   pypi:
     needs: smoke

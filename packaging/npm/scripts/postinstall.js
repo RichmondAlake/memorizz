@@ -15,6 +15,10 @@ const path = require("path");
 const fs = require("fs");
 
 const VERSION = require("../package.json").version;
+// The npm bridge represents the complete command-line product, including MCP
+// client/server commands whose Python dependencies are optional for library-only
+// installs.
+const PACKAGE_SPEC = `memorizz[mcp]==${VERSION}`;
 
 const log = (m) => process.stdout.write(`[memorizz] ${m}\n`);
 const warn = (m) => process.stderr.write(`[memorizz] ${m}\n`);
@@ -68,8 +72,8 @@ function main() {
 
   let uv = findUv() || installUv();
   if (uv) {
-    log(`Installing memorizz==${VERSION} via uv…`);
-    const r = spawnSync(uv, ["tool", "install", "--force", `memorizz==${VERSION}`], { stdio: "inherit" });
+    log(`Installing ${PACKAGE_SPEC} via uv…`);
+    const r = spawnSync(uv, ["tool", "install", "--force", PACKAGE_SPEC], { stdio: "inherit" });
     if (r.status === 0) {
       log("Done. Run:  memorizz");
       return;
@@ -79,7 +83,7 @@ function main() {
 
   const pipx = which("pipx");
   if (pipx) {
-    const r = spawnSync(pipx, ["install", "--force", `memorizz==${VERSION}`], { stdio: "inherit" });
+    const r = spawnSync(pipx, ["install", "--force", PACKAGE_SPEC], { stdio: "inherit" });
     if (r.status === 0) {
       log("Done (via pipx). Run:  memorizz");
       return;
@@ -90,8 +94,9 @@ function main() {
     [
       "Could not bootstrap memorizz automatically.",
       "Install it manually with either:",
-      "  curl -LsSf https://astral.sh/uv/install.sh | sh   # then: uv tool install memorizz",
-      "  pipx install memorizz",
+      "  curl -LsSf https://astral.sh/uv/install.sh | sh",
+      `  uv tool install '${PACKAGE_SPEC}'`,
+      `  pipx install '${PACKAGE_SPEC}'`,
       "The `memorizz` launcher will also retry via `uv tool run` on first use.",
     ].join("\n")
   );

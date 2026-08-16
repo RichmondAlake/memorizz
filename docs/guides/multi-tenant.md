@@ -49,6 +49,24 @@ for chunk in agent.run_stream(query, user_id=current_user_id):
     yield chunk
 ```
 
+Pass `memory_id` and `thread_id` on every request in a shared deployment. The
+agent's per-turn IDs, routed-tool budget, stream callback, and cache scope are
+context-local, so one singleton can safely serve concurrent threads:
+
+```python
+for chunk in agent.run_stream(
+    query,
+    user_id=current_user_id,
+    memory_id=f"primary_{current_user_id}",
+    thread_id=conversation_id,
+    event_callback=emit_event,
+):
+    yield chunk
+```
+
+Prefer the per-call `event_callback` over changing a singleton callback just
+before a request.
+
 ## Isolation semantics
 
 The framework guarantees the following:

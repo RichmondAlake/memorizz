@@ -1326,6 +1326,7 @@ async def agent_playground_stream(request: Request, agent_id: str):
         trace_queue: Queue = Queue()
         chunk_queue: Queue = Queue()
         stream_done = object()
+        stream_state: Dict[str, Optional[str]] = {}
 
         def _queue_trace_event(event: Dict[str, Any]) -> None:
             if not isinstance(event, dict):
@@ -1352,8 +1353,6 @@ async def agent_playground_stream(request: Request, agent_id: str):
             agent_instance = MemAgent.load(
                 agent_id, memory_provider=_state["provider"], **overrides
             )
-            if hasattr(agent_instance, "set_stream_event_callback"):
-                agent_instance.set_stream_event_callback(_queue_trace_event)
             # Apply runtime model override if user changed the model in the playground
             if override_model:
                 try:
@@ -1586,7 +1585,10 @@ async def agent_playground_stream(request: Request, agent_id: str):
 
             def _run_agent_stream() -> None:
                 try:
-                    stream_kwargs: Dict[str, Any] = {"memory_id": memory_id}
+                    stream_kwargs: Dict[str, Any] = {
+                        "memory_id": memory_id,
+                        "event_callback": _queue_trace_event,
+                    }
                     if user_id:
                         stream_kwargs["user_id"] = user_id
                     for chunk in agent_instance.run_stream(query, **stream_kwargs):
@@ -1594,6 +1596,10 @@ async def agent_playground_stream(request: Request, agent_id: str):
                 except Exception as stream_exc:
                     chunk_queue.put({"__stream_error__": _to_text(stream_exc)})
                 finally:
+                    # MemAgent execution IDs are context-local. Capture them in
+                    # the worker before crossing back to the SSE generator.
+                    stream_state["memory_id"] = agent_instance.get_current_memory_id()
+                    stream_state["thread_id"] = agent_instance.get_current_thread_id()
                     chunk_queue.put(stream_done)
 
             stream_worker = threading.Thread(
@@ -1631,7 +1637,7 @@ async def agent_playground_stream(request: Request, agent_id: str):
             for trace_payload in _drain_trace_events():
                 yield trace_payload
 
-            current_memory_id = getattr(agent_instance, "_current_memory_id", None)
+            current_memory_id = stream_state.get("memory_id")
             if current_memory_id:
                 current_memory_id = _to_text(current_memory_id).strip()
             if current_memory_id:
@@ -1655,14 +1661,6 @@ async def agent_playground_stream(request: Request, agent_id: str):
             error_msg = json.dumps(f"Error: {exc}")
             yield f"data: {error_msg}\n\n"
             yield "data: [DONE]\n\n"
-        finally:
-            if agent_instance is not None and hasattr(
-                agent_instance, "set_stream_event_callback"
-            ):
-                try:
-                    agent_instance.set_stream_event_callback(None)
-                except Exception:
-                    pass
 
     return StreamingResponse(
         _event_stream(),
@@ -2094,7 +2092,15 @@ async def agent_playground_config_update(request: Request, agent_id: str):
         llm_config=llm_config,
         tools=getattr(existing, "tools", None),
         delegates=getattr(existing, "delegates", None),
+        embedding_config=getattr(existing, "embedding_config", None),
         semantic_cache_config=getattr(existing, "semantic_cache_config", None),
+        tool_result_policy=getattr(existing, "tool_result_policy", None),
+        context_policy=getattr(existing, "context_policy", None),
+        retrieval_policy=getattr(existing, "retrieval_policy", None),
+        delegation_config=getattr(existing, "delegation_config", None),
+        skill_retrieval=bool(getattr(existing, "skill_retrieval", False)),
+        skill_retrieval_config=getattr(existing, "skill_retrieval_config", None),
+        semantic_layer_config=getattr(existing, "semantic_layer_config", None),
         context_window_tokens=getattr(existing, "context_window_tokens", None),
         internet_access_provider=internet_value,
         internet_access_config=internet_config_value,

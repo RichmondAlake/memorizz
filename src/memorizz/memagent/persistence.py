@@ -124,6 +124,7 @@ def save_agent(agent):
             semantic_cache_config=semantic_cache_config_to_save,
             tool_result_policy=agent.tool_result_policy.to_dict(),
             context_policy=agent.context_policy.to_dict(),
+            retrieval_policy=agent.retrieval_policy.to_dict(),
             delegation_config=normalize_delegation_config(
                 agent.delegation_config, for_persistence=True
             ),
@@ -544,6 +545,10 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     if not isinstance(saved_context_policy, dict):
         saved_context_policy = None
 
+    saved_retrieval_policy = getattr(saved_memagent, "retrieval_policy", None)
+    if not isinstance(saved_retrieval_policy, dict):
+        saved_retrieval_policy = None
+
     raw_skill_retrieval = getattr(saved_memagent, "skill_retrieval", False)
     saved_skill_retrieval = (
         raw_skill_retrieval if isinstance(raw_skill_retrieval, bool) else False
@@ -601,6 +606,7 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
             saved_tool_result_policy,
         ),
         context_policy=overrides.get("context_policy", saved_context_policy),
+        retrieval_policy=overrides.get("retrieval_policy", saved_retrieval_policy),
         skill_retrieval=overrides.get("skill_retrieval", saved_skill_retrieval),
         skill_retrieval_config=overrides.get(
             "skill_retrieval_config",

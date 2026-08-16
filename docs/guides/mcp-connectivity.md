@@ -11,6 +11,14 @@ resource templates, and list/get prompts over:
 MCP calls are available to the agent through `mcp_*` facade tools, in the local
 UI under **MCP Connections**, and through `memorizz mcp`.
 
+Install the optional protocol and credential dependencies first:
+
+```bash
+pip install "memorizz[mcp]"
+# For the MCP management UI as well:
+pip install "memorizz[mcp,ui]"
+```
+
 This page covers MemoRizz as an MCP client. To make MemoRizz memory and agents
 available to other MCP clients, see [Expose MemoRizz as an MCP server](mcp-server.md).
 
