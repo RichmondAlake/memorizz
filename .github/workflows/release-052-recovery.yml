@@ -1,0 +1,95 @@
+name: Recover MemoRizz 0.5.2 Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/release-052-recovery.yml"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    if: "${{ github.event.head_commit.message == 'chore: recover v0.5.2 release' }}"
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v0.5.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download and verify immutable PyPI artifacts
+        run: |
+          mkdir -p dist
+          python - <<'PY'
+          import hashlib
+          import json
+          import urllib.request
+          from pathlib import Path
+
+          expected = {
+              "memorizz-0.5.2-py3-none-any.whl":
+                  "992115bb74c37536d5c1bc19546b83893c513115c5fca4f8db14dc4ec782a7c8",
+              "memorizz-0.5.2.tar.gz":
+                  "3a8d574014a0e56f8bac4150634d705d11fa4fa52b05ba349457632a2798a996",
+          }
+          with urllib.request.urlopen(
+              "https://pypi.org/pypi/memorizz/0.5.2/json"
+          ) as response:
+              metadata = json.load(response)
+          urls = {item["filename"]: item for item in metadata["urls"]}
+          if set(urls) != set(expected):
+              raise SystemExit(
+                  f"Unexpected PyPI artifacts: {set(urls)} != {set(expected)}"
+              )
+          for filename, digest in expected.items():
+              target = Path("dist") / filename
+              urllib.request.urlretrieve(urls[filename]["url"], target)
+              actual = hashlib.sha256(target.read_bytes()).hexdigest()
+              if actual != digest:
+                  raise SystemExit(f"Digest mismatch for {filename}: {actual}")
+          print("Verified immutable PyPI artifacts for MemoRizz 0.5.2")
+          PY
+
+      - name: Extract release notes
+        run: |
+          awk '
+            /^## 0\.5\.2/ { emitting=1 }
+            /^## 0\.5\.1/ { emitting=0 }
+            emitting { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.5.2
+          name: MemoRizz 0.5.2
+          body_path: release-notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
+
+      - name: Publish npm shim
+        working-directory: packaging/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+        run: |
+          test -n "$NODE_AUTH_TOKEN" || {
+            echo "::error::NPM_TOKEN is not configured"
+            exit 1
+          }
+          if npm view "memorizz@0.5.2" version >/dev/null 2>&1; then
+            echo "npm already contains memorizz@0.5.2; skipping duplicate publish."
+            exit 0
+          fi
+          npm publish --provenance --access public
