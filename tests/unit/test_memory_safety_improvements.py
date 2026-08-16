@@ -353,7 +353,10 @@ def test_semantic_cache_defaults_to_session_and_fingerprints_request_context():
 
 @pytest.mark.unit
 def test_mcp_dependencies_are_optional_and_capabilities_are_explicit():
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+        import tomli as tomllib
 
     project_root = Path(__file__).resolve().parents[2]
     with (project_root / "pyproject.toml").open("rb") as handle:
