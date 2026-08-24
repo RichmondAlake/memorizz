@@ -6,14 +6,18 @@
 
 from .entity_memory import (
     EntityAttribute,
+    EntityAttributeInput,
     EntityMemory,
     EntityMemoryRecord,
     EntityRelation,
+    EntityRelationInput,
 )
 
 __all__ = [
     "EntityMemory",
     "EntityMemoryRecord",
     "EntityAttribute",
+    "EntityAttributeInput",
     "EntityRelation",
+    "EntityRelationInput",
 ]

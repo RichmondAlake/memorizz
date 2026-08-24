@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
@@ -41,10 +41,45 @@ _PROFILE_QUERY_TERMS = frozenset(
 )
 
 
+class EntityAttributeInput(BaseModel):
+    """Model-facing contract for a single entity-memory fact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        validation_alias=AliasChoices("name", "attribute", "attribute_name", "key"),
+        description="Stable attribute name, for example role or preferred_language.",
+    )
+    value: str = Field(description="The factual value to store for this attribute.")
+    confidence: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Confidence from 0.0 to 1.0.",
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="Optional non-secret provenance for the fact.",
+    )
+
+
+class EntityRelationInput(BaseModel):
+    """Model-facing contract for a relation between two entities."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str = Field(description="Target entity identifier.")
+    relation_type: str = Field(description="Relationship label, for example works_on.")
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class EntityAttribute(BaseModel):
     """Represents a single attribute associated with an entity."""
 
-    name: str
+    name: str = Field(
+        validation_alias=AliasChoices("name", "attribute", "attribute_name", "key")
+    )
     value: str
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     source: Optional[str] = None

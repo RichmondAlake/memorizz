@@ -51,6 +51,7 @@ from ..conversation_history import is_trace_bundle_entry
 from ..enums import ApplicationMode, ApplicationModeConfig, MemoryType, Role
 from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
+from ..long_term.semantic.entity_memory import EntityAttributeInput, EntityRelationInput
 from ..task_decomposition import normalize_delegation_config
 from ..tooling import (
     ContextPolicy,
@@ -7446,19 +7447,41 @@ class MemAgent:
             """Normalize attributes from various formats to list of dicts with name/value."""
             if not attrs:
                 return None
+            parsed = attrs
             if isinstance(attrs, str):
                 if not attrs.strip():
                     return None
                 try:
                     parsed = json.loads(attrs)
-                    if isinstance(parsed, dict):
-                        return [{"name": k, "value": str(v)} for k, v in parsed.items()]
-                    return parsed if isinstance(parsed, list) else None
                 except (json.JSONDecodeError, TypeError):
                     return None
-            if isinstance(attrs, dict):
-                return [{"name": k, "value": str(v)} for k, v in attrs.items()]
-            return attrs if isinstance(attrs, list) else None
+            if isinstance(parsed, dict):
+                aliases = {"name", "attribute", "attribute_name", "key"}
+                if "value" in parsed and aliases.intersection(parsed):
+                    parsed = [parsed]
+                else:
+                    parsed = [
+                        {"name": key, "value": str(value)}
+                        for key, value in parsed.items()
+                    ]
+            if not isinstance(parsed, list):
+                return None
+
+            normalized = []
+            for index, raw in enumerate(parsed):
+                if isinstance(raw, EntityAttributeInput):
+                    item = raw
+                elif isinstance(raw, dict):
+                    payload = dict(raw)
+                    if "value" in payload and not isinstance(payload["value"], str):
+                        payload["value"] = str(payload["value"])
+                    item = EntityAttributeInput.model_validate(payload)
+                else:
+                    raise ValueError(
+                        f"Entity attribute at index {index} must be an object."
+                    )
+                normalized.append(item.model_dump(exclude_none=True))
+            return normalized
 
         def _normalize_json_field(field, expected_type):
             """Normalize JSON string fields to expected type."""
@@ -7474,12 +7497,29 @@ class MemAgent:
                     return None
             return field if isinstance(field, expected_type) else None
 
+        def _normalize_relations(relations):
+            parsed = _normalize_json_field(relations, list)
+            if parsed is None:
+                return None
+            normalized = []
+            for index, raw in enumerate(parsed):
+                if isinstance(raw, EntityRelationInput):
+                    item = raw
+                elif isinstance(raw, dict):
+                    item = EntityRelationInput.model_validate(raw)
+                else:
+                    raise ValueError(
+                        f"Entity relation at index {index} must be an object."
+                    )
+                normalized.append(item.model_dump(exclude_none=True))
+            return normalized
+
         def entity_memory_upsert(
             entity_id: str = None,
             name: str = None,
             entity_type: str = None,
-            attributes: Optional[List[Dict[str, Any]]] = None,
-            relations: Optional[List[Dict[str, Any]]] = None,
+            attributes: Optional[List[EntityAttributeInput]] = None,
+            relations: Optional[List[EntityRelationInput]] = None,
             metadata: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
             """Insert or update a structured entity in the active run scope."""
@@ -7496,7 +7536,7 @@ class MemAgent:
                 name=name,
                 entity_type=entity_type,
                 attributes=_normalize_attributes(attributes),
-                relations=_normalize_json_field(relations, list),
+                relations=_normalize_relations(relations),
                 metadata=_normalize_json_field(metadata, dict),
                 memory_id=resolved_memory_id,
                 user_id=self._current_user_id,

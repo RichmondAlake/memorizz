@@ -2,7 +2,15 @@
 
 ## Unreleased
 
-_No unreleased changes._
+### Fixed
+
+- Entity-memory tools now publish an explicit nested `name`/`value` schema,
+  canonicalize common model-generated attribute aliases such as `attribute`
+  and `attribute_name`, and reject unknown model-facing fields. This prevents a
+  valid user-profile fact from failing Pydantic validation before persistence.
+- Callable tool schemas now inline annotation-local Pydantic definitions, so
+  nested input models do not emit broken root-level `$ref` pointers when sent
+  to OpenAI-, Anthropic-, or MCP-compatible providers.
 
 ## 0.6.0 — 2026-08-24
 

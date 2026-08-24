@@ -142,6 +142,40 @@ def test_upsert_merges_attributes(
     assert stored_attrs == {"language": "English", "timezone": "PST"}
 
 
+def test_upsert_canonicalizes_common_attribute_name_aliases(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    entity_store.upsert_entity(
+        name="Richmond Alake",
+        entity_type="person",
+        attributes=[
+            {"attribute": "name", "value": "Richmond Alake"},
+            {"attribute_name": "role", "value": "AI Memory Engineer"},
+        ],
+        memory_id="primary-user",
+    )
+
+    stored = next(iter(provider.records.values()))
+    assert stored["attributes"] == [
+        {
+            "name": "name",
+            "value": "Richmond Alake",
+            "confidence": 0.8,
+            "source": None,
+            "created_at": stored["attributes"][0]["created_at"],
+            "updated_at": stored["attributes"][0]["updated_at"],
+        },
+        {
+            "name": "role",
+            "value": "AI Memory Engineer",
+            "confidence": 0.8,
+            "source": None,
+            "created_at": stored["attributes"][1]["created_at"],
+            "updated_at": stored["attributes"][1]["updated_at"],
+        },
+    ]
+
+
 def test_record_attribute_creates_entity(
     provider: InMemoryEntityProvider, entity_store: EntityMemory
 ):

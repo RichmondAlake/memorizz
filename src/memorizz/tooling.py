@@ -61,13 +61,59 @@ def serialize_tool_result(value: Any) -> str:
         return str(value)
 
 
+def _inline_local_schema_refs(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a self-contained annotation schema with local refs expanded.
+
+    ``TypeAdapter`` places ``$defs`` beside the schema it generates. Tool
+    parameters are generated one annotation at a time, so leaving those defs
+    inside an individual property produces refs such as
+    ``#/$defs/EntityAttributeInput`` that incorrectly point at the eventual
+    tool-schema root. Inlining keeps provider tool schemas valid and makes the
+    nested fields explicit to the model. Recursive input models are deliberately
+    reduced to an object at the recursive edge; recursive tool arguments are not
+    a useful or safe model-facing contract.
+    """
+    definitions = schema.get("$defs")
+    if not isinstance(definitions, dict) or not definitions:
+        return schema
+
+    def expand(value: Any, active: tuple[str, ...] = ()) -> Any:
+        if isinstance(value, list):
+            return [expand(item, active) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        ref = value.get("$ref")
+        prefix = "#/$defs/"
+        if isinstance(ref, str) and ref.startswith(prefix):
+            definition_name = ref[len(prefix) :]
+            overlay = {key: item for key, item in value.items() if key != "$ref"}
+            target = definitions.get(definition_name)
+            if isinstance(target, dict):
+                if definition_name in active:
+                    return {
+                        "type": "object",
+                        **{key: expand(item, active) for key, item in overlay.items()},
+                    }
+                return expand(
+                    {**target, **overlay},
+                    (*active, definition_name),
+                )
+
+        return {
+            key: expand(item, active) for key, item in value.items() if key != "$defs"
+        }
+
+    return expand(schema)
+
+
 def _schema_for_annotation(annotation: Any) -> Dict[str, Any]:
     if annotation is inspect.Parameter.empty:
         return {"type": "string"}
     try:
         schema = TypeAdapter(annotation).json_schema(mode="validation")
         if isinstance(schema, dict):
-            return schema
+            return _inline_local_schema_refs(schema)
     except Exception:
         pass
     mapping = {

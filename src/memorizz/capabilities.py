@@ -214,6 +214,11 @@ def capabilities() -> Dict[str, Any]:
                 "explicit_legacy_migration": True,
                 "control_plane_parity": True,
             },
+            "structured_entity_memory_tools": {
+                "available": True,
+                "nested_input_schema": True,
+                "attribute_alias_normalization": True,
+            },
             "host_completion_policy": {
                 "available": True,
                 "stream_buffered_until_acceptance": True,
