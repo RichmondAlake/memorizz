@@ -120,6 +120,27 @@ def test_upsert_normalizes_production_attribute_alias_payload(mock_memory_provid
     ]
 
 
+def test_upsert_normalizes_list_shorthand_attribute_maps(mock_memory_provider):
+    agent = _assistant(mock_memory_provider)
+    upsert = Mock(return_value="entity-a")
+    agent.entity_memory_manager.upsert_entity_from_tool = upsert
+    agent._current_memory_id = "primary-user-a"
+    agent._current_user_id = "user-a"
+
+    tool = agent.tool_manager.tools["entity_memory_upsert"]["function"]
+    result = tool(
+        name="project-a",
+        entity_type="project",
+        attributes=[{"status": "verified", "priority": 1}],
+    )
+
+    assert result["entity_id"] == "entity-a"
+    assert upsert.call_args.kwargs["attributes"] == [
+        {"name": "status", "value": "verified", "confidence": 0.8},
+        {"name": "priority", "value": "1", "confidence": 0.8},
+    ]
+
+
 def test_upsert_tool_schema_exposes_required_nested_attribute_fields(
     mock_memory_provider,
 ):

@@ -7473,6 +7473,35 @@ class MemAgent:
                     item = raw
                 elif isinstance(raw, dict):
                     payload = dict(raw)
+                    aliases = {"name", "attribute", "attribute_name", "key"}
+                    if "value" not in payload and not aliases.intersection(payload):
+                        reserved = {
+                            "confidence",
+                            "source",
+                            "created_at",
+                            "updated_at",
+                            "metadata",
+                        }
+                        facts = [
+                            (key, value)
+                            for key, value in payload.items()
+                            if key not in reserved
+                        ]
+                        if facts:
+                            shared = {
+                                key: value
+                                for key, value in payload.items()
+                                if key in reserved
+                            }
+                            for key, value in facts:
+                                fact_payload = {
+                                    **shared,
+                                    "name": key,
+                                    "value": str(value),
+                                }
+                                fact = EntityAttributeInput.model_validate(fact_payload)
+                                normalized.append(fact.model_dump(exclude_none=True))
+                            continue
                     if "value" in payload and not isinstance(payload["value"], str):
                         payload["value"] = str(payload["value"])
                     item = EntityAttributeInput.model_validate(payload)
