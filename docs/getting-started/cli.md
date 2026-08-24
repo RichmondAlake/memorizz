@@ -13,7 +13,7 @@ memory, no API key) and can launch the [Local UI](local-ui.md).
 The CLI ships in the base package, so the `memorizz` command works straight away:
 
 ```bash
-uv tool install memorizz       # recommended
+uv tool install --python 3.12 memorizz       # recommended
 pipx install memorizz
 pip install memorizz
 ```
@@ -22,7 +22,7 @@ For the **fully-local Ollama stack** (Ollama SDK + FAISS filesystem vector
 store), add the `local` extra:
 
 ```bash
-uv tool install "memorizz[local]"     # == memorizz[ollama,filesystem]
+uv tool install --python 3.12 "memorizz[local]"  # == memorizz[ollama,filesystem]
 ```
 
 Other providers are extras: `memorizz[anthropic]`, `memorizz[mongodb]`,

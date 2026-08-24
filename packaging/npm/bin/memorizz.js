@@ -11,6 +11,7 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const VERSION = require("../package.json").version;
+const PYTHON_VERSION = "3.12";
 const PACKAGE_SPEC = `memorizz[mcp]==${VERSION}`;
 const EXPECTED_VERSION = `memorizz ${VERSION}`;
 
@@ -84,11 +85,15 @@ if (exe) {
     process.stderr.write(
       `[memorizz] MemoRizz ${VERSION} is not installed and uv was not found.\n` +
         "  Try: npm rebuild -g memorizz   (re-runs the bootstrapper)\n" +
-        `  Or:  uv tool install '${PACKAGE_SPEC}'\n`
+        `  Or:  uv tool install --python ${PYTHON_VERSION} '${PACKAGE_SPEC}'\n`
     );
     process.exit(127);
   }
-  res = spawnSync(uv, ["tool", "run", "--from", PACKAGE_SPEC, "memorizz", ...args], { stdio: "inherit" });
+  res = spawnSync(
+    uv,
+    ["tool", "run", "--python", PYTHON_VERSION, "--from", PACKAGE_SPEC, "memorizz", ...args],
+    { stdio: "inherit" }
+  );
 }
 
 process.exit(res.status == null ? 1 : res.status);

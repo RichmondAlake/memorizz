@@ -3,8 +3,9 @@
 //
 // Convenience bootstrapper: `npm i -g memorizz` installs the real Python CLI via
 // `uv` (a standalone binary that manages its own Python — no pre-existing Python
-// required). This is NOT the canonical install path; `uv tool install memorizz`
-// and `pipx install memorizz` are first-class. Fails soft: a bootstrap error
+// required). This is NOT the canonical install path; `uv tool install
+// --python 3.12 memorizz` and `pipx install memorizz` are first-class. Fails
+// soft: a bootstrap error
 // never bricks the package — bin/memorizz.js retries via `uv tool run` on first
 // use.
 "use strict";
@@ -15,6 +16,7 @@ const path = require("path");
 const fs = require("fs");
 
 const VERSION = require("../package.json").version;
+const PYTHON_VERSION = "3.12";
 // The npm bridge represents the complete command-line product, including MCP
 // client/server commands whose Python dependencies are optional for library-only
 // installs.
@@ -73,7 +75,11 @@ function main() {
   let uv = findUv() || installUv();
   if (uv) {
     log(`Installing ${PACKAGE_SPEC} via uv…`);
-    const r = spawnSync(uv, ["tool", "install", "--force", PACKAGE_SPEC], { stdio: "inherit" });
+    const r = spawnSync(
+      uv,
+      ["tool", "install", "--python", PYTHON_VERSION, "--force", PACKAGE_SPEC],
+      { stdio: "inherit" }
+    );
     if (r.status === 0) {
       log("Done. Run:  memorizz");
       return;
@@ -95,7 +101,7 @@ function main() {
       "Could not bootstrap memorizz automatically.",
       "Install it manually with either:",
       "  curl -LsSf https://astral.sh/uv/install.sh | sh",
-      `  uv tool install '${PACKAGE_SPEC}'`,
+      `  uv tool install --python ${PYTHON_VERSION} '${PACKAGE_SPEC}'`,
       `  pipx install '${PACKAGE_SPEC}'`,
       "The `memorizz` launcher will also retry via `uv tool run` on first use.",
     ].join("\n")

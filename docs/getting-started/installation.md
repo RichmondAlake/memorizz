@@ -12,12 +12,14 @@ the integrations your application uses.
 | Goal | Install | Start with |
 |---|---|---|
 | Build a Python application | `pip install memorizz` | [SDK quickstart](python-sdk-quickstart.md) |
-| Use the terminal agent | `uv tool install memorizz` | [CLI guide](cli.md) |
+| Use the terminal agent | `uv tool install --python 3.12 memorizz` | [CLI guide](cli.md) |
 | Operate agents in a browser | `pip install "memorizz[ui]"` | [Local UI](local-ui.md) |
 | Connect to or expose MCP | `pip install "memorizz[mcp]"` | [MCP client](../guides/mcp-connectivity.md) or [server](../guides/mcp-server.md) |
 
-`pipx install memorizz` is equivalent to `uv tool install memorizz` for an
-isolated global CLI. Use a project virtual environment for SDK applications.
+`pipx install memorizz` is equivalent to a uv tool install when pipx uses
+Python 3.10 or newer. The explicit uv Python pin is portable across hosts with
+older system Python versions. Use a project virtual environment for SDK
+applications.
 
 ## Base installation
 

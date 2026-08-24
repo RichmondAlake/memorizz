@@ -69,5 +69,5 @@ if have python3; then
 fi
 
 ERR "Could not install memorizz automatically."
-ERR "Install uv from https://astral.sh/uv then run:  uv tool install memorizz"
+ERR "Install uv from https://astral.sh/uv then run:  uv tool install --python 3.12 memorizz"
 exit 1

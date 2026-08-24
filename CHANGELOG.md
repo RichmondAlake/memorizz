@@ -4,6 +4,16 @@
 
 _No unreleased changes._
 
+## 0.6.3 — 2026-08-25
+
+### Fixed
+
+- The npm postinstall bootstrap and on-demand launcher fallback now explicitly
+  request uv-managed Python 3.12. The npm CLI therefore works on hosts whose
+  default system Python is older than MemoRizz's supported Python range.
+- npm launcher tests now cover both the pinned bootstrap and recovery paths,
+  including their managed-Python requirement.
+
 ## 0.6.2 — 2026-08-25
 
 ### Fixed

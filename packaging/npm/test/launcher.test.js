@@ -8,6 +8,7 @@ const { spawnSync } = require("node:child_process");
 
 const packageRoot = path.resolve(__dirname, "..");
 const launcher = path.join(packageRoot, "bin", "memorizz.js");
+const postinstall = path.join(packageRoot, "scripts", "postinstall.js");
 const version = require(path.join(packageRoot, "package.json")).version;
 
 function executable(target, source) {
@@ -29,6 +30,8 @@ function fixture(managedVersion) {
       )}); process.exit(0); }\n` +
       `if (args[0] === "tool" && args[1] === "run") { ` +
       `console.log("fallback:" + args.join(" ")); process.exit(0); }\n` +
+      `if (args[0] === "tool" && args[1] === "install") { ` +
+      `console.log("install:" + args.join(" ")); process.exit(0); }\n` +
       `process.exit(2);`
   );
   executable(
@@ -90,7 +93,30 @@ if (process.platform === "win32") {
       assert.equal(result.status, 0, result.stderr);
       assert.equal(
         result.stdout.trim(),
-        `fallback:tool run --from memorizz[mcp]==${version} memorizz --version`
+        `fallback:tool run --python 3.12 --from memorizz[mcp]==${version} memorizz --version`
+      );
+    } finally {
+      fs.rmSync(setup.root, { force: true, recursive: true });
+    }
+  });
+
+  check("bootstraps the pinned CLI with a managed Python", () => {
+    const setup = fixture(version);
+    try {
+      const result = spawnSync(process.execPath, [postinstall], {
+        encoding: "utf8",
+        env: setup.env,
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(
+        result.stdout,
+        new RegExp(
+          `install:tool install --python 3\\.12 --force memorizz\\[mcp\\]==${version.replace(
+            /\\./g,
+            "\\."
+          )}`
+        )
       );
     } finally {
       fs.rmSync(setup.root, { force: true, recursive: true });
