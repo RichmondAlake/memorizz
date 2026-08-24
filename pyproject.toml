@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.6.0"
+version = "0.6.1"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -189,6 +189,12 @@ Issues = "https://github.com/RichmondAlake/memorizz/issues"
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.hatch.build.targets.wheel]
+# Hatchling 1.32 defaults to Core Metadata 2.5, which the current stable
+# Twine release does not yet validate. Keep release artifacts on the broadly
+# supported 2.4 format until the upload toolchain has end-to-end 2.5 support.
+core-metadata-version = "2.4"
+
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
 
@@ -211,6 +217,7 @@ allow-direct-references = true
 "src/memorizz/sandbox/MemorizzGraalSandbox.java" = "memorizz/sandbox/MemorizzGraalSandbox.java"
 
 [tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 exclude = [
     ".claude/**",
     "temp_unpack*",

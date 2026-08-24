@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+_No unreleased changes._
+
+## 0.6.1 — 2026-08-25
+
 ### Fixed
 
 - Entity-memory tools now publish an explicit nested `name`/`value` schema,
@@ -11,6 +15,11 @@
 - Callable tool schemas now inline annotation-local Pydantic definitions, so
   nested input models do not emit broken root-level `$ref` pointers when sent
   to OpenAI-, Anthropic-, or MCP-compatible providers.
+- Release artifacts explicitly target Core Metadata 2.4 so current stable
+  Twine and PyPI validation remain compatible with newer Hatchling defaults.
+- The npm launcher now rejects stale or self-resolving `memorizz` executables,
+  prefers the exact uv-managed release, and falls back to the version-pinned
+  package specification instead of silently running an older installation.
 
 ## 0.6.0 — 2026-08-24
 

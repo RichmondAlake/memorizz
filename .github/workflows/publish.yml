@@ -251,6 +251,10 @@ jobs:
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
+      - name: Test npm launcher
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: packaging/npm
+        run: node test/launcher.test.js
       - name: Sync version + publish shim
         if: steps.gate.outputs.enabled == 'true'
         working-directory: packaging/npm

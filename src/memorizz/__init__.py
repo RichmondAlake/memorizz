@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
