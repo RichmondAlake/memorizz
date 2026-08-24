@@ -130,6 +130,11 @@ _No unreleased changes._
   credentials before launch, Codex verifies either an environment key or its
   cached CLI login, and runtime 401/login failures are normalized without
   exposing vendor output or credential values.
+* Persisted harness-backed agents can be created on developer, CI, or
+  deployment hosts before a vendor CLI is installed. Construction still
+  validates adapter registration and native recursion, while executable and
+  authentication readiness remain fail-closed at execution with the same
+  structured remediation across SDK, CLI, UI, and MCP.
 * Real Codex + Claude Code notebook execution now preserves numeric token-usage
   telemetry through redaction, falls back to tenant/thread-scoped lexical
   retrieval when filesystem records have no vectors, and uses a realistic

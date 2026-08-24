@@ -793,23 +793,30 @@ class MemAgent:
         if self.meta_harness_mode and self.meta_harness is None:
             errors.append("meta_harness_mode requires a configured meta-harness")
         if self.meta_harness is not None and self.default_harness != "auto":
-            try:
-                capability = self.meta_harness.probe(self.default_harness)
-                if not capability.get("ready", capability.get("available")):
-                    errors.append(
-                        f"default harness {self.default_harness!r} is unavailable: "
-                        f"{capability.get('error') or 'probe failed'}"
-                    )
-                elif (
-                    self.default_harness in {"native", "memagent", "memorizz"}
-                    and str((capability.get("metadata") or {}).get("agent_id") or "")
-                    == self.agent_id
-                ):
-                    errors.append(
-                        "a MemAgent cannot use itself as its default native harness"
-                    )
-            except Exception as exc:
-                errors.append(f"default harness validation failed: {exc}")
+            normalized_harness = {
+                "claude": "claude-code",
+                "claudecode": "claude-code",
+                "open-hands": "openhands",
+                "native": "memagent",
+                "memorizz": "memagent",
+            }.get(self.default_harness, self.default_harness)
+            adapters = getattr(self.meta_harness, "adapters", {})
+            if normalized_harness not in adapters:
+                errors.append(
+                    f"default harness {self.default_harness!r} is not registered"
+                )
+            elif normalized_harness == "memagent":
+                try:
+                    capability = self.meta_harness.probe(normalized_harness)
+                    if (
+                        str((capability.get("metadata") or {}).get("agent_id") or "")
+                        == self.agent_id
+                    ):
+                        errors.append(
+                            "a MemAgent cannot use itself as its default native harness"
+                        )
+                except Exception as exc:
+                    errors.append(f"default harness validation failed: {exc}")
         report = {"ok": not errors, "errors": errors, "agent_id": self.agent_id}
         if errors:
             raise ValueError("; ".join(errors))

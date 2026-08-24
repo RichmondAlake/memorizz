@@ -585,6 +585,13 @@ memorizz agents create \
   --json
 ```
 
+Agent creation validates that the selected adapter is registered, but it does
+not require that vendor CLI or its credentials to exist on the machine creating
+the record. This keeps persisted agent configuration portable across developer,
+CI, and production hosts. `memorizz harness doctor` reports host readiness, and
+every execution still fails closed with the structured remediation above when
+the executable or authentication is unavailable.
+
 ## Local UI
 
 Start the UI and open **Agent Harnesses**:

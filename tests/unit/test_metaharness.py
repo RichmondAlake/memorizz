@@ -1695,6 +1695,40 @@ def test_memagent_delegate_mode_registers_bounded_harness_tools(
         service.close()
 
 
+def test_memagent_configuration_allows_registered_unready_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Portable agent configuration must not depend on the builder host's CLIs."""
+    from memorizz.memagent.builders import MemAgentBuilder
+
+    monkeypatch.setenv("MEMORIZZ_MEMORY_ROOT", str(tmp_path / "memory"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = MetaHarness(
+        adapters=[CodexHarness(command=str(tmp_path / "missing-codex"))],
+        run_store=SQLiteHarnessRunStore(tmp_path / "runs.sqlite3"),
+        approval_store=SQLiteApprovalStore(tmp_path / "approvals.sqlite3"),
+        allowed_workspace_roots=[str(workspace)],
+    )
+    agent = (
+        MemAgentBuilder()
+        .with_execution_harness(
+            "codex",
+            meta_harness=service,
+            config={"workspace": str(workspace)},
+        )
+        .build(validate=True)
+    )
+    try:
+        assert agent.validate_configuration()["ok"] is True
+        capability = service.probe("codex")
+        assert capability["ready"] is False
+        assert capability["error_code"] == "harness_unavailable"
+    finally:
+        agent.close(close_memory_provider=True)
+        service.close()
+
+
 def test_reported_cost_budget_is_enforced_for_custom_adapters(tmp_path: Path) -> None:
     service = _service(tmp_path)
     workspace = tmp_path / "workspace"
