@@ -369,7 +369,11 @@ class MemoryManager:
                     results = list(results)
                 except TypeError:
                     # Single dict from "find_one"-style helpers.
-                    results = [results] if results else []
+                    # Any other non-iterable value violates the provider
+                    # contract and must degrade to no evidence. Treating a
+                    # truthy sentinel (for example a client mock) as a memory
+                    # row leaks arbitrary attributes into provenance fields.
+                    results = [results] if isinstance(results, dict) else []
 
             # Providers may accept **kwargs yet not push every scope into their
             # native query. Enforce exact boundaries again in the manager so a

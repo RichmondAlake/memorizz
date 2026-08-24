@@ -182,6 +182,52 @@ class EmbeddingManager:
                     self._embedding_cache.popitem(last=False)
         return result
 
+    def get_embeddings(self, texts: List[str], **kwargs) -> List[List[float]]:
+        """Embed a batch while preserving the single-item LRU semantics.
+
+        Providers may expose an optimized ``get_embeddings`` implementation;
+        otherwise this method falls back to the stable single-item contract.
+        """
+        values = [str(text) for text in texts]
+        if not values:
+            return []
+        provider_batch = getattr(self._provider, "get_embeddings", None)
+        if kwargs or not callable(provider_batch):
+            return [self.get_embedding(text, **kwargs) for text in values]
+
+        results: List[Optional[List[float]]] = [None] * len(values)
+        missing_indexes: List[int] = []
+        missing_texts: List[str] = []
+        with self._embedding_cache_lock:
+            for index, text in enumerate(values):
+                cached = self._embedding_cache.get(text)
+                if cached is None:
+                    missing_indexes.append(index)
+                    missing_texts.append(text)
+                else:
+                    self._embedding_cache.move_to_end(text)
+                    results[index] = list(cached)
+
+        if missing_texts:
+            generated = provider_batch(missing_texts)
+            if len(generated) != len(missing_texts):
+                raise RuntimeError(
+                    "Embedding provider returned a different batch length "
+                    f"({len(generated)} != {len(missing_texts)})"
+                )
+            with self._embedding_cache_lock:
+                for index, text, embedding in zip(
+                    missing_indexes, missing_texts, generated
+                ):
+                    value = list(embedding)
+                    results[index] = value
+                    if text:
+                        self._embedding_cache[text] = value
+                        self._embedding_cache.move_to_end(text)
+                while len(self._embedding_cache) > _EMBEDDING_CACHE_MAX_ENTRIES:
+                    self._embedding_cache.popitem(last=False)
+        return [list(item or []) for item in results]
+
     def get_dimensions(self) -> int:
         """Get the dimensionality of embeddings from the current provider."""
         return self._provider.get_dimensions()

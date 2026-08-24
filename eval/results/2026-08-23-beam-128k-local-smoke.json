@@ -1,0 +1,2913 @@
+{
+  "answer_quality": {
+    "faithfulness": null,
+    "gold_evidence_oracle_score": 0.3888888888888889,
+    "grounded_rate": 0.6,
+    "memagent_end_to_end_score": null,
+    "reader_gap_to_oracle": 0.1388888888888889,
+    "retrieved_evidence_score": 0.25,
+    "score_conditioned_on_retrieval_hit": 0.3125,
+    "task_score": 0.25
+  },
+  "benchmark": "beam",
+  "benchmark_name": "BEAM",
+  "cases": [
+    {
+      "answers": [
+        "Based on the provided chat, there is no information related to how user feedback influenced UI/UX improvements."
+      ],
+      "case_id": "beam:128k:1:abstention:0",
+      "category": "abstention",
+      "citations": {
+        "citation_precision": 1.0,
+        "cited_source_ids": [
+          "116"
+        ],
+        "gold_citation_recall": null,
+        "grounding_status": "grounded",
+        "invalid_source_ids": [],
+        "valid_source_ids": [
+          "116"
+        ]
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 9.190827707992867,
+      "grounding_status": "grounded",
+      "judge": {
+        "raw": "{\"score\": 0, \"reason\": \"The reference answer indicates there is no information related to how user feedback influenced UI/UX improvements, contradicting the candidate response.\"}",
+        "reason": "The reference answer indicates there is no information related to how user feedback influenced UI/UX improvements, contradicting the candidate response.",
+        "score": 0.0
+      },
+      "memory_context_chars": 8406,
+      "memory_context_token_estimate": 2102,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": null,
+      "prediction": "The user feedback influenced the UI/UX improvements by guiding the changes to be made before the public launch. The user wants to ensure that the UI/UX is improved based on this feedback.",
+      "query_variants": [
+        "How did the user feedback influence the UI/UX improvements I made before the public launch?",
+        "Retrieve prior memory about date time timeline before after relative absolute chronology."
+      ],
+      "question": "How did the user feedback influence the UI/UX improvements I made before the public launch?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": false,
+        "repair_succeeded": false,
+        "source_ids": [
+          "116"
+        ],
+        "structured": true
+      },
+      "relevant_source_ids": [],
+      "retrieval": {
+        "mrr": null,
+        "ndcg_at_k": null,
+        "recall_at_k": null
+      },
+      "retrieval_hit": false,
+      "retrieval_seconds": 0.37818008300382644,
+      "retrieval_timing": {
+        "fusion_seconds": 0.15581804199609905,
+        "lexical_seconds": 0.010426291992189363,
+        "semantic_seconds": 0.21022499998798594
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.6666666666666666,
+          "final_rank": 1,
+          "fusion_score": 1.271311059598971,
+          "lane_ranks": {
+            "lexical": 1,
+            "semantic:0": 1,
+            "semantic:1": 161
+          },
+          "linked_source_ids": [],
+          "mmr_score": 1.144179953639074,
+          "parent_source_id": "116",
+          "rerank_score": 0.25318484177091666,
+          "rrf_score": 1.0,
+          "source_id": "116#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 2,
+          "fusion_score": 1.1207877059541231,
+          "lane_ranks": {
+            "lexical": 36,
+            "semantic:0": 201,
+            "semantic:1": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9992494758992514,
+          "parent_source_id": "15",
+          "rerank_score": 0.10206207261596577,
+          "rrf_score": 0.9054783950617283,
+          "source_id": "15#part-1#semantic-4",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 3,
+          "fusion_score": 1.109434290269428,
+          "lane_ranks": {
+            "lexical": 25,
+            "semantic:0": 127,
+            "semantic:1": 4
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9762686390202631,
+          "parent_source_id": "145",
+          "rerank_score": 0.11572751247156893,
+          "rrf_score": 0.8920751633986926,
+          "source_id": "145#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.3333333333333333,
+          "final_rank": 4,
+          "fusion_score": 1.0607355475507863,
+          "lane_ranks": {
+            "lexical": 8,
+            "semantic:0": 15,
+            "semantic:1": 109
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9473344065888111,
+          "parent_source_id": "179",
+          "rerank_score": 0.0601929265428846,
+          "rrf_score": 0.8350399419026869,
+          "source_id": "179#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 5,
+          "fusion_score": 1.0577530774341444,
+          "lane_ranks": {
+            "lexical": 33,
+            "semantic:0": 6,
+            "semantic:1": 45
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9426444363573967,
+          "parent_source_id": "181",
+          "rerank_score": 0.020515248496555453,
+          "rrf_score": 0.854675790159661,
+          "source_id": "181#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 6,
+          "fusion_score": 1.0473432820573745,
+          "lane_ranks": {
+            "lexical": 19,
+            "semantic:0": 137,
+            "semantic:1": 12
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.917608953851637,
+          "parent_source_id": "143",
+          "rerank_score": 0.13055824196677338,
+          "rrf_score": 0.8277595457623586,
+          "source_id": "143#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 7,
+          "fusion_score": 1.0340378888422304,
+          "lane_ranks": {
+            "lexical": 86,
+            "semantic:0": 108,
+            "semantic:1": 3
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8988159181398255,
+          "parent_source_id": "87",
+          "rerank_score": 0.05661385170722978,
+          "rrf_score": 0.8255458110861459,
+          "source_id": "87#part-1#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 8,
+          "fusion_score": 1.0093061946277866,
+          "lane_ranks": {
+            "lexical": 14,
+            "semantic:0": 37,
+            "semantic:1": 18
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.895978880950132,
+          "parent_source_id": "1",
+          "rerank_score": 0.10863489966773514,
+          "rrf_score": 0.7930109596776262,
+          "source_id": "1",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "116",
+        "15",
+        "145",
+        "179",
+        "181",
+        "143",
+        "87",
+        "1"
+      ],
+      "score": 0.0,
+      "scorer": "llm_judge",
+      "warnings": []
+    },
+    {
+      "answers": [
+        "I notice you've mentioned contradictory information about this. You said you have never written any Flask routes or handled HTTP requests in this project, but you also mentioned implementing a basic homepage route with Flask. Could you clarify which is correct?"
+      ],
+      "case_id": "beam:128k:1:contradiction_resolution:2",
+      "category": "contradiction-resolution",
+      "citations": {
+        "citation_precision": 1.0,
+        "cited_source_ids": [
+          "58"
+        ],
+        "gold_citation_recall": 0.5,
+        "grounding_status": "grounded",
+        "invalid_source_ids": [],
+        "valid_source_ids": [
+          "58"
+        ]
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 6.983186875004321,
+      "grounding_status": "grounded",
+      "judge": {
+        "raw": "{\"score\": 0, \"reason\": \"The response does not mention the contradictory information or both statements.\"}",
+        "reason": "The response does not mention the contradictory information or both statements.",
+        "score": 0.0
+      },
+      "memory_context_chars": 12343,
+      "memory_context_token_estimate": 3086,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": false,
+        "evidence_source_ids": [
+          "24",
+          "58"
+        ],
+        "generation_seconds": 3.1567520420067012,
+        "judge": {
+          "raw": "{\"score\": 0, \"reason\": \"The response does not mention the contradictory information or ask for clarification.\"}",
+          "reason": "The response does not mention the contradictory information or ask for clarification.",
+          "score": 0.0
+        },
+        "memory_context_chars": 2921,
+        "metric": "local_llm_judge",
+        "prediction": "No, you have not worked with Flask routes or handled HTTP requests in this project, so you are starting from scratch.",
+        "score": 0.0,
+        "source_ids": [
+          "58"
+        ],
+        "structured": true
+      },
+      "prediction": "No, I've never written any Flask routes or handled HTTP requests in this project, so I'm starting from scratch.",
+      "query_variants": [
+        "Have I worked with Flask routes and handled HTTP requests in this project?"
+      ],
+      "question": "Have I worked with Flask routes and handled HTTP requests in this project?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": false,
+        "repair_succeeded": false,
+        "source_ids": [
+          "58"
+        ],
+        "structured": true
+      },
+      "relevant_source_ids": [
+        "58",
+        "24"
+      ],
+      "retrieval": {
+        "mrr": 1.0,
+        "ndcg_at_k": 0.6131471927654584,
+        "recall_at_k": 0.5
+      },
+      "retrieval_hit": true,
+      "retrieval_seconds": 0.9628245420171879,
+      "retrieval_timing": {
+        "fusion_seconds": 0.26984074999927543,
+        "lexical_seconds": 0.010613624996040016,
+        "semantic_seconds": 0.6813230830011889
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.6666666666666666,
+          "final_rank": 1,
+          "fusion_score": 0.9891650632397063,
+          "lane_ranks": {
+            "lexical": 6,
+            "semantic:0": 10
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8902485569157357,
+          "parent_source_id": "58",
+          "rerank_score": 0.47140452079103173,
+          "rrf_score": 0.8851210517877183,
+          "source_id": "58#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.3333333333333333,
+          "final_rank": 2,
+          "fusion_score": 0.9706193939508423,
+          "lane_ranks": {
+            "lexical": 9,
+            "semantic:0": 5
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8690120000103035,
+          "parent_source_id": "39",
+          "rerank_score": 0.197305449466796,
+          "rrf_score": 0.9243569098641562,
+          "source_id": "39",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.3333333333333333,
+          "final_rank": 3,
+          "fusion_score": 0.9600756380928,
+          "lane_ranks": {
+            "lexical": 7,
+            "semantic:0": 6
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8506959812602642,
+          "parent_source_id": "57",
+          "rerank_score": 0.15161960871578067,
+          "rrf_score": 0.9206660301187662,
+          "source_id": "57#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.6666666666666666,
+          "final_rank": 4,
+          "fusion_score": 0.9501886378919515,
+          "lane_ranks": {
+            "lexical": 1,
+            "semantic:0": 12
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.84279192393989,
+          "parent_source_id": "66",
+          "rerank_score": 0.20016019225635892,
+          "rrf_score": 0.8868312757201644,
+          "source_id": "66#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.3333333333333333,
+          "final_rank": 5,
+          "fusion_score": 0.9285032118642578,
+          "lane_ranks": {
+            "lexical": 14,
+            "semantic:0": 7
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.825652890677832,
+          "parent_source_id": "109",
+          "rerank_score": 0.15811388300841897,
+          "rrf_score": 0.8881194627463282,
+          "source_id": "109#part-4",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.3333333333333333,
+          "final_rank": 6,
+          "fusion_score": 0.9017446552070338,
+          "lane_ranks": {
+            "lexical": 13,
+            "semantic:0": 11
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7939775970937378,
+          "parent_source_id": "35",
+          "rerank_score": 0.21350420507344953,
+          "rrf_score": 0.8530523577793497,
+          "source_id": "35#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.3333333333333333,
+          "final_rank": 7,
+          "fusion_score": 0.8811233277575179,
+          "lane_ranks": {
+            "lexical": 91,
+            "semantic:0": 2
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7803794160343976,
+          "parent_source_id": "99",
+          "rerank_score": 0.20619652471058064,
+          "rrf_score": 0.833527182384264,
+          "source_id": "99#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.6666666666666666,
+          "final_rank": 8,
+          "fusion_score": 0.8905816710489796,
+          "lane_ranks": {
+            "lexical": 26,
+            "semantic:0": 9
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7752562228380909,
+          "parent_source_id": "89",
+          "rerank_score": 0.12331590591674751,
+          "rrf_score": 0.8387509518281341,
+          "source_id": "89",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "58",
+        "39",
+        "57",
+        "66",
+        "109",
+        "35",
+        "99",
+        "89"
+      ],
+      "score": 0.0,
+      "scorer": "llm_judge",
+      "warnings": []
+    },
+    {
+      "answers": [
+        "You mentioned aspects of your personal budget tracker in this order: 1) Setting up the core functionality including user authentication, expense tracking, and data visualization, 2) Implementing transaction creation with proper error handling, 3) Enhancing security measures and improving authentication and authorization before deployment."
+      ],
+      "case_id": "beam:128k:1:event_ordering:4",
+      "category": "event-ordering",
+      "citations": {
+        "citation_precision": 0.6666666666666666,
+        "cited_source_ids": [
+          "3",
+          "14",
+          "6"
+        ],
+        "gold_citation_recall": 0.0,
+        "grounding_status": "invalid-citation",
+        "invalid_source_ids": [
+          "6"
+        ],
+        "valid_source_ids": [
+          "3",
+          "14"
+        ]
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 3.664552166010253,
+      "grounding_status": "invalid-citation",
+      "judge": {
+        "raw": "{\"score\": 0, \"reason\": \"The response does not match the reference answer and does not include transaction error handling or security and deployment, which are required by the rubric.\"}",
+        "reason": "The response does not match the reference answer and does not include transaction error handling or security and deployment, which are required by the rubric.",
+        "score": 0.0
+      },
+      "memory_context_chars": 4566,
+      "memory_context_token_estimate": 1142,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": false,
+        "evidence_source_ids": [
+          "4",
+          "60",
+          "116"
+        ],
+        "generation_seconds": 4.733712415996706,
+        "judge": {
+          "raw": "{\"score\": 0, \"reason\": \"The response includes more than three items and does not match the exact order from the reference answer.\"}",
+          "reason": "The response includes more than three items and does not match the exact order from the reference answer.",
+          "score": 0.0
+        },
+        "memory_context_chars": 6980,
+        "metric": "local_llm_judge",
+        "prediction": "basic setup, implementation details, error handling, security hardening",
+        "score": 0.0,
+        "source_ids": [
+          "4",
+          "5",
+          "60",
+          "116"
+        ],
+        "structured": true
+      },
+      "prediction": "Setup Flask Project, User Authentication, Transaction Management",
+      "query_variants": [
+        "Can you list the order in which I brought up different aspects of developing my personal budget tracker throughout our conversations, in order? Mention ONLY and ONLY three items."
+      ],
+      "question": "Can you list the order in which I brought up different aspects of developing my personal budget tracker throughout our conversations, in order? Mention ONLY and ONLY three items.",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": false,
+        "repair_succeeded": false,
+        "source_ids": [
+          "3",
+          "14",
+          "6"
+        ],
+        "structured": true
+      },
+      "relevant_source_ids": [
+        "4",
+        "60",
+        "116"
+      ],
+      "retrieval": {
+        "mrr": 1.0,
+        "ndcg_at_k": 0.46927872602275644,
+        "recall_at_k": 0.3333333333333333
+      },
+      "retrieval_hit": true,
+      "retrieval_seconds": 0.32735887498711236,
+      "retrieval_timing": {
+        "fusion_seconds": 0.14369312502094544,
+        "lexical_seconds": 0.011654583009658381,
+        "semantic_seconds": 0.17096641700481996
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 1,
+          "fusion_score": 0.9205706920247673,
+          "lane_ranks": {
+            "lexical": 6,
+            "semantic:0": 7
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8285136228222906,
+          "parent_source_id": "4",
+          "rerank_score": 0.04364357804719848,
+          "rrf_score": 0.9140241553176875,
+          "source_id": "4#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 2,
+          "fusion_score": 0.9137327048219439,
+          "lane_ranks": {
+            "lexical": 5,
+            "semantic:0": 11
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7967184086987239,
+          "parent_source_id": "14",
+          "rerank_score": 0.22677868380553634,
+          "rrf_score": 0.8797159022511135,
+          "source_id": "14#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 3,
+          "fusion_score": 0.8817998691143593,
+          "lane_ranks": {
+            "lexical": 48,
+            "semantic:0": 3
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7870409348345023,
+          "parent_source_id": "3",
+          "rerank_score": 0.12094157958139043,
+          "rrf_score": 0.8636586321771507,
+          "source_id": "3",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 4,
+          "fusion_score": 0.8876134434152043,
+          "lane_ranks": {
+            "lexical": 37,
+            "semantic:0": 5
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7671447820005132,
+          "parent_source_id": "76",
+          "rerank_score": 0.19611613513818404,
+          "rrf_score": 0.8581960231444767,
+          "source_id": "76#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 5,
+          "fusion_score": 0.8933116257723516,
+          "lane_ranks": {
+            "lexical": 7,
+            "semantic:0": 10
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.765518924733578,
+          "parent_source_id": "12",
+          "rerank_score": 0.07844645405527362,
+          "rrf_score": 0.8815446576640605,
+          "source_id": "12#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 6,
+          "fusion_score": 0.8738813036215246,
+          "lane_ranks": {
+            "lexical": 79,
+            "semantic:0": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7527000698110963,
+          "parent_source_id": "2",
+          "rerank_score": 0.12909944487358058,
+          "rrf_score": 0.8545163868904875,
+          "source_id": "2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 7,
+          "fusion_score": 0.8613753724730127,
+          "lane_ranks": {
+            "lexical": 29,
+            "semantic:0": 9
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7412378352257114,
+          "parent_source_id": "148",
+          "rerank_score": 0.19215378456610457,
+          "rrf_score": 0.8325523047880969,
+          "source_id": "148#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 8,
+          "fusion_score": 0.8605470486284102,
+          "lane_ranks": {
+            "lexical": 55,
+            "semantic:0": 4
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7411590104322359,
+          "parent_source_id": "48",
+          "rerank_score": 0.11338934190276817,
+          "rrf_score": 0.843538647342995,
+          "source_id": "48#semantic-1",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "4",
+        "14",
+        "3",
+        "76",
+        "12",
+        "2",
+        "148",
+        "48"
+      ],
+      "score": 0.0,
+      "scorer": "llm_judge",
+      "warnings": [
+        "reader response was not fully grounded with valid retrieved source IDs"
+      ]
+    },
+    {
+      "answers": [
+        "My first sprint ends on March 29."
+      ],
+      "case_id": "beam:128k:1:information_extraction:6",
+      "category": "information-extraction",
+      "citations": {
+        "citation_precision": 1.0,
+        "cited_source_ids": [
+          "52"
+        ],
+        "gold_citation_recall": 0.0,
+        "grounding_status": "grounded",
+        "invalid_source_ids": [],
+        "valid_source_ids": [
+          "52"
+        ]
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 5.716350667004008,
+      "grounding_status": "grounded",
+      "judge": {
+        "raw": "{\"score\": 0, \"reason\": \"The candidate response does not match the reference answer and the rubric evidence.\"}",
+        "reason": "The candidate response does not match the reference answer and the rubric evidence.",
+        "score": 0.0
+      },
+      "memory_context_chars": 9888,
+      "memory_context_token_estimate": 2472,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": true,
+        "evidence_source_ids": [
+          "28"
+        ],
+        "generation_seconds": 1.3976531660009641,
+        "judge": {
+          "raw": "{\"score\": 1, \"reason\": \"The candidate response correctly states the date as March 29, which matches the reference answer.\"}",
+          "reason": "The candidate response correctly states the date as March 29, which matches the reference answer.",
+          "score": 1.0
+        },
+        "memory_context_chars": 392,
+        "metric": "local_llm_judge",
+        "prediction": "March 29",
+        "score": 1.0,
+        "source_ids": [
+          "28"
+        ],
+        "structured": true
+      },
+      "prediction": "March 31, 2024",
+      "query_variants": [
+        "When does my first sprint end?",
+        "Retrieve prior memory about date time timeline before after relative absolute chronology."
+      ],
+      "question": "When does my first sprint end?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": false,
+        "repair_succeeded": false,
+        "source_ids": [
+          "52"
+        ],
+        "structured": true
+      },
+      "relevant_source_ids": [
+        "28"
+      ],
+      "retrieval": {
+        "mrr": 1.0,
+        "ndcg_at_k": 1.0,
+        "recall_at_k": 1.0
+      },
+      "retrieval_hit": true,
+      "retrieval_seconds": 0.4428254999802448,
+      "retrieval_timing": {
+        "fusion_seconds": 0.1977328750072047,
+        "lexical_seconds": 0.010260750015731901,
+        "semantic_seconds": 0.23283724999055266
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 1,
+          "fusion_score": 1.1949564785573836,
+          "lane_ranks": {
+            "lexical": 5,
+            "semantic:0": 1,
+            "semantic:1": 213
+          },
+          "linked_source_ids": [],
+          "mmr_score": 1.0754608307016453,
+          "parent_source_id": "28",
+          "rerank_score": 0.07273929674533079,
+          "rrf_score": 0.984045584045584,
+          "source_id": "28",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 2,
+          "fusion_score": 1.1814828708665817,
+          "lane_ranks": {
+            "lexical": 1,
+            "semantic:0": 4,
+            "semantic:1": 225
+          },
+          "linked_source_ids": [],
+          "mmr_score": 1.0483345837799236,
+          "parent_source_id": "29",
+          "rerank_score": 0.10803395392536073,
+          "rrf_score": 0.9652777777777776,
+          "source_id": "29#part-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 3,
+          "fusion_score": 1.1351206370424995,
+          "lane_ranks": {
+            "lexical": 16,
+            "semantic:0": 13,
+            "semantic:1": 3
+          },
+          "linked_source_ids": [],
+          "mmr_score": 1.0216085733382496,
+          "parent_source_id": "87",
+          "rerank_score": 0.06537204504606134,
+          "rrf_score": 0.9253148302855904,
+          "source_id": "87#part-1#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 4,
+          "fusion_score": 1.0294036756616838,
+          "lane_ranks": {
+            "lexical": 41,
+            "semantic:0": 8,
+            "semantic:1": 31
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.914955371587579,
+          "parent_source_id": "53",
+          "rerank_score": 0.05555555555555555,
+          "rrf_score": 0.8210703423283504,
+          "source_id": "53#part-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 5,
+          "fusion_score": 1.0213512718069526,
+          "lane_ranks": {
+            "lexical": 10,
+            "semantic:0": 62,
+            "semantic:1": 18
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9051536446262574,
+          "parent_source_id": "1",
+          "rerank_score": 0.10752066611409407,
+          "rrf_score": 0.8052231718898385,
+          "source_id": "1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 6,
+          "fusion_score": 0.9741711165802948,
+          "lane_ranks": {
+            "lexical": 11,
+            "semantic:0": 2,
+            "semantic:1": 11
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8511442488247043,
+          "parent_source_id": "52",
+          "rerank_score": 0.15089291007086422,
+          "rrf_score": 0.9515371800696651,
+          "source_id": "52",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 7,
+          "fusion_score": 1.0234536808387287,
+          "lane_ranks": {
+            "lexical": 153,
+            "semantic:0": 41,
+            "semantic:1": 2
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8425368841834273,
+          "parent_source_id": "60",
+          "rerank_score": 0.13608276348795434,
+          "rrf_score": 0.8030412663155355,
+          "source_id": "60#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 8,
+          "fusion_score": 0.9584184102704043,
+          "lane_ranks": {
+            "semantic:0": 81,
+            "semantic:1": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8225765692433639,
+          "parent_source_id": "15",
+          "rerank_score": 0.11785113019775793,
+          "rrf_score": 0.7407407407407407,
+          "source_id": "15#part-1#semantic-4",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "28",
+        "29",
+        "87",
+        "53",
+        "1",
+        "52",
+        "60",
+        "15"
+      ],
+      "score": 0.0,
+      "scorer": "llm_judge",
+      "warnings": []
+    },
+    {
+      "answers": [],
+      "case_id": "beam:128k:1:instruction_following:8",
+      "category": "instruction-following",
+      "citations": {
+        "citation_precision": null,
+        "cited_source_ids": [],
+        "gold_citation_recall": 0.0,
+        "grounding_status": "uncited",
+        "invalid_source_ids": [],
+        "valid_source_ids": []
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 18.874515874980716,
+      "grounding_status": "uncited",
+      "judge": {
+        "raw": "{\"score\": 0.5, \"reason\": \"The response includes a code block with syntax highlighting, which is a positive aspect. However, it does not explicitly mention the need for a database connection or session management, which are crucial for a complete implementation.\"}",
+        "reason": "The response includes a code block with syntax highlighting, which is a positive aspect. However, it does not explicitly mention the need for a database connection or session management, which are crucial for a complete implementation.",
+        "score": 0.5
+      },
+      "memory_context_chars": 16475,
+      "memory_context_token_estimate": 4119,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": false,
+        "evidence_source_ids": [
+          "54",
+          "56"
+        ],
+        "generation_seconds": 21.40043258399237,
+        "judge": {
+          "raw": "{\"score\": 0.5, \"reason\": \"The response provided code blocks with syntax highlighting, which is a partial match to the rubric requirement. However, the code is incomplete and lacks the final part about password hashing, which is a significant omission.\"}",
+          "reason": "The response provided code blocks with syntax highlighting, which is a partial match to the rubric requirement. However, the code is incomplete and lacks the final part about password hashing, which is a significant omission.",
+          "score": 0.5
+        },
+        "memory_context_chars": 479,
+        "metric": "local_llm_judge",
+        "prediction": "{\"answer\":\"Could you show me how to implement a login feature?\\n\\nSure! Here's a basic example of how you might implement a login feature in Python using Flask and SQLite for the database. This example will include user authentication and session management.\\n\\nFirst, install the necessary packages:\\n```bash\\npip install flask flask_sqlalchemy flask_login\\n```\\n\\nThen, create your Flask application and set up the database and user model:\\n```python\\nfrom flask import Flask, request, redirect, url_for, render_template\\nfrom flask_sqlalchemy import SQLAlchemy\\nfrom flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user\\n\\napp = Flask(__name__)\\napp.config['SECRET_KEY'] = 'your_secret_key'\\napp.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///site.db'\\n\\nlogin_manager = LoginManager(app)\\ndb = SQLAlchemy(app)\\n\\n# User model\\nclass User(UserMixin, db.Model):\\n    id = db.Column(db.Integer, primary_key=True)\\n    username = db.Column(db.String(20), unique=True, nullable=False)\\n    password = db.Column(db.String(60), nullable=False)\\n\\n@login_manager.user_loader\\ndef load_user(user_id):\\n    return User.query.get(int(user_id))\\n\\n@app.route('/login', methods=['GET', 'POST'])\\ndef login():\\n    if request.method == 'POST':\\n        username = request.form['username']\\n        password = request.form['password']\\n        user = User.query.filter_by(username=username).first()\\n        if user and user.password == password:\\n            login_user(user)\\n            return redirect(url_for('home'))\\n        else:\\n            return 'Invalid username or password'\\n    return render_template('login.html')\\n\\n@app.route('/logout')\\n@login_required\\ndef logout():\\n    logout_user()\\n    return redirect(url_for('login'))\\n\\n@app.route('/home')\\n@login_required\\ndef home():\\n    return f'Welcome, {current_user.username}!'\\n\\nif __name__ == '__main__':\\n    app.run(debug=True)\\n```\\n\\nMake sure to create the necessary HTML templates for the login form and any other views you need.\\n\\nThis is a basic example, and you should consider adding more security measures, such as password hashing",
+        "score": 0.5,
+        "source_ids": [],
+        "structured": false
+      },
+      "prediction": "{\"answer\":\"To implement a login feature, you can follow these steps:\n\n1. Define a route for user login.\n2. Query the database to find the user with the provided username.\n3. Verify the password using Werkzeug's `check_password_hash`.\n4. If the password is correct, log the user in using `login_user` from Flask-Login.\n5. Optionally, create a session to store the user's ID.\n\nHere's an example of how to implement the login feature:\n\n```python\nfrom flask import request, jsonify\nfrom flask_login import login_user\n\n@app.route('/login', methods=['POST'])\ndef login():\n    data = request.get_json()\n    username = data.get('username')\n    password = data.get('password')\n\n    user = User.query.filter_by(username=username).first()\n    if user and user.check_password(password):\n        login_user(user)\n        return jsonify({\"message\": \"Logged in successfully\"}), 200\n    return jsonify({\"message\": \"Invalid username or password\"}), 401\n```\n\nThis code assumes you have a `User` model defined with a `check_password` method that uses `werkzeug.security` to verify the password.\n\nMake sure to import the necessary modules and initialize Flask-Login in your application.\",\"source_ids\":[\"66\"],\"abstained\":false}",
+      "query_variants": [
+        "Could you show me how to implement a login feature?"
+      ],
+      "question": "Could you show me how to implement a login feature?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": true,
+        "repair_succeeded": false,
+        "source_ids": [],
+        "structured": false
+      },
+      "relevant_source_ids": [
+        "54",
+        "56"
+      ],
+      "retrieval": {
+        "mrr": 0.125,
+        "ndcg_at_k": 0.19342640361727081,
+        "recall_at_k": 0.5
+      },
+      "retrieval_hit": true,
+      "retrieval_seconds": 0.5197481249924749,
+      "retrieval_timing": {
+        "fusion_seconds": 0.3328716660034843,
+        "lexical_seconds": 0.010369208990596235,
+        "semantic_seconds": 0.1753005830105394
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 1,
+          "fusion_score": 0.91502849002849,
+          "lane_ranks": {
+            "lexical": 44,
+            "semantic:0": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.823525641025641,
+          "parent_source_id": "47",
+          "rerank_score": 0.14814814814814814,
+          "rrf_score": 0.8928062678062677,
+          "source_id": "47#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 2,
+          "fusion_score": 0.8618898827480663,
+          "lane_ranks": {
+            "lexical": 74,
+            "semantic:0": 2
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7471294659018312,
+          "parent_source_id": "23",
+          "rerank_score": 0.1005037815259212,
+          "rrf_score": 0.8468143155191782,
+          "source_id": "23#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 3,
+          "fusion_score": 0.8369800849520329,
+          "lane_ranks": {
+            "lexical": 19,
+            "semantic:0": 13
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7389174355728517,
+          "parent_source_id": "5",
+          "rerank_score": 0.11878277418329973,
+          "rrf_score": 0.8191626688245379,
+          "source_id": "5#part-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 4,
+          "fusion_score": 0.8457452784307594,
+          "lane_ranks": {
+            "lexical": 58,
+            "semantic:0": 5
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7260961237220118,
+          "parent_source_id": "59",
+          "rerank_score": 0.11043152607484655,
+          "rrf_score": 0.8291805495195325,
+          "source_id": "59#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 5,
+          "fusion_score": 0.8332837788101082,
+          "lane_ranks": {
+            "lexical": 20,
+            "semantic:0": 15
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7255279200130669,
+          "parent_source_id": "46",
+          "rerank_score": 0.2208630521496931,
+          "rrf_score": 0.8001543209876543,
+          "source_id": "46",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 6,
+          "fusion_score": 0.817868681666339,
+          "lane_ranks": {
+            "lexical": 14,
+            "semantic:0": 17
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7196159500458899,
+          "parent_source_id": "66",
+          "rerank_score": 0.11556254088025605,
+          "rrf_score": 0.8005343005343005,
+          "source_id": "66#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 7,
+          "fusion_score": 0.8187595481889312,
+          "lane_ranks": {
+            "lexical": 116,
+            "semantic:0": 3
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7063903198274372,
+          "parent_source_id": "67",
+          "rerank_score": 0.0778498944161523,
+          "rrf_score": 0.8070820640265083,
+          "source_id": "67#part-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 8,
+          "fusion_score": 0.7970903616150472,
+          "lane_ranks": {
+            "lexical": 82,
+            "semantic:0": 9
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7014934749862528,
+          "parent_source_id": "56",
+          "rerank_score": 0.20573779994945587,
+          "rrf_score": 0.7662296916226288,
+          "source_id": "56",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "47",
+        "23",
+        "5",
+        "59",
+        "46",
+        "66",
+        "67",
+        "56"
+      ],
+      "score": 0.5,
+      "scorer": "llm_judge",
+      "warnings": [
+        "reader response was not fully grounded with valid retrieved source IDs"
+      ]
+    },
+    {
+      "answers": [
+        "Around 250ms due to caching optimizations"
+      ],
+      "case_id": "beam:128k:1:knowledge_update:10",
+      "category": "knowledge-update",
+      "citations": {
+        "citation_precision": 0.5,
+        "cited_source_ids": [
+          "7",
+          "24"
+        ],
+        "gold_citation_recall": 0.0,
+        "grounding_status": "invalid-citation",
+        "invalid_source_ids": [
+          "7"
+        ],
+        "valid_source_ids": [
+          "24"
+        ]
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 7.8806477499892935,
+      "grounding_status": "invalid-citation",
+      "judge": {
+        "raw": "{\"score\": 0.5, \"reason\": \"The response mentions the optimization to around 250ms, but does not explicitly state '250ms' as required by the rubric.\"}",
+        "reason": "The response mentions the optimization to around 250ms, but does not explicitly state '250ms' as required by the rubric.",
+        "score": 0.5
+      },
+      "memory_context_chars": 14072,
+      "memory_context_token_estimate": 3518,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": true,
+        "evidence_source_ids": [
+          "86",
+          "114"
+        ],
+        "generation_seconds": 4.639167917019222,
+        "judge": {
+          "raw": "{\"score\": 1, \"reason\": \"The candidate response exactly matches the reference answer.\"}",
+          "reason": "The candidate response exactly matches the reference answer.",
+          "score": 1.0
+        },
+        "memory_context_chars": 8597,
+        "metric": "local_llm_judge",
+        "prediction": "250ms",
+        "score": 1.0,
+        "source_ids": [
+          "114"
+        ],
+        "structured": true
+      },
+      "prediction": "The dashboard API response time has been optimized to around 250ms after adding some caching tweaks.",
+      "query_variants": [
+        "What is the average response time of the dashboard API?"
+      ],
+      "question": "What is the average response time of the dashboard API?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": false,
+        "repair_succeeded": false,
+        "source_ids": [
+          "7",
+          "24"
+        ],
+        "structured": true
+      },
+      "relevant_source_ids": [
+        "86",
+        "114"
+      ],
+      "retrieval": {
+        "mrr": 0.16666666666666666,
+        "ndcg_at_k": 0.21840743681816419,
+        "recall_at_k": 0.5
+      },
+      "retrieval_hit": true,
+      "retrieval_seconds": 0.5954457919870038,
+      "retrieval_timing": {
+        "fusion_seconds": 0.2590257090050727,
+        "lexical_seconds": 0.015627457993105054,
+        "semantic_seconds": 0.31901283300248906
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 1,
+          "fusion_score": 1.0377206391303766,
+          "lane_ranks": {
+            "lexical": 4,
+            "semantic:0": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.933948575217339,
+          "parent_source_id": "105",
+          "rerank_score": 0.165822779387697,
+          "rrf_score": 0.9878472222222221,
+          "source_id": "105#part-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 2,
+          "fusion_score": 1.003807032097343,
+          "lane_ranks": {
+            "lexical": 3,
+            "semantic:0": 4
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8884437504903961,
+          "parent_source_id": "115",
+          "rerank_score": 0.14506471329641488,
+          "rrf_score": 0.9570473251028806,
+          "source_id": "115#part-4",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 3,
+          "fusion_score": 1.0109963974729579,
+          "lane_ranks": {
+            "lexical": 10,
+            "semantic:0": 2
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8832592031405093,
+          "parent_source_id": "104",
+          "rerank_score": 0.20851441405707474,
+          "rrf_score": 0.9547192353643966,
+          "source_id": "104",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 4,
+          "fusion_score": 0.9727853753794737,
+          "lane_ranks": {
+            "lexical": 1,
+            "semantic:0": 8
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8603382985156837,
+          "parent_source_id": "108",
+          "rerank_score": 0.16025399127347054,
+          "rrf_score": 0.9237472766884531,
+          "source_id": "108#part-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 5,
+          "fusion_score": 0.8976754779720806,
+          "lane_ranks": {
+            "lexical": 32,
+            "semantic:0": 5
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.797431739698682,
+          "parent_source_id": "24",
+          "rerank_score": 0.2041241452319315,
+          "rrf_score": 0.8670568561872909,
+          "source_id": "24#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 6,
+          "fusion_score": 0.9156034746791222,
+          "lane_ranks": {
+            "lexical": 11,
+            "semantic:0": 11
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7967322028414621,
+          "parent_source_id": "114",
+          "rerank_score": 0.20965696734438366,
+          "rrf_score": 0.8591549295774646,
+          "source_id": "114",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 7,
+          "fusion_score": 0.9001953572013641,
+          "lane_ranks": {
+            "lexical": 33,
+            "semantic:0": 6
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7827845171334016,
+          "parent_source_id": "40",
+          "rerank_score": 0.13679711361135388,
+          "rrf_score": 0.854675790159661,
+          "source_id": "40",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 8,
+          "fusion_score": 0.8669268373260874,
+          "lane_ranks": {
+            "lexical": 28,
+            "semantic:0": 12
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7633327451427745,
+          "parent_source_id": "186",
+          "rerank_score": 0.2309401076758503,
+          "rrf_score": 0.8072858211747098,
+          "source_id": "186",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "105",
+        "115",
+        "104",
+        "108",
+        "24",
+        "114",
+        "40",
+        "186"
+      ],
+      "score": 0.5,
+      "scorer": "llm_judge",
+      "warnings": [
+        "reader response was not fully grounded with valid retrieved source IDs"
+      ]
+    },
+    {
+      "answers": [
+        "Two columns: 'category' and 'notes'."
+      ],
+      "case_id": "beam:128k:1:multi_session_reasoning:12",
+      "category": "multi-session-reasoning",
+      "citations": {
+        "citation_precision": 1.0,
+        "cited_source_ids": [
+          "106",
+          "162"
+        ],
+        "gold_citation_recall": 0.6666666666666666,
+        "grounding_status": "grounded",
+        "invalid_source_ids": [],
+        "valid_source_ids": [
+          "106",
+          "162"
+        ]
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 4.496789083001204,
+      "grounding_status": "grounded",
+      "judge": {
+        "raw": "{\"score\": 0.5, \"reason\": \"The response correctly states that two columns were added but does not explicitly list the columns 'category' and 'notes'.\"}",
+        "reason": "The response correctly states that two columns were added but does not explicitly list the columns 'category' and 'notes'.",
+        "score": 0.5
+      },
+      "memory_context_chars": 4903,
+      "memory_context_token_estimate": 1226,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": false,
+        "evidence_source_ids": [
+          "14",
+          "106",
+          "162"
+        ],
+        "generation_seconds": 4.069728667003801,
+        "judge": {
+          "raw": "{\"score\": 0, \"reason\": \"The response does not match the reference answer and does not state the correct number of columns or their names.\"}",
+          "reason": "The response does not match the reference answer and does not state the correct number of columns or their names.",
+          "score": 0.0
+        },
+        "memory_context_chars": 6135,
+        "metric": "local_llm_judge",
+        "prediction": "3",
+        "score": 0.0,
+        "source_ids": [
+          "14",
+          "106",
+          "162"
+        ],
+        "structured": true
+      },
+      "prediction": "You wanted to add 2 new columns to the transactions table: a 'category' VARCHAR(50) column and a 'notes' TEXT column.",
+      "query_variants": [
+        "How many new columns did I want to add to the transactions table across my requests?",
+        "Retrieve prior memory about goal objective plan intention desired outcome."
+      ],
+      "question": "How many new columns did I want to add to the transactions table across my requests?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": false,
+        "repair_succeeded": false,
+        "source_ids": [
+          "106",
+          "162"
+        ],
+        "structured": true
+      },
+      "relevant_source_ids": [
+        "14",
+        "106",
+        "162"
+      ],
+      "retrieval": {
+        "mrr": 1.0,
+        "ndcg_at_k": 0.6508205185601091,
+        "recall_at_k": 0.6666666666666666
+      },
+      "retrieval_hit": true,
+      "retrieval_seconds": 0.6627136660099495,
+      "retrieval_timing": {
+        "fusion_seconds": 0.1748707079968881,
+        "lexical_seconds": 0.011736999993445352,
+        "semantic_seconds": 0.47415870800614357
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 1,
+          "fusion_score": 1.2112903963857435,
+          "lane_ranks": {
+            "lexical": 3,
+            "semantic:0": 3,
+            "semantic:1": 10
+          },
+          "linked_source_ids": [],
+          "mmr_score": 1.0901613567471693,
+          "parent_source_id": "106",
+          "rerank_score": 0.28690952087850224,
+          "rrf_score": 0.9682539682539681,
+          "source_id": "106#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 2,
+          "fusion_score": 1.1764130216691573,
+          "lane_ranks": {
+            "lexical": 1,
+            "semantic:0": 5,
+            "semantic:1": 15
+          },
+          "linked_source_ids": [],
+          "mmr_score": 1.0457580208721047,
+          "parent_source_id": "107",
+          "rerank_score": 0.1466471150213533,
+          "rrf_score": 0.9544159544159543,
+          "source_id": "107",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 3,
+          "fusion_score": 1.0863619147765964,
+          "lane_ranks": {
+            "lexical": 2,
+            "semantic:0": 16,
+            "semantic:1": 56
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9577257232989368,
+          "parent_source_id": "33",
+          "rerank_score": 0.24494897427831783,
+          "rrf_score": 0.8496195686348487,
+          "source_id": "33#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 4,
+          "fusion_score": 1.0796686898648584,
+          "lane_ranks": {
+            "lexical": 54,
+            "semantic:0": 127,
+            "semantic:1": 3
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9467018208783726,
+          "parent_source_id": "92",
+          "rerank_score": 0.15811388300841897,
+          "rrf_score": 0.8559516074135955,
+          "source_id": "92#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 5,
+          "fusion_score": 1.0868832658474032,
+          "lane_ranks": {
+            "lexical": 30,
+            "semantic:0": 7,
+            "semantic:1": 76
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9311361157332513,
+          "parent_source_id": "162",
+          "rerank_score": 0.2450490147049017,
+          "rrf_score": 0.850125913641668,
+          "source_id": "162#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 6,
+          "fusion_score": 1.0610137813973493,
+          "lane_ranks": {
+            "lexical": 119,
+            "semantic:1": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9191981175433287,
+          "parent_source_id": "53",
+          "rerank_score": 0.21281413268968716,
+          "rrf_score": 0.8290916614938961,
+          "source_id": "53#part-1#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 7,
+          "fusion_score": 1.0243895509160275,
+          "lane_ranks": {
+            "lexical": 29,
+            "semantic:0": 68,
+            "semantic:1": 14
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8896925313082957,
+          "parent_source_id": "148",
+          "rerank_score": 0.24056261216234406,
+          "rrf_score": 0.7883051590916759,
+          "source_id": "148#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 8,
+          "fusion_score": 1.0162160379716205,
+          "lane_ranks": {
+            "lexical": 214,
+            "semantic:0": 2,
+            "semantic:1": 64
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8745944341744585,
+          "parent_source_id": "32",
+          "rerank_score": 0.19802950859533489,
+          "rrf_score": 0.7865116116823203,
+          "source_id": "32",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "106",
+        "107",
+        "33",
+        "92",
+        "162",
+        "53",
+        "148",
+        "32"
+      ],
+      "score": 0.5,
+      "scorer": "llm_judge",
+      "warnings": []
+    },
+    {
+      "answers": [],
+      "case_id": "beam:128k:1:preference_following:14",
+      "category": "preference-following",
+      "citations": {
+        "citation_precision": 1.0,
+        "cited_source_ids": [
+          "109",
+          "115"
+        ],
+        "gold_citation_recall": 0.0,
+        "grounding_status": "grounded",
+        "invalid_source_ids": [],
+        "valid_source_ids": [
+          "109",
+          "115"
+        ]
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 12.423270875005983,
+      "grounding_status": "grounded",
+      "judge": {
+        "raw": "{\"score\": 0.5, \"reason\": \"The response suggests lightweight libraries and tools for user login and database management, which is partially correct. However, it does not explicitly avoid recommending large frameworks or heavy dependencies, and it does not fully address the basic analytics requirement with a lightweight solution.\"}",
+        "reason": "The response suggests lightweight libraries and tools for user login and database management, which is partially correct. However, it does not explicitly avoid recommending large frameworks or heavy dependencies, and it does not fully address the basic analytics requirement with a lightweight solution.",
+        "score": 0.5
+      },
+      "memory_context_chars": 14366,
+      "memory_context_token_estimate": 3592,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": false,
+        "evidence_source_ids": [
+          "34"
+        ],
+        "generation_seconds": 5.5176543749985285,
+        "judge": {
+          "raw": "{\"score\": 0.5, \"reason\": \"The response suggests lightweight libraries for user login and basic analytics, which is correct. However, it does not explicitly avoid recommending large frameworks or heavy dependencies for income and expense tracking, and it includes additional tools like Flask-Migrate and Flask-RESTful that are not directly related to the core features.\"}",
+          "reason": "The response suggests lightweight libraries for user login and basic analytics, which is correct. However, it does not explicitly avoid recommending large frameworks or heavy dependencies for income and expense tracking, and it includes additional tools like Flask-Migrate and Flask-RESTful that are not directly related to the core features.",
+          "score": 0.5
+        },
+        "memory_context_chars": 1777,
+        "metric": "local_llm_judge",
+        "prediction": "For implementing user login, you can use Flask-Login or Flask-Security. For income and expense tracking, you can create custom models and routes in your Flask application. For basic analytics, you might consider using Flask-Migrate for database migrations and Flask-RESTful for creating APIs. Flask-Bcrypt can be used for password hashing. Ensure you handle database operations with SQLite 3.39 through SQLAlchemy or another ORM of your choice.",
+        "score": 0.5,
+        "source_ids": [
+          "34"
+        ],
+        "structured": true
+      },
+      "prediction": "For implementing user login, you can use Flask-Login. For income and expense tracking, you can use Flask-SQLAlchemy to manage your database models. For basic analytics, you can use libraries like Matplotlib or Seaborn for data visualization. Additionally, you can use Flask-Caching to optimize your dashboard API response time. Ensure you have Flask 2.3.1 and the latest versions of your dependencies, like Flask-Login 0.6.2, for compatibility and best practices.",
+      "query_variants": [
+        "I'm planning to add user login, income and expense tracking, and some basic analytics to my Flask app. What libraries or tools would you suggest I use to implement these features?"
+      ],
+      "question": "I'm planning to add user login, income and expense tracking, and some basic analytics to my Flask app. What libraries or tools would you suggest I use to implement these features?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": false,
+        "repair_succeeded": false,
+        "source_ids": [
+          "109",
+          "115"
+        ],
+        "structured": true
+      },
+      "relevant_source_ids": [
+        "34"
+      ],
+      "retrieval": {
+        "mrr": 0.3333333333333333,
+        "ndcg_at_k": 0.5,
+        "recall_at_k": 1.0
+      },
+      "retrieval_hit": true,
+      "retrieval_seconds": 0.5377154579909984,
+      "retrieval_timing": {
+        "fusion_seconds": 0.3130848330038134,
+        "lexical_seconds": 0.013983374985400587,
+        "semantic_seconds": 0.20900345800328068
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 1,
+          "fusion_score": 1.049250164383381,
+          "lane_ranks": {
+            "lexical": 6,
+            "semantic:0": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9443251479450429,
+          "parent_source_id": "4",
+          "rerank_score": 0.292606782383782,
+          "rrf_score": 0.9803591470258136,
+          "source_id": "4",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 2,
+          "fusion_score": 0.9803919368328881,
+          "lane_ranks": {
+            "lexical": 15,
+            "semantic:0": 5
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.870887774996733,
+          "parent_source_id": "2",
+          "rerank_score": 0.32914029430219166,
+          "rrf_score": 0.9060208926875593,
+          "source_id": "2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 3,
+          "fusion_score": 0.928640481352464,
+          "lane_ranks": {
+            "lexical": 33,
+            "semantic:0": 6
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8194302793710637,
+          "parent_source_id": "34",
+          "rerank_score": 0.3264312746186865,
+          "rrf_score": 0.854675790159661,
+          "source_id": "34",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 4,
+          "fusion_score": 0.9076955775304345,
+          "lane_ranks": {
+            "lexical": 19,
+            "semantic:0": 10
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8008954854262461,
+          "parent_source_id": "114",
+          "rerank_score": 0.2467026848422379,
+          "rrf_score": 0.8456901748040988,
+          "source_id": "114",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 5,
+          "fusion_score": 0.8950861671482783,
+          "lane_ranks": {
+            "lexical": 85,
+            "semantic:0": 2
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7945683761215239,
+          "parent_source_id": "109",
+          "rerank_score": 0.21483446221182986,
+          "rrf_score": 0.8378609978165038,
+          "source_id": "109#part-4",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 6,
+          "fusion_score": 0.8908876928815087,
+          "lane_ranks": {
+            "lexical": 23,
+            "semantic:0": 9
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7927080145024488,
+          "parent_source_id": "108",
+          "rerank_score": 0.1365999936439188,
+          "rrf_score": 0.8453976938349209,
+          "source_id": "108#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 7,
+          "fusion_score": 0.8809924170524518,
+          "lane_ranks": {
+            "lexical": 37,
+            "semantic:0": 7
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7739276581058273,
+          "parent_source_id": "115",
+          "rerank_score": 0.12364893354703727,
+          "rrf_score": 0.8374450770203962,
+          "source_id": "115#part-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.5,
+          "final_rank": 8,
+          "fusion_score": 0.8561154623650232,
+          "lane_ranks": {
+            "lexical": 5,
+            "semantic:0": 22
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7435431318147954,
+          "parent_source_id": "87",
+          "rerank_score": 0.24514516892273003,
+          "rrf_score": 0.7943436870266137,
+          "source_id": "87#part-1",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "4",
+        "2",
+        "34",
+        "114",
+        "109",
+        "108",
+        "115",
+        "87"
+      ],
+      "score": 0.5,
+      "scorer": "llm_judge",
+      "warnings": []
+    },
+    {
+      "answers": [],
+      "case_id": "beam:128k:1:summarization:16",
+      "category": "summarization",
+      "citations": {
+        "citation_precision": null,
+        "cited_source_ids": [],
+        "gold_citation_recall": 0.0,
+        "grounding_status": "uncited",
+        "invalid_source_ids": [],
+        "valid_source_ids": []
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 21.659129583014874,
+      "grounding_status": "uncited",
+      "judge": {
+        "raw": "{\"score\": 0.5, \"reason\": \"The response includes key features and a development timeline but lacks detailed security enhancements and documentation efforts as specified in the rubric.\"}",
+        "reason": "The response includes key features and a development timeline but lacks detailed security enhancements and documentation efforts as specified in the rubric.",
+        "score": 0.5
+      },
+      "memory_context_chars": 13181,
+      "memory_context_token_estimate": 3296,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": false,
+        "evidence_source_ids": [
+          "4",
+          "5",
+          "8",
+          "9",
+          "116",
+          "117",
+          "150",
+          "151",
+          "176",
+          "177"
+        ],
+        "generation_seconds": 15.996290582988877,
+        "judge": {
+          "raw": "{\"score\": 0.5, \"reason\": \"The response includes key features, development timeline, security enhancements, and documentation efforts, but it does not explicitly mention breaking down tasks into phases covering authentication, transaction management, analytics, and deployment as required by the rubric.\"}",
+          "reason": "The response includes key features, development timeline, security enhancements, and documentation efforts, but it does not explicitly mention breaking down tasks into phases covering authentication, transaction management, analytics, and deployment as required by the rubric.",
+          "score": 0.5
+        },
+        "memory_context_chars": 24018,
+        "metric": "local_llm_judge",
+        "prediction": "{\"answer\":\"Your budget tracker project has made significant progress since the initial setup and planning completed on November 15, 2023. Key features implemented include user authentication, transaction management, and basic analytics. The development timeline is as follows:\n\n- December 15, 2023: User authentication was implemented.\n- January 15, 2024: Transaction management features were developed.\n- February 15, 2024: Basic analytics, such as monthly summary generation and category-wise spending analysis, were integrated.\n- April 15, 2024: Final adjustments, testing, and deployment were completed.\n\nSecurity enhancements include the use of token-based authentication (JWT) for stateless APIs, role-based access control (RBAC) for managing different levels of access, input validation, and the use of environment variables for configuration settings. Additionally, the application is served over HTTPS to protect data in transit.\n\nDocumentation efforts are ongoing, with the goal of writing comprehensive documentation and creating user guides for easy onboarding. The project is scheduled for a public launch after thorough testing and final adjustments.\n\nFor more detailed information, refer to the project timeline and security enhancements sections of the provided evidence.\",\"source_ids\":[\"116\",\"117\"],\"abstained\":false}",
+        "score": 0.5,
+        "source_ids": [],
+        "structured": false
+      },
+      "prediction": "{\"answer\":\"Your budget tracker project has made significant progress, with key features implemented and a clear development timeline. Here's a summary of the key milestones and achievements:\n\n- **Initial Setup and Planning (November 1 - November 15, 2023):** You set up the development environment, initialized the project structure, and created the initial database schema for users.\n- **User Authentication (November 16 - December 15, 2023):** You implemented user registration, login, and logout functionalities, ensuring proper validation and error handling.\n- **Transaction Management (December 16, 2023 - January 15, 2024):** You developed features to add income and expenses, view transactions, and added validation and error handling.\n- **Basic Analytics (January 16 - February 15, 2024):** You integrated monthly summary generation and category-wise spending analysis, displaying analytics on the user interface.\n- **Final Adjustments, Testing, and Deployment (February 16 - April 15, 2024):** You conducted thorough testing, fixed bugs, optimized performance and security, prepared for deployment, and finalized documentation and user guides.\n\nSecurity enhancements include proper password hashing and validation, and error handling to ensure robustness. Documentation efforts are ongoing, with plans to finalize guides and instructions for users.\n\nThe project is on track to meet the April 15, 2024, deadline, with all planned features implemented and tested. Regular reviews and adjustments will ensure a smooth final phase.\",\"source_ids\":[\"3\",\"2\",\"9\"],\"abstained\":false}",
+      "query_variants": [
+        "Can you provide a comprehensive summary of how my budget tracker project has progressed, including the key features implemented, the development timeline, security enhancements, and documentation efforts?"
+      ],
+      "question": "Can you provide a comprehensive summary of how my budget tracker project has progressed, including the key features implemented, the development timeline, security enhancements, and documentation efforts?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": true,
+        "repair_succeeded": false,
+        "source_ids": [],
+        "structured": false
+      },
+      "relevant_source_ids": [
+        "4",
+        "5",
+        "8",
+        "9",
+        "116",
+        "117",
+        "150",
+        "151",
+        "176",
+        "177"
+      ],
+      "retrieval": {
+        "mrr": 0.25,
+        "ndcg_at_k": 0.1089364926177559,
+        "recall_at_k": 0.1
+      },
+      "retrieval_hit": true,
+      "retrieval_seconds": 0.5690349170181435,
+      "retrieval_timing": {
+        "fusion_seconds": 0.2598275000054855,
+        "lexical_seconds": 0.015101375000085682,
+        "semantic_seconds": 0.29240683300304227
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 1,
+          "fusion_score": 0.9742503509164608,
+          "lane_ranks": {
+            "lexical": 10,
+            "semantic:0": 3
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8768253158248148,
+          "parent_source_id": "3",
+          "rerank_score": 0.20732842213952643,
+          "rrf_score": 0.9431510875955319,
+          "source_id": "3",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 2,
+          "fusion_score": 0.9256194649925091,
+          "lane_ranks": {
+            "lexical": 7,
+            "semantic:0": 8
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8172084618894847,
+          "parent_source_id": "1",
+          "rerank_score": 0.16726290267933522,
+          "rrf_score": 0.9005300295906089,
+          "source_id": "1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 3,
+          "fusion_score": 0.94177637971271,
+          "lane_ranks": {
+            "lexical": 33,
+            "semantic:0": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8138056382931631,
+          "parent_source_id": "2",
+          "rerank_score": 0.2065591117977289,
+          "rrf_score": 0.9107925129430506,
+          "source_id": "2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 4,
+          "fusion_score": 0.9500019374494496,
+          "lane_ranks": {
+            "lexical": 12,
+            "semantic:0": 4
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8052635238092167,
+          "parent_source_id": "9",
+          "rerank_score": 0.16222142113076254,
+          "rrf_score": 0.9256687242798353,
+          "source_id": "9#part-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 5,
+          "fusion_score": 0.9068127433008846,
+          "lane_ranks": {
+            "lexical": 46,
+            "semantic:0": 2
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8048955139146163,
+          "parent_source_id": "111",
+          "rerank_score": 0.19215378456610457,
+          "rrf_score": 0.8779896756159689,
+          "source_id": "111#part-4",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 6,
+          "fusion_score": 0.8837528259407363,
+          "lane_ranks": {
+            "lexical": 30,
+            "semantic:0": 7
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7877688476944888,
+          "parent_source_id": "148",
+          "rerank_score": 0.224179415327122,
+          "rrf_score": 0.850125913641668,
+          "source_id": "148#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 7,
+          "fusion_score": 0.863880195077606,
+          "lane_ranks": {
+            "lexical": 43,
+            "semantic:0": 6
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7645292126068826,
+          "parent_source_id": "15",
+          "rerank_score": 0.17142857142857143,
+          "rrf_score": 0.8381659093633204,
+          "source_id": "15#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 8,
+          "fusion_score": 0.841897703961073,
+          "lane_ranks": {
+            "lexical": 32,
+            "semantic:0": 10
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.7450213664007865,
+          "parent_source_id": "35",
+          "rerank_score": 0.1632993161855452,
+          "rrf_score": 0.8174028065332413,
+          "source_id": "35#part-1",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "3",
+        "1",
+        "2",
+        "9",
+        "111",
+        "148",
+        "15",
+        "35"
+      ],
+      "score": 0.5,
+      "scorer": "llm_judge",
+      "warnings": [
+        "reader response was not fully grounded with valid retrieved source IDs"
+      ]
+    },
+    {
+      "answers": [
+        "I have exactly 4 weeks between finishing the transaction management features on January 15, 2024, and the final deployment deadline on March 15, 2024."
+      ],
+      "case_id": "beam:128k:1:temporal_reasoning:18",
+      "category": "temporal-reasoning",
+      "citations": {
+        "citation_precision": 1.0,
+        "cited_source_ids": [
+          "86"
+        ],
+        "gold_citation_recall": 0.0,
+        "grounding_status": "grounded",
+        "invalid_source_ids": [],
+        "valid_source_ids": [
+          "86"
+        ]
+      },
+      "corpus_id": "beam:128k:1",
+      "correct": false,
+      "evaluation_mode": "retrieval",
+      "faithfulness": null,
+      "faithfulness_score": null,
+      "generation_seconds": 7.075024541991297,
+      "grounding_status": "grounded",
+      "judge": {
+        "raw": "{\"score\": 0, \"reason\": \"The candidate response does not match the reference answer in terms of the number of weeks and the date range.\"}",
+        "reason": "The candidate response does not match the reference answer in terms of the number of weeks and the date range.",
+        "score": 0.0
+      },
+      "memory_context_chars": 11424,
+      "memory_context_token_estimate": 2856,
+      "metadata": {
+        "chat": "1",
+        "scale": "128k"
+      },
+      "metric": "local_llm_judge",
+      "oracle_reader": {
+        "correct": false,
+        "evidence_source_ids": [
+          "0",
+          "2"
+        ],
+        "generation_seconds": 2.479733457992552,
+        "judge": {
+          "raw": "{\"score\": 0, \"reason\": \"The candidate response does not include the specific dates from January 15, 2024, to March 15, 2024, as required by the rubric.\"}",
+          "reason": "The candidate response does not include the specific dates from January 15, 2024, to March 15, 2024, as required by the rubric.",
+          "score": 0.0
+        },
+        "memory_context_chars": 1092,
+        "metric": "local_llm_judge",
+        "prediction": "You have 8 weeks between finishing the transaction management features and the final deployment deadline.",
+        "score": 0.0,
+        "source_ids": [
+          "2"
+        ],
+        "structured": true
+      },
+      "prediction": "You have 2 weeks between finishing the transaction management features and the final deployment deadline.",
+      "query_variants": [
+        "How many weeks do I have between finishing the transaction management features and the final deployment deadline?",
+        "Retrieve prior memory about commitment promise agreement obligation deadline."
+      ],
+      "question": "How many weeks do I have between finishing the transaction management features and the final deployment deadline?",
+      "reader_output": {
+        "abstained": false,
+        "repair_attempted": false,
+        "repair_succeeded": false,
+        "source_ids": [
+          "86"
+        ],
+        "structured": true
+      },
+      "relevant_source_ids": [
+        "2",
+        "0"
+      ],
+      "retrieval": {
+        "mrr": 0.0,
+        "ndcg_at_k": 0.0,
+        "recall_at_k": 0.0
+      },
+      "retrieval_hit": false,
+      "retrieval_seconds": 0.6074151659850031,
+      "retrieval_timing": {
+        "fusion_seconds": 0.22057429098640569,
+        "lexical_seconds": 0.011834334000013769,
+        "semantic_seconds": 0.3729535829916131
+      },
+      "retrieval_trace": [
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 1,
+          "fusion_score": 1.1036163146880855,
+          "lane_ranks": {
+            "lexical": 44,
+            "semantic:0": 25,
+            "semantic:1": 2
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.993254683219277,
+          "parent_source_id": "169",
+          "rerank_score": 0.15171652122725207,
+          "rrf_score": 0.8808588365039977,
+          "source_id": "169#semantic-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.5,
+          "entity_score": 0.0,
+          "final_rank": 2,
+          "fusion_score": 1.0623118553037478,
+          "lane_ranks": {
+            "lexical": 2,
+            "semantic:0": 6,
+            "semantic:1": 126
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9536997173924207,
+          "parent_source_id": "9",
+          "rerank_score": 0.15073452695287923,
+          "rrf_score": 0.939701676260816,
+          "source_id": "9#part-2",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 3,
+          "fusion_score": 1.064348145475896,
+          "lane_ranks": {
+            "lexical": 47,
+            "semantic:0": 16,
+            "semantic:1": 6
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9256552664121774,
+          "parent_source_id": "86",
+          "rerank_score": 0.21281413268968716,
+          "rrf_score": 0.8324260255724429,
+          "source_id": "86#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 4,
+          "fusion_score": 1.0173430879647172,
+          "lane_ranks": {
+            "lexical": 4,
+            "semantic:0": 22,
+            "semantic:1": 89
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.9031467730892181,
+          "parent_source_id": "66",
+          "rerank_score": 0.12798508507643477,
+          "rrf_score": 0.7981453252032519,
+          "source_id": "66#part-2#semantic-3",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 5,
+          "fusion_score": 1.0319835854133261,
+          "lane_ranks": {
+            "lexical": 162,
+            "semantic:0": 48,
+            "semantic:1": 1
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8943024682513039,
+          "parent_source_id": "143",
+          "rerank_score": 0.1333662673423161,
+          "rrf_score": 0.8119786453119786,
+          "source_id": "143#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.5,
+          "entity_score": 0.0,
+          "final_rank": 6,
+          "fusion_score": 1.00104795956175,
+          "lane_ranks": {
+            "lexical": 20,
+            "semantic:0": 7,
+            "semantic:1": 132
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8887160893697673,
+          "parent_source_id": "28",
+          "rerank_score": 0.19304683562633607,
+          "rrf_score": 0.8720909342177997,
+          "source_id": "28",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 1.0,
+          "entity_score": 0.0,
+          "final_rank": 7,
+          "fusion_score": 1.0010730013825402,
+          "lane_ranks": {
+            "lexical": 183,
+            "semantic:0": 41,
+            "semantic:1": 3
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8739386742172592,
+          "parent_source_id": "55",
+          "rerank_score": 0.12510864843424485,
+          "rrf_score": 0.7823067041174036,
+          "source_id": "55#semantic-1",
+          "temporal_score": 0.0
+        },
+        {
+          "concept_score": 0.0,
+          "entity_score": 0.0,
+          "final_rank": 8,
+          "fusion_score": 0.9728622182729947,
+          "lane_ranks": {
+            "lexical": 1,
+            "semantic:0": 5,
+            "semantic:1": 15
+          },
+          "linked_source_ids": [],
+          "mmr_score": 0.8597865227614847,
+          "parent_source_id": "53",
+          "rerank_score": 0.12297509238026913,
+          "rrf_score": 0.9544159544159543,
+          "source_id": "53#part-2",
+          "temporal_score": 0.0
+        }
+      ],
+      "retrieved_source_ids": [
+        "169",
+        "9",
+        "86",
+        "66",
+        "143",
+        "28",
+        "55",
+        "53"
+      ],
+      "score": 0.0,
+      "scorer": "llm_judge",
+      "warnings": []
+    }
+  ],
+  "category_results": {
+    "abstention": {
+      "accuracy": 0.0,
+      "average_score": 0.0,
+      "faithfulness": null,
+      "grounded_rate": 1.0,
+      "mrr": null,
+      "ndcg_at_k": null,
+      "num_samples": 1,
+      "oracle_reader_score": null,
+      "retrieval_recall_at_k": null,
+      "score_confidence_interval_95": {
+        "lower": 0.0,
+        "mean": 0.0,
+        "samples": 1,
+        "upper": 0.0
+      }
+    },
+    "contradiction-resolution": {
+      "accuracy": 0.0,
+      "average_score": 0.0,
+      "faithfulness": null,
+      "grounded_rate": 1.0,
+      "mrr": 1.0,
+      "ndcg_at_k": 0.6131471927654584,
+      "num_samples": 1,
+      "oracle_reader_score": 0.0,
+      "retrieval_recall_at_k": 0.5,
+      "score_confidence_interval_95": {
+        "lower": 0.0,
+        "mean": 0.0,
+        "samples": 1,
+        "upper": 0.0
+      }
+    },
+    "event-ordering": {
+      "accuracy": 0.0,
+      "average_score": 0.0,
+      "faithfulness": null,
+      "grounded_rate": 0.0,
+      "mrr": 1.0,
+      "ndcg_at_k": 0.46927872602275644,
+      "num_samples": 1,
+      "oracle_reader_score": 0.0,
+      "retrieval_recall_at_k": 0.3333333333333333,
+      "score_confidence_interval_95": {
+        "lower": 0.0,
+        "mean": 0.0,
+        "samples": 1,
+        "upper": 0.0
+      }
+    },
+    "information-extraction": {
+      "accuracy": 0.0,
+      "average_score": 0.0,
+      "faithfulness": null,
+      "grounded_rate": 1.0,
+      "mrr": 1.0,
+      "ndcg_at_k": 1.0,
+      "num_samples": 1,
+      "oracle_reader_score": 1.0,
+      "retrieval_recall_at_k": 1.0,
+      "score_confidence_interval_95": {
+        "lower": 0.0,
+        "mean": 0.0,
+        "samples": 1,
+        "upper": 0.0
+      }
+    },
+    "instruction-following": {
+      "accuracy": 0.0,
+      "average_score": 0.5,
+      "faithfulness": null,
+      "grounded_rate": 0.0,
+      "mrr": 0.125,
+      "ndcg_at_k": 0.19342640361727081,
+      "num_samples": 1,
+      "oracle_reader_score": 0.5,
+      "retrieval_recall_at_k": 0.5,
+      "score_confidence_interval_95": {
+        "lower": 0.5,
+        "mean": 0.5,
+        "samples": 1,
+        "upper": 0.5
+      }
+    },
+    "knowledge-update": {
+      "accuracy": 0.0,
+      "average_score": 0.5,
+      "faithfulness": null,
+      "grounded_rate": 0.0,
+      "mrr": 0.16666666666666666,
+      "ndcg_at_k": 0.21840743681816419,
+      "num_samples": 1,
+      "oracle_reader_score": 1.0,
+      "retrieval_recall_at_k": 0.5,
+      "score_confidence_interval_95": {
+        "lower": 0.5,
+        "mean": 0.5,
+        "samples": 1,
+        "upper": 0.5
+      }
+    },
+    "multi-session-reasoning": {
+      "accuracy": 0.0,
+      "average_score": 0.5,
+      "faithfulness": null,
+      "grounded_rate": 1.0,
+      "mrr": 1.0,
+      "ndcg_at_k": 0.6508205185601091,
+      "num_samples": 1,
+      "oracle_reader_score": 0.0,
+      "retrieval_recall_at_k": 0.6666666666666666,
+      "score_confidence_interval_95": {
+        "lower": 0.5,
+        "mean": 0.5,
+        "samples": 1,
+        "upper": 0.5
+      }
+    },
+    "preference-following": {
+      "accuracy": 0.0,
+      "average_score": 0.5,
+      "faithfulness": null,
+      "grounded_rate": 1.0,
+      "mrr": 0.3333333333333333,
+      "ndcg_at_k": 0.5,
+      "num_samples": 1,
+      "oracle_reader_score": 0.5,
+      "retrieval_recall_at_k": 1.0,
+      "score_confidence_interval_95": {
+        "lower": 0.5,
+        "mean": 0.5,
+        "samples": 1,
+        "upper": 0.5
+      }
+    },
+    "summarization": {
+      "accuracy": 0.0,
+      "average_score": 0.5,
+      "faithfulness": null,
+      "grounded_rate": 0.0,
+      "mrr": 0.25,
+      "ndcg_at_k": 0.1089364926177559,
+      "num_samples": 1,
+      "oracle_reader_score": 0.5,
+      "retrieval_recall_at_k": 0.1,
+      "score_confidence_interval_95": {
+        "lower": 0.5,
+        "mean": 0.5,
+        "samples": 1,
+        "upper": 0.5
+      }
+    },
+    "temporal-reasoning": {
+      "accuracy": 0.0,
+      "average_score": 0.0,
+      "faithfulness": null,
+      "grounded_rate": 1.0,
+      "mrr": 0.0,
+      "ndcg_at_k": 0.0,
+      "num_samples": 1,
+      "oracle_reader_score": 0.0,
+      "retrieval_recall_at_k": 0.0,
+      "score_confidence_interval_95": {
+        "lower": 0.0,
+        "mean": 0.0,
+        "samples": 1,
+        "upper": 0.0
+      }
+    }
+  },
+  "comparison_label": "Diagnostic",
+  "dataset_readiness": {
+    "artifacts": [
+      {
+        "alternatives": [
+          "/private/tmp/memorizz-eval-sources/beam/chats/128K",
+          "/private/tmp/memorizz-eval-sources/beam/chats/100K",
+          "/private/tmp/memorizz-eval-sources/beam/chats/128k"
+        ],
+        "bytes": 1410169,
+        "file_count": 14,
+        "manifest_sha256": "sha256:4a179674231003f11e8db02f6ec3a222ea24f50cf51bda1179d16b4bc2c71bc3",
+        "name": "BEAM 128k chats",
+        "path": "/private/tmp/memorizz-eval-sources/beam/chats/100K",
+        "ready": true
+      }
+    ],
+    "benchmark_id": "beam",
+    "data_path": "/private/tmp/memorizz-eval-sources/beam",
+    "dataset_fingerprint": "sha256:58a00c33c8f65ae82d702697e361186381ac7d6cae6ab181cdbee21c636237d7",
+    "deep_checksum": false,
+    "license_note": "BEAM data is CC BY-SA 4.0; code is MIT.",
+    "next_actions": [
+      "memorizz eval dataset sync beam"
+    ],
+    "ready": true,
+    "source": {
+      "expected_revision": "3e12035532eb85768f1a7cd779832b650c4b2ef9",
+      "license_files": [],
+      "path": "~/.memorizz/eval/datasets/beam/source",
+      "ready": false,
+      "remote": null,
+      "repository_url": "https://github.com/mohammadtavakoli78/BEAM",
+      "revision": null,
+      "sync_supported": true
+    },
+    "variant": "128k"
+  },
+  "efficiency": {
+    "average_answer_latency_seconds": 10.356755724796676,
+    "average_generation_seconds": 9.796429512399481,
+    "average_lexical_search_seconds": 0.012160800097626634,
+    "average_memory_context_chars": 10962.4,
+    "average_memory_context_token_estimate": 2740.9,
+    "average_oracle_generation_seconds": 7.043458356444414,
+    "average_reranking_seconds": 0.23273394990246743,
+    "average_retrieval_seconds": 0.5603262123971945,
+    "average_semantic_search_seconds": 0.31381877480016557,
+    "cold_ingestion_seconds": 16.590359583991813,
+    "corpus_count": 1,
+    "derived_semantic_memory_count": 239,
+    "document_count": 507,
+    "embedding_cache_bytes": 3453164,
+    "embedding_cache_hits": 0,
+    "embedding_cache_misses": 1,
+    "embedding_seconds": 15.546208582993131,
+    "generation_p50_seconds": 7.075024541991297,
+    "generation_p95_seconds": 21.659129583014874,
+    "ingestion_seconds": 16.590359583991813,
+    "judge_p95_seconds": 3.256804208998801,
+    "judge_seconds": 40.96462604199769,
+    "memory_footprint_bytes": 9121140,
+    "original_document_count": 268,
+    "reader_repair_attempts": 2,
+    "reader_repair_successes": 0,
+    "retrieval_p50_seconds": 0.5377154579909984,
+    "retrieval_p95_seconds": 0.9628245420171879,
+    "stored_memory_token_estimate": 155342,
+    "total_processing_time": 284.2442965419905,
+    "warm_ingestion_seconds": 0
+  },
+  "metadata": {
+    "agent_evaluation_overrides": {},
+    "agent_template_id": null,
+    "agent_template_name": null,
+    "application_mode": "memory-suite",
+    "dataset_path": "/private/tmp/memorizz-eval-sources/beam",
+    "dataset_subset_fingerprint": "sha256:6078984412e4466177eb4dba99a63866b2d24570d5d0e33de6e4c03fb3b28be7",
+    "dataset_variant": "128k",
+    "embedding_model": "nomic-embed-text",
+    "embedding_model_digest": "sha256:970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6",
+    "embedding_provider": "ollama",
+    "evaluation_mode": "retrieval",
+    "evaluation_profile": "smoke",
+    "external_api_cost_usd": 0.0,
+    "features_exercised": {
+      "automatic_memory_retrieval": false,
+      "memagent_context_assembly": false,
+      "note": "Summarization requires an incremental multi-turn profile; this static QA runner does not claim to exercise it.",
+      "provider_storage": true,
+      "semantic_cache_decision": false,
+      "summarization_compaction": false
+    },
+    "finished_at": "2026-08-23T14:11:54.504102+00:00",
+    "judge_model": "qwen2.5:7b",
+    "model_provider": "ollama",
+    "num_samples": 10,
+    "provider_capabilities": {
+      "batch_store": true,
+      "native_hybrid_search": false,
+      "native_vector_search": false,
+      "provenance": true,
+      "provider": "FileSystemProvider",
+      "result_scores": true,
+      "scoped_search": true,
+      "transactional_batch": false
+    },
+    "reader_model": "qwen2.5:7b",
+    "reasoning_effort": null,
+    "semantic_cache_enabled": false,
+    "semantic_memory_extraction": true,
+    "timestamp": "2026-08-23T14:07:10.185066+00:00",
+    "total_processing_time": 284.2442965419905
+  },
+  "non_comparability_reasons": [
+    "profile='smoke', not the full paper profile",
+    "MemoRizz diagnostic runner used instead of the official runner",
+    "MemoRizz diagnostic scorer used instead of the official scorer",
+    "sample count 10 does not match the paper count 2000",
+    "upstream source revision does not match the pinned manifest",
+    "missing reproducibility field: dataset_revision"
+  ],
+  "overall_accuracy": 0.0,
+  "overall_score": 0.25,
+  "paper_comparable": false,
+  "paper_url": "https://arxiv.org/abs/2510.27246",
+  "protocol": {
+    "comparison_label": "Diagnostic",
+    "evidence": {
+      "dataset_fingerprint": "sha256:58a00c33c8f65ae82d702697e361186381ac7d6cae6ab181cdbee21c636237d7",
+      "dataset_revision": null,
+      "dataset_verified": true,
+      "decoding": {
+        "quantization": null,
+        "seed": 0,
+        "strategy": "greedy",
+        "temperature": 0
+      },
+      "dependency_lock_hash": "sha256:dadc6eabfaad66bf943bf8b714b1c1b384c67d8d762e45e0fd3aa5106fc9f6ec",
+      "embedding_model": "nomic-embed-text",
+      "hardware": {
+        "machine": "arm64",
+        "platform": "macOS-26.5-arm64-arm-64bit",
+        "python": "3.12.13"
+      },
+      "judge_model": "qwen2.5:7b",
+      "num_samples": 10,
+      "official_runner": false,
+      "official_scorer": false,
+      "prompt_hash": "sha256:cc453aab6caa2ae056b5fb271ba852d4d251a25572163dce6967ed8b41006f5e",
+      "reader_model": "qwen2.5:7b",
+      "scorer_hash": "sha256:1ab9b9f0a1e3259233fdb00e513fa62f5ed59b03758e651285da331b3bc037fd",
+      "seed": 0,
+      "top_k": 8,
+      "upstream_revision": null
+    },
+    "manifest": {
+      "benchmark_id": "beam",
+      "official_runner_note": "Use the official benchmark lifecycle and input format.",
+      "official_scorer_note": "Use BEAM's ten-ability rubric evaluator unchanged.",
+      "paper_decoding": {},
+      "paper_embedding_model": null,
+      "paper_judge_model": null,
+      "paper_reader_model": null,
+      "paper_retrieval_k": [],
+      "paper_sample_count": 2000,
+      "profiles": {
+        "paper": {
+          "default_limit": null,
+          "description": "The complete official split through the unmodified upstream evaluator.",
+          "name": "paper",
+          "stratified": true
+        },
+        "regression": {
+          "default_limit": 50,
+          "description": "A fixed stratified subset suitable for repeatable CI comparisons.",
+          "name": "regression",
+          "stratified": true
+        },
+        "smoke": {
+          "default_limit": null,
+          "description": "One bounded case per available category, for integration checks.",
+          "name": "smoke",
+          "stratified": true
+        }
+      },
+      "protocol_version": "2026-08-22.1",
+      "repository_url": "https://github.com/mohammadtavakoli78/BEAM",
+      "required_runtime_fields": [
+        "dataset_revision",
+        "dataset_fingerprint",
+        "prompt_hash",
+        "scorer_hash",
+        "dependency_lock_hash",
+        "hardware",
+        "seed"
+      ],
+      "source_sync_supported": true,
+      "synchronization_revision": "3e12035532eb85768f1a7cd779832b650c4b2ef9"
+    },
+    "non_comparability_reasons": [
+      "profile='smoke', not the full paper profile",
+      "MemoRizz diagnostic runner used instead of the official runner",
+      "MemoRizz diagnostic scorer used instead of the official scorer",
+      "sample count 10 does not match the paper count 2000",
+      "upstream source revision does not match the pinned manifest",
+      "missing reproducibility field: dataset_revision"
+    ],
+    "paper_comparable": false,
+    "profile": {
+      "default_limit": null,
+      "description": "One bounded case per available category, for integration checks.",
+      "name": "smoke",
+      "stratified": true
+    },
+    "protocol_version": "2026-08-22.1"
+  },
+  "repository_url": "https://github.com/mohammadtavakoli78/BEAM",
+  "retrieval": {
+    "basis": "diagnostic_fusion",
+    "candidate_pool_size": 256,
+    "concept_weight": 0.2,
+    "diversity_lambda": 0.9,
+    "entity_weight": 0.05,
+    "fusion": "grouped_weighted_rrf",
+    "lexical_weight": 0.35,
+    "mrr": 0.5416666666666666,
+    "ndcg_at_k": 0.4171129744890572,
+    "parent_source_deduplication": true,
+    "query_expansion": true,
+    "recall_at_k": 0.5111111111111111,
+    "rerank_weight": 0.15,
+    "semantic_weight": 1.0,
+    "strategy": "grouped_weighted_rrf+concept+entity+temporal+local_rerank+mmr",
+    "temporal_weight": 0.05,
+    "top_k": 8
+  },
+  "schema_version": "memorizz.memory-suite.v3",
+  "score_confidence_interval_95": {
+    "lower": 0.1,
+    "mean": 0.25,
+    "samples": 10,
+    "upper": 0.4
+  },
+  "scorer_provenance": {
+    "mode": "memorizz_diagnostic",
+    "note": "Use BEAM's ten-ability rubric evaluator unchanged.",
+    "official": false
+  },
+  "usage": {
+    "cost_is_estimate": false,
+    "cost_usd": 0.0,
+    "generation_cached_tokens": 0,
+    "generation_completion_tokens": 1637,
+    "generation_prompt_tokens": 27661,
+    "generation_reasoning_tokens": 0,
+    "judge_cached_tokens": 0,
+    "judge_completion_tokens": 778,
+    "judge_prompt_tokens": 5922,
+    "judge_reasoning_tokens": 0,
+    "lane_cost_usd": {
+      "judge": 0.0,
+      "oracle_reader": 0.0,
+      "retrieved_reader": 0.0
+    },
+    "oracle_cached_tokens": 0,
+    "oracle_completion_tokens": 1781,
+    "oracle_prompt_tokens": 10929,
+    "oracle_reasoning_tokens": 0,
+    "pricing_usd_per_million_tokens": null,
+    "total_tokens": 48708
+  },
+  "warnings": [
+    {
+      "case_id": "beam:128k:1:event_ordering:4",
+      "warning": "reader response was not fully grounded with valid retrieved source IDs"
+    },
+    {
+      "case_id": "beam:128k:1:instruction_following:8",
+      "warning": "reader response was not fully grounded with valid retrieved source IDs"
+    },
+    {
+      "case_id": "beam:128k:1:knowledge_update:10",
+      "warning": "reader response was not fully grounded with valid retrieved source IDs"
+    },
+    {
+      "case_id": "beam:128k:1:summarization:16",
+      "warning": "reader response was not fully grounded with valid retrieved source IDs"
+    }
+  ]
+}

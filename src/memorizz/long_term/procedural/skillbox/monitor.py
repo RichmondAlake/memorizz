@@ -15,7 +15,7 @@ swallows and logs.
 
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from ....enums.memory_type import MemoryType
 from .promotion import PromotionConfig
@@ -32,11 +32,13 @@ class SkillMonitor:
         memory_provider,
         config: Optional[PromotionConfig] = None,
         agent_id: Optional[str] = None,
+        lifecycle_callback: Optional[Callable[..., None]] = None,
     ):
         self.skillbox = skillbox
         self.memory_provider = memory_provider
         self.config = config or PromotionConfig()
         self.agent_id = agent_id
+        self.lifecycle_callback = lifecycle_callback
 
     # ------------------------------------------------------------ attribution
 
@@ -128,6 +130,7 @@ class SkillMonitor:
         # Release the raw trajectories back to workflow retrieval — the
         # compiled form no longer speaks for them.
         self._clear_promoted_stamps(skill)
+        self._notify_lifecycle("skill_demoted", skill, reason)
 
     def staleness_sweep(self, resolve_tool) -> List[str]:
         """Deprecate ACTIVE skills whose tools no longer resolve.
@@ -157,9 +160,18 @@ class SkillMonitor:
                     )
                     self._clear_promoted_stamps(skill)
                     deprecated.append(skill.skill_id)
+                    self._notify_lifecycle("skill_deprecated", skill, reason)
         except Exception as exc:
             logger.error("Staleness sweep failed: %s", exc)
         return deprecated
+
+    def _notify_lifecycle(self, transition: str, skill: Skill, reason: str) -> None:
+        if not callable(self.lifecycle_callback):
+            return
+        try:
+            self.lifecycle_callback(transition, skill, reason)
+        except Exception as exc:
+            logger.debug("Skill lifecycle callback failed: %s", exc)
 
     @staticmethod
     def _safe_resolve(resolve_tool, tool_name: str) -> bool:

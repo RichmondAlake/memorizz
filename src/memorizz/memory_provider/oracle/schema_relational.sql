@@ -270,6 +270,10 @@ CREATE TABLE knowledge_base (
     chunk_index NUMBER(10) DEFAULT 0,
     chunk_count NUMBER(10) DEFAULT 1,
     chunking_strategy VARCHAR2(32),
+    source_id VARCHAR2(512),                 -- Stable upstream/source provenance
+    parent_source_id VARCHAR2(512),          -- Parent chunk or original memory
+    linked_source_ids CLOB,                  -- JSON array for multi-source memories
+    metadata CLOB,                           -- JSON provenance and event metadata
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

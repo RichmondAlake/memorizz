@@ -1,0 +1,134 @@
+{
+  "schema_version": "memorizz.memory-suite.comparison.v1",
+  "generated_at": "2026-08-22",
+  "paper_comparable": false,
+  "scope": {
+    "sample_count_per_run": 1,
+    "retrieval_top_k": 6,
+    "embedding_provider": "ollama",
+    "embedding_model": "nomic-embed-text",
+    "reader_configurations": [
+      {
+        "provider": "ollama",
+        "model": "qwen2.5:7b",
+        "external_api_cost_usd": 0.0
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "reasoning_effort": "low",
+        "pricing_usd_per_million_tokens": {
+          "input": 5.0,
+          "cached_input": 0.5,
+          "output": 30.0
+        }
+      }
+    ]
+  },
+  "source_improvements_exercised": [
+    "EmbeddingManager memoization and batch dispatch",
+    "filesystem store_many ingestion with one shared-index checkpoint",
+    "tenant and namespace scoped filesystem retrieval",
+    "OpenAI Responses generation with bounded reasoning/output and captured usage"
+  ],
+  "benchmarks": {
+    "agentmembench": {
+      "paper_url": "https://arxiv.org/abs/2608.00009",
+      "dataset_adapter": "locomo",
+      "dataset_subset_fingerprint": "sha256:fe13e6bcda190bba414b0d89badae82913d4a768273b323e856a33f6dad455d9",
+      "document_count": 419,
+      "prior_qwen2_5_0_5b": {
+        "answer_f1": 0.21052631578947367,
+        "faithfulness": 0.0,
+        "retrieval_recall_at_6": 1.0,
+        "mrr": 0.5,
+        "ndcg_at_6": 0.6309297535714575
+      },
+      "qwen2_5_7b": {
+        "answer_f1": 0.30769230769230765,
+        "fully_correct": false,
+        "faithfulness": 0.0,
+        "retrieval_recall_at_6": 1.0,
+        "mrr": 0.5,
+        "ndcg_at_6": 0.6309297535714575,
+        "total_tokens": 1218,
+        "average_answer_latency_seconds": 4.806172374956077,
+        "ingestion_seconds": 7.974404791981215,
+        "external_api_cost_usd": 0.0
+      },
+      "gpt_5_5": {
+        "answer_f1": 0.4615384615384615,
+        "fully_correct": false,
+        "faithfulness": 1.0,
+        "retrieval_recall_at_6": 1.0,
+        "mrr": 0.5,
+        "ndcg_at_6": 0.6309297535714575,
+        "total_tokens": 1152,
+        "reasoning_tokens": 31,
+        "average_answer_latency_seconds": 2.9838794579845853,
+        "ingestion_seconds": 7.331665499979863,
+        "estimated_external_api_cost_usd": 0.00831
+      },
+      "interpretation": "Retrieval was identical and included the gold source at rank 2. Reader quality changed the answer: GPT-5.5 raised F1 and produced a fully evidence-supported response, but neither reader met the exact correctness threshold."
+    },
+    "locomo-plus": {
+      "paper_url": "https://arxiv.org/abs/2602.10715",
+      "official_repository": "https://github.com/xjtuleeyf/Locomo-Plus",
+      "official_revision": "059f4e3d38f7f1f96765e8e2cb7de3097551bffb",
+      "dataset_adapter": "cognitive",
+      "dataset_subset_fingerprint": "sha256:0794cb5b93141a686f0572019cc96cd7b12384fd79a066562e43994e950bac0f",
+      "document_count": 421,
+      "prior_qwen2_5_0_5b": {
+        "judge_score": 0.5,
+        "fully_correct": false,
+        "retrieval_recall_at_6": 0.0
+      },
+      "qwen2_5_7b": {
+        "judge_score": 0.0,
+        "fully_correct": false,
+        "retrieval_recall_at_6": 0.0,
+        "mrr": 0.0,
+        "ndcg_at_6": 0.0,
+        "total_tokens": 898,
+        "average_answer_latency_seconds": 1.6381424159917515,
+        "ingestion_seconds": 8.20878575000097,
+        "external_api_cost_usd": 0.0
+      },
+      "gpt_5_5": {
+        "judge_score": 0.5,
+        "fully_correct": false,
+        "retrieval_recall_at_6": 0.0,
+        "mrr": 0.0,
+        "ndcg_at_6": 0.0,
+        "total_tokens": 1144,
+        "reasoning_tokens": 147,
+        "average_answer_latency_seconds": 3.0051287499954924,
+        "ingestion_seconds": 7.909909165988211,
+        "estimated_external_api_cost_usd": 0.012695
+      },
+      "diagnostic": {
+        "first_gold_cue_semantic_rank": 104,
+        "second_gold_cue_semantic_rank": 218
+      },
+      "interpretation": "Both configurations retrieved the same six non-gold memories. GPT-5.5 earned partial answer credit despite the retrieval miss, so this run identifies semantic cue recall, not reader capability, as the bottleneck."
+    }
+  },
+  "hosted_total_estimated_cost_usd": 0.021005,
+  "suite_coverage": {
+    "executed_with_official_data": [
+      "AgentMemBench via its LoCoMo strategy dataset",
+      "LoCoMo-Plus cognitive"
+    ],
+    "not_executed_without_official_data": [
+      "LongMemEval-V2",
+      "BEAM",
+      "MemoryAgentBench"
+    ]
+  },
+  "non_comparability_reasons": [
+    "one fixed sample per run rather than each full official split",
+    "unified MemoRizz reader and judge rather than each paper's pinned evaluator stack",
+    "engineering regression evidence rather than a leaderboard submission"
+  ],
+  "security": "Raw prompts, answers, local paths, full predictions, and credentials are omitted."
+}

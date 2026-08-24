@@ -682,6 +682,74 @@ def _load_thread_tool_log_memory(
     return filtered
 
 
+def _load_thread_trace_bundles(
+    *, agent_id: str, memory_id: str, limit: Optional[int] = 100
+) -> List[Dict[str, Any]]:
+    """Load private observability bundles for Playground trace replay."""
+    provider = _state.get("provider")
+    normalized_agent_id = _to_text(agent_id).strip()
+    normalized_memory_id = _to_text(memory_id).strip()
+    if not provider or not normalized_memory_id:
+        return []
+
+    from ...enums.memory_type import MemoryType
+
+    try:
+        query = getattr(provider, "query_observability_records", None)
+        if callable(query):
+            page = query(
+                MemoryType.SHARED_MEMORY,
+                agent_ids=[normalized_agent_id] if normalized_agent_id else None,
+                memory_ids=[normalized_memory_id],
+                record_type="observability_trace_bundle",
+                limit=limit or 1000,
+            )
+            documents = page.get("items") or []
+        else:
+            documents = provider.list_all(MemoryType.SHARED_MEMORY) or []
+    except Exception as exc:
+        logger.debug("Failed to load private trace bundles: %s", exc)
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        content = _to_text(document.get("content")).strip()
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != "trace_bundle":
+            continue
+        payload_memory_id = _to_text(
+            document.get("trace_memory_id") or payload.get("memory_id")
+        ).strip()
+        payload_agent_id = _to_text(
+            document.get("agent_id") or payload.get("agent_id")
+        ).strip()
+        if payload_memory_id != normalized_memory_id:
+            continue
+        if normalized_agent_id and payload_agent_id != normalized_agent_id:
+            continue
+        rows.append(
+            {
+                **document,
+                "role": "tool",
+                "content": content,
+                "memory_id": payload_memory_id,
+                "timestamp": document.get("timestamp")
+                or payload.get("timestamp")
+                or document.get("updated_at"),
+            }
+        )
+
+    rows.sort(key=lambda row: _coerce_timestamp(row.get("timestamp")) or 0.0)
+    if limit and limit > 0:
+        return rows[-limit:]
+    return rows
+
+
 def _serialize_thread_message(message: Dict[str, Any]) -> Dict[str, Any]:
     """Convert thread message payload into JSON-serializable structure."""
     if not isinstance(message, dict):
@@ -1083,6 +1151,16 @@ async def agent_playground(
 
         if default_memory_id:
             context_window = _load_thread_messages(default_memory_id, limit=None)
+            context_window.extend(
+                _load_thread_trace_bundles(
+                    agent_id=agent_id,
+                    memory_id=default_memory_id,
+                    limit=100,
+                )
+            )
+            context_window.sort(
+                key=lambda row: _coerce_timestamp(row.get("timestamp")) or 0.0
+            )
             toolbox_memory = _load_thread_toolbox_memory(
                 agent_id=agent_id,
                 memory_id=default_memory_id,
@@ -1735,6 +1813,14 @@ async def agent_playground_thread(agent_id: str, memory_id: str = ""):
     messages: List[Dict[str, Any]] = []
     if requested_memory_id:
         messages = _load_thread_messages(requested_memory_id, limit=None)
+        messages.extend(
+            _load_thread_trace_bundles(
+                agent_id=agent_id,
+                memory_id=requested_memory_id,
+                limit=100,
+            )
+        )
+        messages.sort(key=lambda row: _coerce_timestamp(row.get("timestamp")) or 0.0)
         logger.debug(
             "Thread %s: loaded %d raw messages for agent %s",
             requested_memory_id,

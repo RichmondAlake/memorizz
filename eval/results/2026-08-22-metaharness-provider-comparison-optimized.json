@@ -1,0 +1,181 @@
+{
+  "schema_version": "memorizz.metaharness.provider-comparison.v2",
+  "generated_at": "2026-08-22",
+  "status": "valid",
+  "paper_comparable": false,
+  "source": {
+    "runner": "eval/metaharness/provider_comparison.py",
+    "source_commit": "e08a90e72ca0b618013ad728cb0bdbd2515397f7",
+    "source_worktree": "dirty",
+    "full_local_artifact": "/private/tmp/memorizz-provider-comparison-optimized-20260822.json",
+    "full_local_artifact_sha256": "99fc50c48918eccaa91c43cd6c6d24e48e1241d618364cc47486b6721a733030"
+  },
+  "scope": {
+    "protocol": "structured_adaptive_v1",
+    "repeats": 2,
+    "seed": 20260822,
+    "fixture": "synthetic export-policy review",
+    "gold_findings": 6,
+    "cold_unique_memory_scopes": true,
+    "per_harness_budget_parity": true,
+    "codex_model": "gpt-5.6-luna",
+    "claude_model": "sonnet",
+    "coordinator": "deterministic_structured_union",
+    "judge_model": "gpt-4.1"
+  },
+  "results": [
+    {
+      "arm": "codex_only",
+      "memory_provider": "filesystem",
+      "judge_score_mean": 93.5,
+      "judge_score_sample_stdev": 0.707,
+      "gold_findings_mean": 6.0,
+      "unsupported_claims_mean": 0.5,
+      "operational_success_rate": 1.0,
+      "grounded_rate": 1.0,
+      "verified_rate": 1.0,
+      "wall_latency_ms_mean": 60448,
+      "wall_latency_ms_sample_stdev": 2334.159,
+      "cost_usd_mean": 0.007854,
+      "cost_usd_sample_stdev": 0.000139,
+      "normalized_input_tokens_mean": 67474,
+      "output_tokens_mean": 2902,
+      "memory_context_tokens_mean": 107
+    },
+    {
+      "arm": "claude_only",
+      "memory_provider": "filesystem",
+      "judge_score_mean": 100.0,
+      "judge_score_sample_stdev": 0.0,
+      "gold_findings_mean": 6.0,
+      "unsupported_claims_mean": 0.0,
+      "operational_success_rate": 1.0,
+      "grounded_rate": 1.0,
+      "verified_rate": 1.0,
+      "wall_latency_ms_mean": 83935,
+      "wall_latency_ms_sample_stdev": 1055.003,
+      "cost_usd_mean": 0.140066,
+      "cost_usd_sample_stdev": 0.001692,
+      "normalized_input_tokens_mean": 5480,
+      "output_tokens_mean": 8455,
+      "memory_context_tokens_mean": 107
+    },
+    {
+      "arm": "memorizz_panel_filesystem",
+      "memory_provider": "filesystem",
+      "judge_score_mean": 94.5,
+      "judge_score_sample_stdev": 2.121,
+      "gold_findings_mean": 6.0,
+      "unsupported_claims_mean": 0.0,
+      "operational_success_rate": 1.0,
+      "grounded_rate": 1.0,
+      "verified_rate": 1.0,
+      "wall_latency_ms_mean": 54014,
+      "wall_latency_ms_sample_stdev": 7011.671,
+      "memory_seed_latency_ms_mean": 0,
+      "cost_usd_mean": 0.008035,
+      "cost_usd_sample_stdev": 0.000855,
+      "normalized_input_tokens_mean": 52716,
+      "output_tokens_mean": 2576,
+      "memory_context_tokens_mean": 107,
+      "harness_runs_mean": 1.0,
+      "adaptive_escalation_rate": 0.0,
+      "model_synthesis_rate": 0.0,
+      "phase_timings_ms_mean": {
+        "context": 5,
+        "adapter": 53533,
+        "verification": 44,
+        "workspace_finalize": 44,
+        "total": 53628
+      }
+    },
+    {
+      "arm": "memorizz_panel_oracle",
+      "memory_provider": "oracle",
+      "judge_score_mean": 93.5,
+      "judge_score_sample_stdev": 0.707,
+      "gold_findings_mean": 6.0,
+      "unsupported_claims_mean": 0.0,
+      "operational_success_rate": 1.0,
+      "grounded_rate": 1.0,
+      "verified_rate": 1.0,
+      "wall_latency_ms_mean": 64627,
+      "wall_latency_ms_sample_stdev": 14449.02,
+      "memory_seed_latency_ms_mean": 26,
+      "cost_usd_mean": 0.007784,
+      "cost_usd_sample_stdev": 0.001476,
+      "normalized_input_tokens_mean": 60445,
+      "output_tokens_mean": 2883,
+      "memory_context_tokens_mean": 107,
+      "harness_runs_mean": 1.0,
+      "adaptive_escalation_rate": 0.0,
+      "model_synthesis_rate": 0.0,
+      "phase_timings_ms_mean": {
+        "context": 124,
+        "adapter": 59418,
+        "verification": 38,
+        "workspace_finalize": 40,
+        "total": 59622
+      }
+    }
+  ],
+  "optimization_delta_from_prior_baseline": {
+    "warning": "The implementation and protocol changed; these are engineering deltas, not an isolated causal experiment.",
+    "filesystem_panel": {
+      "judge_points": -3.0,
+      "gold_findings": 0.0,
+      "wall_latency_percent": 23.145,
+      "cost_percent": -87.111,
+      "normalized_input_percent": -9.023,
+      "output_percent": -50.289,
+      "memory_context_percent": -79.264
+    },
+    "oracle_panel": {
+      "judge_points": 0.0,
+      "gold_findings": 0.5,
+      "wall_latency_percent": 37.85,
+      "cost_percent": -85.811,
+      "normalized_input_percent": 35.366,
+      "output_percent": -32.482,
+      "memory_context_percent": -79.264
+    },
+    "total_measured_evaluation_cost_percent": -32.32
+  },
+  "provider_delta_oracle_vs_filesystem_panel": {
+    "judge_points": -1.0,
+    "wall_latency_percent": 19.649,
+    "cost_percent": -3.124,
+    "normalized_input_tokens": 7729,
+    "output_tokens": 307
+  },
+  "context_equivalence": {
+    "valid": true,
+    "filesystem_tokens": 107,
+    "oracle_tokens": 107,
+    "content_fingerprint": "2d8e7384bf25eda6c99e47e6261c0285fb9629dd1be2a45d822e1640de41cd55"
+  },
+  "costs": {
+    "arm_execution_total_usd": 0.32747822,
+    "judge_overhead_usd": 0.030042,
+    "total_measured_usd": 0.35752022,
+    "development_diagnostic_retries_included": false
+  },
+  "oracle_preflight": {
+    "ok": true,
+    "database_product": "Oracle AI Database 26ai Free",
+    "version_full": "23.26.0.0.0",
+    "pdb_open_state": "READ WRITE",
+    "embedding_dimension_compatible": true,
+    "vector_dimensions": 384,
+    "index_policy": "lazy",
+    "exact_search_fallback": true,
+    "diagnostics": []
+  },
+  "interpretation": {
+    "highest_judged_quality": "claude_only",
+    "fastest": "memorizz_panel_filesystem",
+    "lowest_known_cost": "memorizz_panel_oracle",
+    "warning": "One synthetic fixture and two repeats are insufficient for a population-level or leaderboard claim."
+  },
+  "security": "The full artifact was redacted before persistence, contains no redaction placeholders after safe numeric telemetry normalization, and passed a credential-pattern scan. Raw credentials are not included."
+}

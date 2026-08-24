@@ -4,12 +4,19 @@
 
 {% block content %}
 <div class="page-header">
-    <h1>Dashboard</h1>
-    <p>Overview of your memory provider</p>
+    <span class="page-eyebrow">Memory control plane</span>
+    <h1>System overview</h1>
+    <p>Inspect the active provider and every memory surface from one place.</p>
 </div>
 
 <div class="connection-info-card">
-    <h3>Connected to {{ provider_type|title }}</h3>
+    <div class="connection-card-heading">
+        <span class="connection-live-dot" aria-hidden="true"></span>
+        <div>
+            <span class="connection-card-kicker">Active provider</span>
+            <h3>{{ provider_type|title }}</h3>
+        </div>
+    </div>
     <div class="connection-details">
         {% for key, value in connection_info.items() %}
         <div class="detail-item">

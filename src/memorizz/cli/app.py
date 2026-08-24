@@ -19,6 +19,10 @@ import typer
 
 from .._env_io import resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
+from .agent_commands import agents_app
+from .eval_commands import eval_app
+from .harness_commands import harness_app
+from .learning_commands import learning_app
 from .mcp_commands import mcp_app
 
 app = typer.Typer(
@@ -29,6 +33,10 @@ app = typer.Typer(
 )
 
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(learning_app, name="learning")
+app.add_typer(agents_app, name="agents")
+app.add_typer(harness_app, name="harness")
+app.add_typer(eval_app, name="eval")
 
 
 def _eprint(msg: str) -> None:
@@ -46,13 +54,12 @@ def _make_console():
 
 
 def _print_version() -> None:
-    try:
-        from importlib.metadata import version
+    # Use the package source of truth.  Distribution metadata can describe an
+    # older globally installed wheel when this command is run from a checkout
+    # through ``PYTHONPATH=src``.
+    from .. import __version__
 
-        v = version("memorizz")
-    except Exception:
-        v = "unknown"
-    print(f"memorizz {v}")
+    print(f"memorizz {__version__}")
 
 
 # --------------------------------------------------------------------------- #
@@ -212,6 +219,7 @@ def oracle_preflight(
     raw_json: bool = typer.Option(False, "--json", help="Emit compact JSON."),
 ):
     """Run the package-owned structured Oracle preflight report."""
+    cfg.load_layered_env()
     from ..memory_provider.oracle import OracleProvider
 
     provider = OracleProvider.from_env(

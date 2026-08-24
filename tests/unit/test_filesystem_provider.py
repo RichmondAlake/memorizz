@@ -6,6 +6,7 @@ from typing import List
 import pytest
 
 from memorizz.enums import MemoryType
+from memorizz.long_term.semantic.entity_memory import EntityMemory
 from memorizz.memagent import MemAgentModel
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
 
@@ -33,6 +34,30 @@ def _make_provider(tmp_path, embedding_provider=None) -> FileSystemProvider:
     return FileSystemProvider(config)
 
 
+def test_exact_search_mode_does_not_load_faiss(tmp_path, monkeypatch):
+    from memorizz.memory_provider.filesystem import provider as provider_module
+
+    def unexpected_import(name):
+        if name == "faiss":
+            raise AssertionError("FAISS must not load in exact-search mode")
+        return __import__(name)
+
+    monkeypatch.setattr(provider_module.importlib, "import_module", unexpected_import)
+    provider = FileSystemProvider(
+        FileSystemConfig(
+            root_path=tmp_path / "exact-memory",
+            embedding_provider=DummyEmbeddingProvider(),
+            use_faiss=False,
+        )
+    )
+
+    provider.store(
+        {"content": "alpha memory", "embedding": [1.0, 0.0, 0.0]},
+        MemoryType.KNOWLEDGE_BASE,
+    )
+    assert provider.retrieve_by_query("alpha", MemoryType.KNOWLEDGE_BASE, limit=1)
+
+
 def test_store_and_query_documents(tmp_path):
     provider = _make_provider(tmp_path)
 
@@ -57,6 +82,38 @@ def test_store_and_query_documents(tmp_path):
 
     provider.delete_by_id(doc_id, MemoryType.KNOWLEDGE_BASE)
     assert provider.list_all(MemoryType.KNOWLEDGE_BASE) == []
+
+
+def test_entity_legacy_scope_migration_is_explicit_and_strict(tmp_path):
+    provider = _make_provider(tmp_path)
+    provider.store(
+        {
+            "entity_id": "legacy-entity",
+            "name": "user",
+            "memory_id": "shared-memory",
+            "user_id": None,
+        },
+        MemoryType.ENTITY_MEMORY,
+    )
+    entities = EntityMemory(provider)
+
+    assert (
+        entities.get_entity_by_name("user", memory_id="shared-memory", user_id="user-a")
+        is None
+    )
+    assert (
+        entities.migrate_legacy_scope(memory_id="shared-memory", user_id="user-a") == 1
+    )
+    assert (
+        entities.get_entity_by_name(
+            "user", memory_id="shared-memory", user_id="user-a"
+        )["entity_id"]
+        == "legacy-entity"
+    )
+    assert (
+        entities.get_entity_by_name("user", memory_id="shared-memory", user_id=None)
+        is None
+    )
 
 
 def test_memagent_round_trip(tmp_path):
@@ -152,6 +209,72 @@ def test_keyword_search_without_embeddings(tmp_path):
         "keyword fallback", memory_type=MemoryType.KNOWLEDGE_BASE, limit=1
     )
     assert results and results[0]["memory_id"] == "k1"
+
+
+def test_keyword_search_recalls_scoped_memory_for_delegated_query_suffix(tmp_path):
+    provider = _make_provider(tmp_path)
+    base_query = (
+        "Review access_policy.py and verify.py for security and correctness "
+        "against the retrieved export policy requirements"
+    )
+    expected_id = provider.store(
+        {
+            "content": f"Applicable request: {base_query}. Expired grants deny export.",
+            "memory_id": "panel-memory",
+            "user_id": "alice",
+            "thread_id": "repeat-1",
+        },
+        memory_store_type=MemoryType.KNOWLEDGE_BASE,
+    )
+    provider.store(
+        {
+            "content": "Unrelated deployment notes for a different tenant",
+            "memory_id": "other-memory",
+            "user_id": "bob",
+            "thread_id": "repeat-1",
+        },
+        memory_store_type=MemoryType.KNOWLEDGE_BASE,
+    )
+    provider._embedding_provider = None
+    provider._get_embedding_provider = lambda: None
+
+    results = provider.retrieve_by_query(
+        base_query + ". Focus on datetime behavior, typing, and verifier strength.",
+        memory_type=MemoryType.KNOWLEDGE_BASE,
+        memory_id="panel-memory",
+        user_id="alice",
+        thread_id="repeat-1",
+        limit=2,
+    )
+
+    assert [row["_id"] for row in results] == [expected_id]
+    assert results[0]["score"] > 0.8
+
+
+def test_semantic_search_falls_back_without_scoped_document_vectors(tmp_path):
+    embeddings = DummyEmbeddingProvider()
+    provider = _make_provider(tmp_path, embedding_provider=embeddings)
+    provider.store(
+        {
+            "content": "exact scoped grounding requirement",
+            "memory_id": "memory-a",
+            "user_id": "alice",
+            "thread_id": "thread-a",
+        },
+        memory_store_type=MemoryType.KNOWLEDGE_BASE,
+    )
+
+    results = provider.retrieve_by_query(
+        "exact scoped grounding requirement",
+        memory_type=MemoryType.KNOWLEDGE_BASE,
+        memory_id="memory-a",
+        user_id="alice",
+        thread_id="thread-a",
+        limit=2,
+    )
+
+    assert results and results[0]["memory_id"] == "memory-a"
+    assert embeddings.calls == []
 
 
 def test_conversation_history_can_be_scoped_to_one_thread(tmp_path):

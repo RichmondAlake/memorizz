@@ -11,7 +11,7 @@ Semantic memory stores canonical facts, personas, and entity attributes that rar
 ## Typical Operations
 
 ```python
-from memorizz import KnowledgeBase
+from memorizz import EntityMemory, KnowledgeBase, MemoryType
 
 kb = KnowledgeBase(memory_provider=provider)
 
@@ -20,21 +20,42 @@ kb = KnowledgeBase(memory_provider=provider)
 kb_id = kb.ingest_knowledge(
     corpus="The premium plan includes unlimited vector storage.",
     namespace="support",
+    user_id="user-42",
 )
 
 # Attach to an agent so its retrievals scope to this knowledge
 kb.attach_to_agent(agent, kb_id)
 
-# Semantic retrieval returns the most relevant chunks across the namespace
-hits = kb.retrieve_knowledge_by_query(
-    query="What does premium include?", namespace="support", limit=3
+# For a user-facing lookup, call the provider with the exact tenant scope.
+hits = provider.retrieve_by_query(
+    query="What does premium include?",
+    memory_store_type=MemoryType.KNOWLEDGE_BASE,
+    namespace="support",
+    user_id="user-42",
+    limit=3,
 )
 
-agent.memory.entity_memory.upsert(
+entities = EntityMemory(provider)
+entities.upsert_entity(
     entity_id="company_acme",
-    attributes={"plan": "premium"},
+    name="Acme",
+    entity_type="organization",
+    attributes=[
+        {
+            "name": "plan",
+            "value": "premium",
+            "confidence": 0.95,
+            "source": "billing-system",
+        }
+    ],
+    memory_id="support",
+    user_id="user-42",
 )
 ```
+
+The `EntityMemory` helper owns structured entity operations; there is no
+mutable `agent.memory.entity_memory` façade. Always supply the same user and
+memory scope for entity writes and reads.
 
 ### Chunking strategies
 

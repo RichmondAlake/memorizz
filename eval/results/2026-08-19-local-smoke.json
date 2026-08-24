@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-08-19T00:44:05Z",
+  "scope_notice": "Bounded local smoke evaluations; not leaderboard or paper-comparable results.",
+  "benchmarks": {
+    "longmemeval_v2": {
+      "official_repository_revision": "2cc8c540bdb87fe6761629b585e727e1c4704520",
+      "tier": "small",
+      "domain": "enterprise",
+      "scope": {
+        "question_count": 1,
+        "question_ids": [
+          "01307e07"
+        ],
+        "trajectory_count": 100
+      },
+      "models": {
+        "memory_synthesizer": "gpt-5-mini",
+        "reader": "gpt-5-mini",
+        "evaluator": "gpt-5-mini",
+        "embedding": "text-embedding-3-small"
+      },
+      "score": {
+        "correct": 1,
+        "total": 1,
+        "accuracy": 1.0
+      },
+      "memory_evidence": {
+        "indexed_chunk_count": 4072,
+        "summary_count": 5,
+        "compaction_seconds": 66.20479379099561,
+        "query_seconds": 74.93422904098406,
+        "semantic_cache_exact_repeat_hit": true,
+        "retrieved_all_reference_labels": true
+      },
+      "official_reader_usage": {
+        "prompt_tokens": 26428,
+        "completion_tokens": 153,
+        "total_tokens": 26581
+      },
+      "features": {
+        "semantic_vector_retrieval": true,
+        "source_diversified_lexical_retrieval": true,
+        "summarization_and_compaction": true,
+        "tenant_and_thread_isolation": true
+      },
+      "paper_comparable": false
+    },
+    "swe_bench_lite": {
+      "official_repository_revision": "490635b2e9e775dca1e1d6b40ce9dbcff91e780f",
+      "dataset_revision": "b0dde1093fe417d83b7184254edf8199c1f0dff5",
+      "dataset_test_count": 300,
+      "scope": {
+        "instance_count": 1,
+        "instance_ids": [
+          "sympy__sympy-20590"
+        ]
+      },
+      "model": "gpt-5.4-mini",
+      "reasoning_effort": "high",
+      "official_grader": {
+        "completed": 1,
+        "resolved": 1,
+        "unresolved": 0,
+        "infrastructure_failures": 0,
+        "errors": 0
+      },
+      "runtime_evidence": {
+        "duration_seconds": 141.99429812503513,
+        "patch_chars": 985,
+        "tool_call_count": 29,
+        "workflow_count": 1,
+        "summary_count": 1,
+        "host_completion_accepted": true,
+        "side_effect_cache_bypasses": 2,
+        "reflection_exact_repeat_hit": true
+      },
+      "usage": {
+        "prompt_tokens": 326284,
+        "cached_tokens": 293888,
+        "completion_tokens": 16009,
+        "reasoning_tokens": 11787,
+        "total_tokens": 342293
+      },
+      "estimated_cost_usd": 0.1183791,
+      "paper_comparable": false
+    },
+    "membench": {
+      "official_repository_revision": "f66d8d1028d3f68627d00f77a967b93fbb8694b6",
+      "scope": {
+        "track": "official_raw_categorical_smoke",
+        "sample_count": 4,
+        "samples_per_track": 1
+      },
+      "model": "gpt-5-mini",
+      "score": {
+        "correct": 4,
+        "total": 4,
+        "accuracy": 1.0,
+        "source_retrieval_recall": 1.0
+      },
+      "memory_evidence": {
+        "source_capacity_tokens": 16721,
+        "summary_count": 10,
+        "semantic_cache_exact_repeat_hits": 4,
+        "host_completion_acceptances": 4
+      },
+      "usage": {
+        "model_calls": 14,
+        "prompt_tokens": 34562,
+        "cached_tokens": 32384,
+        "completion_tokens": 6071,
+        "reasoning_tokens": 1664,
+        "total_tokens": 40633
+      },
+      "estimated_cost_usd": 0.0134961,
+      "paper_comparable": false,
+      "limitation": "The repository does not contain the README-referenced paper-sampled data2test bundle."
+    }
+  },
+  "security": {
+    "contains_credentials": false,
+    "contains_raw_model_context": false,
+    "contains_generated_patch": false,
+    "contains_absolute_local_paths": false
+  }
+}

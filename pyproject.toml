@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.5.2"
+version = "0.6.0"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -94,6 +94,11 @@ docs = [
     "mkdocs-git-revision-date-localized-plugin>=1.2.0",
     "pymdown-extensions>=10.0",
 ]
+notebooks = [
+    "jupyterlab>=4.0.0",
+    "ipykernel>=6.0.0",
+    "nbconvert>=7.0.0",
+]
 sandbox-e2b = [
     # e2b 2.38 replaced the shared transport signature while the current
     # code-interpreter 2.9 client still passes its HTTP/1.1 `http2` override.
@@ -104,6 +109,22 @@ sandbox-daytona = ["daytona>=1.0"]
 sandbox = [
     "e2b>=2.26.0,<2.38.0",
     "e2b-code-interpreter>=2.9.0,<2.10.0",
+]
+terminal-bench = ["harbor>=0.21.0,<0.22.0"]
+# Benchmark adapters remain optional so production installs do not pull Docker,
+# dataset, tokenizer, or deep-learning stacks unnecessarily.
+swe-bench = [
+    "swebench>=5.0.2,<6.0.0",
+    "datasets>=3.0.0",
+    "docker>=7.0.0",
+]
+membench-eval = ["tiktoken>=0.7.0"]
+longmemeval-v2 = [
+    "transformers>=4.57.0",
+    "pillow>=10.0.0",
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "tqdm>=4.66.0",
 ]
 ui = [
     "fastapi>=0.104.0",
@@ -178,14 +199,28 @@ allow-direct-references = true
 # searches the package dir, so discovery works unchanged.
 "eval/longmemeval/evaluate_memorizz.py" = "memorizz/eval/longmemeval/evaluate_memorizz.py"
 "eval/longmemeval/download_dataset.py" = "memorizz/eval/longmemeval/download_dataset.py"
+"eval/longmemeval_v2/evaluate_memorizz.py" = "memorizz/eval/longmemeval_v2/evaluate_memorizz.py"
+"eval/longmemeval_v2/README.md" = "memorizz/eval/longmemeval_v2/README.md"
+"eval/swe_bench_lite/evaluate_memorizz.py" = "memorizz/eval/swe_bench_lite/evaluate_memorizz.py"
+"eval/swe_bench_lite/README.md" = "memorizz/eval/swe_bench_lite/README.md"
+"eval/membench/evaluate_memorizz.py" = "memorizz/eval/membench/evaluate_memorizz.py"
+"eval/membench/README.md" = "memorizz/eval/membench/README.md"
+"eval/memory_suite/evaluate_memorizz.py" = "memorizz/eval/memory_suite/evaluate_memorizz.py"
+"eval/memory_suite/README.md" = "memorizz/eval/memory_suite/README.md"
 "src/memorizz/py.typed" = "memorizz/py.typed"
 "src/memorizz/sandbox/MemorizzGraalSandbox.java" = "memorizz/sandbox/MemorizzGraalSandbox.java"
 
 [tool.hatch.build.targets.sdist]
 exclude = [
+    ".claude/**",
     "temp_unpack*",
     "eval/longmemeval/data/**",
     "eval/longmemeval/results/**",
+    "eval/longmemeval_v2/results/**",
+    "eval/swe_bench_lite/results/**",
+    "eval/membench/results/**",
+    "eval/memory_suite/results/**",
+    "eval/results/**",
     "longmemeval_evaluation.log",
     "matrix_results*.txt",
     "scenario/**",

@@ -1,0 +1,92 @@
+{
+  "schema_version": "memorizz.memory-path-regression.v1",
+  "generated_at": "2026-08-23",
+  "paper_comparable": false,
+  "comparison_label": "Diagnostic",
+  "scope": {
+    "samples_per_lane": 1,
+    "reader": "qwen2.5:7b",
+    "reader_quantization": "Q4_K_M",
+    "embedding_model": "nomic-embed-text",
+    "embedding_model_digest": "0a109f422b47",
+    "top_k": 6,
+    "candidate_pool_size": 256,
+    "lexical_weight": 0.25,
+    "rerank_weight": 0.15,
+    "external_api_cost_usd": 0.0
+  },
+  "dataset_evidence": {
+    "locomo_sha256": "sha256:79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "locomo_plus_sha256": "sha256:af2fc6e5e0e88735e28d8dd1ef474b718861a73beb21779809e3b9e1a4fe3d23",
+    "agentmembench_subset_fingerprint": "sha256:05667fb797b4fbc782e74ca7c911b6b1c737c8005f1107505400c98df085d6f6",
+    "locomo_plus_subset_fingerprint": "sha256:6fcc0c50cd41eb958a4c7cecb1495a4e0bd5cb68178674f9c332d094dcf9aa54"
+  },
+  "baseline": {
+    "source": "2026-08-23-memory-suite-retry-3.json",
+    "agentmembench_locomo_diagnostic": {
+      "task_score": 0.0,
+      "recall_at_6": 1.0,
+      "mrr": 1.0,
+      "gold_evidence_oracle_score": 0.0
+    },
+    "locomo_plus_cognitive_diagnostic": {
+      "task_score": 0.0,
+      "recall_at_6": 0.0,
+      "mrr": 0.0,
+      "gold_evidence_oracle_score": 0.0
+    }
+  },
+  "fixed_runs": {
+    "agentmembench_locomo_diagnostic": {
+      "evaluation_mode": "retrieval",
+      "task_score": 1.0,
+      "recall_at_6": 1.0,
+      "mrr": 1.0,
+      "gold_evidence_oracle_score": 1.0,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 1.053793,
+      "average_answer_latency_seconds": 2.593775,
+      "total_tokens": 1619,
+      "external_api_cost_usd": 0.0
+    },
+    "locomo_plus_cognitive_diagnostic": {
+      "evaluation_mode": "retrieval",
+      "task_score": 0.0,
+      "recall_at_6": 1.0,
+      "mrr": 0.25,
+      "gold_evidence_oracle_score": 0.5,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 0.463011,
+      "average_answer_latency_seconds": 1.692179,
+      "total_tokens": 1652,
+      "external_api_cost_usd": 0.0
+    },
+    "locomo_plus_cognitive_full_memagent": {
+      "evaluation_mode": "memagent",
+      "task_score": 0.5,
+      "recall_at_6": 1.0,
+      "mrr": 0.2,
+      "gold_evidence_oracle_score": null,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 1.083433,
+      "average_answer_latency_seconds": 6.413534,
+      "total_tokens": 2438,
+      "external_api_cost_usd": 0.0,
+      "features_exercised": [
+        "MemAgent.run",
+        "isolated filesystem memory",
+        "automatic query expansion",
+        "automatic knowledge-base retrieval",
+        "parent-source deduplication",
+        "volatile context assembly",
+        "grounded source citations"
+      ]
+    }
+  },
+  "interpretation": {
+    "retrieval_result": "The previously missed LoCoMo-Plus cues entered the final evidence set through one multi-source, provenance-linked semantic event.",
+    "reader_result": "Qwen remained imperfect: diagnostic answering scored 0.0, its gold-evidence oracle scored 0.5, and full MemAgent scored 0.5. This is reader/evidence-utilization evidence, not a remaining retrieval miss.",
+    "claim_boundary": "One deterministic local sample is an engineering regression only. It is not an official protocol run, leaderboard score, confidence estimate, or paper-level comparison.",
+    "security": "Credentials, raw prompts, raw predictions, benchmark contents, and machine-specific paths are omitted."
+  }
+}

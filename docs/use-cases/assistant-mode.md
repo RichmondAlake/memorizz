@@ -1,32 +1,44 @@
 # Assistant Mode
 
-Assistant mode is the default conversational setup for MemoRizz. It prioritizes continuity, personalization, and a rich memory stack so users feel like they're chatting with the same agent every time.
+Assistant mode prioritizes conversation continuity, personalization, and
+source-linked compaction. It enables conversation, knowledge, persona, entity,
+short-term, and summary memory by default.
 
-## Memory Stack
-
-- `MemoryType.CONVERSATION_MEMORY`
-- `MemoryType.KNOWLEDGE_BASE` + `MemoryType.ENTITY_MEMORY`
-- `MemoryType.PERSONAS`
-- `MemoryType.SHORT_TERM_MEMORY`
-- `MemoryType.SUMMARIES`
-
-## Configuration
+## Build an assistant
 
 ```python
-from memorizz.enums import ApplicationMode
-from memorizz.memagent.builders import MemAgentBuilder
+from memorizz import ApplicationMode, MemAgentBuilder
 
-agent = (MemAgentBuilder()
+agent = (
+    MemAgentBuilder()
+    .with_name("Onboarding assistant")
+    .with_instruction("Help users onboard and distinguish facts from guesses.")
     .with_application_mode(ApplicationMode.ASSISTANT)
-    .with_memory_provider(provider)
-    ...
-    .build())
+    .with_llm_config({"provider": "openai", "model": "gpt-4o-mini"})
+    .with_memory_ids("onboarding")
+    .with_semantic_cache(enabled=True, threshold=0.88)
+    .build_and_save()
+)
+
+answer = agent.run(
+    "Remember that I prefer dark mode.",
+    memory_id="onboarding",
+    user_id="user-42",
+    thread_id="first-run",
+)
 ```
 
-## Tips
+## Design guidance
 
-- Seed personas with voice/tone guidelines and safety rails.
-- Use entity memory to store user preferences (e.g., "prefers dark mode UI").
-- Enable semantic cache for repeated Q&A answers to cut LLM costs.
+- Put stable user or organization facts in entity memory; keep one-off turn
+  details in conversation memory.
+- Keep persona changes versioned and auditable. A transient user instruction
+  should not rewrite the agent's durable identity.
+- Set semantic-cache freshness by domain, and invalidate cached policy or
+  catalog answers when the source changes.
+- Generate summaries with explicit memory, user, and thread scope.
+- Add external tools only with typed schemas and appropriate approval policy.
 
-Assistant mode is ideal for customer support, onboarding companions, or internal help desks.
+Assistant mode is a good starting point for support, onboarding, and internal
+help desks. Use workflow mode when repeatable tool execution matters more than
+conversational history.

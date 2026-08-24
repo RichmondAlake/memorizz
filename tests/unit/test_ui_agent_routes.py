@@ -20,9 +20,11 @@ pytest.importorskip("httpx")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from memorizz import MemAgent  # noqa: E402
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider  # noqa: E402
 from memorizz.ui import state  # noqa: E402
 from memorizz.ui.app import create_app  # noqa: E402
+from memorizz.ui.routers.evalground import _secret_free_agent_template  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -73,6 +75,12 @@ class TestAgentCrud:
         agent = agents[0]
         assert agent.name == "Func Test Agent"
         assert agent.instruction == "You are a functional test agent."
+        loaded = MemAgent.load(agent.agent_id, memory_provider=connected)
+        assert loaded.agent_id == agent.agent_id
+        assert loaded.name == "Func Test Agent"
+        assert loaded.llm_provider == "openai"
+        assert loaded.llm_model == "gpt-4.1-mini"
+        loaded.close(close_memory_provider=False)
 
     @pytest.mark.unit
     def test_create_with_flags_round_trips(self, client, connected):
@@ -82,6 +90,30 @@ class TestAgentCrud:
         assert bool(agent.semantic_cache) is True
         assert bool(agent.continual_learning) is True
         assert agent.continual_learning_config["skill_injection_role"] == "user"
+
+    @pytest.mark.unit
+    def test_meta_harness_runtime_configuration_round_trips(
+        self, client, connected, tmp_path
+    ):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        resp = _create_agent(
+            client,
+            meta_harness_mode="runtime",
+            default_harness="codex",
+            harness_workspace=str(workspace),
+        )
+        assert resp.status_code in (302, 303), resp.text[:300]
+        agent = connected.list_memagents()[0]
+        assert agent.meta_harness is True
+        assert agent.meta_harness_mode == "runtime"
+        assert agent.default_harness == "codex"
+        assert agent.harness_config["workspace"] == str(workspace)
+
+        form = client.get(f"/agents/{agent.agent_id}/edit")
+        assert form.status_code == 200
+        assert 'option value="runtime" selected' in form.text
+        assert 'option value="codex" selected' in form.text
 
     @pytest.mark.unit
     def test_browser_control_can_be_configured_and_persisted(self, client, connected):
@@ -240,6 +272,26 @@ class TestPlayground:
 
 class TestEvalground:
     @pytest.mark.unit
+    def test_page_exposes_local_and_metered_memory_suite_models(
+        self, client, connected
+    ):
+        resp = client.get("/evalground")
+        assert resp.status_code == 200
+        for benchmark_name in (
+            "AgentMemBench",
+            "LongMemEval-V2",
+            "LoCoMo-Plus",
+            "BEAM",
+            "MemoryAgentBench",
+        ):
+            assert benchmark_name in resp.text
+        assert "Ollama readers cost $0 externally" in resp.text
+        assert "OpenAI (metered)" in resp.text
+        assert "Full MemAgent execution" in resp.text
+        assert "Memory retrieval diagnostic" in resp.text
+        assert "Concept Query Expansion" in resp.text
+
+    @pytest.mark.unit
     def test_runs_active_empty(self, client, connected):
         resp = client.get("/evalground/runs/active")
         assert resp.status_code == 200
@@ -263,3 +315,78 @@ class TestEvalground:
         # Filesystem provider isn't supported by evalground: must fail
         # cleanly (4xx or JSON error), never 5xx, and never start a run.
         assert resp.status_code < 500
+
+    @pytest.mark.unit
+    def test_local_suite_can_queue_without_oracle_or_paid_key(
+        self, client, connected, tmp_path
+    ):
+        with patch("memorizz.ui.routers.evalground.threading.Thread") as thread_cls:
+            resp = client.post(
+                "/evalground/runs",
+                data={
+                    "benchmark": "agentmembench",
+                    "dataset_variant": "locomo",
+                    "data_path": str(tmp_path),
+                    "num_samples": "1",
+                    "model": "qwen2.5:0.5b",
+                    "embedding_model": "nomic-embed-text",
+                    "ollama_host": "http://localhost:11434",
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "queued"
+        thread_cls.return_value.start.assert_called_once()
+
+    @pytest.mark.unit
+    def test_local_suite_rejects_unknown_variant(self, client, connected, tmp_path):
+        resp = client.post(
+            "/evalground/runs",
+            data={
+                "benchmark": "beam",
+                "dataset_variant": "tiny",
+                "data_path": str(tmp_path),
+                "num_samples": "1",
+            },
+        )
+        assert resp.status_code == 400
+        assert "Unknown BEAM variant" in resp.json()["error"]
+
+    @pytest.mark.unit
+    def test_full_memagent_mode_requires_selected_agent(
+        self, client, connected, tmp_path
+    ):
+        resp = client.post(
+            "/evalground/runs",
+            data={
+                "benchmark": "agentmembench",
+                "dataset_variant": "locomo",
+                "data_path": str(tmp_path),
+                "num_samples": "1",
+                "evaluation_mode": "memagent",
+            },
+        )
+        assert resp.status_code == 400
+        assert "Select an agent" in resp.json()["error"]
+
+    @pytest.mark.unit
+    def test_agent_eval_snapshot_removes_secrets_and_side_effects(self):
+        snapshot = _secret_free_agent_template(
+            {
+                "agent_id": "agent-1",
+                "llm_config": {
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "api_key": "must-not-leave-process",
+                },
+                "internet_access_config": {"token": "also-secret"},
+                "tools": ["mutating-tool"],
+                "mcp_servers": [{"name": "calendar"}],
+                "continual_learning": True,
+            }
+        )
+        serialized = str(snapshot)
+        assert "must-not-leave-process" not in serialized
+        assert "also-secret" not in serialized
+        assert snapshot["tools"] == []
+        assert snapshot["mcp_servers"] == []
+        assert snapshot["continual_learning"] is False

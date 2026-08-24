@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+
+{% block title %}Agent Harnesses - MemoRizz{% endblock %}
+
+{% block content %}
+<div class="page-header harness-page-header">
+    <div>
+        <span class="harness-eyebrow">Execution control plane</span>
+        <h1>Agent Harnesses</h1>
+        <p>Route memory-grounded tasks to Codex, Claude Code, OpenHands, or a native MemAgent with durable approval and host verification.</p>
+    </div>
+    <button class="btn btn-secondary" type="button" onclick="location.reload()">Refresh</button>
+</div>
+
+{% if error %}<div class="harness-notice harness-notice--bad">{{ error }}</div>{% endif %}
+
+<section class="harness-provider-strip" aria-label="Harness availability">
+    {% for item in harnesses %}
+    <article class="harness-provider-card">
+        <div class="harness-provider-topline">
+            <span class="harness-status-dot {{ 'is-online' if item.ready else 'is-offline' }}"></span>
+            <strong>{{ item.name }}</strong>
+        </div>
+        <div class="harness-provider-version">{{ item.version or ('Ready' if item.ready else ('Setup required' if item.error_code == 'authentication_required' else 'Unavailable')) }}</div>
+        {% if item.error %}<div class="harness-provider-error">{{ item.error }}</div>{% endif %}
+        {% if item.remediation %}<div class="harness-provider-remediation">{{ item.remediation }}</div>{% endif %}
+    </article>
+    {% endfor %}
+</section>
+
+{% if not ui_read_only %}
+<section class="harness-panel harness-launch-panel">
+    <div class="harness-panel-heading">
+        <div><span class="harness-section-index">01</span><h2>Launch a bounded run</h2></div>
+        <span class="harness-panel-note">Direct edits, network, secrets, and governed writes require approval.</span>
+    </div>
+    <form id="harness-run-form" class="harness-run-form">
+        <div class="form-group harness-task-field">
+            <label for="harness-task">Task</label>
+            <textarea id="harness-task" name="task" rows="4" required placeholder="Describe a concrete workspace outcome and acceptance criteria."></textarea>
+        </div>
+        <div class="harness-form-grid">
+            <div class="form-group">
+                <label for="harness-workspace">Workspace</label>
+                <input id="harness-workspace" name="workspace" required value="{{ request.query_params.get('workspace', '') }}" placeholder="/absolute/path/to/project">
+            </div>
+            <div class="form-group">
+                <label for="harness-name">Harness</label>
+                <select id="harness-name" name="harness">
+                    <option value="auto">Auto route</option>
+                    {% for item in harnesses %}<option value="{{ item.name }}" {% if not item.ready %}disabled{% endif %}>{{ item.name }}{% if not item.ready %} · unavailable{% endif %}</option>{% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="harness-agent">Saved MemAgent <span class="optional">required for memagent</span></label>
+                <select id="harness-agent" name="agent_id">
+                    <option value="">None</option>
+                    {% for agent in agents %}<option value="{{ agent.agent_id }}">{{ agent.name or agent.agent_id }}</option>{% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="harness-model">Model override <span class="optional">optional</span></label>
+                <input id="harness-model" name="model" placeholder="Use adapter default">
+            </div>
+            <div class="form-group">
+                <label for="harness-verify">Host verification <span class="optional">optional</span></label>
+                <input id="harness-verify" name="verification_command" placeholder="pytest -q">
+            </div>
+            <div class="form-group">
+                <label for="harness-memory">Memory ID <span class="optional">optional</span></label>
+                <input id="harness-memory" name="memory_id">
+            </div>
+            <div class="form-group">
+                <label for="harness-user">User ID <span class="optional">optional</span></label>
+                <input id="harness-user" name="user_id">
+            </div>
+            <div class="form-group">
+                <label for="harness-timeout">Wall-time limit</label>
+                <input id="harness-timeout" name="timeout_seconds" type="number" min="1" value="900">
+            </div>
+            <div class="form-group">
+                <label for="harness-cost">Cost limit (USD) <span class="optional">optional</span></label>
+                <input id="harness-cost" name="max_cost_usd" type="number" min="0" step="0.01">
+            </div>
+            <div class="form-group">
+                <label for="harness-steps">Action limit</label>
+                <input id="harness-steps" name="max_steps" type="number" min="1" value="80">
+            </div>
+            <div class="form-group">
+                <label for="harness-input-tokens">Input-token limit <span class="optional">optional</span></label>
+                <input id="harness-input-tokens" name="max_input_tokens" type="number" min="1">
+            </div>
+            <div class="form-group">
+                <label for="harness-output-tokens">Output-token limit <span class="optional">optional</span></label>
+                <input id="harness-output-tokens" name="max_output_tokens" type="number" min="1">
+            </div>
+            <div class="form-group">
+                <label for="harness-backend">Isolation backend</label>
+                <select id="harness-backend" name="execution_backend"><option value="local">Local</option><option value="docker">Docker wrapper</option><option value="sandbox">Sandbox wrapper</option><option value="remote">Remote wrapper</option></select>
+            </div>
+        </div>
+        <div class="harness-policy-row">
+            <label class="harness-check"><input type="checkbox" name="write"> Allow direct workspace edits</label>
+            <label class="harness-check"><input type="checkbox" name="allow_dirty_workspace"> Permit an already-dirty Git worktree</label>
+            <label class="harness-inline-select">Network <select name="network"><option value="none">None</option><option value="restricted">Restricted</option><option value="full">Full</option></select></label>
+            <label class="harness-inline-select">MemoRizz MCP <select name="mcp_access"><option value="read_only">Read only</option><option value="none">Disabled</option><option value="governed_write">Governed write</option></select></label>
+        </div>
+        <div class="harness-form-actions">
+            <button id="harness-submit" class="btn btn-primary" type="submit">Start run</button>
+            <span id="harness-submit-status" class="harness-panel-note" aria-live="polite"></span>
+        </div>
+    </form>
+</section>
+{% endif %}
+
+{% if approvals %}
+<section class="harness-panel harness-approval-panel">
+    <div class="harness-panel-heading"><div><span class="harness-section-index">02</span><h2>Approval queue</h2></div><span class="harness-count-pill">{{ approvals|length }} pending</span></div>
+    <div class="harness-approval-list">
+        {% for proposal in approvals %}
+        <article class="harness-approval" data-proposal-id="{{ proposal.proposal_id }}">
+            <div>
+                <div class="harness-approval-title">{{ proposal.arguments.harness }} · {{ proposal.arguments.mode }}</div>
+                <div class="harness-approval-task">{{ proposal.arguments.task }}</div>
+                <div class="harness-approval-meta"><code>{{ proposal.arguments.workspace }}</code><span>{{ proposal.expires_at }}</span></div>
+                <div class="harness-approval-reason">{{ proposal.policy_reason }}</div>
+            </div>
+            {% if not ui_read_only %}
+            <div class="harness-approval-actions">
+                <input class="harness-approver" aria-label="Approver identity" placeholder="Approver identity" required>
+                <button class="btn btn-primary harness-decision" data-decision="approve" type="button">Approve &amp; run</button>
+                <button class="btn btn-danger harness-decision" data-decision="reject" type="button">Reject</button>
+            </div>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+<section class="harness-panel">
+    <div class="harness-panel-heading"><div><span class="harness-section-index">03</span><h2>Run ledger</h2></div><span class="harness-count-pill">{{ runs|length }} recent</span></div>
+    {% if runs %}
+    <div class="harness-table-wrap">
+        <table class="harness-runs-table">
+            <thead><tr><th>Status</th><th>Harness</th><th>Task</th><th>Updated</th><th>Evidence</th><th></th></tr></thead>
+            <tbody>
+            {% for run in runs %}
+                <tr data-run-id="{{ run.run_id }}">
+                    <td><span class="harness-run-status status-{{ run.status }}">{{ run.status|replace('_', ' ') }}</span></td>
+                    <td>{{ run.harness or 'routing' }}</td>
+                    <td><div class="harness-run-task">{{ run.task.task }}</div><code>{{ run.run_id[:8] }}</code></td>
+                    <td>{{ run.updated_at }}</td>
+                    <td>{% if run.result %}{{ 'verified' if run.result.verified else (run.result.error_code or 'complete') }}{% else %}—{% endif %}</td>
+                    <td class="harness-row-actions"><button class="harness-link-button harness-inspect" type="button">Inspect</button>{% if run.status in ['queued', 'running', 'pending_approval'] and not ui_read_only %}<button class="harness-link-button harness-cancel" type="button">Cancel</button>{% endif %}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}<div class="empty-state"><h3>No harness runs yet</h3><p>Launch a bounded task to create the first durable run record.</p></div>{% endif %}
+</section>
+
+<dialog id="harness-run-dialog" class="harness-dialog">
+    <div class="harness-dialog-header"><div><span class="harness-eyebrow">Run evidence</span><h2 id="harness-dialog-title">Harness run</h2></div><button id="harness-dialog-close" class="harness-dialog-close" type="button" aria-label="Close">×</button></div>
+    <pre id="harness-dialog-content"></pre>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const form = document.getElementById('harness-run-form');
+    const status = document.getElementById('harness-submit-status');
+    const request = async (url, options = {}) => {
+        const response = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
+        const body = await response.json().catch(() => ({detail: 'Invalid server response'}));
+        if (!response.ok) {
+            const detail = body.detail ?? body.error ?? 'Harness request failed';
+            if (typeof detail === 'string') throw new Error(detail);
+            const message = [detail.message, detail.remediation].filter(Boolean).join(' ');
+            throw new Error(message || JSON.stringify(detail));
+        }
+        return body;
+    };
+    if (form) form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const data = new FormData(form);
+        const payload = Object.fromEntries(data.entries());
+        payload.write = data.has('write');
+        payload.allow_dirty_workspace = data.has('allow_dirty_workspace');
+        payload.timeout_seconds = Number(payload.timeout_seconds || 900);
+        payload.max_steps = Number(payload.max_steps || 80);
+        if (payload.max_cost_usd) payload.max_cost_usd = Number(payload.max_cost_usd); else delete payload.max_cost_usd;
+        if (payload.max_input_tokens) payload.max_input_tokens = Number(payload.max_input_tokens); else delete payload.max_input_tokens;
+        if (payload.max_output_tokens) payload.max_output_tokens = Number(payload.max_output_tokens); else delete payload.max_output_tokens;
+        status.textContent = 'Creating durable run…';
+        try { await request('/api/harness-runs', {method: 'POST', body: JSON.stringify(payload)}); location.reload(); }
+        catch (error) { status.textContent = error.message; }
+    });
+    document.querySelectorAll('.harness-decision').forEach(button => button.addEventListener('click', async () => {
+        const card = button.closest('.harness-approval');
+        const proposal = card.dataset.proposalId;
+        const approver = card.querySelector('.harness-approver').value.trim();
+        if (!approver) { card.querySelector('.harness-approver').focus(); return; }
+        button.disabled = true;
+        try {
+            await request(`/api/harness-approvals/${proposal}/${button.dataset.decision}`, {method: 'POST', body: JSON.stringify({approver_id: approver})});
+            if (button.dataset.decision === 'approve') await request(`/api/harness-approvals/${proposal}/resume`, {method: 'POST', body: '{}'});
+            location.reload();
+        } catch (error) { button.disabled = false; alert(error.message); }
+    }));
+    const dialog = document.getElementById('harness-run-dialog');
+    const content = document.getElementById('harness-dialog-content');
+    document.querySelectorAll('.harness-inspect').forEach(button => button.addEventListener('click', async () => {
+        const runId = button.closest('tr').dataset.runId;
+        try { const body = await request(`/api/harness-runs/${runId}?include_events=true`); document.getElementById('harness-dialog-title').textContent = runId; content.textContent = JSON.stringify(body.run, null, 2); dialog.showModal(); }
+        catch (error) { alert(error.message); }
+    }));
+    document.querySelectorAll('.harness-cancel').forEach(button => button.addEventListener('click', async () => {
+        const runId = button.closest('tr').dataset.runId;
+        if (!confirm(`Cancel harness run ${runId}?`)) return;
+        try { await request(`/api/harness-runs/${runId}/cancel`, {method: 'POST', body: '{}'}); location.reload(); }
+        catch (error) { alert(error.message); }
+    }));
+    document.getElementById('harness-dialog-close')?.addEventListener('click', () => dialog.close());
+})();
+</script>
+{% endblock %}

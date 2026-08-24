@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures for MemAgent tests."""
 import os
 import sys
+import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, Mock
@@ -9,6 +10,9 @@ import pytest
 
 # Ensure third-party clients that expect OpenAI credentials during tests do not fail.
 os.environ.setdefault("OPENAI_API_KEY", "test-api-key")
+# Bare MemAgent instances use filesystem memory by default. Keep that durable
+# behavior isolated from a developer's real ~/.memorizz store during tests.
+os.environ.setdefault("MEMORIZZ_HOME", tempfile.mkdtemp(prefix="memorizz-tests-"))
 
 # Add src to path for testing
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))

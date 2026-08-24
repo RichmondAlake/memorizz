@@ -49,7 +49,7 @@ Snapshots are ordinary dictionaries, so you can emit them to observability pipel
 
 MemoRizz tries to detect the context window automatically:
 
-1. Use the explicit `context_window_tokens` argument passed to `MemAgent` or `MemAgentBuilder`.
+1. Use the explicit `context_window_tokens` argument passed to `MemAgent`.
 2. If not provided, look for `context_window_tokens` / `max_context_tokens` / `context_window` inside `llm_config`.
 3. Fall back to the provider's built-in knowledge (OpenAI & Azure expose known limits; Hugging Face derives the tokenizer limit).
 
@@ -57,16 +57,19 @@ You can override the inferred value at any time:
 
 ```python
 agent = (MemAgentBuilder()
-    .with_llm_config({"provider": "openai", "model": "gpt-4o-mini"})
+    .with_llm_config({
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "context_window_tokens": 32_000,
+    })
     .with_memory_provider(provider)
     .build()
 )
-
-# Later, adjust for a custom fine-tuned model
-agent._context_window_tokens = 32_000
 ```
 
-> **Tip:** When you know the exact budget (e.g., for a fine-tuned or local model) always pass it explicitly so percentage calculations remain accurate.
+Do not mutate the private `_context_window_tokens` field after construction.
+When you know the exact budget (for example, for a fine-tuned or local model),
+set it in the constructor/config so percentage calculations remain accurate.
 
 ## Provider Support
 

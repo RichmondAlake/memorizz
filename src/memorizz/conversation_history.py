@@ -5,11 +5,11 @@
 """Helpers for turning raw ``conversation_memory`` rows into display-clean
 conversation history.
 
-``MemAgent.run_stream`` persists a ``role="tool"`` conversation row whose
-content is a ``{"type": "trace_bundle", ...}`` JSON document so the Playground
-can replay the reasoning/tool trace of a streamed turn (see
-``MemAgent._record_stream_trace_bundle``). That row is internal telemetry — it
-carries no tool name and is *not* a user-facing tool call.
+Memorizz versions before 0.5.2 persisted a ``role="tool"`` conversation row
+whose content was a ``{"type": "trace_bundle", ...}`` JSON document. Trace
+bundles now live in private observability storage, but existing databases can
+still contain those legacy rows. They are internal telemetry, not user-facing
+tool calls.
 
 External consumers that render conversation history from the raw provider rows
 (a custom chat UI, an export, an audit view) previously had to reverse-engineer
@@ -30,7 +30,7 @@ from typing import Any, Dict, Iterable, List
 
 __all__ = ["is_trace_bundle_entry", "strip_trace_bundles"]
 
-# Mirrors the ``type`` field written by ``MemAgent._record_stream_trace_bundle``.
+# Mirrors the ``type`` field used by both legacy and current trace bundles.
 _TRACE_BUNDLE_TYPE = "trace_bundle"
 
 
@@ -39,8 +39,7 @@ def is_trace_bundle_entry(entry: Any) -> bool:
 
     A trace bundle is a ``role="tool"`` ``conversation_memory`` row whose
     ``content`` is a JSON object with ``"type": "trace_bundle"``. These rows are
-    persisted only so the Playground can replay a streamed turn's reasoning/tool
-    trace; they must never surface in user-facing history.
+    legacy telemetry rows and must never surface in user-facing history.
 
     Safe to call on any row shape — anything that isn't a trace bundle (plain
     ``user``/``assistant`` turns, real ``[Tool '…']`` placeholder rows, malformed

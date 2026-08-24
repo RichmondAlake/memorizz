@@ -5,7 +5,7 @@
 {% block content %}
 <div class="page-header">
     <h1>Evalground</h1>
-    <p>Evaluate agents against the benchmarks in the library (LongMemEval).</p>
+    <p>Run paper-backed long-term-memory evaluations with local open models or a metered OpenAI reader.</p>
 </div>
 
 {% if warnings %}
@@ -26,18 +26,62 @@
 {% endif %}
 
 <div class="detail-section evalground-section">
+    <h2>Trace-derived experiments</h2>
+    <p class="form-hint">Accepted Trace Insights become versioned drafts here. A draft is evidence for an evaluation plan; it does not mutate the production agent.</p>
+    {% if trace_experiments %}
+    <div class="traces-table-wrap">
+        <table class="traces-agents-table">
+            <thead>
+                <tr>
+                    <th>Experiment</th>
+                    <th>Version</th>
+                    <th>Status</th>
+                    <th>Agent</th>
+                    <th>Component</th>
+                    <th>Target</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for experiment in trace_experiments %}
+                <tr>
+                    <td><code>{{ experiment.experiment_id|truncate(24) }}</code></td>
+                    <td>v{{ experiment.experiment_version }}</td>
+                    <td><span class="badge badge-warning">{{ experiment.status|default('draft')|title }}</span></td>
+                    <td><code>{{ experiment.agent_id|default('—')|truncate(16) }}</code></td>
+                    <td>{{ experiment.component or '—' }}</td>
+                    <td>{{ experiment.target or '—' }}</td>
+                    <td>{{ experiment.created_at or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty-hint">No accepted trace recommendations yet.</p>
+    {% endif %}
+</div>
+
+<div class="detail-section evalground-section">
     <h2>Dataset Library</h2>
+    <p class="form-hint">Official datasets remain external. Configure each environment variable or enter a path for the run.</p>
     <div class="dataset-status">
-        {% for item in dataset_status %}
+        {% for item in benchmark_catalog %}
         <div class="dataset-row">
-            <div class="dataset-name">LongMemEval {{ item.variant|upper }}</div>
+            <div>
+                <div class="dataset-name"><a href="{{ item.paper_url }}" target="_blank" rel="noopener">{{ item.name }}</a></div>
+                <div class="dataset-file">{{ item.variants|join(', ') }} · protocol {{ item.protocol_version }} · <code>{{ item.dataset_env }}</code></div>
+                {% if item.source_sync_supported %}
+                <div class="dataset-file"><code>memorizz eval dataset sync {{ item.benchmark_id }}</code></div>
+                {% endif %}
+            </div>
             <div class="dataset-meta">
-                <span class="dataset-file">{{ item.filename }}</span>
-                {% if item.exists %}
+                {% if item.dataset_ready %}
                 <span class="badge badge-success">Ready</span>
                 {% else %}
-                <span class="badge badge-warning">Missing</span>
+                <span class="badge badge-warning">Path needed</span>
                 {% endif %}
+                <span class="badge">Diagnostic</span>
             </div>
         </div>
         {% endfor %}
@@ -53,23 +97,40 @@
     </div>
     {% endif %}
 
-    {% if missing_variants %}
-    <form method="post" action="/evalground/datasets" class="dataset-actions">
-        <button type="submit" class="btn">Download datasets</button>
-        <p class="form-hint">Uses the bundled LongMemEval downloader to fetch dataset files.</p>
-    </form>
-    {% endif %}
+    <details class="dataset-actions">
+        <summary>Legacy LongMemEval dataset helper</summary>
+        <div class="dataset-status">
+            {% for item in dataset_status %}
+            <div class="dataset-row">
+                <div class="dataset-name">LongMemEval {{ item.variant|upper }}</div>
+                <div class="dataset-meta"><span class="dataset-file">{{ item.filename }}</span> <span class="badge {% if item.exists %}badge-success{% else %}badge-warning{% endif %}">{% if item.exists %}Ready{% else %}Missing{% endif %}</span></div>
+            </div>
+            {% endfor %}
+        </div>
+        {% if missing_variants %}
+        <form method="post" action="/evalground/datasets" class="dataset-actions">
+            <button type="submit" class="btn">Download legacy datasets</button>
+        </form>
+        {% endif %}
+    </details>
 </div>
 
 <div class="detail-section evalground-section">
     <h2>Benchmark Run</h2>
-    {% if agents %}
     <form method="post" action="/evalground/runs" class="evalground-form">
         <div class="form-grid">
             <div class="form-group">
+                <label for="evaluation_mode">Execution Mode</label>
+                <select name="evaluation_mode" id="evaluation_mode">
+                    <option value="retrieval" {% if (evaluation_mode or 'retrieval') == 'retrieval' %}selected{% endif %}>Memory retrieval diagnostic</option>
+                    <option value="memagent" {% if evaluation_mode == 'memagent' %}selected{% endif %}>Full MemAgent execution</option>
+                </select>
+                <span class="form-hint">Diagnostic mode isolates retrieval and reader quality. Full mode runs the selected agent through <code>MemAgent.run()</code> on isolated benchmark memory.</span>
+            </div>
+            <div class="form-group">
                 <label for="agent_id">Agent</label>
                 <select name="agent_id" id="agent_id">
-                    <option value="">Select an agent</option>
+                    <option value="">No agent · diagnostic defaults</option>
                     {% for agent in agents %}
                     {% set agent_name = agent.persona.name if agent.persona and agent.persona.name else 'Agent' %}
                     <option value="{{ agent.agent_id }}" {% if agent.agent_id == selected_agent_id %}selected{% endif %}>
@@ -77,40 +138,116 @@
                     </option>
                     {% endfor %}
                 </select>
+                <span class="form-hint">Required for Full MemAgent execution; optional attribution in diagnostic mode.</span>
             </div>
             <div class="form-group">
                 <label for="benchmark">Benchmark</label>
                 <select name="benchmark" id="benchmark">
-                    <option value="longmemeval" {% if benchmark == 'longmemeval' %}selected{% endif %}>LongMemEval</option>
+                    {% for item in benchmark_catalog %}
+                    <option value="{{ item.benchmark_id }}" {% if benchmark == item.benchmark_id %}selected{% endif %}>{{ item.name }}</option>
+                    {% endfor %}
+                    <option value="longmemeval" {% if benchmark == 'longmemeval' %}selected{% endif %}>LongMemEval (legacy paid path)</option>
                 </select>
             </div>
             <div class="form-group">
                 <label for="dataset_variant">Dataset Variant</label>
                 <select name="dataset_variant" id="dataset_variant">
-                    <option value="oracle" {% if dataset_variant == 'oracle' %}selected{% endif %}>Oracle (full)</option>
-                    <option value="s" {% if dataset_variant == 's' %}selected{% endif %}>S (small)</option>
-                    <option value="m" {% if dataset_variant == 'm' %}selected{% endif %}>M (medium)</option>
+                    <option value="{{ dataset_variant }}" selected>{{ dataset_variant }}</option>
                 </select>
+            </div>
+            <div class="form-group">
+                <label for="profile">Evaluation Profile</label>
+                <select id="profile" name="profile">
+                    <option value="smoke" {% if (profile or 'smoke') == 'smoke' %}selected{% endif %}>Smoke · bounded integration check</option>
+                    <option value="regression" {% if profile == 'regression' %}selected{% endif %}>Regression · fixed stratified subset</option>
+                    <option value="paper" {% if profile == 'paper' %}selected{% endif %}>Paper · full official split</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="data_path">Official Dataset Path</label>
+                <input id="data_path" name="data_path" type="text" value="{{ data_path or '' }}" placeholder="/path/to/official/data">
             </div>
             <div class="form-group">
                 <label for="num_samples">Samples</label>
                 <input id="num_samples" name="num_samples" type="number" min="1" value="{{ num_samples }}">
+            </div>
+            <div class="form-group">
+                <label for="memory_provider">Memory Provider</label>
+                <select id="memory_provider" name="memory_provider">
+                    <option value="filesystem" {% if (memory_provider or 'filesystem') == 'filesystem' %}selected{% endif %}>Filesystem</option>
+                    <option value="oracle" {% if memory_provider == 'oracle' %}selected{% endif %}>Oracle AI Database</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="top_k">Final Evidence (top-k)</label>
+                <input id="top_k" name="top_k" type="number" min="1" value="{{ top_k or 8 }}">
+            </div>
+            <div class="form-group">
+                <label for="candidate_pool_size">First-stage Candidates</label>
+                <input id="candidate_pool_size" name="candidate_pool_size" type="number" min="8" value="{{ candidate_pool_size or 256 }}">
+            </div>
+            <div class="form-group">
+                <label for="lexical_weight">Lexical Fusion Weight</label>
+                <input id="lexical_weight" name="lexical_weight" type="number" min="0" max="1" step="0.05" value="{{ lexical_weight if lexical_weight is defined else 0.35 }}">
+            </div>
+            <div class="form-group">
+                <label for="rerank_weight">Local Rerank Weight</label>
+                <input id="rerank_weight" name="rerank_weight" type="number" min="0" step="0.05" value="{{ rerank_weight if rerank_weight is defined else 0.15 }}">
+            </div>
+            <div class="form-group">
+                <label for="query_expansion">Concept Query Expansion</label>
+                <select id="query_expansion" name="query_expansion">
+                    <option value="true" {% if query_expansion %}selected{% endif %}>Enabled</option>
+                    <option value="false" {% if not query_expansion %}selected{% endif %}>Disabled</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="reader_repair">Structured-output Repair</label>
+                <select id="reader_repair" name="reader_repair">
+                    <option value="true" {% if reader_repair %}selected{% endif %}>One bounded repair</option>
+                    <option value="false" {% if not reader_repair %}selected{% endif %}>Disabled</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="model_provider">Reader Provider</label>
+                <select id="model_provider" name="model_provider">
+                    <option value="ollama" {% if (model_provider or 'ollama') == 'ollama' %}selected{% endif %}>Ollama (local)</option>
+                    <option value="openai" {% if model_provider == 'openai' %}selected{% endif %}>OpenAI (metered)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="model">Reader Model</label>
+                <input id="model" name="model" type="text" value="{{ model or 'qwen2.5:3b' }}">
+            </div>
+            <div class="form-group">
+                <label for="judge_model">Judge Model (optional)</label>
+                <input id="judge_model" name="judge_model" type="text" value="{{ judge_model or '' }}" placeholder="Uses reader model">
+            </div>
+            <div class="form-group">
+                <label for="embedding_model">Ollama Embeddings</label>
+                <input id="embedding_model" name="embedding_model" type="text" value="{{ embedding_model or 'nomic-embed-text' }}">
+            </div>
+            <div class="form-group">
+                <label for="ollama_host">Ollama Host</label>
+                <input id="ollama_host" name="ollama_host" type="text" value="{{ ollama_host or 'http://localhost:11434' }}">
+            </div>
+            <div class="form-group form-check-group">
+                <label for="oracle_reader">Gold-evidence Oracle Reader</label>
+                <select id="oracle_reader" name="oracle_reader">
+                    <option value="true" {% if oracle_reader %}selected{% endif %}>Enabled</option>
+                    <option value="false" {% if not oracle_reader %}selected{% endif %}>Disabled</option>
+                </select>
+                <span class="form-hint">Separates retrieval failures from answer-synthesis failures.</span>
             </div>
         </div>
         <div class="eval-run-actions">
             <button type="submit" id="eval-run-start-btn" class="btn btn-primary" {% if not can_run %}disabled{% endif %}>Run Evaluation</button>
             <button type="button" id="eval-run-stop-btn" class="btn btn-danger" hidden>Stop Run</button>
         </div>
-        <p class="form-hint">Uses the connected Oracle provider and OpenAI for scoring. Results saved to <code>{{ eval_results_dir }}</code>.</p>
+        <p class="form-hint">Every run is fail-closed as <strong>Diagnostic</strong> unless its versioned manifest proves the official runner, scorer, full split, source revision, models, prompts, and runtime metadata all match. Full MemAgent mode disables side-effect tools and uses isolated benchmark memory while preserving the selected agent's memory configuration. Ollama readers cost $0 externally; OpenAI usage is metered. Paper profiles ignore the sample field.</p>
+        <p class="form-hint">Results saved to <code>{{ eval_results_dir }}</code>.</p>
         <p id="eval-run-status" class="form-hint eval-run-status"></p>
     </form>
-    {% else %}
-    <div class="empty-pane">
-        <div class="empty-icon">EVAL</div>
-        <p>No agents available</p>
-        <p class="empty-hint">Create an agent to run benchmarks.</p>
-    </div>
-    {% endif %}
 </div>
 
 <div id="live-run-output-section" class="detail-section evalground-section" hidden>
@@ -128,6 +265,7 @@
                     <th>Run ID</th>
                     <th>Status</th>
                     <th>Benchmark</th>
+                    <th>Mode</th>
                     <th>Agent</th>
                     <th>Dataset</th>
                     <th>Samples</th>
@@ -150,6 +288,7 @@
                     <td><code>{{ run.run_id[:8] }}...</code></td>
                     <td><span class="badge {{ badge_class }}">{{ run_status }}</span></td>
                     <td>{{ run.benchmark or 'longmemeval' }}</td>
+                    <td>{{ 'Full MemAgent' if run.evaluation_mode == 'memagent' else 'Retrieval' }}</td>
                     <td>{{ run.agent_name }}</td>
                     <td>{{ run.dataset_variant or 'oracle' }}</td>
                     <td>{{ run.num_samples }}</td>
@@ -227,21 +366,69 @@
             <div class="eval-summary-label">Processing Time</div>
             <div class="eval-summary-value">{{ eval_results.metadata.total_processing_time|round(2) }}s</div>
         </div>
+        {% if eval_results.retrieval %}
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Retrieval Recall@k</div>
+            <div class="eval-summary-value">{% if eval_results.retrieval.recall_at_k is not none %}{{ eval_results.retrieval.recall_at_k|round(3) }}{% else %}—{% endif %}</div>
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Gold-evidence Ceiling</div>
+            <div class="eval-summary-value">{% if eval_results.answer_quality.gold_evidence_oracle_score is not none %}{{ eval_results.answer_quality.gold_evidence_oracle_score|round(3) }}{% else %}—{% endif %}</div>
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Grounded Answers</div>
+            <div class="eval-summary-value">{{ (eval_results.answer_quality.grounded_rate * 100)|round(1) }}%</div>
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Corpus Cache</div>
+            <div class="eval-summary-value">{{ eval_results.efficiency.embedding_cache_hits }} hit / {{ eval_results.efficiency.embedding_cache_misses }} miss</div>
+        </div>
+        {% endif %}
     </div>
 
     <table class="info-table eval-metadata-table">
+        {% if eval_results.benchmark_name %}
+        <tr>
+            <td class="info-label">Benchmark</td>
+            <td class="info-value">{{ eval_results.benchmark_name }}</td>
+        </tr>
+        {% endif %}
         <tr>
             <td class="info-label">Dataset</td>
             <td class="info-value"><span class="badge">{{ eval_results.metadata.dataset_variant }}</span></td>
         </tr>
         <tr>
-            <td class="info-label">Mode</td>
-            <td class="info-value">{{ eval_results.metadata.application_mode|default('assistant') }}</td>
+            <td class="info-label">Execution</td>
+            <td class="info-value">
+                {% if eval_results.metadata.evaluation_mode == 'memagent' %}
+                Full MemAgent · {{ eval_results.metadata.application_mode|default('assistant') }}
+                {% else %}
+                Memory retrieval diagnostic
+                {% endif %}
+            </td>
         </tr>
         <tr>
             <td class="info-label">Timestamp</td>
             <td class="info-value">{{ eval_results.metadata.timestamp }}</td>
         </tr>
+        {% if eval_results.schema_version %}
+        <tr>
+            <td class="info-label">Retrieval basis</td>
+            <td class="info-value">{{ eval_results.retrieval.basis or 'diagnostic_fusion' }} · top {{ eval_results.retrieval.top_k }} of {{ eval_results.retrieval.candidate_pool_size }}</td>
+        </tr>
+        <tr>
+            <td class="info-label">Models</td>
+            <td class="info-value">{{ eval_results.metadata.model_provider }}:{{ eval_results.metadata.reader_model }} reader · {{ eval_results.metadata.judge_model }} judge · {{ eval_results.metadata.embedding_model }} embeddings</td>
+        </tr>
+        <tr>
+            <td class="info-label">External API cost</td>
+            <td class="info-value"><span class="badge badge-success">${{ eval_results.metadata.external_api_cost_usd }}</span></td>
+        </tr>
+        <tr>
+            <td class="info-label">Comparison status</td>
+            <td class="info-value"><span class="badge {% if eval_results.paper_comparable %}badge-success{% else %}badge-warning{% endif %}">{{ eval_results.comparison_label or 'Diagnostic' }}</span></td>
+        </tr>
+        {% endif %}
         {% if eval_output_path %}
         <tr>
             <td class="info-label">Output</td>
@@ -250,108 +437,67 @@
         {% endif %}
     </table>
 
-    <h3 class="eval-ability-heading">Information Extraction</h3>
-    <p class="eval-ability-desc">Ability to extract and recall facts from prior conversations, broken down by source.</p>
-    <div class="eval-category-grid eval-category-grid--trio">
-        {% for cat_key in ['single-session-user', 'single-session-assistant', 'single-session-preference'] %}
-        {% if cat_key in eval_results.category_results %}
-        {% set metrics = eval_results.category_results[cat_key] %}
+    <h3 class="eval-ability-heading">Ability breakdown</h3>
+    <div class="eval-category-grid">
+        {% for cat_key, metrics in eval_results.category_results.items() %}
         <div class="eval-category-card">
-            <div class="eval-category-name">{{ cat_key|replace('-', ' ')|title }}</div>
+            <div class="eval-category-name">{{ cat_key|replace('-', ' ')|replace('_', ' ')|title }}</div>
             <div class="eval-category-metric">
                 <span class="metric-label">Accuracy</span>
-                <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
+                <span class="metric-value">{% if eval_results.schema_version %}{{ (metrics.accuracy * 100)|round(1) }}%{% else %}{{ metrics.accuracy|round(2) }}{% endif %}</span>
             </div>
             <div class="eval-category-metric">
                 <span class="metric-label">Avg Score</span>
-                <span class="metric-value">{{ metrics.average_score|round(2) }}</span>
+                <span class="metric-value">{{ metrics.average_score|round(3) }}</span>
             </div>
             <div class="eval-category-metric">
                 <span class="metric-label">Samples</span>
                 <span class="metric-value">{{ metrics.num_samples }}</span>
             </div>
+            {% if metrics.retrieval_recall_at_k is defined and metrics.retrieval_recall_at_k is not none %}
+            <div class="eval-category-metric">
+                <span class="metric-label">Recall@k</span>
+                <span class="metric-value">{{ metrics.retrieval_recall_at_k|round(3) }}</span>
+            </div>
+            {% endif %}
+            {% if metrics.faithfulness is defined and metrics.faithfulness is not none %}
+            <div class="eval-category-metric">
+                <span class="metric-label">Faithfulness</span>
+                <span class="metric-value">{{ metrics.faithfulness|round(3) }}</span>
+            </div>
+            {% endif %}
+            {% if metrics.oracle_reader_score is defined and metrics.oracle_reader_score is not none %}
+            <div class="eval-category-metric">
+                <span class="metric-label">Oracle reader</span>
+                <span class="metric-value">{{ metrics.oracle_reader_score|round(3) }}</span>
+            </div>
+            {% endif %}
+            {% if metrics.grounded_rate is defined %}
+            <div class="eval-category-metric">
+                <span class="metric-label">Grounded</span>
+                <span class="metric-value">{{ (metrics.grounded_rate * 100)|round(1) }}%</span>
+            </div>
+            {% endif %}
         </div>
-        {% endif %}
         {% endfor %}
     </div>
 
-    <h3 class="eval-ability-heading">Multi-Session Reasoning</h3>
-    <p class="eval-ability-desc">Ability to reason across information spread over multiple sessions.</p>
-    <div class="eval-category-grid eval-category-grid--single">
-        {% if 'multi-session' in eval_results.category_results %}
-        {% set metrics = eval_results.category_results['multi-session'] %}
-        <div class="eval-category-card">
-            <div class="eval-category-name">Multi Session</div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Accuracy</span>
-                <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
-            </div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Avg Score</span>
-                <span class="metric-value">{{ metrics.average_score|round(2) }}</span>
-            </div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Samples</span>
-                <span class="metric-value">{{ metrics.num_samples }}</span>
-            </div>
-        </div>
-        {% endif %}
-    </div>
-
-    <h3 class="eval-ability-heading">Temporal Reasoning</h3>
-    <p class="eval-ability-desc">Ability to reason about when events occurred and handle time-sensitive queries.</p>
-    <div class="eval-category-grid eval-category-grid--single">
-        {% if 'temporal-reasoning' in eval_results.category_results %}
-        {% set metrics = eval_results.category_results['temporal-reasoning'] %}
-        <div class="eval-category-card">
-            <div class="eval-category-name">Temporal Reasoning</div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Accuracy</span>
-                <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
-            </div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Avg Score</span>
-                <span class="metric-value">{{ metrics.average_score|round(2) }}</span>
-            </div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Samples</span>
-                <span class="metric-value">{{ metrics.num_samples }}</span>
-            </div>
-        </div>
-        {% endif %}
-    </div>
-
-    <h3 class="eval-ability-heading">Knowledge Updates</h3>
-    <p class="eval-ability-desc">Ability to handle updated or corrected information across sessions.</p>
-    <div class="eval-category-grid eval-category-grid--single">
-        {% if 'knowledge-update' in eval_results.category_results %}
-        {% set metrics = eval_results.category_results['knowledge-update'] %}
-        <div class="eval-category-card">
-            <div class="eval-category-name">Knowledge Update</div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Accuracy</span>
-                <span class="metric-value">{{ metrics.accuracy|round(2) }}</span>
-            </div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Avg Score</span>
-                <span class="metric-value">{{ metrics.average_score|round(2) }}</span>
-            </div>
-            <div class="eval-category-metric">
-                <span class="metric-label">Samples</span>
-                <span class="metric-value">{{ metrics.num_samples }}</span>
-            </div>
-        </div>
-        {% endif %}
-    </div>
-
+    {% if eval_results.schema_version %}
     <div class="eval-abstention-callout">
         <span class="eval-abstention-icon">&#9432;</span>
         <div>
-            <strong>Abstention</strong> &mdash; The fifth core LongMemEval ability (knowing when <em>not</em> to answer) is evaluated across all categories above via questions with a <code>_abs</code> suffix, rather than as a separate category. Scores penalise both hallucinated answers when the agent should abstain and refusals when the agent should know the answer.
+            <strong>{{ eval_results.comparison_label or 'Diagnostic' }}</strong> &mdash;
+            {% if eval_results.paper_comparable %}
+            Every required paper-protocol field matched the versioned manifest.
+            {% else %}
+            This run is useful for engineering diagnosis, not as an official paper or leaderboard score.
+            {% if eval_results.non_comparability_reasons %}<ul>{% for reason in eval_results.non_comparability_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}
+            {% endif %}
         </div>
     </div>
+    {% endif %}
 </div>
-{% elif selected_agent %}
+{% elif selected_run_id %}
 <div class="empty-state">
     <div class="empty-icon">EVAL</div>
     <h3>No results yet</h3>
@@ -374,6 +520,52 @@ document.addEventListener("DOMContentLoaded", () => {
     const selectedRunId = {{ (selected_run_id or '')|tojson }};
     const selectedRunStatus = {{ (selected_run_status or '')|tojson }};
     const activeRunStatuses = new Set(["queued", "running", "canceling"]);
+    const benchmarkCatalog = {{ benchmark_catalog|tojson }};
+    const variantMap = {{ suite_variant_map|tojson }};
+    const initialVariant = {{ (dataset_variant or '')|tojson }};
+    const benchmarkSelect = document.getElementById("benchmark");
+    const variantSelect = document.getElementById("dataset_variant");
+    const dataPathInput = document.getElementById("data_path");
+    const evaluationModeSelect = document.getElementById("evaluation_mode");
+    const agentSelect = document.getElementById("agent_id");
+
+    function syncEvaluationMode() {
+        if (!evaluationModeSelect || !agentSelect) return;
+        agentSelect.required = evaluationModeSelect.value === "memagent";
+    }
+
+    function syncBenchmark(initial = false) {
+        if (!benchmarkSelect || !variantSelect) return;
+        const benchmarkId = benchmarkSelect.value;
+        const variants = variantMap[benchmarkId] || [];
+        const wanted = initial && variants.includes(initialVariant) ? initialVariant : variants[0];
+        variantSelect.replaceChildren(...variants.map((variant) => {
+            const option = document.createElement("option");
+            option.value = variant;
+            option.textContent = variant;
+            option.selected = variant === wanted;
+            return option;
+        }));
+        const localBenchmark = benchmarkCatalog.find((item) => item.benchmark_id === benchmarkId);
+        if (dataPathInput) {
+            dataPathInput.disabled = !localBenchmark;
+            dataPathInput.placeholder = localBenchmark
+                ? `${localBenchmark.dataset_env} or /path/to/official/data`
+                : "Not used by legacy LongMemEval";
+            if (!initial) {
+                dataPathInput.value = localBenchmark?.dataset_path || "";
+            }
+        }
+    }
+
+    if (benchmarkSelect) {
+        benchmarkSelect.addEventListener("change", () => syncBenchmark(false));
+        syncBenchmark(true);
+    }
+    if (evaluationModeSelect) {
+        evaluationModeSelect.addEventListener("change", syncEvaluationMode);
+        syncEvaluationMode();
+    }
 
     if (evalMonitor && selectedRunId && activeRunStatuses.has(selectedRunStatus)) {
         evalMonitor.trackRun(selectedRunId, {

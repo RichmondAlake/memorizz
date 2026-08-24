@@ -17,6 +17,7 @@ class MemAgentModel(BaseModel):
     model: Optional[Any] = None
     llm_config: Optional[Dict[str, Any]] = None  # Configuration for the LLM
     agent_id: Optional[str] = None
+    application_id: Optional[str] = None
     name: Optional[str] = None
     tools: Optional[Union[List, Any]] = None
     persona: Optional[Any] = None
@@ -37,6 +38,7 @@ class MemAgentModel(BaseModel):
     ] = None  # Semantic cache configuration
     tool_result_policy: Optional[Dict[str, Any]] = None
     context_policy: Optional[Dict[str, Any]] = None
+    completion_policy: Optional[Dict[str, Any]] = None
     retrieval_policy: Optional[Dict[str, Any]] = None
     delegation_config: Optional[Dict[str, Any]] = None
     skill_retrieval: bool = False
@@ -50,12 +52,18 @@ class MemAgentModel(BaseModel):
     skills_marketplace_config: Optional[Dict[str, Any]] = None
     sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
     browser_control: Optional[Union[str, Dict[str, Any]]] = None
+    meta_harness: bool = False
+    meta_harness_mode: Optional[str] = None
+    default_harness: str = "auto"
+    harness_config: Optional[Dict[str, Any]] = None
     skill_paths: Optional[List[str]] = None
     mcp_servers: Optional[List[Dict[str, Any]]] = None
     self_aware: bool = False
     self_aware_config: Optional[Dict[str, Any]] = None
     continual_learning: bool = False
     continual_learning_config: Optional[Dict[str, Any]] = None
+    learning_control_plane: bool = False
+    learning_control_plane_config: Optional[Dict[str, Any]] = None
     automations_enabled: bool = True
     default_timezone: Optional[str] = None
     whatsapp_enabled: bool = False

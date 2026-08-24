@@ -2,13 +2,14 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import base64
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from bson import ObjectId
-from pymongo import MongoClient
+from pymongo import InsertOne, MongoClient, ReplaceOne
 from pymongo.errors import CollectionInvalid, OperationFailure
 from pymongo.operations import SearchIndexModel
 
@@ -16,7 +17,7 @@ from ...embeddings import get_embedding
 from ...enums.memory_type import MemoryType
 from ...long_term.semantic.persona.persona import Persona
 from ...memagent import MemAgentModel
-from ..base import MemoryProvider
+from ..base import MemoryProvider, MemoryProviderCapabilities
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,21 @@ class _MongoUserIdUnset:
 
 
 _MONGO_UNSET = _MongoUserIdUnset()
+
+
+class VectorSearchExecutionError(RuntimeError):
+    """A Mongo vector query failed before producing a trustworthy result."""
+
+    def __init__(self, message: str, *, reason: str = "vector_query_failed"):
+        super().__init__(message)
+        self.reason = reason
+
+
+class VectorSearchUnavailableError(VectorSearchExecutionError):
+    """Mongo vector search is not provisioned for the requested collection."""
+
+    def __init__(self, message: str):
+        super().__init__(message, reason="vector_search_unavailable")
 
 
 _MONGO_USER_SCOPED_TYPES = frozenset(
@@ -68,6 +84,53 @@ def _mongo_user_id_predicate(user_id: Any) -> Dict[str, Any]:
     return {"user_id": user_id}
 
 
+def _lexical_tokens(value: Any) -> set[str]:
+    punctuation = ".,:;!?()[]{}\"'"
+    return {
+        token.strip(punctuation)
+        for token in str(value or "").lower().replace("_", " ").split()
+        if token.strip(punctuation)
+    }
+
+
+def _lexical_overlap(query_tokens: set[str], content: Any) -> float:
+    """Return a deterministic rank for degraded, already-scoped retrieval."""
+    return (
+        len(query_tokens & _lexical_tokens(content)) / len(query_tokens)
+        if query_tokens
+        else 0.0
+    )
+
+
+_PRESERVED_MONGO_ID_FIELDS = {
+    MemoryType.SEMANTIC_CACHE: frozenset({"agent_id", "memory_id"}),
+    MemoryType.SHARED_MEMORY: frozenset({"agent_id", "thread_id", "memory_id"}),
+    MemoryType.TOOL_LOG: frozenset({"agent_id", "thread_id", "memory_id"}),
+    MemoryType.TOOLBOX: frozenset({"agent_id", "tool_id"}),
+    MemoryType.SKILLBOX: frozenset({"agent_id"}),
+    MemoryType.WORKFLOW_MEMORY: frozenset({"agent_id", "workflow_id"}),
+    MemoryType.CONVERSATION_MEMORY: frozenset({"thread_id", "memory_id"}),
+    MemoryType.KNOWLEDGE_BASE: frozenset({"knowledge_base_id", "memory_id"}),
+    MemoryType.ENTITY_MEMORY: frozenset({"memory_id"}),
+}
+
+
+def _mongo_id_fields_to_strip(memory_type: MemoryType) -> set[str]:
+    """Return legacy logical IDs that must not become Mongo primary keys."""
+    fields = {
+        "persona_id",
+        "tool_id",
+        "workflow_id",
+        "short_term_memory_id",
+        "agent_id",
+        "thread_id",
+        "knowledge_base_id",
+        "memory_id",
+    }
+    fields.difference_update(_PRESERVED_MONGO_ID_FIELDS.get(memory_type, ()))
+    return fields
+
+
 @dataclass
 class MongoDBConfig:
     """Configuration for the MongoDB provider."""
@@ -77,6 +140,7 @@ class MongoDBConfig:
         uri: str,
         db_name: str = "memorizz",
         lazy_vector_indexes: bool = False,
+        read_only: bool = False,
         embedding_provider=None,
         embedding_config: Dict[str, Any] = None,
     ):
@@ -105,12 +169,25 @@ class MongoDBConfig:
         self.uri = uri
         self.db_name = db_name
         self.lazy_vector_indexes = lazy_vector_indexes
+        self.read_only = bool(read_only)
         self.embedding_provider = embedding_provider
         self.embedding_config = embedding_config or {}
 
 
 class MongoDBProvider(MemoryProvider):
     """MongoDB implementation of the MemoryProvider interface."""
+
+    def memory_capabilities(self) -> MemoryProviderCapabilities:
+        return MemoryProviderCapabilities(
+            provider=type(self).__name__,
+            batch_store=True,
+            transactional_batch=False,
+            scoped_search=True,
+            result_scores=True,
+            provenance=True,
+            native_vector_search=True,
+            native_hybrid_search=False,
+        )
 
     def __init__(self, config: MongoDBConfig):
         """
@@ -126,6 +203,7 @@ class MongoDBProvider(MemoryProvider):
             - 'embedding_provider': Optional explicit embedding provider
         """
         self.config = config
+        self.lazy_vector_indexes = bool(config.lazy_vector_indexes)
         self.client = MongoClient(config.uri)
         self.db = self.client[config.db_name]
         self.persona_collection = self.db[MemoryType.PERSONAS.value]
@@ -156,15 +234,19 @@ class MongoDBProvider(MemoryProvider):
         # collection at boot, only the first one logs a WARNING; the rest
         # are recorded silently. See _handle_index_unavailable.
         self._vector_index_unavailable_root_causes: set = set()
+        self._vector_search_status_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
         # Process embedding provider configuration
         self._embedding_provider = self._setup_embedding_provider(config)
 
-        # Create all memory stores in MongoDB.
-        self._create_memory_stores()
+        # A production inspector should be able to connect with a MongoDB user
+        # that has read-only roles. In that mode provider construction must not
+        # create collections or indexes as a hidden side effect.
+        if not config.read_only:
+            self._create_memory_stores()
 
         # Create vector indexes immediately only if not using lazy initialization
-        if not config.lazy_vector_indexes:
+        if not config.read_only and not config.lazy_vector_indexes:
             try:
                 self._create_vector_indexes_for_memory_stores()
             except Exception as e:
@@ -174,6 +256,7 @@ class MongoDBProvider(MemoryProvider):
                 logger.info("Vector indexes will be created lazily when needed")
                 # Set lazy mode if immediate creation fails
                 self.config.lazy_vector_indexes = True
+                self.lazy_vector_indexes = True
 
     @staticmethod
     def _normalize_legacy_fields(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -199,7 +282,7 @@ class MongoDBProvider(MemoryProvider):
         code = getattr(exc, "code", None)
         code_name = (getattr(exc, "details", None) or {}).get("codeName", "")
         text = str(exc).lower()
-        if code in (20, 59):  # IllegalOperation, CommandNotFound
+        if code in (20, 59, 6047401):  # IllegalOperation/CommandNotFound/Community
             return True
         if code_name in {"IllegalOperation", "CommandNotFound"}:
             return True
@@ -210,6 +293,7 @@ class MongoDBProvider(MemoryProvider):
             "search is not supported",
             "no such command: 'createsearchindex'",
             "atlas search is not enabled",
+            "listsearchindexes stage is only allowed on mongodb atlas",
         ):
             if needle in text:
                 return True
@@ -243,16 +327,19 @@ class MongoDBProvider(MemoryProvider):
         if root_cause is not None:
             self._vector_index_unavailable_root_causes.add(root_cause)
         if first_for_root:
+            details = getattr(exc, "details", None) or {}
             logger.warning(
                 "MongoDB vector-search index unavailable (first offender: "
                 "collection=%r, index=%s). Vector-search consumers will "
                 "degrade to no-op for any collection hitting the same root "
                 "cause. Likely cause: Atlas Search quota exceeded on this "
                 "cluster tier (M0/M2 cap is 3 search indexes) or Atlas "
-                "Search not enabled. Original error: %s",
+                "Search not enabled. Error type=%s code=%s code_name=%s",
                 collection_name,
                 index_name,
-                exc,
+                type(exc).__name__,
+                getattr(exc, "code", None),
+                details.get("codeName"),
             )
         else:
             logger.debug(
@@ -274,7 +361,105 @@ class MongoDBProvider(MemoryProvider):
 
     def _vector_index_unavailable(self, collection_name: str) -> bool:
         """True when the named collection's vector index can't be used."""
-        return collection_name in self._vector_indexes_unavailable
+        return collection_name in getattr(self, "_vector_indexes_unavailable", set())
+
+    def get_vector_search_status(
+        self,
+        memory_store_type: Union[str, MemoryType],
+        *,
+        cache_ttl_seconds: float = 30.0,
+    ) -> Dict[str, Any]:
+        """Return bounded vector-index health without creating an index.
+
+        Semantic consumers use this to distinguish a genuine zero-match result
+        from a deployment where vector search is unavailable. The short cache
+        avoids an Atlas metadata query on every agent turn.
+        """
+        try:
+            resolved_type = (
+                memory_store_type
+                if isinstance(memory_store_type, MemoryType)
+                else MemoryType(memory_store_type)
+            )
+        except Exception:
+            return {"available": False, "reason": "unsupported_memory_type"}
+
+        collection = self._collection(resolved_type)
+        if collection is None:
+            return {"available": False, "reason": "collection_unavailable"}
+        collection_name = collection.name
+        now = time.monotonic()
+        cached = self._vector_search_status_cache.get(collection_name)
+        if cached and now - cached[0] <= max(0.0, float(cache_ttl_seconds)):
+            return dict(cached[1])
+
+        if self._vector_index_unavailable(collection_name):
+            status = {
+                "available": False,
+                "queryable": False,
+                "reason": "vector_search_unavailable",
+            }
+            self._vector_search_status_cache[collection_name] = (now, status)
+            return dict(status)
+
+        try:
+            indexes = list(collection.list_search_indexes())
+        except Exception as exc:
+            if self._is_quota_or_unsupported(exc):
+                self._handle_index_unavailable(collection_name, "vector_index", exc)
+                status = {
+                    "available": False,
+                    "queryable": False,
+                    "reason": "vector_search_unsupported",
+                }
+            else:
+                # Unknown metadata failures must not be mistaken for a
+                # confirmed missing index. The caller may still try semantic
+                # retrieval, then use its scoped exact fallback on failure.
+                status = {
+                    "available": None,
+                    "reason": "status_check_failed",
+                }
+            self._vector_search_status_cache[collection_name] = (now, status)
+            return dict(status)
+
+        index = next(
+            (
+                item
+                for item in indexes
+                if item.get("name") == "vector_index"
+                and item.get("type") == "vectorSearch"
+            ),
+            None,
+        )
+        if index is None:
+            lazy_creation = bool(
+                getattr(self, "lazy_vector_indexes", False)
+            ) and not bool(getattr(getattr(self, "config", None), "read_only", False))
+            status = (
+                {
+                    "available": None,
+                    "queryable": False,
+                    "reason": "vector_index_pending_lazy_creation",
+                }
+                if lazy_creation
+                else {
+                    "available": False,
+                    "queryable": False,
+                    "reason": "vector_index_missing",
+                }
+            )
+        else:
+            queryable = index.get("queryable") is True
+            index_status = str(index.get("status") or "").upper() or None
+            status = {
+                "available": queryable,
+                "queryable": queryable,
+                "status": index_status,
+                "reason": None if queryable else "vector_index_not_queryable",
+            }
+        self._vector_search_status_cache[collection_name] = (now, status)
+        return dict(status)
 
     @staticmethod
     def _build_vector_search_pipeline(
@@ -328,7 +513,12 @@ class MongoDBProvider(MemoryProvider):
         return pipeline
 
     def _run_vector_search(
-        self, collection, pipeline: List[Dict[str, Any]], *, label: str
+        self,
+        collection,
+        pipeline: List[Dict[str, Any]],
+        *,
+        label: str,
+        raise_on_error: bool = False,
     ) -> List[Dict[str, Any]]:
         """Run a vector-search pipeline, honoring the unavailable-index flag.
 
@@ -338,14 +528,44 @@ class MongoDBProvider(MemoryProvider):
         creator has already flagged the collection.
         """
         if self._vector_index_unavailable(collection.name):
+            if raise_on_error:
+                raise VectorSearchUnavailableError(
+                    f"Vector search is unavailable for {label}"
+                )
             return []
         try:
             return list(collection.aggregate(pipeline))
         except Exception as exc:
             if self._is_quota_or_unsupported(exc):
                 self._handle_index_unavailable(collection.name, "vector_index", exc)
+                cache = getattr(self, "_vector_search_status_cache", None)
+                if isinstance(cache, dict):
+                    cache[collection.name] = (
+                        time.monotonic(),
+                        {
+                            "available": False,
+                            "queryable": False,
+                            "reason": "vector_search_unavailable",
+                        },
+                    )
+                if raise_on_error:
+                    raise VectorSearchUnavailableError(
+                        f"Vector search is unavailable for {label}"
+                    ) from exc
                 return []
-            logger.warning("Vector search failed for %s: %s", label, exc)
+            cache = getattr(self, "_vector_search_status_cache", None)
+            if isinstance(cache, dict):
+                cache[collection.name] = (
+                    time.monotonic(),
+                    {"available": None, "reason": "vector_query_failed"},
+                )
+            logger.warning(
+                "Vector search failed for %s (%s)", label, type(exc).__name__
+            )
+            if raise_on_error:
+                raise VectorSearchExecutionError(
+                    f"Vector search execution failed for {label}"
+                ) from exc
             return []
 
     def _setup_embedding_provider(self, config: MongoDBConfig):
@@ -449,19 +669,32 @@ class MongoDBProvider(MemoryProvider):
 
         if index_key not in self._vector_indexes_created:
             try:
-                self._ensure_vector_index(
+                ensured = self._ensure_vector_index(
                     collection,
                     "vector_index",
                     memory_store,
                     filter_fields=(
                         ["status", "agent_id", "user_id"]
                         if collection_name == MemoryType.SKILLBOX.value
-                        else None
+                        else (
+                            ["user_id"]
+                            if collection_name == MemoryType.ENTITY_MEMORY.value
+                            else None
+                        )
                     ),
                 )
-                self._vector_indexes_created.add(index_key)
-                logger.info(f"Created vector index for collection: {collection_name}")
+                if ensured and not self._vector_index_unavailable(collection_name):
+                    self._vector_indexes_created.add(index_key)
+                    cache = getattr(self, "_vector_search_status_cache", None)
+                    if isinstance(cache, dict):
+                        cache.pop(collection_name, None)
+                    logger.info(
+                        f"Ensured vector index for collection: {collection_name}"
+                    )
             except Exception as e:
+                if self._is_quota_or_unsupported(e):
+                    self._handle_index_unavailable(collection_name, "vector_index", e)
+                    return
                 logger.error(
                     f"Failed to create vector index for {collection_name}: {e}"
                 )
@@ -533,6 +766,18 @@ class MongoDBProvider(MemoryProvider):
     _BTREE_INDEX_SPECS = {
         MemoryType.TOOL_LOG: [
             (
+                "tool_log_agent_cursor",
+                [("agent_id", 1), ("_id", -1)],
+            ),
+            (
+                "tool_log_thread_cursor",
+                [("thread_id", 1), ("_id", -1)],
+            ),
+            (
+                "tool_log_tool_success_cursor",
+                [("tool_name", 1), ("success", 1), ("_id", -1)],
+            ),
+            (
                 "tool_log_memory_timestamp",
                 [("memory_id", 1), ("timestamp", -1)],
             ),
@@ -548,6 +793,14 @@ class MongoDBProvider(MemoryProvider):
         ],
         MemoryType.CONVERSATION_MEMORY: [
             (
+                "conv_agent_cursor",
+                [("agent_id", 1), ("_id", -1)],
+            ),
+            (
+                "conv_thread_cursor",
+                [("thread_id", 1), ("_id", -1)],
+            ),
+            (
                 "conv_memory_thread_ts",
                 [("memory_id", 1), ("thread_id", 1), ("timestamp", 1)],
             ),
@@ -556,7 +809,38 @@ class MongoDBProvider(MemoryProvider):
                 [("user_id", 1), ("timestamp", 1)],
             ),
         ],
+        MemoryType.SHARED_MEMORY: [
+            (
+                "shared_observability_agent_cursor",
+                [("record_type", 1), ("agent_id", 1), ("_id", -1)],
+            ),
+            (
+                "shared_observability_thread_cursor",
+                [("record_type", 1), ("thread_id", 1), ("_id", -1)],
+            ),
+            (
+                "shared_observability_memory_cursor",
+                [("record_type", 1), ("trace_memory_id", 1), ("_id", -1)],
+            ),
+            (
+                "shared_observability_trace_cursor",
+                [("root_trace_id", 1), ("_id", -1)],
+            ),
+            (
+                "shared_observability_record_unique",
+                [("memory_id", 1)],
+                {"unique": True, "sparse": True},
+            ),
+        ],
         MemoryType.ENTITY_MEMORY: [
+            (
+                "entity_memory_scope_name",
+                [("memory_id", 1), ("user_id", 1), ("name", 1)],
+            ),
+            (
+                "entity_memory_scope_id",
+                [("memory_id", 1), ("user_id", 1), ("entity_id", 1)],
+            ),
             (
                 "entity_memory_user_updated",
                 [("user_id", 1), ("updated_at", -1)],
@@ -587,6 +871,7 @@ class MongoDBProvider(MemoryProvider):
         collections_by_type = {
             MemoryType.TOOL_LOG: self.tool_log_collection,
             MemoryType.CONVERSATION_MEMORY: self.conversation_memory_collection,
+            MemoryType.SHARED_MEMORY: self.shared_memory_collection,
             MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
             MemoryType.SUMMARIES: self.summaries_collection,
         }
@@ -637,7 +922,11 @@ class MongoDBProvider(MemoryProvider):
                     filter_fields=(
                         ["status", "agent_id", "user_id"]
                         if memory_store_type == MemoryType.SKILLBOX
-                        else None
+                        else (
+                            ["user_id"]
+                            if memory_store_type == MemoryType.ENTITY_MEMORY
+                            else None
+                        )
                     ),
                 )
 
@@ -655,6 +944,62 @@ class MongoDBProvider(MemoryProvider):
         except Exception:
             return None
         return self.db[memory_store_type.value]
+
+    @staticmethod
+    def _normalize_store_input(
+        data: Optional[Dict[str, Any]],
+        memory_store_type: Optional[MemoryType],
+        memory_id: Optional[str],
+        memory_unit: Any,
+    ) -> Tuple[Dict[str, Any], MemoryType]:
+        if memory_unit is not None:
+            if hasattr(memory_unit, "model_dump"):
+                data = memory_unit.model_dump()
+            elif hasattr(memory_unit, "dict"):
+                data = memory_unit.dict()
+            else:
+                data = dict(memory_unit.__dict__)
+            memory_store_type = getattr(memory_unit, "memory_type", None) or data.get(
+                "memory_type", MemoryType.CONVERSATION_MEMORY
+            )
+
+        if data is None or memory_store_type is None:
+            raise ValueError(
+                "Either (data, memory_store_type) or (memory_unit) must be provided"
+            )
+        normalized_data = dict(data)
+        if memory_id is not None:
+            if memory_unit is not None:
+                normalized_data["memory_id"] = memory_id
+            else:
+                normalized_data.setdefault("memory_id", memory_id)
+        normalized_type = (
+            MemoryType(memory_store_type)
+            if isinstance(memory_store_type, str)
+            else memory_store_type
+        )
+        return normalized_data, normalized_type
+
+    @staticmethod
+    def _write_document(
+        collection: Any, data: Dict[str, Any], memory_type: MemoryType
+    ) -> Any:
+        if (
+            memory_type == MemoryType.SHARED_MEMORY
+            and str(data.get("record_type") or "").startswith("observability_")
+            and data.get("memory_id")
+        ):
+            logical_id = str(data["memory_id"])
+            data.pop("_id", None)
+            existing = collection.find_one({"memory_id": logical_id}, {"_id": 1})
+            if existing:
+                collection.replace_one({"_id": existing["_id"]}, data)
+                return existing["_id"]
+
+        if "_id" in data:
+            collection.replace_one({"_id": data["_id"]}, data, upsert=True)
+            return data["_id"]
+        return collection.insert_one(data).inserted_id
 
     def store(
         self,
@@ -682,37 +1027,9 @@ class MongoDBProvider(MemoryProvider):
         str
             The ID of the inserted/updated document (MongoDB _id).
         """
-        # Handle new calling style (memory_unit + memory_id)
-        if memory_unit is not None:
-            # Convert memory_unit to dict
-            if hasattr(memory_unit, "model_dump"):
-                data = memory_unit.model_dump()
-            elif hasattr(memory_unit, "dict"):
-                data = memory_unit.dict()
-            else:
-                data = memory_unit.__dict__
-
-            # Add memory_id if provided
-            if memory_id:
-                data["memory_id"] = memory_id
-
-            # Determine memory_store_type from memory_unit
-            if hasattr(memory_unit, "memory_type"):
-                memory_store_type = memory_unit.memory_type
-            elif "memory_type" in data:
-                memory_store_type = data["memory_type"]
-            else:
-                memory_store_type = MemoryType.CONVERSATION_MEMORY
-
-        # Validate we have required parameters
-        if data is None or memory_store_type is None:
-            raise ValueError(
-                "Either (data, memory_store_type) or (memory_unit) must be provided"
-            )
-
-        # Ensure memory_store_type is MemoryType enum
-        if isinstance(memory_store_type, str):
-            memory_store_type = MemoryType(memory_store_type)
+        data, memory_store_type = self._normalize_store_input(
+            data, memory_store_type, memory_id, memory_unit
+        )
 
         if memory_store_type == MemoryType.MEMAGENT:
             memagent = (
@@ -731,107 +1048,67 @@ class MongoDBProvider(MemoryProvider):
         if collection is None:
             raise ValueError(f"Invalid memory store type: {memory_store_type}")
 
-        # Clean data by removing custom ID fields - only use MongoDB _id
-        # Note: thread_id is preserved for CONVERSATION_MEMORY as it serves a functional purpose
-        data_copy = data.copy()
-
-        # Remove custom ID fields since we only want to use _id
-        custom_id_fields = [
-            "persona_id",
-            "tool_id",
-            "workflow_id",
-            "short_term_memory_id",
-            "agent_id",
-        ]
-
-        # Don't remove thread_id for conversation memory
-        if memory_store_type != MemoryType.CONVERSATION_MEMORY:
-            custom_id_fields.append("thread_id")
-
-        # Don't remove knowledge_base_id for knowledge base entries as it's needed for knowledge linking
-        if memory_store_type != MemoryType.KNOWLEDGE_BASE:
-            custom_id_fields.append("knowledge_base_id")
-
-        # Don't remove agent_id and memory_id for semantic cache as they're needed for filtering and scoping
-        if memory_store_type == MemoryType.SEMANTIC_CACHE:
-            # Remove agent_id from the removal list to preserve it (we used this for scoped agents semantic cache)
-            custom_id_fields = [
-                field for field in custom_id_fields if field != "agent_id"
-            ]
-            # Don't add memory_id to removal list for semantic cache
-        elif memory_store_type == MemoryType.TOOL_LOG:
-            # Tool-log rows carry the context the row was produced under:
-            # which thread the agent was responding in, which memory bucket
-            # it belonged to, and which agent emitted it. Stripping these
-            # would break ``list_recent_tool_logs`` / per-thread audit views
-            # and is the source of "tool_log rows have no thread" complaints.
-            custom_id_fields = [
-                field
-                for field in custom_id_fields
-                if field not in ("agent_id", "thread_id")
-            ]
-            # ``memory_id`` is not in the base list yet for TOOL_LOG, so
-            # nothing to remove there; this branch just keeps it that way.
-        elif memory_store_type == MemoryType.TOOLBOX:
-            # Preserve agent_id so the playground toolbox-memory pane can
-            # scope rows to the right agent, and tool_id so the UI can show
-            # a human-readable identifier. Tools are agent-scoped across
-            # threads, so memory_id is still stripped.
-            custom_id_fields = [
-                field
-                for field in custom_id_fields
-                if field not in ("agent_id", "tool_id")
-            ]
-            custom_id_fields.append("memory_id")
-        elif memory_store_type == MemoryType.SKILLBOX:
-            # Learned skills are agent-scoped and addressed by skill_id
-            # (the Skillbox manager updates them across lifecycle
-            # transitions). skill_id isn't in the base strip list, so only
-            # agent_id needs rescuing; memory_id is stripped like TOOLBOX.
-            custom_id_fields = [
-                field for field in custom_id_fields if field != "agent_id"
-            ]
-            custom_id_fields.append("memory_id")
-        elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            # Workflow docs are the evidence stream for continual learning:
-            # trajectory aggregation groups by agent_id and the promotion
-            # engine stamps rows back via workflow_id, so both must survive
-            # the store. memory_id is still stripped (thread scope lives on
-            # conversation memory).
-            custom_id_fields = [
-                field
-                for field in custom_id_fields
-                if field not in ("agent_id", "workflow_id")
-            ]
-            custom_id_fields.append("memory_id")
-        elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
-            # Don't remove memory_id for conversation memory as it's needed for conversation history retrieval
-            pass  # Keep memory_id for conversation memory
-        elif memory_store_type == MemoryType.ENTITY_MEMORY:
-            # Entity memory relies on memory_id for scoping
-            pass
-        elif memory_store_type == MemoryType.TOOL_LOG:
-            # Tool-log rows need ``memory_id`` to be scopable per
-            # conversation thread; stripping it would force every audit
-            # view to scan the entire collection.
-            pass
-        else:
-            # For all other memory types, remove memory_id as before
-            custom_id_fields.append("memory_id")
-
-        for field in custom_id_fields:
+        data_copy = dict(data)
+        for field in _mongo_id_fields_to_strip(memory_store_type):
             data_copy.pop(field, None)
+        return str(self._write_document(collection, data_copy, memory_store_type))
 
-        # If document has MongoDB _id, update it
-        if "_id" in data_copy:
-            result = collection.update_one(
-                {"_id": data_copy["_id"]}, {"$set": data_copy}, upsert=True
-            )
-            return str(data_copy["_id"])
-        else:
-            # For new documents, let MongoDB generate _id automatically
-            result = collection.insert_one(data_copy)
-            return str(result.inserted_id)
+    def store_many(
+        self,
+        rows: List[Dict[str, Any]],
+        memory_store_type: Union[str, MemoryType],
+        *,
+        memory_id: Optional[str] = None,
+    ) -> List[str]:
+        """Persist ordinary records with one unordered MongoDB bulk write.
+
+        Agent records and shared observability upserts retain their specialized
+        single-row semantics. Evaluation corpora and other ordinary memory
+        rows avoid one network round trip per chunk.
+        """
+
+        normalized_type = (
+            MemoryType(memory_store_type)
+            if isinstance(memory_store_type, str)
+            else memory_store_type
+        )
+        if normalized_type in {MemoryType.MEMAGENT, MemoryType.SHARED_MEMORY}:
+            return super().store_many(rows, normalized_type, memory_id=memory_id)
+        collection = self._collection(normalized_type)
+        if collection is None:
+            raise ValueError(f"Invalid memory store type: {normalized_type}")
+
+        operations = []
+        prepared_documents: List[Dict[str, Any]] = []
+        identifiers: List[str] = []
+        for row in rows:
+            data, _ = self._normalize_store_input(row, normalized_type, memory_id, None)
+            document = dict(data)
+            for field in _mongo_id_fields_to_strip(normalized_type):
+                document.pop(field, None)
+            record_id = document.get("_id")
+            if record_id is None:
+                record_id = ObjectId()
+                document["_id"] = record_id
+                operations.append(InsertOne(document))
+            else:
+                operations.append(ReplaceOne({"_id": record_id}, document, upsert=True))
+            prepared_documents.append(document)
+            identifiers.append(str(record_id))
+        if operations:
+            try:
+                collection.bulk_write(operations, ordered=False)
+            except TypeError as exc:
+                # Some mongomock releases lag PyMongo's private bulk API and
+                # reject its newer ``sort`` argument. Preserve compatibility
+                # without masking unrelated production failures.
+                if "unexpected keyword argument 'sort'" not in str(exc):
+                    raise
+                for document in prepared_documents:
+                    collection.replace_one(
+                        {"_id": document["_id"]}, document, upsert=True
+                    )
+        return identifiers
 
     def retrieve_by_query(
         self,
@@ -1251,11 +1528,32 @@ class MongoDBProvider(MemoryProvider):
             projection = {} if include_embedding else {"embedding": 0}
             return self.entity_memory_collection.find(query, projection).limit(limit)
 
+        if getattr(self, "lazy_vector_indexes", False):
+            # Existing entity indexes also need the user_id prefilter. Lazy
+            # deployments must reconcile that definition before issuing a
+            # scoped query; unsupported local/community servers are marked
+            # unavailable and return through the exact fallback upstream.
+            self._ensure_vector_index_for_collection(
+                self.entity_memory_collection,
+                MemoryType.ENTITY_MEMORY.value,
+                memory_store=True,
+            )
+            if self._vector_index_unavailable(self.entity_memory_collection.name):
+                raise VectorSearchUnavailableError(
+                    "Vector search is unavailable for entity_memory"
+                )
+
         try:
             embedding = get_embedding(query)
         except Exception as e:
-            logger.error(f"Failed to generate embedding for entity query: {e}")
-            return []
+            logger.warning(
+                "Failed to generate an entity query embedding (%s)",
+                type(e).__name__,
+            )
+            raise VectorSearchExecutionError(
+                "Entity semantic query embedding failed",
+                reason="semantic_embedding_failed",
+            ) from e
 
         search_filter: Dict[str, Any] = {}
         memory_id = kwargs.get("memory_id")
@@ -1268,7 +1566,10 @@ class MongoDBProvider(MemoryProvider):
             embedding, limit, search_filter=search_filter or None
         )
         return self._run_vector_search(
-            self.entity_memory_collection, pipeline, label="entity_memory"
+            self.entity_memory_collection,
+            pipeline,
+            label="entity_memory",
+            raise_on_error=True,
         )
 
     def retrieve_workflow_by_query(
@@ -1490,7 +1791,71 @@ class MongoDBProvider(MemoryProvider):
             )
             return []
 
-        return self._knowledge_base_vector_search(embedding, limit=limit, **kwargs)
+        return self._knowledge_base_vector_search(
+            embedding,
+            limit=limit,
+            query_text=query,
+            **kwargs,
+        )
+
+    def _knowledge_base_scoped_fallback(
+        self,
+        *,
+        limit: int,
+        query_text: Optional[str] = None,
+        reason: str,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        """Bounded, provider-local fallback when Atlas vector search is absent.
+
+        This is deliberately not a replacement for vector search.  It keeps a
+        memory-first harness useful on MongoDB Community, local Docker and
+        lower Atlas tiers by retrieving only the exact memory/user/namespace
+        scope, then applying a small lexical rank.  The degraded provenance is
+        attached to every row so callers and traces can distinguish it from a
+        semantic match.
+        """
+        search_filter: Dict[str, Any] = {}
+        memory_id = kwargs.get("memory_id")
+        if memory_id is not None:
+            search_filter["memory_id"] = str(memory_id)
+        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
+        if user_id_scope is not _MONGO_UNSET:
+            search_filter.update(_mongo_user_id_predicate(user_id_scope))
+        namespace = kwargs.get("namespace")
+        if namespace:
+            search_filter["namespace"] = str(namespace)
+
+        bounded_limit = max(1, min(int(limit), 100))
+        candidate_limit = min(200, max(32, bounded_limit * 8))
+        rows = list(
+            self.knowledge_base_collection.find(
+                search_filter,
+                {"embedding": 0},
+            ).limit(candidate_limit)
+        )
+        query_tokens = _lexical_tokens(query_text)
+
+        def lexical_score(row: Dict[str, Any]) -> float:
+            return _lexical_overlap(query_tokens, row.get("content"))
+
+        rows.sort(
+            key=lambda row: (
+                lexical_score(row),
+                float(row.get("importance") or 0.0),
+                str(row.get("updated_at") or row.get("created_at") or ""),
+            ),
+            reverse=True,
+        )
+        results: List[Dict[str, Any]] = []
+        for row in rows[:bounded_limit]:
+            item = dict(row)
+            item["score"] = lexical_score(item)
+            item["retrieval_mode"] = "scoped_lexical_fallback"
+            item["retrieval_degraded"] = True
+            item["retrieval_reason"] = reason
+            results.append(item)
+        return results
 
     def _knowledge_base_vector_search(
         self, embedding: List[float], limit: int = 5, **kwargs
@@ -1515,9 +1880,22 @@ class MongoDBProvider(MemoryProvider):
             search_filter=search_filter or None,
             include_embedding=bool(kwargs.get("include_embedding")),
         )
-        return self._run_vector_search(
-            self.knowledge_base_collection, pipeline, label="knowledge_base"
-        )
+        try:
+            return self._run_vector_search(
+                self.knowledge_base_collection,
+                pipeline,
+                label="knowledge_base",
+                raise_on_error=True,
+            )
+        except VectorSearchExecutionError as exc:
+            fallback_kwargs = dict(kwargs)
+            query_text = fallback_kwargs.pop("query_text", None)
+            return self._knowledge_base_scoped_fallback(
+                limit=limit,
+                query_text=query_text,
+                reason=exc.reason,
+                **fallback_kwargs,
+            )
 
     def find_similar_cache_entries(
         self, query: str, limit: int = 5, **kwargs
@@ -1725,6 +2103,132 @@ class MongoDBProvider(MemoryProvider):
             )
             return []
         return list(collection.find(mongo_filter, projection))
+
+    @staticmethod
+    def _encode_observability_cursor(value: Any) -> str:
+        return (
+            base64.urlsafe_b64encode(str(value).encode("ascii"))
+            .decode("ascii")
+            .rstrip("=")
+        )
+
+    @staticmethod
+    def _decode_observability_cursor(value: str) -> Any:
+        try:
+            padded = value + "=" * (-len(value) % 4)
+            decoded = base64.urlsafe_b64decode(padded).decode("ascii")
+        except Exception as exc:
+            raise ValueError("Invalid observability cursor") from exc
+        return ObjectId(decoded) if ObjectId.is_valid(decoded) else decoded
+
+    def query_observability_records(
+        self,
+        memory_store_type: Any,
+        *,
+        agent_ids: Optional[List[str]] = None,
+        memory_ids: Optional[List[str]] = None,
+        thread_id: Optional[str] = None,
+        user_id: Any = _MONGO_UNSET,
+        record_type: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        success: Optional[bool] = None,
+        start_time: Any = None,
+        end_time: Any = None,
+        limit: int = 250,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run an indexed, cursor-paginated trace query in MongoDB."""
+        started_at = time.perf_counter()
+        try:
+            resolved_type = (
+                memory_store_type
+                if isinstance(memory_store_type, MemoryType)
+                else MemoryType(memory_store_type)
+            )
+        except Exception as exc:
+            raise ValueError("Unsupported observability memory type") from exc
+        if resolved_type not in {
+            MemoryType.CONVERSATION_MEMORY,
+            MemoryType.TOOL_LOG,
+            MemoryType.SHARED_MEMORY,
+        }:
+            raise ValueError(
+                "Observability queries support conversation, tool, and shared logs"
+            )
+
+        safe_limit = max(1, min(int(limit or 250), 1000))
+        clauses: List[Dict[str, Any]] = []
+        wanted_agents = [str(value) for value in (agent_ids or []) if value]
+        wanted_memories = [str(value) for value in (memory_ids or []) if value]
+        if wanted_agents or wanted_memories:
+            identity_clauses: List[Dict[str, Any]] = []
+            if wanted_agents:
+                identity_clauses.append({"agent_id": {"$in": wanted_agents}})
+            if wanted_memories:
+                memory_field = (
+                    "trace_memory_id"
+                    if resolved_type == MemoryType.SHARED_MEMORY
+                    else "memory_id"
+                )
+                identity_clauses.append({memory_field: {"$in": wanted_memories}})
+            clauses.append(
+                identity_clauses[0]
+                if len(identity_clauses) == 1
+                else {"$or": identity_clauses}
+            )
+        if thread_id is not None:
+            clauses.append({"thread_id": str(thread_id)})
+        if user_id is not _MONGO_UNSET:
+            clauses.append(_mongo_user_id_predicate(user_id))
+        if record_type is not None:
+            clauses.append({"record_type": str(record_type)})
+        if tool_name is not None:
+            clauses.append({"tool_name": str(tool_name)})
+        if success is not None:
+            clauses.append({"success": bool(success)})
+        if start_time is not None or end_time is not None:
+            timestamp_filter: Dict[str, Any] = {}
+            if start_time is not None:
+                timestamp_filter["$gte"] = start_time
+            if end_time is not None:
+                timestamp_filter["$lte"] = end_time
+            clauses.append({"timestamp": timestamp_filter})
+        if cursor:
+            clauses.append({"_id": {"$lt": self._decode_observability_cursor(cursor)}})
+
+        mongo_filter: Dict[str, Any]
+        if not clauses:
+            mongo_filter = {}
+        elif len(clauses) == 1:
+            mongo_filter = clauses[0]
+        else:
+            mongo_filter = {"$and": clauses}
+
+        collection = self._collection(resolved_type)
+        projection = {"embedding": 0}
+        docs = list(
+            collection.find(mongo_filter, projection)
+            .sort("_id", -1)
+            .limit(safe_limit + 1)
+        )
+        has_more = len(docs) > safe_limit
+        page = docs[:safe_limit]
+        next_cursor = (
+            self._encode_observability_cursor(page[-1]["_id"])
+            if has_more and page
+            else None
+        )
+        return {
+            "items": page,
+            "next_cursor": next_cursor,
+            "truncated": has_more,
+            "limit": safe_limit,
+            "scanned_count": len(docs),
+            "scanned_count_is_lower_bound": has_more,
+            "query_duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
+            "freshness": str(page[0].get("timestamp") or "") if page else None,
+            "provider_native": True,
+        }
 
     def list_tool_logs(
         self,
@@ -2165,6 +2669,7 @@ class MongoDBProvider(MemoryProvider):
         # Use the MongoDB _id as agent_id since we no longer store agent_id field
         memagent = MemAgentModel(
             name=document.get("name"),
+            application_id=document.get("application_id"),
             instruction=document.get("instruction"),
             application_mode=document.get("application_mode", "assistant"),
             memory_types=document.get("memory_types"),
@@ -2184,6 +2689,10 @@ class MongoDBProvider(MemoryProvider):
             context_window_tokens=document.get("context_window_tokens"),
             sandbox_provider=document.get("sandbox_provider"),
             browser_control=document.get("browser_control"),
+            meta_harness=bool(document.get("meta_harness", False)),
+            meta_harness_mode=document.get("meta_harness_mode"),
+            default_harness=document.get("default_harness", "auto"),
+            harness_config=document.get("harness_config"),
             internet_access_provider=document.get("internet_access_provider"),
             internet_access_config=document.get("internet_access_config"),
             skills_marketplace_provider=document.get("skills_marketplace_provider"),
@@ -2193,6 +2702,8 @@ class MongoDBProvider(MemoryProvider):
             self_aware=bool(document.get("self_aware", False)),
             continual_learning=bool(document.get("continual_learning", False)),
             continual_learning_config=document.get("continual_learning_config"),
+            learning_control_plane=bool(document.get("learning_control_plane", False)),
+            learning_control_plane_config=document.get("learning_control_plane_config"),
             self_aware_config=document.get("self_aware_config"),
             automations_enabled=bool(document.get("automations_enabled", True)),
             default_timezone=document.get("default_timezone"),
@@ -2226,6 +2737,7 @@ class MongoDBProvider(MemoryProvider):
             # Use the MongoDB _id as agent_id since we no longer store agent_id field
             agent = MemAgentModel(
                 name=doc.get("name"),
+                application_id=doc.get("application_id"),
                 instruction=doc.get("instruction"),
                 application_mode=doc.get("application_mode", "assistant"),
                 memory_types=doc.get("memory_types"),
@@ -2245,6 +2757,10 @@ class MongoDBProvider(MemoryProvider):
                 context_window_tokens=doc.get("context_window_tokens"),
                 sandbox_provider=doc.get("sandbox_provider"),
                 browser_control=doc.get("browser_control"),
+                meta_harness=bool(doc.get("meta_harness", False)),
+                meta_harness_mode=doc.get("meta_harness_mode"),
+                default_harness=doc.get("default_harness", "auto"),
+                harness_config=doc.get("harness_config"),
                 internet_access_provider=doc.get("internet_access_provider"),
                 internet_access_config=doc.get("internet_access_config"),
                 skills_marketplace_provider=doc.get("skills_marketplace_provider"),
@@ -2254,6 +2770,8 @@ class MongoDBProvider(MemoryProvider):
                 self_aware=bool(doc.get("self_aware", False)),
                 continual_learning=bool(doc.get("continual_learning", False)),
                 continual_learning_config=doc.get("continual_learning_config"),
+                learning_control_plane=bool(doc.get("learning_control_plane", False)),
+                learning_control_plane_config=doc.get("learning_control_plane_config"),
                 self_aware_config=doc.get("self_aware_config"),
                 automations_enabled=bool(doc.get("automations_enabled", True)),
                 default_timezone=doc.get("default_timezone"),
@@ -2275,6 +2793,17 @@ class MongoDBProvider(MemoryProvider):
     def supports_entity_memory(self) -> bool:
         """MongoDB provider supports entity memory operations."""
         return True
+
+    def migrate_entity_memory_user_scope(self, *, memory_id: str, user_id: str) -> int:
+        """Atomically adopt anonymous entity rows in one MongoDB scope."""
+        result = self.entity_memory_collection.update_many(
+            {
+                "memory_id": str(memory_id),
+                **_mongo_user_id_predicate(None),
+            },
+            {"$set": {"user_id": str(user_id)}},
+        )
+        return int(result.modified_count)
 
     def update_memagent_memory_ids(self, agent_id: str, memory_ids: List[str]) -> bool:
         """
@@ -2471,10 +3000,10 @@ class MongoDBProvider(MemoryProvider):
                 self._handle_index_unavailable(collection.name, index_name, exc)
             else:
                 logger.warning(
-                    "Failed to create vector index '%s' on %s: %s",
+                    "Failed to create vector index '%s' on %s (%s)",
                     index_name,
                     collection.name,
-                    exc,
+                    type(exc).__name__,
                 )
                 self._vector_indexes_unavailable.add(collection.name)
             return None
@@ -2526,7 +3055,7 @@ class MongoDBProvider(MemoryProvider):
         index_name="vector_index",
         memory_store: bool = False,
         filter_fields: Optional[List[str]] = None,
-    ):
+    ) -> bool:
         """
         Ensure a vector search index exists for the collection. If it doesn't exist, create it and wait for it to be ready.
 
@@ -2547,13 +3076,18 @@ class MongoDBProvider(MemoryProvider):
         )
 
         if existing_index is None:
-            self._setup_vector_search_index(
+            created = self._setup_vector_search_index(
                 collection,
                 index_name,
                 memory_store,
                 filter_fields=filter_fields,
             )
-            return
+            if created is None:
+                return False
+            cache = getattr(self, "_vector_search_status_cache", None)
+            if isinstance(cache, dict):
+                cache.pop(collection.name, None)
+            return True
 
         required = set(filter_fields or [])
         if memory_store:
@@ -2569,7 +3103,7 @@ class MongoDBProvider(MemoryProvider):
         }
         missing = required - present
         if not missing:
-            return
+            return True
 
         definition = dict(current_definition)
         updated_fields = list(definition.get("fields") or [])
@@ -2585,15 +3119,20 @@ class MongoDBProvider(MemoryProvider):
                 collection.name,
                 ", ".join(sorted(missing)),
             )
+            cache = getattr(self, "_vector_search_status_cache", None)
+            if isinstance(cache, dict):
+                cache.pop(collection.name, None)
+            return True
         except Exception as exc:
             logger.warning(
                 "Vector index %s on %s lacks required filters %s and could "
-                "not be reconciled automatically: %s",
+                "not be reconciled automatically (%s)",
                 index_name,
                 collection.name,
                 ", ".join(sorted(missing)),
-                exc,
+                type(exc).__name__,
             )
+            return False
 
     def _ensure_semantic_cache_vector_index(self) -> None:
         """

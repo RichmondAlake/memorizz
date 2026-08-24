@@ -1,0 +1,63 @@
+{
+  "schema_version": "memorizz.memory-suite.validation.v1",
+  "benchmark": "locomo-plus",
+  "paper_url": "https://arxiv.org/abs/2602.10715",
+  "official_repository": "https://github.com/xjtuleeyf/Locomo-Plus",
+  "official_revision": "059f4e3d38f7f1f96765e8e2cb7de3097551bffb",
+  "dataset_variant": "cognitive",
+  "dataset_subset_fingerprint": "sha256:0794cb5b93141a686f0572019cc96cd7b12384fd79a066562e43994e950bac0f",
+  "sample_count": 1,
+  "corpus_count": 1,
+  "document_count": 421,
+  "reader_model": "qwen2.5:0.5b",
+  "judge_model": "qwen2.5:0.5b",
+  "embedding_model": "nomic-embed-text",
+  "answer_metric": "local_llm_judge",
+  "answer_score": 0.5,
+  "fully_correct_rate": 0.0,
+  "retrieval": {
+    "top_k": 6,
+    "recall_at_k": 0.0,
+    "mrr": 0.0,
+    "ndcg_at_k": 0.0
+  },
+  "efficiency": {
+    "ingestion_seconds": 7.576287375006359,
+    "retrieval_seconds": 0.10079566700733267,
+    "generation_seconds": 0.4229327919892967,
+    "total_processing_time": 8.43385441598366,
+    "memory_footprint_bytes": 7089817,
+    "total_model_tokens": 1052
+  },
+  "external_api_cost_usd": 0.0,
+  "paper_comparable": false,
+  "non_comparability_reasons": [
+    "one bounded cognitive sample rather than the full official split",
+    "local 0.5B Ollama reader and judge rather than the paper evaluator stack",
+    "integration validation, not a leaderboard submission"
+  ],
+  "agentmembench_validation": {
+    "paper_url": "https://arxiv.org/abs/2608.00009",
+    "dataset_variant": "locomo",
+    "dataset_subset_fingerprint": "sha256:fe13e6bcda190bba414b0d89badae82913d4a768273b323e856a33f6dad455d9",
+    "sample_count": 1,
+    "document_count": 419,
+    "category": "temporal",
+    "answer_f1": 0.21052631578947367,
+    "faithfulness": 0.0,
+    "retrieval": {
+      "top_k": 6,
+      "recall_at_k": 1.0,
+      "mrr": 0.5,
+      "ndcg_at_k": 0.6309297535714575
+    },
+    "average_memory_context_token_estimate": 407.0,
+    "answer_latency_seconds": 0.3882633750035893,
+    "ingestion_seconds": 7.193093042005785,
+    "total_processing_time": 7.893449833005434,
+    "total_model_tokens": 1232,
+    "external_api_cost_usd": 0.0,
+    "paper_comparable": false
+  },
+  "interpretation": "Both runs completed end to end and retained weak model outcomes: the LoCoMo-Plus case had a retrieval miss and partial-credit answer, while the AgentMemBench case retrieved its gold source but produced low answer F1 and zero faithfulness. These validate the harness, not model quality. Raw conversation data, prompts, answers, and local paths are omitted."
+}

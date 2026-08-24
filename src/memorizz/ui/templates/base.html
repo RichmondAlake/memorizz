@@ -3,25 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark light">
     <title>{% block title %}Memorizz{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=27">
-    <style>
-        /* Background accents */
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image:
-                radial-gradient(circle at 20% 50%, rgba(0, 217, 255, 0.01) 0%, transparent 50%),
-                radial-gradient(circle at 80% 80%, rgba(0, 255, 136, 0.01) 0%, transparent 50%),
-                radial-gradient(circle at 40% 20%, rgba(0, 217, 255, 0.01) 0%, transparent 50%);
-            pointer-events: none;
-            z-index: 0;
-        }
-    </style>
+    <link rel="stylesheet" href="/static/css/styles.css?v=28">
     {% block head %}{% endblock %}
 </head>
 <body>
@@ -58,7 +42,7 @@
 
             <nav class="sidebar-nav">
                 {% set memory_pages = ['personas', 'toolbox', 'conversations', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
-                {% set continual_learning_pages = ['workflows', 'skills'] %}
+                {% set continual_learning_pages = ['workflows', 'skills', 'learning-control-plane'] %}
                 <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -244,6 +228,10 @@
                             </span>
                             <span>Learned Skills</span>
                         </a>
+                        <a href="/learning-control-plane{% if active_agent_id %}?agent_id={{ active_agent_id }}{% endif %}" class="nav-item nav-item--sub {% if active_page == 'learning-control-plane' %}active{% endif %}">
+                            <span class="nav-icon" aria-hidden="true">◎</span>
+                            <span>Control Plane</span>
+                        </a>
                     </div>
                 </details>
 
@@ -258,6 +246,17 @@
                         </svg>
                     </span>
                     <span>Playground</span>
+                </a>
+
+                <a href="/harnesses" class="nav-item {% if active_page == 'harnesses' %}active{% endif %}">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="4" width="18" height="16" rx="3"/>
+                            <path d="m7 9 3 3-3 3"/>
+                            <path d="M13 15h4"/>
+                        </svg>
+                    </span>
+                    <span>Agent Harnesses</span>
                 </a>
 
                 <a href="/mcp{% if active_agent_id %}?agent_id={{ active_agent_id }}{% endif %}" class="nav-item {% if active_page == 'mcp' %}active{% endif %}">

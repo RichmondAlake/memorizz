@@ -190,6 +190,9 @@ Oracle persists the same production metadata as the document providers:
   provenance, tags, and invalidation metadata;
 - workflow, skill, shared-memory, tool-log, and first-party MCP data required by
   the 0.5 runtime.
+- immutable learning events, compiler checkpoints, compiled artifacts, and
+  reversible forgetting tombstones as logical records in private shared
+  memory; `list_all(shared_memory)` returns the complete typed projection.
 
 Summary creation and original-message marking are transactional. Retrieval by
 `summary_id` and `expand_summary()` reconstruct the linked source messages.
@@ -254,3 +257,8 @@ authorized DBA increase vector memory and restart the database.
 
 **Missing summary/cache fields:** apply migration 004, then restart the
 provider and rerun preflight/tests.
+
+**Missing knowledge provenance fields:** apply migration 006. It adds
+`source_id`, `parent_source_id`, `linked_source_ids`, and `metadata` to
+`knowledge_base` so the same grounded evidence contract survives Filesystem,
+MongoDB, and Oracle round trips.

@@ -7,12 +7,18 @@ from memorizz.enums.memory_type import MemoryType
 from memorizz.long_term.semantic.entity_memory import EntityMemory
 from memorizz.memagent.managers.entity_memory_manager import EntityMemoryManager
 
+_UNSET = object()
+
 
 class InMemoryEntityProvider:
     """Minimal provider that mimics the entity-memory interface."""
 
     def __init__(self):
         self.records: Dict[str, Dict[str, Any]] = {}
+        self.vector_available = True
+        self.semantic_query_count = 0
+        self.store_count = 0
+        self.last_filter_limit: Optional[int] = None
 
     def supports_entity_memory(self) -> bool:
         return True
@@ -24,6 +30,7 @@ class InMemoryEntityProvider:
         entity_id = record["entity_id"]
 
         self.records[entity_id] = record
+        self.store_count += 1
 
         return record["_id"]
 
@@ -33,11 +40,13 @@ class InMemoryEntityProvider:
         memory_type: MemoryType,
         limit: int = 5,
         memory_id: Optional[str] = None,
-        **__,
+        **kwargs,
     ) -> List[Dict[str, Any]]:
         assert memory_type == MemoryType.ENTITY_MEMORY
+        user_id = kwargs.get("user_id", _UNSET)
 
         if isinstance(query, dict):
+            self.last_filter_limit = limit
             candidates = [
                 rec
                 for rec in self.records.values()
@@ -45,16 +54,47 @@ class InMemoryEntityProvider:
                 and (memory_id is None or rec.get("memory_id") == memory_id)
             ]
         else:
+            self.semantic_query_count += 1
+            if not self.vector_available:
+                return []
             candidates = [
                 rec
                 for rec in self.records.values()
                 if memory_id is None or rec.get("memory_id") == memory_id
             ]
+        if user_id is not _UNSET:
+            candidates = [rec for rec in candidates if rec.get("user_id") == user_id]
         return candidates[:limit]
 
-    def list_all(self, memory_store_type: MemoryType) -> List[Dict[str, Any]]:
+    def list_all(
+        self, memory_store_type: MemoryType, user_id: Any = _UNSET
+    ) -> List[Dict[str, Any]]:
         assert memory_store_type == MemoryType.ENTITY_MEMORY
-        return [dict(rec) for rec in self.records.values()]
+        records = [dict(rec) for rec in self.records.values()]
+        if user_id is not _UNSET:
+            records = [rec for rec in records if rec.get("user_id") == user_id]
+        return records
+
+    def migrate_entity_memory_user_scope(self, *, memory_id: str, user_id: str) -> int:
+        migrated = 0
+        for record in self.records.values():
+            if record.get("memory_id") != memory_id:
+                continue
+            if record.get("user_id") is not None:
+                continue
+            record["user_id"] = user_id
+            migrated += 1
+        return migrated
+
+    def get_vector_search_status(self, memory_store_type: MemoryType):
+        assert memory_store_type == MemoryType.ENTITY_MEMORY
+        if self.vector_available:
+            return {"available": True, "queryable": True, "status": "READY"}
+        return {
+            "available": False,
+            "queryable": False,
+            "reason": "vector_index_missing",
+        }
 
 
 @pytest.fixture()
@@ -163,3 +203,241 @@ def test_manager_lookup_filters_by_memory_id(
 
     assert len(matches) == 1
     assert matches[0]["name"] == "Jordan"
+
+
+def test_same_generic_entity_name_is_isolated_by_user_with_shared_memory_id(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    first_id = entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "tier", "value": "gold"}],
+        memory_id="shared-memory",
+        user_id="user-a",
+    )
+    second_id = entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "tier", "value": "silver"}],
+        memory_id="shared-memory",
+        user_id="user-b",
+    )
+
+    assert first_id != second_id
+    assert len(provider.records) == 2
+    manager = EntityMemoryManager(provider)
+    first = manager.lookup_entities(
+        name="user", memory_id="shared-memory", user_id="user-a"
+    )
+    second = manager.lookup_entities(
+        name="user", memory_id="shared-memory", user_id="user-b"
+    )
+
+    assert first[0]["attributes"]["tier"] == "gold"
+    assert second[0]["attributes"]["tier"] == "silver"
+
+
+def test_name_lookup_cannot_cross_memory_scope(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "secret", "value": "tenant-a-only"}],
+        memory_id="primary-user-a",
+        user_id="user-a",
+    )
+
+    manager = EntityMemoryManager(provider)
+    matches = manager.lookup_entities(
+        name="user", memory_id="primary-user-b", user_id="user-b"
+    )
+
+    assert matches == []
+
+
+def test_legacy_null_user_record_requires_explicit_operator_migration(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    entity_id = entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "role", "value": "developer advocate"}],
+        memory_id="primary-user-a",
+        user_id=None,
+    )
+    manager = EntityMemoryManager(provider)
+
+    authenticated_before = manager.lookup_entities(
+        name="user", memory_id="primary-user-a", user_id="user-a"
+    )
+    anonymous_before = manager.lookup_entities(
+        name="user", memory_id="primary-user-a", user_id=None
+    )
+    migrated = entity_store.migrate_legacy_scope(
+        memory_id="primary-user-a", user_id="user-a"
+    )
+    authenticated_after = manager.lookup_entities(
+        name="user", memory_id="primary-user-a", user_id="user-a"
+    )
+    anonymous_after = manager.lookup_entities(
+        name="user", memory_id="primary-user-a", user_id=None
+    )
+
+    assert authenticated_before == []
+    assert anonymous_before[0]["attributes"]["role"] == "developer advocate"
+    assert migrated == 1
+    assert authenticated_after[0]["entity_id"] == entity_id
+    assert anonymous_after == []
+    assert provider.records[entity_id]["user_id"] == "user-a"
+    assert len(provider.records) == 1
+
+
+def test_repeated_relation_upsert_is_a_noop(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    relation = {
+        "entity_id": "company-1",
+        "relation_type": "works_at",
+        "confidence": 0.9,
+    }
+    entity_id = entity_store.upsert_entity(
+        name="Avery",
+        entity_type="person",
+        relations=[relation],
+        memory_id="shared-memory",
+        user_id="user-a",
+    )
+    entity_store.upsert_entity(
+        entity_id=entity_id,
+        relations=[relation],
+        memory_id="shared-memory",
+        user_id="user-a",
+    )
+
+    assert len(provider.records[entity_id]["relations"]) == 1
+    assert provider.store_count == 1
+
+
+def test_missing_vector_index_uses_exact_scoped_profile_fallback(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[
+            {"name": "role", "value": "developer experience leader"},
+            {"name": "response_preference", "value": "no em dashes"},
+        ],
+        memory_id="primary-user-a",
+        user_id="user-a",
+    )
+    provider.vector_available = False
+    manager = EntityMemoryManager(provider)
+
+    result = manager.lookup_entities_with_diagnostics(
+        query="user profile role preferences audience goals",
+        memory_id="primary-user-a",
+        user_id="user-a",
+    )
+
+    assert result["matches"][0]["attributes"]["role"] == ("developer experience leader")
+    assert result["retrieval"]["retrieval_mode"] == "exact_fallback"
+    assert result["retrieval"]["fallback_used"] is True
+    assert result["retrieval"]["degraded"] is True
+    assert result["retrieval"]["degraded_reason"] == "vector_index_missing"
+    assert provider.semantic_query_count == 0
+    assert provider.last_filter_limit == 100
+
+
+def test_semantic_zero_match_falls_back_without_crossing_scope(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "role", "value": "engineer"}],
+        memory_id="primary-user-a",
+        user_id="user-a",
+    )
+    # Simulate a queryable vector service returning no candidates rather than
+    # an unavailable index.
+    provider.retrieve_by_query = lambda query, memory_type, limit=5, **kwargs: (
+        []
+        if isinstance(query, str)
+        else [
+            rec
+            for rec in provider.records.values()
+            if all(rec.get(key) == value for key, value in query.items())
+        ][:limit]
+    )
+    manager = EntityMemoryManager(provider)
+
+    result = manager.lookup_entities_with_diagnostics(
+        query="what do you know about me",
+        memory_id="primary-user-a",
+        user_id="user-a",
+    )
+
+    assert len(result["matches"]) == 1
+    assert result["retrieval"]["degraded"] is False
+    assert result["retrieval"]["degraded_reason"] == "semantic_empty"
+
+
+def test_semantic_query_failure_is_reported_as_degraded(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "role", "value": "engineer"}],
+        memory_id="shared-memory",
+        user_id="user-a",
+    )
+    original_retrieve = provider.retrieve_by_query
+
+    def retrieve(query, memory_type, limit=5, **kwargs):
+        if isinstance(query, str):
+            raise RuntimeError("semantic backend failed")
+        return original_retrieve(query, memory_type, limit=limit, **kwargs)
+
+    provider.retrieve_by_query = retrieve
+    manager = EntityMemoryManager(provider)
+
+    result = manager.lookup_entities_with_diagnostics(
+        query="what do you know about me",
+        memory_id="shared-memory",
+        user_id="user-a",
+    )
+
+    assert len(result["matches"]) == 1
+    assert result["retrieval"]["degraded"] is True
+    assert result["retrieval"]["degraded_reason"] == "semantic_error"
+    assert result["retrieval"]["semantic_error_type"] == "RuntimeError"
+
+
+def test_tool_update_rejects_entity_id_outside_active_scope(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    entity_id = entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "secret", "value": "tenant-a-only"}],
+        memory_id="primary-user-a",
+        user_id="user-a",
+    )
+    manager = EntityMemoryManager(provider)
+
+    with pytest.raises(ValueError, match="not found in the active entity scope"):
+        manager.upsert_entity_from_tool(
+            entity_id=entity_id,
+            name="user",
+            entity_type="person",
+            attributes=[{"name": "secret", "value": "overwritten"}],
+            relations=None,
+            metadata=None,
+            memory_id="primary-user-b",
+            user_id="user-b",
+        )
+
+    assert provider.records[entity_id]["attributes"][0]["value"] == "tenant-a-only"

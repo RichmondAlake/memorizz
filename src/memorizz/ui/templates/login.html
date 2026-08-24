@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in - Memorizz</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+<main class="login-shell">
+    <section class="login-card">
+        <h1>Memorizz operator access</h1>
+        <p>Enter the local UI access token. It is exchanged for a signed, short-lived HttpOnly session and is never written to the page.</p>
+        {% if error %}<div class="error-message"><span>!</span> {{ error }}</div>{% endif %}
+        <form method="post" action="/login">
+            <input type="hidden" name="next" value="{{ next_path }}">
+            <div class="form-group">
+                <label for="access_token">Access token</label>
+                <input id="access_token" name="access_token" type="password" autocomplete="current-password" required autofocus>
+            </div>
+            <button type="submit" class="btn btn-primary">Sign in</button>
+        </form>
+    </section>
+</main>
+</body>
+</html>

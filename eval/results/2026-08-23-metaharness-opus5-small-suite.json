@@ -1,0 +1,3405 @@
+{
+  "schema_version": "memorizz.metaharness.opus5-small-suite.v1",
+  "generated_at": "2026-08-23T01:44:55.927437+00:00",
+  "status": "valid",
+  "valid": true,
+  "paper_comparable": false,
+  "protocol_manifest": {
+    "schema_version": "memorizz.metaharness.opus5-small-suite.v1",
+    "protocol": "opus5_task_native_small_suite_v1",
+    "profile": "small_regression",
+    "paper_comparable": false,
+    "models": {
+      "codex": "gpt-5.6-luna",
+      "claude_code": "claude-opus-5",
+      "judge": null,
+      "coordinator": null
+    },
+    "memory_provider": "filesystem",
+    "strategies": {
+      "memagent_codex": {
+        "display_name": "MemAgent + Codex",
+        "kind": "single_codex",
+        "model_configuration": "Codex: gpt-5.6-luna (medium effort)"
+      },
+      "memagent_opus": {
+        "display_name": "MemAgent + Claude Code",
+        "kind": "single_opus",
+        "model_configuration": "Claude Code: claude-opus-5 (medium effort)"
+      },
+      "panel_always": {
+        "display_name": "MemoRizz Always-on Panel",
+        "kind": "sequential_panel",
+        "model_configuration": "Codex: gpt-5.6-luna then Claude Code: claude-opus-5 (medium effort each)"
+      },
+      "panel_routed": {
+        "display_name": "MemoRizz Risk-routed Panel",
+        "kind": "risk_router",
+        "model_configuration": "Codex: gpt-5.6-luna or Claude Code: claude-opus-5 (medium effort)"
+      }
+    },
+    "fixtures": [
+      {
+        "id": "numeric_contract",
+        "title": "Strict numerical API contract",
+        "risk": "ordinary",
+        "routed_harness": "codex",
+        "requirements_sha256": "f5af91b9daacf019a6b558de0ebe1cee1c1dacec5b37448a750eb3e05d298256",
+        "initial_tree_hash": "736a39ed834a39526ac9a7f2e905c3fa02ce749c0f9c1fc1d406f84e4685eff7",
+        "hidden_verify_sha256": "f508ab3352cc2ada9c2630ff3e7b047cc57d5c50d8c55019262b1d261fe92d10",
+        "hidden_check_count": 8
+      },
+      {
+        "id": "tenant_cache",
+        "title": "Tenant-safe versioned cache",
+        "risk": "tenant_isolation",
+        "routed_harness": "claude-code",
+        "requirements_sha256": "976affdccfa0f0741c29d550f1729404c316af6d14d4a4f532f39037f5804036",
+        "initial_tree_hash": "024eb20617535173083e337afd703711ac661dd916821d398741a2602a2767ba",
+        "hidden_verify_sha256": "74aec05a773396c24643cbb1977c3c9aa754efd3f6d13450ab0f8bc9f4148ab8",
+        "hidden_check_count": 8
+      },
+      {
+        "id": "durable_approval",
+        "title": "Single-use durable approval",
+        "risk": "security",
+        "routed_harness": "claude-code",
+        "requirements_sha256": "f98e7a9ba6b26f779533ff94cf7921aec75970b8ec6c2a61738af97530120c41",
+        "initial_tree_hash": "cecf4dc370aa06012ae1d574379a60ba9823261ef031a5ebbb4ec0a0c04ae2bf",
+        "hidden_verify_sha256": "9072c2da3251b14ac0eff138c6e6802eb371d7805c2fde08257eb07eae5ae3bc",
+        "hidden_check_count": 8
+      },
+      {
+        "id": "retry_schedule",
+        "title": "Bounded retry schedule",
+        "risk": "ordinary",
+        "routed_harness": "codex",
+        "requirements_sha256": "c973879bb6fbfdf136e2f1708567a351eae6604916dee2f7c3e98152e966b2ef",
+        "initial_tree_hash": "300e201a40dfac875923294e95b2dccca15ba9014e302a76bb1610929dc384bd",
+        "hidden_verify_sha256": "3b0afe64c11d2dad1493ca6ef023058e98ab14988ddcac6b28a0d50f74d03e40",
+        "hidden_check_count": 8
+      }
+    ],
+    "task_orders": {
+      "numeric_contract": [
+        "panel_routed",
+        "memagent_codex",
+        "memagent_opus",
+        "panel_always"
+      ],
+      "tenant_cache": [
+        "panel_routed",
+        "memagent_opus",
+        "memagent_codex",
+        "panel_always"
+      ],
+      "durable_approval": [
+        "memagent_codex",
+        "memagent_opus",
+        "panel_routed",
+        "panel_always"
+      ],
+      "retry_schedule": [
+        "panel_routed",
+        "panel_always",
+        "memagent_codex",
+        "memagent_opus"
+      ]
+    },
+    "seed": 20260823,
+    "repeats": 1,
+    "controls": {
+      "independent_task_count": 4,
+      "fresh_workspace_per_task_and_strategy": true,
+      "same_fixture_and_requirements_per_task": true,
+      "same_per_harness_resource_budget": true,
+      "per_harness_budget": {
+        "max_wall_time_seconds": 180,
+        "max_steps": 12,
+        "max_output_tokens": 12000,
+        "max_retries": 0
+      },
+      "claude_per_call_cost_cap_usd": 0.35,
+      "model_effort": "medium",
+      "source_linked_memory_context_required": true,
+      "durable_host_approval_for_writes": true,
+      "public_verification_required": true,
+      "held_out_task_native_checks_primary": true,
+      "llm_judge_calls": 0,
+      "semantic_cache": "disabled_for_cold_comparison",
+      "summarization_compaction": "not_triggered_in_single_turn_tasks",
+      "maximum_observed_execution_cost_usd": 3.0
+    },
+    "decision_rule": {
+      "quality_metric": "micro_hidden_check_pass_rate",
+      "panel_frontier_supported_when": "The risk-routed panel equals or exceeds the better singleton, strictly exceeds Codex-only, and costs less than Opus-only.",
+      "no_post_hoc_weighting": true
+    },
+    "claim_boundaries": [
+      "This is a four-task synthetic regression, not a public benchmark.",
+      "Held-out checks replace a style-sensitive scalar LLM judge.",
+      "The always-on panel receives two model calls and more compute.",
+      "The risk-routed panel receives one call per task, matching singletons.",
+      "Codex cost is API-equivalent; Claude Code cost is CLI-reported.",
+      "Filesystem is held constant; provider effects are outside this run.",
+      "A positive result supports a bounded frontier claim, not universality."
+    ],
+    "implementation": {
+      "runner_sha256": "78f9f2bb71fd00ebc9d6a2b22bb8feecb600a60000187be18d9f6c082009acd4"
+    },
+    "reproducibility": {
+      "generated_at": "2026-08-23T01:44:55.909765+00:00",
+      "memorizz_version": "0.6.0",
+      "python": "3.12.13",
+      "platform": "macOS-26.5-arm64-arm-64bit",
+      "git_revision": "e08a90e72ca0b618013ad728cb0bdbd2515397f7"
+    },
+    "protocol_fingerprint": "75eb08ae74f9a84a37807749ef5af2fcd14f08d3302c3ddaaa7370be3258620f"
+  },
+  "records": [
+    {
+      "fixture_id": "numeric_contract",
+      "fixture_title": "Strict numerical API contract",
+      "risk": "ordinary",
+      "strategy": "panel_routed",
+      "display_name": "MemoRizz Risk-routed Panel",
+      "model_configuration": "Codex: gpt-5.6-luna or Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "35d56c4a-0abb-4eaf-80c1-1fb3fbb58f28",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 50460,
+      "runs": [
+        {
+          "run_id": "6abaa6d7-048f-4cff-932e-70df78bc9ef0",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 111,
+          "context_fingerprint": "6d5230ca46bcce8bacc48a207b81e748194f672c998b4965d47ead61bc736710",
+          "context_content_fingerprint": "82e7f3bc8d38a9fd4397fbec6189128164de0d0c19ee279830a2d00e91070b04",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-51307421d3535e68dd4938b1179b",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 111,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "bd03eeef-5ae8-51d6-b4aa-580d094edb98",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 318,
+            "initial_context_build_latency_ms": 318
+          },
+          "latency_ms": 50306,
+          "phase_timings_ms": {
+            "context": 318,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 49891,
+            "verification": 40,
+            "workspace_finalize": 53,
+            "total": 50306
+          },
+          "usage": {
+            "input_tokens": 82630,
+            "cached_input_tokens": 64256,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2385,
+            "reasoning_output_tokens": 730
+          },
+          "usage_totals": {
+            "input_tokens": 82630,
+            "cached_tokens": 64256,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2385
+          },
+          "actions": 4,
+          "cost_usd": 0.00782192,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 50400,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "26246767-ad6f-4960-a1ad-3204f6352a20",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "292ce54518ceaf9ea28152a9acc6224b1c55110531e94bc3339d74a013f0f9eb"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "basic_float",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_string_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_non_finite",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_float_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "optimized_verifier",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.00782192,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent"
+      ],
+      "usage_totals": {
+        "input_tokens": 82630,
+        "cached_tokens": 64256,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2385
+      },
+      "final_workspace_hash": "93194bd2ddf998c59a4e51bbcb37cedc0cb38e3723c39a3470c6e5fb6db2c579",
+      "valid": true
+    },
+    {
+      "fixture_id": "numeric_contract",
+      "fixture_title": "Strict numerical API contract",
+      "risk": "ordinary",
+      "strategy": "memagent_codex",
+      "display_name": "MemAgent + Codex",
+      "model_configuration": "Codex: gpt-5.6-luna (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "f4e91996-5fee-4a06-958a-a623514ceac2",
+      "seed_latency_ms": 2,
+      "wall_latency_ms": 66814,
+      "runs": [
+        {
+          "run_id": "9f926453-0145-4b0d-9ca9-2c999ee7e12d",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 111,
+          "context_fingerprint": "742658e37362a180543f252950a7916de5514ab0a9793fe2bc425e85feeb2ef4",
+          "context_content_fingerprint": "82e7f3bc8d38a9fd4397fbec6189128164de0d0c19ee279830a2d00e91070b04",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-2c6f65a70b01fd4d12e5d28a99f0",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 111,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "827d8f78-74e2-56fe-841c-ce6350bd6d1d",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 2,
+            "initial_context_build_latency_ms": 2
+          },
+          "latency_ms": 66200,
+          "phase_timings_ms": {
+            "context": 2,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 66093,
+            "verification": 43,
+            "workspace_finalize": 60,
+            "total": 66200
+          },
+          "usage": {
+            "input_tokens": 105600,
+            "cached_input_tokens": 68352,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3196,
+            "reasoning_output_tokens": 728
+          },
+          "usage_totals": {
+            "input_tokens": 105600,
+            "cached_tokens": 68352,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3196
+          },
+          "actions": 5,
+          "cost_usd": 0.01265184,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 66790,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "751c6d62-91b7-4c66-8347-dba029896b32",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "998d9be8daa8f8b4135042c412ef0cfe578019a0851824d2c6845123a0764fcc"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "basic_float",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_string_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_non_finite",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_float_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "optimized_verifier",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.01265184,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent"
+      ],
+      "usage_totals": {
+        "input_tokens": 105600,
+        "cached_tokens": 68352,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3196
+      },
+      "final_workspace_hash": "fa22e27d766277ed297a428c754854650150fb123d7cf1ec8bd7fb481ee79b46",
+      "valid": true
+    },
+    {
+      "fixture_id": "numeric_contract",
+      "fixture_title": "Strict numerical API contract",
+      "risk": "ordinary",
+      "strategy": "memagent_opus",
+      "display_name": "MemAgent + Claude Code",
+      "model_configuration": "Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "89700a87-844c-4775-a21b-caa879540cea",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 34401,
+      "runs": [
+        {
+          "run_id": "5f3db864-bbca-41e2-a3f5-49d5b3a9ef29",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 111,
+          "context_fingerprint": "fb6aeffdb68783fdce704fa16ac71c5459cacfdf19d7be9a3118a8a8c3c53c95",
+          "context_content_fingerprint": "82e7f3bc8d38a9fd4397fbec6189128164de0d0c19ee279830a2d00e91070b04",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-2e3085540e6aec7a05fb0e0ccc39",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 111,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "114971ef-6482-581a-a0d0-f0d87ca2c766",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 4,
+            "initial_context_build_latency_ms": 4
+          },
+          "latency_ms": 33844,
+          "phase_timings_ms": {
+            "context": 4,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 33743,
+            "verification": 35,
+            "workspace_finalize": 62,
+            "total": 33844
+          },
+          "usage": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 4599,
+            "cache_read_input_tokens": 10366,
+            "output_tokens": 2852,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 4599
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 546,
+                "cache_read_input_tokens": 4011,
+                "cache_creation_input_tokens": 588,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 588,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 14975,
+            "cached_tokens": 10366,
+            "cache_write_input_tokens": 4599,
+            "output_tokens": 2852
+          },
+          "actions": 5,
+          "cost_usd": 0.10617974999999999,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 34353,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "4c0cf8ff-8edb-4370-b8cc-d41a229b4dec",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "099af0f987bd760e06cff4d17e4cc82a3826959b5387d1122f9d8415b73fbd33"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "basic_float",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_string_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_non_finite",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_float_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "optimized_verifier",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.10617975,
+      "cost_complete": true,
+      "cost_basis": [
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 14975,
+        "cached_tokens": 10366,
+        "cache_write_input_tokens": 4599,
+        "output_tokens": 2852
+      },
+      "final_workspace_hash": "f23d817cda337c4dd767436a23e083e9aea1e44c107f9c716db29e520d35da85",
+      "valid": true
+    },
+    {
+      "fixture_id": "numeric_contract",
+      "fixture_title": "Strict numerical API contract",
+      "risk": "ordinary",
+      "strategy": "panel_always",
+      "display_name": "MemoRizz Always-on Panel",
+      "model_configuration": "Codex: gpt-5.6-luna then Claude Code: claude-opus-5 (medium effort each)",
+      "memory_provider": "filesystem",
+      "source_id": "b4e0127e-1bd3-4a98-9a0a-947b08e1e662",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 120516,
+      "runs": [
+        {
+          "run_id": "cf8f3d17-cb6a-4eaf-b084-231cab9ccf14",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 111,
+          "context_fingerprint": "26cd38e618624848cac62155a2c1427d4aee18aa91a3f012d458597ba5703e72",
+          "context_content_fingerprint": "82e7f3bc8d38a9fd4397fbec6189128164de0d0c19ee279830a2d00e91070b04",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-2d03f4787f66c4db5729ceb7d92f",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 111,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "10e1d73b-3c63-5752-b932-20b94dfb4af1",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 7,
+            "initial_context_build_latency_ms": 7
+          },
+          "latency_ms": 65897,
+          "phase_timings_ms": {
+            "context": 7,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 65790,
+            "verification": 41,
+            "workspace_finalize": 58,
+            "total": 65897
+          },
+          "usage": {
+            "input_tokens": 145715,
+            "cached_input_tokens": 123648,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3014,
+            "reasoning_output_tokens": 893
+          },
+          "usage_totals": {
+            "input_tokens": 145715,
+            "cached_tokens": 123648,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3014
+          },
+          "actions": 8,
+          "cost_usd": 0.01050316,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 66112,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "2544d4e3-ac1f-4652-9191-8d8b2d4fba56",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "7d340bb070110951d4898b783f18213b23a5ce0e7784ebdc26b8bda91b2b050e"
+        },
+        {
+          "run_id": "7e09fa92-3a4c-48d1-bb43-5e5ce2fdb0bd",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 216,
+          "context_fingerprint": "ed21019835dfa887ac3cf273fc70b1e39ebdeb202c0fce00f2e3dbe63df83e51",
+          "context_content_fingerprint": "6aaf083f33e5923be5b9c9e174d60fa232505fa394e55becfe5b420643b4eb6b",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-23a515462102b103626ed1dd7c5c",
+            "candidate_count": 3,
+            "selected_count": 3,
+            "rejected_count": 0,
+            "candidate_tokens": 216,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "54fc4d36-d6ec-55a5-901e-4ff693dd215f",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 138,
+            "initial_context_build_latency_ms": 138
+          },
+          "latency_ms": 53789,
+          "phase_timings_ms": {
+            "context": 138,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 53549,
+            "verification": 45,
+            "workspace_finalize": 57,
+            "total": 53789
+          },
+          "usage": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 4985,
+            "cache_read_input_tokens": 14312,
+            "output_tokens": 3616,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 4985
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1167,
+                "cache_read_input_tokens": 5116,
+                "cache_creation_input_tokens": 686,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 686,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 19307,
+            "cached_tokens": 14312,
+            "cache_write_input_tokens": 4985,
+            "output_tokens": 3616
+          },
+          "actions": 5,
+          "cost_usd": 0.12988024999999997,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 54377,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "074fd791-bd73-4a46-805a-354d82825a94",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "a980077aa96695099559e2ddb1c708e7ef093fa37d48941a5190d71ee45d7503"
+        }
+      ],
+      "harness_calls": 2,
+      "actual_models": [
+        "gpt-5.6-luna",
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "basic_float",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_string_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_non_finite",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_float_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "optimized_verifier",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.14038341,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent",
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 165022,
+        "cached_tokens": 137960,
+        "cache_write_input_tokens": 4985,
+        "output_tokens": 6630
+      },
+      "final_workspace_hash": "097a27cfc21f2ccbe0eb84c7fc7d32d3e091b7f4fae41c3a4decf03c47c29a75",
+      "valid": true
+    },
+    {
+      "fixture_id": "tenant_cache",
+      "fixture_title": "Tenant-safe versioned cache",
+      "risk": "tenant_isolation",
+      "strategy": "panel_routed",
+      "display_name": "MemoRizz Risk-routed Panel",
+      "model_configuration": "Codex: gpt-5.6-luna or Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "ee195630-5e5f-40fc-bb0b-8723eebc6bf5",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 51368,
+      "runs": [
+        {
+          "run_id": "ef4a691c-4aed-45ba-b17c-46570e43b429",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 124,
+          "context_fingerprint": "22364bdc0c68351efde99a2ea9801fdeb6e8ad07856770bdf13996d956136204",
+          "context_content_fingerprint": "5ce6a0a40c8ab7e57907c6de1a8d3ca023f624608a0e7285ca8eef6145f96903",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-b20aeb02e08793d959c52645cbf6",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 124,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "82af25f6-5a04-579d-9825-98e476394cee",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 8,
+            "initial_context_build_latency_ms": 8
+          },
+          "latency_ms": 51098,
+          "phase_timings_ms": {
+            "context": 8,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 50971,
+            "verification": 32,
+            "workspace_finalize": 86,
+            "total": 51098
+          },
+          "usage": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 4785,
+            "cache_read_input_tokens": 8487,
+            "output_tokens": 4585,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 4785
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1418,
+                "cache_read_input_tokens": 3628,
+                "cache_creation_input_tokens": 1974,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 1974,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 13280,
+            "cached_tokens": 8487,
+            "cache_write_input_tokens": 4785,
+            "output_tokens": 4585
+          },
+          "actions": 4,
+          "cost_usd": 0.14975975,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 51339,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "de57e089-5282-48f8-ab93-057b72938ffd",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "448f85b8e6db58dfad2c7c32d71549807be3767965d1489c0e534768c52d472e"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "normalized_query",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "tenant_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "domain_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "version_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "domain_invalidation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "version_invalidation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "combined_invalidation",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.14975975,
+      "cost_complete": true,
+      "cost_basis": [
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 13280,
+        "cached_tokens": 8487,
+        "cache_write_input_tokens": 4785,
+        "output_tokens": 4585
+      },
+      "final_workspace_hash": "36094cecf4b71d4b56a3342860b20536f42b36c5978a81ba6e33a939b91895fd",
+      "valid": true
+    },
+    {
+      "fixture_id": "tenant_cache",
+      "fixture_title": "Tenant-safe versioned cache",
+      "risk": "tenant_isolation",
+      "strategy": "memagent_opus",
+      "display_name": "MemAgent + Claude Code",
+      "model_configuration": "Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "e3ecb9dc-5e28-4c91-ba30-cb8d78027ea9",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 49965,
+      "runs": [
+        {
+          "run_id": "e7c300b5-fe19-4fe4-a5a0-f22457abc2a5",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 124,
+          "context_fingerprint": "180acd952cf44ccfbe177aa3e7c58e99d96d3ee3bd158d249f66b1760aa25c92",
+          "context_content_fingerprint": "5ce6a0a40c8ab7e57907c6de1a8d3ca023f624608a0e7285ca8eef6145f96903",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-199c6c09d7062ce18556675fe61e",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 124,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "7b548367-9035-52b6-b99e-67e7ba2a1319",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 10,
+            "initial_context_build_latency_ms": 10
+          },
+          "latency_ms": 49671,
+          "phase_timings_ms": {
+            "context": 10,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 49571,
+            "verification": 34,
+            "workspace_finalize": 56,
+            "total": 49671
+          },
+          "usage": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 5694,
+            "cache_read_input_tokens": 17261,
+            "output_tokens": 4412,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 5694
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 999,
+                "cache_read_input_tokens": 5688,
+                "cache_creation_input_tokens": 823,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 823,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 22967,
+            "cached_tokens": 17261,
+            "cache_write_input_tokens": 5694,
+            "output_tokens": 4412
+          },
+          "actions": 6,
+          "cost_usd": 0.155524,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 49941,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "ee5fbdda-2c20-45c9-b496-458a1edcc0d2",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "1980942a250f4fe33a185bc590b73025166ab9cca8d98f53b45018a4ebf31ee2"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "normalized_query",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "tenant_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "domain_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "version_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "domain_invalidation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "version_invalidation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "combined_invalidation",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.155524,
+      "cost_complete": true,
+      "cost_basis": [
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 22967,
+        "cached_tokens": 17261,
+        "cache_write_input_tokens": 5694,
+        "output_tokens": 4412
+      },
+      "final_workspace_hash": "5d18e0cda0030379563e6a4c75524cfd7f6d4c9d8cce0fe8d730a3bd23532343",
+      "valid": true
+    },
+    {
+      "fixture_id": "tenant_cache",
+      "fixture_title": "Tenant-safe versioned cache",
+      "risk": "tenant_isolation",
+      "strategy": "memagent_codex",
+      "display_name": "MemAgent + Codex",
+      "model_configuration": "Codex: gpt-5.6-luna (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "29c204a1-ddf0-4753-a65f-932684154f29",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 71107,
+      "runs": [
+        {
+          "run_id": "c45359cd-7aa8-4b79-81cd-fb1bad9061d0",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 124,
+          "context_fingerprint": "a285dab011f51b1edb75ab1dfc41199cea919b2588c1a2966879f352eb71a80f",
+          "context_content_fingerprint": "5ce6a0a40c8ab7e57907c6de1a8d3ca023f624608a0e7285ca8eef6145f96903",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-649e128143783c0974b477ffa4d4",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 124,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "5b8a3944-9300-57b8-ac38-05d57b599e89",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 11,
+            "initial_context_build_latency_ms": 11
+          },
+          "latency_ms": 70854,
+          "phase_timings_ms": {
+            "context": 11,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 70760,
+            "verification": 33,
+            "workspace_finalize": 48,
+            "total": 70854
+          },
+          "usage": {
+            "input_tokens": 133620,
+            "cached_input_tokens": 110592,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3411,
+            "reasoning_output_tokens": 889
+          },
+          "usage_totals": {
+            "input_tokens": 133620,
+            "cached_tokens": 110592,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3411
+          },
+          "actions": 7,
+          "cost_usd": 0.01091064,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 71083,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "cb2075f9-8b08-491b-af01-418b9b92f9db",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "28d17cda3cf63343fdb82f8a2eef337d1d6d62cf265e0f3bd1f3d45da76dcdc7"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "normalized_query",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "tenant_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "domain_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "version_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "domain_invalidation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "version_invalidation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "combined_invalidation",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.01091064,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent"
+      ],
+      "usage_totals": {
+        "input_tokens": 133620,
+        "cached_tokens": 110592,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3411
+      },
+      "final_workspace_hash": "7468a702ea0fd4b75a556493e47e12e19c09b1091b976a2c5258c89b46f6ebd0",
+      "valid": true
+    },
+    {
+      "fixture_id": "tenant_cache",
+      "fixture_title": "Tenant-safe versioned cache",
+      "risk": "tenant_isolation",
+      "strategy": "panel_always",
+      "display_name": "MemoRizz Always-on Panel",
+      "model_configuration": "Codex: gpt-5.6-luna then Claude Code: claude-opus-5 (medium effort each)",
+      "memory_provider": "filesystem",
+      "source_id": "c885d0a5-1168-48b9-afc3-ba98b6604d24",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 170705,
+      "runs": [
+        {
+          "run_id": "0288d942-51a0-4019-9580-6093ecbb94c2",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 124,
+          "context_fingerprint": "e31875b8bc6824ca0be8688b22a50876230bb693c82ba6545abe1170e2c44415",
+          "context_content_fingerprint": "5ce6a0a40c8ab7e57907c6de1a8d3ca023f624608a0e7285ca8eef6145f96903",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-e37ab7897b659cb79ddfb644ef41",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 124,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "ccc6cfe7-9d17-5154-aa9d-8684b9901153",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 13,
+            "initial_context_build_latency_ms": 13
+          },
+          "latency_ms": 57615,
+          "phase_timings_ms": {
+            "context": 13,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 57505,
+            "verification": 44,
+            "workspace_finalize": 50,
+            "total": 57615
+          },
+          "usage": {
+            "input_tokens": 70741,
+            "cached_input_tokens": 52224,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2773,
+            "reasoning_output_tokens": 976
+          },
+          "usage_totals": {
+            "input_tokens": 70741,
+            "cached_tokens": 52224,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2773
+          },
+          "actions": 3,
+          "cost_usd": 0.00807548,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 58211,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "e494745d-7258-4627-80f1-dd2bd9401cb9",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "abc78e9238251531217741790f7f0db7c33d95886fbe35e8d02e758208b2f96d"
+        },
+        {
+          "run_id": "2fdb20df-b325-4e63-b804-2f707c8b9231",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 265,
+          "context_fingerprint": "998a5f928f3acbd96c97fa644b86461820ce322ee20fbba20f02c84770c12bc0",
+          "context_content_fingerprint": "9a1784e8fb25869c499763b81a083d8c0be5462ba0579f4fc91155cd9d4a6293",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-b493670b34eba71b03022faaf996",
+            "candidate_count": 3,
+            "selected_count": 3,
+            "rejected_count": 0,
+            "candidate_tokens": 265,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "898abcbb-e0f0-5fab-9cb4-c6d8df95cd49",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 165,
+            "initial_context_build_latency_ms": 165
+          },
+          "latency_ms": 111892,
+          "phase_timings_ms": {
+            "context": 165,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 111621,
+            "verification": 44,
+            "workspace_finalize": 58,
+            "total": 111892
+          },
+          "usage": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 9601,
+            "cache_read_input_tokens": 13854,
+            "output_tokens": 8530,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 9601
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1734,
+                "cache_read_input_tokens": 7422,
+                "cache_creation_input_tokens": 2996,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 2996,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 23463,
+            "cached_tokens": 13854,
+            "cache_write_input_tokens": 9601,
+            "output_tokens": 8530
+          },
+          "actions": 4,
+          "cost_usd": 0.28143524999999997,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 112467,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "dea10237-2dd3-4d42-ad47-a1359019d168",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "ca119de73a734436520fd98764f765374b13a4610f81ad70b29967753c42fcef"
+        }
+      ],
+      "harness_calls": 2,
+      "actual_models": [
+        "gpt-5.6-luna",
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "normalized_query",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "tenant_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "domain_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "version_isolation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "domain_invalidation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "version_invalidation",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "combined_invalidation",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.28951073,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent",
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 94204,
+        "cached_tokens": 66078,
+        "cache_write_input_tokens": 9601,
+        "output_tokens": 11303
+      },
+      "final_workspace_hash": "71dc07b06197955d40889b51730ca29159c7e1d878dc2e7e738c429c9394de00",
+      "valid": true
+    },
+    {
+      "fixture_id": "durable_approval",
+      "fixture_title": "Single-use durable approval",
+      "risk": "security",
+      "strategy": "memagent_codex",
+      "display_name": "MemAgent + Codex",
+      "model_configuration": "Codex: gpt-5.6-luna (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "2d9c5da1-cc11-4392-92cd-024031667f01",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 66580,
+      "runs": [
+        {
+          "run_id": "78d28025-b984-4858-a7cf-ecefe1d39734",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 148,
+          "context_fingerprint": "ecfe14dfb29c4d90974a5b997fb5d86e68a2863e38f838c3a2b0df81182d14dd",
+          "context_content_fingerprint": "cd1a070b019e72c68b6e6e5514cfc787030d851b1ed75ab17cf7763959259e01",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-e89f0dd3ecd19678b901e71e0919",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 148,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "764aa022-a65e-598c-9da1-5fa2d8d71f46",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 16,
+            "initial_context_build_latency_ms": 16
+          },
+          "latency_ms": 66279,
+          "phase_timings_ms": {
+            "context": 16,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 66152,
+            "verification": 59,
+            "workspace_finalize": 50,
+            "total": 66279
+          },
+          "usage": {
+            "input_tokens": 120439,
+            "cached_input_tokens": 98560,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3084,
+            "reasoning_output_tokens": 673
+          },
+          "usage_totals": {
+            "input_tokens": 120439,
+            "cached_tokens": 98560,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3084
+          },
+          "actions": 5,
+          "cost_usd": 0.0100478,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 66555,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "83e1f341-5b11-478a-bdc8-8dc867d44f66",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "4d3c879e427621df86d496c8b0310857aa49e92c27365dac7c8fa6a07daf5f72"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": false,
+        "passed": 7,
+        "total": 8,
+        "pass_rate": 87.5,
+        "checks": [
+          {
+            "error": null,
+            "id": "canonical_hash",
+            "passed": true
+          },
+          {
+            "error": "AssertionError: wrong exception: ApprovalStateError",
+            "id": "approver_identity",
+            "passed": false
+          },
+          {
+            "error": null,
+            "id": "approve_expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approve_state",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "argument_mismatch",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "consume_expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "single_use",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approver_retained",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.0100478,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent"
+      ],
+      "usage_totals": {
+        "input_tokens": 120439,
+        "cached_tokens": 98560,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3084
+      },
+      "final_workspace_hash": "5516ff169de92a5a984033672ee3a1313293d8641be373fb7fb38b5cc017f9ec",
+      "valid": true
+    },
+    {
+      "fixture_id": "durable_approval",
+      "fixture_title": "Single-use durable approval",
+      "risk": "security",
+      "strategy": "memagent_opus",
+      "display_name": "MemAgent + Claude Code",
+      "model_configuration": "Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "02460f99-83b9-46c7-b876-81d873eb53d2",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 70863,
+      "runs": [
+        {
+          "run_id": "63befced-fecc-4424-a8a6-5700b92467ca",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 148,
+          "context_fingerprint": "05d6ddc64c15e9b189e31480787b1a431f1e420acc3c87910b9a6a3a018c97f0",
+          "context_content_fingerprint": "cd1a070b019e72c68b6e6e5514cfc787030d851b1ed75ab17cf7763959259e01",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-cabe6251e27571a3325bc70104b6",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 148,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "269b20c9-af9a-585a-9eac-1d76046b88b3",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 16,
+            "initial_context_build_latency_ms": 16
+          },
+          "latency_ms": 70258,
+          "phase_timings_ms": {
+            "context": 16,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 70126,
+            "verification": 58,
+            "workspace_finalize": 57,
+            "total": 70258
+          },
+          "usage": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 8261,
+            "cache_read_input_tokens": 21073,
+            "output_tokens": 6689,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 8261
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1425,
+                "cache_read_input_tokens": 7514,
+                "cache_creation_input_tokens": 1564,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 1564,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 29346,
+            "cached_tokens": 21073,
+            "cache_write_input_tokens": 8261,
+            "output_tokens": 6689
+          },
+          "actions": 6,
+          "cost_usd": 0.23038575000000003,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 70838,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "41580024-0bdd-4ced-9637-8fc9a0f80985",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "8d89ed6a0436e5e26bd54fcfa7848ffd7eb9a5afe3750e6626b9b6807a78d7a2"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": false,
+        "passed": 7,
+        "total": 8,
+        "pass_rate": 87.5,
+        "checks": [
+          {
+            "error": null,
+            "id": "canonical_hash",
+            "passed": true
+          },
+          {
+            "error": "AssertionError: wrong exception: ApprovalStateError",
+            "id": "approver_identity",
+            "passed": false
+          },
+          {
+            "error": null,
+            "id": "approve_expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approve_state",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "argument_mismatch",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "consume_expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "single_use",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approver_retained",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.23038575,
+      "cost_complete": true,
+      "cost_basis": [
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 29346,
+        "cached_tokens": 21073,
+        "cache_write_input_tokens": 8261,
+        "output_tokens": 6689
+      },
+      "final_workspace_hash": "3fb52a59149cb24051e3faea2b21083744899eee3804244cdb5b6ae44aea9b95",
+      "valid": true
+    },
+    {
+      "fixture_id": "durable_approval",
+      "fixture_title": "Single-use durable approval",
+      "risk": "security",
+      "strategy": "panel_routed",
+      "display_name": "MemoRizz Risk-routed Panel",
+      "model_configuration": "Codex: gpt-5.6-luna or Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "527364bc-3fa1-4bd8-b820-3b8f0b5317b4",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 74378,
+      "runs": [
+        {
+          "run_id": "a03bd8d6-d0da-4a98-a160-cd4a8efed33c",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 148,
+          "context_fingerprint": "73d68c98f6a914da32234f700b40607d2f852f814e0601f32a0c14ada254763b",
+          "context_content_fingerprint": "cd1a070b019e72c68b6e6e5514cfc787030d851b1ed75ab17cf7763959259e01",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-0444336c6273cdcac2f0844caccc",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 148,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "3dae9597-abe1-5fcc-b31c-b3b711fd1925",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 18,
+            "initial_context_build_latency_ms": 18
+          },
+          "latency_ms": 74098,
+          "phase_timings_ms": {
+            "context": 18,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 73966,
+            "verification": 57,
+            "workspace_finalize": 56,
+            "total": 74098
+          },
+          "usage": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 7187,
+            "cache_read_input_tokens": 10332,
+            "output_tokens": 6881,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 7187
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1565,
+                "cache_read_input_tokens": 5224,
+                "cache_creation_input_tokens": 2780,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 2780,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 17527,
+            "cached_tokens": 10332,
+            "cache_write_input_tokens": 7187,
+            "output_tokens": 6881
+          },
+          "actions": 4,
+          "cost_usd": 0.22308475,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 74353,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "a519f584-6685-4089-b7c9-b0076715cc71",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "23d698ed053b9048c9115d319f9fc284457285c4f42bf6a89c5c44c35fb5237f"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "canonical_hash",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approver_identity",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approve_expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approve_state",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "argument_mismatch",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "consume_expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "single_use",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approver_retained",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.22308475,
+      "cost_complete": true,
+      "cost_basis": [
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 17527,
+        "cached_tokens": 10332,
+        "cache_write_input_tokens": 7187,
+        "output_tokens": 6881
+      },
+      "final_workspace_hash": "2c8edd075c716040d88daf4637afc275fd8ec1f2fb8921981c06386ccaf56e7d",
+      "valid": true
+    },
+    {
+      "fixture_id": "durable_approval",
+      "fixture_title": "Single-use durable approval",
+      "risk": "security",
+      "strategy": "panel_always",
+      "display_name": "MemoRizz Always-on Panel",
+      "model_configuration": "Codex: gpt-5.6-luna then Claude Code: claude-opus-5 (medium effort each)",
+      "memory_provider": "filesystem",
+      "source_id": "821761bd-507d-4b09-ab01-1068ea4ce9b8",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 127332,
+      "runs": [
+        {
+          "run_id": "dd8913ca-c018-4f9a-9e72-94728c373d1e",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 148,
+          "context_fingerprint": "fb255a16a05187f28b8050a5cbf0f5d78a640e7ea7575127f2106eef861ad02c",
+          "context_content_fingerprint": "cd1a070b019e72c68b6e6e5514cfc787030d851b1ed75ab17cf7763959259e01",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-9db7febff57d454279a248f1aab2",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 148,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "91bed548-d9a5-5e24-a372-2dc2a7e67024",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 20,
+            "initial_context_build_latency_ms": 20
+          },
+          "latency_ms": 66368,
+          "phase_timings_ms": {
+            "context": 20,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 66240,
+            "verification": 58,
+            "workspace_finalize": 49,
+            "total": 66368
+          },
+          "usage": {
+            "input_tokens": 103777,
+            "cached_input_tokens": 81408,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3222,
+            "reasoning_output_tokens": 948
+          },
+          "usage_totals": {
+            "input_tokens": 103777,
+            "cached_tokens": 81408,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3222
+          },
+          "actions": 5,
+          "cost_usd": 0.00996836,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 66623,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "6cc6e4df-018a-4899-9592-9918d205af55",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "aac73dd7bed5649789d6772ae06c8a76d6857653ab96c589383417f745412ac2"
+        },
+        {
+          "run_id": "6fbea2c5-cd74-428d-87bc-1eebc7b117df",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 356,
+          "context_fingerprint": "094a4ef5e4c2a33b43666ddd9cbf4ed1b07f50c4c7a63dcc22e8ec56ea074440",
+          "context_content_fingerprint": "4ec9b7048a5ad6e8d0cf352090820ea2da51cdea33f071cd8c512ae524867ab6",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-88a27389d219448ebb8cad78f2b2",
+            "candidate_count": 3,
+            "selected_count": 3,
+            "rejected_count": 0,
+            "candidate_tokens": 356,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "8d7654b8-a387-5014-abbc-d92afd8a5e63",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 142,
+            "initial_context_build_latency_ms": 142
+          },
+          "latency_ms": 60047,
+          "phase_timings_ms": {
+            "context": 142,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 59784,
+            "verification": 59,
+            "workspace_finalize": 60,
+            "total": 60047
+          },
+          "usage": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 8404,
+            "cache_read_input_tokens": 21327,
+            "output_tokens": 4720,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 8404
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1138,
+                "cache_read_input_tokens": 7413,
+                "cache_creation_input_tokens": 1808,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 1808,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 29741,
+            "cached_tokens": 21327,
+            "cache_write_input_tokens": 8404,
+            "output_tokens": 4720
+          },
+          "actions": 5,
+          "cost_usd": 0.18255349999999998,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 60678,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "d1c1dbaf-59aa-4260-8886-0513a5ee6a7a",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "4b6754fe8c04deabbdc48f311126b54c5bac6b5fc69b6d25298473a4e1077eb9"
+        }
+      ],
+      "harness_calls": 2,
+      "actual_models": [
+        "gpt-5.6-luna",
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": false,
+        "passed": 7,
+        "total": 8,
+        "pass_rate": 87.5,
+        "checks": [
+          {
+            "error": null,
+            "id": "canonical_hash",
+            "passed": true
+          },
+          {
+            "error": "AssertionError: wrong exception: ApprovalStateError",
+            "id": "approver_identity",
+            "passed": false
+          },
+          {
+            "error": null,
+            "id": "approve_expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approve_state",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "argument_mismatch",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "consume_expiry_boundary",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "single_use",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "approver_retained",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.19252186,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent",
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 133518,
+        "cached_tokens": 102735,
+        "cache_write_input_tokens": 8404,
+        "output_tokens": 7942
+      },
+      "final_workspace_hash": "5da7d91d55127bcb5b2671fe9e5aef54fa0a7a311efb1d97f86439371d33d21c",
+      "valid": true
+    },
+    {
+      "fixture_id": "retry_schedule",
+      "fixture_title": "Bounded retry schedule",
+      "risk": "ordinary",
+      "strategy": "panel_routed",
+      "display_name": "MemoRizz Risk-routed Panel",
+      "model_configuration": "Codex: gpt-5.6-luna or Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "3177df11-8057-4c9e-96b8-c00a30521db1",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 60512,
+      "runs": [
+        {
+          "run_id": "c4dd1938-9e28-4ac3-9a84-a1bd5aebc92e",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 138,
+          "context_fingerprint": "1145114ab8662f0c82a0b02a79034e25550aed51ff4daa6a6587b1dda82b298c",
+          "context_content_fingerprint": "2f9f8924422c0499dc0a19304cc320f15aaca24ea0aacdef7fd0efd1a4b4e4a6",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-d79b93d228a6e62be17f62a81d4d",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 138,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "8a698ad4-35d1-5482-880e-83e0b2cf91e3",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 22,
+            "initial_context_build_latency_ms": 22
+          },
+          "latency_ms": 60221,
+          "phase_timings_ms": {
+            "context": 22,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 60123,
+            "verification": 26,
+            "workspace_finalize": 49,
+            "total": 60221
+          },
+          "usage": {
+            "input_tokens": 85652,
+            "cached_input_tokens": 65280,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2933,
+            "reasoning_output_tokens": 1334
+          },
+          "usage_totals": {
+            "input_tokens": 85652,
+            "cached_tokens": 65280,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2933
+          },
+          "actions": 3,
+          "cost_usd": 0.0088996,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 60489,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "cc96c173-00ab-4870-a8e1-4f4d1336e569",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "e77b8600f9dbacc8de3cdad576f883f7c0244cbf26438c2d53fe3603c6079f33"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "length_semantics",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "exponential_cap",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "float_outputs",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_bool",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "base_contract",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "cap_contract",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.0088996,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent"
+      ],
+      "usage_totals": {
+        "input_tokens": 85652,
+        "cached_tokens": 65280,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2933
+      },
+      "final_workspace_hash": "9030ef39906d013c756bf9ff81a7f488e36632cb03c642a79ee01a5fd6ab0a00",
+      "valid": true
+    },
+    {
+      "fixture_id": "retry_schedule",
+      "fixture_title": "Bounded retry schedule",
+      "risk": "ordinary",
+      "strategy": "panel_always",
+      "display_name": "MemoRizz Always-on Panel",
+      "model_configuration": "Codex: gpt-5.6-luna then Claude Code: claude-opus-5 (medium effort each)",
+      "memory_provider": "filesystem",
+      "source_id": "6dd43256-6ff3-4d7f-bd78-1def9076e0b1",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 191454,
+      "runs": [
+        {
+          "run_id": "30edd2ea-6683-4ddb-b5d8-2c664afc96a4",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 138,
+          "context_fingerprint": "8464b7462a22789659b254733678323f4856bbb8961d6769ef5cefcef7d74ea2",
+          "context_content_fingerprint": "2f9f8924422c0499dc0a19304cc320f15aaca24ea0aacdef7fd0efd1a4b4e4a6",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-c1227608e3cf0f2b0ff6c94483dc",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 138,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "ad3c267c-fda1-59fc-b650-93f96524bd1c",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 23,
+            "initial_context_build_latency_ms": 23
+          },
+          "latency_ms": 76185,
+          "phase_timings_ms": {
+            "context": 23,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 76066,
+            "verification": 44,
+            "workspace_finalize": 51,
+            "total": 76185
+          },
+          "usage": {
+            "input_tokens": 89515,
+            "cached_input_tokens": 65280,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3831,
+            "reasoning_output_tokens": 1106
+          },
+          "usage_totals": {
+            "input_tokens": 89515,
+            "cached_tokens": 65280,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3831
+          },
+          "actions": 2,
+          "cost_usd": 0.0107498,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 76727,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "6297eab7-95de-4b66-88b1-bc2066b60741",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "303e59a91ec6460ade865e55285ce906e0ba14f5a2ebc968a404c23dc5faf7de"
+        },
+        {
+          "run_id": "9d56475c-1b64-4f10-9c76-5ba4dc49daae",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 173,
+          "context_fingerprint": "c9a7d4843056bb70fa6fbd6736ff1847d408dd286b068ed2b126f1d6ec782a30",
+          "context_content_fingerprint": "01fbc2a6a941bae4bc3968654c6eb54147bd97d134c4b9e7c7f0fff533046893",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-d5d4d5080db8a2e2cba9c83f1682",
+            "candidate_count": 2,
+            "selected_count": 2,
+            "rejected_count": 0,
+            "candidate_tokens": 173,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "0ad24e68-233d-5b1a-86b0-6f5f91d22f3c",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 218,
+            "initial_context_build_latency_ms": 218
+          },
+          "latency_ms": 114251,
+          "phase_timings_ms": {
+            "context": 218,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 113937,
+            "verification": 36,
+            "workspace_finalize": 59,
+            "total": 114251
+          },
+          "usage": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 12161,
+            "cache_read_input_tokens": 33212,
+            "output_tokens": 8952,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 12161
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1163,
+                "cache_read_input_tokens": 11066,
+                "cache_creation_input_tokens": 1912,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 1912,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 45385,
+            "cached_tokens": 33212,
+            "cache_write_input_tokens": 12161,
+            "output_tokens": 8952
+          },
+          "actions": 9,
+          "cost_usd": 0.31749924999999996,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 114700,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "ce306687-c815-4c90-8cc6-f927aed05465",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "d702c9182a4cfd881d9710928c6ea516a88bbde479e5e58bfe2bcc5f72618a60"
+        }
+      ],
+      "harness_calls": 2,
+      "actual_models": [
+        "gpt-5.6-luna",
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "length_semantics",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "exponential_cap",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "float_outputs",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_bool",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "base_contract",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "cap_contract",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.32824905,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent",
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 134900,
+        "cached_tokens": 98492,
+        "cache_write_input_tokens": 12161,
+        "output_tokens": 12783
+      },
+      "final_workspace_hash": "1d5802b13c95b0ec9bd5a30882b3a93712a69bdeca6da76b22bb5897c0808a3a",
+      "valid": true
+    },
+    {
+      "fixture_id": "retry_schedule",
+      "fixture_title": "Bounded retry schedule",
+      "risk": "ordinary",
+      "strategy": "memagent_codex",
+      "display_name": "MemAgent + Codex",
+      "model_configuration": "Codex: gpt-5.6-luna (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "1f4aab7d-68c5-4282-bea3-9dc28a15ec1a",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 63563,
+      "runs": [
+        {
+          "run_id": "71caf9b4-4f84-4f61-956c-53db49fbc516",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 138,
+          "context_fingerprint": "804a1e38f6f73ea9a6f6f496feee317a640a71c4665ede308dca1def994f7a36",
+          "context_content_fingerprint": "2f9f8924422c0499dc0a19304cc320f15aaca24ea0aacdef7fd0efd1a4b4e4a6",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-0d2f7dcb9ddb38ec4a897fc7be3a",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 138,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "7c674460-b2fc-511a-8cbe-20f994cf70e0",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 28,
+            "initial_context_build_latency_ms": 28
+          },
+          "latency_ms": 63265,
+          "phase_timings_ms": {
+            "context": 28,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 63139,
+            "verification": 43,
+            "workspace_finalize": 53,
+            "total": 63265
+          },
+          "usage": {
+            "input_tokens": 102173,
+            "cached_input_tokens": 88320,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3087,
+            "reasoning_output_tokens": 941
+          },
+          "usage_totals": {
+            "input_tokens": 102173,
+            "cached_tokens": 88320,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3087
+          },
+          "actions": 3,
+          "cost_usd": 0.0082414,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 63540,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "8cfd1c19-2daa-4a6c-83ad-856c4385d514",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "3ecc0d79045370567febada38d6266e8d9b86142c26758e91169338f44749d71"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "length_semantics",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "exponential_cap",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "float_outputs",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_bool",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "base_contract",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "cap_contract",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.0082414,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent"
+      ],
+      "usage_totals": {
+        "input_tokens": 102173,
+        "cached_tokens": 88320,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3087
+      },
+      "final_workspace_hash": "0de73db01f6b287b2fe778780a99d17ccee58c70cef4629132ea27b860f39d7c",
+      "valid": true
+    },
+    {
+      "fixture_id": "retry_schedule",
+      "fixture_title": "Bounded retry schedule",
+      "risk": "ordinary",
+      "strategy": "memagent_opus",
+      "display_name": "MemAgent + Claude Code",
+      "model_configuration": "Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "source_id": "7a1080b1-3bc1-496c-a89d-f8737213e730",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 35030,
+      "runs": [
+        {
+          "run_id": "cddc601a-86a3-4fa5-9be2-f395ede2ffca",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 138,
+          "context_fingerprint": "197ed47de75a7f5f51229d17e42d9ef9133c9d44637039e32a76056935959da3",
+          "context_content_fingerprint": "2f9f8924422c0499dc0a19304cc320f15aaca24ea0aacdef7fd0efd1a4b4e4a6",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-be1bad5d83e45647c0e32fa6826d",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 138,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "60ca209a-c674-534f-9d6f-deb28fd62b80",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 27,
+            "initial_context_build_latency_ms": 27
+          },
+          "latency_ms": 34449,
+          "phase_timings_ms": {
+            "context": 27,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 34329,
+            "verification": 33,
+            "workspace_finalize": 58,
+            "total": 34449
+          },
+          "usage": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 3323,
+            "cache_read_input_tokens": 7430,
+            "output_tokens": 2994,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 3323
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 895,
+                "cache_read_input_tokens": 2997,
+                "cache_creation_input_tokens": 1143,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 1143,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 10761,
+            "cached_tokens": 7430,
+            "cache_write_input_tokens": 3323,
+            "output_tokens": 2994
+          },
+          "actions": 4,
+          "cost_usd": 0.10029975,
+          "cost_basis": "reported",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 35006,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "3c1cbeee-8e0e-41c7-92fd-d76ccae3aefe",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "bafcbfacfcd1714f9ed82d4c9f81e239d25e9c462d7a3fbee08ac80f97600e36"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "claude-opus-5"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "length_semantics",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "exponential_cap",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "float_outputs",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_bool",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "attempts_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "base_contract",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "cap_contract",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.10029975,
+      "cost_complete": true,
+      "cost_basis": [
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 10761,
+        "cached_tokens": 7430,
+        "cache_write_input_tokens": 3323,
+        "output_tokens": 2994
+      },
+      "final_workspace_hash": "738a01881fd2652881b6990f42f53d6f4b4c1681b82e8e7bee7c4be5e82acea0",
+      "valid": true
+    }
+  ],
+  "summaries": [
+    {
+      "strategy": "memagent_codex",
+      "display_name": "MemAgent + Codex",
+      "model_configuration": "Codex: gpt-5.6-luna (medium effort)",
+      "memory_provider": "filesystem",
+      "task_count": 4,
+      "hidden_checks_passed": 31,
+      "hidden_checks_total": 32,
+      "accuracy_pct": 96.875,
+      "fully_correct_tasks": 3,
+      "public_verified_rate": 1,
+      "grounded_rate": 1,
+      "wall_latency_ms_total": 268064,
+      "wall_latency_ms_mean": 67016,
+      "cost_usd_total": 0.04185168,
+      "cost_coverage": "4/4",
+      "harness_calls": 4,
+      "input_tokens": 461832,
+      "output_tokens": 12778,
+      "total_tokens": 474610,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ]
+    },
+    {
+      "strategy": "memagent_opus",
+      "display_name": "MemAgent + Claude Code",
+      "model_configuration": "Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "task_count": 4,
+      "hidden_checks_passed": 31,
+      "hidden_checks_total": 32,
+      "accuracy_pct": 96.875,
+      "fully_correct_tasks": 3,
+      "public_verified_rate": 1,
+      "grounded_rate": 1,
+      "wall_latency_ms_total": 190259,
+      "wall_latency_ms_mean": 47565,
+      "cost_usd_total": 0.59238925,
+      "cost_coverage": "4/4",
+      "harness_calls": 4,
+      "input_tokens": 78049,
+      "output_tokens": 16947,
+      "total_tokens": 94996,
+      "actual_models": [
+        "claude-opus-5"
+      ]
+    },
+    {
+      "strategy": "panel_always",
+      "display_name": "MemoRizz Always-on Panel",
+      "model_configuration": "Codex: gpt-5.6-luna then Claude Code: claude-opus-5 (medium effort each)",
+      "memory_provider": "filesystem",
+      "task_count": 4,
+      "hidden_checks_passed": 31,
+      "hidden_checks_total": 32,
+      "accuracy_pct": 96.875,
+      "fully_correct_tasks": 3,
+      "public_verified_rate": 1,
+      "grounded_rate": 1,
+      "wall_latency_ms_total": 610007,
+      "wall_latency_ms_mean": 152502,
+      "cost_usd_total": 0.95066505,
+      "cost_coverage": "4/4",
+      "harness_calls": 8,
+      "input_tokens": 527644,
+      "output_tokens": 38658,
+      "total_tokens": 566302,
+      "actual_models": [
+        "claude-opus-5",
+        "gpt-5.6-luna"
+      ]
+    },
+    {
+      "strategy": "panel_routed",
+      "display_name": "MemoRizz Risk-routed Panel",
+      "model_configuration": "Codex: gpt-5.6-luna or Claude Code: claude-opus-5 (medium effort)",
+      "memory_provider": "filesystem",
+      "task_count": 4,
+      "hidden_checks_passed": 32,
+      "hidden_checks_total": 32,
+      "accuracy_pct": 100.0,
+      "fully_correct_tasks": 4,
+      "public_verified_rate": 1,
+      "grounded_rate": 1,
+      "wall_latency_ms_total": 236718,
+      "wall_latency_ms_mean": 59180,
+      "cost_usd_total": 0.38956602,
+      "cost_coverage": "4/4",
+      "harness_calls": 4,
+      "input_tokens": 199089,
+      "output_tokens": 16784,
+      "total_tokens": 215873,
+      "actual_models": [
+        "claude-opus-5",
+        "gpt-5.6-luna"
+      ]
+    }
+  ],
+  "decision": {
+    "panel_cost_quality_frontier_supported": true,
+    "quality_floor_pct": 96.875,
+    "routed_minus_codex_accuracy_points": 3.125,
+    "routed_minus_opus_accuracy_points": 3.125,
+    "routed_minus_opus_cost_usd": -0.20282323,
+    "routed_minus_opus_latency_ms": 46459,
+    "interpretation": "The preregistered MemoRizz frontier rule passed."
+  },
+  "validation_failures": [],
+  "provider_preflight": {
+    "filesystem": {
+      "ok": true,
+      "provider": "filesystem"
+    }
+  },
+  "harness_probes": {
+    "codex": {
+      "name": "codex",
+      "available": true,
+      "version": "codex-cli 0.149.0",
+      "command": "[HOME]/.nvm/versions/node/v24.15.0/lib/node_modules/@openai/codex/bin/codex.js",
+      "structured_events": true,
+      "resume": false,
+      "mcp": true,
+      "per_action_approvals": true,
+      "requires_external_isolation": false,
+      "usage_reporting": true,
+      "models": [],
+      "error_code": null,
+      "error": null,
+      "remediation": null,
+      "metadata": {
+        "cost_reporting": false,
+        "token_reporting": true,
+        "network_policy": "codex_sandbox",
+        "network_modes": [
+          "none"
+        ],
+        "task_tool_policy": false,
+        "output_schema": true,
+        "authentication_configured": true,
+        "authentication_mode": "environment",
+        "authentication_note": null
+      },
+      "ready": true
+    },
+    "claude-code": {
+      "name": "claude-code",
+      "available": true,
+      "version": "2.1.202 (Claude Code)",
+      "command": "[HOME]/.local/share/claude/versions/2.1.202",
+      "structured_events": true,
+      "resume": false,
+      "mcp": true,
+      "per_action_approvals": true,
+      "requires_external_isolation": false,
+      "usage_reporting": true,
+      "models": [],
+      "error_code": null,
+      "error": null,
+      "remediation": null,
+      "metadata": {
+        "cost_reporting": true,
+        "token_reporting": true,
+        "network_policy": "tool_allowlist",
+        "network_modes": [
+          "none",
+          "full"
+        ],
+        "forbidden_tools": [
+          "bash"
+        ],
+        "task_tool_policy": true,
+        "output_schema": true,
+        "authentication_configured": true,
+        "authentication_mode": "environment_or_cloud_provider",
+        "required_environment_any": [
+          "ANTHROPIC_API_KEY",
+          "CLAUDE_CODE_USE_BEDROCK",
+          "CLAUDE_CODE_USE_VERTEX",
+          "CLAUDE_CODE_USE_FOUNDRY"
+        ]
+      },
+      "ready": true
+    }
+  },
+  "task_envelope_preflight": {
+    "ok": true,
+    "harnesses": {
+      "codex": {
+        "ok": true,
+        "status": "pending_approval",
+        "model": "gpt-5.6-luna",
+        "external_calls": 0
+      },
+      "claude-code": {
+        "ok": true,
+        "status": "pending_approval",
+        "model": "claude-opus-5",
+        "external_calls": 0
+      }
+    }
+  },
+  "pricing": {
+    "as_of": "2026-08-23",
+    "currency": "USD",
+    "note": "Codex cost is estimated from API-equivalent token pricing. Claude Code cost is reported by its CLI.",
+    "per_million_tokens": {
+      "gpt-5.6-luna": {
+        "input": 0.2,
+        "cached_input": 0.02,
+        "output": 1.2
+      },
+      "claude-opus-5": {
+        "input": 5.0,
+        "output": 25.0
+      }
+    }
+  },
+  "accounting": {
+    "harness_calls": 20,
+    "judge_model_calls": 0,
+    "known_execution_cost_usd": 1.974472,
+    "cost_complete": true
+  }
+}

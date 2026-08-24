@@ -12,6 +12,7 @@ state and the template engine without a circular import.
 never rebound), so everyone importing it observes the same object.
 """
 
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -28,9 +29,44 @@ _state: Dict[str, Any] = {
     "provider_type": None,
     "connection_info": {},
     "provider_secrets": {},
+    "read_only": False,
     "whatsapp_worker_thread": None,
     "whatsapp_worker_stop_event": None,
+    "meta_harness": None,
+    "meta_harness_provider": None,
 }
+_meta_harness_lock = threading.RLock()
+
+
+def get_meta_harness():
+    """Return one UI-process harness service bound to the connected provider."""
+    provider = _state.get("provider")
+    if provider is None:
+        raise RuntimeError("Connect a memory provider before using harnesses")
+    with _meta_harness_lock:
+        current = _state.get("meta_harness")
+        if current is not None and _state.get("meta_harness_provider") is provider:
+            return current
+        close_meta_harness()
+        from ..metaharness import MetaHarness
+
+        current = MetaHarness.from_env(memory_provider=provider)
+        _state["meta_harness"] = current
+        _state["meta_harness_provider"] = provider
+        return current
+
+
+def close_meta_harness() -> None:
+    """Cancel active UI-owned workers and close the durable run-store handle."""
+    with _meta_harness_lock:
+        current = _state.get("meta_harness")
+        _state["meta_harness"] = None
+        _state["meta_harness_provider"] = None
+    if current is not None:
+        try:
+            current.close()
+        except Exception:
+            pass
 
 
 class CompatibleJinja2Templates(Jinja2Templates):
@@ -75,3 +111,14 @@ class CompatibleJinja2Templates(Jinja2Templates):
 
 # Shared Jinja2 template engine for all HTML routes.
 templates = CompatibleJinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+__all__ = [
+    "STATIC_DIR",
+    "TEMPLATES_DIR",
+    "UI_DIR",
+    "_state",
+    "close_meta_harness",
+    "get_meta_harness",
+    "templates",
+]

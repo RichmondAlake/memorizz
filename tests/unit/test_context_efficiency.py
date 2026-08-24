@@ -73,6 +73,21 @@ def test_exact_duplicates_collapse_across_sources():
     assert len(out) == 1
 
 
+def test_exact_duplicate_from_stronger_query_variant_keeps_higher_score():
+    rows = [
+        (
+            "knowledge_base",
+            {"content": "Same memory", "source_id": "weak", "score": 0.2},
+        ),
+        (
+            "knowledge_base",
+            {"content": "Same memory", "source_id": "strong", "score": 0.9},
+        ),
+    ]
+    out = dedupe_and_select(rows)
+    assert out[0]["id"] == "strong"
+
+
 def test_candidates_already_in_history_are_dropped():
     rows = [
         ("episodic", {"content": "Budget is $500", "_id": "a"}),
@@ -123,6 +138,59 @@ def test_near_duplicates_dropped_by_embedding_similarity():
     assert "likes hiking" in texts
     assert "enjoys hiking trips" not in texts
     assert "allergic to peanuts" in texts
+
+
+def test_parent_source_dedup_is_explicit_and_keeps_best_ranked_copy():
+    rows = [
+        (
+            "knowledge_base",
+            {
+                "content": "Original statement",
+                "source_id": "turn-1",
+                "parent_source_id": "turn-1",
+                "score": 0.6,
+            },
+        ),
+        (
+            "knowledge_base",
+            {
+                "content": "Semantic constraint derived from the statement",
+                "source_id": "turn-1#semantic-1",
+                "parent_source_id": "turn-1",
+                "score": 0.9,
+            },
+        ),
+    ]
+    assert len(dedupe_and_select(rows)) == 2
+    selected = dedupe_and_select(rows, dedupe_parent_sources=True)
+    assert len(selected) == 1
+    assert selected[0]["text"].startswith("Semantic constraint")
+
+
+def test_parent_source_dedup_prefers_multi_source_provenance():
+    rows = [
+        (
+            "knowledge_base",
+            {
+                "content": "One statement",
+                "source_id": "cue:1#semantic",
+                "parent_source_id": "cue:1",
+                "score": 0.95,
+            },
+        ),
+        (
+            "knowledge_base",
+            {
+                "content": "Statement plus related advice",
+                "source_id": "cue-group#semantic",
+                "parent_source_id": "cue:1",
+                "linked_source_ids": ["cue:1", "cue:2"],
+                "score": 0.90,
+            },
+        ),
+    ]
+    selected = dedupe_and_select(rows, dedupe_parent_sources=True)
+    assert selected[0]["linked_source_ids"] == ["cue:1", "cue:2"]
 
 
 def test_selection_respects_max_items_and_orders_chronologically():
@@ -658,6 +726,17 @@ def test_openai_cache_options_skipped_for_local_base_url():
     assert "prompt_cache_retention" not in kwargs
 
 
+def test_openai_prompt_cache_key_hashes_values_over_api_limit():
+    provider = _make_openai()
+
+    provider.set_prompt_cache_key("tenant:agent:memory:thread:" + "x" * 100)
+
+    assert len(provider._prompt_cache_key) == 64
+    assert provider._prompt_cache_key == (
+        "b7724a8ded18f921d68fa4a1ec7bb689d0aa94ad71c30dfd3e30d70502ab0d7b"
+    )
+
+
 def test_openai_usage_extracts_cached_tokens():
     provider = _make_openai()
     usage = SimpleNamespace(
@@ -724,6 +803,177 @@ def test_openai_reasoning_effort_is_forwarded_and_persisted():
     assert provider.generate([{"role": "user", "content": "ready?"}]) == "ready"
     assert captured["reasoning_effort"] == "none"
     assert provider.get_config()["reasoning_effort"] == "none"
+
+
+def test_openai_gpt_5_6_translates_legacy_max_tokens():
+    from memorizz.llms.openai import OpenAI as MemorizzOpenAI
+
+    with patch("memorizz.llms.openai.openai.OpenAI"):
+        provider = MemorizzOpenAI(
+            api_key="test-key",
+            model="gpt-5.6-terra",
+            max_tokens=32_000,
+        )
+
+    assert provider._request_options["max_completion_tokens"] == 32_000
+    assert "max_tokens" not in provider._request_options
+    assert provider.get_context_window_tokens() == 1_050_000
+
+
+def test_openai_gpt_5_5_text_generation_uses_responses_options_and_usage():
+    from memorizz.llms.openai import OpenAI as MemorizzOpenAI
+
+    with patch("memorizz.llms.openai.openai.OpenAI"):
+        provider = MemorizzOpenAI(
+            api_key="test-key",
+            model="gpt-5.5",
+            max_tokens=512,
+            reasoning_effort="low",
+        )
+
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            output_text="Paris",
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                input_tokens_details=SimpleNamespace(cached_tokens=50),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=10),
+            ),
+        )
+
+    provider.client.responses.create = fake_create
+    assert provider.generate_text("Capital?", instructions="Answer briefly") == "Paris"
+    assert captured["model"] == "gpt-5.5"
+    assert captured["reasoning"] == {"effort": "low"}
+    assert captured["max_output_tokens"] == 512
+    assert captured["store"] is False
+    assert provider.get_context_window_tokens() == 1_050_000
+    assert provider.get_last_usage()["cached_tokens"] == 50
+
+
+def test_openai_explicit_max_completion_tokens_wins_for_gpt_5_6():
+    from memorizz.llms.openai import OpenAI as MemorizzOpenAI
+
+    with patch("memorizz.llms.openai.openai.OpenAI"):
+        provider = MemorizzOpenAI(
+            api_key="test-key",
+            model="gpt-5.6-terra",
+            max_tokens=16_000,
+            max_completion_tokens=8_000,
+        )
+
+    assert provider._request_options["max_completion_tokens"] == 8_000
+    assert "max_tokens" not in provider._request_options
+
+
+def test_openai_responses_mode_translates_function_tools_and_usage():
+    from memorizz.llms.openai import OpenAI as MemorizzOpenAI
+
+    with patch("memorizz.llms.openai.openai.OpenAI"):
+        provider = MemorizzOpenAI(
+            api_key="test-key",
+            model="gpt-5.6-terra",
+            max_tokens=32_000,
+            reasoning_effort="max",
+            api_mode="responses",
+        )
+
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            id="resp_1",
+            output_text="",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    id="fc_1",
+                    call_id="call_1",
+                    name="terminal_exec",
+                    arguments='{"command":"pwd"}',
+                )
+            ],
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                input_tokens_details=SimpleNamespace(cached_tokens=64),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=10),
+            ),
+        )
+
+    provider.client.responses.create = fake_create
+    response = provider.generate(
+        [{"role": "user", "content": "inspect"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "terminal_exec",
+                    "description": "Run a command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+    )
+
+    assert response.choices[0].message.tool_calls[0].id == "call_1"
+    assert captured["reasoning"] == {"effort": "max"}
+    assert captured["max_output_tokens"] == 32_000
+    assert captured["tools"][0]["name"] == "terminal_exec"
+    assert captured["tools"][0]["strict"] is False
+    assert provider.get_last_usage()["cached_tokens"] == 64
+    assert provider.get_last_usage()["reasoning_tokens"] == 10
+    assert provider.get_config()["api_mode"] == "responses"
+
+
+def test_openai_responses_input_replays_tool_calls_and_outputs():
+    from memorizz.llms.openai import OpenAI as MemorizzOpenAI
+
+    items = MemorizzOpenAI._responses_input(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "terminal_exec",
+                            "arguments": '{"command":"pwd"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "name": "terminal_exec",
+                "content": '{"return_code":0,"stdout":"/app"}',
+            },
+        ]
+    )
+
+    assert items[0] == {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "terminal_exec",
+        "arguments": '{"command":"pwd"}',
+    }
+    assert items[1]["type"] == "function_call_output"
+    assert items[1]["call_id"] == "call_1"
 
 
 # ---------------------------------------------------------------------------

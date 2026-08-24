@@ -4,8 +4,20 @@
 
 {% block content %}
 <div class="page-header">
+    <span class="page-eyebrow">Operations / Observability</span>
     <h1>Observability &amp; monitoring</h1>
-    <p>Inspect conversations, lifecycle traces, model tool calls, results, and durable execution logs by agent and thread.</p>
+    <p>Follow context lineage, grounding, cache routing, tool execution, and verified outcomes by agent and thread.</p>
+</div>
+
+<div class="trace-access-banner">
+    <span class="badge {% if ui_read_only %}badge-success{% else %}badge-warning{% endif %}">
+        {% if ui_read_only %}Read-only provider{% else %}Writable provider{% endif %}
+    </span>
+    <span>Content mode: <strong>{{ trace_content_mode or 'full' }}</strong></span>
+    {% if trace_query_metadata %}
+    <span>Query: {% if trace_query_metadata.provider_native %}provider-native{% else %}compatibility fallback{% endif %}</span>
+    {% if trace_query_metadata.truncated %}<span class="badge badge-warning">Window truncated</span>{% endif %}
+    {% endif %}
 </div>
 
 {% if error %}
@@ -108,13 +120,7 @@
 <div class="agent-summary">
     <div class="summary-item">
         <span class="summary-label">Agent</span>
-        <span class="summary-value">
-            {% if selected_agent.persona and selected_agent.persona.name %}
-                {{ selected_agent.persona.name }}
-            {% else %}
-                Agent
-            {% endif %}
-        </span>
+        <span class="summary-value">{{ selected_agent_name or 'Agent' }}</span>
     </div>
     <div class="summary-item">
         <span class="summary-label">Agent ID</span>
@@ -142,6 +148,135 @@
     {% endif %}
 </div>
 
+{% if trace_analysis %}
+<div class="detail-section observability-section trace-analysis" id="trace-insights">
+    <div class="trace-analysis-header">
+        <div>
+            <div class="trace-analysis-title-row">
+                <h2>Trace Insights</h2>
+                <span class="trace-analysis-badge">Read-only analysis</span>
+            </div>
+            <p class="trace-analysis-methodology">{{ trace_analysis.methodology }}</p>
+        </div>
+        {% if trace_analysis_export_url %}
+        <div class="trace-analysis-actions">
+            <a class="btn btn-sm" href="{{ trace_analysis_export_url }}" download>Export JSON</a>
+            {% if not ui_read_only %}
+            <form method="post" action="/traces/recommendations">
+                <input type="hidden" name="agent_id" value="{{ selected_agent_id }}">
+                {% if selected_thread_id %}<input type="hidden" name="thread_id" value="{{ selected_thread_id }}">{% endif %}
+                {% if selected_thread_memory_id %}<input type="hidden" name="thread_memory_id" value="{{ selected_thread_memory_id }}">{% endif %}
+                <button type="submit" class="btn btn-sm btn-primary">Save findings for review</button>
+            </form>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="trace-analysis-grid" aria-label="Trace analysis summary">
+        <div class="trace-analysis-stat">
+            <span class="trace-analysis-stat-kicker">Trace volume</span>
+            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.events_analyzed }}</span>
+            <span class="trace-analysis-stat-label">Events analyzed</span>
+            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.threads_analyzed }} thread{% if trace_analysis.summary.threads_analyzed != 1 %}s{% endif %} · {{ trace_analysis.summary.context_provenance_events }} provenance events</span>
+        </div>
+        <div class="trace-analysis-stat {% if trace_analysis.summary.verified_outcome_failures %}trace-analysis-stat--warning{% endif %}">
+            <span class="trace-analysis-stat-kicker">Verified outcomes</span>
+            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.verified_outcome_successes }}/{{ trace_analysis.summary.verified_outcomes }}</span>
+            <span class="trace-analysis-stat-label">Successful outcomes</span>
+            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.verified_outcome_failures }} failed · {{ trace_analysis.summary.verified_negative_feedback }} negative feedback</span>
+        </div>
+        <div class="trace-analysis-stat {% if trace_analysis.summary.page_context_mismatches or trace_analysis.summary.missing_current_page_grounding or trace_analysis.summary.unverified_page_ownership %}trace-analysis-stat--critical{% endif %}">
+            <span class="trace-analysis-stat-kicker">Context integrity</span>
+            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.page_context_mismatches }}</span>
+            <span class="trace-analysis-stat-label">Page / thread mismatches</span>
+            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.missing_current_page_grounding }} missing grounding · {{ trace_analysis.summary.unverified_page_ownership }} unverified ownership</span>
+        </div>
+        <div class="trace-analysis-stat {% if trace_analysis.summary.tool_failures %}trace-analysis-stat--warning{% endif %}">
+            <span class="trace-analysis-stat-kicker">Tool health</span>
+            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.tool_calls }}</span>
+            <span class="trace-analysis-stat-label">Tool calls</span>
+            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.tool_failures }} failures · {{ trace_analysis.summary.unique_tools }} unique tools</span>
+        </div>
+        <div class="trace-analysis-stat">
+            <span class="trace-analysis-stat-kicker">Semantic cache</span>
+            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.cache_hits }}</span>
+            <span class="trace-analysis-stat-label">Validated hits</span>
+            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.cache_misses }} miss · {{ trace_analysis.summary.cache_bypasses }} bypass · {{ trace_analysis.summary.cache_rejections }} rejected</span>
+        </div>
+        <div class="trace-analysis-stat">
+            <span class="trace-analysis-stat-kicker">Continual learning</span>
+            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.learning_candidates }}</span>
+            <span class="trace-analysis-stat-label">Learning candidates</span>
+            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.priority_counts.P0 }} P0 · {{ trace_analysis.summary.priority_counts.P1 }} P1 · {{ trace_analysis.summary.priority_counts.P2 }} P2 findings</span>
+        </div>
+    </div>
+
+    {% if trace_analysis.insights %}
+    <div class="trace-insights-list">
+        {% for insight in trace_analysis.insights %}
+        {% set saved = persisted_recommendations.get(insight.id) %}
+        <article class="trace-insight-card trace-insight-card--{{ insight.priority|lower }}">
+            <div class="trace-insight-heading">
+                <div>
+                    <span class="trace-priority trace-priority--{{ insight.priority|lower }}">{{ insight.priority }}</span>
+                    <span class="trace-insight-component">{{ insight.component }}</span>
+                    <h3>{{ insight.title }}</h3>
+                </div>
+                <div class="trace-insight-meta">
+                    <span>{{ insight.confidence }} confidence</span>
+                    <span>{{ insight.evidence_count }} signal{% if insight.evidence_count != 1 %}s{% endif %}</span>
+                    <span>{{ insight.effort }} effort</span>
+                </div>
+            </div>
+            <p>{{ insight.finding }}</p>
+            <div class="trace-insight-recommendation">
+                <span>Recommended change</span>
+                <p>{{ insight.recommendation }}</p>
+                <code>{{ insight.target }}</code>
+            </div>
+            <div class="trace-review-row">
+                {% if saved %}
+                <span class="badge {% if saved.review_status == 'accepted' %}badge-success{% elif saved.review_status == 'rejected' %}badge-danger{% else %}badge-warning{% endif %}">
+                    {{ saved.review_status|replace('_', ' ')|title }} · revision {{ saved.revision }}
+                </span>
+                {% if not ui_read_only %}
+                <form method="post" action="/traces/recommendations/{{ saved.recommendation_id }}/review" class="trace-review-form">
+                    <input type="text" name="note" maxlength="2000" placeholder="Optional review note">
+                    <button type="submit" name="decision" value="accepted" class="btn btn-sm btn-primary">Accept &amp; draft experiment</button>
+                    <button type="submit" name="decision" value="deferred" class="btn btn-sm">Defer</button>
+                    <button type="submit" name="decision" value="rejected" class="btn btn-sm btn-danger">Reject</button>
+                </form>
+                {% endif %}
+                {% else %}
+                <span class="trace-review-pending">Not yet saved for review</span>
+                {% endif %}
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-pane trace-analysis-empty">
+        <div class="empty-icon">OK</div>
+        <p>No actionable signals in this trace window</p>
+        <p class="empty-hint">Broaden the trace window or add explicit outcome feedback before changing the agent.</p>
+    </div>
+    {% endif %}
+
+    <div class="trace-learning-bridge">
+        <div>
+            <h3>Continual-learning handoff</h3>
+            {% if trace_analysis.learning_candidates %}
+            <p>{{ trace_analysis.learning_candidates|length }} recurring trajectory candidate{% if trace_analysis.learning_candidates|length != 1 %}s{% endif %} found. Review outcomes before promotion; the existing diversity, success-rate, recency, and shadow-readiness gates still apply.</p>
+            {% else %}
+            <p>No repeated multi-step trajectory is strong enough in this window. Memorizz will keep collecting evidence without changing the agent.</p>
+            {% endif %}
+        </div>
+        <a class="btn btn-sm" href="/memory/workflows">Review Workflow Memory</a>
+    </div>
+</div>
+{% endif %}
+
 <div class="detail-section observability-section" id="trace-timeline">
     <h2>Trace Timeline</h2>
     {% if trace_events %}
@@ -156,10 +291,19 @@
                     <div class="message-meta">
                         <span class="message-role">{{ event.title or event.role|default('Event')|title }}</span>
                         <div class="trace-meta">
-                            {% if event.kind %}<span class="meta-tag">{{ event.kind|replace('_', ' ')|title }}</span>{% endif %}
-                            {% if event.trace_id %}<span class="meta-tag">Trace {{ event.trace_id|truncate(14) }}</span>{% endif %}
-                            <span class="meta-tag">Memory {{ event.memory_id|truncate(12) }}</span>
-                            <span class="meta-tag">Thread {{ event.thread_id|default('—')|truncate(12) }}</span>
+                            {% if event.kind %}<span class="meta-tag trace-tag trace-tag--kind">{{ event.kind|replace('_', ' ')|title }}</span>{% endif %}
+                            {% if event.canonical_page_type %}<span class="meta-tag trace-tag">Page {{ event.canonical_page_type }} · {{ event.canonical_page_id|default('—')|truncate(12) }}</span>{% endif %}
+                            {% if event.thread_binding_status %}<span class="meta-tag trace-tag {% if event.thread_binding_status in ['matched', 'bound', 'verified'] %}trace-tag--ok{% else %}trace-tag--warning{% endif %}">Binding {{ event.thread_binding_status|replace('_', ' ') }}</span>{% endif %}
+                            {% if event.ownership_verified is defined and event.ownership_verified is not none %}<span class="meta-tag trace-tag {% if event.ownership_verified %}trace-tag--ok{% else %}trace-tag--critical{% endif %}">Ownership {% if event.ownership_verified %}verified{% else %}unverified{% endif %}</span>{% endif %}
+                            {% if event.grounding_status %}<span class="meta-tag trace-tag {% if event.grounding_status == 'ready' %}trace-tag--ok{% else %}trace-tag--critical{% endif %}">Grounding {{ event.grounding_status|replace('_', ' ') }}{% if event.grounding_source %} · {{ event.grounding_source|replace('_', ' ') }}{% endif %}</span>{% endif %}
+                            {% if event.cache_decision %}<span class="meta-tag trace-tag {% if event.cache_decision == 'hit' %}trace-tag--ok{% elif event.cache_decision in ['bypassed', 'rejected'] %}trace-tag--warning{% else %}trace-tag--muted{% endif %}">Cache {{ event.cache_decision }}</span>{% endif %}
+                            {% if event.canonical_title_fingerprint or event.client_title_fingerprint %}<span class="meta-tag trace-tag trace-tag--fingerprint">Content fp {{ (event.canonical_title_fingerprint or event.client_title_fingerprint)|truncate(14) }}</span>{% endif %}
+                            {% if event.request_context_fingerprint %}<span class="meta-tag trace-tag trace-tag--fingerprint">Context fp {{ event.request_context_fingerprint|truncate(14) }}</span>{% endif %}
+                            {% if event.trace_id %}<span class="meta-tag trace-tag trace-tag--id">Trace {{ event.trace_id|truncate(14) }}</span>{% endif %}
+                            {% if event.run_id %}<span class="meta-tag trace-tag trace-tag--id">Run {{ event.run_id|truncate(12) }}</span>{% endif %}
+                            {% if event.span_id %}<span class="meta-tag trace-tag trace-tag--id">Span {{ event.span_id|truncate(12) }}</span>{% endif %}
+                            <span class="meta-tag trace-tag trace-tag--id">Memory {{ event.memory_id|truncate(12) }}</span>
+                            <span class="meta-tag trace-tag trace-tag--id">Thread {{ event.thread_id|default('—')|truncate(12) }}</span>
                             <span class="message-time">{{ event.timestamp }}</span>
                         </div>
                     </div>

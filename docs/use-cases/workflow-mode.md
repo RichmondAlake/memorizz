@@ -1,31 +1,50 @@
 # Workflow Mode
 
-Workflow mode targets deterministic task execution (think onboarding checklists, ticket triage, or knowledge-base upkeep). It favors procedural memory and tools over conversational depth.
+Workflow mode emphasizes typed tools, workflow traces, knowledge, short-term
+state, and summaries for repeatable operational tasks.
 
-## Memory Stack
-
-- `MemoryType.WORKFLOW_MEMORY`
-- `MemoryType.TOOLBOX`
-- `MemoryType.KNOWLEDGE_BASE`
-- `MemoryType.SHORT_TERM_MEMORY`
-
-## Sample Flow
+## Build a read-only workflow agent
 
 ```python
-from memorizz.enums import ApplicationMode
-from memorizz.memagent.builders import MemAgentBuilder
+from memorizz import ApplicationMode, MemAgentBuilder, governed_tool
 
-def process_ticket(ticket_id: str) -> str:
-    """Example workflow tool that processes a ticket id."""
-    return f"Processed ticket {ticket_id}"
 
-agent = (MemAgentBuilder()
+@governed_tool(deterministic=True, domains=("tickets",))
+def ticket_status(ticket_id: str) -> dict:
+    """Return the current status of one ticket."""
+    return {"ticket_id": ticket_id, "status": "open"}
+
+
+agent = (
+    MemAgentBuilder()
+    .with_name("Ticket workflow")
     .with_application_mode(ApplicationMode.WORKFLOW)
-    .with_memory_provider(provider)
-    .with_tool(process_ticket)
-    .build())
+    .with_llm_config({"provider": "openai", "model": "gpt-4o-mini"})
+    .with_memory_ids("ticket-operations")
+    .with_tools([ticket_status])
+    .build_and_save()
+)
 
-agent.run("Process ticket 12491 and summarize the outcome")
+result = agent.run(
+    "Check ticket 12491 and summarize its status.",
+    memory_id="ticket-operations",
+    user_id="operator-7",
+    thread_id="ticket-12491",
+)
 ```
 
-Workflow mode keeps episodic memory minimal so the agent can stay focused on the currently executing process. Pair it with shared memory if you need a supervisor agent to inspect progress.
+## Design guidance
+
+- Mark mutating or non-deterministic tools explicitly and require durable host
+  approval where policy demands it.
+- Supply idempotency keys in host/tool context for retryable mutations.
+- Record verified application outcomes; the model's claim that a workflow
+  succeeded is not sufficient learning evidence.
+- Use a deterministic delegation plan for known workflows and inspect partial
+  failures/dependency states.
+- Enable continual learning only after defining promotion, shadow evaluation,
+  demotion, and forgetting policy.
+
+Use shared memory when delegates need a workflow- and user-scoped blackboard.
+See [Tools, Safety, and Human Approval](../guides/tools-and-approvals.md) and
+[Continual Learning](../guides/continual-learning.md).

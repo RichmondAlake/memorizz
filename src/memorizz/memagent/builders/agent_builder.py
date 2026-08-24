@@ -47,6 +47,10 @@ class MemAgentBuilder:
         self._mcp_servers = []
         self._sandbox_provider = None
         self._browser_control = None
+        self._meta_harness = None
+        self._meta_harness_mode = None
+        self._default_harness = "auto"
+        self._harness_config = None
         self._toolbox = None
         self._skillbox = None
         self._authored_skills = []
@@ -54,6 +58,7 @@ class MemAgentBuilder:
         self._skill_retrieval_config = None
         self._tool_result_policy = None
         self._context_policy = None
+        self._completion_policy = None
         self._retrieval_policy = None
         self._approval_store = None
         self._delegation_config = None
@@ -62,8 +67,10 @@ class MemAgentBuilder:
         self._self_aware_config = None
         self._continual_learning_enabled = False
         self._continual_learning_config = None
+        self._learning_control_plane = None
         self._workflow_outcome_evaluator = None
         self._automations_enabled = True
+        self._auto_register = True
         self._default_timezone = None
         self._is_favorite = False
         self._environment_reports: Dict[str, Any] = {}
@@ -259,6 +266,48 @@ class MemAgentBuilder:
         """Compatibility alias for :meth:`with_browser_control`."""
         return self.with_browser_control(provider)
 
+    def with_meta_harness(
+        self,
+        meta_harness: Any = None,
+        *,
+        mode: str = "delegate",
+        default_harness: str = "auto",
+        config: Optional[Dict[str, Any]] = None,
+    ) -> "MemAgentBuilder":
+        """Attach the memory-first external-harness control plane.
+
+        ``delegate`` exposes bounded harness invocation tools to the native
+        MemAgent loop. ``runtime`` makes the selected harness execute the
+        complete turn while MemoRizz retains memory, approval, and trace
+        ownership. Passing ``None`` lazily builds the standard Codex, Claude
+        Code, and OpenHands registry from the local configuration.
+        """
+        normalized = str(mode or "delegate").strip().lower()
+        if normalized not in {"delegate", "runtime"}:
+            raise ValueError("meta-harness mode must be delegate or runtime")
+        self._meta_harness = True if meta_harness is None else meta_harness
+        self._meta_harness_mode = normalized
+        self._default_harness = (
+            str(default_harness or "auto").strip().lower().replace("_", "-")
+        )
+        self._harness_config = dict(config or {})
+        return self
+
+    def with_execution_harness(
+        self,
+        harness: str,
+        *,
+        meta_harness: Any = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> "MemAgentBuilder":
+        """Convenience alias for full-runtime meta-harness execution."""
+        return self.with_meta_harness(
+            meta_harness,
+            mode="runtime",
+            default_harness=harness,
+            config=config,
+        )
+
     def with_toolbox(self, toolbox: Any) -> "MemAgentBuilder":
         """Attach a progressively retrieved Toolbox and its callable bindings."""
         self._toolbox = toolbox
@@ -296,6 +345,11 @@ class MemAgentBuilder:
 
     def with_context_policy(self, policy: Any) -> "MemAgentBuilder":
         self._context_policy = policy
+        return self
+
+    def with_completion_policy(self, policy: Any) -> "MemAgentBuilder":
+        """Attach a host-enforced final-response acceptance policy."""
+        self._completion_policy = policy
         return self
 
     def with_approval_store(self, store: Any) -> "MemAgentBuilder":
@@ -347,6 +401,19 @@ class MemAgentBuilder:
             self._continual_learning_config = None
         return self
 
+    def with_learning_control_plane(
+        self,
+        enabled: bool = True,
+        config: Optional[Dict[str, Any]] = None,
+        **settings: Any,
+    ) -> "MemAgentBuilder":
+        """Enable bounded evidence, event compilation, and governed forgetting."""
+        value = dict(config or {})
+        value.update(settings)
+        value["enabled"] = bool(enabled)
+        self._learning_control_plane = value
+        return self
+
     def with_workflow_outcome_evaluator(self, evaluator: Any) -> "MemAgentBuilder":
         """Set a runtime business-success rubric for captured workflows."""
         if evaluator is not None and not callable(evaluator):
@@ -357,6 +424,23 @@ class MemAgentBuilder:
     def with_automations_enabled(self, enabled: bool = True) -> "MemAgentBuilder":
         """Enable/disable durable automations tooling (when supported by provider)."""
         self._automations_enabled = bool(enabled)
+        return self
+
+    def with_auto_registration(self, enabled: bool = True) -> "MemAgentBuilder":
+        """Control fail-soft persistence of agent metadata on the first run."""
+        self._auto_register = bool(enabled)
+        return self
+
+    def as_ephemeral(self, enabled: bool = True) -> "MemAgentBuilder":
+        """Build a run-scoped agent without persisting its tool/config snapshot.
+
+        Memory, trace, verification, and learning evidence still use the configured
+        provider. Only automatic agent registration and unused automation tooling are
+        disabled, which is appropriate for evaluators and short-lived workers.
+        """
+        self._auto_register = not bool(enabled)
+        if enabled:
+            self._automations_enabled = False
         return self
 
     def with_default_timezone(self, tz: str) -> "MemAgentBuilder":
@@ -475,6 +559,10 @@ class MemAgentBuilder:
                 mcp_servers=self._mcp_servers if self._mcp_servers else None,
                 sandbox_provider=self._sandbox_provider,
                 browser_control=self._browser_control,
+                meta_harness=self._meta_harness,
+                meta_harness_mode=self._meta_harness_mode,
+                default_harness=self._default_harness,
+                harness_config=self._harness_config,
                 toolbox=self._toolbox,
                 skillbox=self._skillbox,
                 authored_skills=(
@@ -486,6 +574,7 @@ class MemAgentBuilder:
                 skill_retrieval_config=self._skill_retrieval_config,
                 tool_result_policy=self._tool_result_policy,
                 context_policy=self._context_policy,
+                completion_policy=self._completion_policy,
                 approval_store=self._approval_store,
                 delegation=self._delegation_config,
                 semantic_layer=self._semantic_layer,
@@ -495,7 +584,9 @@ class MemAgentBuilder:
                 self_aware_config=self._self_aware_config,
                 continual_learning=self._continual_learning_enabled,
                 continual_learning_config=self._continual_learning_config,
+                learning_control_plane=self._learning_control_plane,
                 workflow_outcome_evaluator=self._workflow_outcome_evaluator,
+                auto_register=self._auto_register,
             )
             agent.environment_reports = {
                 key: dict(value) if isinstance(value, dict) else value
@@ -566,6 +657,12 @@ class MemAgentBuilder:
         new_builder._mcp_servers = self._mcp_servers.copy()
         new_builder._sandbox_provider = self._sandbox_provider
         new_builder._browser_control = self._browser_control
+        new_builder._meta_harness = self._meta_harness
+        new_builder._meta_harness_mode = self._meta_harness_mode
+        new_builder._default_harness = self._default_harness
+        new_builder._harness_config = (
+            self._harness_config.copy() if self._harness_config else None
+        )
         new_builder._toolbox = self._toolbox
         new_builder._skillbox = self._skillbox
         new_builder._authored_skills = self._authored_skills.copy()
@@ -577,6 +674,7 @@ class MemAgentBuilder:
         )
         new_builder._tool_result_policy = self._tool_result_policy
         new_builder._context_policy = self._context_policy
+        new_builder._completion_policy = self._completion_policy
         new_builder._retrieval_policy = self._retrieval_policy
         new_builder._approval_store = self._approval_store
         new_builder._delegation_config = (
@@ -593,8 +691,14 @@ class MemAgentBuilder:
             if self._continual_learning_config
             else None
         )
+        new_builder._learning_control_plane = (
+            self._learning_control_plane.copy()
+            if isinstance(self._learning_control_plane, dict)
+            else self._learning_control_plane
+        )
         new_builder._workflow_outcome_evaluator = self._workflow_outcome_evaluator
         new_builder._automations_enabled = self._automations_enabled
+        new_builder._auto_register = self._auto_register
         new_builder._default_timezone = self._default_timezone
         new_builder._environment_reports = {
             key: dict(value) if isinstance(value, dict) else value

@@ -31,7 +31,7 @@ from memorizz import MemAgentBuilder
 
 agent = (
     MemAgentBuilder()
-    .with_llm(my_llm)
+    .with_llm_config({"provider": "openai", "model": "gpt-4o-mini"})
     .with_sandbox(
         {
             "provider": "e2b",

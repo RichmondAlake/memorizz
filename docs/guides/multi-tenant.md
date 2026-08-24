@@ -123,13 +123,34 @@ sqlplus MEMORIZZ/<password>@<service> \
 ```
 
 The migration is additive: all new columns are nullable and existing rows
-default to `user_id = NULL` (the legacy/anonymous scope), so the framework
-remains backwards-compatible with data written before the upgrade.
+default to `user_id = NULL` (the legacy/anonymous scope). Those rows remain
+available only to callers that explicitly request `user_id=None`; authenticated
+reads never adopt them implicitly.
+
+After verifying ownership, an operator can adopt entity-memory rows from one
+legacy memory scope explicitly:
+
+```python
+from memorizz import EntityMemory
+
+migrated = EntityMemory(provider).migrate_legacy_scope(
+    memory_id="primary-user-a",
+    user_id="user-a",
+)
+print(f"migrated {migrated} entity rows")
+```
+
+Run this as an administrative migration with an exact `memory_id`, never from
+model-generated arguments or a request-serving code path. Filesystem performs
+the change under its provider write lock; MongoDB and Oracle use one database
+update.
 
 ### MongoDB Atlas vector index update
 
-If you rely on MongoDB Atlas vector search, add `user_id` as a filterable
-field to the existing indexes on:
+Writable MongoDB providers reconcile `user_id` as a filterable field on the
+indexes below. The database principal must have search-index update permission;
+otherwise MemoRizz records one diagnostic, keeps the reconciliation retryable,
+and uses strict bounded exact fallback.
 
 - `conversation_memory`
 - `summaries`
@@ -155,6 +176,8 @@ theater rather than real tenancy.
 - [ ] Run the Oracle migration (if using Oracle).
 - [ ] Update Atlas vector indexes to mark `user_id` filterable (if using MongoDB).
 - [ ] Always pass `user_id` through `run()` / `run_stream()` at every request.
+- [ ] Explicitly migrate any intended anonymous entity rows before authenticated
+      traffic; never depend on an implicit legacy fallback.
 - [ ] Never mix `user_id=None` traffic with authenticated traffic on the same
       agent instance — the two scopes are correctly isolated, but mixing
       makes auditing harder.

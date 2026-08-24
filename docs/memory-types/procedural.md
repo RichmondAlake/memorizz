@@ -12,20 +12,39 @@ Procedural memory captures *how* an agent should act. It bundles tool registrati
 ## Registering Tools
 
 ```python
-from memorizz.memagent.builders import MemAgentBuilder
-from memorizz.long_term.procedural.toolbox import Toolbox
+from memorizz import MemAgentBuilder, Toolbox
 
-toolbox = Toolbox(memory_provider)
 
-@toolbox.register_tool
-def system_status():
+def system_status() -> dict:
     """Return current system status."""
     return {"status": "ok"}
 
-agent = MemAgentBuilder().with_memory_provider(memory_provider).with_tool(system_status).build()
+toolbox = Toolbox.from_functions(
+    [system_status],
+    memory_provider=memory_provider,
+    agent_id="operations-agent",
+    augment=False,
+)
+
+agent = (
+    MemAgentBuilder()
+    .with_name("Operations")
+    .with_memory_provider(memory_provider)
+    .with_tools([system_status])
+    .with_toolbox(toolbox)
+    .build()
+)
 ```
 
-Each tool is stored inside your configured provider with embedding metadata so agents can retrieve the right action based on the natural language plan they produce.
+`Toolbox.from_functions(...)` preserves the trusted Python callables and can
+persist their strict schemas for progressive discovery. Deterministic
+registration does not construct an LLM. Avoid using `@toolbox.register_tool` as
+a normal decorator: the low-level registration method returns a tool ID rather
+than the original function.
+
+Tool schemas are capability descriptions, not authority. Apply a
+[`ToolPolicy`](../guides/tools-and-approvals.md) to side effects and use host
+approval for mutations.
 
 ## When to Reach for Procedural Memory
 

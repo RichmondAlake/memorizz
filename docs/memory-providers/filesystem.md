@@ -18,6 +18,22 @@ This installs `faiss-cpu`. If you skip the extra, the provider still works but f
 
 ## Configuration
 
+Filesystem memory is the SDK default. A bare agent stores data beneath
+`~/.memorizz/memory`:
+
+```python
+from memorizz import MemAgent
+
+agent = MemAgent(name="durable-agent")
+```
+
+Set `MEMORIZZ_HOME` to relocate all MemoRizz state, or set
+`MEMORIZZ_MEMORY_ROOT` to relocate only memory data. For an intentionally
+stateless agent, pass `memory_provider=False`; `memory_types=[]` disables active
+memory retrieval but retains the provider for agent/config persistence.
+
+Pass an explicit provider when you need a different root or embedding setup:
+
 ```python
 from pathlib import Path
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
@@ -25,6 +41,7 @@ from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
 config = FileSystemConfig(
     root_path=Path("~/.memorizz").expanduser(),  # Each MemoryType gets its own folder
     lazy_vector_indexes=True,                    # Build FAISS indexes on demand
+    use_faiss=True,                              # False uses exact cosine search
     embedding_provider="openai",                 # Optional, enables semantic search
     embedding_config={"model": "text-embedding-3-small"},
 )
@@ -34,12 +51,15 @@ provider = FileSystemProvider(config)
 
 - `root_path` is the only required field. The provider creates subdirectories named after each `MemoryType`.
 - Set `lazy_vector_indexes=True` to skip vector index builds until a semantic query hits a store.
+- Set `use_faiss=False` for exact cosine search. This is useful for small
+  stores and processes where FAISS would conflict with another native OpenMP
+  runtime; retrieval remains semantic but trades index speed for a linear scan.
 - You can also pass a fully constructed `EmbeddingManager` instance via `embedding_provider` for complete control.
 
 ## Storage Layout
 
 ```
-~/.memorizz/
+~/.memorizz/memory/
 ├── conversation_memory/
 │   ├── index.json                # Lightweight metadata for quick lookups
 │   ├── 4c1d9a2f.json             # Individual memory documents

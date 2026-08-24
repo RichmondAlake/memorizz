@@ -55,6 +55,11 @@ class RetrievalPolicy:
     conversation_scope: str = "memory"
     knowledge_base_scope: str = "memory"
     knowledge_base_namespaces: Tuple[str, ...] = ()
+    candidate_limit: int = 5
+    max_items: int = 4
+    query_expansion: bool = False
+    max_query_variants: int = 2
+    dedupe_parent_sources: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -79,6 +84,22 @@ class RetrievalPolicy:
             self,
             "knowledge_base_namespaces",
             _namespaces(self.knowledge_base_namespaces),
+        )
+        if isinstance(self.candidate_limit, bool) or int(self.candidate_limit) < 1:
+            raise ValueError("candidate_limit must be a positive integer")
+        if isinstance(self.max_items, bool) or int(self.max_items) < 1:
+            raise ValueError("max_items must be a positive integer")
+        object.__setattr__(self, "candidate_limit", int(self.candidate_limit))
+        object.__setattr__(self, "max_items", int(self.max_items))
+        object.__setattr__(self, "query_expansion", bool(self.query_expansion))
+        if (
+            isinstance(self.max_query_variants, bool)
+            or int(self.max_query_variants) < 1
+        ):
+            raise ValueError("max_query_variants must be a positive integer")
+        object.__setattr__(self, "max_query_variants", int(self.max_query_variants))
+        object.__setattr__(
+            self, "dedupe_parent_sources", bool(self.dedupe_parent_sources)
         )
 
     @classmethod
@@ -133,8 +154,19 @@ class RetrievalPolicy:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "conversation_scope": self.conversation_scope,
             "knowledge_base_scope": self.knowledge_base_scope,
             "knowledge_base_namespaces": list(self.knowledge_base_namespaces),
         }
+        if self.candidate_limit != 5:
+            result["candidate_limit"] = self.candidate_limit
+        if self.max_items != 4:
+            result["max_items"] = self.max_items
+        if self.query_expansion:
+            result["query_expansion"] = True
+        if self.max_query_variants != 2:
+            result["max_query_variants"] = self.max_query_variants
+        if self.dedupe_parent_sources:
+            result["dedupe_parent_sources"] = True
+        return result

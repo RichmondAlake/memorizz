@@ -1,0 +1,29 @@
+{
+  "schema_version": "memorizz.metaharness.opus5-fixtures.v1",
+  "fixtures": [
+    {
+      "id": "numeric_contract",
+      "title": "Strict numerical API contract",
+      "risk": "ordinary",
+      "hidden_check_count": 8
+    },
+    {
+      "id": "tenant_cache",
+      "title": "Tenant-safe versioned cache",
+      "risk": "tenant_isolation",
+      "hidden_check_count": 8
+    },
+    {
+      "id": "durable_approval",
+      "title": "Single-use durable approval",
+      "risk": "security",
+      "hidden_check_count": 8
+    },
+    {
+      "id": "retry_schedule",
+      "title": "Bounded retry schedule",
+      "risk": "ordinary",
+      "hidden_check_count": 8
+    }
+  ]
+}

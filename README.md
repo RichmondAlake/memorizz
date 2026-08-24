@@ -20,6 +20,7 @@ It provides:
 - scheduled automations (cron, interval, one-shot) with optional WhatsApp delivery
 - optional internet access, governed browser control, sandbox code execution, skills marketplace, and local web UI
 - first-class MCP connectivity over stdio, Streamable HTTP, and SSE, including OAuth, encrypted credentials, resources, prompts, and tool approval policy
+- a memory-first meta-harness for running Codex, Claude Code, OpenHands, or a native MemAgent behind shared memory, policy, approval, verification, and learning controls
 - an interactive, Claude-Code-style terminal CLI (`memorizz`) with persistent memory — see [CLI](#cli)
 
 ## Key Capabilities
@@ -27,21 +28,30 @@ It provides:
 - **Persistent memory** across sessions and conversations
 - **Semantic retrieval** with embeddings + vector search
 - **Knowledge base** with file/folder ingestion (`.pdf`, `.md`, `.txt`, `.csv`, `.json`, …) and configurable chunking (`fixed` / `sentence` / `paragraph` / `semantic` / custom). Same extractor registry powers the SDK and the local UI's drag-and-drop uploader; see [`long_term/semantic/README.md`](src/memorizz/long_term/semantic/README.md).
-- **Entity memory** tools for profile-style facts (`entity_memory_lookup` / `entity_memory_upsert`)
+- **Entity memory** tools for profile-style facts (`entity_memory_lookup` / `entity_memory_upsert`), with host-owned tenant scope and bounded exact fallback when vector search is unavailable
 - **Tool calling** with automatic function registration
 - **Semantic cache** to reduce repeat LLM calls
 - **Prompt-cache-friendly context assembly** — stable prefix (frozen system prompt, append-only chunk-evicted history) with all per-turn content at the tail; automatic Anthropic `cache_control` breakpoints and OpenAI `prompt_cache_key` routing serve most of each turn's prompt at cached-input rates (see [docs/guides/context-efficiency.md](docs/guides/context-efficiency.md))
 - **Pre-inference deduplication** — retrieved memories are exact-hash, similarity (cosine ≥ 0.95), and vs-history deduplicated, then MMR-selected before entering the context window
 - **Continual learning** — repeated successful tool workflows are promoted into reusable learned skills (gated by frequency × success × recency × query diversity, LLM-distilled into validated SKILL.md documents, monitored for drift, and demoted when they stop working). Skills use user-context authority by default; reviewed skills can opt into developer/application authority. Enable with `continual_learning=True` (see [docs/guides/continual-learning.md](docs/guides/continual-learning.md))
+- **Memory-first learning control plane** — immutable learning events, host-verified outcomes, deterministic incremental compilation, per-turn token-bounded `EvidencePack` retrieval, skill lifecycle evidence, and reversible operator-approved forgetting across filesystem, MongoDB, and Oracle (see [Learning Control Plane](docs/guides/learning-control-plane.md))
+- **Memory-first MetaHarness** — run Codex, Claude Code, OpenHands, and native MemAgent workers through one durable, tenant-scoped control plane with deterministic routing, exact host approvals, workspace isolation, budgets, cancellation, normalized evidence, and host verification (see [Memory-First Meta-Harness](docs/guides/meta-harness.md))
 - **Multi-agent orchestration** with shared blackboard memory
-- **Context-window telemetry** via `get_context_window_stats()` and per-turn cache metrics (`cached_tokens`) from `get_last_usage()`
+- **Context-window telemetry** via `agent.get_context_window_stats()` and
+  per-turn cache metrics (`cached_tokens`) from `agent.model.get_last_usage()`
 - **Skills marketplace** with Vercel Agent Skills and SkillsMP providers
 - **Scheduled automations** via SDK, web UI, or agent conversation (see `src/memorizz/automation/README.md`)
 - **Production-oriented MCP connectivity** for Notion, Google Calendar, and custom servers, with encrypted OAuth/bearer credentials, SSRF controls, bounded retries/timeouts, mutation approval, and UI/CLI management (see [MCP Connectivity](docs/guides/mcp-connectivity.md))
-- **First-party MCP server** over local stdio or authenticated Streamable HTTP, exposing tenant-scoped memory, conversations, agents, resources, and prompts (see [Expose MemoRizz as an MCP Server](docs/guides/mcp-server.md))
-- **0.5 production governance** with durable host approvals, progressive tool disclosure, size-aware tool results, cache freshness controls, Oracle compaction parity, bounded sandboxes, and provider-neutral orchestration (see [Production Governance](docs/guides/production-governance.md))
+- **First-party MCP server** over headless local stdio or authenticated Streamable HTTP, with 23 strict-schema tools spanning safe agent lifecycle, tenant-scoped memory/conversations, observability, cache, learning, compaction, and harness execution. Credential and approval authority remains host-only (see [Expose MemoRizz as an MCP Server](docs/guides/mcp-server.md))
+- **Production governance** with durable host approvals, progressive tool disclosure, size-aware tool results, cache freshness controls, Oracle compaction parity, bounded sandboxes, and provider-neutral orchestration (see [Production Governance](docs/guides/production-governance.md))
 - **Operational runtime APIs** for JSON-safe deterministic delegation, explicitly scoped compaction, structured approval-resume evidence, provider-error propagation, Oracle/E2B environment presets, cache inspection, scoped observability, and context-managed cleanup.
+- **Host-enforced completion gates** with bounded same-loop retries, buffered streaming, auditable decision evidence, cache-safe revalidation, and fail-closed trusted validator rebinding.
 - **Governed browser control** through a provider-neutral capability and an isolated Browser Use provider. Every model-initiated browser task requires a durable, single-use host approval (see [Browser Control](docs/browser-control/index.md))
+- **Memory-first evaluation adapters** for AgentMemBench, LongMemEval-V2, LoCoMo-Plus, BEAM, MemoryAgentBench, Terminal-Bench, SWE-bench Lite, and MemBench, including a zero-cost Ollama suite (see [Evaluation Suite](docs/evaluation-suite.md)).
+- **Two local systems-paper drafts** cover the memory-first agent harness and
+  the agent memory/continual-learning platform. They are intentionally ignored
+  by Git; see [Research Papers](docs/research-paper.md) for local build and
+  review instructions.
 
 Expose local MemoRizz functionality to a desktop MCP host:
 
@@ -62,6 +72,7 @@ Base install:
 
 ```bash
 pip install memorizz
+export OPENAI_API_KEY="your-key"
 ```
 
 The base install also gives you the interactive **`memorizz` CLI** (see
@@ -77,6 +88,10 @@ pip install "memorizz[filesystem]"      # Local filesystem + FAISS
 pip install "memorizz[mcp]"             # MCP client/server + encrypted credentials
 pip install "memorizz[sandbox-e2b]"     # E2B sandbox
 pip install "memorizz[sandbox-daytona]" # Daytona sandbox
+pip install "memorizz[terminal-bench]"   # Harbor benchmark adapter
+pip install "memorizz[longmemeval-v2]"  # LongMemEval-V2 official harness adapter
+pip install "memorizz[swe-bench]"       # SWE-bench Lite + Docker grader
+pip install "memorizz[membench-eval]"   # MemBench capacity tokenization
 pip install "memorizz[ui]"              # Local web UI
 pip install "memorizz[huggingface]"     # transformers + sentence-transformers
 pip install "memorizz[mlx]"             # Apple-Silicon MLX backend (native arm64 only)
@@ -85,52 +100,112 @@ pip install "memorizz[all]"             # Everything
 
 ## Quick Start (Filesystem Provider)
 
+Filesystem memory is now the zero-configuration SDK default: `MemAgent()` and
+`MemAgentBuilder().build()` persist beneath `~/.memorizz/memory`. Set
+`MEMORIZZ_MEMORY_ROOT` to relocate it, pass an explicit provider for custom
+embeddings/storage, or use `memory_provider=False` for an intentionally
+stateless agent.
+
 ```python
-import os
 from pathlib import Path
 
-from memorizz.memagent.builders import MemAgentBuilder
-from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
-
-os.environ["OPENAI_API_KEY"] = "your-openai-api-key"
+from memorizz import FileSystemConfig, FileSystemProvider, MemAgentBuilder
 
 provider = FileSystemProvider(
     FileSystemConfig(
-        root_path=Path("~/.memorizz").expanduser(),
+        root_path=Path("~/.memorizz/memory").expanduser(),
+        lazy_vector_indexes=True,
         embedding_provider="openai",
         embedding_config={"model": "text-embedding-3-small"},
     )
 )
 
+llm_config = {"provider": "openai", "model": "gpt-4o-mini"}
+
 agent = (
     MemAgentBuilder()
     .with_instruction("You are a helpful assistant with persistent memory.")
     .with_memory_provider(provider)
-    .with_llm_config(
-        {
-            "provider": "openai",
-            "model": "gpt-4o-mini",
-            "api_key": os.environ["OPENAI_API_KEY"],
-        }
-    )
+    .with_llm_config(llm_config)
+    .with_memory_ids("payments-assistant")
     .with_semantic_cache(enabled=True, threshold=0.85)
-    .build()
+    .build_and_save()
 )
 
-print(agent.run("Hi, my name is Leah and I work on payments systems."))
-print(agent.run("What did I tell you about my work?"))
+scope = {
+    "memory_id": "payments-assistant",
+    "user_id": "leah",
+    "thread_id": "onboarding",
+}
+print(agent.run("Hi, I work on payments systems.", **scope))
+print(agent.run("What did I tell you about my work?", **scope))
 
 stats = agent.get_context_window_stats()
 print(stats)
 ```
+
+Add the memory-first learning layer without changing providers:
+
+```python
+agent = (
+    MemAgentBuilder()
+    .with_llm_config(llm_config)
+    .with_memory_provider(provider)
+    .with_memory_ids("release-assistant")
+    .with_learning_control_plane(
+        evidence_token_budget=1600,
+        compile_every_n_events=12,
+    )
+    .build()
+)
+
+agent.run(
+    "Use what we learned from the last release.",
+    memory_id="release-assistant",
+    user_id="alice",
+    thread_id="release-42",
+)
+print(agent.explain_memory_decision())
+```
+
+Agent memory is how we make intelligent systems retain, reuse, recall and
+refine information. The control plane keeps that loop bounded and auditable;
+it reuses existing memory-provider storage rather than adding another service.
+
+Run a bounded repository task through an installed coding harness while
+MemoRizz owns memory scope, policy, evidence, and verification:
+
+```python
+from pathlib import Path
+
+from memorizz import HarnessPermissions, HarnessTask, MetaHarness
+
+repo = Path.cwd().resolve()
+with MetaHarness.from_env(allowed_workspace_roots=[str(repo)]) as harness:
+    result = harness.run(
+        HarnessTask(
+            task="Inspect the test failures and report the likely cause.",
+            workspace=str(repo),
+            harness="auto",
+            permissions=HarnessPermissions(workspace_mode="read_only"),
+        )
+    )
+
+print(result.status.value, result.final_response)
+```
+
+Use `memorizz harness doctor` to inspect locally installed adapters. Direct
+edits, expanded tools, secrets, and network access pause for an exact,
+single-use host approval.
 
 Building a multi-user application? Pass `user_id` to isolate memory per
 end-user — one agent can serve every tenant in your app. See the
 [Multi-Tenant Guide](docs/guides/multi-tenant.md) for the full contract.
 
 ```python
-agent.run("Remember my favorite color is purple.", user_id="alice")
-agent.run("What's my favorite color?", user_id="bob")  # won't see alice's data
+scope = {"memory_id": "preferences", "thread_id": "profile"}
+agent.run("Remember my favorite color is purple.", user_id="alice", **scope)
+agent.run("What's my favorite color?", user_id="bob", **scope)  # isolated
 ```
 
 ## Continual Learning and Reviewed Skill Authority
@@ -141,18 +216,27 @@ prompt retrieval does not replay raw workflows. Matching active skills are
 retrieved from Skillbox instead.
 
 ```python
-from memorizz import MemAgent
+from memorizz import MemAgentBuilder
 
-agent = MemAgent(
-    model=model,
-    memory_provider=provider,
-    tools=tools,
-    continual_learning=True,
-    continual_learning_config={
-        "require_shadow": True,
-        "skill_injection_role": "developer",  # or "user" (default)
-        "shadow_evaluation_enabled": True,    # optional passive evidence
-    },
+
+def release_status(release_id: str) -> dict:
+    """Return the current status of one release."""
+    return {"release_id": release_id, "status": "healthy"}
+
+agent = (
+    MemAgentBuilder()
+    .with_llm_config(llm_config)
+    .with_memory_provider(provider)
+    .with_tools([release_status])
+    .with_continual_learning(
+        enabled=True,
+        config={
+            "require_shadow": True,
+            "skill_injection_role": "developer",  # or "user" (default)
+            "shadow_evaluation_enabled": True,
+        },
+    )
+    .build()
 )
 ```
 
@@ -351,15 +435,11 @@ export MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS=1536
 Example:
 
 ```python
-import os
-
-from memorizz.enums import ApplicationMode
-from memorizz.memagent.builders import MemAgentBuilder
+from memorizz import ApplicationMode, MemAgentBuilder
 
 llm_config = {
     "provider": "openai",
     "model": "gpt-4o-mini",
-    "api_key": os.environ["OPENAI_API_KEY"],
 }
 
 agent = (
@@ -376,18 +456,15 @@ agent = (
 Deep Research agents can attach internet providers and expose `internet_search` / `open_web_page` tools.
 
 ```python
-import os
-
 from memorizz.internet_access import TavilyProvider
 from memorizz.memagent.builders import create_deep_research_agent
 
 llm_config = {
     "provider": "openai",
     "model": "gpt-4o-mini",
-    "api_key": os.environ["OPENAI_API_KEY"],
 }
 
-internet_provider = TavilyProvider(api_key=os.environ["TAVILY_API_KEY"])
+internet_provider = TavilyProvider()  # reads TAVILY_API_KEY
 
 agent = (
     create_deep_research_agent(internet_provider=internet_provider)
@@ -404,14 +481,11 @@ results = agent.search_internet("latest vector database benchmark")
 Attach a sandbox provider to enable `execute_code`, `sandbox_write_file`, and `sandbox_read_file` tools.
 
 ```python
-import os
-
-from memorizz.memagent import MemAgent
+from memorizz import MemAgent
 
 llm_config = {
     "provider": "openai",
     "model": "gpt-4o-mini",
-    "api_key": os.environ["OPENAI_API_KEY"],
 }
 
 agent = MemAgent(
@@ -558,6 +632,34 @@ With no API key and a running [Ollama](https://ollama.com) daemon it runs a
 
 See the **[CLI Guide](docs/getting-started/cli.md)** for the full reference.
 
+## Evaluation Suite
+
+MemoRizz includes local, revision-recording adapters for Terminal-Bench 2.1,
+LongMemEval-V2, SWE-bench Lite, and MemBench. The runners keep official scoring
+separate from MemoRizz diagnostics and exercise scoped filesystem memory,
+hybrid/semantic retrieval, summarization and compaction, semantic-cache safety,
+workflow persistence, observability, and host-enforced completion.
+
+The memory suite adds versioned paper-protocol manifests, official source/data
+verification, `smoke`/`regression`/`paper` profiles, fail-closed comparability,
+calibrated rank fusion, reusable corpus embeddings, grounded citations, and a
+gold-evidence reader lane. Filesystem and Oracle are selectable from the same
+SDK/CLI/UI workflow; MongoDB implements the same batch/search capability
+contract for application integrations.
+
+```bash
+memorizz eval list
+memorizz eval protocol show longmemeval-v2
+memorizz eval dataset verify longmemeval-v2 --data-path /data/lme-v2
+memorizz eval terminal-bench forecast --total-budget-usd 1000
+memorizz eval run longmemeval-v2 \
+  --data-path /data/lme-v2 --variant small-web --profile smoke
+```
+
+Small local subsets are reported as smoke tests, never extrapolated into
+leaderboard scores. See the [evaluation methodology, commands, measured local
+results, and improvement backlog](docs/evaluation-suite.md).
+
 Database/admin helpers:
 
 ```bash
@@ -567,6 +669,9 @@ memorizz oracle setup               # initialize Oracle schema/user
 
 ## Examples
 
+- `examples/zero_to_hero/README.md` — current memory-first tutorials: a
+  zero-configuration filesystem agent, a real Oracle AI Database companion,
+  and a field guide to every MemoRizz memory type
 - `examples/single_agent/memagent_local_oracle.ipynb`
 - `examples/single_agent/memagent_remote_oracle.ipynb`
 - `examples/deep_research/deep_research_memagent.ipynb`
@@ -575,6 +680,8 @@ memorizz oracle setup               # initialize Oracle schema/user
 - `examples/sandbox/memagent_graalpy_sandbox.ipynb`
 - `examples/automations/automations_guide.ipynb`
 - `examples/continual_learning/continual_learning_guide.ipynb`
+- `examples/metaharness/README.md` — six-notebook path from an offline adapter
+  contract to a Codex + Claude Code review team and the measured fair comparison
 - `examples/model_providers/openai_provider.ipynb`
 - `examples/model_providers/anthropic_provider.ipynb`
 - `examples/model_providers/ollama_provider.ipynb`
@@ -582,9 +689,18 @@ memorizz oracle setup               # initialize Oracle schema/user
 
 ## Documentation
 
-- Docs source: `docs/`
-- Local preview: `make docs-serve` (or `mkdocs serve`)
-- Architecture notes: `src/memorizz/MEMORY_ARCHITECTURE.md`
+- [Installation and interface selection](docs/getting-started/installation.md)
+- [Core concepts and scope model](docs/getting-started/concepts.md)
+- [Model providers](docs/getting-started/model-providers.md)
+- [Python SDK quickstart](docs/getting-started/python-sdk-quickstart.md)
+- [Scheduled automations](docs/guides/automations.md)
+- [Configuration and secrets](docs/reference/configuration.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Python API reference](docs/reference/python-api.md)
+
+For a local preview, run `make docs-serve` (or `mkdocs serve`). Contributor
+rules are in [`docs/README.md`](docs/README.md); implementation architecture is
+in [`src/memorizz/MEMORY_ARCHITECTURE.md`](src/memorizz/MEMORY_ARCHITECTURE.md).
 
 ## License
 

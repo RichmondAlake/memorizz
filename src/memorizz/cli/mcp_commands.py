@@ -92,6 +92,16 @@ def serve_memorizz(
         "--allow-agent-execution/--no-agent-execution",
         help="Allow exposed agents to run for MCP callers.",
     ),
+    allow_harness_execution: Optional[bool] = typer.Option(
+        None,
+        "--allow-harness-execution/--no-harness-execution",
+        help="Allow governed Codex, Claude Code, or OpenHands runs.",
+    ),
+    harness_workspace_root: Optional[List[str]] = typer.Option(
+        None,
+        "--harness-workspace-root",
+        help="Allowed harness workspace root; repeat to add roots.",
+    ),
     stateless_http: Optional[bool] = typer.Option(
         None,
         "--stateless-http/--stateful-http",
@@ -122,6 +132,10 @@ def serve_memorizz(
         "allow_anonymous_http": allow_anonymous,
         "allow_writes": allow_writes,
         "allow_agent_execution": allow_agent_execution,
+        "allow_harness_execution": allow_harness_execution,
+        "harness_workspace_roots": (
+            set(harness_workspace_root) if harness_workspace_root is not None else None
+        ),
         "stateless_http": stateless_http,
     }
     try:

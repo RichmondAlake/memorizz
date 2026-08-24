@@ -117,6 +117,24 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
             logger.error(f"Error generating OpenAI embedding: {str(e)}")
             raise
 
+    def get_embeddings(self, texts: List[str], **kwargs) -> List[List[float]]:
+        """Generate embeddings in one API request and restore input ordering."""
+        if not texts:
+            return []
+        model = kwargs.get("model", self.model)
+        dimensions = kwargs.get("dimensions", self.dimensions)
+        cleaned = [str(text).replace("\n", " ") for text in texts]
+        request: Dict[str, Any] = {"input": cleaned, "model": model}
+        if model != "text-embedding-ada-002":
+            request["dimensions"] = dimensions
+        try:
+            response = self.client.embeddings.create(**request)
+            rows = sorted(response.data, key=lambda row: int(row.index))
+            return [list(row.embedding) for row in rows]
+        except Exception as e:
+            logger.error("Error generating OpenAI embedding batch: %s", e)
+            raise
+
     def get_dimensions(self) -> int:
         """Get the dimensionality of embeddings produced by this provider."""
         return self.dimensions

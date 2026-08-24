@@ -169,6 +169,38 @@ def test_cache_admission_and_domain_version_invalidation_are_real_operations():
 
 
 @pytest.mark.unit
+def test_exact_repeat_bypasses_vector_score_rounding_at_strict_threshold():
+    cache = SemanticCache(
+        config=SemanticCacheConfig(
+            similarity_threshold=1.0,
+            enable_memory_provider_sync=False,
+        ),
+        embedding_manager=_EmbeddingManager(),
+        agent_id="agent-1",
+        memory_id="memory-1",
+    )
+    assert cache.set(
+        "exact question",
+        "stable answer",
+        session_id="thread-1",
+        user_id="alice",
+        metadata=_metadata(),
+    )
+    cache._cosine_similarity = lambda *_args: 0.999999  # type: ignore[method-assign]
+
+    assert (
+        cache.get(
+            "exact question",
+            session_id="thread-1",
+            user_id="alice",
+            lookup_metadata=_metadata(),
+        )
+        == "stable answer"
+    )
+    assert cache.statistics()["last_hit"]["similarity"] == 1.0
+
+
+@pytest.mark.unit
 def test_persistent_domain_invalidation_is_provider_neutral_and_scoped():
     class PersistentRows:
         def __init__(self):

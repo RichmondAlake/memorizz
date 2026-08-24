@@ -1,0 +1,103 @@
+{
+  "schema_version": "memorizz.memory-suite.reproducibility-rerun.v1",
+  "generated_at": "2026-08-22",
+  "paper_comparable": false,
+  "comparison_basis": "2026-08-22-memory-suite-fixed-rerun.json",
+  "source_assessment": {
+    "memory_evaluation_source_changed_since_comparison_basis": false,
+    "newer_source_files": [
+      "src/memorizz/metaharness/adapters.py"
+    ],
+    "effect_on_memory_suite": "none"
+  },
+  "validation": {
+    "focused_tests_passed": 64,
+    "focused_tests_failed": 0,
+    "duration_seconds": 4.35,
+    "covered": [
+      "memory suite",
+      "memory provider capability contract",
+      "evaluation CLI",
+      "embedding batching",
+      "MetaHarness adapters",
+      "documentation quality"
+    ]
+  },
+  "configuration": {
+    "sample_count_per_run": 1,
+    "top_k": 6,
+    "candidate_pool_size": 256,
+    "lexical_weight": 0.25,
+    "embedding_model": "nomic-embed-text",
+    "embedding_model_digest": "0a109f422b47",
+    "semantic_memory_extraction": true,
+    "gold_evidence_oracle_reader": true
+  },
+  "fingerprints": {
+    "agentmembench_locomo": "sha256:fe13e6bcda190bba414b0d89badae82913d4a768273b323e856a33f6dad455d9",
+    "locomo_plus_cognitive": "sha256:0794cb5b93141a686f0572019cc96cd7b12384fd79a066562e43994e950bac0f"
+  },
+  "runs": {
+    "agentmembench_qwen2_5_7b": {
+      "score": 0.0,
+      "retrieval_recall_at_6": 1.0,
+      "mrr": 1.0,
+      "ndcg_at_6": 1.0,
+      "gold_evidence_oracle_score": 0.0,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 1.034030333015835,
+      "average_answer_latency_seconds": 5.575756999023724,
+      "total_tokens": 1483,
+      "external_api_cost_usd": 0.0,
+      "outcome_changed": false
+    },
+    "locomo_plus_qwen2_5_7b": {
+      "score": 0.0,
+      "retrieval_recall_at_6": 0.0,
+      "mrr": 0.0,
+      "ndcg_at_6": 0.0,
+      "gold_evidence_oracle_score": 0.0,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 1.059753208013717,
+      "average_answer_latency_seconds": 3.051084250007989,
+      "total_tokens": 1461,
+      "external_api_cost_usd": 0.0,
+      "outcome_changed": false
+    },
+    "agentmembench_gpt_5_5": {
+      "score": 0.4615384615384615,
+      "retrieval_recall_at_6": 1.0,
+      "mrr": 1.0,
+      "ndcg_at_6": 1.0,
+      "gold_evidence_oracle_score": 0.4615384615384615,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 0.5319650409801397,
+      "average_answer_latency_seconds": 4.063442209007917,
+      "total_tokens": 1566,
+      "estimated_external_api_cost_usd": 0.014255,
+      "outcome_changed": false
+    },
+    "locomo_plus_gpt_5_5": {
+      "score": 0.0,
+      "retrieval_recall_at_6": 0.0,
+      "mrr": 0.0,
+      "ndcg_at_6": 0.0,
+      "gold_evidence_oracle_score": 1.0,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 0.5138140830094926,
+      "average_answer_latency_seconds": 3.5363353340071626,
+      "total_tokens": 1667,
+      "estimated_external_api_cost_usd": 0.018635,
+      "outcome_changed": false
+    }
+  },
+  "estimated_hosted_cost_usd": 0.03289,
+  "reproducibility_result": {
+    "dataset_fingerprints_unchanged": true,
+    "retrieved_source_order_unchanged_for_all_runs": true,
+    "task_scores_unchanged_for_all_runs": true,
+    "oracle_scores_unchanged_for_all_runs": true,
+    "conclusion": "The rerun reproduces the prior result. No new memory-suite code was present to change retrieval or answer quality."
+  },
+  "security": "Credentials, raw prompts, full predictions, and machine-specific local paths are omitted."
+}

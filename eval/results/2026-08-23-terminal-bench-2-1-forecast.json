@@ -1,0 +1,103 @@
+{
+  "accuracy_forecast": {
+    "reason": "At least 10 distinct tasks are required before MemoRizz emits an accuracy or rank forecast. A cost reference is not performance evidence.",
+    "status": "withheld",
+    "trials": 0,
+    "unique_tasks": 0
+  },
+  "benchmark": "terminal-bench@2.1",
+  "cost_forecast": {
+    "basis": "external_codex_terra_reference",
+    "caveat": "The guard is checked between model calls. An in-flight final call can overshoot a trial's guard, so the nominal total is not a hard invoice cap.",
+    "configured_total_budget_usd": 1000.0,
+    "headroom_usd": 221.25,
+    "nominal_guard_total_usd": 778.75,
+    "per_trial_spend_guard_usd": 1.75,
+    "point_usd": 421.15,
+    "scenario_usd": [
+      315.86,
+      631.72
+    ],
+    "within_budget_before_in_flight_overshoot": true
+  },
+  "latency_forecast": {
+    "basis": "not_measured",
+    "serial_hours": null
+  },
+  "leaderboard_context": {
+    "rows": [
+      {
+        "accuracy_percent": 83.8,
+        "agent": "Claude Code",
+        "cost_usd": 552.67,
+        "model": "Fable 5",
+        "rank": 1
+      },
+      {
+        "accuracy_percent": 83.1,
+        "agent": "Codex",
+        "cost_usd": 2059.19,
+        "model": "GPT-5.5",
+        "rank": 2
+      },
+      {
+        "accuracy_percent": 80.4,
+        "agent": "Terminus2",
+        "cost_usd": 438.64,
+        "model": "Fable 5",
+        "rank": 3
+      },
+      {
+        "accuracy_percent": 79.3,
+        "agent": "Cursor CLI",
+        "cost_usd": 134.09,
+        "model": "Grok 4.5",
+        "rank": 4
+      },
+      {
+        "accuracy_percent": 78.9,
+        "agent": "Claude Code",
+        "cost_usd": 286.94,
+        "model": "Opus 4.8",
+        "rank": 5
+      },
+      {
+        "accuracy_percent": 78.4,
+        "agent": "Codex",
+        "cost_usd": 421.15,
+        "model": "GPT-5.6 Terra",
+        "rank": 6
+      },
+      {
+        "accuracy_percent": 74.6,
+        "agent": "Claude Code",
+        "cost_usd": null,
+        "model": "Sonnet 5",
+        "rank": 10
+      }
+    ],
+    "snapshot_date": "2026-08-23",
+    "submission_status": "Community submissions are closed; current additions are maintainer-run only."
+  },
+  "model": "openai/gpt-5.6-terra",
+  "official_run_requirements": {
+    "atif_trajectory_required_for_successful_trials": true,
+    "dataset_sha256": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+    "failed_and_error_trials_count_as_zero": true,
+    "minimum_total_trials": 445,
+    "minimum_trials_per_task": 5,
+    "tasks": 89,
+    "timeout_or_resource_overrides_allowed": false
+  },
+  "paper_comparable": false,
+  "pilot": {
+    "measured_cost_count": 0,
+    "measured_duration_count": 0,
+    "trial_count": 0,
+    "unique_task_count": 0
+  },
+  "recommended_next_step": "Run 10 stratified tasks once with the same model, reasoning effort, resources, and guard; then regenerate this forecast before any 445-trial run.",
+  "result_kind": "unofficial_forecast",
+  "schema_version": "1.0",
+  "submitted": false
+}

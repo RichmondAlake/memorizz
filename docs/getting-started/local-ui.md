@@ -7,16 +7,23 @@ The Memorizz local UI gives you a browser-based workflow for connecting to your 
 - Connect to Oracle, MongoDB, or filesystem providers.
 - Create, edit, favorite, and delete agents.
 - Run agents in Playground with streaming responses.
+- Launch and govern Codex, Claude Code, OpenHands, and native MemAgent tasks
+  through the Agent Harnesses operator console.
 - Configure Browser Use per agent and approve/reject exact browser tasks in
   Playground before they execute.
+- Create, pause, resume, trigger, inspect, and delete durable scheduled
+  automations.
 - Connect agents to Notion, Google Calendar, or custom MCP servers, including
   OAuth, encrypted credentials, allowlists, and mutation approvals.
 - Inspect memory types (personas, toolbox, conversations, workflows, long-term, short-term, entity, summaries, shared, cache).
 - Configure continual learning, choose user or reviewed developer authority
   for newly promoted skills, inspect trajectory gates, and activate/demote
   learned skills.
+- Enable the memory-first learning control plane, inspect immutable event and
+  artifact counts, compile pending events, and approve reversible forgetting.
 - Review run traces by agent and thread.
-- Run LongMemEval benchmarks in Evalground.
+- Run AgentMemBench, LongMemEval-V2, LoCoMo-Plus, BEAM, MemoryAgentBench, and
+  legacy LongMemEval in Evalground.
 - Manage runtime keys and defaults in Settings.
 
 ## 1. Install UI Dependencies
@@ -72,14 +79,16 @@ On first load, the UI opens the `/connect` page.
 ### Filesystem
 
 - Required: `Storage Path`
-- Example path: `~/.memorizz/data`
+- Example path: `~/.memorizz/memory`
 
-Tip for Oracle embedding consistency across UI + notebooks:
+For Oracle embedding consistency across UI, SDK, and evaluations, first run
+`memorizz oracle preflight --json`, then set the dimension reported by the
+existing schema:
 
 ```bash
 export MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER=openai
 export MEMORIZZ_DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
-export MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS=1536
+export MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS=384  # example; use preflight value
 ```
 
 ## 4. Navigation Map
@@ -93,10 +102,13 @@ Once connected, the sidebar is your main navigation.
 | Create Agent | `/agents/new` | Build a new agent with mode, persona, tool/memory options, and provider config. |
 | Playground | `/playground` and `/agents/{id}/playground` | Interactive chat, thread switching, token/context stats, and per-agent runtime config. |
 | MCP Connections | `/mcp` | Configure/test MCP servers, authorize OAuth, inspect capabilities, and invoke governed tools. |
+| Automations | `/automations` | Create schedules, inspect runs, and manage worker-backed agent jobs. |
 | Memory Types | `/memory/{type}` | Browse stored memory entries by type (`personas`, `toolbox`, `conversations`, etc.). |
 | Continual Learning | `/memory/workflows` and `/memory/skills` | Review canonical trajectory classes, run gated distillation, inspect persisted skill authority, and activate/demote skills. |
+| Learning Control Plane | `/learning-control-plane` | Inspect scoped event/artifact counts, compile pending events, and plan/apply reversible forgetting. |
+| Agent Harnesses | `/harnesses` | Probe adapters, launch bounded runs, decide exact approvals, cancel work, and inspect verification evidence. |
 | Traces | `/traces` | Filter/search agents and inspect thread-level trace timelines. |
-| Evalground | `/evalground` | Run LongMemEval, monitor logs, and review run history/results. |
+| Evalground | `/evalground` | Run local open-model memory suites, monitor logs, and review run history/results. |
 | Settings | `/settings` | Save API keys and runtime defaults into the UI session and `.env`. |
 
 ## 5. Suggested First Run Workflow
@@ -106,12 +118,34 @@ Once connected, the sidebar is your main navigation.
    To evaluate learned procedures, enable **Continual learning**, choose
    **User context** or **Developer instructions**, and keep **Require shadow
    review** enabled. Developer authority cannot be saved without review.
+   Enable **Memory-first learning control plane** to use bounded EvidencePack
+   retrieval and the operator page.
    Select **Browser Use** under Browser Control only after installing the
    isolated `browser-use` CLI and configuring its matching LLM key.
 3. Open that agent in `Playground`.
 4. Send a message and confirm streaming response.
 5. Switch to `Traces` to inspect events for that run.
 6. Review memory entries under `Memory Types` (especially conversations/summaries/cache).
+7. Open `Learning Control Plane` to inspect the same scope and its compiler or
+   forgetting state.
+8. Open `Agent Harnesses` to inspect local adapter readiness or launch a
+   bounded repository task. Direct edits pause until a host operator approves
+   the exact envelope.
+
+## Agent Harnesses in the UI
+
+The `/harnesses` page is an operator surface, not a vendor terminal emulator.
+It shows adapter capability probes, bounded launch controls, durable runs and
+events, token/cost data when the adapter reports it, workspace changes, host
+verification, and pending exact-envelope proposals. `MEMORIZZ_UI_READ_ONLY=true`
+blocks launches, cancellation, approval, rejection, and resume endpoints.
+Select a saved agent when choosing the `memagent` adapter; native execution is
+explicit-only and never wins automatic routing.
+
+Agent create/edit forms can persist `runtime` mode, where an external harness
+owns the full turn, or `delegate` mode, where MemAgent receives governed
+specialist tools. See the
+[Memory-First Meta-Harness guide](../guides/meta-harness.md).
 
 ## Browser control in the UI
 
@@ -158,20 +192,29 @@ results remain higher-trust inputs. See the
 
 ## Evalground Requirements
 
-Evalground currently requires:
-
-- Oracle as the connected provider.
-- `OPENAI_API_KEY` set.
-- LongMemEval dataset files available (UI can download missing variants).
+The five memory-suite adapters require a running Ollama daemon for local
+`nomic-embed-text` embeddings and an official dataset path. The default Ollama
+reader (for example, `qwen2.5:3b`) uses no external API. Selecting an OpenAI
+reader keeps memory and embeddings local but requires `OPENAI_API_KEY` and
+records an estimated token cost. Neither route requires Oracle. The legacy
+LongMemEval option still requires an Oracle connection, `OPENAI_API_KEY`, an
+agent, and its downloaded dataset files.
 
 ## Security Notes
 
 - The local UI is intended for development/local usage.
 - Default bind is localhost (`127.0.0.1`).
-- No built-in authentication is enabled.
+- Authentication is disabled by default, but built-in token login and signed
+  sessions are enabled when `MEMORIZZ_UI_AUTH_TOKEN` is set.
 - Avoid exposing the UI directly on public networks.
 - Browser actions can change external systems. Keep approval enabled and use a
   narrow domain allowlist for production agents.
+
+For an operator deployment, use a read-only database identity and configure
+authentication, a separate session secret, secure cookies behind HTTPS,
+redacted or metadata-only trace content, and audit logging. See
+[Observability and Trace Inspection](../observability-ui.md) and
+[Configuration and Secrets](../reference/configuration.md).
 
 ## Troubleshooting
 

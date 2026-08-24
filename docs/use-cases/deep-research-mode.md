@@ -13,7 +13,7 @@ from memorizz.memagent.orchestrators import DeepResearchWorkflow
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
 
 memory_provider = FileSystemProvider(
-    FileSystemConfig(root_path=Path("~/.memorizz").expanduser())
+    FileSystemConfig(root_path=Path("~/.memorizz/memory").expanduser())
 )
 
 workflow = DeepResearchWorkflow.from_config(
@@ -106,7 +106,7 @@ from memorizz.internet_access import get_default_internet_access_provider
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
 
 memory_provider = FileSystemProvider(
-    FileSystemConfig(root_path=Path("~/.memorizz").expanduser())
+    FileSystemConfig(root_path=Path("~/.memorizz/memory").expanduser())
 )
 internet_provider = get_default_internet_access_provider()
 

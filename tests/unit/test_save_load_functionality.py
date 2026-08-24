@@ -249,7 +249,9 @@ class TestMemAgentSaveFunctionality:
     def test_save_without_memory_provider(self):
         """Test saving fails gracefully without memory provider."""
         agent = MemAgent(
-            model=MockLLMProvider(["No provider"]), instruction="No memory provider"
+            model=MockLLMProvider(["No provider"]),
+            instruction="No memory provider",
+            memory_provider=False,
         )
 
         # Should raise ValueError
@@ -338,6 +340,12 @@ class TestMemAgentLoadFunctionality:
             assert loaded_agent.max_steps == 30
             assert loaded_agent.memory_ids == ["loaded_memory"]
             assert loaded_agent.model == mock_llm
+            assert loaded_agent.llm_config == {
+                "provider": "test",
+                "model": "test-model",
+            }
+            assert loaded_agent.llm_provider == "test"
+            assert loaded_agent.llm_model == "test-model"
             assert loaded_agent.memory_provider == memory_provider
             assert loaded_agent.get_skills_marketplace_provider_name() == "skillsmp"
             skills_cfg = loaded_agent.get_skills_marketplace_config() or {}
@@ -369,7 +377,7 @@ class TestMemAgentLoadFunctionality:
 
         override_llm = MockLLMProvider(["Override response"])
 
-        with patch("memorizz.memagent.core.create_llm_provider"):
+        with patch("memorizz.memagent.core.create_llm_provider") as create_provider:
             # Test loading with overrides
             loaded_agent = MemAgent.load(
                 "test_agent_123",
@@ -381,8 +389,13 @@ class TestMemAgentLoadFunctionality:
 
             # Verify overrides were applied
             assert loaded_agent.model == override_llm
+            assert loaded_agent.llm_config == {
+                "provider": "mock",
+                "model": "mock-model",
+            }
             assert loaded_agent.instruction == "Override instruction"
             assert loaded_agent.max_steps == 50
+            create_provider.assert_not_called()
 
     @pytest.mark.save_load
     def test_load_legacy_agent_defaults_self_awareness_safely(self):
@@ -590,7 +603,9 @@ class TestMemAgentRefreshFunctionality:
     def test_refresh_without_memory_provider(self):
         """Test refresh fails gracefully without memory provider."""
         agent = MemAgent(
-            model=MockLLMProvider(["No provider"]), instruction="No memory provider"
+            model=MockLLMProvider(["No provider"]),
+            instruction="No memory provider",
+            memory_provider=False,
         )
 
         result = agent.refresh()

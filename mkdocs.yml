@@ -4,49 +4,69 @@ site_url: https://richmondalake.github.io/memorizz
 repo_name: RichmondAlake/memorizz
 repo_url: https://github.com/RichmondAlake/memorizz
 edit_uri: edit/main/docs/
-exclude_docs: README.md
+exclude_docs: |
+  README.md
+  issues/*
+  observability-roadmap.md
 
 nav:
   - Home: index.md
-  - Getting Started:
-      - Overview: getting-started/overview.md
-      - Concepts: getting-started/concepts.md
+  - Start Here:
+      - Choose Your Path: getting-started/overview.md
+      - Installation: getting-started/installation.md
+      - Core Concepts: getting-started/concepts.md
+      - Model Providers: getting-started/model-providers.md
       - Python SDK Quickstart: getting-started/python-sdk-quickstart.md
       - CLI Guide: getting-started/cli.md
       - Local UI Guide: getting-started/local-ui.md
-  - Memory Types:
-      - Semantic Memory: memory-types/semantic.md
-      - Episodic Memory: memory-types/episodic.md
-      - Procedural Memory: memory-types/procedural.md
-      - Short-Term Memory: memory-types/short-term.md
-      - Shared Memory: memory-types/shared.md
-  - Memory Providers:
-      - Oracle Provider: memory-providers/oracle.md
-      - MongoDB Provider: memory-providers/mongodb.md
-      - Filesystem Provider: memory-providers/filesystem.md
-      - Bring Your Own Provider: memory-providers/custom.md
-  - Guides:
+  - Build Agents:
+      - Memory-First Meta-Harness: guides/meta-harness.md
+      - Tools, Safety & Approvals: guides/tools-and-approvals.md
+      - Scheduled Automations: guides/automations.md
+      - Agent Modes:
+          - Assistant: use-cases/assistant-mode.md
+          - Workflow: use-cases/workflow-mode.md
+          - Deep Research: use-cases/deep-research-mode.md
+      - MCP Integrations:
+          - Connect to MCP Servers: guides/mcp-connectivity.md
+          - Expose MemoRizz as an MCP Server: guides/mcp-server.md
+      - Internet Access: internet-access/providers.md
+      - Browser Control: browser-control/index.md
+      - Code Execution:
+          - Choose a Provider: sandbox/index.md
+          - E2B: sandbox/e2b.md
+          - Daytona: sandbox/daytona.md
+          - GraalPy: sandbox/graalpy.md
+      - Skills Marketplace: skills-marketplace/index.md
+  - Memory:
+      - Memory Types:
+          - Semantic Memory: memory-types/semantic.md
+          - Episodic Memory: memory-types/episodic.md
+          - Procedural Memory: memory-types/procedural.md
+          - Short-Term Memory: memory-types/short-term.md
+          - Shared Memory: memory-types/shared.md
+      - Memory Providers:
+          - Choose a Provider: memory-providers/filesystem.md
+          - MongoDB: memory-providers/mongodb.md
+          - Oracle AI Database: memory-providers/oracle.md
+          - Bring Your Own Provider: memory-providers/custom.md
       - Multi-Tenant Applications: guides/multi-tenant.md
       - Context Efficiency & Prompt Caching: guides/context-efficiency.md
-      - Continual Learning (Workflows → Skills): guides/continual-learning.md
-      - Production Governance (0.5): guides/production-governance.md
-      - Connect to MCP Servers: guides/mcp-connectivity.md
-      - Expose MemoRizz as an MCP Server: guides/mcp-server.md
-  - Use Cases:
-      - Assistant Mode: use-cases/assistant-mode.md
-      - Workflow Mode: use-cases/workflow-mode.md
-      - Deep Research Mode: use-cases/deep-research-mode.md
-  - Skills Marketplace:
-      - Overview: skills-marketplace/index.md
-  - Internet Access Providers: internet-access/providers.md
-  - Browser Control:
-      - Overview & Browser Use: browser-control/index.md
-  - Sandbox Providers:
-      - Overview: sandbox/index.md
-      - E2B Provider: sandbox/e2b.md
-      - Daytona Provider: sandbox/daytona.md
-      - GraalPy Provider: sandbox/graalpy.md
-  - Utilities:
+  - Continual Learning:
+      - Workflows to Skills: guides/continual-learning.md
+      - Learning Control Plane: guides/learning-control-plane.md
+  - Operate:
+      - Configuration & Secrets: reference/configuration.md
+      - Observability & Trace Inspection: observability-ui.md
+      - Production Governance: guides/production-governance.md
+      - Capabilities & Preflight: reference/capabilities.md
+      - Troubleshooting: troubleshooting.md
+  - Evaluate & Research:
+      - Evaluation Suite: evaluation-suite.md
+      - Terminal-Bench Evaluation: terminal-bench.md
+      - Research Papers: research-paper.md
+  - Reference:
+      - Python SDK API: reference/python-api.md
       - Context Window Stats: utilities/context_window_stats.md
 
 theme:

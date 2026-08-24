@@ -29,7 +29,7 @@ class SubTask:
         self.assigned_agent_id = assigned_agent_id
         self.priority = priority
         self.dependencies = dependencies or []
-        self.status = "pending"  # pending, in_progress, completed, failed
+        self.status = "pending"  # pending, in_progress, completed, failed, skipped
         self.result = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -69,7 +69,14 @@ class SubTask:
             dependencies=[str(item) for item in dependencies],
         )
         status = str(value.get("status") or "pending").strip().lower()
-        if status not in {"pending", "in_progress", "completed", "failed"}:
+        if status not in {
+            "pending",
+            "in_progress",
+            "completed",
+            "failed",
+            "skipped",
+            "blocked",
+        }:
             raise ValueError(f"Unsupported SubTask status '{status}'")
         task.status = status
         task.result = value.get("result")
@@ -118,6 +125,60 @@ def normalize_delegation_config(
                 "SubTask/dict entries before persisting the agent"
             )
         normalized["plan"] = normalize_delegation_plan(plan)
+    strategy = str(normalized.get("consolidation_strategy") or "model").lower()
+    if strategy not in {"model", "deterministic", "primary", "structured"}:
+        raise ValueError(
+            "consolidation_strategy must be model, deterministic, primary, or "
+            "structured"
+        )
+    if "consolidation_strategy" in normalized:
+        normalized["consolidation_strategy"] = strategy
+    if strategy == "primary" and normalized.get("primary_task_id") is not None:
+        primary_task_id = str(normalized["primary_task_id"]).strip()
+        if not primary_task_id:
+            raise ValueError("primary_task_id cannot be empty")
+        normalized["primary_task_id"] = primary_task_id
+    for key in (
+        "max_dependency_context_chars",
+        "max_consolidation_result_chars",
+    ):
+        if key in normalized:
+            normalized[key] = max(1_000, min(int(normalized[key]), 100_000))
+    if "required_finding_ids" in normalized:
+        values = normalized.get("required_finding_ids") or []
+        if not isinstance(values, (list, tuple, set)):
+            raise TypeError("required_finding_ids must be a list")
+        normalized["required_finding_ids"] = list(
+            dict.fromkeys(str(item).strip() for item in values if str(item).strip())
+        )
+    if "adaptive_escalation" in normalized:
+        value = normalized.get("adaptive_escalation")
+        if value in (None, False):
+            normalized["adaptive_escalation"] = {"enabled": False}
+        elif value is True:
+            normalized["adaptive_escalation"] = {"enabled": True}
+        elif isinstance(value, dict):
+            adaptive = dict(value)
+            adaptive["enabled"] = bool(adaptive.get("enabled", True))
+            task_ids = adaptive.get("escalation_task_ids") or []
+            if not isinstance(task_ids, (list, tuple, set)):
+                raise TypeError("adaptive escalation_task_ids must be a list")
+            adaptive["escalation_task_ids"] = list(
+                dict.fromkeys(
+                    str(item).strip() for item in task_ids if str(item).strip()
+                )
+            )
+            descriptions = adaptive.get("criterion_descriptions") or {}
+            if not isinstance(descriptions, dict):
+                raise TypeError("adaptive criterion_descriptions must be a dictionary")
+            adaptive["criterion_descriptions"] = {
+                str(key).strip(): str(description).strip()
+                for key, description in descriptions.items()
+                if str(key).strip() and str(description).strip()
+            }
+            normalized["adaptive_escalation"] = adaptive
+        else:
+            raise TypeError("adaptive_escalation must be bool, dict, or None")
     return normalized
 
 
@@ -428,33 +489,48 @@ Only respond with the JSON array, no additional text.
             return []
 
     def create_consolidation_prompt(
-        self, original_query: str, sub_task_results: List[Dict[str, Any]]
+        self,
+        original_query: str,
+        sub_task_results: List[Dict[str, Any]],
+        *,
+        memory_context: str = "",
+        max_result_chars: int = 12_000,
     ) -> str:
-        """Create a prompt for consolidating sub-task results."""
+        """Create a bounded, evidence-preserving consolidation prompt."""
 
-        prompt = f"""You are a result consolidation specialist. Your job is to take the results from multiple specialized agents and create a comprehensive, coherent response to the original user query.
+        result_limit = max(1_000, min(int(max_result_chars), 100_000))
 
-ORIGINAL USER QUERY: {original_query}
+        prompt = f"""ORIGINAL USER QUERY:
+{original_query}
+
+AUTHORITATIVE RETRIEVED MEMORY:
+{memory_context or "No retrieved memory was available to the coordinator."}
 
 SUB-TASK RESULTS:
 """
 
         for result in sub_task_results:
+            result_text = str(result.get("result", "No result"))
+            if len(result_text) > result_limit:
+                result_text = result_text[:result_limit] + "\u2026"
             prompt += f"\nTask: {result.get('description', 'Unknown task')}\n"
             prompt += f"Agent: {result.get('assigned_agent_id', 'Unknown agent')}\n"
             prompt += f"Status: {result.get('status', 'Unknown status')}\n"
-            prompt += f"Result: {result.get('result', 'No result')}\n"
+            prompt += f"Result: {result_text}\n"
             prompt += "---\n"
 
         prompt += """
 CONSOLIDATION INSTRUCTIONS:
-1. Synthesize all sub-task results into a coherent response
-2. Address the original user query comprehensively
-3. Identify any gaps or missing information
-4. If there are conflicting results, highlight them
-5. Provide a clear, helpful final answer
-
-If the objective is not fully met, specify what additional steps are needed.
+1. Return one concise, standalone answer to the original query.
+2. Preserve every distinct, material finding that is supported by concrete evidence.
+3. Accept a factual claim only when it is supported by a sub-task result and is
+   consistent with the authoritative retrieved memory. Do not invent new claims.
+4. Preserve source identifiers, file/line evidence, verification facts, and severity.
+5. Deduplicate overlapping findings without weakening their evidence.
+6. If results conflict, state the conflict instead of guessing.
+7. Omit tangents that are outside the original query or retrieved requirements.
+8. If the evidence is incomplete, state the limitation; do not fill the gap from
+   general knowledge.
 """
 
         return prompt

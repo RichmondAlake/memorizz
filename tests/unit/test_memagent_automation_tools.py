@@ -177,7 +177,7 @@ def test_create_automation_raises_when_unavailable():
     """SDK methods raise ValueError when automations are not configured."""
     from memorizz.memagent import MemAgent
 
-    agent = MemAgent()
+    agent = MemAgent(memory_provider=False)
     assert not agent.has_automations()
 
     with pytest.raises(ValueError, match="not available"):

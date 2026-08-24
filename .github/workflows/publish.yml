@@ -201,15 +201,29 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
+      - name: Extract curated release notes
+        run: |
+          VER="${RELEASE_TAG#v}"
+          awk -v version="$VER" '
+            $0 ~ "^## " version " " { emitting=1; next }
+            /^## / && emitting { exit }
+            emitting { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          name: MemoRizz ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
           files: dist/*
-          generate_release_notes: true
+          fail_on_unmatched_files: true
 
   npm:
     needs: pypi

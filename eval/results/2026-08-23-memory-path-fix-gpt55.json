@@ -1,0 +1,118 @@
+{
+  "schema_version": "memorizz.memory-path-regression.v1",
+  "generated_at": "2026-08-23",
+  "paper_comparable": false,
+  "comparison_label": "Diagnostic",
+  "scope": {
+    "samples_per_lane": 1,
+    "reader": "gpt-5.5",
+    "judge": "gpt-5.5",
+    "reasoning_effort": "low",
+    "max_output_tokens_per_call": 512,
+    "embedding_provider": "ollama",
+    "embedding_model": "nomic-embed-text",
+    "embedding_model_digest": "0a109f422b47",
+    "memory_provider": "filesystem",
+    "top_k": 6,
+    "candidate_pool_size": 256,
+    "lexical_weight": 0.25,
+    "rerank_weight": 0.15
+  },
+  "dataset_evidence": {
+    "locomo_sha256": "sha256:79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "locomo_plus_sha256": "sha256:af2fc6e5e0e88735e28d8dd1ef474b718861a73beb21779809e3b9e1a4fe3d23",
+    "agentmembench_subset_fingerprint": "sha256:05667fb797b4fbc782e74ca7c911b6b1c737c8005f1107505400c98df085d6f6",
+    "locomo_plus_subset_fingerprint": "sha256:6fcc0c50cd41eb958a4c7cecb1495a4e0bd5cb68178674f9c332d094dcf9aa54"
+  },
+  "results": {
+    "agentmembench_locomo_diagnostic": {
+      "evaluation_mode": "retrieval",
+      "task_score": 0.4615384615384615,
+      "accuracy": 0.0,
+      "recall_at_6": 1.0,
+      "mrr": 1.0,
+      "ndcg_at_6": 1.0,
+      "grounded_rate": 1.0,
+      "citation_precision": 1.0,
+      "gold_citation_recall": 1.0,
+      "faithfulness": 1.0,
+      "gold_evidence_oracle_score": 0.4615384615384615,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 1.059716,
+      "average_retrieval_seconds": 0.262178,
+      "average_answer_latency_seconds": 3.435774,
+      "total_processing_seconds": 7.321396,
+      "total_tokens": 1427,
+      "estimated_api_cost_usd": 0.011485,
+      "warnings": []
+    },
+    "locomo_plus_cognitive_diagnostic": {
+      "evaluation_mode": "retrieval",
+      "task_score": 1.0,
+      "accuracy": 1.0,
+      "recall_at_6": 1.0,
+      "mrr": 0.25,
+      "ndcg_at_6": 0.2640681225725909,
+      "grounded_rate": 1.0,
+      "citation_precision": 1.0,
+      "gold_citation_recall": 1.0,
+      "gold_evidence_oracle_score": 1.0,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 0.451525,
+      "average_retrieval_seconds": 0.256027,
+      "average_answer_latency_seconds": 2.876856,
+      "total_processing_seconds": 8.673663,
+      "total_tokens": 1769,
+      "estimated_api_cost_usd": 0.01582,
+      "warnings": []
+    },
+    "locomo_plus_cognitive_full_memagent": {
+      "evaluation_mode": "memagent",
+      "task_score": 1.0,
+      "accuracy": 1.0,
+      "recall_at_6": 1.0,
+      "mrr": 0.16666666666666666,
+      "ndcg_at_6": 0.21840743681816419,
+      "grounded_rate": 1.0,
+      "citation_precision": 1.0,
+      "gold_citation_recall": 1.0,
+      "gold_evidence_oracle_score": null,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 0.438354,
+      "average_retrieval_seconds": 2.429072,
+      "average_answer_latency_seconds": 4.221046,
+      "total_processing_seconds": 6.825512,
+      "total_tokens": 4203,
+      "estimated_api_cost_usd": 0.024415,
+      "warnings": [],
+      "features_exercised": [
+        "MemAgent.run",
+        "isolated filesystem memory",
+        "automatic query expansion",
+        "automatic knowledge-base retrieval",
+        "parent-source deduplication",
+        "volatile context assembly",
+        "grounded source citations"
+      ]
+    }
+  },
+  "spend": {
+    "retained_run_estimate_usd": 0.05172,
+    "discarded_citation_contract_run_estimate_usd": 0.016435,
+    "actual_session_estimate_usd": 0.068155,
+    "pricing_basis": "MemoRizz token telemetry and configured per-million-token rates; not an invoice"
+  },
+  "prompt_contract": {
+    "version": "memory-suite-grounded-reader-v4",
+    "retrieval_hash": "sha256:cc453aab6caa2ae056b5fb271ba852d4d251a25572163dce6967ed8b41006f5e",
+    "memagent_hash": "sha256:52c2655ea15b58210f9554ae1aab5e6de90bf26046930254a69bb356003c2dbd",
+    "correction": "Multi-source evidence is rendered as a JSON source_ids list and each citation must be a distinct output array element."
+  },
+  "interpretation": {
+    "agentmembench": "Retrieval, citations, and faithfulness were complete. The 0.462 token-F1 score reflects a longer factually correct sentence versus a terse reference; the gold-evidence oracle received the same score.",
+    "locomo_plus_diagnostic": "The fixed retriever returned both gold cues and GPT-5.5 used and cited both correctly.",
+    "locomo_plus_memagent": "The real MemAgent automatic retrieval and context-assembly path achieved complete task and grounding scores without a gold-evidence oracle call.",
+    "claim_boundary": "Each lane contains one deterministic source subset and uses the MemoRizz diagnostic scorer. This is an engineering regression, not an official protocol, leaderboard score, confidence estimate, or paper result.",
+    "security": "Credentials, raw prompts, raw predictions, benchmark contents, and machine-specific paths are omitted."
+  }
+}

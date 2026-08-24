@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Learning Control Plane - Memorizz{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Learning Control Plane</h1>
+    <p>Bounded retrieval evidence, immutable learning events, incremental compilation, and reversible forgetting.</p>
+</div>
+
+<form method="get" action="/learning-control-plane" class="settings-form">
+    <div class="form-grid">
+        <div class="form-group">
+            <label for="agent_id">Agent</label>
+            <select id="agent_id" name="agent_id" required>
+                {% for id in known_agent_ids %}<option value="{{ id }}" {% if id == selected_agent_id %}selected{% endif %}>{{ id }}</option>{% endfor %}
+            </select>
+        </div>
+        <div class="form-group"><label for="memory_id">Memory ID</label><input id="memory_id" name="memory_id" value="{{ memory_id }}"></div>
+        <div class="form-group"><label for="user_id">User ID</label><input id="user_id" name="user_id" value="{{ user_id }}"></div>
+        <div class="form-group"><label for="thread_id">Thread ID</label><input id="thread_id" name="thread_id" value="{{ thread_id }}"></div>
+    </div>
+    <button class="btn btn-secondary" type="submit">Inspect scope</button>
+</form>
+
+{% if error %}<div class="cl-report cl-report-bad">{{ error }}</div>{% endif %}
+{% if action %}<div class="cl-report"><strong>{{ action.message }}</strong>{% if action.at %}<span class="cl-report-time"> {{ action.at }}</span>{% endif %}</div>{% endif %}
+
+{% if selected_agent_id and report %}
+<div class="stats-grid">
+    <div class="stat-card"><div class="stat-value">{{ report.records.record_count }}</div><div class="stat-label">Control records</div></div>
+    <div class="stat-card"><div class="stat-value">{{ report.records.record_types.get('learning_event', 0) }}</div><div class="stat-label">Immutable events</div></div>
+    <div class="stat-card"><div class="stat-value">{{ report.records.record_types.get('learning_artifact', 0) }}</div><div class="stat-label">Compiled artifacts</div></div>
+    <div class="stat-card"><div class="stat-value">{{ report.config.evidence_token_budget }}</div><div class="stat-label">Evidence token budget</div></div>
+</div>
+
+{% if not ui_read_only %}
+<div class="cl-agent-header">
+    <form method="post" action="/learning-control-plane/compile" class="cl-inline-form">
+        <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
+        <button class="btn btn-primary" type="submit">Compile pending events</button>
+    </form>
+    <form method="post" action="/learning-control-plane/forget-plan" class="cl-inline-form">
+        <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
+        <button class="btn btn-secondary" type="submit">Plan forgetting (dry run)</button>
+    </form>
+</div>
+{% if action and action.kind == 'forget-plan' and action.report.candidate_count > 0 %}
+<div class="memory-item">
+    <h3>Approve reversible forgetting</h3>
+    <p>This writes tombstones only; immutable events are retained.</p>
+    <form method="post" action="/learning-control-plane/forget-apply" class="settings-form">
+        <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="plan_id" value="{{ action.report.plan_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
+        <div class="form-grid"><div class="form-group"><label for="approved_by">Approver identity</label><input id="approved_by" name="approved_by" required></div><div class="form-group"><label for="reason">Reason</label><input id="reason" name="reason"></div></div>
+        <button class="btn btn-danger" type="submit">Apply {{ action.report.candidate_count }} tombstone(s)</button>
+    </form>
+</div>
+{% endif %}
+{% endif %}
+
+<h2>Recent events</h2>
+{% if events %}<table class="cl-runs-table"><thead><tr><th>When</th><th>Type</th><th>Run / workflow</th><th>Event</th></tr></thead><tbody>{% for event in events %}<tr><td>{{ event.timestamp }}</td><td>{{ event.event_type }}</td><td><code>{{ event.run_id or event.workflow_id or '—' }}</code></td><td><code>{{ event.event_id }}</code></td></tr>{% endfor %}</tbody></table>{% else %}<div class="empty-state"><h3>No learning events in this scope</h3></div>{% endif %}
+
+<h2>Compiled artifacts</h2>
+{% if artifacts %}<table class="cl-runs-table"><thead><tr><th>Updated</th><th>Kind</th><th>Verified</th><th>Utility</th><th>Artifact</th></tr></thead><tbody>{% for artifact in artifacts %}<tr><td>{{ artifact.updated_at }}</td><td>{{ artifact.kind }}</td><td>{{ 'yes' if artifact.verified else 'no' }}</td><td>{{ artifact.utility }}</td><td><code>{{ artifact.artifact_id }}</code></td></tr>{% endfor %}</tbody></table>{% else %}<div class="empty-state"><h3>No compiled artifacts yet</h3></div>{% endif %}
+{% else %}
+<div class="empty-state"><h3>No saved agent selected</h3><p>Create or save an agent before inspecting its learning stream.</p></div>
+{% endif %}
+{% endblock %}

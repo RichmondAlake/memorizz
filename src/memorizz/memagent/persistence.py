@@ -90,19 +90,22 @@ def save_agent(agent):
 
         # Get semantic cache config for saving
         semantic_cache_config_to_save = _serialize_semantic_cache_config(agent)
+        llm_config_to_save = None
+        if agent.model and hasattr(agent.model, "get_config"):
+            candidate_llm_config = agent.model.get_config()
+            if isinstance(candidate_llm_config, dict):
+                llm_config_to_save = candidate_llm_config
 
         # Create MemAgentModel with current configuration
         from .models import MemAgentModel
 
         memagent_to_save = MemAgentModel(
-            llm_config=(
-                agent.model.get_config()
-                if agent.model and hasattr(agent.model, "get_config")
-                else None
-            ),
+            llm_config=llm_config_to_save,
+            application_id=getattr(agent, "application_id", None),
             name=agent.name,
             instruction=agent.instruction,
             max_steps=agent.max_steps,
+            tool_access=getattr(agent, "tool_access", "private"),
             application_mode=_get_application_mode_value(agent),
             memory_types=[
                 memory_type.value
@@ -124,6 +127,7 @@ def save_agent(agent):
             semantic_cache_config=semantic_cache_config_to_save,
             tool_result_policy=agent.tool_result_policy.to_dict(),
             context_policy=agent.context_policy.to_dict(),
+            completion_policy=agent.completion_policy.to_dict(),
             retrieval_policy=agent.retrieval_policy.to_dict(),
             delegation_config=normalize_delegation_config(
                 agent.delegation_config, for_persistence=True
@@ -156,12 +160,22 @@ def save_agent(agent):
                 if agent.has_browser_control()
                 else getattr(agent, "browser_control_config", None)
             ),
+            meta_harness=bool(getattr(agent, "meta_harness", None)),
+            meta_harness_mode=getattr(agent, "meta_harness_mode", None),
+            default_harness=getattr(agent, "default_harness", "auto"),
+            harness_config=dict(getattr(agent, "harness_config", None) or {}),
             skill_paths=agent.skill_paths or None,
             mcp_servers=agent.mcp_servers or None,
             self_aware=bool(agent.self_aware),
             self_aware_config=agent.get_self_aware_config() or None,
             continual_learning=bool(agent.continual_learning),
             continual_learning_config=agent.continual_learning_config or None,
+            learning_control_plane=bool(agent.learning_control_plane_enabled),
+            learning_control_plane_config=(
+                agent.learning_control_plane_config.to_dict()
+                if agent.learning_control_plane_config is not None
+                else None
+            ),
             automations_enabled=bool(getattr(agent, "automations_enabled", True)),
             default_timezone=getattr(agent, "default_timezone", None),
         )
@@ -173,21 +187,27 @@ def save_agent(agent):
                 try:
                     existing = agent.memory_provider.retrieve_memagent(agent.agent_id)
                     if existing and hasattr(agent.memory_provider, "update_memagent"):
-                        saved_memagent = agent.memory_provider.update_memagent(
-                            memagent_to_save
+                        saved_memagent = _write_memagent_compat(
+                            agent.memory_provider.update_memagent,
+                            memagent_to_save,
                         )
                     else:
-                        saved_memagent = agent.memory_provider.store_memagent(
-                            memagent_to_save
+                        saved_memagent = _write_memagent_compat(
+                            agent.memory_provider.store_memagent,
+                            memagent_to_save,
                         )
                 except Exception:
                     # Agent doesn't exist, create new
-                    saved_memagent = agent.memory_provider.store_memagent(
-                        memagent_to_save
+                    saved_memagent = _write_memagent_compat(
+                        agent.memory_provider.store_memagent,
+                        memagent_to_save,
                     )
             else:
                 # New agent
-                saved_memagent = agent.memory_provider.store_memagent(memagent_to_save)
+                saved_memagent = _write_memagent_compat(
+                    agent.memory_provider.store_memagent,
+                    memagent_to_save,
+                )
 
             # Update agent_id if it was generated
             if not agent.agent_id and saved_memagent.get("_id"):
@@ -214,6 +234,19 @@ def save_agent(agent):
 
     except Exception as e:
         logger.error(f"Failed to save MemAgent {agent.agent_id}: {e}")
+        raise
+
+
+def _write_memagent_compat(writer, model):
+    """Support both model-native and legacy dict-based provider contracts."""
+    try:
+        return writer(model)
+    except (AttributeError, TypeError):
+        # First-party providers accept MemAgentModel. A number of established
+        # third-party providers predate that contract and call ``.get`` on a
+        # plain mapping; retry once with the lossless Pydantic representation.
+        if hasattr(model, "model_dump"):
+            return writer(model.model_dump())
         raise
 
 
@@ -366,19 +399,22 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     # import at module load.
     from . import core as _core
 
-    if not memory_provider:
-        # Try to import default memory provider
-        try:
-            from ..memory_provider import MemoryProvider
+    if memory_provider is None:
+        from ..memory_provider import create_default_memory_provider
 
-            memory_provider = MemoryProvider()
-        except ImportError:
-            raise ValueError(
-                "No memory provider specified and default MemoryProvider not available"
-            )
+        memory_provider = create_default_memory_provider()
+    elif memory_provider is False:
+        raise ValueError("Cannot load MemAgent with memory_provider=False")
 
     if not hasattr(memory_provider, "retrieve_memagent"):
         raise ValueError("Memory provider does not support loading MemAgent")
+
+    # Configuration and runtime memory are normally the same provider. An
+    # isolated evaluation can load a persisted agent template while directing
+    # all benchmark reads/writes to a disposable provider instead.
+    runtime_memory_provider = overrides.pop("runtime_memory_provider", memory_provider)
+    if runtime_memory_provider is False or runtime_memory_provider is None:
+        raise ValueError("runtime_memory_provider must be a memory provider")
 
     logger.info(f"Loading MemAgent with agent id {agent_id}...")
 
@@ -393,11 +429,22 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     # attach it to the new instance below — otherwise chat would
     # surface a generic "No LLM model configured" instead of the
     # actual cause (e.g. uncached HF repo, network failure).
-    model_to_load = None
+    saved_llm_config = getattr(saved_memagent, "llm_config", None)
+    resolved_llm_config = overrides.get("llm_config", saved_llm_config)
+    override_model = overrides.get("model") if "model" in overrides else None
+    model_to_load = override_model
     load_llm_error: Optional[str] = None
-    if hasattr(saved_memagent, "llm_config") and saved_memagent.llm_config:
+    if override_model is not None:
+        if "llm_config" not in overrides and hasattr(override_model, "get_config"):
+            try:
+                candidate_config = override_model.get_config()
+                if isinstance(candidate_config, dict):
+                    resolved_llm_config = candidate_config
+            except Exception:
+                pass
+    elif saved_llm_config:
         try:
-            model_to_load = _core.create_llm_provider(saved_memagent.llm_config)
+            model_to_load = _core.create_llm_provider(saved_llm_config)
         except Exception as e:
             load_llm_error = f"{type(e).__name__}: {e}"
             logger.warning(
@@ -412,7 +459,11 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         loaded_delegates = []
         for delegate_id in saved_memagent.delegates:
             try:
-                delegate_agent = cls.load(delegate_id, memory_provider)
+                delegate_agent = cls.load(
+                    delegate_id,
+                    memory_provider,
+                    runtime_memory_provider=runtime_memory_provider,
+                )
                 loaded_delegates.append(delegate_agent)
             except Exception as e:
                 logger.warning(f"Could not load delegate agent {delegate_id}: {e}")
@@ -480,6 +531,17 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     if not isinstance(saved_browser_control, (str, dict)):
         saved_browser_control = None
 
+    saved_meta_harness = bool(getattr(saved_memagent, "meta_harness", False))
+    saved_meta_harness_mode = getattr(saved_memagent, "meta_harness_mode", None)
+    if saved_meta_harness_mode not in {"delegate", "runtime"}:
+        saved_meta_harness_mode = None
+    saved_default_harness = getattr(saved_memagent, "default_harness", "auto")
+    if not isinstance(saved_default_harness, str):
+        saved_default_harness = "auto"
+    saved_harness_config = getattr(saved_memagent, "harness_config", None)
+    if not isinstance(saved_harness_config, dict):
+        saved_harness_config = None
+
     saved_skills_marketplace_provider = getattr(
         saved_memagent, "skills_marketplace_provider", None
     )
@@ -526,6 +588,20 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     if not isinstance(saved_continual_learning_config, dict):
         saved_continual_learning_config = None
 
+    raw_learning_control_plane = getattr(
+        saved_memagent, "learning_control_plane", False
+    )
+    saved_learning_control_plane = (
+        raw_learning_control_plane
+        if isinstance(raw_learning_control_plane, bool)
+        else False
+    )
+    saved_learning_control_plane_config = getattr(
+        saved_memagent, "learning_control_plane_config", None
+    )
+    if not isinstance(saved_learning_control_plane_config, dict):
+        saved_learning_control_plane_config = None
+
     raw_automations_enabled = getattr(saved_memagent, "automations_enabled", True)
     saved_automations_enabled = (
         raw_automations_enabled if isinstance(raw_automations_enabled, bool) else True
@@ -544,6 +620,10 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     saved_context_policy = getattr(saved_memagent, "context_policy", None)
     if not isinstance(saved_context_policy, dict):
         saved_context_policy = None
+
+    saved_completion_policy = getattr(saved_memagent, "completion_policy", None)
+    if not isinstance(saved_completion_policy, dict):
+        saved_completion_policy = None
 
     saved_retrieval_policy = getattr(saved_memagent, "retrieval_policy", None)
     if not isinstance(saved_retrieval_policy, dict):
@@ -573,23 +653,40 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         except Exception as exc:
             logger.warning("Failed to restore semantic catalog: %s", exc)
 
+    saved_tool_access = getattr(saved_memagent, "tool_access", "private")
+    if not isinstance(saved_tool_access, str) or saved_tool_access not in {
+        "private",
+        "public",
+        "global",
+    }:
+        saved_tool_access = "private"
+
     # Create new agent instance with loaded configuration
     agent_instance = cls(
-        model=overrides.get("model", model_to_load),
+        model=model_to_load,
+        # Preserve the secret-free provider metadata as well as the hydrated
+        # runtime model.  Passing only ``model`` made a successfully reloaded
+        # agent report an empty ``llm_config`` (and therefore no provider or
+        # model) to the SDK, CLI, MCP server, and UI.
+        llm_config=resolved_llm_config,
         tools=overrides.get("tools", getattr(saved_memagent, "tools", None)),
         persona=overrides.get("persona", getattr(saved_memagent, "persona", None)),
         name=overrides.get("name", getattr(saved_memagent, "name", None)),
+        application_id=overrides.get(
+            "application_id", getattr(saved_memagent, "application_id", None)
+        ),
         instruction=overrides.get(
             "instruction", getattr(saved_memagent, "instruction", None)
         ),
         max_steps=overrides.get(
             "max_steps", getattr(saved_memagent, "max_steps", DEFAULT_MAX_STEPS)
         ),
+        tool_access=overrides.get("tool_access", saved_tool_access),
         memory_ids=overrides.get(
             "memory_ids", getattr(saved_memagent, "memory_ids", [])
         ),
         agent_id=agent_id,
-        memory_provider=memory_provider,
+        memory_provider=runtime_memory_provider,
         application_mode=application_mode_to_use,
         memory_types=overrides.get(
             "memory_types", getattr(saved_memagent, "memory_types", None)
@@ -606,6 +703,10 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
             saved_tool_result_policy,
         ),
         context_policy=overrides.get("context_policy", saved_context_policy),
+        completion_policy=overrides.get(
+            "completion_policy",
+            saved_completion_policy,
+        ),
         retrieval_policy=overrides.get("retrieval_policy", saved_retrieval_policy),
         skill_retrieval=overrides.get("skill_retrieval", saved_skill_retrieval),
         skill_retrieval_config=overrides.get(
@@ -625,6 +726,10 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         ),
         sandbox_provider=overrides.get("sandbox_provider", saved_sandbox_provider),
         browser_control=overrides.get("browser_control", saved_browser_control),
+        meta_harness=overrides.get("meta_harness", saved_meta_harness),
+        meta_harness_mode=overrides.get("meta_harness_mode", saved_meta_harness_mode),
+        default_harness=overrides.get("default_harness", saved_default_harness),
+        harness_config=overrides.get("harness_config", saved_harness_config),
         skill_paths=overrides.get("skill_paths", saved_skill_paths),
         mcp_servers=overrides.get("mcp_servers", saved_mcp_servers),
         automations_enabled=overrides.get(
@@ -639,11 +744,18 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         continual_learning_config=overrides.get(
             "continual_learning_config", saved_continual_learning_config
         ),
+        learning_control_plane=overrides.get(
+            "learning_control_plane",
+            saved_learning_control_plane_config
+            if saved_learning_control_plane_config is not None
+            else saved_learning_control_plane,
+        ),
         workflow_outcome_evaluator=overrides.get("workflow_outcome_evaluator"),
         is_favorite=overrides.get(
             "is_favorite", getattr(saved_memagent, "is_favorite", False)
         ),
         streaming=overrides.get("streaming", False),
+        auto_register=overrides.get("auto_register", True),
     )
 
     # Hydrate knowledge_base_ids separately — it isn't a constructor arg
@@ -657,11 +769,10 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         list(_kb_ids) if isinstance(_kb_ids, (list, tuple)) else []
     )
 
-    # Carry the LLM-init failure forward so chat surfaces the real
-    # cause. Constructor sets this when *it* tries to build the LLM;
-    # here we propagate the error from the load-time create_llm_provider
-    # call above (the constructor never sees llm_config in the load
-    # path so its own try/except can't catch this case).
+    # Carry the LLM-init failure forward so chat surfaces the real cause.
+    # The constructor receives both the resolved model and its persisted
+    # config, so it retains introspection metadata without constructing the
+    # provider a second time.
     if load_llm_error and not getattr(agent_instance, "_llm_init_error", None):
         agent_instance._llm_init_error = load_llm_error
 
@@ -689,6 +800,8 @@ def refresh_agent(agent):
                     agent.instruction = saved_memagent.instruction
                 if hasattr(saved_memagent, "max_steps"):
                     agent.max_steps = saved_memagent.max_steps
+                if hasattr(saved_memagent, "tool_access"):
+                    agent.tool_access = saved_memagent.tool_access or "private"
                 if hasattr(saved_memagent, "memory_ids"):
                     agent.memory_ids = saved_memagent.memory_ids
                 if hasattr(saved_memagent, "knowledge_base_ids"):

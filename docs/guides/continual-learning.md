@@ -9,6 +9,13 @@ Active skills are monitored and demoted when they stop working. Shadow skills
 can instead be evaluated passively on later production workflows without
 being injected or executing anything again.
 
+When the [memory-first learning control plane](learning-control-plane.md) is
+enabled (the default alongside continual learning), workflow and skill
+lifecycle transitions are also captured as immutable events. The control
+plane does not replace promotion or Skillbox; it supplies a bounded recall
+path, trace-linked outcome evidence, deterministic projections, and reversible
+forgetting around the existing loop.
+
 ```
 Agent run ─→ Workflow memory (per-run trajectory, canonical hash)
                  │  aggregation: frequency × success × recency × diversity

@@ -1,0 +1,775 @@
+{
+  "schema_version": "memorizz.metaharness.opus5-small-suite.v1",
+  "generated_at": "2026-08-23T01:37:53.843782+00:00",
+  "status": "error",
+  "valid": false,
+  "paper_comparable": false,
+  "protocol_manifest": {
+    "schema_version": "memorizz.metaharness.opus5-small-suite.v1",
+    "protocol": "opus5_task_native_small_suite_v1",
+    "profile": "small_regression",
+    "paper_comparable": false,
+    "models": {
+      "codex": "gpt-5.6-luna",
+      "claude_code": "claude-opus-5",
+      "judge": null,
+      "coordinator": null
+    },
+    "memory_provider": "filesystem",
+    "strategies": {
+      "memagent_codex": {
+        "display_name": "MemAgent + Codex",
+        "kind": "single_codex",
+        "model_configuration": "Codex: gpt-5.6-luna"
+      },
+      "memagent_opus": {
+        "display_name": "MemAgent + Claude Code",
+        "kind": "single_opus",
+        "model_configuration": "Claude Code: claude-opus-5"
+      },
+      "panel_always": {
+        "display_name": "MemoRizz Always-on Panel",
+        "kind": "sequential_panel",
+        "model_configuration": "Codex: gpt-5.6-luna then Claude Code: claude-opus-5"
+      },
+      "panel_routed": {
+        "display_name": "MemoRizz Risk-routed Panel",
+        "kind": "risk_router",
+        "model_configuration": "Codex: gpt-5.6-luna or Claude Code: claude-opus-5"
+      }
+    },
+    "fixtures": [
+      {
+        "id": "numeric_contract",
+        "title": "Strict numerical API contract",
+        "risk": "ordinary",
+        "routed_harness": "codex",
+        "requirements_sha256": "f5af91b9daacf019a6b558de0ebe1cee1c1dacec5b37448a750eb3e05d298256",
+        "initial_tree_hash": "736a39ed834a39526ac9a7f2e905c3fa02ce749c0f9c1fc1d406f84e4685eff7",
+        "hidden_verify_sha256": "f508ab3352cc2ada9c2630ff3e7b047cc57d5c50d8c55019262b1d261fe92d10",
+        "hidden_check_count": 8
+      },
+      {
+        "id": "tenant_cache",
+        "title": "Tenant-safe versioned cache",
+        "risk": "tenant_isolation",
+        "routed_harness": "claude-code",
+        "requirements_sha256": "976affdccfa0f0741c29d550f1729404c316af6d14d4a4f532f39037f5804036",
+        "initial_tree_hash": "024eb20617535173083e337afd703711ac661dd916821d398741a2602a2767ba",
+        "hidden_verify_sha256": "74aec05a773396c24643cbb1977c3c9aa754efd3f6d13450ab0f8bc9f4148ab8",
+        "hidden_check_count": 8
+      },
+      {
+        "id": "durable_approval",
+        "title": "Single-use durable approval",
+        "risk": "security",
+        "routed_harness": "claude-code",
+        "requirements_sha256": "f98e7a9ba6b26f779533ff94cf7921aec75970b8ec6c2a61738af97530120c41",
+        "initial_tree_hash": "cecf4dc370aa06012ae1d574379a60ba9823261ef031a5ebbb4ec0a0c04ae2bf",
+        "hidden_verify_sha256": "9072c2da3251b14ac0eff138c6e6802eb371d7805c2fde08257eb07eae5ae3bc",
+        "hidden_check_count": 8
+      },
+      {
+        "id": "retry_schedule",
+        "title": "Bounded retry schedule",
+        "risk": "ordinary",
+        "routed_harness": "codex",
+        "requirements_sha256": "c973879bb6fbfdf136e2f1708567a351eae6604916dee2f7c3e98152e966b2ef",
+        "initial_tree_hash": "300e201a40dfac875923294e95b2dccca15ba9014e302a76bb1610929dc384bd",
+        "hidden_verify_sha256": "3b0afe64c11d2dad1493ca6ef023058e98ab14988ddcac6b28a0d50f74d03e40",
+        "hidden_check_count": 8
+      }
+    ],
+    "task_orders": {
+      "numeric_contract": [
+        "panel_routed",
+        "memagent_codex",
+        "memagent_opus",
+        "panel_always"
+      ],
+      "tenant_cache": [
+        "panel_routed",
+        "memagent_opus",
+        "memagent_codex",
+        "panel_always"
+      ],
+      "durable_approval": [
+        "memagent_codex",
+        "memagent_opus",
+        "panel_routed",
+        "panel_always"
+      ],
+      "retry_schedule": [
+        "panel_routed",
+        "panel_always",
+        "memagent_codex",
+        "memagent_opus"
+      ]
+    },
+    "seed": 20260823,
+    "repeats": 1,
+    "controls": {
+      "independent_task_count": 4,
+      "fresh_workspace_per_task_and_strategy": true,
+      "same_fixture_and_requirements_per_task": true,
+      "same_per_harness_resource_budget": true,
+      "source_linked_memory_context_required": true,
+      "durable_host_approval_for_writes": true,
+      "public_verification_required": true,
+      "held_out_task_native_checks_primary": true,
+      "llm_judge_calls": 0,
+      "semantic_cache": "disabled_for_cold_comparison",
+      "summarization_compaction": "not_triggered_in_single_turn_tasks",
+      "maximum_observed_execution_cost_usd": 3.0
+    },
+    "decision_rule": {
+      "quality_metric": "micro_hidden_check_pass_rate",
+      "panel_frontier_supported_when": "The risk-routed panel equals or exceeds the better singleton, strictly exceeds Codex-only, and costs less than Opus-only.",
+      "no_post_hoc_weighting": true
+    },
+    "claim_boundaries": [
+      "This is a four-task synthetic regression, not a public benchmark.",
+      "Held-out checks replace a style-sensitive scalar LLM judge.",
+      "The always-on panel receives two model calls and more compute.",
+      "The risk-routed panel receives one call per task, matching singletons.",
+      "Codex cost is API-equivalent; Claude Code cost is CLI-reported.",
+      "Filesystem is held constant; provider effects are outside this run.",
+      "A positive result supports a bounded frontier claim, not universality."
+    ],
+    "implementation": {
+      "runner_sha256": "1e0c6893e5666e1816e26430945843423042efb665a41e11afd8b8dfda5127d9"
+    },
+    "reproducibility": {
+      "generated_at": "2026-08-23T01:37:53.826203+00:00",
+      "memorizz_version": "0.6.0",
+      "python": "3.12.13",
+      "platform": "macOS-26.5-arm64-arm-64bit",
+      "git_revision": "e08a90e72ca0b618013ad728cb0bdbd2515397f7"
+    },
+    "protocol_fingerprint": "1a321c310224566f7e6e3b5790705df8f9cea91c7112f8a5c85ccdeefdb33548"
+  },
+  "records": [
+    {
+      "fixture_id": "numeric_contract",
+      "fixture_title": "Strict numerical API contract",
+      "risk": "ordinary",
+      "strategy": "panel_routed",
+      "display_name": "MemoRizz Risk-routed Panel",
+      "model_configuration": "Codex: gpt-5.6-luna or Claude Code: claude-opus-5",
+      "memory_provider": "filesystem",
+      "source_id": "109d4e55-10ec-4ab6-9351-1ca679e68d02",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 58446,
+      "runs": [
+        {
+          "run_id": "96d94aed-b02d-4746-b9da-0238e078e8f4",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 111,
+          "context_fingerprint": "ac775c2db7c6a036967edb530172fc54dcd368369bf1f7c6d854593140be1e64",
+          "context_content_fingerprint": "82e7f3bc8d38a9fd4397fbec6189128164de0d0c19ee279830a2d00e91070b04",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-9954aff1f61bbb8a055193611229",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 111,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "bd03eeef-5ae8-51d6-b4aa-580d094edb98",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 303,
+            "initial_context_build_latency_ms": 303
+          },
+          "latency_ms": 58301,
+          "phase_timings_ms": {
+            "context": 303,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 57908,
+            "verification": 37,
+            "workspace_finalize": 53,
+            "total": 58301
+          },
+          "usage": {
+            "input_tokens": 85771,
+            "cached_input_tokens": 68096,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2662,
+            "reasoning_output_tokens": 687
+          },
+          "usage_totals": {
+            "input_tokens": 85771,
+            "cached_tokens": 68096,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2662
+          },
+          "actions": 5,
+          "cost_usd": 0.00809132,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 58391,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "810196a8-73de-451f-ab42-a8bab46539b9",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "a28cc60ae8d2b29ecceb2ac8a5f7db926e97872588f41839ff80a2df3b1ed3ae"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "basic_float",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_string_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_non_finite",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_float_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "optimized_verifier",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.00809132,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent"
+      ],
+      "usage_totals": {
+        "input_tokens": 85771,
+        "cached_tokens": 68096,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2662
+      },
+      "final_workspace_hash": "1fca339e987af42363a9800b551e07b0b4d4d3da81f08baa7998854ee8ed18ae",
+      "valid": true
+    },
+    {
+      "fixture_id": "numeric_contract",
+      "fixture_title": "Strict numerical API contract",
+      "risk": "ordinary",
+      "strategy": "memagent_codex",
+      "display_name": "MemAgent + Codex",
+      "model_configuration": "Codex: gpt-5.6-luna",
+      "memory_provider": "filesystem",
+      "source_id": "1b06b277-b57c-4fcb-b50f-411a7b6a9f47",
+      "seed_latency_ms": 2,
+      "wall_latency_ms": 57705,
+      "runs": [
+        {
+          "run_id": "a71664f7-6800-47a8-8565-ae4afca685e5",
+          "harness": "codex",
+          "model": "gpt-5.6-luna",
+          "status": "succeeded",
+          "ok": true,
+          "verified": true,
+          "grounded": true,
+          "context_tokens": 111,
+          "context_fingerprint": "5df89fa4dc7829ae9e99324fea89de4f6a9dacdddab9353d16464026737421d4",
+          "context_content_fingerprint": "82e7f3bc8d38a9fd4397fbec6189128164de0d0c19ee279830a2d00e91070b04",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-03195569b5be24ce38fb17fbab85",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 111,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "827d8f78-74e2-56fe-841c-ce6350bd6d1d",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 4,
+            "initial_context_build_latency_ms": 4
+          },
+          "latency_ms": 57109,
+          "phase_timings_ms": {
+            "context": 4,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 57006,
+            "verification": 41,
+            "workspace_finalize": 57,
+            "total": 57109
+          },
+          "usage": {
+            "input_tokens": 99502,
+            "cached_input_tokens": 82176,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2687,
+            "reasoning_output_tokens": 668
+          },
+          "usage_totals": {
+            "input_tokens": 99502,
+            "cached_tokens": 82176,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2687
+          },
+          "actions": 4,
+          "cost_usd": 0.00833312,
+          "cost_basis": "estimated_api_equivalent",
+          "error_code": null,
+          "error": null,
+          "remediation": null,
+          "model_identity": {
+            "requested": "gpt-5.6-luna",
+            "actual": "gpt-5.6-luna",
+            "verification": "cli_argument_pinned"
+          },
+          "wall_latency_ms": 57680,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "1028be67-83c8-40d8-8f39-94b09a1c61ff",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "359ff340c450df09c273159af415a786617b17c17babc8dcc163b7f29360879b"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "gpt-5.6-luna"
+      ],
+      "public_verified": true,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "basic_float",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_string_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_non_finite",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_float_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "optimized_verifier",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.00833312,
+      "cost_complete": true,
+      "cost_basis": [
+        "estimated_api_equivalent"
+      ],
+      "usage_totals": {
+        "input_tokens": 99502,
+        "cached_tokens": 82176,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2687
+      },
+      "final_workspace_hash": "a6cb66aaf3af070b232efe0efd039170bf17547c4eda9e5383eb652a02d979b2",
+      "valid": true
+    },
+    {
+      "fixture_id": "numeric_contract",
+      "fixture_title": "Strict numerical API contract",
+      "risk": "ordinary",
+      "strategy": "memagent_opus",
+      "display_name": "MemAgent + Claude Code",
+      "model_configuration": "Claude Code: claude-opus-5",
+      "memory_provider": "filesystem",
+      "source_id": "924a92a3-3f36-436a-b830-9d39d3733240",
+      "seed_latency_ms": 0,
+      "wall_latency_ms": 114624,
+      "runs": [
+        {
+          "run_id": "e0adff0d-ec06-41fe-9d65-181861e5633e",
+          "harness": "claude-code",
+          "model": "claude-opus-5",
+          "status": "budget_exceeded",
+          "ok": false,
+          "verified": false,
+          "grounded": true,
+          "context_tokens": 111,
+          "context_fingerprint": "d6e84a86b7040891fd7c4171d7843acebf689dadda71e807206a6be2cd4acacf",
+          "context_content_fingerprint": "82e7f3bc8d38a9fd4397fbec6189128164de0d0c19ee279830a2d00e91070b04",
+          "context_metadata": {
+            "strategy": "evidence_pack",
+            "pack_id": "evidence-pack-cb8ca915768bc24bbce76c62ba67",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "rejected_count": 0,
+            "candidate_tokens": 111,
+            "tokens_saved": 0,
+            "retrieval_modes": [],
+            "retrieval_reasons": [],
+            "retrieval_degraded": false,
+            "context_agent_id": "114971ef-6482-581a-a0d0-f0d87ca2c766",
+            "shared_context_reused": false,
+            "context_cache_hit": false,
+            "context_access_latency_ms": 4,
+            "initial_context_build_latency_ms": 4
+          },
+          "latency_ms": 114004,
+          "phase_timings_ms": {
+            "context": 4,
+            "mcp_setup": 0,
+            "output_schema_setup": 0,
+            "adapter": 113909,
+            "verification": 0,
+            "workspace_finalize": 89,
+            "total": 114004
+          },
+          "usage": {
+            "input_tokens": 20,
+            "cache_creation_input_tokens": 12730,
+            "cache_read_input_tokens": 57682,
+            "output_tokens": 9347,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 12730
+            },
+            "inference_geo": "global",
+            "iterations": [
+              {
+                "input_tokens": 2,
+                "output_tokens": 1732,
+                "cache_read_input_tokens": 10466,
+                "cache_creation_input_tokens": 2264,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 2264,
+                  "ephemeral_1h_input_tokens": 0
+                },
+                "type": "message"
+              }
+            ],
+            "speed": "standard"
+          },
+          "usage_totals": {
+            "input_tokens": 70432,
+            "cached_tokens": 57682,
+            "cache_write_input_tokens": 12730,
+            "output_tokens": 9347
+          },
+          "actions": 10,
+          "cost_usd": 0.3430855,
+          "cost_basis": "reported",
+          "error_code": "output_token_budget_exceeded",
+          "error": "Harness output token budget exceeded (9347 > 6000)",
+          "remediation": null,
+          "model_identity": {
+            "requested": "claude-opus-5",
+            "actual": "claude-opus-5",
+            "verification": "runtime_reported"
+          },
+          "wall_latency_ms": 114556,
+          "approval": {
+            "required": true,
+            "approved": true,
+            "proposal_id": "02b0e6b4-bd98-425d-87b2-95777193e654",
+            "approver_id": "eval-host"
+          },
+          "response_digest": "8221d323193335e0a4f37ad2aafc3aa174a634286c37fe9c6342b38fcccbe937"
+        }
+      ],
+      "harness_calls": 1,
+      "actual_models": [
+        "claude-opus-5"
+      ],
+      "public_verified": false,
+      "grounded": true,
+      "approvals_consumed": true,
+      "hidden_score": {
+        "ok": true,
+        "passed": 8,
+        "total": 8,
+        "pass_rate": 100.0,
+        "checks": [
+          {
+            "error": null,
+            "id": "basic_float",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_string_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "total_non_finite",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_bool_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_float_type",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "count_value",
+            "passed": true
+          },
+          {
+            "error": null,
+            "id": "optimized_verifier",
+            "passed": true
+          }
+        ],
+        "runner_error": null,
+        "return_code": 0,
+        "stderr": ""
+      },
+      "cost_usd": 0.3430855,
+      "cost_complete": true,
+      "cost_basis": [
+        "reported"
+      ],
+      "usage_totals": {
+        "input_tokens": 70432,
+        "cached_tokens": 57682,
+        "cache_write_input_tokens": 12730,
+        "output_tokens": 9347
+      },
+      "final_workspace_hash": "524816e87888843249817e4df55ce8e9ec4b5f044e35170426358e5b24f67c98",
+      "valid": false
+    }
+  ],
+  "summaries": [],
+  "decision": {},
+  "validation_failures": [
+    {
+      "fixture_id": "numeric_contract",
+      "strategy": "memagent_opus",
+      "issues": [
+        "record_invalid"
+      ]
+    }
+  ],
+  "provider_preflight": {
+    "filesystem": {
+      "ok": true,
+      "provider": "filesystem"
+    }
+  },
+  "harness_probes": {
+    "codex": {
+      "name": "codex",
+      "available": true,
+      "version": "codex-cli 0.149.0",
+      "command": "[HOME]/.nvm/versions/node/v24.15.0/lib/node_modules/@openai/codex/bin/codex.js",
+      "structured_events": true,
+      "resume": false,
+      "mcp": true,
+      "per_action_approvals": true,
+      "requires_external_isolation": false,
+      "usage_reporting": true,
+      "models": [],
+      "error_code": null,
+      "error": null,
+      "remediation": null,
+      "metadata": {
+        "cost_reporting": false,
+        "token_reporting": true,
+        "network_policy": "codex_sandbox",
+        "network_modes": [
+          "none"
+        ],
+        "task_tool_policy": false,
+        "output_schema": true,
+        "authentication_configured": true,
+        "authentication_mode": "environment",
+        "authentication_note": null
+      },
+      "ready": true
+    },
+    "claude-code": {
+      "name": "claude-code",
+      "available": true,
+      "version": "2.1.202 (Claude Code)",
+      "command": "[HOME]/.local/share/claude/versions/2.1.202",
+      "structured_events": true,
+      "resume": false,
+      "mcp": true,
+      "per_action_approvals": true,
+      "requires_external_isolation": false,
+      "usage_reporting": true,
+      "models": [],
+      "error_code": null,
+      "error": null,
+      "remediation": null,
+      "metadata": {
+        "cost_reporting": true,
+        "token_reporting": true,
+        "network_policy": "tool_allowlist",
+        "network_modes": [
+          "none",
+          "full"
+        ],
+        "forbidden_tools": [
+          "bash"
+        ],
+        "task_tool_policy": true,
+        "output_schema": true,
+        "authentication_configured": true,
+        "authentication_mode": "environment_or_cloud_provider",
+        "required_environment_any": [
+          "ANTHROPIC_API_KEY",
+          "CLAUDE_CODE_USE_BEDROCK",
+          "CLAUDE_CODE_USE_VERTEX",
+          "CLAUDE_CODE_USE_FOUNDRY"
+        ]
+      },
+      "ready": true
+    }
+  },
+  "task_envelope_preflight": {
+    "ok": true,
+    "harnesses": {
+      "codex": {
+        "ok": true,
+        "status": "pending_approval",
+        "model": "gpt-5.6-luna",
+        "external_calls": 0
+      },
+      "claude-code": {
+        "ok": true,
+        "status": "pending_approval",
+        "model": "claude-opus-5",
+        "external_calls": 0
+      }
+    }
+  },
+  "pricing": {
+    "as_of": "2026-08-23",
+    "currency": "USD",
+    "note": "Codex cost is estimated from API-equivalent token pricing. Claude Code cost is reported by its CLI.",
+    "per_million_tokens": {
+      "gpt-5.6-luna": {
+        "input": 0.2,
+        "cached_input": 0.02,
+        "output": 1.2
+      },
+      "claude-opus-5": {
+        "input": 5.0,
+        "output": 25.0
+      }
+    }
+  },
+  "error": {
+    "type": "RuntimeError",
+    "message": "Rejected numeric_contract/memagent_opus: record_invalid"
+  },
+  "accounting": {
+    "harness_calls": 3,
+    "judge_model_calls": 0,
+    "known_execution_cost_usd": 0.35950994,
+    "cost_complete": true
+  }
+}

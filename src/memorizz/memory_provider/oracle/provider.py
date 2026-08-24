@@ -24,7 +24,7 @@ from ...enums.memory_type import MemoryType
 from ...long_term.semantic.persona.persona import Persona
 from ...long_term.semantic.persona.role_type import RoleType
 from ...memagent import MemAgentModel
-from ..base import MemoryProvider, filter_tool_log_rows
+from ..base import MemoryProvider, MemoryProviderCapabilities, filter_tool_log_rows
 
 if TYPE_CHECKING:
     pass
@@ -282,6 +282,10 @@ _KNOWLEDGE_BASE_HEAD = (
     _c("access_count"),
     _c("agent_id"),
     _c("user_id"),
+    _c("source_id"),
+    _c("parent_source_id"),
+    _c("linked_source_ids", kind="json", default=list),
+    _c("metadata", kind="json", default=dict),
 )
 
 _SHORT_TERM_CORE = (
@@ -437,6 +441,21 @@ _LIST_SPECS: Dict[MemoryType, tuple] = {
             _c("expires_at", kind="ts_attr"),
         ),
         None,
+    ),
+    MemoryType.SHARED_MEMORY: (
+        (
+            _c("id", key="_id", kind="uuid"),
+            _c("memory_id"),
+            _c("content", kind="json"),
+            _c("memory_type"),
+            _c("scope"),
+            _c("owner_agent_id"),
+            _c("access_list", kind="json"),
+            _EMB_OPT,
+            _c("created_at", kind="ts_opt"),
+            _c("updated_at", kind="ts_opt"),
+        ),
+        "created_at",
     ),
 }
 
@@ -701,6 +720,18 @@ class OracleProvider(MemoryProvider):
         MemoryType.ENTITY_MEMORY,
         MemoryType.MEMAGENT,
     }
+
+    def memory_capabilities(self) -> MemoryProviderCapabilities:
+        return MemoryProviderCapabilities(
+            provider=type(self).__name__,
+            batch_store=False,
+            transactional_batch=False,
+            scoped_search=True,
+            result_scores=True,
+            provenance=True,
+            native_vector_search=True,
+            native_hybrid_search=False,
+        )
 
     @classmethod
     def from_env(
@@ -1391,6 +1422,10 @@ class OracleProvider(MemoryProvider):
             ("chunk_index", "NUMBER(10) DEFAULT 0"),
             ("chunk_count", "NUMBER(10) DEFAULT 1"),
             ("chunking_strategy", "VARCHAR2(32)"),
+            ("source_id", "VARCHAR2(512)"),
+            ("parent_source_id", "VARCHAR2(512)"),
+            ("linked_source_ids", "CLOB"),
+            ("metadata", "CLOB"),
         ],
         MemoryType.SHORT_TERM_MEMORY: [
             ("memory_id", "VARCHAR2(255)"),
@@ -2112,6 +2147,16 @@ class OracleProvider(MemoryProvider):
             raise ValueError(
                 "Either (data, memory_store_type) or (memory_unit) must be provided"
             )
+
+        # ``memory_id`` is part of the public provider contract for both the
+        # legacy ``data=`` form and the newer ``memory_unit=`` form.  The
+        # latter already copied it above, but the former silently dropped the
+        # scope and made scoped vector retrieval return no rows.  Keep an
+        # explicitly supplied value in ``data`` authoritative, matching the
+        # filesystem provider's compatibility behavior.
+        if memory_id is not None and isinstance(data, dict):
+            data = dict(data)
+            data.setdefault("memory_id", memory_id)
 
         # Ensure memory_store_type is MemoryType enum
         if isinstance(memory_store_type, str):
@@ -2988,6 +3033,14 @@ class OracleProvider(MemoryProvider):
                 "chunk_index": int(chunk_index) if chunk_index is not None else None,
                 "chunk_count": int(chunk_count) if chunk_count is not None else None,
                 "chunking_strategy": data.get("chunking_strategy"),
+                "source_id": data.get("source_id"),
+                "parent_source_id": data.get("parent_source_id"),
+                "linked_source_ids": json.dumps(
+                    list(data.get("linked_source_ids") or []), ensure_ascii=False
+                ),
+                "metadata": json.dumps(
+                    data.get("metadata") or {}, ensure_ascii=False, sort_keys=True
+                ),
             },
             embedding=embedding,
         )
@@ -3471,6 +3524,29 @@ class OracleProvider(MemoryProvider):
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            scope_columns = "memory_id, user_id" if include_user_id else "memory_id"
+            cursor.execute(
+                f"""
+                SELECT {scope_columns}
+                FROM {table_name}
+                WHERE entity_id = :entity_id
+                FOR UPDATE
+                """,
+                {"entity_id": entity_id},
+            )
+            existing_scope = cursor.fetchone()
+            if existing_scope:
+                existing_memory_id = existing_scope[0]
+                existing_user_id = existing_scope[1] if include_user_id else None
+                memory_scope_changed = existing_memory_id != params.get("memory_id")
+                user_scope_changed = include_user_id and existing_user_id != params.get(
+                    "user_id"
+                )
+                if memory_scope_changed or user_scope_changed:
+                    raise PermissionError(
+                        "Entity ownership mismatch: entity_id already belongs to "
+                        "a different memory or user scope"
+                    )
             try:
                 cursor.execute(merge_sql, params)
             except Exception as exc:
@@ -4375,7 +4451,6 @@ class OracleProvider(MemoryProvider):
             elif memory_store_type in (
                 MemoryType.PERSONAS,
                 MemoryType.SHORT_TERM_MEMORY,
-                MemoryType.SHARED_MEMORY,
                 MemoryType.SEMANTIC_CACHE,
             ):
                 # These tables have type-specific columns, not a generic
@@ -6115,6 +6190,12 @@ class OracleProvider(MemoryProvider):
             llm_config = memagent_dict.get("llm_config") or {}
             additional_cfg = dict(llm_config.get("additional_config", {}) or {})
 
+            application_id_val = memagent_dict.get("application_id")
+            if isinstance(application_id_val, str) and application_id_val.strip():
+                additional_cfg["application_id"] = application_id_val.strip()
+            else:
+                additional_cfg.pop("application_id", None)
+
             sandbox_val = memagent_dict.get("sandbox_provider")
             if sandbox_val:
                 additional_cfg["sandbox_provider"] = sandbox_val
@@ -6126,6 +6207,22 @@ class OracleProvider(MemoryProvider):
                 additional_cfg["browser_control"] = browser_control_val
             else:
                 additional_cfg.pop("browser_control", None)
+
+            additional_cfg["meta_harness"] = bool(
+                memagent_dict.get("meta_harness", False)
+            )
+            meta_harness_mode_val = memagent_dict.get("meta_harness_mode")
+            if meta_harness_mode_val:
+                additional_cfg["meta_harness_mode"] = meta_harness_mode_val
+            else:
+                additional_cfg.pop("meta_harness_mode", None)
+            default_harness_val = memagent_dict.get("default_harness") or "auto"
+            additional_cfg["default_harness"] = default_harness_val
+            harness_config_val = memagent_dict.get("harness_config")
+            if isinstance(harness_config_val, dict) and harness_config_val:
+                additional_cfg["harness_config"] = harness_config_val
+            else:
+                additional_cfg.pop("harness_config", None)
 
             if "skill_paths" in memagent_dict:
                 skill_paths_val = memagent_dict.get("skill_paths")
@@ -6219,6 +6316,18 @@ class OracleProvider(MemoryProvider):
                     additional_cfg["continual_learning_config"] = cl_cfg_val
                 else:
                     additional_cfg.pop("continual_learning_config", None)
+
+            if "learning_control_plane" in memagent_dict:
+                additional_cfg["learning_control_plane"] = bool(
+                    memagent_dict.get("learning_control_plane", False)
+                )
+
+            if "learning_control_plane_config" in memagent_dict:
+                control_cfg = memagent_dict.get("learning_control_plane_config")
+                if isinstance(control_cfg, dict):
+                    additional_cfg["learning_control_plane_config"] = control_cfg
+                else:
+                    additional_cfg.pop("learning_control_plane_config", None)
 
             if "automations_enabled" in memagent_dict:
                 additional_cfg["automations_enabled"] = bool(
@@ -6635,6 +6744,12 @@ class OracleProvider(MemoryProvider):
             continual_learning_cfg_value = cfg.get("continual_learning_config")
             if not isinstance(continual_learning_cfg_value, dict):
                 continual_learning_cfg_value = None
+            learning_control_plane_value = bool(
+                cfg.get("learning_control_plane", False)
+            )
+            learning_control_plane_cfg_value = cfg.get("learning_control_plane_config")
+            if not isinstance(learning_control_plane_cfg_value, dict):
+                learning_control_plane_cfg_value = None
             automations_enabled_value = cfg.get("automations_enabled", True)
             if automations_enabled_value is None:
                 automations_enabled_value = True
@@ -6646,6 +6761,7 @@ class OracleProvider(MemoryProvider):
                 default_timezone_value = default_timezone_value.strip() or None
             agent = MemAgentModel(
                 name=doc.get("name"),
+                application_id=cfg.get("application_id"),
                 instruction=doc.get("instruction"),
                 application_mode=doc.get("application_mode", "assistant"),
                 memory_types=doc.get("memory_types"),
@@ -6666,9 +6782,15 @@ class OracleProvider(MemoryProvider):
                 semantic_layer_config=cfg.get("semantic_layer_config"),
                 context_window_tokens=cfg.get("context_window_tokens"),
                 browser_control=cfg.get("browser_control"),
+                meta_harness=bool(cfg.get("meta_harness", False)),
+                meta_harness_mode=cfg.get("meta_harness_mode"),
+                default_harness=cfg.get("default_harness", "auto"),
+                harness_config=cfg.get("harness_config"),
                 self_aware=self_aware_value,
                 continual_learning=continual_learning_value,
                 continual_learning_config=continual_learning_cfg_value,
+                learning_control_plane=learning_control_plane_value,
+                learning_control_plane_config=learning_control_plane_cfg_value,
                 self_aware_config=self_aware_cfg_value,
                 automations_enabled=automations_enabled_value,
                 default_timezone=default_timezone_value,
@@ -6688,6 +6810,29 @@ class OracleProvider(MemoryProvider):
     def supports_entity_memory(self) -> bool:
         """Oracle provider fully supports entity memory operations."""
         return True
+
+    def migrate_entity_memory_user_scope(self, *, memory_id: str, user_id: str) -> int:
+        """Atomically adopt anonymous entity rows in one Oracle scope."""
+        if not self._memory_type_has_column(MemoryType.ENTITY_MEMORY, "user_id"):
+            raise RuntimeError(
+                "Oracle entity migration requires migrations/001_add_user_id.sql"
+            )
+        table_name = self._get_table_name(MemoryType.ENTITY_MEMORY)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET user_id = :user_id,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE memory_id = :memory_id
+                  AND user_id IS NULL
+                """,
+                {"memory_id": str(memory_id), "user_id": str(user_id)},
+            )
+            migrated = int(cursor.rowcount or 0)
+            conn.commit()
+        return migrated
 
     def retrieve_memagent(self, agent_id: str) -> "MemAgentModel":
         """Retrieve a memagent."""
@@ -6888,6 +7033,10 @@ class OracleProvider(MemoryProvider):
             # Extract extended config from llm_config's additional_config
             sandbox_provider = None
             browser_control = None
+            meta_harness = False
+            meta_harness_mode = None
+            default_harness = "auto"
+            harness_config = None
             skill_paths = None
             mcp_servers = None
             internet_access_provider = None
@@ -6899,6 +7048,8 @@ class OracleProvider(MemoryProvider):
             self_aware_config = None
             continual_learning = False
             continual_learning_config = None
+            learning_control_plane = False
+            learning_control_plane_config = None
             automations_enabled = True
             default_timezone = None
             favorite_from_cfg = None
@@ -6911,10 +7062,15 @@ class OracleProvider(MemoryProvider):
             skill_retrieval_config = None
             semantic_layer_config = None
             context_window_tokens = None
+            application_id = None
             if llm_config:
                 additional_cfg = llm_config.get("additional_config") or {}
                 sandbox_provider = additional_cfg.pop("sandbox_provider", None)
                 browser_control = additional_cfg.pop("browser_control", None)
+                meta_harness = bool(additional_cfg.pop("meta_harness", False))
+                meta_harness_mode = additional_cfg.pop("meta_harness_mode", None)
+                default_harness = additional_cfg.pop("default_harness", "auto")
+                harness_config = additional_cfg.pop("harness_config", None)
                 skill_paths = additional_cfg.pop("skill_paths", None)
                 mcp_servers = additional_cfg.pop("mcp_servers", None)
                 internet_access_provider = additional_cfg.pop(
@@ -6959,6 +7115,14 @@ class OracleProvider(MemoryProvider):
                 )
                 if not isinstance(continual_learning_config, dict):
                     continual_learning_config = None
+                learning_control_plane = bool(
+                    additional_cfg.pop("learning_control_plane", False)
+                )
+                learning_control_plane_config = additional_cfg.pop(
+                    "learning_control_plane_config", None
+                )
+                if not isinstance(learning_control_plane_config, dict):
+                    learning_control_plane_config = None
                 automations_enabled = additional_cfg.pop("automations_enabled", True)
                 if automations_enabled is None:
                     automations_enabled = True
@@ -6969,10 +7133,12 @@ class OracleProvider(MemoryProvider):
                 else:
                     default_timezone = default_timezone.strip() or None
                 favorite_from_cfg = additional_cfg.pop("is_favorite", None)
+                application_id = additional_cfg.pop("application_id", None)
 
             # Create MemAgentModel from JSON
             memagent = MemAgentModel(
                 name=agent_json.get("name"),
+                application_id=application_id,
                 instruction=agent_json.get("instruction"),
                 application_mode=agent_json.get("applicationMode", "assistant"),
                 memory_types=memory_types,
@@ -7003,6 +7169,10 @@ class OracleProvider(MemoryProvider):
                 persona=persona,
                 sandbox_provider=sandbox_provider,
                 browser_control=browser_control,
+                meta_harness=meta_harness,
+                meta_harness_mode=meta_harness_mode,
+                default_harness=default_harness,
+                harness_config=harness_config,
                 skill_paths=skill_paths,
                 mcp_servers=mcp_servers,
                 internet_access_provider=internet_access_provider,
@@ -7013,6 +7183,8 @@ class OracleProvider(MemoryProvider):
                 self_aware_config=self_aware_config,
                 continual_learning=continual_learning,
                 continual_learning_config=continual_learning_config,
+                learning_control_plane=learning_control_plane,
+                learning_control_plane_config=learning_control_plane_config,
                 automations_enabled=automations_enabled,
                 default_timezone=default_timezone,
                 memory_provider=self,

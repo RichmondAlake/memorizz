@@ -72,6 +72,7 @@ class ContinualLearningManager:
                 "co-injected"
             )
         self.tool_manager = tool_manager
+        self.control_plane = None
 
         self.skillbox = Skillbox(
             memory_provider, llm_provider=llm_provider, agent_id=agent_id
@@ -85,7 +86,11 @@ class ContinualLearningManager:
             resolve_tool=self._resolve_tool,
         )
         self.monitor = SkillMonitor(
-            self.skillbox, memory_provider, config=self.config, agent_id=agent_id
+            self.skillbox,
+            memory_provider,
+            config=self.config,
+            agent_id=agent_id,
+            lifecycle_callback=self._record_skill_lifecycle,
         )
         shadow_similarity = (
             self.config.retrieval_min_similarity
@@ -316,6 +321,7 @@ class ContinualLearningManager:
         """Synchronous cycle: staleness sweep first, then promotion."""
         self.monitor.staleness_sweep(self._resolve_tool)
         report = self.engine.run_promotion_cycle(user_id=user_id)
+        self._record_promoted_skills(report)
         self.last_report = report
         if report.promoted or report.rejected or report.review_flags:
             logger.info("Promotion cycle report: %s", report.to_dict())
@@ -366,7 +372,13 @@ class ContinualLearningManager:
                 skill_id,
                 "; ".join(readiness["reasons"]),
             )
-        return self.engine.activate_skill(skill_id, injection_role=injection_role)
+        activated = self.engine.activate_skill(skill_id, injection_role=injection_role)
+        if activated:
+            skill = self.skillbox.get_skill_by_id(skill_id)
+            self._record_skill_lifecycle(
+                "skill_promoted", skill, "activated after review"
+            )
+        return activated
 
     def promote_class(
         self, canonical_hash: str, user_id: Optional[str] = None
@@ -377,6 +389,7 @@ class ContinualLearningManager:
         not bypass the evidence requirements.
         """
         report = self.engine.promote_class(canonical_hash, user_id=user_id)
+        self._record_promoted_skills(report)
         self.last_report = report
         return report
 
@@ -387,6 +400,44 @@ class ContinualLearningManager:
             return False
         self.monitor.demote(skill, reason)
         return True
+
+    def _record_promoted_skills(self, report: PromotionReport) -> None:
+        for skill_id in report.promoted:
+            skill = self.skillbox.get_skill_by_id(skill_id)
+            status = getattr(getattr(skill, "status", None), "value", None)
+            transition = (
+                "skill_promoted"
+                if status == SkillStatus.ACTIVE.value
+                else "skill_candidate_created"
+            )
+            self._record_skill_lifecycle(
+                transition,
+                skill,
+                "workflow evidence passed promotion gates",
+            )
+
+    def _record_skill_lifecycle(self, transition, skill, reason) -> None:
+        if self.control_plane is None or skill is None:
+            return
+        try:
+            self.control_plane.record_skill_transition(
+                transition,
+                skill_id=str(skill.skill_id),
+                reason=str(reason or "")[:2000],
+                metadata={
+                    "name": skill.name,
+                    "version": skill.version,
+                    "status": getattr(skill.status, "value", str(skill.status)),
+                    "source_canonical_hash": skill.source_canonical_hash,
+                    "source_workflow_ids": list(skill.source_workflow_ids or []),
+                    "injection_role": getattr(
+                        skill.injection_role, "value", str(skill.injection_role)
+                    ),
+                },
+                scope={"user_id": skill.user_id},
+            )
+        except Exception as exc:
+            logger.debug("Skill lifecycle event capture failed: %s", exc)
 
     # ---------------------------------------------------------------- helpers
 

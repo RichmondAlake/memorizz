@@ -2,9 +2,11 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import importlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -21,13 +23,8 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     np = None
 
-try:
-    import faiss  # type: ignore
-except ImportError:  # pragma: no cover - optional dependency
-    faiss = None
-
 from ...enums.memory_type import MemoryType
-from ..base import MemoryProvider, filter_tool_log_rows
+from ..base import MemoryProvider, MemoryProviderCapabilities, filter_tool_log_rows
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +59,7 @@ class FileSystemConfig:
 
     root_path: Union[str, Path]
     lazy_vector_indexes: bool = False
+    use_faiss: bool = True
     embedding_provider: Optional[Any] = None
     embedding_config: Optional[Dict[str, Any]] = None
 
@@ -81,12 +79,25 @@ class FileSystemProvider(MemoryProvider):
 
     INDEX_VERSION = 1
 
+    def memory_capabilities(self) -> MemoryProviderCapabilities:
+        return MemoryProviderCapabilities(
+            provider=type(self).__name__,
+            batch_store=True,
+            transactional_batch=False,
+            scoped_search=True,
+            result_scores=True,
+            provenance=True,
+            native_vector_search=bool(self.config.use_faiss),
+            native_hybrid_search=False,
+        )
+
     def __init__(self, config: FileSystemConfig):
         self.config = config
         self.root_path = config.root_path
         self.root_path.mkdir(parents=True, exist_ok=True)
 
         self._embedding_provider = self._setup_embedding_provider(config)
+        self._faiss = self._load_faiss() if config.use_faiss else None
         self._store_paths: Dict[MemoryType, Path] = {}
         self._indexes: Dict[MemoryType, Dict[str, Dict[str, Any]]] = {}
         self._locks: Dict[MemoryType, threading.RLock] = {
@@ -97,6 +108,13 @@ class FileSystemProvider(MemoryProvider):
         ] = {}  # {"index": faiss.Index, "doc_ids": [...], "dirty": bool}
 
         self._initialize_storage()
+
+    @staticmethod
+    def _load_faiss() -> Optional[Any]:
+        try:
+            return importlib.import_module("faiss")
+        except ImportError:  # pragma: no cover - optional dependency
+            return None
 
     # ---------------------------------------------------------------------
     # Public API - Required by MemoryProvider
@@ -143,6 +161,55 @@ class FileSystemProvider(MemoryProvider):
 
         self._write_document(memory_type, record_id, document)
         return record_id
+
+    def store_many(
+        self,
+        rows: List[Dict[str, Any]],
+        memory_store_type: Union[str, MemoryType],
+        *,
+        memory_id: Optional[str] = None,
+    ) -> List[str]:
+        """Store a batch while persisting the shared index only once.
+
+        Benchmark ingestion can contain thousands of independently retrievable
+        chunks. Rewriting the complete JSON index after every chunk makes that
+        path quadratic in corpus size, so this optional provider extension
+        retains ordinary ``store`` semantics with one final index checkpoint.
+        """
+        memory_type = self._normalize_memory_type(memory_store_type)
+        if memory_type == MemoryType.MEMAGENT:
+            return [
+                self.store(row, memory_store_type=memory_type, memory_id=memory_id)
+                for row in rows
+            ]
+        prepared: List[Tuple[str, Dict[str, Any]]] = []
+        for row in rows:
+            document = self._prepare_document(row)
+            if memory_id:
+                document.setdefault("memory_id", memory_id)
+            record_id = str(document.get("_id") or document.get("id") or uuid.uuid4())
+            document["_id"] = record_id
+            document["id"] = record_id
+            prepared.append((record_id, document))
+        if not prepared:
+            return []
+
+        written = False
+        with self._locks[memory_type]:
+            try:
+                for record_id, document in prepared:
+                    self._write_document(
+                        memory_type,
+                        record_id,
+                        document,
+                        persist_index=False,
+                    )
+                    written = True
+            finally:
+                if written:
+                    self._save_index(memory_type)
+                    self._mark_vector_index_dirty(memory_type)
+        return [record_id for record_id, _ in prepared]
 
     def retrieve_by_query(
         self,
@@ -539,6 +606,7 @@ class FileSystemProvider(MemoryProvider):
         for doc in documents:
             agent = MemAgentModel(
                 name=doc.get("name"),
+                application_id=doc.get("application_id"),
                 instruction=doc.get("instruction"),
                 application_mode=doc.get("application_mode", "assistant"),
                 memory_types=doc.get("memory_types"),
@@ -564,6 +632,10 @@ class FileSystemProvider(MemoryProvider):
                 context_window_tokens=doc.get("context_window_tokens"),
                 sandbox_provider=doc.get("sandbox_provider"),
                 browser_control=doc.get("browser_control"),
+                meta_harness=bool(doc.get("meta_harness", False)),
+                meta_harness_mode=doc.get("meta_harness_mode"),
+                default_harness=doc.get("default_harness", "auto"),
+                harness_config=doc.get("harness_config"),
                 internet_access_provider=doc.get("internet_access_provider"),
                 internet_access_config=doc.get("internet_access_config"),
                 skills_marketplace_provider=doc.get("skills_marketplace_provider"),
@@ -573,6 +645,8 @@ class FileSystemProvider(MemoryProvider):
                 self_aware=bool(doc.get("self_aware", False)),
                 continual_learning=bool(doc.get("continual_learning", False)),
                 continual_learning_config=doc.get("continual_learning_config"),
+                learning_control_plane=bool(doc.get("learning_control_plane", False)),
+                learning_control_plane_config=doc.get("learning_control_plane_config"),
                 self_aware_config=doc.get("self_aware_config"),
                 automations_enabled=bool(doc.get("automations_enabled", True)),
                 default_timezone=doc.get("default_timezone"),
@@ -597,6 +671,7 @@ class FileSystemProvider(MemoryProvider):
 
         memagent = MemAgentModel(
             name=document.get("name"),
+            application_id=document.get("application_id"),
             instruction=document.get("instruction"),
             application_mode=document.get("application_mode", "assistant"),
             memory_types=document.get("memory_types"),
@@ -622,6 +697,10 @@ class FileSystemProvider(MemoryProvider):
             context_window_tokens=document.get("context_window_tokens"),
             sandbox_provider=document.get("sandbox_provider"),
             browser_control=document.get("browser_control"),
+            meta_harness=bool(document.get("meta_harness", False)),
+            meta_harness_mode=document.get("meta_harness_mode"),
+            default_harness=document.get("default_harness", "auto"),
+            harness_config=document.get("harness_config"),
             internet_access_provider=document.get("internet_access_provider"),
             internet_access_config=document.get("internet_access_config"),
             skills_marketplace_provider=document.get("skills_marketplace_provider"),
@@ -631,6 +710,8 @@ class FileSystemProvider(MemoryProvider):
             self_aware=bool(document.get("self_aware", False)),
             continual_learning=bool(document.get("continual_learning", False)),
             continual_learning_config=document.get("continual_learning_config"),
+            learning_control_plane=bool(document.get("learning_control_plane", False)),
+            learning_control_plane_config=document.get("learning_control_plane_config"),
             self_aware_config=document.get("self_aware_config"),
             automations_enabled=bool(document.get("automations_enabled", True)),
             default_timezone=document.get("default_timezone"),
@@ -646,6 +727,24 @@ class FileSystemProvider(MemoryProvider):
 
     def supports_entity_memory(self) -> bool:
         return True
+
+    def migrate_entity_memory_user_scope(self, *, memory_id: str, user_id: str) -> int:
+        """Adopt anonymous entity rows under the filesystem provider write lock."""
+        memory_type = MemoryType.ENTITY_MEMORY
+        migrated = 0
+        with self._locks[memory_type]:
+            for document_id in list(self._indexes[memory_type]):
+                document = self._read_document(memory_type, document_id)
+                if not document:
+                    continue
+                if document.get("memory_id") != memory_id:
+                    continue
+                if document.get("user_id") is not None:
+                    continue
+                document["user_id"] = user_id
+                self._write_document(memory_type, document_id, document)
+                migrated += 1
+        return migrated
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -747,7 +846,12 @@ class FileSystemProvider(MemoryProvider):
         return str(value)
 
     def _write_document(
-        self, memory_type: MemoryType, document_id: str, document: Dict[str, Any]
+        self,
+        memory_type: MemoryType,
+        document_id: str,
+        document: Dict[str, Any],
+        *,
+        persist_index: bool = True,
     ) -> None:
         # Serialize writers per store: ``store()`` runs on the caller's
         # thread while the conversation-embedding backfill worker calls
@@ -762,8 +866,9 @@ class FileSystemProvider(MemoryProvider):
 
             metadata = self._indexes[memory_type]
             metadata[document_id] = self._build_metadata(document)
-            self._save_index(memory_type)
-            self._mark_vector_index_dirty(memory_type)
+            if persist_index:
+                self._save_index(memory_type)
+                self._mark_vector_index_dirty(memory_type)
 
     def _document_path(self, memory_type: MemoryType, document_id: str) -> Path:
         return self._store_paths[memory_type] / f"{document_id}.json"
@@ -919,11 +1024,36 @@ class FileSystemProvider(MemoryProvider):
                 namespace=namespace,
             )
 
-        if faiss is None or np is None:
+        # Documents created while embeddings were disabled have no vector to
+        # rank. A later global embedder must not turn exact scoped recall into
+        # a false miss or spend tokens embedding a query that cannot match.
+        with self._locks[memory_type]:
+            has_scoped_embedding = any(
+                bool(meta.get("has_embedding"))
+                and (not memory_id or meta.get("memory_id") == memory_id)
+                and (user_id is _FS_UNSET or meta.get("user_id") == user_id)
+                and (
+                    thread_id is None
+                    or str(meta.get("thread_id") or "") == str(thread_id)
+                )
+                for meta in self._indexes[memory_type].values()
+            )
+        if not has_scoped_embedding:
+            return self._keyword_search(
+                memory_type,
+                query,
+                limit,
+                memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                namespace=namespace,
+            )
+
+        if self._faiss is None or np is None:
             logger.debug(
                 "FAISS/numpy unavailable; falling back to brute-force cosine search"
             )
-            return self._brute_force_search(
+            matches = self._brute_force_search(
                 memory_type,
                 query,
                 limit,
@@ -933,17 +1063,35 @@ class FileSystemProvider(MemoryProvider):
                 thread_id=thread_id,
                 namespace=namespace,
             )
+            return matches or self._keyword_search(
+                memory_type,
+                query,
+                limit,
+                memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                namespace=namespace,
+            )
 
         # A global FAISS top-k followed by filtering can return a false miss
         # when another thread/namespace crowds the requested scope. Rank only
         # eligible documents for explicitly scoped recall.
         if thread_id is not None or namespace is not None:
-            return self._brute_force_search(
+            matches = self._brute_force_search(
                 memory_type,
                 query,
                 limit,
                 memory_id,
                 embedding_provider,
+                user_id=user_id,
+                thread_id=thread_id,
+                namespace=namespace,
+            )
+            return matches or self._keyword_search(
+                memory_type,
+                query,
+                limit,
+                memory_id,
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
@@ -956,7 +1104,15 @@ class FileSystemProvider(MemoryProvider):
 
         index, doc_ids = self._ensure_vector_index(memory_type)
         if index is None or not doc_ids:
-            return []
+            return self._keyword_search(
+                memory_type,
+                query,
+                limit,
+                memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                namespace=namespace,
+            )
 
         top_k = max(limit or 1, 1)
         # Over-fetch so the user_id filter still returns enough matches.
@@ -982,7 +1138,15 @@ class FileSystemProvider(MemoryProvider):
             matches.append(document)
             if len(matches) >= top_k:
                 break
-        return matches
+        return matches or self._keyword_search(
+            memory_type,
+            query,
+            limit,
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            namespace=namespace,
+        )
 
     def _brute_force_search(
         self,
@@ -1048,8 +1212,9 @@ class FileSystemProvider(MemoryProvider):
     ) -> List[Dict[str, Any]]:
         if not query:
             return []
-        needle = query.lower()
-        matches: List[Dict[str, Any]] = []
+        needle = query.lower().strip()
+        query_terms = set(re.findall(r"[a-z0-9_]+", needle))
+        scored: List[Tuple[float, Dict[str, Any]]] = []
         with self._locks[memory_type]:
             for doc_id in self._indexes[memory_type]:
                 document = self._read_document(memory_type, doc_id)
@@ -1068,16 +1233,32 @@ class FileSystemProvider(MemoryProvider):
                     str(document.get("name", "")),
                     str(document.get("title", "")),
                 ]
-                if any(needle in hay.lower() for hay in haystacks if hay):
-                    matches.append(document)
-                    if limit and len(matches) >= limit:
-                        break
-        return matches
+                searchable = "\n".join(haystacks).lower()
+                if needle in searchable:
+                    score = 2.0
+                else:
+                    document_terms = set(re.findall(r"[a-z0-9_]+", searchable))
+                    overlap = len(query_terms.intersection(document_terms))
+                    minimum_overlap = (
+                        1
+                        if len(query_terms) <= 2
+                        else max(2, (len(query_terms) + 4) // 5)
+                    )
+                    if overlap < minimum_overlap:
+                        continue
+                    coverage = overlap / max(len(query_terms), 1)
+                    specificity = overlap / max(len(document_terms), 1)
+                    score = coverage + (0.2 * specificity)
+                ranked = dict(document)
+                ranked["score"] = float(score)
+                scored.append((float(score), ranked))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [document for _, document in scored[: max(int(limit or 1), 1)]]
 
     def _ensure_vector_index(
         self, memory_type: MemoryType
-    ) -> Tuple[Optional["faiss.Index"], List[str]]:
-        if np is None or faiss is None:
+    ) -> Tuple[Optional[Any], List[str]]:
+        if np is None or self._faiss is None:
             return None, []
         state = self._vector_state[memory_type]
         if state["index"] is not None and not state.get("dirty"):
@@ -1104,7 +1285,7 @@ class FileSystemProvider(MemoryProvider):
             return None, []
 
         dimension = vectors[0].shape[0]
-        index = faiss.IndexFlatIP(dimension)
+        index = self._faiss.IndexFlatIP(dimension)
         stacked = np.stack(vectors, axis=0)
         index.add(stacked)
 

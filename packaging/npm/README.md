@@ -11,6 +11,10 @@ developers. On `npm install -g memorizz` it:
 
 The `memorizz` command then execs the uv-installed CLI.
 
+This includes `memorizz harness` for governing installed Codex, Claude Code,
+OpenHands, and native MemAgent workers. The bootstrapper does not install those
+vendor CLIs; inspect local readiness with `memorizz harness doctor`.
+
 ## First-class install paths
 
 If you already use Python tooling, prefer these:

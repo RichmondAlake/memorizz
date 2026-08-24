@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import hashlib
 import inspect
 import json
 import logging
@@ -34,6 +35,7 @@ class OpenAI(LLMProvider):
         context_window_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        max_completion_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
@@ -41,6 +43,7 @@ class OpenAI(LLMProvider):
         reasoning_effort: Optional[str] = None,
         response_format: Optional[Any] = None,
         prompt_cache_retention: Optional[str] = None,
+        api_mode: str = "chat_completions",
         additional_config: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ):
@@ -64,10 +67,18 @@ class OpenAI(LLMProvider):
             Reasoning effort forwarded to Chat Completions. GPT-5.6
             function tools on this endpoint can use ``"none"``; Responses
             API text helpers keep their provider defaults.
+        max_completion_tokens : int, optional
+            Maximum generated tokens for current reasoning models. For the
+            GPT-5.6 family, the legacy ``max_tokens`` argument is translated
+            to this parameter automatically for backwards compatibility.
         prompt_cache_retention : str, optional
             OpenAI prompt-cache retention policy (``"in_memory"`` or
             ``"24h"``). Only sent to the official OpenAI endpoint; local
             OpenAI-compatible servers don't understand it.
+        api_mode : str, optional
+            Tool-loop endpoint: ``"chat_completions"`` (legacy/default) or
+            ``"responses"``. The Responses API is required for GPT-5.6
+            function tools combined with non-zero reasoning effort.
         """
         # Local OpenAI-compatible servers don't authenticate but the SDK
         # still requires a non-empty api_key. Substitute a placeholder so
@@ -84,6 +95,14 @@ class OpenAI(LLMProvider):
         self.client = openai.OpenAI(**client_kwargs)
         self.model = model
         self.base_url = base_url
+        normalized_api_mode = str(api_mode or "chat_completions").strip().lower()
+        if normalized_api_mode not in {"chat_completions", "responses"}:
+            raise ValueError("api_mode must be 'chat_completions' or 'responses'")
+        if base_url and normalized_api_mode == "responses":
+            raise ValueError(
+                "api_mode='responses' is only supported by the official OpenAI endpoint"
+            )
+        self.api_mode = normalized_api_mode
         self.context_window_tokens = (
             context_window_tokens or self._infer_context_window_tokens(model)
         )
@@ -95,9 +114,18 @@ class OpenAI(LLMProvider):
         self._prompt_cache_key: Optional[str] = None
         self._prompt_cache_retention = prompt_cache_retention
         self._request_options: Dict[str, Any] = {}
+        # GPT-5.6 rejects the legacy ``max_tokens`` field. Preserve the public
+        # MemoRizz constructor while translating it to the current API name.
+        uses_completion_limit = model.lower().startswith(("gpt-5.5", "gpt-5.6"))
+        if uses_completion_limit:
+            if max_completion_tokens is None:
+                max_completion_tokens = max_tokens
+            max_tokens = None
+
         request_options = {
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "max_completion_tokens": max_completion_tokens,
             "top_p": top_p,
             "frequency_penalty": frequency_penalty,
             "presence_penalty": presence_penalty,
@@ -113,6 +141,7 @@ class OpenAI(LLMProvider):
             allowed_keys = {
                 "temperature",
                 "max_tokens",
+                "max_completion_tokens",
                 "top_p",
                 "frequency_penalty",
                 "presence_penalty",
@@ -137,6 +166,12 @@ class OpenAI(LLMProvider):
         normalized = model.lower() if model else ""
         context_map = {
             # GPT-5 family
+            "gpt-5.5": 1_050_000,
+            "gpt-5.5-pro": 1_050_000,
+            "gpt-5.6": 1_050_000,
+            "gpt-5.6-sol": 1_050_000,
+            "gpt-5.6-terra": 1_050_000,
+            "gpt-5.6-luna": 1_050_000,
             "gpt-5.2": 1_047_576,
             "gpt-5.2-pro": 1_047_576,
             "gpt-5.1": 1_047_576,
@@ -163,6 +198,8 @@ class OpenAI(LLMProvider):
     def get_config(self) -> Dict[str, Any]:
         """Returns a serializable configuration for the OpenAI provider."""
         config: Dict[str, Any] = {"provider": "openai", "model": self.model}
+        if self.api_mode != "chat_completions":
+            config["api_mode"] = self.api_mode
         if self.base_url:
             config["base_url"] = self.base_url
         if self.reasoning_effort is not None:
@@ -176,7 +213,16 @@ class OpenAI(LLMProvider):
         combined with this key; keeping it stable per conversation thread
         maximizes cache hits. ``None`` clears it.
         """
-        self._prompt_cache_key = key or None
+        if not key:
+            self._prompt_cache_key = None
+            return
+        normalized = str(key)
+        # The official API accepts at most 64 characters. Thread, tenant and
+        # agent identifiers can easily exceed that, so retain deterministic
+        # cache affinity without leaking or truncating identifying suffixes.
+        if len(normalized) > 64:
+            normalized = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        self._prompt_cache_key = normalized
 
     def _apply_cache_options(self, kwargs: Dict[str, Any]) -> None:
         """Attach prompt-caching parameters for the official OpenAI endpoint.
@@ -210,6 +256,175 @@ class OpenAI(LLMProvider):
             if len(trimmed) == len(kwargs):
                 raise
             return self.client.chat.completions.create(**trimmed)
+
+    @staticmethod
+    def _responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Translate the internal Chat Completions history to Responses items."""
+
+        items: List[Dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role") or "user")
+            if role == "tool":
+                output = message.get("content", "")
+                if not isinstance(output, str):
+                    output = json.dumps(output, ensure_ascii=False, default=str)
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": str(message.get("tool_call_id") or ""),
+                        "output": output,
+                    }
+                )
+                continue
+
+            content = message.get("content")
+            if content not in (None, ""):
+                items.append({"role": role, "content": content})
+
+            for call in message.get("tool_calls") or []:
+                function = call.get("function", {}) if isinstance(call, dict) else {}
+                call_id = call.get("id", "") if isinstance(call, dict) else ""
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": str(call_id),
+                        "name": str(function.get("name") or "unknown"),
+                        "arguments": str(function.get("arguments") or "{}"),
+                    }
+                )
+        return items
+
+    @staticmethod
+    def _responses_tools(
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Translate Chat Completions function schemas to Responses schemas."""
+
+        if not tools:
+            return None
+        translated: List[Dict[str, Any]] = []
+        for tool in tools:
+            if tool.get("type") != "function":
+                translated.append(dict(tool))
+                continue
+            function = dict(tool.get("function") or {})
+            translated.append(
+                {
+                    "type": "function",
+                    "name": function.get("name"),
+                    "description": function.get("description"),
+                    "parameters": function.get("parameters")
+                    or {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                    # Do not opt schemas into OpenAI strict mode implicitly.
+                    # MemoRizz allows defaulted optional parameters, whereas
+                    # Responses strict mode requires every property to appear
+                    # in ``required`` (using nullable types for optionals).
+                    # MemoRizz still performs its own exact signature binding
+                    # and additionalProperties enforcement before dispatch.
+                    "strict": bool(function.get("strict", False)),
+                }
+            )
+        return translated
+
+    def _extract_responses_usage(self, response: Any) -> Optional[Dict[str, int]]:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return None
+        try:
+            prompt_tokens = getattr(usage, "input_tokens", None)
+            completion_tokens = getattr(usage, "output_tokens", None)
+            extracted: Dict[str, int] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": getattr(usage, "total_tokens", None),
+            }
+            input_details = getattr(usage, "input_tokens_details", None)
+            cached = (
+                getattr(input_details, "cached_tokens", None) if input_details else None
+            )
+            if cached is not None:
+                extracted["cached_tokens"] = cached
+            output_details = getattr(usage, "output_tokens_details", None)
+            reasoning = (
+                getattr(output_details, "reasoning_tokens", None)
+                if output_details
+                else None
+            )
+            if reasoning is not None:
+                extracted["reasoning_tokens"] = reasoning
+            return extracted
+        except Exception:
+            return None
+
+    def _generate_responses(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        tool_choice: str,
+    ) -> Any:
+        """Generate through Responses while preserving MemoRizz's tool contract."""
+
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "input": self._responses_input(messages),
+            "store": False,
+        }
+        translated_tools = self._responses_tools(tools)
+        if translated_tools:
+            kwargs["tools"] = translated_tools
+            kwargs["tool_choice"] = tool_choice
+
+        max_output_tokens = self._request_options.get("max_completion_tokens")
+        if max_output_tokens is None:
+            max_output_tokens = self._request_options.get("max_tokens")
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max_output_tokens
+        if self.reasoning_effort is not None:
+            kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        for key in ("temperature", "top_p"):
+            value = self._request_options.get(key)
+            if value is not None:
+                kwargs[key] = value
+        if self._prompt_cache_key:
+            kwargs["prompt_cache_key"] = self._prompt_cache_key
+        if self._prompt_cache_retention:
+            kwargs["prompt_cache_retention"] = self._prompt_cache_retention
+
+        response = self.client.responses.create(**kwargs)
+        self._last_usage = self._extract_responses_usage(response)
+
+        function_calls = [
+            item
+            for item in getattr(response, "output", []) or []
+            if getattr(item, "type", None) == "function_call"
+        ]
+        if function_calls:
+            from types import SimpleNamespace
+
+            tool_calls = [
+                SimpleNamespace(
+                    id=str(getattr(item, "call_id", "") or getattr(item, "id", "")),
+                    type="function",
+                    function=SimpleNamespace(
+                        name=str(getattr(item, "name", "") or "unknown"),
+                        arguments=str(getattr(item, "arguments", "") or "{}"),
+                    ),
+                )
+                for item in function_calls
+            ]
+            message = SimpleNamespace(
+                content=getattr(response, "output_text", None) or None,
+                tool_calls=tool_calls,
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)],
+                response_id=getattr(response, "id", None),
+            )
+        return getattr(response, "output_text", "") or ""
 
     def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
         """
@@ -312,10 +527,32 @@ class OpenAI(LLMProvider):
         Returns:
             str: The generated text.
         """
-        response = self.client.responses.create(
-            model=self.model, instructions=instructions, input=prompt
-        )
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "input": prompt,
+            "store": False,
+        }
+        if instructions:
+            kwargs["instructions"] = instructions
 
+        max_output_tokens = self._request_options.get("max_completion_tokens")
+        if max_output_tokens is None:
+            max_output_tokens = self._request_options.get("max_tokens")
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max_output_tokens
+        if self.reasoning_effort is not None:
+            kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        for key in ("temperature", "top_p"):
+            value = self._request_options.get(key)
+            if value is not None:
+                kwargs[key] = value
+        if self._prompt_cache_key:
+            kwargs["prompt_cache_key"] = self._prompt_cache_key
+        if self._prompt_cache_retention:
+            kwargs["prompt_cache_retention"] = self._prompt_cache_retention
+
+        response = self.client.responses.create(**kwargs)
+        self._last_usage = self._extract_responses_usage(response)
         return response.output_text
 
     def generate(
@@ -336,6 +573,9 @@ class OpenAI(LLMProvider):
         Returns:
             Any: Either a string (final response) or the full response object (if tool calls are present).
         """
+        if getattr(self, "api_mode", "chat_completions") == "responses":
+            return self._generate_responses(messages, tools, tool_choice)
+
         provider_messages = (
             developer_messages_to_system(messages) if self.base_url else messages
         )
@@ -374,6 +614,16 @@ class OpenAI(LLMProvider):
             - {"type": "tool_calls", "response": <reconstructed response>} when tool calls are detected
             - {"type": "done", "content": "<full accumulated text>"} at the end
         """
+
+        if getattr(self, "api_mode", "chat_completions") == "responses":
+            response = self.generate(messages, tools=tools, tool_choice=tool_choice)
+            if isinstance(response, str):
+                if response:
+                    yield {"type": "content", "content": response}
+                yield {"type": "done", "content": response}
+            else:
+                yield {"type": "tool_calls", "response": response}
+            return
 
         def _flatten_reasoning_text(value: Any) -> str:
             if value is None:

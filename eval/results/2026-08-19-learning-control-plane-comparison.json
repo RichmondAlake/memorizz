@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-08-19T15:00:00Z",
+  "scope_notice": "Bounded local smoke evaluations; not leaderboard, full-suite, or paper-comparable results.",
+  "methodology": {
+    "comparison": "Earlier MemoRizz smoke configuration versus the learning-control-plane configuration on the same fixed cases.",
+    "repetitions_per_configuration": 1,
+    "causal_limit": "Model/tool-loop runs are stochastic. Deltas are observed engineering measurements, not provider-effect estimates.",
+    "submitted": false
+  },
+  "benchmarks": {
+    "membench": {
+      "official_repository_revision": "f66d8d1028d3f68627d00f77a967b93fbb8694b6",
+      "scope": "Four raw categorical samples: one per participation/observation x factual/reflective track.",
+      "baseline": {
+        "memory_backend": "filesystem",
+        "accuracy": 1.0,
+        "source_retrieval_recall": 1.0,
+        "total_tokens": 40633,
+        "estimated_cost_usd": 0.0134961,
+        "aggregate_total_seconds": 90.4169989,
+        "aggregate_answer_seconds": 7.8981052
+      },
+      "learning_control_plane_filesystem": {
+        "accuracy": 1.0,
+        "source_retrieval_recall": 1.0,
+        "total_tokens": 39068,
+        "estimated_cost_usd": 0.0168795,
+        "aggregate_total_seconds": 73.91980070894351,
+        "aggregate_answer_seconds": 6.047520041989628,
+        "selected_evidence_items_per_sample": [4, 4, 4, 4],
+        "semantic_cache_exact_repeat_hits": 4,
+        "verified_outcomes": 4,
+        "delta_vs_baseline_percent": {
+          "total_tokens": -3.852,
+          "estimated_cost_usd": 25.069,
+          "aggregate_total_seconds": -18.246,
+          "aggregate_answer_seconds": -23.431,
+          "accuracy_points": 0.0,
+          "source_retrieval_recall_points": 0.0
+        },
+        "cost_note": "Observed cost rose because this trial received fewer provider prompt-cache hits despite using fewer total tokens."
+      },
+      "learning_control_plane_oracle": {
+        "oracle_version_full": "23.26.0.0.0",
+        "accuracy": 1.0,
+        "source_retrieval_recall": 1.0,
+        "total_tokens": 38862,
+        "estimated_cost_usd": 0.01648675,
+        "aggregate_total_seconds": 110.84074558393331,
+        "aggregate_answer_seconds": 11.320226999931037,
+        "selected_evidence_items_per_sample": [4, 4, 4, 4],
+        "semantic_cache_exact_repeat_hits": 4,
+        "verified_outcomes": 4,
+        "delta_vs_baseline_percent": {
+          "total_tokens": -4.359,
+          "estimated_cost_usd": 22.159,
+          "aggregate_total_seconds": 22.588,
+          "aggregate_answer_seconds": 43.328,
+          "accuracy_points": 0.0,
+          "source_retrieval_recall_points": 0.0
+        }
+      }
+    },
+    "longmemeval_v2": {
+      "official_repository_revision": "2cc8c540bdb87fe6761629b585e727e1c4704520",
+      "scope": "One enterprise dynamic-environment question over the same 100-trajectory small-tier haystack.",
+      "usage_boundary": "Token counts below are the official downstream reader only; embedding, summary, and memory-synthesizer usage is excluded.",
+      "baseline": {
+        "accuracy": 1.0,
+        "official_reader_total_tokens": 26581,
+        "memory_query_seconds": 74.93422904098406,
+        "compaction_seconds": 66.20479379099561
+      },
+      "learning_control_plane_filesystem": {
+        "accuracy": 1.0,
+        "official_reader_total_tokens": 337,
+        "official_memory_context_tokens": 29,
+        "memory_query_seconds": 87.88096737500746,
+        "compaction_seconds": 81.41443812497891,
+        "evidence_candidate_tokens": 24822,
+        "evidence_selected_tokens": 4991,
+        "evidence_selected_items": 3,
+        "semantic_cache_exact_repeat_hit": true,
+        "delta_vs_baseline_percent": {
+          "official_reader_total_tokens": -98.732,
+          "memory_query_seconds": 17.277,
+          "compaction_seconds": 22.974,
+          "accuracy_points": 0.0
+        }
+      },
+      "learning_control_plane_oracle": {
+        "oracle_version_full": "23.26.0.0.0",
+        "accuracy": 1.0,
+        "official_reader_total_tokens": 275,
+        "official_memory_context_tokens": 29,
+        "memory_query_seconds": 93.71525183296762,
+        "compaction_seconds": 85.96650566597236,
+        "evidence_candidate_tokens": 26430,
+        "evidence_selected_tokens": 5834,
+        "evidence_selected_items": 3,
+        "semantic_cache_exact_repeat_hit": true,
+        "delta_vs_baseline_percent": {
+          "official_reader_total_tokens": -98.965,
+          "memory_query_seconds": 25.063,
+          "compaction_seconds": 29.849,
+          "accuracy_points": 0.0
+        }
+      }
+    },
+    "swe_bench_lite": {
+      "official_repository_revision": "490635b2e9e775dca1e1d6b40ce9dbcff91e780f",
+      "dataset_revision": "b0dde1093fe417d83b7184254edf8199c1f0dff5",
+      "scope": "One fixed instance: sympy__sympy-20590, officially graded in the network-disabled instance image.",
+      "model": "gpt-5.4-mini",
+      "reasoning_effort": "high",
+      "baseline": {
+        "official_resolved": 1,
+        "official_total": 1,
+        "total_tokens": 342293,
+        "estimated_cost_usd": 0.1183791,
+        "agent_duration_seconds": 141.99429812503513,
+        "tool_calls": 29
+      },
+      "learning_control_plane_filesystem": {
+        "official_resolved": 1,
+        "official_total": 1,
+        "total_tokens": 192439,
+        "estimated_cost_usd": 0.0616308,
+        "agent_duration_seconds": 71.59473466698546,
+        "tool_calls": 22,
+        "host_completion_accepted": true,
+        "summary_count": 1,
+        "reflection_exact_cache_hit": true,
+        "verified_outcome": true,
+        "compiler_ok": true,
+        "compiled_events": 3,
+        "delta_vs_baseline_percent": {
+          "total_tokens": -43.779,
+          "estimated_cost_usd": -47.938,
+          "agent_duration_seconds": -49.579,
+          "tool_calls": -24.138,
+          "resolved_points": 0.0
+        }
+      },
+      "learning_control_plane_oracle": {
+        "oracle_version_full": "23.26.0.0.0",
+        "official_resolved": 1,
+        "official_total": 1,
+        "total_tokens": 553434,
+        "estimated_cost_usd": 0.14201445,
+        "agent_duration_seconds": 188.5519165410078,
+        "tool_calls": 34,
+        "host_completion_accepted": true,
+        "summary_count": 1,
+        "reflection_exact_cache_hit": true,
+        "verified_outcome": true,
+        "compiler_ok": true,
+        "compiled_events": 3,
+        "delta_vs_baseline_percent": {
+          "total_tokens": 61.684,
+          "estimated_cost_usd": 19.966,
+          "agent_duration_seconds": 32.788,
+          "tool_calls": 17.241,
+          "resolved_points": 0.0
+        },
+        "interpretation": "This single Oracle trial used twelve more tool calls than the filesystem trial. Do not attribute the full delta to the memory provider."
+      }
+    }
+  },
+  "security": {
+    "contains_credentials": false,
+    "contains_raw_model_context": false,
+    "contains_generated_patch": false,
+    "contains_absolute_local_paths": false
+  }
+}

@@ -62,6 +62,144 @@ memorizz
 Cloud keys are auto-detected (Anthropic → OpenAI → Azure → local Ollama). You can
 also save a key from inside the REPL with `/login`.
 
+## Create and inspect agents
+
+Create a persisted agent without entering the REPL:
+
+```bash
+memorizz agents create \
+  --name "Research Assistant" \
+  --instruction "Research carefully and preserve useful findings." \
+  --application-mode deep_research \
+  --semantic-cache \
+  --memory-id research-team \
+  --set-default
+
+memorizz agents list
+memorizz agents show AGENT_ID --json
+```
+
+The command uses the configured memory provider and therefore defaults to the
+filesystem store under `~/.memorizz/memory`. LLM settings are auto-detected;
+pass `--llm-provider openai --model gpt-4o-mini` to select one explicitly, or
+`--no-llm` to create a configuration that will be completed later in the SDK or
+UI. `--set-default` makes the new agent the one opened by `memorizz chat`.
+
+### Headless use
+
+The non-UI CLI, one-shot runner, SDK, and MCP server need no window system. They
+work in containers, CI, SSH sessions, and servers with `DISPLAY` and
+`WAYLAND_DISPLAY` unset, and they do not import the optional UI application.
+
+```bash
+unset DISPLAY WAYLAND_DISPLAY
+memorizz agents create --name "Headless Agent" --no-llm --json
+memorizz capabilities --json
+memorizz mcp serve --transport stdio
+```
+
+Use `memory_provider=False` only for an intentionally stateless SDK agent;
+otherwise headless agents use the normal filesystem default.
+
+## Run Codex, Claude Code, OpenHands, or MemAgent
+
+The `harness` command group places installed agent CLIs behind MemoRizz's
+durable memory, policy, approval, cancellation, verification, and learning
+contract:
+
+```bash
+memorizz harness doctor
+memorizz harness run \
+  "Inspect the failing tests and report the cause" \
+  --workspace "$PWD" \
+  --harness auto \
+  --read-only \
+  --verify "python -m pytest -q" \
+  --json
+```
+
+A write run returns `pending_approval` before the external process starts:
+
+```bash
+memorizz harness run "Implement the verified fix" --workspace "$PWD" --write --json
+memorizz harness approvals --status pending --json
+memorizz harness approve PROPOSAL_ID --approver operator@example.com
+memorizz harness show RUN_ID --events --json
+```
+
+Initialize the secret-free adapter allowlist with `memorizz harness init`.
+OpenHands remains unavailable until its configured command is an
+operator-provided isolation wrapper. See the
+[Memory-First Meta-Harness guide](../guides/meta-harness.md) for adapter
+policies, budgets, runtime/delegate modes, and deployment limits.
+
+`memorizz harness doctor NAME --json` reports typed `error_code`, `error`, and
+`remediation` fields. A missing Claude bare-mode credential or missing Codex
+key/login therefore fails before launch with an actionable, secret-free
+message; `harness run` preserves the same fields in its durable failed result.
+
+To select a saved native agent, use
+`--harness native --agent-id AGENT_ID`. Native execution is explicit-only so
+`auto` cannot accidentally recurse into the coordinating MemAgent.
+
+## Run memory evaluations
+
+The `eval` group uses versioned protocol manifests and never upgrades a smoke
+run into a paper claim merely because it completed:
+
+```bash
+memorizz eval list
+memorizz eval protocol show beam
+memorizz eval dataset sync beam
+memorizz eval dataset verify beam --data-path /data/BEAM --variant 128k
+memorizz eval terminal-bench forecast \
+  --per-trial-spend-guard-usd 1.75 \
+  --total-budget-usd 1000
+
+memorizz eval run beam \
+  --data-path /data/BEAM \
+  --variant 128k \
+  --profile smoke \
+  --memory-provider filesystem
+```
+
+The default `--evaluation-mode retrieval` is a normalized retriever/reader
+diagnostic. To exercise an actual agent's automatic memory path, export a
+secret-free `MemAgentModel` JSON template and run:
+
+```bash
+memorizz eval run locomo-plus \
+  --data-path /data/Locomo-Plus/data \
+  --variant cognitive \
+  --evaluation-mode memagent \
+  --agent-template ./agent-template.json \
+  --top-k 6 \
+  --candidate-pool-size 256
+```
+
+Useful retrieval controls are `--query-expansion/--no-query-expansion`,
+`--lexical-weight`, and `--rerank-weight`. The lexical and rerank controls apply
+to diagnostic fusion; full MemAgent reports them as not applied. Use
+`--reader-repair/--no-reader-repair` to control the one bounded repair of
+malformed JSON-like output.
+
+Profiles are `smoke` (one case/category), `regression` (fixed stratified
+subset), and `paper` (full split). Add `--strict-paper` when any mismatch with
+the official runner, scorer, source revision, models, prompts, or runtime must
+fail the command. The report always separates retrieval metrics, grounded
+retrieved-evidence answers, the gold-evidence reader ceiling, and the scorer.
+
+Use `--memory-provider oracle` for a matched Oracle run. Use
+`--no-oracle-reader` only when you explicitly accept losing the reader/retriever
+decomposition, and `--no-corpus-cache` for a deliberate cold-ingestion trial.
+See the [Evaluation Suite](../evaluation-suite.md) for the protocol support
+matrix and interpretation rules.
+
+The Terminal-Bench forecast makes no model call. Without at least ten distinct
+pilot tasks it reports only cost/headroom and withholds accuracy and rank. This
+prevents a public agent's cost or score from being presented as MemoRizz
+performance.
+
 ## The REPL
 
 Running `memorizz` with no arguments launches the interactive loop:
@@ -191,7 +329,9 @@ memorizz init           # interactive key wizard
 memorizz init --local   # configure the local Ollama stack
 memorizz config         # show paths, providers, embeddings, and learning mode
 memorizz capabilities   # report installed features/provider readiness
+memorizz agents create --help
 memorizz oracle preflight --index-policy lazy
+memorizz learning --help # inspect/compile/govern durable learning records
 ```
 
 ### Browser control
@@ -306,8 +446,18 @@ memorizz mcp --help
 memorizz --version
 memorizz oracle install|setup|setup-schema|preflight|teardown
 memorizz automations run [--poll-interval N] [--lease-seconds N] [--concurrency N]
+memorizz learning status --agent-id AGENT [--memory-id ID] [--user-id USER]
+memorizz learning events --agent-id AGENT [--limit 50]
+memorizz learning compile --agent-id AGENT --memory-id ID --user-id USER
+memorizz learning forget-plan --agent-id AGENT --memory-id ID --user-id USER
+memorizz learning forget-apply PLAN_ID --agent-id AGENT --approved-by OPERATOR
 # Uses MEMORIZZ_BACKEND=filesystem|mongodb|oracle (filesystem by default)
 ```
+
+The `learning` commands use `--backend filesystem|mongodb|oracle`, preserve
+tenant filters, and emit JSON with `--json`. Forget planning is always a dry
+run; application writes reversible tombstones and requires an approver
+identity. See the [Learning Control Plane guide](../guides/learning-control-plane.md).
 
 ## MCP connections
 

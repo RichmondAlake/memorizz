@@ -1,0 +1,95 @@
+{
+  "schema_version": "memorizz.memory-suite.reproducibility-rerun.v2",
+  "generated_at": "2026-08-23",
+  "paper_comparable": false,
+  "comparison_basis": "2026-08-22-memory-suite-retry-2.json",
+  "source_improvement": {
+    "changed_file": "src/memorizz/metaharness/security.py",
+    "features": [
+      "explicit path redaction for publishable reports",
+      "untracked-file content fingerprints for Git write workspaces",
+      "bounded whole-tree fingerprints for non-Git write workspaces",
+      "symlink escape checks and file/byte safety limits"
+    ],
+    "memory_evaluation_path_changed": false,
+    "expected_score_effect": "none",
+    "benefit": "stronger harness isolation, auditability, and reproducibility evidence"
+  },
+  "validation": {
+    "focused_tests_passed": 75,
+    "focused_tests_failed": 0,
+    "duration_seconds": 5.74
+  },
+  "configuration": {
+    "sample_count_per_run": 1,
+    "top_k": 6,
+    "candidate_pool_size": 256,
+    "lexical_weight": 0.25,
+    "embedding_model": "nomic-embed-text",
+    "embedding_model_digest": "0a109f422b47",
+    "semantic_memory_extraction": true,
+    "gold_evidence_oracle_reader": true
+  },
+  "fingerprints": {
+    "agentmembench_locomo": "sha256:fe13e6bcda190bba414b0d89badae82913d4a768273b323e856a33f6dad455d9",
+    "locomo_plus_cognitive": "sha256:0794cb5b93141a686f0572019cc96cd7b12384fd79a066562e43994e950bac0f"
+  },
+  "runs": {
+    "agentmembench_qwen2_5_7b": {
+      "task_score": 0.0,
+      "retrieval_recall_at_6": 1.0,
+      "mrr": 1.0,
+      "gold_evidence_oracle_score": 0.0,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 1.055683125014184,
+      "average_answer_latency_seconds": 5.732626916986192,
+      "total_tokens": 1483,
+      "external_api_cost_usd": 0.0
+    },
+    "locomo_plus_qwen2_5_7b": {
+      "task_score": 0.0,
+      "retrieval_recall_at_6": 0.0,
+      "mrr": 0.0,
+      "gold_evidence_oracle_score": 0.0,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 1.3400358329818118,
+      "average_answer_latency_seconds": 3.1834302919742186,
+      "total_tokens": 1461,
+      "external_api_cost_usd": 0.0
+    },
+    "agentmembench_gpt_5_5": {
+      "task_score": 0.4615384615384615,
+      "retrieval_recall_at_6": 1.0,
+      "mrr": 1.0,
+      "gold_evidence_oracle_score": 0.33333333333333337,
+      "oracle_score_previous_run": 0.4615384615384615,
+      "oracle_variance_note": "The answer remained factually correct but received lower token F1 because it added an explanatory relative-date clause.",
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 0.48300983299850486,
+      "average_answer_latency_seconds": 3.1634484590031207,
+      "total_tokens": 1586,
+      "estimated_external_api_cost_usd": 0.01483
+    },
+    "locomo_plus_gpt_5_5": {
+      "task_score": 0.0,
+      "retrieval_recall_at_6": 0.0,
+      "mrr": 0.0,
+      "gold_evidence_oracle_score": 1.0,
+      "embedding_cache_hit": true,
+      "ingestion_seconds": 0.5080310420016758,
+      "average_answer_latency_seconds": 3.1052384579961654,
+      "total_tokens": 1596,
+      "estimated_external_api_cost_usd": 0.01698
+    }
+  },
+  "comparison": {
+    "dataset_fingerprints_unchanged": true,
+    "retrieval_metrics_unchanged": true,
+    "retrieved_source_order_unchanged": true,
+    "task_scores_unchanged": true,
+    "locomo_plus_retrieval_failure_unchanged": true,
+    "estimated_hosted_cost_usd": 0.03181
+  },
+  "conclusion": "The new source work improves MetaHarness security and reproducibility, but it does not modify the memory evaluation pipeline. The controlled rerun therefore reproduces the prior task and retrieval scores.",
+  "security": "Credentials, raw prompts, full predictions, and machine-specific local paths are omitted."
+}

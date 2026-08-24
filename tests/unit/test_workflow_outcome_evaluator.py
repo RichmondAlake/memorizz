@@ -29,8 +29,15 @@ class _LearningRecorder:
         self.cycles += 1
 
 
+def _agent_with_persistence(**kwargs):
+    """Build an agent whose captured-workflow double accepts any provider."""
+    agent = MemAgent(**kwargs)
+    agent.memory_provider = object()
+    return agent
+
+
 def test_business_failure_is_stored_and_used_for_learning():
-    agent = MemAgent(workflow_outcome_evaluator=lambda workflow: False)
+    agent = _agent_with_persistence(workflow_outcome_evaluator=lambda workflow: False)
     recorder = _LearningRecorder()
     agent.continual_learning_manager = recorder
     workflow = _CapturedWorkflow()
@@ -42,7 +49,7 @@ def test_business_failure_is_stored_and_used_for_learning():
 
 
 def test_business_evaluator_cannot_upgrade_execution_failure():
-    agent = MemAgent(workflow_outcome_evaluator=lambda workflow: True)
+    agent = _agent_with_persistence(workflow_outcome_evaluator=lambda workflow: True)
     workflow = _CapturedWorkflow(outcome=WorkflowOutcome.FAILURE)
 
     assert agent._persist_workflow_run(workflow) is True
@@ -53,7 +60,7 @@ def test_evaluator_exception_fails_closed_without_dropping_workflow():
     def broken_evaluator(_workflow):
         raise RuntimeError("rubric service unavailable")
 
-    agent = MemAgent(workflow_outcome_evaluator=broken_evaluator)
+    agent = _agent_with_persistence(workflow_outcome_evaluator=broken_evaluator)
     workflow = _CapturedWorkflow()
 
     assert agent._persist_workflow_run(workflow) is True
@@ -61,19 +68,25 @@ def test_evaluator_exception_fails_closed_without_dropping_workflow():
 
 
 def test_evaluator_accepts_outcome_string_and_none():
-    string_agent = MemAgent(workflow_outcome_evaluator=lambda workflow: "failure")
+    string_agent = _agent_with_persistence(
+        workflow_outcome_evaluator=lambda workflow: "failure"
+    )
     string_workflow = _CapturedWorkflow()
     assert string_agent._persist_workflow_run(string_workflow) is True
     assert string_workflow.stored_outcome == WorkflowOutcome.FAILURE
 
-    none_agent = MemAgent(workflow_outcome_evaluator=lambda workflow: None)
+    none_agent = _agent_with_persistence(
+        workflow_outcome_evaluator=lambda workflow: None
+    )
     none_workflow = _CapturedWorkflow()
     assert none_agent._persist_workflow_run(none_workflow) is True
     assert none_workflow.stored_outcome == WorkflowOutcome.SUCCESS
 
 
 def test_invalid_evaluator_result_fails_closed():
-    agent = MemAgent(workflow_outcome_evaluator=lambda workflow: {"passed": True})
+    agent = _agent_with_persistence(
+        workflow_outcome_evaluator=lambda workflow: {"passed": True}
+    )
     workflow = _CapturedWorkflow()
 
     assert agent._persist_workflow_run(workflow) is True

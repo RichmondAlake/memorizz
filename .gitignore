@@ -60,14 +60,23 @@ src/memorizz/examples/
 site/
 *.map
 
+# Local research papers and LaTeX builds
+research/
+
 # Local runtime toolchains (e.g., downloaded GraalPy binaries)
 .local/
 
 # Evaluation data (large JSON files)
 eval/longmemeval/data/
 eval/longmemeval/results/
+eval/longmemeval_v2/results/
+eval/swe_bench_lite/results/
+eval/membench/results/
 longmemeval_evaluation.log
 matrix_results*.txt
+
+# Local benchmark harness build logs
+logs/image_builder/
 
 # Node / Tauri build artifacts under apps/
 apps/**/node_modules/

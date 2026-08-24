@@ -1,55 +1,102 @@
-# Memorizz Documentation
+# Memorizz
 
-Memorizz is a memory-first framework for Python AI agents. The docs in this directory are versioned with the code so examples and API references stay in sync with each release.
+Memorizz is a memory-first Python framework for agents that must retain,
+retrieve, reuse, and refine information across turns and processes. It combines
+an agent runtime, typed tools, provider-backed memory, context controls,
+observability, and governed continual learning behind one SDK.
 
-## Looking For The App UI?
+!!! warning "Project status"
+    Memorizz is experimental software licensed under PolyForm Noncommercial
+    1.0.0. APIs may change, and deployments must supply their own security,
+    privacy, availability, and model-risk controls.
 
-The docs website runs on `http://localhost:8000` (MkDocs).
-The Memorizz web app UI is separate and runs on `http://127.0.0.1:8765`.
-
-```bash
-pip install "memorizz[ui]"
-memorizz ui
-```
-
-Open `http://127.0.0.1:8765` after starting the command above.
-
-## What Memorizz Covers
-
-- **Memory architecture**: semantic, episodic, procedural, short-term, and shared memory systems.
-- **Application modes**: pre-configured memory stacks for assistant, workflow, and deep research agents.
-- **Provider abstraction**: Oracle, MongoDB, filesystem, or custom `MemoryProvider` implementations.
-- **Agent runtime features**: tool calling, semantic cache, context-window stats, and summary generation.
-- **Optional integrations**: internet access providers, sandbox code execution, skills marketplace (Vercel Agent Skills, SkillsMP), and local web UI.
-
-## Docs Map
-
-- **Getting Started**: installation, first agent setup, and the [Local UI Guide](getting-started/local-ui.md).
-- **Memory Types**: detailed behavior of each memory subsystem.
-- **Memory Providers**: persistence backend setup and tradeoffs.
-- **Use Cases**: mode-specific patterns for assistants, workflows, and deep research.
-- **Skills Marketplace**: discover and use Vercel Agent Skills or SkillsMP skills at runtime.
-- **Internet Access + Sandbox**: optional runtime capabilities for web research and isolated code execution.
-
-## Local Preview
-
-From the project root:
+## Start in five minutes
 
 ```bash
-pip install -e ".[docs]"
-mkdocs serve
+python -m pip install memorizz
+export OPENAI_API_KEY="your-key"
 ```
 
-Visit <http://localhost:8000>.
+```python
+from memorizz import MemAgentBuilder
 
-Before publishing docs changes:
+agent = (
+    MemAgentBuilder()
+    .with_name("Support memory")
+    .with_instruction("Answer concisely and use prior context when relevant.")
+    .with_llm_config({"provider": "openai", "model": "gpt-4o-mini"})
+    .with_memory_ids("support-demo")
+    .build()
+)
 
-```bash
-mkdocs build --strict
+scope = {
+    "memory_id": "support-demo",
+    "user_id": "user-42",
+    "thread_id": "thread-1",
+}
+agent.run("I prefer Python examples.", **scope)
+print(agent.run("How should you show me code?", **scope))
+agent.close()
 ```
 
-## Release Checklist (Docs)
+With no provider supplied, the SDK persists to
+`~/.memorizz/memory`. Use `memory_provider=False` only for an intentionally
+stateless agent.
 
-1. Ensure `README.md` and docs quickstarts reference existing files and valid API names.
-2. Verify new features are documented under the relevant provider/memory/use-case page.
-3. Run `mkdocs build --strict` to catch broken links/snippets.
+## Choose your interface
+
+| You want to… | Start here |
+|---|---|
+| Embed an agent in Python | [Python SDK quickstart](getting-started/python-sdk-quickstart.md) |
+| Chat with and administer agents in a terminal | [CLI guide](getting-started/cli.md) |
+| Configure and inspect agents in a browser | [Local UI guide](getting-started/local-ui.md) |
+| Let an MCP host operate Memorizz | [Memorizz MCP server](guides/mcp-server.md) |
+| Give an agent access to Notion, Calendar, or another MCP server | [MCP connectivity](guides/mcp-connectivity.md) |
+| Run Codex, Claude Code, OpenHands, or MemAgent behind one control plane | [Memory-first MetaHarness](guides/meta-harness.md) |
+
+Not sure which path fits? Read [Choose Your Path](getting-started/overview.md)
+and [Installation](getting-started/installation.md).
+
+## The system at a glance
+
+```text
+request + tenant scope
+        │
+        ▼
+  MemAgent runtime ── policies ── tools / MCP / browser / sandbox
+        │
+        ├── retrieve and assemble bounded context
+        ├── call the configured model and governed capabilities
+        └── persist outcomes, traces, summaries, and learning evidence
+        │
+        ▼
+filesystem (default) │ MongoDB │ Oracle AI Database │ custom provider
+```
+
+For repository work, the same control plane can route a bounded task to a
+Codex, Claude Code, OpenHands, or native MemAgent worker. The worker owns its
+agent loop; MemoRizz owns memory scope, policy, approvals, normalized evidence,
+verification, and learning.
+
+The important distinction is that a **memory type** defines what a record
+means, while a **memory provider** defines where it is persisted and queried.
+The runtime decides what enters the model context on each turn. See
+[Core Concepts](getting-started/concepts.md) for the scopes, lifecycle, and
+trust boundaries.
+
+## Build, operate, and evaluate
+
+- Add application functions with [typed tools and durable approvals](guides/tools-and-approvals.md).
+- Choose a [memory provider](memory-providers/filesystem.md) and follow the
+  [multi-tenant contract](guides/multi-tenant.md).
+- Control token use with [context efficiency, semantic caching, and compaction](guides/context-efficiency.md).
+- Inspect runs with [observability and trace analysis](observability-ui.md).
+- Verify optional integrations with [capability reports and preflight](reference/capabilities.md).
+- Use the [evaluation suite](evaluation-suite.md) for reproducible comparisons;
+  benchmark results are not leaderboard submissions unless submitted through
+  the benchmark's official process.
+
+For production-oriented review, start with
+[Configuration and Secrets](reference/configuration.md),
+[Production Governance](guides/production-governance.md), and
+[Troubleshooting](troubleshooting.md).

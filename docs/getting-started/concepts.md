@@ -1,47 +1,94 @@
-# Concepts
+# Core Concepts
 
-Memorizz composes agent behavior from memory types, storage providers, and application modes.
+A useful mental model is:
 
-## Memory Types
+```text
+MemAgent = model + memory provider + runtime policies + optional capabilities
+```
 
-`MemoryType` is defined in `src/memorizz/enums/memory_type.py`.
+The model reasons, the provider persists, and the runtime decides what may be
+retrieved, exposed, executed, cached, compacted, or learned.
 
-| Enum | Purpose | Main Implementation |
+## Identity and scope
+
+Pass scope on every request in multi-user applications.
+
+| Identifier | Meaning | Example |
 |---|---|---|
-| `PERSONAS` | Versioned agent identity and evolution history | `src/memorizz/long_term/semantic/persona/` |
-| `KNOWLEDGE_BASE` | Semantic facts and reusable knowledge | `src/memorizz/long_term/semantic/` |
-| `ENTITY_MEMORY` | Structured entity profiles and attributes | `src/memorizz/long_term/semantic/entity_memory/` |
-| `TOOLBOX` | Callable tools and tool metadata | `src/memorizz/long_term/procedural/toolbox/` |
-| `WORKFLOW_MEMORY` | Process and task execution traces | `src/memorizz/long_term/procedural/workflow/` |
-| `SKILLBOX` | Distilled learned skills and lifecycle state | `src/memorizz/long_term/procedural/skillbox/` |
-| `CONVERSATION_MEMORY` | User/assistant interaction history | `src/memorizz/long_term/episodic/` |
-| `SUMMARIES` | Compressed conversation summaries | `src/memorizz/long_term/episodic/summary_component.py` |
-| `SHORT_TERM_MEMORY` | Provider-backed working-session records | `src/memorizz/memagent/core.py` |
-| `SEMANTIC_CACHE` | Similar-query response caching | `src/memorizz/short_term_memory/semantic_cache.py` |
-| `TOOL_LOG` | Offloaded tool output referenced from prompt context | `src/memorizz/memagent/utils/tool_log.py` |
-| `SHARED_MEMORY` | Multi-agent coordination state | `src/memorizz/coordination/shared_memory/` |
-| `MEMAGENT` | Persisted agent configuration | `src/memorizz/memagent/models.py` |
+| `agent_id` | Persisted agent definition | `support-agent-v2` |
+| `memory_id` | Application or memory namespace | `acme-support` |
+| `user_id` | Tenant/end-user isolation boundary | `user-42` |
+| `thread_id` | One conversation or workstream | `ticket-918` |
 
-## Providers vs Memory Types
+`None` is an anonymous/legacy user scope, not a wildcard. Provider APIs that
+support an omitted-filter sentinel distinguish “do not filter by user” from
+“only rows whose `user_id` is null.” See
+[Multi-Tenant Applications](../guides/multi-tenant.md).
 
-- **Memory types** define what data is stored.
-- **Providers** define where data is stored (filesystem, Oracle, MongoDB, custom).
-- **Application modes** choose a default combination of memory types.
+## Memory types and providers
 
-## Application Modes
+Memory types describe semantics. Providers implement persistence and query
+behavior.
 
-Mode defaults come from `src/memorizz/enums/application_mode.py`.
+| Family | Units capture | Common runtime use |
+|---|---|---|
+| Episodic | Messages, conversations, summaries | Continuity and historical recall |
+| Semantic | Knowledge, entities, personas | Facts and structured profiles |
+| Procedural | Tools, workflows, skills | Reusable actions and learned procedures |
+| Short-term | Working records and semantic-cache entries | Current-turn efficiency |
+| Shared | Workflow-scoped coordination state | Multi-agent hand-offs |
+| Operational | Tool logs, traces, agent definitions | Audit, expansion, and lifecycle |
 
-- `assistant`: conversation, long-term, personas, entity memory, short-term, summaries
-- `workflow`: workflow memory, toolbox, long-term, short-term, summaries
-- `deep_research`: toolbox, shared memory, long-term, short-term, summaries
+All providers should preserve canonical identifiers, timestamps, metadata, and
+scope. Semantic retrieval must apply tenant/agent/toolbox filters before vector
+top-k selection—not after it.
 
-You can still override with explicit `memory_types` if your use case needs a custom stack.
+## Storage is not context
 
-## Typical Runtime Lifecycle
+Persisting a record does not mean sending it to the model. On each turn the
+runtime retrieves candidates, applies scope and policy, deduplicates them,
+selects a bounded set, and assembles a stable prompt prefix. Large tool results
+can be replaced with an auditable pointer; summaries compact old history while
+retaining links to their source messages.
 
-1. Agent receives a query.
-2. Relevant memory is retrieved from active memory types via the configured provider.
-3. LLM produces a response (and may call registered tools).
-4. Interaction is written back to memory stores.
-5. Optional semantic cache and summary logic optimize future turns.
+This separation lets an application keep rich durable history without paying
+to place every record in every prompt.
+
+## Turn lifecycle
+
+```text
+host request and scope
+  → semantic-cache admission / lookup
+  → scoped memory and skill retrieval
+  → bounded context assembly
+  → model call and governed tool loop
+  → response and operational evidence
+  → memory, cache, summary, trace, and learning writes
+```
+
+Side-effecting tools bypass semantic-cache admission. Cache keys and matches
+incorporate ownership, model/prompt/tool/data fingerprints, domains, TTL, and
+freshness policy; vector similarity alone does not establish freshness.
+
+## Application modes
+
+`assistant`, `workflow`, and `deep_research` choose default memory families.
+They do not change the provider security boundary or automatically enable
+external capabilities. Explicit `memory_types` can override mode defaults.
+
+## Trust boundaries
+
+- The **host** owns credentials, tenant scope, approval decisions, tool
+  registration, and policy configuration.
+- The **model** may propose actions but cannot approve its own mutations.
+- **MCP, browser, internet, and sandbox providers** are separate authority and
+  execution boundaries; enable only the least privilege required.
+- **Continual learning** consumes host-verified evidence and promotes workflows
+  through explicit lifecycle policy. A repeated model claim is not verified
+  success.
+- **Observability** may contain sensitive operational metadata. Use content
+  redaction, authentication, audit logging, and scoped access.
+
+Next, build an agent in the [SDK quickstart](python-sdk-quickstart.md), then add
+[tools and approval](../guides/tools-and-approvals.md) or review
+[context efficiency](../guides/context-efficiency.md).

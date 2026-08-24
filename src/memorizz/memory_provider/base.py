@@ -2,8 +2,11 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import base64
 import json
+import time
 from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 # Use TYPE_CHECKING for forward references to avoid circular imports
@@ -14,6 +17,23 @@ if TYPE_CHECKING:
 # Sentinel so "user_id not supplied" is distinguishable from an explicit None
 # (matching the MongoDB provider's _MONGO_UNSET convention).
 _UNSET = object()
+
+
+@dataclass(frozen=True)
+class MemoryProviderCapabilities:
+    """Portable retrieval and storage behavior exposed by a provider."""
+
+    provider: str
+    batch_store: bool = False
+    transactional_batch: bool = False
+    scoped_search: bool = True
+    result_scores: bool = False
+    provenance: bool = True
+    native_vector_search: bool = False
+    native_hybrid_search: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 def filter_tool_log_rows(
@@ -56,6 +76,61 @@ def filter_tool_log_rows(
 
 class MemoryProvider(ABC):
     """Abstract base class for memory providers."""
+
+    def memory_capabilities(self) -> MemoryProviderCapabilities:
+        """Describe the portable contract without probing optional internals."""
+
+        return MemoryProviderCapabilities(provider=type(self).__name__)
+
+    def store_many(
+        self,
+        rows: List[Dict[str, Any]],
+        memory_store_type: Any,
+        *,
+        memory_id: Optional[str] = None,
+    ) -> List[str]:
+        """Portable batch contract with a correct per-record fallback."""
+
+        return [
+            self.store(
+                data=dict(row),
+                memory_store_type=memory_store_type,
+                memory_id=memory_id,
+            )
+            for row in rows
+        ]
+
+    def search_memory(
+        self,
+        query: Any,
+        memory_store_type: Any,
+        *,
+        limit: int = 10,
+        memory_id: Optional[str] = None,
+        **scope: Any,
+    ) -> List[Dict[str, Any]]:
+        """Return one normalized ranked list through the provider contract."""
+
+        result = self.retrieve_by_query(
+            query,
+            memory_store_type=memory_store_type,
+            limit=max(1, int(limit)),
+            memory_id=memory_id,
+            **scope,
+        )
+        rows = [result] if isinstance(result, dict) else list(result or [])
+        normalized: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            document = dict(row)
+            identifier = (
+                document.get("source_id") or document.get("_id") or document.get("id")
+            )
+            if identifier is not None:
+                document.setdefault("source_id", str(identifier))
+            normalized.append(document)
+        return normalized
 
     def retrieve_skillbox_candidates(
         self,
@@ -195,6 +270,145 @@ class MemoryProvider(ABC):
         an administrative/unscoped read, explicitly passing ``None`` selects
         only anonymous/legacy rows, and a string selects that exact tenant.
         """
+
+    def query_observability_records(
+        self,
+        memory_store_type: Any,
+        *,
+        agent_ids: Optional[List[str]] = None,
+        memory_ids: Optional[List[str]] = None,
+        thread_id: Optional[str] = None,
+        user_id: Any = _UNSET,
+        record_type: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        success: Optional[bool] = None,
+        start_time: Any = None,
+        end_time: Any = None,
+        limit: int = 250,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return one bounded observability page with portable metadata.
+
+        First-party database providers should override this with indexed
+        predicates. This compatibility path intentionally remains available
+        to third-party and filesystem providers, but it never returns an
+        unbounded page to the caller.
+        """
+        started_at = time.perf_counter()
+        safe_limit = max(1, min(int(limit or 250), 1000))
+        try:
+            rows = self.list_all(memory_store_type=memory_store_type) or []
+        except TypeError:
+            rows = self.list_all(memory_store_type) or []
+
+        wanted_agents = {str(value) for value in (agent_ids or []) if value}
+        wanted_memories = {str(value) for value in (memory_ids or []) if value}
+        filtered: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            filter_row = row
+            # Oracle and older third-party providers can keep shared-memory
+            # metadata only inside the JSON payload. Decode it for filtering
+            # without changing the returned provider document.
+            if record_type and not row.get("record_type"):
+                content = row.get("content")
+                if hasattr(content, "read"):
+                    try:
+                        content = content.read()
+                    except Exception:
+                        content = None
+                if isinstance(content, bytes):
+                    content = content.decode("utf-8", errors="replace")
+                if isinstance(content, str):
+                    try:
+                        payload = json.loads(content)
+                    except (TypeError, ValueError):
+                        payload = None
+                    if isinstance(payload, dict):
+                        filter_row = {**row, **payload}
+            if record_type is not None and str(
+                filter_row.get("record_type") or ""
+            ) != str(record_type):
+                continue
+            row_agent = str(
+                filter_row.get("agent_id") or filter_row.get("agentId") or ""
+            )
+            row_memory = str(
+                filter_row.get("trace_memory_id")
+                or filter_row.get("memory_id")
+                or filter_row.get("memoryId")
+                or ""
+            )
+            if wanted_agents or wanted_memories:
+                if row_agent not in wanted_agents and row_memory not in wanted_memories:
+                    continue
+            row_thread = str(
+                filter_row.get("thread_id") or filter_row.get("conversation_id") or ""
+            )
+            if thread_id is not None and row_thread != str(thread_id):
+                continue
+            if user_id is not _UNSET and filter_row.get("user_id") != user_id:
+                continue
+            if tool_name is not None and str(filter_row.get("tool_name") or "") != str(
+                tool_name
+            ):
+                continue
+            if success is not None and filter_row.get("success") is not success:
+                continue
+            timestamp = filter_row.get("timestamp")
+            if start_time is not None and str(timestamp or "") < str(start_time):
+                continue
+            if end_time is not None and str(timestamp or "") > str(end_time):
+                continue
+            result_row = dict(row)
+            for key in (
+                "record_type",
+                "application_id",
+                "agent_id",
+                "run_id",
+                "turn_id",
+                "root_trace_id",
+                "trace_memory_id",
+                "thread_id",
+                "user_id",
+                "timestamp",
+            ):
+                if result_row.get(key) is None and filter_row.get(key) is not None:
+                    result_row[key] = filter_row[key]
+            filtered.append(result_row)
+
+        filtered.sort(
+            key=lambda item: str(item.get("timestamp") or item.get("_id") or ""),
+            reverse=True,
+        )
+        offset = 0
+        if cursor:
+            try:
+                padded = cursor + "=" * (-len(cursor) % 4)
+                offset = int(base64.urlsafe_b64decode(padded).decode("ascii"))
+            except Exception as exc:
+                raise ValueError("Invalid observability cursor") from exc
+        page = filtered[offset : offset + safe_limit]
+        next_offset = offset + len(page)
+        has_more = next_offset < len(filtered)
+        next_cursor = None
+        if has_more:
+            next_cursor = (
+                base64.urlsafe_b64encode(str(next_offset).encode("ascii"))
+                .decode("ascii")
+                .rstrip("=")
+            )
+        return {
+            "items": page,
+            "next_cursor": next_cursor,
+            "truncated": has_more,
+            "limit": safe_limit,
+            "scanned_count": len(rows),
+            "query_duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
+            "freshness": str(page[0].get("timestamp") or "") if page else None,
+            "provider_native": False,
+        }
 
     @abstractmethod
     def retrieve_conversation_history_ordered_by_timestamp(

@@ -10,6 +10,8 @@ net that lets app.py be refactored — route extractions and template edits
 that break a page fail here instead of in someone's browser.
 """
 
+import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,6 +27,7 @@ from memorizz.memory_provider import FileSystemConfig, FileSystemProvider  # noq
 from memorizz.ui import state  # noqa: E402
 from memorizz.ui.app import create_app  # noqa: E402
 from memorizz.ui.routers.traces import (  # noqa: E402
+    _RUNTIME_TRACE_AGENT_ID,
     _expand_trace_bundle,
     _thread_row_key,
 )
@@ -44,6 +47,8 @@ PAGES = [
     "/observability",
     "/vercel-skills",
     "/evalground",
+    "/learning-control-plane",
+    "/harnesses",
     "/api/status",
     "/api/personas",
     "/api/persona-presets",
@@ -89,6 +94,86 @@ def test_page_renders_disconnected(client, path):
     ):
         resp = client.get(path)
     assert resp.status_code < 500, f"{path} -> {resp.status_code}"
+
+
+@pytest.mark.unit
+def test_connect_page_uses_env_secrets_without_rendering_them(client):
+    secret_uri = "mongodb://operator:super-secret@db.example.test/memorizz"
+    secret_password = "oracle-super-secret"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "MONGODB_URI": secret_uri,
+                "MONGODB_DB_NAME": "production-memory",
+                "ORACLE_PASSWORD": secret_password,
+            },
+            clear=False,
+        ),
+        patch.dict(
+            state._state,
+            {"provider": None, "provider_type": None, "connection_info": {}},
+        ),
+    ):
+        response = client.get("/connect")
+
+    assert response.status_code == 200
+    assert secret_uri not in response.text
+    assert secret_password not in response.text
+    assert "Configured via MONGODB_URI" in response.text
+    assert '<option value="mongodb" selected>' in response.text
+
+
+@pytest.mark.unit
+def test_ui_token_auth_read_only_mode_and_trace_audit(tmp_path, fs_provider):
+    audit_path = Path(tmp_path) / "trace-audit.jsonl"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "MEMORIZZ_UI_AUTH_TOKEN": "burner-operator-token",
+                "MEMORIZZ_UI_READ_ONLY": "true",
+                "MEMORIZZ_UI_AUDIT_LOG": str(audit_path),
+                "MEMORIZZ_UI_TRACE_CONTENT_MODE": "redacted",
+            },
+            clear=False,
+        ),
+        patch.dict(
+            state._state,
+            {
+                "provider": fs_provider,
+                "provider_type": "filesystem",
+                "connection_info": {"root_path": str(fs_provider.root_path)},
+                "read_only": True,
+            },
+        ),
+    ):
+        secure_client = TestClient(create_app(), follow_redirects=False)
+        unauthenticated = secure_client.get("/traces", headers={"accept": "text/html"})
+        invalid = secure_client.post(
+            "/login",
+            data={"access_token": "wrong", "next": "/traces"},
+        )
+        authenticated = secure_client.post(
+            "/login",
+            data={"access_token": "burner-operator-token", "next": "/traces"},
+        )
+        trace_page = secure_client.get("/traces")
+        blocked_mutation = secure_client.post("/settings", data={})
+
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/login")
+    assert invalid.status_code == 401
+    assert "burner-operator-token" not in invalid.text
+    assert authenticated.status_code == 303
+    assert "httponly" in authenticated.headers["set-cookie"].lower()
+    assert trace_page.status_code == 200
+    assert "Read-only provider" in trace_page.text
+    assert blocked_mutation.status_code == 403
+    assert audit_path.exists()
+    audit_text = audit_path.read_text(encoding="utf-8")
+    assert "trace_dashboard" in audit_text
+    assert "burner-operator-token" not in audit_text
 
 
 @pytest.mark.unit
@@ -140,9 +225,11 @@ def test_trace_bundle_expands_into_timeline_events():
             "content": (
                 '{"type":"trace_bundle","version":1,"events":['
                 '{"trace_kind":"tool_call","title":"Tool Call · inventory_status",'
-                '"content":"{\\"region\\":\\"London\\"}","trace_id":"call-1"},'
+                '"content":"{\\"region\\":\\"London\\"}","trace_id":"call-1",'
+                '"logical_tool_name":"inventory_status"},'
                 '{"trace_kind":"tool_result","title":"Tool Result · inventory_status",'
-                '"content":"{\\"units\\":21}","trace_id":"result:call-1"}'
+                '"content":"{\\"units\\":21}","trace_id":"result:call-1",'
+                '"logical_tool_name":"inventory_status","success":true,"duration_ms":18.5}'
                 "]}"
             ),
         },
@@ -154,13 +241,151 @@ def test_trace_bundle_expands_into_timeline_events():
     assert [event["kind"] for event in events] == ["tool_call", "tool_result"]
     assert events[0]["title"] == "Tool Call · inventory_status"
     assert events[1]["trace_id"] == "result:call-1"
+    assert events[1]["logical_tool_name"] == "inventory_status"
+    assert events[1]["success"] is True
+    assert events[1]["duration_ms"] == 18.5
     assert all(event["thread_id"] == "thread-1" for event in events)
+
+
+@pytest.mark.unit
+def test_trace_bundle_expands_context_and_cache_provenance_metadata():
+    events = _expand_trace_bundle(
+        {
+            "role": "tool",
+            "timestamp": "2026-08-20T10:30:00+00:00",
+            "content": json.dumps(
+                {
+                    "type": "trace_bundle",
+                    "version": 2,
+                    "events": [
+                        {
+                            "trace_kind": "context_provenance",
+                            "title": "Request context provenance",
+                            "content": '{"grounding_status":"ready"}',
+                            "canonical_page_type": "analysis",
+                            "canonical_page_id": "analysis-1",
+                            "canonical_title_fingerprint": "sha256:abc123",
+                            "thread_binding_status": "matched",
+                            "ownership_verified": True,
+                            "grounding_status": "ready",
+                            "grounding_source": "stored_text",
+                        },
+                        {
+                            "trace_kind": "cache_decision",
+                            "title": "Semantic cache · miss",
+                            "content": '{"cache_decision":"miss"}',
+                            "cache_decision": "miss",
+                            "cache_enabled": True,
+                        },
+                    ],
+                }
+            ),
+        },
+        memory_id="primary-user-1",
+        thread_id="analysis_analysis-1",
+    )
+
+    assert events is not None
+    assert events[0]["canonical_page_id"] == "analysis-1"
+    assert events[0]["canonical_title_fingerprint"] == "sha256:abc123"
+    assert events[0]["grounding_source"] == "stored_text"
+    assert events[1]["cache_decision"] == "miss"
 
 
 @pytest.mark.unit
 def test_trace_thread_key_keeps_threads_in_one_memory_distinct():
     assert _thread_row_key("thread-a", "memory-1") != _thread_row_key(
         "thread-b", "memory-1"
+    )
+
+
+class _RuntimeOnlyTraceProvider:
+    def __init__(self):
+        self.conversations = [
+            {
+                "memory_id": "primary_user-1",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+                "role": "user",
+                "content": "Remember this exact article URL",
+                "timestamp": 1,
+            },
+            {
+                "memory_id": "primary_user-1",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+                "role": "assistant",
+                "content": "I will keep it in this thread.",
+                "timestamp": 2,
+            },
+        ]
+        self.tool_logs = [
+            {
+                "agent_id": "ephemeral-process-agent",
+                "memory_id": "primary_user-1",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+                "tool_name": "ingest_url",
+                "success": True,
+                "timestamp": 3,
+            }
+        ]
+
+    def list_memagents(self):
+        return []
+
+    def retrieve_memagent(self, _agent_id):
+        return None
+
+    def list_all(self, memory_type, **_kwargs):
+        value = getattr(memory_type, "value", str(memory_type))
+        if value == "conversation_memory":
+            return list(self.conversations)
+        if value == "tool_log":
+            return list(self.tool_logs)
+        return []
+
+
+@pytest.mark.unit
+def test_traces_discovers_unregistered_runtime_and_renders_its_timeline(client):
+    provider = _RuntimeOnlyTraceProvider()
+    with patch.dict(
+        state._state,
+        {
+            "provider": provider,
+            "provider_type": "mongodb",
+            "connection_info": {"db_name": "trace-test"},
+        },
+    ):
+        overview = client.get("/traces")
+        timeline = client.get(
+            "/traces",
+            params={
+                "agent_id": _RUNTIME_TRACE_AGENT_ID,
+                "thread_id": "thread-1",
+                "thread_memory_id": "primary_user-1",
+            },
+        )
+        analysis = client.get(
+            "/traces/analysis.json",
+            params={
+                "agent_id": _RUNTIME_TRACE_AGENT_ID,
+                "thread_id": "thread-1",
+                "thread_memory_id": "primary_user-1",
+            },
+        )
+
+    assert overview.status_code == 200
+    assert "Unregistered runtime traces" in overview.text
+    assert "thread-1" in overview.text
+    assert timeline.status_code == 200
+    assert "Trace Insights" in timeline.text
+    assert "Remember this exact article URL" in timeline.text
+    assert "Execution Log · ingest_url" in timeline.text
+    assert analysis.status_code == 200
+    assert analysis.json()["read_only"] is True
+    assert any(
+        row["id"] == "missing_trace_identity" for row in analysis.json()["insights"]
     )
 
 

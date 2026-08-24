@@ -32,7 +32,7 @@ from memorizz import MemAgentBuilder
 
 agent = (
     MemAgentBuilder()
-    .with_llm(my_llm)
+    .with_llm_config({"provider": "openai", "model": "gpt-4o-mini"})
     .with_sandbox(
         {
             "provider": "e2b",
@@ -45,7 +45,8 @@ agent = (
 )
 ```
 
-The equivalent constructor form is:
+The equivalent constructor form, when `my_llm` is an already configured
+`LLMProvider`, is:
 
 ```python
 from memorizz import MemAgent
@@ -90,4 +91,4 @@ and the Java wrapper build requirements.
   an isolation boundary.
 - Test the exact provider SDK versions and deployment template used in
   production. MemoRizz validates its supported E2B compatibility range at
-runtime.
+  runtime.

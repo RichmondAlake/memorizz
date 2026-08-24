@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 from dataclasses import dataclass
 from typing import FrozenSet, Optional
 
@@ -46,10 +47,17 @@ class StaticAPIKeyVerifier:
 def current_identity() -> RequestIdentity:
     token = get_access_token()
     if token is None:
+        # A run-scoped stdio server may be launched by the trusted MemoRizz
+        # meta-harness. Bind its otherwise anonymous local connection to the
+        # exact tenant selected by the host; remote transports never use this
+        # fallback because authenticated requests carry an access token.
+        local_principal = str(
+            os.getenv("MEMORIZZ_MCP_SERVER_LOCAL_PRINCIPAL", "")
+        ).strip()
         return RequestIdentity(
-            principal=None,
+            principal=local_principal or None,
             scopes=frozenset(ALL_SCOPES),
-            authenticated=False,
+            authenticated=bool(local_principal),
         )
     return RequestIdentity(
         principal=token.subject or token.client_id,

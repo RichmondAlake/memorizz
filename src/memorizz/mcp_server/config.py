@@ -125,6 +125,8 @@ class MemorizzMCPServerConfig:
     allow_anonymous_http: bool = False
     allow_writes: Optional[bool] = None
     allow_agent_execution: Optional[bool] = None
+    allow_harness_execution: Optional[bool] = None
+    harness_workspace_roots: Optional[Set[str]] = None
     api_key_grants: List[StaticAPIKeyGrant] = field(default_factory=list)
     exposed_agent_ids: Optional[Set[str]] = None
     max_result_items: int = 100
@@ -161,6 +163,16 @@ class MemorizzMCPServerConfig:
             self.allow_writes = is_stdio
         if self.allow_agent_execution is None:
             self.allow_agent_execution = is_stdio and bool(self.allow_writes)
+        if self.allow_harness_execution is None:
+            self.allow_harness_execution = is_stdio and bool(self.allow_agent_execution)
+        if self.harness_workspace_roots is None:
+            self.harness_workspace_roots = {os.getcwd()} if is_stdio else set()
+        else:
+            self.harness_workspace_roots = {
+                os.path.realpath(os.path.expanduser(str(value).strip()))
+                for value in self.harness_workspace_roots
+                if str(value).strip()
+            }
 
         if self.exposed_agent_ids is not None:
             self.exposed_agent_ids = {
@@ -176,6 +188,14 @@ class MemorizzMCPServerConfig:
         if not is_stdio and self.allow_agent_execution and not self.exposed_agent_ids:
             raise ValueError(
                 "Remote agent execution requires at least one explicit --agent-id"
+            )
+        if (
+            not is_stdio
+            and self.allow_harness_execution
+            and not self.harness_workspace_roots
+        ):
+            raise ValueError(
+                "Remote harness execution requires explicit harness workspace roots"
             )
 
         if not is_stdio and not self.api_key_grants and not self.allow_anonymous_http:
@@ -220,6 +240,19 @@ class MemorizzMCPServerConfig:
             "configured_principals": len(self.api_key_grants),
             "allow_writes": bool(self.allow_writes),
             "allow_agent_execution": bool(self.allow_agent_execution),
+            "allow_harness_execution": bool(self.allow_harness_execution),
+            "harness_workspace_roots": sorted(self.harness_workspace_roots or []),
+            "agent_creation": {
+                "available": bool(self.transport == "stdio" and self.allow_writes),
+                "transport": "stdio",
+                "remote_http": False,
+            },
+            "agent_management": {
+                "available": bool(self.transport == "stdio" and self.allow_writes),
+                "operations": ["create", "update", "delete"],
+                "transport": "stdio",
+                "remote_http": False,
+            },
             "exposed_agent_ids": sorted(self.exposed_agent_ids or []),
             "max_result_items": self.max_result_items,
             "max_text_chars": self.max_text_chars,
@@ -242,6 +275,12 @@ class MemorizzMCPServerConfig:
             "allow_writes": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_WRITES"),
             "allow_agent_execution": _env_bool(
                 "MEMORIZZ_MCP_SERVER_ALLOW_AGENT_EXECUTION"
+            ),
+            "allow_harness_execution": _env_bool(
+                "MEMORIZZ_MCP_SERVER_ALLOW_HARNESS_EXECUTION"
+            ),
+            "harness_workspace_roots": _env_csv(
+                "MEMORIZZ_MCP_SERVER_HARNESS_WORKSPACE_ROOTS"
             ),
             "exposed_agent_ids": _env_csv("MEMORIZZ_MCP_SERVER_AGENT_IDS"),
             "approval_ttl_seconds": int(

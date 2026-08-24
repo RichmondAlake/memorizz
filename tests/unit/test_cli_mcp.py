@@ -92,7 +92,29 @@ def test_cli_capability_report_identifies_050_mcp_surface():
 
     assert result.exit_code == 0, result.output
     report = json.loads(result.output)
-    assert report["version"] == "0.5.2"
+    assert report["version"] == "0.6.0"
     assert report["features"]["mcp_client"]["available"] is True
     assert report["features"]["mcp_server"]["available"] is True
+    assert report["features"]["mcp_server"]["tool_count"] == 23
+    assert report["features"]["mcp_server"]["strict_input_schemas"] is True
+    assert report["features"]["agent_creation"] == {
+        "available": True,
+        "cli": True,
+        "mcp_local_stdio": True,
+        "mcp_remote_http": False,
+        "sdk": True,
+        "ui": True,
+    }
+    assert report["features"]["headless_runtime"] == {
+        "available": True,
+        "cli": True,
+        "display_server_required": False,
+        "mcp_stdio": True,
+        "sdk": True,
+        "ui_dependency_required": False,
+    }
+    assert (
+        "approval_decisions"
+        in report["features"]["agent_surface_parity"]["trusted_host_only"]
+    )
     assert report["features"]["durable_approvals"]["single_use"] is True

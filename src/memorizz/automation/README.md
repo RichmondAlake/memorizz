@@ -101,7 +101,11 @@ When `has_automations()` is `True`, six tool functions are automatically registe
  that summarizes my portfolio performance."
 ```
 
-The agent will call `automation_create_job` internally. This approach requires a two-step confirmation (the agent asks for confirmation before creating).
+The agent calls `automation_create_job` internally. Mutating automation tools
+pause as durable, single-use approval proposals containing the exact arguments
+and checkpoint. A trusted UI/CLI/host approves or rejects the proposal and
+resumes the stored call; the model never receives a `confirm` or `approved`
+argument.
 
 **Registered tools:** `automation_create_job`, `automation_list_jobs`, `automation_pause_job`, `automation_resume_job`, `automation_delete_job`, `automation_run_now`.
 
@@ -282,7 +286,7 @@ The worker is a long-running process that polls the store for due jobs and execu
 memorizz automations run --poll-interval 5 --lease-seconds 120 --concurrency 2
 ```
 
-Required environment variables:
+Backend environment variables:
 
 | Env Var | Description |
 |---------|-------------|
@@ -290,6 +294,11 @@ Required environment variables:
 | `ORACLE_PASSWORD` | Oracle database password |
 | `ORACLE_DSN` | Oracle connection DSN |
 | `ORACLE_SCHEMA` | (Optional) Oracle schema name |
+
+Set `MEMORIZZ_BACKEND=filesystem` for the zero-configuration local store,
+`MEMORIZZ_BACKEND=mongodb` plus `MONGODB_URI`, or
+`MEMORIZZ_BACKEND=oracle` plus the Oracle values above. The worker must resolve
+the same provider and Memorizz home as the process that saved the agent.
 
 The web UI can also run an embedded worker when automations are enabled in settings.
 

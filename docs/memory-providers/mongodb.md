@@ -15,8 +15,8 @@ from memorizz.memory_provider.mongodb import MongoDBProvider, MongoDBConfig
 
 provider = MongoDBProvider(MongoDBConfig(
     uri=os.environ["MONGODB_URI"],
-    database="memorizz",
-    collection_prefix="agents",
+    db_name="memorizz",
+    lazy_vector_indexes=True,
 ))
 ```
 
@@ -28,9 +28,30 @@ Collections are created lazily (e.g., `agents_personas`, `agents_knowledge_base`
 
 ## Atlas Vector Search
 
-1. Enable the [Vector Search](https://www.mongodb.com/docs/atlas/atlas-vector-search/) preview on your cluster.
-2. Create an index per collection referencing the embedding field.
-3. Configure the provider with your embedding model dimensions.
+1. Enable Atlas Vector Search on your cluster.
+2. Configure the provider with your embedding model dimensions.
+3. Give the provider search-index management permission, or provision the
+   indexes separately.
+
+MemoRizz reconciles the `memory_id` and `user_id` filter definitions used by
+entity retrieval, and `status`, `agent_id`, and `user_id` for Skillbox
+retrieval. Filters are applied inside `$vectorSearch` before top-k selection.
+If Atlas Search is missing or unavailable, entity memory uses a strict bounded
+exact fallback. Query failures are reported as degraded retrieval rather than
+healthy zero-match results.
+
+Knowledge-base retrieval follows the same production-safe principle for
+MetaHarness and learning-control-plane evidence. MemoRizz first applies exact
+`memory_id`, `user_id`, and optional namespace filters. If `$vectorSearch` is
+not available (for example MongoDB Community, local Docker, or an Atlas tier
+without Search), it examines at most 200 rows inside that scope, ranks them
+lexically, and labels every result `scoped_lexical_fallback` with a degraded
+reason. It never turns a vector failure into an unscoped collection scan.
+
+Both `provider.store(data, ..., memory_id="...")` and a `memory_id` embedded in
+the data now persist the same knowledge-base scope. This parity matters for
+shared MetaHarness evidence snapshots: later panel stages can reuse the first
+bounded snapshot without another MongoDB query.
 
 ## When to Choose MongoDB
 

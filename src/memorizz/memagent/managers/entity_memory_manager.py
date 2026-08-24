@@ -43,9 +43,16 @@ class EntityMemoryManager:
         if not self.is_enabled() or not query:
             return []
 
-        records = self._entity_memory.search_entities(
+        records, diagnostics = self._entity_memory.search_entities_with_diagnostics(
             query, limit=limit, memory_id=memory_id, user_id=user_id
         )
+        if diagnostics.get("fallback_used"):
+            logger.info(
+                "Entity context retrieval fallback " "(mode=%s, reason=%s, matches=%s)",
+                diagnostics.get("retrieval_mode"),
+                diagnostics.get("degraded_reason"),
+                diagnostics.get("match_count"),
+            )
         return [
             self._simplify_record(record)
             for record in records
@@ -63,29 +70,98 @@ class EntityMemoryManager:
         user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Lookup utility exposed via agent tools."""
+        return self.lookup_entities_with_diagnostics(
+            entity_id=entity_id,
+            name=name,
+            query=query,
+            limit=limit,
+            memory_id=memory_id,
+            user_id=user_id,
+        )["matches"]
+
+    def lookup_entities_with_diagnostics(
+        self,
+        *,
+        entity_id: Optional[str] = None,
+        name: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 5,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Lookup entities and return safe metadata for traces/observability."""
+        safe_limit = max(1, min(int(limit or 5), 100))
+        base_diagnostics: Dict[str, Any] = {
+            "selector": "list",
+            "retrieval_mode": "exact",
+            "fallback_used": False,
+            "match_count": 0,
+            "legacy_scope_match_count": 0,
+            "degraded": False,
+            "degraded_reason": None,
+            "scope": {
+                "memory_id_bound": memory_id is not None,
+                "user_id_bound": user_id is not None,
+            },
+        }
         if not self.is_enabled():
-            return []
+            base_diagnostics.update(
+                {
+                    "degraded": True,
+                    "degraded_reason": "entity_memory_disabled",
+                }
+            )
+            return {"matches": [], "retrieval": base_diagnostics}
 
         if entity_id:
-            record = self._entity_memory.get_entity(entity_id, user_id=user_id)
-            return [self._simplify_record(record)] if record else []
+            base_diagnostics["selector"] = "entity_id"
+            record = self._entity_memory.get_entity(
+                entity_id, memory_id=memory_id, user_id=user_id
+            )
+            records = [record] if record else []
 
-        if name:
-            record = self._entity_memory.get_entity_by_name(name, user_id=user_id)
-            return [self._simplify_record(record)] if record else []
+        elif name:
+            base_diagnostics["selector"] = "name"
+            record = self._entity_memory.get_entity_by_name(
+                name, memory_id=memory_id, user_id=user_id
+            )
+            records = [record] if record else []
 
-        if query:
-            return self.build_context(query, memory_id, limit=limit, user_id=user_id)
+        elif query:
+            (
+                records,
+                query_diagnostics,
+            ) = self._entity_memory.search_entities_with_diagnostics(
+                query,
+                limit=safe_limit,
+                memory_id=memory_id,
+                user_id=user_id,
+            )
+            matches = [
+                self._simplify_record(record)
+                for record in records
+                if record and record.get("entity_id")
+            ]
+            query_diagnostics["match_count"] = len(matches)
+            return {"matches": matches, "retrieval": query_diagnostics}
 
-        # No selector provided – list scoped entities
-        entities = self._entity_memory.list_entities(
-            memory_id=memory_id, user_id=user_id
-        )
-        return [
-            self._simplify_record(entity)
-            for entity in entities[:limit]
-            if entity and entity.get("entity_id")
+        else:
+            records = self._entity_memory.list_entities(
+                memory_id=memory_id, user_id=user_id
+            )[:safe_limit]
+
+        matches = [
+            self._simplify_record(record)
+            for record in records
+            if record and record.get("entity_id")
         ]
+        base_diagnostics.update(
+            {
+                "match_count": len(matches),
+                "legacy_scope_match_count": 0,
+            }
+        )
+        return {"matches": matches, "retrieval": base_diagnostics}
 
     def upsert_entity_from_tool(
         self,
@@ -104,6 +180,14 @@ class EntityMemoryManager:
             raise RuntimeError("Entity memory is not enabled for this provider.")
         if not memory_id:
             raise ValueError("memory_id is required to store entity updates.")
+        if entity_id and not self._entity_memory.get_entity(
+            entity_id, memory_id=memory_id, user_id=user_id
+        ):
+            # An LLM may only update an ID that it could resolve inside the
+            # server-bound tenant scope. This prevents an attacker-supplied or
+            # hallucinated ID from overwriting a different tenant in providers
+            # that use entity_id as their physical upsert key.
+            raise ValueError("entity_id was not found in the active entity scope.")
 
         return self._entity_memory.upsert_entity(
             entity_id=entity_id,

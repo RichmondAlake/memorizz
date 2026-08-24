@@ -1,0 +1,86 @@
+{
+  "benchmark": "LongMemEval-V2",
+  "comparison_label": "Official adapter · diagnostic configuration",
+  "paper_comparable": false,
+  "scope": {
+    "tier": "small",
+    "domain": "enterprise",
+    "question_ids": [
+      "01307e07"
+    ],
+    "question_count": 1,
+    "trajectory_count": 100,
+    "text_only": true,
+    "seed": 0
+  },
+  "configuration": {
+    "reader_model": "gpt-5-mini",
+    "evaluator_model": "gpt-5-mini",
+    "embedding_model": "text-embedding-3-small",
+    "memory_provider": "filesystem",
+    "top_k": 12,
+    "evidence_token_budget": 6000,
+    "learning_control_plane": true
+  },
+  "official_result": {
+    "score": 1.0,
+    "correct": 1,
+    "questions": 1,
+    "reader_prompt_tokens": 186,
+    "reader_completion_tokens": 153,
+    "reader_total_tokens": 339,
+    "memory_context_tokens": 29,
+    "memory_context_was_truncated": false
+  },
+  "memory_evidence": {
+    "indexed_chunk_count": 4072,
+    "summary_count": 5,
+    "compaction_duration_seconds": 96.053495,
+    "memory_query_duration_seconds": 134.79845,
+    "evidence_candidates": 17,
+    "candidate_tokens": 24802,
+    "selected_items": 3,
+    "selected_tokens": 4991,
+    "tokens_removed_before_synthesis": 19811,
+    "semantic_cache": {
+      "hits": 1,
+      "misses": 1,
+      "writes": 1,
+      "probe_exact_match": true
+    },
+    "memory_model_calls": 6,
+    "memory_model_prompt_tokens": 107982,
+    "memory_model_completion_tokens": 6915
+  },
+  "cost_usd": {
+    "preflight_point_forecast": 0.263522,
+    "preflight_with_50_percent_contingency": 0.395283,
+    "embedding_estimate": 0.166665,
+    "memory_model_from_reported_usage": 0.040826,
+    "official_reader_from_reported_usage": 0.000353,
+    "llm_judge": 0.0,
+    "estimated_total": 0.207843,
+    "invoice_is_authoritative": true
+  },
+  "reproducibility": {
+    "official_repository": "https://github.com/xiaowu0162/LongMemEval-V2",
+    "official_revision": "2cc8c540bdb87fe6761629b585e727e1c4704520",
+    "checksum_manifest_sha256": "sha256:b17a18daa52873f915808502217c3c5fab39d20638544f986401155c9e8d67a6",
+    "questions_sha256": "sha256:0a3ae5ebea938c24d7800e1e0b0828e08ae1646f939a53853b2b8cdc08e292b7",
+    "trajectories_sha256": "sha256:363cec9a8e87aa8d9101ce4e600aadbf7031d674056ebe4f969e8424abc5f3c6",
+    "small_haystack_sha256": "sha256:9b5301defb23a088a5f06e45ff8d5f35e569d78305a66d492046a9fff9b46593"
+  },
+  "non_comparability_reasons": [
+    "Smoke profile rather than the complete 451-question split.",
+    "GPT-5 mini reader rather than the paper's Qwen3.5-9B reader.",
+    "text-embedding-3-small rather than Qwen3-Embedding-8B.",
+    "GPT-5 mini evaluator configuration rather than GPT-5.2; this selected question used a deterministic phrase-set scorer and made no judge call."
+  ],
+  "security": {
+    "sanitized": true,
+    "contains_raw_trajectories": false,
+    "contains_prompts_or_answers": false,
+    "contains_credentials": false,
+    "contains_local_paths": false
+  }
+}

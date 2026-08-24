@@ -68,6 +68,9 @@ def resolve_env_file() -> Path:
 
 def memory_root() -> Path:
     """Default on-disk root for the FileSystem memory provider."""
+    explicit = os.environ.get("MEMORIZZ_MEMORY_ROOT")
+    if explicit:
+        return Path(explicit).expanduser()
     return memorizz_home() / "memory"
 
 

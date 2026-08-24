@@ -35,7 +35,7 @@ class TestMemAgentCore:
         result, _ = agent.tool_manager.execute_tool("summarize_conversation", {})
         assert isinstance(result, dict)
         assert result.get("ok") is False
-        assert "memory provider" in result.get("error", "").lower()
+        assert "llm model" in result.get("error", "").lower()
 
     @pytest.mark.unit
     def test_memagent_initialization_full(
@@ -122,12 +122,62 @@ class TestMemAgentCore:
         assert agent.internet_access_manager.is_enabled() is False
 
     @pytest.mark.unit
-    def test_memagent_without_memory_provider(self):
-        """Test MemAgent initialization without memory provider."""
-        agent = MemAgent(instruction="Test without memory")
+    def test_memagent_defaults_to_filesystem_memory_provider(self):
+        """A bare MemAgent should be durable and memory-first by default."""
+        from memorizz.memory_provider import FileSystemProvider
+
+        agent = MemAgent(instruction="Test with default memory")
 
         assert_agent_state_valid(agent)
+        assert isinstance(agent.memory_provider, FileSystemProvider)
+        assert agent.uses_default_memory_provider is True
+        assert agent.memory_manager is not None
+
+    @pytest.mark.unit
+    def test_default_filesystem_provider_honors_root_and_is_process_shared(
+        self, tmp_path, monkeypatch
+    ):
+        """Default agents share one provider for the configured durable root."""
+        configured_root = tmp_path / "default-memory"
+        monkeypatch.setenv("MEMORIZZ_MEMORY_ROOT", str(configured_root))
+
+        first = MemAgent(instruction="First default agent")
+        second = MemAgent(instruction="Second default agent")
+
+        assert first.memory_provider is second.memory_provider
+        assert first.memory_provider.root_path == configured_root.resolve()
+
+    @pytest.mark.unit
+    def test_memagent_allows_explicit_stateless_opt_out(self):
+        """memory_provider=False preserves intentional stateless execution."""
+        agent = MemAgent(instruction="Test without memory", memory_provider=False)
+
+        assert_agent_state_valid(agent)
+        assert agent.memory_provider is None
+        assert agent.uses_default_memory_provider is False
         assert agent.memory_manager is None
+        assert agent._init_workflow_capture("use a tool", "test-user") is None
+
+    @pytest.mark.unit
+    def test_explicit_empty_memory_types_make_agent_stateless(self):
+        """An explicit empty memory list must not silently restore defaults."""
+        agent = MemAgent(
+            instruction="Stateless agent",
+            memory_types=[],
+        )
+
+        assert agent.active_memory_types == []
+
+    @pytest.mark.unit
+    def test_workflow_persistence_is_noop_without_provider(self, caplog):
+        """A provider-less tool run must not log a failed workflow write."""
+        agent = MemAgent(instruction="Provider-less agent", memory_provider=False)
+        workflow = MagicMock()
+        workflow.steps = {"Step 1": {"result": "ok"}}
+
+        assert agent._persist_workflow_run(workflow) is False
+        workflow.store_workflow.assert_not_called()
+        assert "Error storing workflow" not in caplog.text
 
     @pytest.mark.unit
     def test_memagent_llm_config_loading(self):

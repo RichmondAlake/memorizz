@@ -477,6 +477,42 @@ class SemanticCache:
 
         return str(uuid.uuid5(uuid.NAMESPACE_OID, "|".join(key_parts)))
 
+    def _exact_cache_match(
+        self,
+        query: str,
+        *,
+        session_id: Optional[str],
+        user_id: Optional[str],
+        lookup_metadata: Optional[Dict[str, Any]],
+    ) -> Optional[SemanticCacheEntry]:
+        """Resolve an exact scoped key before approximate vector search.
+
+        Exact repeats should not depend on floating-point vector normalization
+        or a backend-specific score rounding to precisely ``1.0``. Freshness,
+        tenant scope, and every configured fingerprint remain mandatory.
+        """
+        key = self._generate_cache_key(query, session_id, user_id)
+        entry = self.cache.get(key)
+        if entry is None:
+            return None
+        if getattr(entry, "user_id", None) != user_id:
+            return None
+        if self.agent_id and entry.agent_id != self.agent_id:
+            return None
+        if self.memory_id and entry.memory_id != self.memory_id:
+            return None
+        if not self._fresh_for_metadata(entry):
+            return None
+        if not self._metadata_matches(entry, lookup_metadata):
+            return None
+        if (
+            self.config.enable_session_scoping
+            and session_id
+            and entry.session_id != session_id
+        ):
+            return None
+        return entry
+
     def record_bypass(self, reason: str) -> None:
         normalized = str(reason or "policy").strip() or "policy"
         self._stats["bypasses"] += 1
@@ -602,9 +638,16 @@ class SemanticCache:
             if similarity_threshold is None
             else float(similarity_threshold)
         )
-        best_match: Optional[SemanticCacheEntry] = None
-        best_similarity = 0.0
-        if self._should_use_memory_provider():
+        best_match = self._exact_cache_match(
+            query,
+            session_id=session_id,
+            user_id=user_id,
+            lookup_metadata=lookup_metadata,
+        )
+        best_similarity = 1.0 if best_match is not None else 0.0
+        if best_match is not None:
+            pass
+        elif self._should_use_memory_provider():
             best_match = self._search_via_memory_provider(
                 query,
                 threshold,
@@ -689,11 +732,24 @@ class SemanticCache:
                 f"Cache context - agent_id={self.agent_id}, memory_id={self.memory_id}, session_id={session_id}"
             )
 
+            # Exact scoped repeats are deterministic and should not be sent
+            # through a vector backend where score rounding can turn 1.0 into
+            # a miss at strict thresholds.
+            best_match = self._exact_cache_match(
+                query,
+                session_id=session_id,
+                user_id=user_id,
+                lookup_metadata=lookup_metadata,
+            )
+            exact_match = best_match is not None
+
             # Decide whether to use memory provider or in-memory search
             should_use_provider = self._should_use_memory_provider()
             logger.debug(f"Using memory provider for search: {should_use_provider}")
 
-            if should_use_provider:
+            if exact_match:
+                best_similarity = 1.0
+            elif should_use_provider:
                 logger.debug("Using memory provider for semantic cache retrieval")
                 best_match = self._search_via_memory_provider(
                     query,
@@ -765,7 +821,9 @@ class SemanticCache:
                 logger.debug(f"Cache HIT: query: {query[:50]}...")
                 self._stats["hits"] += 1
                 similarity = None
-                if isinstance(best_match.metadata, dict):
+                if exact_match:
+                    similarity = 1.0
+                elif isinstance(best_match.metadata, dict):
                     similarity = best_match.metadata.get("similarity")
                 if similarity is None and not should_use_provider:
                     similarity = best_similarity

@@ -1,26 +1,373 @@
 # Changelog
 
+## Unreleased
+
+_No unreleased changes._
+
+## 0.6.0 — 2026-08-24
+
+### Evaluation, MetaHarness, and memory-platform additions
+
+- Added an explicitly unofficial Terminal-Bench 2.1 forecast command with the
+  canonical 89-task/445-trial protocol, a dated leaderboard context snapshot,
+  nominal spend/headroom scenarios, pilot latency extrapolation, Wilson
+  uncertainty, and fail-closed rank reporting until at least ten distinct
+  pilot tasks exist.
+- LongMemEval-V2 official-adapter runs now verify upstream checksums before
+  spend, forecast embedding/reader/synthesis/judge cost with a configurable
+  preflight limit, batch-persist thousands of chunks, pin question order,
+  fingerprint the actual scorer/dependencies, and report MemoRizz-owned model
+  usage separately from the downstream reader.
+- Added sanitized release evidence for a passing 1/1 LongMemEval-V2 official-
+  adapter smoke and a zero-cost, ten-ability BEAM 128K diagnostic, with exact
+  paper-comparability exclusions.
+
+- Evalground now distinguishes a normalized memory-retrieval diagnostic from
+  **Full MemAgent execution**. The latter loads a secret-free selected-agent
+  template onto isolated benchmark memory, calls `MemAgent.run()`, disables
+  side-effecting integrations, and reports actual automatic-retrieval/context-
+  assembly evidence. The SDK and `memorizz eval run` expose the same mode,
+  template, query-expansion, rerank, and reader-repair controls.
+- Memory diagnostics now use grouped semantic-query RRF, label-blind
+  capacity/boundary expansion, source-linked causal and multi-turn event
+  memories, widest-provenance representative selection, parent-source
+  deduplication, timestamp preservation, relative-date annotations, and
+  unambiguous date normalization. One bounded formatting-only repair handles
+  malformed JSON-like local-reader output.
+- Multi-source diagnostic evidence now renders an explicit JSON source-ID list
+  and requires one citation per array element. This closes an ambiguity where a
+  grounded reader could copy two comma-separated IDs as one invalid citation.
+  A bounded GPT-5.5 rerun achieved 1.0 answer, Recall@6, and grounding on both
+  LoCoMo-Plus diagnostic and full-MemAgent lanes; the sanitized artifact keeps
+  the one-sample/non-paper-comparable boundary and full spend accounting.
+
+- Added a four-task, task-native MetaHarness regression pinned to GPT-5.6 Luna
+  and Claude Opus 5 at medium effort. It compares Codex-only, Opus-only,
+  always-on, and preregistered risk-routed MemAgent strategies with fresh
+  Filesystem scopes, durable write approvals, host verification, 32 held-out
+  checks, complete cost/usage evidence, and no LLM judge.
+- Notebook 06 now opens with a model-aware example result table and reconstructs
+  the same table from the sanitized evaluation artifact at the end, exposing
+  reusable table rows plus an artifact SHA-256 and protocol fingerprint.
+- Claude Code harness tasks can pin claude_effort to low, medium, high, xhigh,
+  or max; invalid values fail before launch. Secret-value redaction now requires
+  a credential-prefix boundary, avoiding false positives such as task_native
+  while continuing to redact real provider keys.
+- Added the paid, paired MetaHarness factorial evaluation across direct Codex,
+  direct Claude Code, MemAgent wrappers, mandatory panels, adaptive panels,
+  Filesystem, and Oracle AI Database, with a sanitized educational artifact and
+  Notebook 06 analysis.
+- Hardened evaluation reporting with layered dotenv loading, publishable path
+  redaction, safe numeric token telemetry, explicit judge scale normalization,
+  construct-irrelevant rationale rejection, bounded retries, and durable cost
+  evidence for failed judge calls.
+- Made deterministic required-criterion recall, grounding, schema validity, and
+  host verification the primary fixture-quality gates; LLM scalar scores are
+  explicitly secondary diagnostics.
+
+### Fixed
+
+* Terminal-Bench cost accounting now prices the selected registered OpenAI
+  model and rejects unknown or variant pricing instead of silently applying
+  GPT-5.6 Terra rates to every model.
+* Dataset verification now treats GitHub remotes with and without `.git` as
+  equivalent, detects source checkouts that also contain benchmark data, and
+  reports BEAM conversation coverage without presenting a partial smoke corpus
+  as the full variant.
+
+* Fixed the memory benchmark path that left LoCoMo-Plus cognitive cues outside
+  top-k while unrelated MetaHarness security work correctly had no score
+  effect. On the same one-sample local diagnostic, gold Recall@6 moved from 0.0
+  to 1.0; Qwen answer quality remains reported separately rather than being
+  misrepresented as retrieval success.
+* Exact duplicates returned through multiple automatic-retrieval query variants
+  now retain their strongest provider score, and grouped records retain complete
+  linked-source provenance. Full MemAgent reports no longer claim diagnostic
+  fusion or semantic-cache decisions that did not run.
+* Oracle knowledge-base rows now persist source, parent, linked-source, and
+  structured metadata provenance through additive migration 006. The same
+  evidence shape already survives Filesystem and MongoDB storage.
+* Invalid non-list retrieval and tool-log values from third-party providers now
+  degrade to empty evidence instead of leaking sentinel attributes into prompt
+  provenance or preventing an otherwise healthy model turn.
+
+* Coordinated MetaHarness panels now retrieve one ranked, tenant-scoped evidence
+  snapshot for the original request and reuse it across role-specific workers.
+  Dependency outputs reach later stages through bounded allowlisted context,
+  while synthesis is grounded in root memory and instructed to preserve only
+  supported evidence. The root reuses an identical delegate evidence snapshot
+  when it fits the coordinator budget, removing a duplicate provider read while
+  closing the earlier ungrounded-consolidation failure mode. The optimization is
+  provider-neutral and now has explicit filesystem, MongoDB, and live local
+  Oracle coverage. MongoDB knowledge-base evidence preserves `memory_id` and
+  degrades to a bounded, exactly scoped lexical retrieval when Atlas vector
+  search is unavailable; Oracle's legacy `store(data=..., memory_id=...)` path
+  now persists that scope instead of silently generating an unrelated one.
+  Shared context-cache keys include the effective evidence owner, while
+  coordinated panels explicitly use the root owner for procedural retrieval.
+* Deterministic, host-verified, read-only delegation can now reuse a semantic
+  cache entry only when the caller supplies a data version and the complete
+  plan, delegate, model, harness, and policy fingerprint still matches.
+  Successful coordinated root responses are recorded in conversation memory
+  and their workflow is captured by the learning control plane.
+* Multi-agent result consolidation now treats an intentionally model-less root
+  as a supported deterministic aggregation mode instead of logging a false
+  provider error. Configured synthesis failures remain visible as structured
+  partial-workflow evidence, while successful model synthesis records provider,
+  model, latency, and available usage. Model-based consolidation now also honors
+  the root coordinator's configured instruction.
+* MetaHarness action budgets now count one vendor command/tool lifecycle once
+  across `in_progress` and `completed` events, and runtime-backed MemAgents
+  propagate their configured harness model pin into the executed `HarnessTask`.
+* Filesystem lexical fallback now ranks sufficiently overlapping scoped records
+  when delegation adds a role-specific query suffix, instead of requiring the
+  complete extended query to occur verbatim. Multi-agent orchestration now
+  treats a failed runtime-backed harness result as a failed subtask rather than
+  successful serialized text.
+* Meta-harness authentication readiness now has one secret-free
+  `error_code`/message/remediation contract across the SDK, CLI, local UI, and
+  first-party MCP server. Claude Code reports its required bare-mode
+  credentials before launch, Codex verifies either an environment key or its
+  cached CLI login, and runtime 401/login failures are normalized without
+  exposing vendor output or credential values.
+* Real Codex + Claude Code notebook execution now preserves numeric token-usage
+  telemetry through redaction, falls back to tenant/thread-scoped lexical
+  retrieval when filesystem records have no vectors, and uses a realistic
+  bounded multi-turn output budget in the two-harness review example.
+
+### Added
+
+* A sixth educational MetaHarness notebook and versioned factorial evaluator
+  separate direct-MetaHarness versus MemAgent wrapper overhead, mandatory
+  Codex-plus-Claude coordination, adaptive fallback, and Filesystem-versus-
+  Oracle effects. The 12-arm protocol uses exact call-policy validation,
+  provider-neutral evidence fingerprints, deterministic model-less union,
+  independently blinded per-candidate judging, reverse-order balancing, and an
+  explicit one-fixture inference boundary. It reinterprets the earlier
+  one-call adaptive artifact instead of presenting it as a two-harness result,
+  makes no external call by default, and keeps paid execution behind an
+  environment opt-in. A dedicated `notebooks` package extra provides a
+  consistent Jupyter kernel and execution toolchain.
+* Memory evaluation now has fail-closed versioned protocol manifests,
+  smoke/regression/paper profiles, pinned official-source synchronization and
+  checksum verification, calibrated reciprocal-rank fusion, conservative
+  source-linked constraint memory, persistent corpus embeddings, grounded
+  citation scoring, an oracle-reader ceiling, confidence intervals, and
+  phase/cost accounting. The CLI and Evalground expose the same profile and
+  Filesystem/Oracle controls; diagnostic runs cannot claim paper comparability.
+* The memory-provider contract now includes portable bulk storage, scoped
+  normalized search, and declared capabilities, with matching Filesystem,
+  MongoDB, and Oracle behavior.
+* Multi-agent orchestration now offers `model`, `deterministic`, and `primary`
+  consolidation strategies plus explicit dependency/synthesis context bounds.
+  Capability reports expose ranked evidence, workflow snapshot reuse,
+  dependency propagation, and verified delegation-cache support.
+* A fifth MetaHarness notebook compares Codex-only, Claude-only, and a
+  MemAgent-coordinated Codex + Claude panel using a blinded LLM judge, gold
+  findings, host verification, memory grounding, latency, tokens, normalized
+  actions, reported/estimated cost, and cost per quality point. Provider-aware
+  enforceable budgets and a fail-closed validity gate prevent failed baselines
+  from being ranked as wins; invalid attempts retain diagnostic JSON evidence
+  without a judge ranking or winner. Filesystem remains the default evaluation
+  provider; an opt-in Oracle mode runs preflight before spend, records provider
+  capabilities, and deletes the synthetic scopes during cleanup.
+
+### MetaHarness and interface foundations
+
+* A memory-first MetaHarness for running Codex, Claude Code, OpenHands, and
+  native MemAgent workers behind one durable contract. It includes
+  deterministic routing, exact-envelope host approval, workspace policy and
+  leases, cancellation, bounded budgets, normalized events and results,
+  host-side verification, tenant-scoped memory context, and verified
+  continual-learning evidence.
+* MetaHarness parity across the Python SDK, persisted MemAgent configuration,
+  `memorizz harness` CLI, local operator UI, and six first-party MCP tools plus
+  a run resource. OpenHands is fail-closed until an operator-supplied isolated
+  wrapper is configured.
+* A developer-oriented documentation information architecture with a single
+  installation path, core runtime/scoping model, tools and durable approval
+  guide, model-provider and scheduled-automation guides,
+  configuration/secrets reference, capability/preflight guide, curated Python
+  API, troubleshooting playbook, and static documentation quality gates.
+* The first-party MCP server now exposes a 23-tool operational surface with
+  local agent update/deletion, combined agent/cache/learning/observability
+  inspection, scoped learning compilation, conversation compaction, and
+  governed harness execution. Tool
+  schemas reject undeclared arguments, while credentials, local-path ingestion,
+  approval decisions, and outbound MCP configuration remain host-only.
+* A stable headless-runtime capability report and subprocess coverage confirm
+  that the SDK, CLI, and stdio MCP server run without a display server or an
+  import of the optional UI application.
+
+### Fixed
+
+* Developer examples now use the real public entity, episodic, semantic-cache,
+  Toolbox, shared-memory, and agent-mode APIs; supported Python versions and
+  local UI authentication/read-only guidance now match the package.
+* Persisted agent updates retain continual-learning workflow and skill memory
+  types when application-mode defaults are recalculated.
+* Explicit SDK model overrides no longer initialize the persisted provider as a
+  side effect, and `tool_access` now survives construction, save/load, and MCP
+  agent updates.
+* Harness diagnostics no longer crash when an optional configured memory
+  provider is unavailable, source checkouts report the source package version,
+  and Codex project configuration cannot re-enable hooks, web search, egress,
+  extra writable roots, or non-MemoRizz MCP servers for a governed run.
+
+## 0.5.3 — 2026-08-20
+
+### Added
+
+* Explicit persisted-agent creation parity across the SDK, CLI
+  (`memorizz agents create/list/show`), local UI, and first-party MCP server.
+  MCP creation is a local-stdio-only write that resumes through durable host
+  approval; remote HTTP creation remains disabled until agent ownership is
+  durably tenant-scoped.
+
+* Privacy-safe `observability_context` on `MemAgent.run` and `run_stream`, with
+  allowlisted page/thread/grounding lineage, request-context fingerprints,
+  cache hit/miss/bypass events, timeline metadata, and deterministic Trace
+  Insights for wrong-page and missing-grounding failures.
+* A provider-neutral memory-first learning control plane with immutable,
+  idempotent run/tool/cache/workflow/outcome/skill events; deterministic
+  incremental compilation; bounded and explainable `EvidencePack` retrieval;
+  host-verified outcome evidence; and reversible, single-use, operator-approved
+  forgetting plans. It reuses private shared memory on filesystem, MongoDB, and
+  Oracle rather than adding a service or schema.
+* SDK (`with_learning_control_plane`, reports, retrieval explanations,
+  compiler, durable forgetting), `memorizz learning` CLI commands, and a local
+  UI Learning Control Plane page with agent configuration support.
+* Memory-first adapters and revision manifests for the official
+  LongMemEval-V2 harness, SWE-bench Lite Docker grader, and all four MemBench
+  memory tracks, plus optional benchmark dependency groups and local result
+  documentation.
+* `CompletionPolicy`, `CompletionCandidate`, `CompletionDecision`, and
+  `CompletionRejectedError` for host-enforced, auditable final-answer gates
+  with bounded same-loop retries and builder/persistence support.
+* Batch embedding support in `EmbeddingManager` and the OpenAI embedding
+  provider for high-volume benchmark ingestion.
+* The LongMemEval-V2 adapter now isolates the official base memory registry from
+  unrelated optional backends, avoiding incompatible eager dependencies.
+* Two arXiv-compatible companion systems-paper drafts with a shared
+  bibliography: one covering the memory-first agent harness, taxonomy, unit
+  shapes, context tokenomics, providers, and runtime components; the other
+  covering the agent-memory and continual-learning platform. The latter
+  explicitly attributes its recency/importance/relevance inspiration to
+  Generative Agents. Both include reproducibility statements and the sanitized
+  filesystem/Oracle benchmark comparison.
+
+### Changed
+
+* The local control-plane UI now uses a restrained, high-density visual system
+  with matte surfaces, metric-first overview cards, compact navigation, and
+  semantic observability states for provenance, ownership, grounding, cache,
+  and trace identity. Trace Insights group related signals into six operational
+  summaries instead of presenting every counter at equal weight.
+* Continual-learning skill candidate, promotion, demotion, and deprecation
+  transitions now emit control-plane evidence; per-turn context assembly can
+  delegate multi-source recall to one tenant-scoped token budget.
+* LongMemEval-V2, SWE-bench Lite, MemBench, and Terminal-Bench adapters now
+  exercise and report the control plane; benchmark memory can run on filesystem
+  or Oracle, with Oracle vector-dimension preflight before paid model calls.
+* LongMemEval-V2 retrieval combines tenant-scoped lexical and vector lanes,
+  diversifies results across trajectory sources, and preserves both ends of
+  bounded accessibility trees so exact late-menu UI labels are not silently
+  discarded.
+* Terminal-Bench and SWE-bench agents require a successful substantive
+  `terminal_verify` call before the host accepts a final response.
+* The filesystem provider loads FAISS lazily per provider and supports
+  `use_faiss=False` exact cosine search for small stores or incompatible native
+  runtime combinations.
+
+### Fixed
+
+* Reloaded agents now retain their secret-free LLM provider/model metadata in
+  `llm_config`, keeping SDK, CLI, MCP, and UI introspection consistent with the
+  hydrated runtime provider.
+* Entity-memory reads are strictly scoped by both `memory_id` and `user_id`;
+  authenticated requests no longer inherit anonymous legacy rows. A separate
+  operator-only `EntityMemory.migrate_legacy_scope()` API provides deliberate
+  provider-managed adoption for filesystem, MongoDB, and Oracle.
+* Learning-control-plane `EvidencePack` retrieval now uses entity memory's
+  bounded exact fallback and carries retrieval mode/degradation metadata when
+  vector search is unavailable or fails.
+* MongoDB entity vector failures propagate typed evidence to the fallback
+  layer; lazy missing indexes remain eligible for creation, failed filter-index
+  reconciliation remains retryable, and stale status entries are invalidated
+  after successful creation or update.
+* Oracle entity upserts lock and verify the existing memory/user owner before
+  updating a globally unique `entity_id`, preventing direct SDK calls from
+  moving another tenant's entity row.
+* The model-visible `entity_memory_upsert` schema no longer contains
+  `memory_id`; active scope is supplied only by the host. Repeated identical
+  entity relations are deduplicated and no longer trigger redundant embedding
+  and storage writes.
+
+* Oracle `list_all(shared_memory)` now returns its typed relational projection,
+  allowing immutable learning events and compiled artifacts to survive and be
+  enumerated after agent reload.
+* Completion-gated streaming buffers candidates until host acceptance, cached
+  completions are revalidated by the current policy, and tool-evidence policies
+  cannot be bypassed by a cached string.
+* Exact semantic-cache repeats use their deterministic scoped key before vector
+  search, avoiding false misses caused by floating-point score rounding at a
+  strict `1.0` threshold.
+* SWE-bench completion retries now have a bounded reservation beyond the normal
+  work-loop tool budget, so the mandatory final verification cannot be blocked
+  by an exhausted exploration budget.
+
 ## 0.5.2 — 2026-08-16
 
 ### Added
 
+* Optional Harbor/Terminal-Bench adapter with native ATIF v1.7 trajectories,
+  isolated per-trial memory, bounded terminal execution, token/cost reporting,
+  spend guards, and deadline-aware finalization.
 * `RetrievalPolicy` separates automatic episodic/knowledge recall from memory
   storage and tool availability, with exact thread and KB-namespace scopes.
 * Capability flags for thread-scoped summaries, retrieval policy, shared-agent
   concurrency safety, logical tool trace names, and session-safe cache defaults.
 * Durable observability timelines that expand streamed trace bundles and tool
   execution logs by their real memory/thread scope.
+* Read-only Trace Insights for agent/thread windows, with JSON export and
+  evidence-ranked recommendations for tool, prompt, retrieval, context, and
+  continual-learning improvements.
+* Canonical v2 trace envelopes with application, agent, run, turn, root trace,
+  span, memory, thread, and user identity. Named/application-scoped agents use
+  stable IDs and automatically upsert themselves and new memory associations.
+* Provider-neutral cursor-paginated observability queries, with a native
+  indexed MongoDB implementation and query latency, scan, truncation, and
+  freshness metadata.
+* Durable recommendation reviews, versioned draft Evalground experiments, and
+  trace-linked verified feedback/task outcome records.
+* Optional local UI token authentication, signed expiring sessions, read-only
+  provider inspection, field-level trace redaction, and trace-view audit logs.
 * Oracle migration `005_scoped_retrieval_052.sql` for summary thread markers,
   knowledge-base namespaces, safe legacy backfill, and exact-scope indexes.
 
 ### Changed
 
+* A bare `MemAgent()` now uses the filesystem memory provider at
+  `~/.memorizz/memory` by default. `MEMORIZZ_MEMORY_ROOT` relocates it and
+  `memory_provider=False` remains the explicit stateless opt-out.
+* OpenAI's provider supports a Responses API tool loop and current GPT-5.6
+  completion limits, reasoning, context-window, usage, and prompt-cache rules.
 * Summary registries, expansion, source-message reconstruction, MongoDB vector
   lookup, and Oracle summary storage now preserve exact `thread_id` scope.
 * Shared `MemAgent`, progressive router, stream callback, and semantic-cache
   execution state is context-local for concurrent web requests.
 * Routed stream traces report both `logical_tool_name` and
   `model_tool_name`; `tool_name` is the application-level logical name.
+* Persisted tool-result traces retain success/error status and monotonic
+  duration so the observability UI can calculate failure and latency signals.
+* Model and tool spans are captured for synchronous and streaming execution;
+  model spans include provider/model identity, duration, and available token
+  usage, while all spans retain parent/root correlation.
+* Trace bundles now live in private observability records instead of hidden
+  conversation rows, so telemetry cannot enter chat recall or inflate raw
+  conversation history. Legacy conversation bundles remain readable.
+* The traces dashboard uses bounded provider queries instead of collection-wide
+  reads and exposes a cursor JSON endpoint at `/traces/events.json`.
 * Semantic cache is session-scoped by default and fingerprints request context
   to prevent stale reuse when page or grounding context changes.
 * MCP client/server dependencies moved to `memorizz[mcp]`; importing and using

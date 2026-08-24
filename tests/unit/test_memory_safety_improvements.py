@@ -328,6 +328,16 @@ def test_routed_trace_exposes_model_and_logical_tool_names():
         assert trace["tool_name"] == "summarize_article"
         assert trace["logical_tool_name"] == "summarize_article"
         assert trace["model_tool_name"] == "invoke_tool"
+    assert traces[-1]["success"] is True
+    assert traces[-1]["duration_ms"] >= 0
+
+    persisted = agent._build_trace_bundle_events(traces)
+    persisted_result = persisted[-1]
+    assert persisted_result["tool_name"] == "summarize_article"
+    assert persisted_result["logical_tool_name"] == "summarize_article"
+    assert persisted_result["model_tool_name"] == "invoke_tool"
+    assert persisted_result["success"] is True
+    assert persisted_result["duration_ms"] >= 0
     assert json.loads(messages[-1]["content"])["tool_name"] == "summarize_article"
 
 
@@ -377,9 +387,14 @@ def test_mcp_dependencies_are_optional_and_capabilities_are_explicit():
         "concurrency_safe_run_state",
         "logical_tool_trace_names",
         "semantic_cache_session_default",
+        "entity_memory",
+        "host_completion_policy",
+        "evaluation_suite",
     ):
         assert report["features"][feature]["available"] is True
     assert report["features"]["mcp_client"]["install_extra"] == "mcp"
+    assert report["features"]["entity_memory"]["strict_tenant_scope"] is True
+    assert report["features"]["entity_memory"]["control_plane_parity"] is True
 
 
 @pytest.mark.unit

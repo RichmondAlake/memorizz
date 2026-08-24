@@ -29,6 +29,18 @@ is single-user, does not require bearer authentication, and permits memory
 writes and agent execution by default. An MCP host should still request user
 approval before it calls a mutating tool.
 
+Local MCP hosts can manage the safe agent lifecycle with create, read, update,
+delete, and execute tools. MemoRizz's MCP client turns mutating calls into exact,
+durable host proposals before dispatch; other MCP hosts must enforce their own
+human approval policy. Agent deletion creates an additional server-owned,
+single-use proposal for the operator commands shown below. There is no
+model-visible `approved` or `confirm` argument. Newly created or updated agents
+are immediately visible in the same server process.
+
+The creation schema accepts secret-free `llm_provider` and `llm_model` names.
+Credentials remain server-side. If an explicitly selected provider cannot be
+initialized, creation fails without persisting a partially configured agent.
+
 Run the same server directly when troubleshooting:
 
 ```bash
@@ -131,23 +143,49 @@ external origin, not the internal bind address.
 |---|---|---|
 | Inspect server policy | `memorizz_server_info` | `memorizz:read` |
 | List/read exposed agents | `memorizz_list_agents`, `memorizz_get_agent` | `memorizz:read` |
+| Inspect capabilities, cache, learning, and scoped observability | `memorizz_inspect_agent` | `memorizz:read` |
+| Create a persisted local agent | `memorizz_create_agent` | `memorizz:write`; local `stdio` only; durable approval required |
+| Update safe local agent configuration | `memorizz_update_agent` | `memorizz:write`; local `stdio` only; durable approval required |
+| Propose local agent deletion | `memorizz_delete_agent` | `memorizz:write`; local `stdio` only; durable operator approval required |
 | Execute an exposed agent | `memorizz_execute_agent` | `memorizz:execute` + `memorizz:write` |
+| Compile scoped continual-learning memory | `memorizz_compile_memory` | `memorizz:write` |
+| Compact a scoped conversation | `memorizz_compact_conversation` | `memorizz:execute` + `memorizz:write` |
+| Inspect installed harnesses | `memorizz_list_harnesses` | `memorizz:read` |
+| Start a bounded harness run | `memorizz_start_harness_run` | `memorizz:execute`; writes also require `memorizz:write` |
+| Read/list harness runs | `memorizz_get_harness_run`, `memorizz_list_harness_runs` | `memorizz:read` |
+| Read normalized harness events | `memorizz_get_harness_events` | `memorizz:read` |
+| Cancel an owned harness run | `memorizz_cancel_harness_run` | `memorizz:execute` |
 | List/search/read memories | `memorizz_list_memories`, `memorizz_search_memories`, `memorizz_get_memory` | `memorizz:read` |
 | Store memory | `memorizz_store_memory` | `memorizz:write` |
 | Propose deletion of owned memory | `memorizz_forget_memory` | `memorizz:write`; returns a durable proposal |
 | List/read conversations | `memorizz_list_conversations`, `memorizz_get_conversation` | `memorizz:read` |
 
+Harness capability and startup responses use the same secret-free
+`error_code`, message, and remediation contract as the SDK, CLI, and UI. When
+authentication is absent or expired, `memorizz_start_harness_run` returns
+`ok=false`, `status="failed"`, the durable failed run, and
+`error.code="authentication_required"`; no API-key value is returned.
+
 The server also exposes:
 
 - `memorizz://server`;
 - `memorizz://agents/{agent_id}`;
-- `memorizz://agents/{agent_id}/conversations`; and
+- `memorizz://agents/{agent_id}/conversations`;
+- `memorizz://harness-runs/{run_id}`; and
 - the `memorizz_memory_assistant` prompt.
 
 Direct memory writes are limited to `knowledge_base` and `short_term_memory`.
 Remote callers cannot access global configuration stores such as
 personas, toolboxes, agents, shared memory, or skill definitions through the
 generic memory tools.
+
+Remote HTTP agent creation, update, and deletion are deliberately unavailable.
+Persisted agents do not yet carry a durable tenant-owner field, and a
+process-wide exposed-agent list is not a safe substitute for ownership. Manage
+remote agents through the trusted host SDK, CLI, or authenticated local UI,
+then explicitly expose their IDs. Remote callers can inspect or execute only
+allowlisted agents, and all memory, conversation, observability, learning, and
+compaction calls use the authenticated principal as `user_id` server-side.
 
 `memorizz_store_memory` returns the physical `record_id` assigned by the
 provider. Pass that exact value to `memorizz_get_memory`; `memory_id` remains
@@ -157,8 +195,9 @@ a write → read round trip has the same contract as filesystem and MongoDB.
 The authenticated principal supplies tenant identity server-side—callers
 cannot escape their scope by placing another `user_id` in tool arguments.
 
-Deletion never accepts a model-visible `confirm` argument. The server operator
-must decide and consume the exact proposal out of band:
+Deletion and harness execution never accept a model-visible `confirm` or
+`approved` argument. The server operator must decide and consume exact
+memory-deletion, agent-deletion, or harness-envelope proposals out of band:
 
 ```bash
 memorizz mcp server-approvals --status pending
@@ -166,6 +205,45 @@ memorizz mcp server-approve PROPOSAL_ID --approver operator@example.com
 memorizz mcp server-resume PROPOSAL_ID
 # Or: server-reject / server-cancel with --approver
 ```
+
+## Form-factor parity and trust boundary
+
+The 23-tool MCP surface covers the common operational capabilities available
+through the SDK, CLI, and local UI: agent lifecycle and execution, scoped memory
+and conversations, capability/cache/learning/observability inspection,
+continual-learning compilation, conversation compaction, and governed harness
+execution. Every tool schema rejects undeclared arguments
+(`additionalProperties: false`). The server also publishes four resources and
+one stable assistant prompt.
+
+Some host-administration functions intentionally remain outside model-visible
+MCP tools:
+
+- credentials and API-key management;
+- ingestion from arbitrary local paths;
+- approval, rejection, and resumption decisions; and
+- configuration of outbound MCP connections.
+
+Those operations remain in trusted SDK, CLI, or authenticated local-UI code.
+An MCP caller may cancel its own tenant-scoped harness run, but cannot approve
+or resume the proposed execution envelope. This is the parity boundary: an MCP
+client can use a configured MemoRizz agent and its memory-first runtime without
+receiving the host's secrets or approval authority.
+
+## Headless operation
+
+The SDK, CLI, and stdio/HTTP MCP server do not require a display server and do
+not import the optional UI application. A minimal headless installation is:
+
+```bash
+pip install "memorizz[mcp]"
+unset DISPLAY WAYLAND_DISPLAY
+memorizz agents create --name "Headless Agent" --no-llm --json
+memorizz mcp serve --transport stdio
+```
+
+Add an LLM provider configuration before executing the no-LLM agent. The local
+UI remains an optional, separately launched form factor.
 
 ## Configuration reference
 
@@ -180,6 +258,8 @@ Every CLI option has a deployment-friendly environment equivalent:
 | `MEMORIZZ_MCP_SERVER_API_KEYS` | Principal-to-token grant JSON |
 | `MEMORIZZ_MCP_SERVER_ALLOW_WRITES` | Enable direct writes (`true`/`false`) |
 | `MEMORIZZ_MCP_SERVER_ALLOW_AGENT_EXECUTION` | Enable agent turns |
+| `MEMORIZZ_MCP_SERVER_ALLOW_HARNESS_EXECUTION` | Enable governed external harness runs |
+| `MEMORIZZ_MCP_SERVER_HARNESS_WORKSPACE_ROOTS` | Comma-separated allowed workspace roots |
 | `MEMORIZZ_MCP_SERVER_AGENT_IDS` | Comma-separated remote agent allowlist |
 | `MEMORIZZ_MCP_SERVER_ALLOW_ANONYMOUS` | Explicitly disable HTTP auth |
 | `MEMORIZZ_MCP_SERVER_STATELESS_HTTP` | Stateless Streamable HTTP sessions |

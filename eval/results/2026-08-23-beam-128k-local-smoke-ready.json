@@ -1,0 +1,143 @@
+{
+  "benchmark": "BEAM",
+  "comparison_label": "Diagnostic",
+  "paper_comparable": false,
+  "scope": {
+    "variant": "128k",
+    "conversation_count": 1,
+    "expected_conversations_for_variant": 20,
+    "case_count": 10,
+    "selection": "one deterministic case per available ability",
+    "seed": 0
+  },
+  "configuration": {
+    "reader_model": "qwen2.5:7b",
+    "judge_model": "qwen2.5:7b",
+    "embedding_model": "nomic-embed-text",
+    "model_provider": "ollama",
+    "memory_provider": "filesystem",
+    "top_k": 8,
+    "candidate_pool_size": 256,
+    "fusion": "grouped_weighted_rrf",
+    "query_expansion": true,
+    "parent_source_deduplication": true,
+    "local_reranking": true,
+    "mmr": true
+  },
+  "result": {
+    "mean_partial_credit_score": 0.25,
+    "score_confidence_interval_95": [
+      0.1,
+      0.4
+    ],
+    "exact_accuracy": 0.0,
+    "grounded_rate": 0.6,
+    "retrieved_evidence_score": 0.25,
+    "gold_evidence_oracle_score": 0.388889,
+    "reader_gap_to_oracle": 0.138889,
+    "score_conditioned_on_retrieval_hit": 0.3125
+  },
+  "retrieval": {
+    "recall_at_8": 0.511111,
+    "mrr": 0.541667,
+    "ndcg_at_8": 0.417113
+  },
+  "categories": [
+    {
+      "ability": "abstention",
+      "score": 0.0,
+      "recall_at_8": null,
+      "oracle_reader_score": null
+    },
+    {
+      "ability": "contradiction-resolution",
+      "score": 0.0,
+      "recall_at_8": 0.5,
+      "oracle_reader_score": 0.0
+    },
+    {
+      "ability": "event-ordering",
+      "score": 0.0,
+      "recall_at_8": 0.333333,
+      "oracle_reader_score": 0.0
+    },
+    {
+      "ability": "information-extraction",
+      "score": 0.0,
+      "recall_at_8": 1.0,
+      "oracle_reader_score": 1.0
+    },
+    {
+      "ability": "instruction-following",
+      "score": 0.5,
+      "recall_at_8": 0.5,
+      "oracle_reader_score": 0.5
+    },
+    {
+      "ability": "knowledge-update",
+      "score": 0.5,
+      "recall_at_8": 0.5,
+      "oracle_reader_score": 1.0
+    },
+    {
+      "ability": "multi-session-reasoning",
+      "score": 0.5,
+      "recall_at_8": 0.666667,
+      "oracle_reader_score": 0.0
+    },
+    {
+      "ability": "preference-following",
+      "score": 0.5,
+      "recall_at_8": 1.0,
+      "oracle_reader_score": 0.5
+    },
+    {
+      "ability": "summarization",
+      "score": 0.5,
+      "recall_at_8": 0.1,
+      "oracle_reader_score": 0.5
+    },
+    {
+      "ability": "temporal-reasoning",
+      "score": 0.0,
+      "recall_at_8": 0.0,
+      "oracle_reader_score": 0.0
+    }
+  ],
+  "efficiency": {
+    "external_api_cost_usd": 0.0,
+    "total_local_model_tokens": 48708,
+    "cold_ingestion_seconds": 15.991997,
+    "average_retrieval_seconds": 0.547972,
+    "retrieval_p95_seconds": 0.981297,
+    "average_generation_seconds": 10.924513,
+    "generation_p95_seconds": 26.231322,
+    "total_processing_seconds": 315.494603,
+    "original_document_count": 268,
+    "derived_semantic_memory_count": 239,
+    "stored_memory_token_estimate": 155342,
+    "memory_footprint_bytes": 9121140,
+    "reader_repair_attempts": 2,
+    "reader_repair_successes": 0
+  },
+  "reproducibility": {
+    "official_repository": "https://github.com/mohammadtavakoli78/BEAM",
+    "official_revision": "3e12035532eb85768f1a7cd779832b650c4b2ef9",
+    "dataset_fingerprint": "sha256:58a00c33c8f65ae82d702697e361186381ac7d6cae6ab181cdbee21c636237d7",
+    "selected_subset_fingerprint": "sha256:6078984412e4466177eb4dba99a63866b2d24570d5d0e33de6e4c03fb3b28be7",
+    "artifact_manifest_sha256": "sha256:4a179674231003f11e8db02f6ec3a222ea24f50cf51bda1179d16b4bc2c71bc3"
+  },
+  "non_comparability_reasons": [
+    "Smoke profile rather than the complete paper profile.",
+    "MemoRizz normalized diagnostic runner rather than BEAM's official runner.",
+    "MemoRizz diagnostic scorer rather than BEAM's official rubric evaluator.",
+    "Ten cases from one conversation rather than 2,000 questions from 100 conversations."
+  ],
+  "security": {
+    "sanitized": true,
+    "contains_raw_conversations": false,
+    "contains_questions_answers_or_predictions": false,
+    "contains_credentials": false,
+    "contains_local_paths": false
+  }
+}

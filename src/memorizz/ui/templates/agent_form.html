@@ -97,6 +97,13 @@
                     Enable continual learning (promote repeated successful workflows into learned skills)
                 </label>
             </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="learning_control_plane" {% if learning_control_plane %}checked{% endif %}>
+                    Enable the learning control plane (bounded evidence, compilation, and reversible forgetting)
+                </label>
+                <p class="form-hint">Continual learning enables this automatically unless you explicitly turn it off.</p>
+            </div>
             <div class="form-group">
                 <label for="skill_injection_role">Authority for newly learned skills</label>
                 <select id="skill_injection_role" name="skill_injection_role"
@@ -683,6 +690,41 @@
                 <input id="memory_ids" name="memory_ids" type="text" value="{{ memory_ids_raw }}">
                 <p class="form-hint">Comma or newline separated memory IDs.</p>
             </div>
+        </div>
+    </details>
+
+    <!-- Meta-harness — collapsible -->
+    <details class="detail-section collapsible-section" {% if meta_harness_mode %}open{% endif %}>
+        <summary class="section-toggle">
+            <h2>Agent Harness Runtime</h2>
+            <span class="toggle-caret">▾</span>
+        </summary>
+        <div class="section-body">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="meta_harness_mode">Mode</label>
+                    <select id="meta_harness_mode" name="meta_harness_mode">
+                        <option value="" {% if not meta_harness_mode %}selected{% endif %}>Disabled</option>
+                        <option value="delegate" {% if meta_harness_mode == 'delegate' %}selected{% endif %}>Delegate specialist tasks</option>
+                        <option value="runtime" {% if meta_harness_mode == 'runtime' %}selected{% endif %}>Run complete turns on a harness</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="default_harness">Default Harness</label>
+                    <select id="default_harness" name="default_harness">
+                        <option value="auto" {% if default_harness == 'auto' %}selected{% endif %}>Auto route</option>
+                        <option value="codex" {% if default_harness == 'codex' %}selected{% endif %}>Codex</option>
+                        <option value="claude-code" {% if default_harness == 'claude-code' %}selected{% endif %}>Claude Code</option>
+                        <option value="openhands" {% if default_harness == 'openhands' %}selected{% endif %}>OpenHands</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="harness_workspace">Default Workspace <span class="optional">optional</span></label>
+                    <input id="harness_workspace" name="harness_workspace" value="{{ harness_workspace }}" placeholder="/absolute/path/to/project">
+                </div>
+            </div>
+            <p class="form-hint">MemoRizz remains the memory, approval, observability, and verification control plane. Runtime mode routes the complete turn externally; delegate mode gives the native MemAgent bounded harness tools. Risky run envelopes require host approval.</p>
+            <p class="form-hint"><a href="/harnesses">Open the Agent Harnesses console</a> to probe adapters and inspect durable runs.</p>
         </div>
     </details>
 

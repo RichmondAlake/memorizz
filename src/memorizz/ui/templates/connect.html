@@ -85,6 +85,10 @@
                 <p>Connect to your memory provider</p>
             </div>
 
+            {% if ui_read_only %}
+            <div class="success-message">Read-only inspection mode is enabled. Database mutations, settings changes, and recommendation decisions are blocked.</div>
+            {% endif %}
+
             {% if error %}
             <div class="error-message" id="connect-error">
                 <span>⚠️</span> {{ error }}
@@ -241,7 +245,7 @@
                     <div class="form-group">
                         <label for="oracle_password">Password</label>
                         <div class="password-field">
-                            <input type="password" name="oracle_password" id="oracle_password" value="{{ env_oracle_password }}" placeholder="••••••••">
+                            <input type="password" name="oracle_password" id="oracle_password" value="" autocomplete="off" placeholder="{% if has_env_oracle_password %}Configured via ORACLE_PASSWORD{% else %}••••••••{% endif %}">
                             <button type="button" class="password-toggle" data-target="oracle_password" aria-label="Show password" aria-pressed="false">
                                 <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
@@ -270,7 +274,8 @@
                 <div id="mongodb-fields" class="provider-fields" style="display: none;">
                     <div class="form-group">
                         <label for="mongodb_uri">Connection URI</label>
-                        <input type="text" name="mongodb_uri" id="mongodb_uri" value="{{ env_mongodb_uri }}" placeholder="mongodb://localhost:27017">
+                        <input type="password" name="mongodb_uri" id="mongodb_uri" value="" autocomplete="off" placeholder="{% if has_env_mongodb_uri %}Configured via MONGODB_URI{% else %}mongodb://localhost:27017{% endif %}">
+                        {% if has_env_mongodb_uri %}<small>Using the URI from this process environment when left blank.</small>{% endif %}
                     </div>
                     <div class="form-group">
                         <label for="mongodb_db_name">Database Name <span class="optional">(optional)</span></label>
@@ -289,7 +294,7 @@
                 <div class="form-group" style="margin-top: 0.5rem;">
                     <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.85rem;">
                         <input type="checkbox" id="remember_me" style="accent-color: #00d9ff; width: 16px; height: 16px; cursor: pointer;">
-                        Remember me
+                        Remember non-secret connection details
                     </label>
                 </div>
 
@@ -344,10 +349,8 @@
             const data = {
                 provider_type: document.getElementById('provider_type').value,
                 oracle_user: document.getElementById('oracle_user').value,
-                oracle_password: document.getElementById('oracle_password').value,
                 oracle_dsn: document.getElementById('oracle_dsn').value,
                 oracle_schema: document.getElementById('oracle_schema').value,
-                mongodb_uri: document.getElementById('mongodb_uri').value,
                 mongodb_db_name: document.getElementById('mongodb_db_name').value,
                 filesystem_path: document.getElementById('filesystem_path').value,
             };
@@ -362,10 +365,8 @@
                 const fields = [
                     ['provider_type', 'provider_type'],
                     ['oracle_user', 'oracle_user'],
-                    ['oracle_password', 'oracle_password'],
                     ['oracle_dsn', 'oracle_dsn'],
                     ['oracle_schema', 'oracle_schema'],
-                    ['mongodb_uri', 'mongodb_uri'],
                     ['mongodb_db_name', 'mongodb_db_name'],
                     ['filesystem_path', 'filesystem_path'],
                 ];
@@ -373,6 +374,11 @@
                     const el = document.getElementById(id);
                     if (el && data[key]) el.value = data[key];
                 }
+                // Older UI versions stored secrets in this browser key.
+                // Rewrite it immediately with the allowlisted fields only.
+                delete data.oracle_password;
+                delete data.mongodb_uri;
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
                 toggleProviderFields();
                 return true;
             } catch (e) {

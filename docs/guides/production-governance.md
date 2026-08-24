@@ -1,8 +1,19 @@
-# Production Governance in 0.5
+# Production Governance
 
 MemoRizz 0.5 makes tool execution, caching, compaction, and delegation explicit
 runtime contracts. This guide covers the controls that matter when an agent can
 reach Notion, Google Calendar, business systems, or a code-execution provider.
+
+For the provider-neutral layer that connects bounded retrieval, immutable
+learning events, verified outcomes, workflow/skill lifecycle evidence, and
+reversible forgetting, see the
+[Memory-first Learning Control Plane](learning-control-plane.md).
+
+For repository-scale work delegated to Codex, Claude Code, OpenHands, or a
+native MemAgent, apply these controls through the
+[Memory-First Meta-Harness](meta-harness.md). It adds a durable run envelope,
+workspace policy, host approval, budgets, cancellation, and verification
+without replacing the worker's own agent loop.
 
 ## Compose the complete runtime
 
@@ -110,6 +121,59 @@ Setting `ContextPolicy(progressive_tool_disclosure=False)` restores direct
 schema exposure for a small, trusted tool set. It should be an explicit
 compatibility choice.
 
+## Host-enforced completion
+
+Prompts cannot reliably enforce “do not stop until verification passes.”
+`CompletionPolicy` makes that decision a host responsibility. A rejected final
+answer stays in the same model/tool loop, preserving the workspace, messages,
+and exact tool evidence for a bounded retry:
+
+```python
+from memorizz import CompletionDecision, CompletionPolicy, MemAgentBuilder
+
+
+def acceptance(candidate):
+    evidence = verification_store.last_success(candidate.metadata["run_id"])
+    if not evidence:
+        return CompletionDecision(
+            accepted=False,
+            code="verification_required",
+            reason="Run the task-specific verification and make it pass.",
+        )
+    return CompletionDecision(
+        accepted=True,
+        code="verification_passed",
+        metadata={"verification_id": evidence.id},
+    )
+
+
+agent = (
+    MemAgentBuilder()
+    .with_completion_policy(
+        CompletionPolicy(
+            enabled=True,
+            max_rejections=3,
+            fail_closed=True,
+            require_tool_calls=True,
+            validator=acceptance,
+            validator_name="task_acceptance_v1",
+        )
+    )
+    .build()
+)
+```
+
+Streaming responses are buffered until accepted, so rejected candidate tokens
+never reach the client. Decisions include a response digest, iteration, tool
+count, reason, timestamp, and host metadata and are available through
+`agent.completion_policy_report()`.
+
+Validator code is never serialized. Persisted policies remember that a named
+validator is required and fail closed until trusted host code rebinds it. Cache
+entries include the policy fingerprint, cached candidates are revalidated by
+the current host policy, and policies requiring tool evidence bypass cache
+lookup because a cached string cannot prove a fresh tool execution.
+
 ## Durable human approval
 
 A side-effecting governed tool pauses execution by creating a serializable
@@ -162,8 +226,10 @@ Semantic similarity is a candidate-reuse signal; **it does not establish that
 an answer is fresh or operationally correct**. MemoRizz therefore admits
 read-only, deterministic turns by default and automatically bypasses cache
 writes for side-effecting tools. Entries include user/memory/session scope and
-model, prompt, tool-schema, and data-version fingerprints, with domain-specific
-freshness limits and hit provenance.
+model, prompt, tool-schema, completion-policy, and data-version fingerprints,
+with domain-specific freshness limits and hit provenance. Exact scoped repeats
+use their deterministic cache key before vector search, avoiding false misses
+from backend floating-point rounding at a strict `1.0` threshold.
 
 ```python
 stats = agent.semantic_cache_stats()

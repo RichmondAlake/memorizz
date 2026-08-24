@@ -1,0 +1,208 @@
+{
+  "schema_version": "memorizz.memory-suite.comparison.v2",
+  "generated_at": "2026-08-22",
+  "paper_comparable": false,
+  "comparison_basis": "2026-08-22-memory-suite-model-comparison.json",
+  "validation": {
+    "focused": {
+      "passed": 21,
+      "failed": 0,
+      "duration_seconds": 0.5
+    },
+    "full": {
+      "passed": 930,
+      "skipped": 3,
+      "failed": 0,
+      "duration_seconds": 189.02
+    }
+  },
+  "scope": {
+    "sample_count_per_run": 1,
+    "profile": "smoke",
+    "retrieval_top_k": 6,
+    "candidate_pool_size": 256,
+    "lexical_weight": 0.25,
+    "embedding_provider": "ollama",
+    "embedding_model": "nomic-embed-text",
+    "embedding_model_digest": "0a109f422b47",
+    "semantic_memory_extraction": true,
+    "gold_evidence_oracle_reader": true,
+    "reader_configurations": [
+      {
+        "provider": "ollama",
+        "model": "qwen2.5:7b",
+        "external_api_cost_usd": 0.0
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "reasoning_effort": "low"
+      }
+    ]
+  },
+  "source_improvements_exercised": [
+    "content-addressed persistent corpus embedding cache",
+    "batch memory-provider ingestion and portable provider capabilities",
+    "scoped semantic retrieval over a 256-record candidate pool",
+    "weighted reciprocal-rank fusion with lexical, entity, temporal, and MMR signals",
+    "query-independent semantic memory extraction with parent-source provenance",
+    "gold-evidence oracle reader lane",
+    "versioned protocol manifest and fail-closed paper-comparability gate"
+  ],
+  "fixed_subset_integrity": {
+    "agentmembench_locomo": {
+      "unchanged": true,
+      "dataset_subset_fingerprint": "sha256:fe13e6bcda190bba414b0d89badae82913d4a768273b323e856a33f6dad455d9"
+    },
+    "locomo_plus_cognitive": {
+      "unchanged": true,
+      "dataset_subset_fingerprint": "sha256:0794cb5b93141a686f0572019cc96cd7b12384fd79a066562e43994e950bac0f"
+    }
+  },
+  "benchmarks": {
+    "agentmembench": {
+      "dataset_adapter": "locomo",
+      "source_document_count": 419,
+      "derived_semantic_memory_count": 64,
+      "indexed_document_count": 483,
+      "qwen2_5_7b": {
+        "before": {
+          "answer_f1": 0.30769230769230765,
+          "faithfulness": 0.0,
+          "retrieval_recall_at_6": 1.0,
+          "mrr": 0.5,
+          "ndcg_at_6": 0.6309297535714575,
+          "total_tokens": 1218,
+          "average_answer_latency_seconds": 4.806172374956077,
+          "ingestion_seconds": 7.974404791981215
+        },
+        "after": {
+          "answer_f1": 0.0,
+          "faithfulness": 1.0,
+          "retrieval_recall_at_6": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_6": 1.0,
+          "gold_evidence_oracle_score": 0.0,
+          "total_tokens": 1483,
+          "average_answer_latency_seconds": 5.472850749007193,
+          "cold_ingestion_seconds": 9.607230541005265,
+          "external_api_cost_usd": 0.0
+        }
+      },
+      "gpt_5_5": {
+        "before": {
+          "answer_f1": 0.4615384615384615,
+          "faithfulness": 1.0,
+          "retrieval_recall_at_6": 1.0,
+          "mrr": 0.5,
+          "ndcg_at_6": 0.6309297535714575,
+          "total_tokens": 1152,
+          "average_answer_latency_seconds": 2.9838794579845853,
+          "ingestion_seconds": 7.331665499979863,
+          "estimated_external_api_cost_usd": 0.00831
+        },
+        "after": {
+          "answer_f1": 0.4615384615384615,
+          "faithfulness": 1.0,
+          "retrieval_recall_at_6": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_6": 1.0,
+          "gold_evidence_oracle_score": 0.4615384615384615,
+          "total_tokens": 1544,
+          "average_answer_latency_seconds": 3.6265356249641627,
+          "warm_ingestion_seconds": 0.5431300000054762,
+          "embedding_cache_hit": true,
+          "estimated_external_api_cost_usd": 0.01357
+        }
+      },
+      "interpretation": "Retrieval moved the gold source from rank 2 to rank 1. GPT-5.5 preserved its answer score. Qwen failed even with the gold-only oracle because the source expressed a relative date and the reader did not resolve it to the expected absolute date; its regression is therefore reader-side on this case, not a retrieval miss."
+    },
+    "locomo-plus": {
+      "dataset_adapter": "cognitive",
+      "source_document_count": 421,
+      "derived_semantic_memory_count": 65,
+      "indexed_document_count": 486,
+      "qwen2_5_7b": {
+        "before": {
+          "judge_score": 0.0,
+          "retrieval_recall_at_6": 0.0,
+          "total_tokens": 898,
+          "average_answer_latency_seconds": 1.6381424159917515,
+          "ingestion_seconds": 8.20878575000097
+        },
+        "after": {
+          "judge_score": 0.0,
+          "retrieval_recall_at_6": 0.0,
+          "gold_evidence_oracle_score": 0.0,
+          "total_tokens": 1461,
+          "average_answer_latency_seconds": 2.974846958008129,
+          "cold_ingestion_seconds": 9.729710458021145,
+          "external_api_cost_usd": 0.0
+        }
+      },
+      "gpt_5_5": {
+        "before": {
+          "judge_score": 0.5,
+          "retrieval_recall_at_6": 0.0,
+          "total_tokens": 1144,
+          "average_answer_latency_seconds": 3.0051287499954924,
+          "ingestion_seconds": 7.909909165988211,
+          "estimated_external_api_cost_usd": 0.012695
+        },
+        "after": {
+          "judge_score": 0.0,
+          "retrieval_recall_at_6": 0.0,
+          "gold_evidence_oracle_score": 1.0,
+          "reader_gap_to_oracle": 1.0,
+          "total_tokens": 1742,
+          "average_answer_latency_seconds": 3.3360177080030553,
+          "warm_ingestion_seconds": 0.49946495800395496,
+          "embedding_cache_hit": true,
+          "estimated_external_api_cost_usd": 0.020835
+        }
+      },
+      "retrieval_diagnostic": {
+        "semantic_rank_of_cue_0_2_derived_constraint": 136,
+        "semantic_rank_of_cue_0_1_original": 148,
+        "semantic_rank_of_cue_0_2_original": 274,
+        "gold_cues_with_positive_lexical_rank": 0,
+        "duplicate_parent_sources_in_top_6": 1
+      },
+      "interpretation": "The GPT-5.5 oracle scored 1.0 from the gold cues, while the retrieved-evidence lane scored 0.0. This isolates retrieval as the primary failure. The conservative semantic extractor preserved the cue but did not bridge the causal concept from being overwhelmed to saying no or protecting time, and final top-k diversity allowed an original record plus its derived copy to consume two slots."
+    }
+  },
+  "efficiency": {
+    "agentmembench_hosted_ingestion_reduction_percent": 92.59,
+    "locomo_plus_hosted_ingestion_reduction_percent": 93.69,
+    "hosted_total_estimated_cost_usd": 0.034405,
+    "previous_hosted_total_estimated_cost_usd": 0.021005,
+    "cost_increase_note": "The new total includes gold-evidence oracle generation and, for judge-scored cases, an additional oracle grading call."
+  },
+  "suite_coverage": {
+    "executed_with_available_data": [
+      "AgentMemBench through the LoCoMo adapter",
+      "LoCoMo-Plus cognitive"
+    ],
+    "source_checkout_present_but_dataset_not_ready": {
+      "longmemeval-v2": [
+        "questions.jsonl",
+        "trajectories.jsonl",
+        "haystacks/lme_v2_small.json"
+      ],
+      "beam": [
+        "chats/128K or chats/100K"
+      ],
+      "memoryagentbench": [
+        "top-level normalized JSON or JSONL export"
+      ]
+    }
+  },
+  "conclusion": "The latest changes materially improved reproducibility, observability, retrieval rank on the AgentMemBench sample, and repeated-run ingestion speed. They did not improve LoCoMo-Plus cognitive recall on the fixed sample, and the one-case answer-score changes are too small to support an aggregate quality claim.",
+  "non_comparability_reasons": [
+    "one fixed sample per run rather than each complete official split",
+    "MemoRizz diagnostic runner and scorer rather than each benchmark's official implementation",
+    "reader, embedding, top-k, and decoding configurations do not match all paper manifests",
+    "the official upstream dataset revision was not available in the runtime evidence"
+  ],
+  "security": "Credentials, raw prompts, full predictions, and machine-specific local paths are omitted."
+}
