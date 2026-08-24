@@ -4,6 +4,16 @@
 
 _No unreleased changes._
 
+## 0.6.2 — 2026-08-25
+
+### Fixed
+
+- Source distributions now explicitly exclude local-only plans, credentials,
+  research output, dependency trees, and generated desktop artifacts even when
+  built from a developer checkout. This is the canonical production package
+  for the 0.6.1 runtime fixes; 0.6.1 is superseded because its manually
+  uploaded source archive contained ignored development files.
+
 ## 0.6.1 — 2026-08-25
 
 ### Fixed

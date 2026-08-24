@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.6.1"
+version = "0.6.2"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -219,7 +219,29 @@ core-metadata-version = "2.4"
 [tool.hatch.build.targets.sdist]
 core-metadata-version = "2.4"
 exclude = [
+    # A source archive may be built from a developer checkout rather than a
+    # pristine CI clone. Exclude local-only plans, credentials, and generated
+    # desktop output explicitly instead of relying solely on Git ignore rules.
+    "**/*.local.md",
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "**/secrets.json",
+    "**/credentials.json",
+    "**/*.key",
+    "**/*.pem",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/*.secret",
     ".claude/**",
+    ".venv/**",
+    "apps/**/dist/**",
+    "apps/**/node_modules/**",
+    "apps/**/src-tauri/gen/**",
+    "apps/**/src-tauri/target/**",
+    "dist/**",
+    "research/**",
     "temp_unpack*",
     "eval/longmemeval/data/**",
     "eval/longmemeval/results/**",
