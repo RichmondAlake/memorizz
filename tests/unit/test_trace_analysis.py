@@ -114,10 +114,42 @@ def test_trace_analysis_uses_structured_success_latency_and_model_metadata():
             "calls": 1,
             "results": 1,
             "failures": 0,
+            "outcomes": {
+                "success": 1,
+                "empty": 0,
+                "degraded": 0,
+                "fallback": 0,
+                "provider_error": 0,
+                "error": 0,
+            },
             "failure_rate": 0.0,
             "average_duration_ms": 25.5,
         }
     ]
+
+
+@pytest.mark.unit
+def test_trace_analysis_separates_fallback_degraded_and_provider_errors():
+    report = analyze_trace_events(
+        [
+            _event("t1", "tool_result", "Tool Result: search", outcome="fallback"),
+            _event("t2", "tool_result", "Tool Result: search", outcome="fallback"),
+            _event("t3", "tool_result", "Tool Result: lookup", outcome="degraded"),
+            _event(
+                "t4",
+                "tool_result",
+                "Tool Result: calendar",
+                outcome="provider_error",
+                success=False,
+            ),
+        ]
+    )
+
+    assert report["summary"]["tool_fallbacks"] == 2
+    assert report["summary"]["tool_degraded_results"] == 1
+    assert report["summary"]["tool_provider_errors"] == 1
+    assert report["summary"]["tool_failures"] == 1
+    assert "tool_fallback:search" in {row["id"] for row in report["insights"]}
 
 
 @pytest.mark.unit
@@ -205,3 +237,134 @@ def test_trace_analysis_summarizes_unscoped_context_and_all_cache_decisions():
     assert any(
         insight["id"] == "content_on_unscoped_thread" for insight in report["insights"]
     )
+
+
+@pytest.mark.unit
+def test_trace_analysis_is_memory_first_without_exposing_memory_values():
+    private_memory = "private-user-fact-must-never-appear"
+    events = [
+        _event("t1", "turn_start", "Agent turn started"),
+        _event(
+            "t1",
+            "memory_context",
+            "Memory supplied",
+            json.dumps(
+                {
+                    "stage": "supplied",
+                    "source_counts": {
+                        "history_messages": 2,
+                        "semantic_memories": 1,
+                        "entity_profiles": 1,
+                        "entity_attributes": 2,
+                        "preferences": 1,
+                        "conversation_memories": 1,
+                        "writing_samples": 1,
+                    },
+                    "retrieved_candidate_count": 6,
+                    "supplied_count": 8,
+                    "injected_char_count": 1800,
+                    "degraded": True,
+                    "fallback_used": True,
+                    "entity_refs": [
+                        {"ref": "sha256:safe", "attribute_names": ["role"]}
+                    ],
+                }
+            ),
+        ),
+        _event(
+            "t1",
+            "memory_reference",
+            "Memory referenced",
+            json.dumps(
+                {
+                    "stage": "referenced",
+                    "supplied_count": 8,
+                    "referenced_count": 1,
+                    "referenced_refs": [{"source": "entity", "ref": "sha256:safe"}],
+                    "behavioral_sources_not_measured": 2,
+                }
+            ),
+        ),
+    ]
+
+    report = analyze_trace_events(events)
+
+    assert report["version"] == 3
+    assert report["summary"]["memory_context_events"] == 1
+    assert report["summary"]["memory_candidates"] == 6
+    assert report["summary"]["memory_supplied"] == 8
+    assert report["summary"]["memory_explicit_references"] == 1
+    assert report["summary"]["memory_degraded_turns"] == 1
+    assert report["summary"]["memory_fallback_turns"] == 1
+    assert any(row["source"] == "entity_memory" for row in report["memory_health"])
+    assert "degraded_memory_retrieval" in {
+        insight["id"] for insight in report["insights"]
+    }
+    assert private_memory not in json.dumps(report)
+
+
+@pytest.mark.unit
+def test_trace_analysis_flags_missing_memory_supply_observability():
+    report = analyze_trace_events([_event("t1", "turn_start", "Agent turn started")])
+
+    assert "missing_memory_supply_trace" in {
+        insight["id"] for insight in report["insights"]
+    }
+
+
+@pytest.mark.unit
+def test_cache_hit_does_not_claim_model_memory_observability_is_missing():
+    report = analyze_trace_events(
+        [
+            _event("t1", "turn_start", "Agent turn started"),
+            _event(
+                "t1",
+                "cache_decision",
+                "Semantic cache hit",
+                '{"cache_decision":"hit"}',
+            ),
+        ]
+    )
+
+    assert "missing_memory_supply_trace" not in {
+        insight["id"] for insight in report["insights"]
+    }
+
+
+@pytest.mark.unit
+def test_memory_health_attributes_summary_references_to_summaries():
+    report = analyze_trace_events(
+        [
+            _event("t1", "turn_start", "Agent turn started"),
+            _event(
+                "t1",
+                "memory_context",
+                "Memory supplied",
+                json.dumps(
+                    {
+                        "source_counts": {"summaries": 1},
+                        "supplied_count": 1,
+                    }
+                ),
+            ),
+            _event(
+                "t1",
+                "memory_reference",
+                "Memory referenced",
+                json.dumps(
+                    {
+                        "referenced_count": 1,
+                        "referenced_refs": [
+                            {"source": "summary", "ref": "sha256:safe"}
+                        ],
+                    }
+                ),
+            ),
+        ]
+    )
+
+    summary_health = next(
+        row for row in report["memory_health"] if row["source"] == "summaries"
+    )
+    assert summary_health["supplied"] == 1
+    assert summary_health["explicit_references"] == 1

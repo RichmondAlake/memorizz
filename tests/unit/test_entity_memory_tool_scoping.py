@@ -160,7 +160,9 @@ def test_upsert_tool_schema_exposes_required_nested_attribute_fields(
     assert "$defs" not in serialized
 
 
-def test_upsert_schema_does_not_expose_memory_scope(mock_memory_provider):
+def test_upsert_schema_does_not_expose_host_scope_or_identity_authority(
+    mock_memory_provider,
+):
     agent = _assistant(mock_memory_provider)
     upsert = Mock(return_value="entity-a")
     agent.entity_memory_manager.upsert_entity_from_tool = upsert
@@ -169,11 +171,20 @@ def test_upsert_schema_does_not_expose_memory_scope(mock_memory_provider):
 
     tool = agent.tool_manager.tools["entity_memory_upsert"]["function"]
     assert "memory_id" not in inspect.signature(tool).parameters
+    assert "identity_key" not in inspect.signature(tool).parameters
     with pytest.raises(TypeError, match="memory_id"):
         tool(
             name="user",
             attributes={"role": "attacker-selected"},
             memory_id="primary-user-b",
+        )
+
+    upsert.assert_not_called()
+    with pytest.raises(TypeError, match="identity_key"):
+        tool(
+            name="user",
+            attributes={"role": "attacker-selected"},
+            identity_key="authenticated_user",
         )
 
     upsert.assert_not_called()

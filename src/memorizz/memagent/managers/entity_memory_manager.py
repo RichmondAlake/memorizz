@@ -40,8 +40,35 @@ class EntityMemoryManager:
         user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Return simplified entity profiles relevant to the query."""
+        return self.build_context_with_diagnostics(
+            query=query,
+            memory_id=memory_id,
+            limit=limit,
+            user_id=user_id,
+        )["profiles"]
+
+    def build_context_with_diagnostics(
+        self,
+        query: str,
+        memory_id: Optional[str],
+        limit: int = 3,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return prompt profiles plus content-free retrieval diagnostics."""
         if not self.is_enabled() or not query:
-            return []
+            return {
+                "profiles": [],
+                "retrieval": {
+                    "retrieval_mode": "disabled" if not self.is_enabled() else "exact",
+                    "match_count": 0,
+                    "degraded": not self.is_enabled(),
+                    "degraded_reason": (
+                        "entity_memory_disabled"
+                        if not self.is_enabled()
+                        else "empty_query"
+                    ),
+                },
+            }
 
         records, diagnostics = self._entity_memory.search_entities_with_diagnostics(
             query, limit=limit, memory_id=memory_id, user_id=user_id
@@ -53,11 +80,13 @@ class EntityMemoryManager:
                 diagnostics.get("degraded_reason"),
                 diagnostics.get("match_count"),
             )
-        return [
+        profiles = [
             self._simplify_record(record)
             for record in records
             if record and record.get("entity_id")
         ]
+        diagnostics["match_count"] = len(profiles)
+        return {"profiles": profiles, "retrieval": diagnostics}
 
     def lookup_entities(
         self,

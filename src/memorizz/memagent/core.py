@@ -56,8 +56,12 @@ from ..task_decomposition import normalize_delegation_config
 from ..tooling import (
     ContextPolicy,
     SemanticToolRouter,
+    ToolOutcome,
+    ToolOutcomeStatus,
+    ToolResult,
     ToolResultPolicy,
     governed_tool,
+    normalize_tool_result,
     serialize_tool_result,
     tool_metadata_to_openai,
 )
@@ -233,6 +237,11 @@ class MemAgent:
     _current_root_trace_id = _ContextLocal()
     _current_parent_span_id = _ContextLocal()
     _last_trace_context = _ContextLocal(dict)
+    _last_tool_outcomes = _ContextLocal(list)
+    _last_retrieved_memories = _ContextLocal(list)
+    _last_retrieval_stats = _ContextLocal(dict)
+    _last_memory_context_evidence = _ContextLocal(dict)
+    _last_memory_attribution_context = _ContextLocal()
     _thread_ids_by_memory = _ContextLocal(dict)
     _stream_event_callback = _ContextLocal()
     _stream_trace_events = _ContextLocal()
@@ -409,6 +418,8 @@ class MemAgent:
             "candidate_count": 0,
             "selected_count": 0,
         }
+        self._last_memory_context_evidence: Dict[str, Any] = {}
+        self._last_memory_attribution_context = None
         self.skill_paths = self._normalize_skill_paths(skill_paths)
         self.skills: List[Dict[str, Any]] = []
         # MCP is a first-class client subsystem. It owns protocol negotiation,
@@ -595,6 +606,7 @@ class MemAgent:
         )
         self._stream_event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
         self._stream_trace_events: Optional[List[Dict[str, Any]]] = None
+        self._last_tool_outcomes: List[Dict[str, Any]] = []
         # Learned skills injected into the CURRENT turn's context — reset at
         # the top of every _build_context so attribution never leaks across
         # runs. Read by the workflow capture paths (skills_activated).
@@ -1049,6 +1061,13 @@ class MemAgent:
             for row in tool_logs
             if row.get("success") is False or bool(row.get("error"))
         )
+        tool_outcomes: Dict[str, int] = {}
+        for row in tool_logs:
+            outcome = str(
+                row.get("outcome")
+                or ("success" if row.get("success") is not False else "error")
+            ).lower()
+            tool_outcomes[outcome] = tool_outcomes.get(outcome, 0) + 1
 
         return {
             "agent_id": self.agent_id,
@@ -1077,6 +1096,7 @@ class MemAgent:
                 "count": len(tool_logs),
                 "failure_count": tool_failures,
                 "success_count": len(tool_logs) - tool_failures,
+                "outcomes": tool_outcomes,
             },
             "workflows": {
                 "count": len(workflows),
@@ -1908,6 +1928,24 @@ class MemAgent:
                     + "\nUse the entity memory tools to keep these facts up to date."
                 )
 
+        personalization_value = context.get("personalization_context")
+        if personalization_value:
+            try:
+                from ..personalization import PersonalizationContext
+
+                personalization = PersonalizationContext.from_value(
+                    personalization_value
+                )
+                rendered_personalization = personalization.render()
+            except Exception as exc:
+                logger.warning("Personalization context rendering failed: %s", exc)
+                rendered_personalization = ""
+            if rendered_personalization:
+                sections.append(
+                    "Personalization context for this turn:\n"
+                    + rendered_personalization
+                )
+
         summaries = context.get("summaries") or []
         if summaries:
             summary_lines = []
@@ -1930,9 +1968,13 @@ class MemAgent:
             sections.append(recent_digest)
 
         if request_context:
+            visible_request_context = dict(request_context)
+            # The typed block above is already rendered with its own authority
+            # and usage rules. Avoid injecting a duplicate raw JSON copy.
+            visible_request_context.pop("personalization_context", None)
             try:
                 rendered_context = json.dumps(
-                    request_context,
+                    visible_request_context,
                     ensure_ascii=False,
                     indent=2,
                     default=str,
@@ -3975,6 +4017,9 @@ class MemAgent:
         self._current_root_trace_id = str(uuid.uuid4())
         self._current_parent_span_id = self._current_root_trace_id
         self._stream_trace_events = []
+        self._last_tool_outcomes = []
+        self._last_memory_context_evidence = {}
+        self._last_memory_attribution_context = None
         self._last_trace_context = self._trace_identity_payload()
         if query is not None and self.learning_control_plane is not None:
             try:
@@ -4065,6 +4110,394 @@ class MemAgent:
             },
         )
 
+    def _attach_personalization_context(
+        self,
+        built_context: Dict[str, Any],
+        request_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Attach a typed host context without duplicating entity profiles."""
+        raw = (
+            request_context.get("personalization_context")
+            if isinstance(request_context, dict)
+            else None
+        )
+        if not raw:
+            return built_context
+        try:
+            from ..personalization import PersonalizationContext
+
+            personalization = PersonalizationContext.from_value(raw)
+        except Exception as exc:
+            logger.warning("Ignoring invalid personalization context: %s", exc)
+            return built_context
+        result = dict(built_context)
+        result["personalization_context"] = personalization
+        # A host-built context may already contain the same entity retrieval.
+        # Keep one authoritative rendering and one observable supply record.
+        if personalization.policy.include_entity_memory:
+            result.pop("entity_memory_profiles", None)
+            result.pop("entity_memory_retrieval", None)
+        return result
+
+    @staticmethod
+    def _host_owns_entity_personalization(
+        request_context: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Avoid a second entity lookup when the host supplied that source."""
+        raw = (
+            request_context.get("personalization_context")
+            if isinstance(request_context, dict)
+            else None
+        )
+        if not raw:
+            return False
+        try:
+            from ..personalization import PersonalizationContext
+
+            return PersonalizationContext.from_value(raw).policy.include_entity_memory
+        except Exception:
+            return False
+
+    @staticmethod
+    def _memory_row_identifier(row: Any, fallback: str) -> str:
+        if not isinstance(row, dict):
+            return fallback
+        for key in (
+            "parent_source_id",
+            "source_id",
+            "entity_id",
+            "summary_id",
+            "id",
+            "_id",
+            "thread_id",
+        ):
+            value = row.get(key)
+            if value is not None and str(value).strip():
+                return str(value)
+        content = row.get("content")
+        if isinstance(content, dict):
+            for key in ("id", "thread_id", "summary_id"):
+                value = content.get(key)
+                if value is not None and str(value).strip():
+                    return str(value)
+        return fallback
+
+    @staticmethod
+    def _memory_row_text(row: Any) -> str:
+        if not isinstance(row, dict):
+            return ""
+        for key in ("text", "summary_content", "content", "excerpt"):
+            value = row.get(key)
+            if isinstance(value, dict):
+                value = value.get("content") or value.get("text")
+            if value is not None and str(value).strip():
+                return str(value)
+        return ""
+
+    def _emit_memory_context_trace(
+        self,
+        built_context: Dict[str, Any],
+    ) -> None:
+        """Persist content-free evidence for every memory item sent to the LLM."""
+        from ..personalization import PersonalizationContext, PersonalizationPolicy
+
+        history = [
+            row
+            for row in (built_context.get("conversation_history") or [])
+            if isinstance(row, dict)
+        ]
+        semantic = [
+            row
+            for row in (built_context.get("retrieved_memories") or [])
+            if isinstance(row, dict)
+        ]
+        entities = [
+            row
+            for row in (built_context.get("entity_memory_profiles") or [])
+            if isinstance(row, dict)
+        ]
+        summaries = [
+            row
+            for row in (built_context.get("summaries") or [])
+            if isinstance(row, dict)
+        ]
+        has_personalization = built_context.get("personalization_context") is not None
+        personalization = PersonalizationContext.from_value(
+            built_context.get("personalization_context")
+        )
+        personalization_summary = personalization.trace_summary()
+        if personalization.entity_profiles:
+            entities = list(personalization.entity_profiles)
+
+        entity_attribute_count = 0
+        entity_char_count = 0
+        entity_refs: List[Dict[str, Any]] = []
+        for index, profile in enumerate(entities):
+            raw_attributes = profile.get("attributes") or {}
+            if isinstance(raw_attributes, dict):
+                attribute_names = sorted(str(key) for key in raw_attributes)[:32]
+            else:
+                attribute_names = sorted(
+                    str(item.get("name"))
+                    for item in raw_attributes
+                    if isinstance(item, dict) and item.get("name")
+                )[:32]
+            entity_attribute_count += len(attribute_names)
+            if isinstance(raw_attributes, dict):
+                entity_char_count += sum(
+                    len(str(key)) + len(str(value))
+                    for key, value in raw_attributes.items()
+                )
+            else:
+                entity_char_count += sum(
+                    len(str(item.get("name") or "")) + len(str(item.get("value") or ""))
+                    for item in raw_attributes
+                    if isinstance(item, dict)
+                )
+            identifier = self._memory_row_identifier(profile, f"entity:{index}")
+            entity_refs.append(
+                {
+                    "ref": self._fingerprint(identifier),
+                    "attribute_names": attribute_names,
+                }
+            )
+
+        semantic_refs = [
+            {
+                "ref": self._fingerprint(
+                    self._memory_row_identifier(row, f"semantic:{index}")
+                ),
+                "source": str(row.get("source") or "memory")[:40],
+                "score": row.get("score"),
+            }
+            for index, row in enumerate(semantic)
+        ]
+        summary_refs = [
+            self._fingerprint(self._memory_row_identifier(row, f"summary:{index}"))
+            for index, row in enumerate(summaries)
+        ]
+        source_counts = {
+            "history_messages": len(history),
+            "semantic_memories": len(semantic),
+            "entity_profiles": len(entities),
+            "entity_attributes": entity_attribute_count,
+            "summaries": len(summaries),
+            "preferences": int(
+                personalization_summary.get("source_counts", {}).get("preferences", 0)
+            ),
+            "conversation_memories": int(
+                personalization_summary.get("source_counts", {}).get(
+                    "conversation_memories", 0
+                )
+            ),
+            "writing_samples": int(
+                personalization_summary.get("source_counts", {}).get(
+                    "writing_samples", 0
+                )
+            ),
+        }
+        supplied_count = sum(
+            source_counts[source]
+            for source in (
+                "history_messages",
+                "semantic_memories",
+                "entity_attributes",
+                "summaries",
+                "preferences",
+                "conversation_memories",
+                "writing_samples",
+            )
+        )
+        entity_retrieval = built_context.get("entity_memory_retrieval") or {}
+        personalization_diagnostics = personalization_summary.get("diagnostics") or {}
+        degraded = bool(
+            entity_retrieval.get("degraded")
+            or personalization_diagnostics.get("degraded")
+        )
+        fallback_used = bool(
+            entity_retrieval.get("fallback_used")
+            or personalization_diagnostics.get("fallback_used")
+        )
+        volatile_chars = sum(
+            len(self._memory_row_text(row)) for row in [*history, *semantic, *summaries]
+        ) + int(personalization_summary.get("rendered_char_count") or 0)
+        if personalization.is_empty:
+            volatile_chars += entity_char_count
+        automatic_entity_candidate_count = int(
+            (
+                entity_retrieval.get("fallback_candidate_count")
+                if entity_retrieval.get("fallback_used")
+                else entity_retrieval.get("semantic_match_count")
+            )
+            or 0
+        )
+        semantic_candidate_count = int(
+            (self._last_retrieval_stats or {}).get("candidate_count") or 0
+        )
+        personalization_candidate_count = int(
+            personalization_diagnostics.get("candidate_count") or 0
+        )
+        personalization_owns_entity = bool(
+            has_personalization and personalization.policy.include_entity_memory
+        )
+        personalization_selected_count = int(
+            personalization_diagnostics.get("selected_count") or 0
+        )
+        payload = {
+            "schema_version": 1,
+            "stage": "supplied",
+            "source_counts": source_counts,
+            "retrieved_candidate_count": (
+                semantic_candidate_count
+                + automatic_entity_candidate_count
+                + personalization_candidate_count
+            ),
+            "retrieved_source_counts": {
+                "semantic": semantic_candidate_count,
+                "entity": (
+                    int(personalization_diagnostics.get("entity_candidate_count") or 0)
+                    if personalization_owns_entity
+                    else automatic_entity_candidate_count
+                ),
+                "conversation_personalization": int(
+                    personalization_diagnostics.get("conversation_candidate_count") or 0
+                ),
+            },
+            "retrieved_selected_count": (
+                len(semantic)
+                + (
+                    personalization_selected_count
+                    if has_personalization
+                    else len(entities)
+                )
+            ),
+            "retrieved_selected_source_counts": {
+                "semantic": len(semantic),
+                "entity": (
+                    int(personalization_diagnostics.get("entity_selected_count") or 0)
+                    if personalization_owns_entity
+                    else len(entities)
+                ),
+                "conversation_personalization": int(
+                    personalization_diagnostics.get("conversation_selected_count") or 0
+                ),
+            },
+            "supplied_count": supplied_count,
+            "injected_char_count": volatile_chars,
+            "degraded": degraded,
+            "fallback_used": fallback_used,
+            "semantic_refs": semantic_refs,
+            "entity_refs": entity_refs,
+            "summary_refs": summary_refs,
+            "preference_keys": personalization_summary.get("preference_keys") or [],
+            "conversation_refs": personalization_summary.get("conversation_refs") or [],
+            "writing_sample_refs": personalization_summary.get("writing_sample_refs")
+            or [],
+            "entity_retrieval": {
+                key: entity_retrieval.get(key)
+                for key in (
+                    "retrieval_mode",
+                    "semantic_attempted",
+                    "semantic_match_count",
+                    "fallback_used",
+                    "fallback_candidate_count",
+                    "match_count",
+                    "degraded",
+                    "degraded_reason",
+                )
+                if entity_retrieval.get(key) is not None
+            },
+            "personalization_retrieval": personalization_diagnostics,
+        }
+        self._last_memory_context_evidence = dict(payload)
+
+        def _attribution_rows(
+            rows: List[Dict[str, Any]], source: str
+        ) -> List[Dict[str, Any]]:
+            return [{**row, "_memorizz_reference_source": source} for row in rows]
+
+        attribution_memories = _attribution_rows(semantic, "semantic_memory")
+        attribution_memories.extend(
+            _attribution_rows(
+                list(personalization.conversation_memories), "conversation"
+            )
+        )
+        attribution_memories.extend(_attribution_rows(history, "history"))
+        attribution_memories.extend(_attribution_rows(summaries, "summary"))
+        self._last_memory_attribution_context = PersonalizationContext(
+            entity_profiles=entities,
+            preferences=personalization.preferences,
+            conversation_memories=attribution_memories,
+            writing_samples=personalization.writing_samples,
+            policy=PersonalizationPolicy(
+                max_entity_profiles=max(1, len(entities)),
+                max_conversation_memories=max(1, len(attribution_memories)),
+                max_preferences=max(1, len(personalization.preferences)),
+                max_writing_samples=max(1, len(personalization.writing_samples)),
+                max_chars=1,
+            ),
+        )
+
+        self._emit_stream_event(
+            "trace",
+            {
+                "trace_kind": "memory_context",
+                "title": "Memory supplied",
+                "trace_id": f"memory:{self._current_turn_id}:supplied",
+                "span_id": str(uuid.uuid4()),
+                "parent_span_id": self._current_root_trace_id,
+                "status": "degraded" if degraded else "recorded",
+                "content": json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+                "memory_history_count": len(history),
+                "memory_candidate_count": payload["retrieved_candidate_count"],
+                "memory_supplied_count": supplied_count,
+                "memory_injected_chars": volatile_chars,
+                "memory_degraded": degraded,
+                "memory_fallback_used": fallback_used,
+                "entity_profile_count": len(entities),
+                "preference_count": source_counts["preferences"],
+                "conversation_memory_count": source_counts["conversation_memories"],
+                "writing_sample_count": source_counts["writing_samples"],
+            },
+        )
+
+    def _emit_memory_reference_trace(self, response: str) -> None:
+        """Record conservative post-response attribution without raw content."""
+        context = self._last_memory_attribution_context
+        supplied = int(
+            (self._last_memory_context_evidence or {}).get("supplied_count") or 0
+        )
+        if context is None or supplied <= 0:
+            return
+        try:
+            payload = {
+                "schema_version": 1,
+                "stage": "referenced",
+                "supplied_count": supplied,
+                **context.referenced_by(response),
+            }
+        except Exception as exc:
+            logger.debug("Memory response attribution failed: %s", exc)
+            return
+        self._emit_stream_event(
+            "trace",
+            {
+                "trace_kind": "memory_reference",
+                "title": "Memory referenced",
+                "trace_id": f"memory:{self._current_turn_id}:referenced",
+                "span_id": str(uuid.uuid4()),
+                "parent_span_id": self._current_root_trace_id,
+                "status": "measured",
+                "content": json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+                "memory_supplied_count": supplied,
+                "memory_referenced_count": payload["referenced_count"],
+            },
+        )
+
     def _emit_cache_decision_trace(
         self,
         decision: str,
@@ -4137,6 +4570,11 @@ class MemAgent:
             for key, value in dict(self._last_trace_context or {}).items()
             if value is not None
         }
+
+    @property
+    def last_tool_outcomes(self) -> List[Dict[str, Any]]:
+        """Structured outcomes from the most recent turn, in execution order."""
+        return [dict(item) for item in (self._last_tool_outcomes or [])]
 
     def record_feedback(
         self,
@@ -4578,7 +5016,16 @@ class MemAgent:
                     )
 
             # 3. Build context and prompt
-            built_context = self._build_context(query, memory_id, user_id=user_id)
+            built_context = self._build_context(
+                query,
+                memory_id,
+                user_id=user_id,
+                include_entity_memory=not self._host_owns_entity_personalization(
+                    context
+                ),
+            )
+            built_context = self._attach_personalization_context(built_context, context)
+            self._emit_memory_context_trace(built_context)
             system_prompt = self._build_system_prompt()
 
             # 4. Execute with LLM
@@ -4589,6 +5036,7 @@ class MemAgent:
                 user_id=user_id,
                 request_context=context,
             )
+            self._emit_memory_reference_trace(response)
 
             # 5. Cache the response
             if self.cache_manager.enabled:
@@ -5347,7 +5795,16 @@ class MemAgent:
                     )
 
             # 3. Build context and prompt
-            built_context = self._build_context(query, memory_id, user_id=user_id)
+            built_context = self._build_context(
+                query,
+                memory_id,
+                user_id=user_id,
+                include_entity_memory=not self._host_owns_entity_personalization(
+                    context
+                ),
+            )
+            built_context = self._attach_personalization_context(built_context, context)
+            self._emit_memory_context_trace(built_context)
             system_prompt = self._build_system_prompt()
 
             # 4. Stream the LLM interaction
@@ -5361,6 +5818,7 @@ class MemAgent:
             ):
                 full_response += chunk
                 yield chunk
+            self._emit_memory_reference_trace(full_response)
 
             # 5. Cache the response
             if self.cache_manager.enabled:
@@ -5603,6 +6061,15 @@ class MemAgent:
             "tool_call_id",
             "success",
             "status",
+            "outcome",
+            "outcome_reason_code",
+            "tool_provider",
+            "primary_provider",
+            "fallback_provider",
+            "outcome_retryable",
+            "result_count",
+            "fallback_used",
+            "degraded",
             "error_code",
             "duration_ms",
             "model",
@@ -5634,6 +6101,17 @@ class MemAgent:
             "grounding_excerpt_count",
             "grounding_source_ids",
             "cache_decision",
+            "memory_history_count",
+            "memory_candidate_count",
+            "memory_supplied_count",
+            "memory_referenced_count",
+            "memory_injected_chars",
+            "memory_degraded",
+            "memory_fallback_used",
+            "entity_profile_count",
+            "preference_count",
+            "conversation_memory_count",
+            "writing_sample_count",
             "cache_enabled",
             "cache_bypass_reason",
         )
@@ -6087,9 +6565,8 @@ class MemAgent:
 
     @staticmethod
     def _tool_result_failed(value: Any) -> bool:
-        if isinstance(value, str):
-            return value.startswith("Error")
-        return isinstance(value, dict) and value.get("ok") is False
+        _payload, outcome = normalize_tool_result(value)
+        return not outcome.ok
 
     def _execute_and_record_tool_call(
         self,
@@ -6134,6 +6611,7 @@ class MemAgent:
         routed_call_hash: Optional[str] = None
         error_message: Optional[str] = None
         result: Any = None
+        tool_outcome: Optional[ToolOutcome] = None
         router = getattr(self, "semantic_tool_router", None)
 
         # A routed model call is named ``invoke_tool``, but that transport name
@@ -6309,10 +6787,16 @@ class MemAgent:
                         result = "Error: No tool manager available"
                         error_message = "No tool manager available"
 
-                failed = self._tool_result_failed(result)
+                result, tool_outcome = normalize_tool_result(result)
+                failed = not tool_outcome.ok
                 if failed and error_message is None:
                     error_message = (
-                        str(result.get("error"))
+                        str(
+                            result.get("error")
+                            or result.get("message")
+                            or tool_outcome.reason_code
+                            or "Tool execution failed"
+                        )
                         if isinstance(result, dict)
                         else str(result)
                     )
@@ -6325,14 +6809,35 @@ class MemAgent:
                         "result": result,
                         "call_hash": routed_call_hash,
                         "warnings": routed_warnings,
+                        "outcome": tool_outcome.to_dict(),
                     }
 
-        tool_failed = self._tool_result_failed(result)
+        if tool_outcome is None:
+            result, tool_outcome = normalize_tool_result(result)
+        tool_failed = not tool_outcome.ok
+        if (
+            tool_outcome.status is not ToolOutcomeStatus.SUCCESS
+            and not self._cache_bypass_reason
+        ):
+            self._cache_bypass_reason = f"tool_outcome_{tool_outcome.status.value}"
+        outcome_payload = tool_outcome.to_dict()
+        duration_ms = round((time.perf_counter() - tool_started_at) * 1000, 3)
         error_code = (
             _to_jsonable(result.get("error_code"))
             if isinstance(result, dict) and result.get("error_code") is not None
-            else ""
+            else outcome_payload.get("reason_code", "")
         )
+        outcome_record = {
+            "tool_name": logical_tool_name,
+            "model_tool_name": model_tool_name,
+            "tool_call_id": getattr(tool_call, "id", None),
+            "duration_ms": duration_ms,
+            **outcome_payload,
+        }
+        self._last_tool_outcomes = [
+            *list(self._last_tool_outcomes or []),
+            outcome_record,
+        ]
         self._emit_stream_trace_chunks(
             "tool_result",
             f"Tool Result: {logical_tool_name}",
@@ -6348,12 +6853,18 @@ class MemAgent:
                 "span_id": tool_span_id,
                 "parent_span_id": tool_parent_span_id,
                 "status": "error" if tool_failed else "success",
+                "outcome": tool_outcome.status.value,
+                "outcome_reason_code": tool_outcome.reason_code,
+                "tool_provider": tool_outcome.provider,
+                "primary_provider": tool_outcome.primary_provider,
+                "fallback_provider": tool_outcome.fallback_provider,
+                "outcome_retryable": tool_outcome.retryable,
+                "result_count": tool_outcome.result_count,
+                "fallback_used": tool_outcome.fallback_used,
+                "degraded": tool_outcome.degraded,
                 "success": not tool_failed,
                 "error_code": error_code,
-                "duration_ms": round(
-                    (time.perf_counter() - tool_started_at) * 1000,
-                    3,
-                ),
+                "duration_ms": duration_ms,
             },
         )
 
@@ -6378,8 +6889,10 @@ class MemAgent:
                     memory_id=self._current_memory_id,
                     agent_id=self.agent_id,
                     tool_call_id=getattr(tool_call, "id", None),
-                    success=(error_message is None),
+                    success=tool_outcome.ok,
                     error=error_message,
+                    outcome=tool_outcome.status.value,
+                    outcome_details=outcome_payload,
                     thread_id=self._current_thread_id,
                     user_id=user_id,
                 )
@@ -6449,6 +6962,7 @@ class MemAgent:
                     "result": result,
                     "timestamp": datetime.now().isoformat(),
                     "error": error_message,
+                    "tool_outcome": outcome_payload,
                 },
             )
             if error_message is not None:
@@ -6461,7 +6975,8 @@ class MemAgent:
                     arguments=logical_arguments,
                     result=result,
                     success=not tool_failed,
-                    duration_ms=(time.perf_counter() - tool_started_at) * 1000,
+                    outcome=outcome_payload,
+                    duration_ms=duration_ms,
                     scope=self._trace_identity_payload(),
                 )
             except Exception as exc:
@@ -6650,6 +7165,8 @@ class MemAgent:
         query: str,
         memory_id: str,
         user_id: Optional[str] = None,
+        *,
+        include_entity_memory: bool = True,
     ) -> Dict[str, Any]:
         """Build context for the query using memory manager."""
         context = {"query": query}
@@ -6870,17 +7387,24 @@ class MemAgent:
                 }
 
         if (
-            self.learning_control_plane is None
+            include_entity_memory
+            and self.learning_control_plane is None
             and self._entity_memory_enabled
             and self.entity_memory_manager
             and self.entity_memory_manager.is_enabled()
         ):
             try:
-                entity_context = self.entity_memory_manager.build_context(
-                    query=query, memory_id=memory_id, user_id=user_id
+                entity_result = (
+                    self.entity_memory_manager.build_context_with_diagnostics(
+                        query=query, memory_id=memory_id, user_id=user_id
+                    )
                 )
+                entity_context = entity_result.get("profiles") or []
                 if entity_context:
                     context["entity_memory_profiles"] = entity_context
+                context["entity_memory_retrieval"] = dict(
+                    entity_result.get("retrieval") or {}
+                )
             except Exception as e:
                 logger.warning(f"Failed to retrieve entity memory context: {e}")
 
@@ -7749,31 +8273,61 @@ class MemAgent:
         if self._internet_access_tools_registered:
             return
 
-        def internet_search(query: str, max_results: int = 5) -> Dict[str, Any]:
+        def internet_search(query: str, max_results: int = 5) -> Any:
             """Search the public internet for up-to-date information."""
             try:
                 if self._internet_access_disabled_reason:
-                    return {
-                        "error": f"Internet access disabled: {self._internet_access_disabled_reason}"
-                    }
+                    message = f"Internet access disabled: {self._internet_access_disabled_reason}"
+                    return self._internet_error_result(
+                        {
+                            "ok": False,
+                            "error_code": "provider_unavailable",
+                            "error": message,
+                        },
+                        reason_code="provider_unavailable",
+                        retryable=True,
+                    )
                 results = self.internet_access_manager.search(
                     query=query, max_results=max_results
                 )
                 self._internet_access_failure_count = 0
+                provider_name = self.get_internet_access_provider_name()
+                if provider_name == "offline":
+                    return self._internet_error_result(
+                        {"results": results},
+                        reason_code="provider_unavailable",
+                        retryable=False,
+                        result_count=0,
+                    )
                 return {"results": results}
             except Exception as exc:
                 logger.error("internet_search failed: %s", exc)
                 return self._handle_internet_access_error(str(exc))
 
-        def open_web_page(url: str) -> Dict[str, Any]:
+        def open_web_page(url: str) -> Any:
             """Fetch and summarize the contents of a website."""
             try:
                 if self._internet_access_disabled_reason:
-                    return {
-                        "error": f"Internet access disabled: {self._internet_access_disabled_reason}"
-                    }
+                    message = f"Internet access disabled: {self._internet_access_disabled_reason}"
+                    return self._internet_error_result(
+                        {
+                            "ok": False,
+                            "error_code": "provider_unavailable",
+                            "error": message,
+                        },
+                        reason_code="provider_unavailable",
+                        retryable=True,
+                    )
                 page = self.internet_access_manager.fetch_url(url=url)
                 self._internet_access_failure_count = 0
+                provider_name = self.get_internet_access_provider_name()
+                if provider_name == "offline":
+                    return self._internet_error_result(
+                        page,
+                        reason_code="provider_unavailable",
+                        retryable=False,
+                        result_count=0,
+                    )
                 return page
             except Exception as exc:
                 logger.error("open_web_page failed: %s", exc)
@@ -7785,6 +8339,26 @@ class MemAgent:
         self.tool_manager.add_tool(internet_search)
         self.tool_manager.add_tool(open_web_page)
         self._internet_access_tools_registered = True
+
+    def _internet_error_result(
+        self,
+        value: Any,
+        *,
+        reason_code: str,
+        retryable: bool,
+        result_count: Optional[int] = None,
+    ) -> ToolResult:
+        """Attach provider-error evidence without changing model-visible data."""
+        return ToolResult(
+            value=value,
+            outcome=ToolOutcome(
+                status=ToolOutcomeStatus.PROVIDER_ERROR,
+                reason_code=reason_code,
+                provider=self.get_internet_access_provider_name(),
+                retryable=retryable,
+                result_count=result_count,
+            ),
+        )
 
     def _register_persona_tools(self) -> None:
         """Register ``update_persona`` and ``read_persona`` tools on the agent.
@@ -8250,9 +8824,13 @@ class MemAgent:
                 self._internet_access_failure_count,
             )
         return {
+            "ok": False,
+            "error_code": "provider_error",
+            "provider": self.get_internet_access_provider_name(),
+            "retryable": not bool(self._internet_access_disabled_reason),
             "error": message
             if not self._internet_access_disabled_reason
-            else f"{message} | {self._internet_access_disabled_reason}"
+            else f"{message} | {self._internet_access_disabled_reason}",
         }
 
     def _record_interaction(
@@ -8724,6 +9302,187 @@ class MemAgent:
             "items": [dict(item) for item in self._last_retrieved_memories],
             **dict(self._last_retrieval_stats),
         }
+
+    def last_memory_context_evidence(self) -> Dict[str, Any]:
+        """Return the content-free memory supply snapshot for the latest turn."""
+        return dict(self._last_memory_context_evidence or {})
+
+    def build_personalization_context(
+        self,
+        query: str,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        preferences: Optional[Dict[str, Any]] = None,
+        writing_samples: Optional[List[Dict[str, Any]]] = None,
+        additional_memories: Optional[List[Dict[str, Any]]] = None,
+        policy: Optional[Any] = None,
+        exclude_thread_id: Optional[str] = None,
+    ):
+        """Build explicit, tenant-scoped personalization without running an LLM.
+
+        Cross-thread conversation recall occurs only when the supplied
+        :class:`~memorizz.personalization.PersonalizationPolicy` enables it and
+        both ``memory_id`` and ``user_id`` are bound.  Host preferences and
+        writing samples are accepted as already-authorized application data.
+        """
+        from ..personalization import (
+            PersonalizationContextBuilder,
+            PersonalizationPolicy,
+        )
+
+        resolved_policy = PersonalizationPolicy.from_value(policy)
+        resolved_memory_id = str(
+            memory_id
+            or self._current_memory_id
+            or (self.memory_ids[0] if self.memory_ids else "")
+        ).strip()
+        diagnostics: Dict[str, Any] = {
+            "retrieval_mode": "explicit",
+            "candidate_count": 0,
+            "selected_count": 0,
+            "entity_candidate_count": 0,
+            "entity_selected_count": 0,
+            "conversation_candidate_count": 0,
+            "conversation_selected_count": 0,
+            "fallback_used": False,
+            "degraded": False,
+            "degraded_reason": None,
+        }
+
+        entity_profiles: List[Dict[str, Any]] = []
+        if (
+            resolved_policy.include_entity_memory
+            and self.entity_memory_manager
+            and self.entity_memory_manager.is_enabled()
+            and resolved_memory_id
+            and resolved_policy.max_entity_profiles > 0
+        ):
+            try:
+                entity_result = (
+                    self.entity_memory_manager.build_context_with_diagnostics(
+                        query=(
+                            f"{query} current user profile role preferences "
+                            "audience goals"
+                        ),
+                        memory_id=resolved_memory_id,
+                        limit=resolved_policy.max_entity_profiles,
+                        user_id=user_id,
+                    )
+                )
+                entity_profiles = list(entity_result.get("profiles") or [])
+                entity_diagnostics = entity_result.get("retrieval") or {}
+                entity_candidate_count = int(
+                    (
+                        entity_diagnostics.get("fallback_candidate_count")
+                        if entity_diagnostics.get("fallback_used")
+                        else entity_diagnostics.get("semantic_match_count")
+                    )
+                    or 0
+                )
+                diagnostics["entity_candidate_count"] = entity_candidate_count
+                diagnostics["entity_selected_count"] = len(entity_profiles)
+                diagnostics["candidate_count"] += entity_candidate_count
+                diagnostics["fallback_used"] = bool(
+                    entity_diagnostics.get("fallback_used")
+                )
+                diagnostics["degraded"] = bool(entity_diagnostics.get("degraded"))
+                if entity_diagnostics.get("degraded_reason"):
+                    diagnostics["degraded_reason"] = entity_diagnostics.get(
+                        "degraded_reason"
+                    )
+            except Exception as exc:
+                diagnostics.update(
+                    {
+                        "degraded": True,
+                        "degraded_reason": "entity_retrieval_failed",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+
+        selected_memories: List[Dict[str, Any]] = []
+        if (
+            resolved_policy.conversation_recall
+            and resolved_policy.max_conversation_memories > 0
+            and resolved_policy.conversation_candidate_limit > 0
+        ):
+            if not resolved_memory_id or not str(user_id or "").strip():
+                diagnostics.update(
+                    {
+                        "degraded": True,
+                        "degraded_reason": "unbound_tenant_scope",
+                    }
+                )
+            elif self.memory_manager:
+                try:
+                    candidates = self.memory_manager.retrieve_relevant_memories(
+                        query=query,
+                        memory_type=MemoryType.CONVERSATION_MEMORY,
+                        memory_id=resolved_memory_id,
+                        limit=resolved_policy.conversation_candidate_limit,
+                        user_id=user_id,
+                        include_embedding=True,
+                    )
+                    if exclude_thread_id:
+                        wanted_exclusion = str(exclude_thread_id)
+
+                        def _thread(row: Dict[str, Any]) -> str:
+                            content = row.get("content")
+                            nested = content if isinstance(content, dict) else {}
+                            return str(
+                                row.get("thread_id")
+                                or row.get("conversation_id")
+                                or nested.get("thread_id")
+                                or nested.get("conversation_id")
+                                or ""
+                            )
+
+                        candidates = [
+                            row
+                            for row in candidates
+                            if _thread(row) != wanted_exclusion
+                        ]
+                    diagnostics["conversation_candidate_count"] = len(candidates)
+                    diagnostics["candidate_count"] += len(candidates)
+                    thresholded = []
+                    for row in candidates:
+                        try:
+                            score = float(row.get("score") or 0.0)
+                        except (TypeError, ValueError):
+                            score = 0.0
+                        if score >= resolved_policy.min_relevance_score:
+                            thresholded.append(("conversation", row))
+                    selected_memories = dedupe_and_select(
+                        thresholded,
+                        max_items=resolved_policy.max_conversation_memories,
+                        dedupe_parent_sources=True,
+                    )
+                    diagnostics["conversation_selected_count"] = len(selected_memories)
+                except Exception as exc:
+                    diagnostics.update(
+                        {
+                            "degraded": True,
+                            "degraded_reason": "conversation_retrieval_failed",
+                            "error_type": type(exc).__name__,
+                        }
+                    )
+
+        for item in additional_memories or []:
+            if isinstance(item, dict) and self._memory_row_text(item):
+                selected_memories.append(dict(item))
+        selected_memories = selected_memories[
+            : resolved_policy.max_conversation_memories
+        ]
+        diagnostics["conversation_selected_count"] = len(selected_memories)
+        diagnostics["selected_count"] = len(entity_profiles) + len(selected_memories)
+
+        return PersonalizationContextBuilder(resolved_policy).build(
+            entity_profiles=entity_profiles,
+            preferences=preferences,
+            conversation_memories=selected_memories,
+            writing_samples=writing_samples,
+            diagnostics=diagnostics,
+        )
 
     def add_tool(self, tool, persist: bool = False):
         """Add a tool (delegated to tool manager)."""

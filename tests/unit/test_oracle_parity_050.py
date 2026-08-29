@@ -126,6 +126,26 @@ def test_oracle_summary_schema_and_by_id_projection_are_complete():
     }.issubset(fields)
     tool_log_fields = {field.col for field in _BY_ID_SPECS[MemoryType.TOOL_LOG][1]}
     assert "user_id" in tool_log_fields
+    assert {"outcome", "outcome_details"}.issubset(tool_log_fields)
+
+
+@pytest.mark.unit
+def test_oracle_tool_outcome_migration_is_rerunnable_and_backfills_legacy_rows():
+    migration = (
+        Path(__file__).parents[2]
+        / "src"
+        / "memorizz"
+        / "memory_provider"
+        / "oracle"
+        / "migrations"
+        / "007_structured_tool_outcomes.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "user_tab_columns" in migration
+    assert "add_column_if_missing" in migration
+    assert "'tool_log', 'outcome'" in migration
+    assert "'tool_log', 'outcome_details'" in migration
+    assert "CASE WHEN success = 1 THEN 'success' ELSE 'error' END" in migration
 
 
 @pytest.mark.unit
@@ -284,6 +304,44 @@ def test_oracle_entity_upsert_allows_existing_owner_scope():
     assert entity_id == "entity-shared-id"
     assert len(cursor.calls) == 2
     assert "MERGE INTO MEMORIZZ.entity_memory" in cursor.calls[1][0]
+    assert connection.commits == 1
+
+
+@pytest.mark.unit
+def test_oracle_entity_upsert_recovers_same_scope_concurrent_insert():
+    class ConcurrentCursor(_Cursor):
+        def __init__(self):
+            super().__init__()
+            self._scopes = iter([None, ("shared-memory", "user-a")])
+            self._merge_count = 0
+
+        def execute(self, sql, params=None):
+            super().execute(sql, params)
+            if "MERGE INTO" in str(sql).upper():
+                self._merge_count += 1
+                if self._merge_count == 1:
+                    raise RuntimeError("ORA-00001: unique constraint violated")
+
+        def fetchone(self):
+            return next(self._scopes)
+
+    cursor = ConcurrentCursor()
+    connection = _Connection(cursor)
+    provider = _bare_provider(connection)
+    provider._memory_type_has_column = lambda *_args: True
+
+    entity_id = provider._store_entity_memory(
+        {
+            "entity_id": "entity-shared-id",
+            "name": "user",
+            "memory_id": "shared-memory",
+            "user_id": "user-a",
+        }
+    )
+
+    assert entity_id == "entity-shared-id"
+    assert ["FOR UPDATE" in sql for sql, _params in cursor.calls].count(True) == 2
+    assert ["MERGE INTO" in sql for sql, _params in cursor.calls].count(True) == 2
     assert connection.commits == 1
 
 

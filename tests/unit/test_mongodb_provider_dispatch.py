@@ -18,6 +18,7 @@ pytest.importorskip("pymongo")
 import memorizz.memory_provider.mongodb.provider as mongodb_module  # noqa: E402
 from memorizz.approval import SQLiteApprovalStore  # noqa: E402
 from memorizz.enums.memory_type import MemoryType  # noqa: E402
+from memorizz.long_term.semantic.entity_memory import EntityMemory  # noqa: E402
 from memorizz.memory_provider.mongodb.provider import MongoDBProvider  # noqa: E402
 from memorizz.metaharness import (  # noqa: E402
     HarnessTask,
@@ -86,6 +87,37 @@ def test_delete_by_name_and_delete_all(provider):
     assert len(provider.list_all(memory_store_type=MemoryType.TOOLBOX)) == 1
     assert provider.delete_all(MemoryType.TOOLBOX)
     assert provider.list_all(memory_store_type=MemoryType.TOOLBOX) == []
+
+
+@pytest.mark.unit
+def test_canonical_entity_identity_uses_one_mongodb_storage_key(provider, monkeypatch):
+    provider.entity_memory_collection = provider.db[MemoryType.ENTITY_MEMORY.value]
+    monkeypatch.setattr(
+        "memorizz.long_term.semantic.entity_memory.entity_memory.get_embedding",
+        lambda _text: [0.25, 0.75],
+    )
+    entities = EntityMemory(provider)
+
+    first_id = entities.upsert_entity(
+        identity_key="authenticated_user",
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "role", "value": "AI Memory Engineer"}],
+        memory_id="primary-user-1",
+        user_id="user-1",
+    )
+    second_id = entities.upsert_entity(
+        identity_key="authenticated_user",
+        name="Richmond Alake",
+        attributes=[{"name": "timezone", "value": "Europe/London"}],
+        memory_id="primary-user-1",
+        user_id="user-1",
+    )
+
+    rows = provider.list_all(MemoryType.ENTITY_MEMORY, user_id="user-1")
+    assert second_id == first_id
+    assert len(rows) == 1
+    assert rows[0]["_id"] == first_id
 
 
 @pytest.mark.unit

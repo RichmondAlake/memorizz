@@ -229,7 +229,9 @@ def test_trace_bundle_expands_into_timeline_events():
                 '"logical_tool_name":"inventory_status"},'
                 '{"trace_kind":"tool_result","title":"Tool Result · inventory_status",'
                 '"content":"{\\"units\\":21}","trace_id":"result:call-1",'
-                '"logical_tool_name":"inventory_status","success":true,"duration_ms":18.5}'
+                '"logical_tool_name":"inventory_status","success":true,'
+                '"outcome":"fallback","outcome_reason_code":"primary_timeout",'
+                '"fallback_provider":"replica","duration_ms":18.5}'
                 "]}"
             ),
         },
@@ -243,6 +245,9 @@ def test_trace_bundle_expands_into_timeline_events():
     assert events[1]["trace_id"] == "result:call-1"
     assert events[1]["logical_tool_name"] == "inventory_status"
     assert events[1]["success"] is True
+    assert events[1]["outcome"] == "fallback"
+    assert events[1]["outcome_reason_code"] == "primary_timeout"
+    assert events[1]["fallback_provider"] == "replica"
     assert events[1]["duration_ms"] == 18.5
     assert all(event["thread_id"] == "thread-1" for event in events)
 
@@ -327,6 +332,14 @@ class _RuntimeOnlyTraceProvider:
                 "user_id": "user-1",
                 "tool_name": "ingest_url",
                 "success": True,
+                "outcome": "fallback",
+                "outcome_details": {
+                    "status": "fallback",
+                    "ok": True,
+                    "fallback_used": True,
+                    "reason_code": "primary_timeout",
+                    "fallback_provider": "replica",
+                },
                 "timestamp": 3,
             }
         ]
@@ -382,6 +395,8 @@ def test_traces_discovers_unregistered_runtime_and_renders_its_timeline(client):
     assert "Trace Insights" in timeline.text
     assert "Remember this exact article URL" in timeline.text
     assert "Execution Log · ingest_url" in timeline.text
+    assert "Completed via fallback" in timeline.text
+    assert "Reason primary timeout" in timeline.text
     assert analysis.status_code == 200
     assert analysis.json()["read_only"] is True
     assert any(

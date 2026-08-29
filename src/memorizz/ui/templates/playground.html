@@ -1953,9 +1953,13 @@ function renderThreadMessages(messages, memoryId) {
                 const traceKindClass = traceKind.replace(/[^a-z0-9_-]/g, '-');
                 const title = event && event.title ? String(event.title) : 'Trace';
                 const content = event && event.content ? String(event.content) : '';
+                const outcomeMeta = traceOutcomeMeta(event);
+                const outcomeBadge = outcomeMeta
+                    ? `<span class="pg-trace-outcome pg-trace-outcome--${outcomeMeta.status}">${escapeHtml(outcomeMeta.label)}</span>`
+                    : '';
                 return `
-                    <div class="pg-trace-item pg-trace-item--${traceKindClass}">
-                        <div class="pg-trace-title">${escapeHtml(title)}</div>
+                    <div class="pg-trace-item pg-trace-item--${traceKindClass}${outcomeMeta ? ` pg-trace-item--outcome-${outcomeMeta.status}` : ''}">
+                        <div class="pg-trace-title">${escapeHtml(title)}${outcomeBadge}</div>
                         <div class="pg-trace-content">${escapeHtml(content)}</div>
                     </div>
                 `;
@@ -2660,6 +2664,20 @@ async function compactContextWindow() {
     }
 }
 
+function traceOutcomeMeta(traceEvent) {
+    if (!traceEvent || typeof traceEvent !== 'object') return null;
+    const status = String(traceEvent.outcome || '').toLowerCase();
+    const labels = {
+        success: 'Completed',
+        empty: 'Completed · no results',
+        degraded: 'Completed with limitations',
+        fallback: 'Completed via fallback',
+        provider_error: 'Provider error',
+        error: 'Failed',
+    };
+    return labels[status] ? { status, label: labels[status] } : null;
+}
+
 function appendTraceBox(traceTimeline, traceEvent) {
     if (!traceTimeline || !traceEvent || typeof traceEvent !== 'object') return;
 
@@ -2668,6 +2686,7 @@ function appendTraceBox(traceTimeline, traceEvent) {
     const content = String(traceEvent.content || traceEvent.message || '').trim();
     const traceId = String(traceEvent.trace_id || '').trim();
     const appendMode = Boolean(traceEvent.append);
+    const outcomeMeta = traceOutcomeMeta(traceEvent);
 
     if (!content && !appendMode) return;
 
@@ -2691,10 +2710,13 @@ function appendTraceBox(traceTimeline, traceEvent) {
     }
 
     item = document.createElement('div');
-    item.className = `pg-trace-item pg-trace-item--${traceKind}`;
+    item.className = `pg-trace-item pg-trace-item--${traceKind}${outcomeMeta ? ` pg-trace-item--outcome-${outcomeMeta.status}` : ''}`;
     if (traceId) item.dataset.traceId = traceId;
+    const outcomeBadge = outcomeMeta
+        ? `<span class="pg-trace-outcome pg-trace-outcome--${outcomeMeta.status}">${escapeHtml(outcomeMeta.label)}</span>`
+        : '';
     item.innerHTML = `
-        <div class="pg-trace-title">${escapeHtml(title)}</div>
+        <div class="pg-trace-title">${escapeHtml(title)}${outcomeBadge}</div>
         <div class="pg-trace-content">${escapeHtml(content)}</div>
     `;
     traceTimeline.appendChild(item);

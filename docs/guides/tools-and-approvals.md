@@ -139,6 +139,74 @@ Small results stay inline. Large results are stored once and replaced by an
 auditable pointer containing a digest and identifiers. Expansion tools are
 never re-offloaded, preventing pointer-to-pointer loops.
 
+## Report structured tool outcomes
+
+A tool can complete without producing a clean primary-provider success. Use a
+`ToolResult` when the host knows that execution was empty, degraded, or served
+by a fallback:
+
+```python
+from memorizz import ToolOutcome, ToolOutcomeStatus, ToolResult
+
+
+def inventory_lookup(sku: str) -> ToolResult:
+    try:
+        return ToolResult(
+            primary_inventory.lookup(sku),
+            ToolOutcome(
+                status=ToolOutcomeStatus.SUCCESS,
+                provider="primary_inventory",
+                result_count=1,
+            ),
+        )
+    except TimeoutError:
+        rows = inventory_replica.lookup(sku)
+        return ToolResult(
+            rows,
+            ToolOutcome(
+                status=ToolOutcomeStatus.FALLBACK,
+                reason_code="primary_timeout",
+                primary_provider="primary_inventory",
+                fallback_provider="inventory_replica",
+                retryable=True,
+                result_count=len(rows),
+            ),
+        )
+```
+
+MemoRizz unwraps the value before sending it to the model. The tool's existing
+result schema therefore stays unchanged, while the SDK, CLI, MCP server, UI,
+trace analyzer, and learning control plane receive content-free outcome
+evidence. Non-clean outcomes bypass semantic-cache admission for that turn, so
+an empty, degraded, fallback, or failed provider response is not replayed later
+as though it were a clean primary-provider success.
+
+| Outcome | Meaning | Counts as usable |
+|---|---|---|
+| `success` | Primary path completed normally | Yes |
+| `empty` | A read completed but returned no records | Yes |
+| `degraded` | The result is usable with reduced capability | Yes |
+| `fallback` | A usable alternate path completed the operation | Yes |
+| `provider_error` | No provider path produced a usable result | No |
+| `error` | A non-provider execution or validation failure | No |
+
+Fallback and degradation can coexist. `status="fallback"` remains the primary
+display state while `degraded=True` preserves the quality signal. Do not label
+an unavailable-provider placeholder as a successful fallback: if the user's
+operation was not satisfied, return `provider_error`.
+
+Legacy tools do not have to change immediately. MemoRizz safely recognizes
+`ok: false`, `success: false`, structured error codes, empty `results`/`items`/
+`matches` collections, and existing `fallback_used`/`degraded` retrieval
+diagnostics. It does not infer outcomes from arbitrary prose.
+
+After a turn, trusted SDK hosts can inspect the same evidence:
+
+```python
+for outcome in agent.last_tool_outcomes:
+    print(outcome["tool_name"], outcome["status"], outcome.get("reason_code"))
+```
+
 ## Choose the right execution boundary
 
 | Need | Capability | Boundary |

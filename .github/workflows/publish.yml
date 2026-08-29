@@ -65,6 +65,7 @@ jobs:
           )
           blocked_roots = {".venv", "dist", "research", "site"}
           blocked_segments = {
+              ("eval", "datasets"),
               ("src-tauri", "gen"),
               ("src-tauri", "target"),
           }

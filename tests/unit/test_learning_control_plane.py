@@ -80,6 +80,12 @@ def test_events_are_idempotent_immutable_and_incrementally_compiled(provider):
         arguments={"region": "London"},
         result={"ok": True},
         success=True,
+        outcome={
+            "status": "fallback",
+            "ok": True,
+            "fallback_used": True,
+            "reason_code": "primary_timeout",
+        },
         scope=scope,
     )
     plane.complete_run("done", status="success", tool_call_count=1, scope=scope)
@@ -97,7 +103,7 @@ def test_events_are_idempotent_immutable_and_incrementally_compiled(provider):
         memory_id="memory-1", user_id="user-1", thread_id="thread-1"
     )
     assert len(artifacts) == 1
-    assert "Tool deploy succeeded" in artifacts[0]["content"]
+    assert "Tool deploy completed via fallback" in artifacts[0]["content"]
 
 
 @pytest.mark.unit

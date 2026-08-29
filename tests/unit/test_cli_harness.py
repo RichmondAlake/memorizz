@@ -147,7 +147,7 @@ def test_cli_version_uses_source_package_version():
     result = CliRunner().invoke(app, ["--version"])
 
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "memorizz 0.6.3"
+    assert result.output.strip() == "memorizz 0.7.0"
 
 
 @pytest.mark.unit

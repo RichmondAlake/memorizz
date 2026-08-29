@@ -150,6 +150,35 @@ def create_memorizz_mcp_server(
             include_package_capabilities=include_package_capabilities,
         )
 
+    @server.tool(annotations=read_only)
+    async def memorizz_preview_personalization(
+        agent_id: str,
+        query: str,
+        memory_id: Optional[str] = None,
+        exclude_thread_id: Optional[str] = None,
+        include_conversation_recall: bool = False,
+        min_relevance_score: float = 0.65,
+        max_conversation_memories: int = 2,
+        preferences: Optional[Dict[str, Any]] = None,
+        writing_samples: Optional[list[Dict[str, Any]]] = None,
+        include_content: bool = True,
+    ) -> Dict[str, Any]:
+        """Preview bounded memory personalization and content-safe evidence."""
+        return await _tool_call(
+            service.preview_personalization,
+            agent_id,
+            query,
+            current_identity(),
+            memory_id=memory_id,
+            exclude_thread_id=exclude_thread_id,
+            include_conversation_recall=include_conversation_recall,
+            min_relevance_score=min_relevance_score,
+            max_conversation_memories=max_conversation_memories,
+            preferences=preferences,
+            writing_samples=writing_samples,
+            include_content=include_content,
+        )
+
     @server.tool(annotations=write)
     async def memorizz_create_agent(
         name: str,

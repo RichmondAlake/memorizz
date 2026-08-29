@@ -11,11 +11,13 @@ from memorizz.internet_access import (
     InternetAccessProvider,
     InternetPageContent,
     InternetSearchResult,
+    OfflineInternetProvider,
     register_provider,
 )
 from memorizz.memagent.core import MemAgent
 from memorizz.memagent.managers.internet_access_manager import InternetAccessManager
 from memorizz.memagent.models import MemAgentModel
+from memorizz.tooling import ToolOutcomeStatus, normalize_tool_result
 
 
 class _DummyProvider(InternetAccessProvider):
@@ -90,6 +92,24 @@ def test_memagent_disables_internet_access():
     agent.with_internet_access_provider(None)
     assert agent.has_internet_access() is False
     assert "internet_search" not in agent.tool_manager.tools
+
+
+@pytest.mark.unit
+def test_offline_internet_tool_is_provider_error_not_false_success():
+    agent = MemAgent(
+        instruction="Offline internet agent",
+        internet_access_provider=OfflineInternetProvider("No provider credentials"),
+    )
+
+    raw, _workflow = agent.tool_manager.execute_tool(
+        "internet_search", {"query": "latest release", "max_results": 3}
+    )
+    payload, outcome = normalize_tool_result(raw)
+
+    assert payload["results"][0]["metadata"]["status"] == "offline"
+    assert outcome.status is ToolOutcomeStatus.PROVIDER_ERROR
+    assert outcome.ok is False
+    assert outcome.provider == "offline"
 
 
 @pytest.mark.unit

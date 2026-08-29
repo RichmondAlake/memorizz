@@ -80,18 +80,38 @@ def test_memory_manager_enforces_thread_and_namespace_after_provider_query():
             return [
                 {
                     "_id": "right",
+                    "memory_id": "memory-1",
+                    "user_id": "alice",
                     "thread_id": "thread-a",
                     "namespace": "agents",
                 },
                 {
                     "_id": "wrong-thread",
+                    "memory_id": "memory-1",
+                    "user_id": "alice",
                     "thread_id": "thread-b",
                     "namespace": "agents",
                 },
                 {
                     "_id": "wrong-namespace",
+                    "memory_id": "memory-1",
+                    "user_id": "alice",
                     "thread_id": "thread-a",
                     "content": {"namespace": "finance"},
+                },
+                {
+                    "_id": "wrong-user",
+                    "memory_id": "memory-1",
+                    "user_id": "bob",
+                    "thread_id": "thread-a",
+                    "namespace": "agents",
+                },
+                {
+                    "_id": "wrong-memory",
+                    "memory_id": "memory-2",
+                    "user_id": "alice",
+                    "thread_id": "thread-a",
+                    "namespace": "agents",
                 },
             ]
 
@@ -388,6 +408,9 @@ def test_mcp_dependencies_are_optional_and_capabilities_are_explicit():
         "logical_tool_trace_names",
         "semantic_cache_session_default",
         "entity_memory",
+        "personalization_context",
+        "memory_supply_observability",
+        "canonical_entity_identity",
         "host_completion_policy",
         "evaluation_suite",
     ):

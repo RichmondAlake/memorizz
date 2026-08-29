@@ -433,6 +433,22 @@ def _run_oneshot(text, code_mode=False, browser_control=None):
         user_id=session.user_id,
     )
     print(result)
+    outcome_labels = {
+        "empty": "completed with no results",
+        "degraded": "completed with limitations",
+        "fallback": "completed via fallback",
+        "provider_error": "provider error",
+        "error": "failed",
+    }
+    for outcome in getattr(session.agent, "last_tool_outcomes", []) or []:
+        status = str(outcome.get("status") or "success").lower()
+        if status == "success":
+            continue
+        tool_name = str(outcome.get("tool_name") or "tool")
+        console.print(
+            f"[yellow]tool outcome[/yellow] {tool_name}: "
+            f"{outcome_labels.get(status, status.replace('_', ' '))}"
+        )
     session.sync_ids()
     try:
         cfg.save_state(

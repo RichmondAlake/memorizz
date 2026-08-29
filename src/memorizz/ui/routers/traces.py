@@ -1343,6 +1343,15 @@ def _expand_trace_bundle(
                         "tool_call_id",
                         "success",
                         "status",
+                        "outcome",
+                        "outcome_reason_code",
+                        "tool_provider",
+                        "primary_provider",
+                        "fallback_provider",
+                        "outcome_retryable",
+                        "result_count",
+                        "fallback_used",
+                        "degraded",
                         "error_code",
                         "duration_ms",
                         "model",
@@ -1376,6 +1385,17 @@ def _expand_trace_bundle(
                         "cache_decision",
                         "cache_enabled",
                         "cache_bypass_reason",
+                        "memory_history_count",
+                        "memory_candidate_count",
+                        "memory_supplied_count",
+                        "memory_referenced_count",
+                        "memory_injected_chars",
+                        "memory_degraded",
+                        "memory_fallback_used",
+                        "entity_profile_count",
+                        "preference_count",
+                        "conversation_memory_count",
+                        "writing_sample_count",
                     )
                     if event.get(field) is not None
                 },
@@ -1426,6 +1446,17 @@ def _load_agent_tool_log_events(
         tool_name = _to_text(doc.get("tool_name") or "tool").strip()
         arguments = doc.get("arguments")
         result = doc.get("result")
+        outcome_details = doc.get("outcome_details") or {}
+        if isinstance(outcome_details, str):
+            try:
+                outcome_details = json.loads(outcome_details)
+            except (TypeError, ValueError):
+                outcome_details = {}
+        if not isinstance(outcome_details, dict):
+            outcome_details = {}
+        outcome = _to_text(doc.get("outcome")).strip().lower() or (
+            "success" if doc.get("success") is not False else "error"
+        )
         content = json.dumps(
             {
                 "tool_log_id": doc.get("tool_log_id")
@@ -1436,6 +1467,8 @@ def _load_agent_tool_log_events(
                 "result": result,
                 "success": doc.get("success"),
                 "error": doc.get("error"),
+                "outcome": outcome,
+                "outcome_details": outcome_details,
             },
             ensure_ascii=False,
             default=str,
@@ -1451,6 +1484,15 @@ def _load_agent_tool_log_events(
                 "tool_name": tool_name,
                 "logical_tool_name": tool_name,
                 "success": doc.get("success"),
+                "outcome": outcome,
+                "outcome_reason_code": outcome_details.get("reason_code"),
+                "tool_provider": outcome_details.get("provider"),
+                "primary_provider": outcome_details.get("primary_provider"),
+                "fallback_provider": outcome_details.get("fallback_provider"),
+                "outcome_retryable": outcome_details.get("retryable"),
+                "result_count": outcome_details.get("result_count"),
+                "fallback_used": outcome_details.get("fallback_used"),
+                "degraded": outcome_details.get("degraded"),
                 "error_code": doc.get("error_code") or doc.get("error"),
                 "duration_ms": doc.get("duration_ms"),
                 "trace_id": _to_text(doc.get("tool_call_id")).strip(),

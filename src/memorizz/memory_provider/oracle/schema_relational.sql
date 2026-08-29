@@ -482,6 +482,8 @@ CREATE TABLE tool_log (
     result CLOB,
     success NUMBER(1) DEFAULT 1,
     error CLOB,
+    outcome VARCHAR2(32) DEFAULT 'success',
+    outcome_details CLOB,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     agent_id VARCHAR2(255),
     tool_call_id VARCHAR2(255),

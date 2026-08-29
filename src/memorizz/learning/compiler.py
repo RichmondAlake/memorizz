@@ -96,7 +96,18 @@ class MemoryCompiler:
     def _event_summary(event: LearningEvent) -> str:
         payload = event.payload
         if event.event_type == LearningEventType.TOOL_EXECUTED:
-            status = "succeeded" if payload.get("success") else "failed"
+            outcome = payload.get("outcome") or {}
+            outcome_status = str(outcome.get("status") or "").strip().lower()
+            if outcome_status == "fallback":
+                status = "completed via fallback"
+            elif outcome_status == "degraded":
+                status = "completed with degraded capability"
+            elif outcome_status == "empty":
+                status = "completed with no results"
+            elif outcome_status == "provider_error":
+                status = "failed with a provider error"
+            else:
+                status = "succeeded" if payload.get("success") else "failed"
             return f"Tool {payload.get('tool_name') or 'unknown'} {status}."
         if event.event_type == LearningEventType.OUTCOME_RECORDED:
             authority = "verified" if payload.get("verified") else "unverified"

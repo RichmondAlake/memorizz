@@ -192,11 +192,17 @@
             <span class="trace-analysis-stat-label">Page / thread mismatches</span>
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.missing_current_page_grounding }} missing grounding · {{ trace_analysis.summary.unverified_page_ownership }} unverified ownership</span>
         </div>
+        <div class="trace-analysis-stat {% if trace_analysis.summary.memory_degraded_turns %}trace-analysis-stat--warning{% endif %}">
+            <span class="trace-analysis-stat-kicker">Memory supply</span>
+            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.memory_supplied }}</span>
+            <span class="trace-analysis-stat-label">Items supplied to the model</span>
+            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.memory_candidates }} retrieved candidates · {{ trace_analysis.summary.memory_explicit_references }} explicit references · {{ trace_analysis.summary.memory_degraded_turns }} degraded</span>
+        </div>
         <div class="trace-analysis-stat {% if trace_analysis.summary.tool_failures %}trace-analysis-stat--warning{% endif %}">
             <span class="trace-analysis-stat-kicker">Tool health</span>
             <span class="trace-analysis-stat-value">{{ trace_analysis.summary.tool_calls }}</span>
             <span class="trace-analysis-stat-label">Tool calls</span>
-            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.tool_failures }} failures · {{ trace_analysis.summary.unique_tools }} unique tools</span>
+            <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.tool_failures }} failures · {{ trace_analysis.summary.tool_fallbacks }} fallback · {{ trace_analysis.summary.tool_degraded_results }} degraded</span>
         </div>
         <div class="trace-analysis-stat">
             <span class="trace-analysis-stat-kicker">Semantic cache</span>
@@ -211,6 +217,50 @@
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.priority_counts.P0 }} P0 · {{ trace_analysis.summary.priority_counts.P1 }} P1 · {{ trace_analysis.summary.priority_counts.P2 }} P2 findings</span>
         </div>
     </div>
+
+    <section class="trace-memory-pipeline" aria-label="Memory context pipeline">
+        <div class="trace-memory-pipeline__header">
+            <div>
+                <span class="trace-analysis-stat-kicker">Memory-first observability</span>
+                <h3>What the model could actually use</h3>
+                <p>Counts and hashed source references only. Raw profile facts, conversation excerpts, preferences, and writing samples are never copied into the trace.</p>
+            </div>
+            <span class="trace-analysis-badge">Content-safe</span>
+        </div>
+        <div class="trace-memory-stages">
+            <div class="trace-memory-stage">
+                <span>1 · Retrieved</span>
+                <strong>{{ trace_analysis.summary.memory_candidates }}</strong>
+                <small>candidates considered</small>
+            </div>
+            <div class="trace-memory-stage">
+                <span>2 · Supplied</span>
+                <strong>{{ trace_analysis.summary.memory_supplied }}</strong>
+                <small>{{ trace_analysis.summary.memory_injected_chars }} context characters</small>
+            </div>
+            <div class="trace-memory-stage">
+                <span>3 · Referenced</span>
+                <strong>{{ trace_analysis.summary.memory_explicit_references }}</strong>
+                <small>conservative exact overlaps</small>
+            </div>
+        </div>
+        {% if trace_analysis.memory_health %}
+        <div class="trace-memory-sources">
+            {% for source in trace_analysis.memory_health %}
+            <div class="trace-memory-source">
+                <span>{{ source.source|replace('_', ' ')|title }}</span>
+                <strong>{{ source.supplied }}</strong>
+                <small>{{ source.explicit_references }} explicit reference{% if source.explicit_references != 1 %}s{% endif %}</small>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="trace-memory-empty">No memory-supply events are available in this trace window yet.</p>
+        {% endif %}
+        {% if trace_analysis.summary.memory_behavioral_sources_not_measured %}
+        <p class="trace-memory-note">{{ trace_analysis.summary.memory_behavioral_sources_not_measured }} style/preference signal{% if trace_analysis.summary.memory_behavioral_sources_not_measured != 1 %}s were{% else %} was{% endif %} supplied but not labelled “referenced”: behavioral application requires outcome evaluation, not string matching.</p>
+        {% endif %}
+    </section>
 
     {% if trace_analysis.insights %}
     <div class="trace-insights-list">
@@ -292,11 +342,20 @@
                         <span class="message-role">{{ event.title or event.role|default('Event')|title }}</span>
                         <div class="trace-meta">
                             {% if event.kind %}<span class="meta-tag trace-tag trace-tag--kind">{{ event.kind|replace('_', ' ')|title }}</span>{% endif %}
+                            {% if event.outcome %}
+                            <span class="meta-tag trace-tag {% if event.outcome == 'success' %}trace-tag--ok{% elif event.outcome == 'empty' %}trace-tag--muted{% elif event.outcome in ['fallback', 'degraded'] %}trace-tag--warning{% else %}trace-tag--critical{% endif %}">
+                                {% if event.outcome == 'success' %}Completed{% elif event.outcome == 'empty' %}Completed · no results{% elif event.outcome == 'fallback' %}Completed via fallback{% elif event.outcome == 'degraded' %}Completed with limitations{% elif event.outcome == 'provider_error' %}Provider error{% else %}Failed{% endif %}
+                            </span>
+                            {% endif %}
+                            {% if event.tool_provider %}<span class="meta-tag trace-tag">Provider {{ event.tool_provider }}</span>{% endif %}
+                            {% if event.outcome_reason_code %}<span class="meta-tag trace-tag trace-tag--muted">Reason {{ event.outcome_reason_code|replace('_', ' ') }}</span>{% endif %}
                             {% if event.canonical_page_type %}<span class="meta-tag trace-tag">Page {{ event.canonical_page_type }} · {{ event.canonical_page_id|default('—')|truncate(12) }}</span>{% endif %}
                             {% if event.thread_binding_status %}<span class="meta-tag trace-tag {% if event.thread_binding_status in ['matched', 'bound', 'verified'] %}trace-tag--ok{% else %}trace-tag--warning{% endif %}">Binding {{ event.thread_binding_status|replace('_', ' ') }}</span>{% endif %}
                             {% if event.ownership_verified is defined and event.ownership_verified is not none %}<span class="meta-tag trace-tag {% if event.ownership_verified %}trace-tag--ok{% else %}trace-tag--critical{% endif %}">Ownership {% if event.ownership_verified %}verified{% else %}unverified{% endif %}</span>{% endif %}
                             {% if event.grounding_status %}<span class="meta-tag trace-tag {% if event.grounding_status == 'ready' %}trace-tag--ok{% else %}trace-tag--critical{% endif %}">Grounding {{ event.grounding_status|replace('_', ' ') }}{% if event.grounding_source %} · {{ event.grounding_source|replace('_', ' ') }}{% endif %}</span>{% endif %}
                             {% if event.cache_decision %}<span class="meta-tag trace-tag {% if event.cache_decision == 'hit' %}trace-tag--ok{% elif event.cache_decision in ['bypassed', 'rejected'] %}trace-tag--warning{% else %}trace-tag--muted{% endif %}">Cache {{ event.cache_decision }}</span>{% endif %}
+                            {% if event.kind == 'memory_context' %}<span class="meta-tag trace-tag {% if event.memory_degraded %}trace-tag--warning{% else %}trace-tag--ok{% endif %}">{{ event.memory_supplied_count|default(0) }} supplied · {{ event.memory_candidate_count|default(0) }} candidates</span>{% endif %}
+                            {% if event.kind == 'memory_reference' %}<span class="meta-tag trace-tag trace-tag--ok">{{ event.memory_referenced_count|default(0) }} explicitly referenced</span>{% endif %}
                             {% if event.canonical_title_fingerprint or event.client_title_fingerprint %}<span class="meta-tag trace-tag trace-tag--fingerprint">Content fp {{ (event.canonical_title_fingerprint or event.client_title_fingerprint)|truncate(14) }}</span>{% endif %}
                             {% if event.request_context_fingerprint %}<span class="meta-tag trace-tag trace-tag--fingerprint">Context fp {{ event.request_context_fingerprint|truncate(14) }}</span>{% endif %}
                             {% if event.trace_id %}<span class="meta-tag trace-tag trace-tag--id">Trace {{ event.trace_id|truncate(14) }}</span>{% endif %}

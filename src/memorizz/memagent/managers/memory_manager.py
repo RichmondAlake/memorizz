@@ -128,6 +128,15 @@ class MemoryManager:
             return content.get("user_id")
         return None
 
+    @staticmethod
+    def _entry_memory_id(entry: Any) -> str:
+        """Read the owning memory id from flat and nested provider rows."""
+        if not isinstance(entry, dict):
+            return ""
+        content = entry.get("content")
+        nested = content if isinstance(content, dict) else {}
+        return str(entry.get("memory_id") or nested.get("memory_id") or "")
+
     def load_conversation_history(
         self,
         memory_id: str,
@@ -375,6 +384,19 @@ class MemoryManager:
                     # row leaks arbitrary attributes into provenance fields.
                     results = [results] if isinstance(results, dict) else []
 
+            # ``**kwargs`` support does not prove that a third-party provider
+            # applied those filters.  Semantic recall is a prompt-injection
+            # boundary, so enforce the authenticated memory and user scope a
+            # second time before any row can reach the model.
+            wanted_memory_id = str(memory_id or "")
+            results = [
+                row
+                for row in results
+                if isinstance(row, dict)
+                and self._entry_memory_id(row) == wanted_memory_id
+                and self._entry_user_id(row) == user_id
+            ]
+
             # Providers may accept **kwargs yet not push every scope into their
             # native query. Enforce exact boundaries again in the manager so a
             # third-party backend cannot silently broaden automatic recall.
@@ -585,6 +607,8 @@ class MemoryManager:
         tool_call_id: Optional[str] = None,
         success: bool = True,
         error: Optional[str] = None,
+        outcome: Optional[str] = None,
+        outcome_details: Optional[Dict[str, Any]] = None,
         thread_id: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> Optional[str]:
@@ -604,6 +628,10 @@ class MemoryManager:
             tool_call_id: Optional tool call ID from the LLM.
             success: Whether the tool executed successfully.
             error: Error message if the tool failed.
+            outcome: Structured terminal outcome such as ``fallback`` or
+                ``provider_error``.
+            outcome_details: Content-free provider, reason, and result-count
+                metadata for the structured outcome.
             thread_id: Optional thread ID.
 
         Returns:
@@ -635,6 +663,8 @@ class MemoryManager:
                 "result": result_str,
                 "success": success,
                 "error": error,
+                "outcome": outcome or ("success" if success else "error"),
+                "outcome_details": dict(outcome_details or {}),
                 "timestamp": timestamp.isoformat(),
                 "agent_id": agent_id,
                 "tool_call_id": tool_call_id or "",

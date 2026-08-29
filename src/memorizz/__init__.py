@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.6.3"
+__version__ = "0.7.0"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
@@ -43,6 +43,9 @@ _LAZY = {
     "ApprovalStatus": (".approval", "ApprovalStatus"),
     "SQLiteApprovalStore": (".approval", "SQLiteApprovalStore"),
     "ToolPolicy": (".tooling", "ToolPolicy"),
+    "ToolOutcome": (".tool_outcomes", "ToolOutcome"),
+    "ToolOutcomeStatus": (".tool_outcomes", "ToolOutcomeStatus"),
+    "ToolResult": (".tool_outcomes", "ToolResult"),
     "ToolResultPolicy": (".tooling", "ToolResultPolicy"),
     "ContextPolicy": (".tooling", "ContextPolicy"),
     "CompletionCandidate": (".completion", "CompletionCandidate"),
@@ -50,6 +53,16 @@ _LAZY = {
     "CompletionPolicy": (".completion", "CompletionPolicy"),
     "CompletionRejectedError": (".completion", "CompletionRejectedError"),
     "RetrievalPolicy": (".retrieval", "RetrievalPolicy"),
+    "PersonalizationContext": (".personalization", "PersonalizationContext"),
+    "PersonalizationContextBuilder": (
+        ".personalization",
+        "PersonalizationContextBuilder",
+    ),
+    "PersonalizationPolicy": (".personalization", "PersonalizationPolicy"),
+    "build_personalization_context": (
+        ".personalization",
+        "build_personalization_context",
+    ),
     "LearningControlPlane": (".learning", "LearningControlPlane"),
     "LearningControlPlaneConfig": (".learning", "LearningControlPlaneConfig"),
     "LearningEvent": (".learning", "LearningEvent"),
@@ -177,6 +190,9 @@ __all__ = [
     "ApprovalStatus",
     "SQLiteApprovalStore",
     "ToolPolicy",
+    "ToolOutcome",
+    "ToolOutcomeStatus",
+    "ToolResult",
     "ToolResultPolicy",
     "ContextPolicy",
     "CompletionCandidate",
@@ -184,6 +200,10 @@ __all__ = [
     "CompletionPolicy",
     "CompletionRejectedError",
     "RetrievalPolicy",
+    "PersonalizationContext",
+    "PersonalizationContextBuilder",
+    "PersonalizationPolicy",
+    "build_personalization_context",
     "LearningControlPlane",
     "LearningControlPlaneConfig",
     "LearningEvent",

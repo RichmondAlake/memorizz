@@ -62,6 +62,12 @@ memorizz
 Cloud keys are auto-detected (Anthropic → OpenAI → Azure → local Ollama). You can
 also save a key from inside the REPL with `/login`.
 
+During tool-using turns, the REPL displays the normalized terminal state beside
+each tool: **Completed**, **Completed · no results**, **Completed with
+limitations**, **Completed via fallback**, **Provider error**, or **Failed**.
+One-shot execution prints non-clean outcomes after the answer so headless logs
+do not silently treat an unavailable primary provider as a normal success.
+
 ## Create and inspect agents
 
 Create a persisted agent without entering the REPL:

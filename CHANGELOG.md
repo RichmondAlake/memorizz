@@ -4,6 +4,47 @@
 
 _No unreleased changes._
 
+## 0.7.0 — 2026-08-29
+
+### Added
+
+- Added provider-neutral structured tool outcomes across the SDK, CLI, MCP
+  server, UI, observability, and continual-learning evidence. Tool executions
+  now distinguish clean success, empty results, degraded capability, usable
+  fallback, provider errors, and other failures without changing the payload
+  exposed to the model.
+- Added explicit `ToolResult`/`ToolOutcome` SDK types, per-turn
+  `MemAgent.last_tool_outcomes`, provider/fallback trace metadata, outcome-aware
+  cache admission, and Oracle tool-log persistence with a forward migration.
+- Added provider-neutral `PersonalizationContext` SDK/MCP abstractions with
+  opt-in, tenant-scoped cross-thread recall, natural-use prompt rules, bounded
+  writing/profile inputs, and content-free per-turn memory supply evidence.
+- Added memory-first observability across the SDK and UI, separating candidates
+  retrieved, context supplied, and sources explicitly referenced while marking
+  behavioral style attribution as not measurable.
+- Added deterministic canonical entity identities and dry-run-first duplicate
+  consolidation with conflict reporting and reversible soft supersession.
+
+### Fixed
+
+- Internet-provider failures and offline placeholders no longer appear as
+  successful green tool completions. The CLI and UI now report states such as
+  **Completed via fallback** and **Provider error**.
+- Source distributions now exclude downloaded benchmark corpora under
+  `eval/datasets/`, preventing local evaluation data from inflating or leaking
+  into release artifacts.
+
+### Security
+
+- Automatic memory recall now rechecks exact `memory_id` and `user_id` ownership
+  after every provider query, preventing an overly broad third-party provider
+  from supplying cross-tenant prompt context.
+- Canonical entity `identity_key` binding remains trusted host/application
+  authority and is deliberately absent from the model-visible entity tool.
+- Personalization authority rules are rendered before memory-derived content,
+  so a large or adversarial excerpt cannot truncate away the instruction
+  boundary. Reference attribution also ignores ambiguous single-token overlap.
+
 ## 0.6.3 — 2026-08-25
 
 ### Fixed

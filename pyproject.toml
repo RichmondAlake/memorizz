@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.6.3"
+version = "0.7.0"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -244,6 +244,7 @@ exclude = [
     "dist/**",
     "research/**",
     "temp_unpack*",
+    "eval/datasets/**",
     "eval/longmemeval/data/**",
     "eval/longmemeval/results/**",
     "eval/longmemeval_v2/results/**",

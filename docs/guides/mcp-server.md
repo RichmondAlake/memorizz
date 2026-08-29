@@ -144,6 +144,7 @@ external origin, not the internal bind address.
 | Inspect server policy | `memorizz_server_info` | `memorizz:read` |
 | List/read exposed agents | `memorizz_list_agents`, `memorizz_get_agent` | `memorizz:read` |
 | Inspect capabilities, cache, learning, and scoped observability | `memorizz_inspect_agent` | `memorizz:read` |
+| Preview bounded personalization and content-safe memory evidence | `memorizz_preview_personalization` | `memorizz:read` |
 | Create a persisted local agent | `memorizz_create_agent` | `memorizz:write`; local `stdio` only; durable approval required |
 | Update safe local agent configuration | `memorizz_update_agent` | `memorizz:write`; local `stdio` only; durable approval required |
 | Propose local agent deletion | `memorizz_delete_agent` | `memorizz:write`; local `stdio` only; durable operator approval required |
@@ -160,11 +161,24 @@ external origin, not the internal bind address.
 | Propose deletion of owned memory | `memorizz_forget_memory` | `memorizz:write`; returns a durable proposal |
 | List/read conversations | `memorizz_list_conversations`, `memorizz_get_conversation` | `memorizz:read` |
 
+`memorizz_preview_personalization` never performs cross-thread recall unless
+`include_conversation_recall=true`. The authenticated principal is always used
+as `user_id`, one `memory_id` must be explicit (or the agent must expose exactly
+one), and thresholds/source limits are bounded server-side. Set
+`include_content=false` to return only counts, scores, attribute/preference
+names, and hashed source references for an observability-only client.
+
 Harness capability and startup responses use the same secret-free
 `error_code`, message, and remediation contract as the SDK, CLI, and UI. When
 authentication is absent or expired, `memorizz_start_harness_run` returns
 `ok=false`, `status="failed"`, the durable failed run, and
 `error.code="authentication_required"`; no API-key value is returned.
+
+`memorizz_execute_agent` also returns a `tool_outcomes` array for the completed
+turn. Each item includes the tool name, terminal status, success flag, duration,
+and any content-free provider/fallback reason fields. MCP hosts can therefore
+distinguish clean completion from `empty`, `degraded`, `fallback`,
+`provider_error`, and `error` without parsing the assistant response.
 
 The server also exposes:
 
@@ -208,7 +222,7 @@ memorizz mcp server-resume PROPOSAL_ID
 
 ## Form-factor parity and trust boundary
 
-The 23-tool MCP surface covers the common operational capabilities available
+The 24-tool MCP surface covers the common operational capabilities available
 through the SDK, CLI, and local UI: agent lifecycle and execution, scoped memory
 and conversations, capability/cache/learning/observability inspection,
 continual-learning compilation, conversation compaction, and governed harness

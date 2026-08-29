@@ -1166,6 +1166,119 @@ class MemorizzRuntime:
             result["observability"] = _json_value(observability)
         return result
 
+    def preview_personalization(
+        self,
+        agent_id: str,
+        query: str,
+        identity: RequestIdentity,
+        *,
+        memory_id: Optional[str] = None,
+        exclude_thread_id: Optional[str] = None,
+        include_conversation_recall: bool = False,
+        min_relevance_score: float = 0.65,
+        max_conversation_memories: int = 2,
+        preferences: Optional[Dict[str, Any]] = None,
+        writing_samples: Optional[List[Dict[str, Any]]] = None,
+        include_content: bool = True,
+    ) -> Dict[str, Any]:
+        """Build one bounded personalization context without running the model."""
+        self._require_scope(identity, READ_SCOPE)
+        text = str(query or "").strip()
+        if not text:
+            raise MemorizzServerError(
+                "invalid_query", "Personalization query cannot be empty"
+            )
+        if len(text) > self.config.max_text_chars:
+            raise MemorizzServerError(
+                "query_too_large",
+                f"Query exceeds {self.config.max_text_chars} characters",
+            )
+        agent = self._load_agent_for_inspection(agent_id, identity)
+        agent_memory_ids = {
+            str(value).strip()
+            for value in (getattr(agent, "memory_ids", None) or [])
+            if str(value).strip()
+        }
+        resolved_memory_id = str(memory_id or "").strip()
+        if not resolved_memory_id:
+            if len(agent_memory_ids) != 1:
+                raise MemorizzServerError(
+                    "memory_id_required",
+                    "Select one explicit memory_id for personalization preview",
+                )
+            resolved_memory_id = next(iter(agent_memory_ids))
+        if resolved_memory_id not in agent_memory_ids:
+            raise MemorizzServerError(
+                "memory_not_attached",
+                "The selected memory is not attached to this agent",
+            )
+
+        bounded_preferences = {
+            str(key)[:80]: str(value)[:600]
+            for key, value in dict(preferences or {}).items()
+            if str(key).strip() and value not in (None, "")
+        }
+        bounded_samples = []
+        for raw in writing_samples or []:
+            if not isinstance(raw, dict):
+                continue
+            bounded_samples.append(
+                {
+                    "sample_id": str(
+                        raw.get("sample_id") or raw.get("id") or uuid.uuid4()
+                    )[:160],
+                    "title": str(raw.get("title") or "Writing sample")[:160],
+                    "text": str(
+                        raw.get("text")
+                        or raw.get("content")
+                        or raw.get("excerpt")
+                        or ""
+                    )[:2000],
+                }
+            )
+            if len(bounded_samples) >= 3:
+                break
+
+        try:
+            context = agent.build_personalization_context(
+                text,
+                memory_id=resolved_memory_id,
+                user_id=identity.principal,
+                preferences=bounded_preferences,
+                writing_samples=bounded_samples,
+                exclude_thread_id=exclude_thread_id,
+                policy={
+                    "conversation_recall": bool(include_conversation_recall),
+                    "min_relevance_score": float(min_relevance_score),
+                    "max_conversation_memories": max(
+                        0,
+                        min(
+                            int(max_conversation_memories),
+                            self.config.max_result_items,
+                        ),
+                    ),
+                },
+            )
+        except (TypeError, ValueError) as exc:
+            raise MemorizzServerError(
+                "invalid_personalization_policy", str(exc)
+            ) from exc
+        except Exception as exc:
+            raise MemorizzServerError(
+                "provider_error", "Personalization context could not be assembled"
+            ) from exc
+
+        result = {
+            "ok": True,
+            "agent_id": str(agent_id),
+            "memory_id": resolved_memory_id,
+            "context_evidence": context.trace_summary(),
+        }
+        if include_content:
+            result["context"] = context.to_dict()
+            result["prompt_block"] = context.render()
+        return _json_value(result)
+
     def compile_agent_memory(
         self,
         agent_id: str,
@@ -1300,12 +1413,19 @@ class MemorizzRuntime:
             resolved_memory_id,
             resolved_thread_id,
         )
+        raw_outcomes = getattr(agent, "last_tool_outcomes", [])
+        if callable(raw_outcomes):
+            raw_outcomes = raw_outcomes()
+        tool_outcomes = [
+            _json_value(item) for item in (raw_outcomes or []) if isinstance(item, dict)
+        ]
         return {
             "ok": True,
             "agent_id": resolved_agent_id,
             "memory_id": resolved_memory_id,
             "thread_id": resolved_thread_id,
             "response": str(response),
+            "tool_outcomes": tool_outcomes,
         }
 
     def _bounded_limit(self, limit: int) -> int:

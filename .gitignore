@@ -67,6 +67,7 @@ research/
 .local/
 
 # Evaluation data (large JSON files)
+eval/datasets/
 eval/longmemeval/data/
 eval/longmemeval/results/
 eval/longmemeval_v2/results/

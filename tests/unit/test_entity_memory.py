@@ -176,6 +176,216 @@ def test_upsert_canonicalizes_common_attribute_name_aliases(
     ]
 
 
+def test_identity_key_reuses_one_canonical_entity_across_name_changes(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    first_id = entity_store.upsert_entity(
+        identity_key="authenticated_user",
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "role", "value": "AI Memory Engineer"}],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+    second_id = entity_store.upsert_entity(
+        identity_key="authenticated_user",
+        name="Richmond Alake",
+        entity_type="person",
+        attributes=[{"name": "timezone", "value": "Europe/London"}],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+
+    assert second_id == first_id
+    assert len(provider.records) == 1
+    stored = provider.records[first_id]
+    assert stored["_id"] == first_id
+    assert stored["metadata"]["identity_key"] == "authenticated_user"
+    assert {item["name"] for item in stored["attributes"]} == {"role", "timezone"}
+
+
+def test_identity_key_overrides_a_stale_duplicate_entity_id(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    canonical_id = entity_store.upsert_entity(
+        identity_key="authenticated_user",
+        name="Richmond Alake",
+        attributes=[{"name": "role", "value": "AI Memory Engineer"}],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+    duplicate_id = entity_store.upsert_entity(
+        name="user",
+        attributes=[{"name": "timezone", "value": "Europe/London"}],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+
+    resolved_id = entity_store.upsert_entity(
+        entity_id=duplicate_id,
+        identity_key="authenticated_user",
+        attributes=[{"name": "audience", "value": "agent engineers"}],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+
+    assert resolved_id == canonical_id
+    assert {item["name"] for item in provider.records[canonical_id]["attributes"]} == {
+        "role",
+        "audience",
+    }
+    assert {item["name"] for item in provider.records[duplicate_id]["attributes"]} == {
+        "timezone"
+    }
+
+
+def test_duplicate_consolidation_is_dry_run_first_and_soft_supersedes(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    first_id = entity_store.upsert_entity(
+        name="Richmond Alake",
+        entity_type="person",
+        attributes=[{"name": "role", "value": "Engineer", "confidence": 0.7}],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+    second_id = entity_store.upsert_entity(
+        name="  richmond   alake  ",
+        entity_type="PERSON",
+        attributes=[
+            {
+                "name": "role",
+                "value": "AI Memory Engineer",
+                "confidence": 0.95,
+            },
+            {"name": "timezone", "value": "Europe/London"},
+        ],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+    assert first_id != second_id
+
+    preview = entity_store.consolidate_duplicate_entities(
+        memory_id="primary-user", user_id="user-1"
+    )
+
+    assert preview["dry_run"] is True
+    assert preview["duplicate_group_count"] == 1
+    assert preview["records_to_supersede"] == 1
+    assert preview["deleted_count"] == 0
+    assert (
+        len(entity_store.list_entities(memory_id="primary-user", user_id="user-1")) == 2
+    )
+
+    applied = entity_store.consolidate_duplicate_entities(
+        memory_id="primary-user", user_id="user-1", apply=True
+    )
+
+    assert applied["dry_run"] is False
+    assert applied["groups"][0]["applied"] is True
+    active = entity_store.list_entities(memory_id="primary-user", user_id="user-1")
+    all_rows = entity_store.list_entities(
+        memory_id="primary-user", user_id="user-1", include_superseded=True
+    )
+    assert len(active) == 1
+    assert len(all_rows) == 2
+    attributes = {item["name"]: item["value"] for item in active[0]["attributes"]}
+    assert attributes == {
+        "role": "AI Memory Engineer",
+        "timezone": "Europe/London",
+    }
+    superseded = [
+        row for row in all_rows if (row.get("metadata") or {}).get("superseded_by")
+    ]
+    assert len(superseded) == 1
+
+
+def test_duplicate_consolidation_requires_explicit_legacy_scope_opt_in(
+    entity_store: EntityMemory,
+):
+    with pytest.raises(ValueError, match="allow_legacy_scope"):
+        entity_store.consolidate_duplicate_entities(
+            memory_id="legacy-memory", user_id=None
+        )
+
+
+def test_cross_name_consolidation_requires_explicit_ids_and_is_reversible(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    generic_id = entity_store.upsert_entity(
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "role", "value": "AI Memory Engineer"}],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+    named_id = entity_store.upsert_entity(
+        name="Richmond Alake",
+        entity_type="person",
+        attributes=[{"name": "timezone", "value": "Europe/London"}],
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+
+    automatic = entity_store.consolidate_duplicate_entities(
+        memory_id="primary-user", user_id="user-1"
+    )
+    assert automatic["duplicate_group_count"] == 0
+
+    preview = entity_store.consolidate_duplicate_entities(
+        memory_id="primary-user",
+        user_id="user-1",
+        entity_ids=[generic_id, named_id],
+        canonical_identity_key="authenticated_user",
+    )
+    assert preview["dry_run"] is True
+    assert preview["explicit_selection"] is True
+    assert preview["groups"][0]["canonical_identity_bound"] is True
+    assert (
+        len(entity_store.list_entities(memory_id="primary-user", user_id="user-1")) == 2
+    )
+
+    applied = entity_store.consolidate_duplicate_entities(
+        memory_id="primary-user",
+        user_id="user-1",
+        entity_ids=[generic_id, named_id],
+        canonical_identity_key="authenticated_user",
+        apply=True,
+    )
+    assert applied["records_to_supersede"] == 1
+    active = entity_store.list_entities(memory_id="primary-user", user_id="user-1")
+    assert len(active) == 1
+    assert active[0]["metadata"]["identity_key"] == "authenticated_user"
+    assert (
+        len(
+            entity_store.list_entities(
+                memory_id="primary-user",
+                user_id="user-1",
+                include_superseded=True,
+            )
+        )
+        == 2
+    )
+
+
+def test_explicit_consolidation_fails_closed_for_out_of_scope_id(
+    entity_store: EntityMemory,
+):
+    entity_store.upsert_entity(
+        name="user",
+        memory_id="primary-user",
+        user_id="user-1",
+    )
+    with pytest.raises(ValueError, match="exact memory/user scope"):
+        entity_store.consolidate_duplicate_entities(
+            memory_id="primary-user",
+            user_id="user-1",
+            entity_ids=["missing", "also-missing"],
+            canonical_identity_key="authenticated_user",
+            apply=True,
+        )
+
+
 def test_record_attribute_creates_entity(
     provider: InMemoryEntityProvider, entity_store: EntityMemory
 ):

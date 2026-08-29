@@ -96,6 +96,9 @@ metadata.
   update.
 - Round-trip `memory_id`, `user_id`, `agent_id`, `thread_id`, `memory_type`,
   timestamps, metadata, and embeddings when present.
+- Include `memory_id` and `user_id` on every semantic-retrieval result. MemAgent
+  rechecks both fields after the provider call and discards rows that omit or
+  mismatch the authenticated scope before prompt assembly.
 - Store complete toolbox JSON Schemas, including `required`, defaults, enums,
   nested types, and `additionalProperties`.
 - Preserve summary provenance and source-message markers so expansion is

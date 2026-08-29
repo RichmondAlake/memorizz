@@ -15,6 +15,24 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 _PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2}
+_TOOL_OUTCOMES = (
+    "success",
+    "empty",
+    "degraded",
+    "fallback",
+    "provider_error",
+    "error",
+)
+_PROVIDER_ERROR_CODES = {
+    "authentication_required",
+    "authorization_required",
+    "connection_error",
+    "oauth_required",
+    "provider_error",
+    "provider_timeout",
+    "provider_unavailable",
+    "transport_error",
+}
 _TOOL_TITLE = re.compile(
     r"^(?:tool\s+(?:call|result)|execution\s+log)\s*(?::|·|-)\s*(.+)$",
     re.IGNORECASE,
@@ -76,6 +94,8 @@ def _correlation_id(event: Dict[str, Any]) -> str:
 
 
 def _failure(event: Dict[str, Any]) -> bool:
+    if _tool_outcome(event) in {"provider_error", "error"}:
+        return True
     if event.get("success") is False:
         return True
     payload = _payload(event.get("content"))
@@ -93,6 +113,66 @@ def _failure(event: Dict[str, Any]) -> bool:
             return True
     content = _text(event.get("content")).lower()
     return content.startswith("error:") or content.startswith("error ")
+
+
+def _tool_outcome(event: Dict[str, Any]) -> str:
+    """Return a normalized outcome while retaining legacy trace support."""
+
+    def failed_payload_outcome(value: Any) -> Optional[str]:
+        if not isinstance(value, dict):
+            return None
+        status = _text(value.get("status")).lower()
+        failed = (
+            value.get("ok") is False
+            or value.get("success") is False
+            or (bool(value.get("error")) and value.get("ok") is not True)
+            or status in {"failed", "failure", "error", "provider_error"}
+        )
+        if not failed:
+            return None
+        error_code = _text(value.get("error_code")).lower()
+        if (
+            status == "provider_error"
+            or error_code in _PROVIDER_ERROR_CODES
+            or error_code.startswith("provider_")
+        ):
+            return "provider_error"
+        return "error"
+
+    explicit = _text(event.get("outcome")).lower()
+    if explicit in _TOOL_OUTCOMES:
+        return explicit
+    payload = _payload(event.get("content"))
+    if isinstance(payload, dict):
+        payload_outcome = payload.get("outcome")
+        if isinstance(payload_outcome, dict):
+            payload_outcome = payload_outcome.get("status")
+        normalized = _text(payload_outcome).lower()
+        if normalized in _TOOL_OUTCOMES:
+            return normalized
+        failed = failed_payload_outcome(payload)
+        if failed:
+            return failed
+        nested = _payload(payload.get("result"))
+        if isinstance(nested, dict):
+            nested_outcome = nested.get("outcome")
+            if isinstance(nested_outcome, dict):
+                nested_outcome = nested_outcome.get("status")
+            normalized = _text(nested_outcome).lower()
+            if normalized in _TOOL_OUTCOMES:
+                return normalized
+            failed = failed_payload_outcome(nested)
+            if failed:
+                return failed
+    status = _text(event.get("status")).lower()
+    if status in _TOOL_OUTCOMES:
+        return status
+    if event.get("success") is False:
+        return "error"
+    content = _text(event.get("content")).lower()
+    if content.startswith("error:") or content.startswith("error "):
+        return "error"
+    return "success"
 
 
 def _arguments_fingerprint(event: Dict[str, Any]) -> str:
@@ -170,6 +250,8 @@ def analyze_trace_events(
     result_events: List[Tuple[int, Dict[str, Any]]] = []
     execution_events: List[Tuple[int, Dict[str, Any]]] = []
     context_events: List[Dict[str, Any]] = []
+    memory_context_events: List[Dict[str, Any]] = []
+    memory_reference_events: List[Dict[str, Any]] = []
     cache_decisions: Counter[str] = Counter()
     correction_count = 0
     limitation_count = 0
@@ -229,6 +311,31 @@ def analyze_trace_events(
                     context_event[field] = event.get(field)
             context_event["thread_id"] = event.get("thread_id")
             context_events.append(context_event)
+        elif kind == "memory_context":
+            structured = _payload(event.get("content"))
+            memory_event = dict(structured) if isinstance(structured, dict) else {}
+            for field in (
+                "memory_history_count",
+                "memory_candidate_count",
+                "memory_supplied_count",
+                "memory_injected_chars",
+                "memory_degraded",
+                "memory_fallback_used",
+                "entity_profile_count",
+                "preference_count",
+                "conversation_memory_count",
+                "writing_sample_count",
+            ):
+                if event.get(field) is not None:
+                    memory_event[field] = event.get(field)
+            memory_context_events.append(memory_event)
+        elif kind == "memory_reference":
+            structured = _payload(event.get("content"))
+            memory_event = dict(structured) if isinstance(structured, dict) else {}
+            for field in ("memory_supplied_count", "memory_referenced_count"):
+                if event.get(field) is not None:
+                    memory_event[field] = event.get(field)
+            memory_reference_events.append(memory_event)
         elif kind == "cache_decision":
             structured = _payload(event.get("content"))
             decision = _text(event.get("cache_decision"))
@@ -271,6 +378,7 @@ def analyze_trace_events(
                 "calls": 0,
                 "results": 0,
                 "failures": 0,
+                "outcomes": Counter(),
                 "durations": [],
             },
         )
@@ -287,6 +395,7 @@ def analyze_trace_events(
         name = _tool_name(event) or "unknown"
         stat = _stats(name)
         stat["results"] += 1
+        stat["outcomes"][_tool_outcome(event)] += 1
         if _failure(event):
             stat["failures"] += 1
         duration = event.get("duration_ms")
@@ -437,6 +546,118 @@ def analyze_trace_events(
             )
         )
 
+    def _count(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    memory_source_counts: Counter[str] = Counter()
+    memory_candidates = 0
+    memory_supplied = 0
+    memory_injected_chars = 0
+    memory_degraded_turns = 0
+    memory_fallback_turns = 0
+    for event in memory_context_events:
+        source_counts = event.get("source_counts") or {}
+        if isinstance(source_counts, dict):
+            for source, value in source_counts.items():
+                memory_source_counts[str(source)] += _count(value)
+        memory_candidates += _count(
+            event.get("retrieved_candidate_count")
+            or event.get("memory_candidate_count")
+        )
+        memory_supplied += _count(
+            event.get("supplied_count") or event.get("memory_supplied_count")
+        )
+        memory_injected_chars += _count(
+            event.get("injected_char_count") or event.get("memory_injected_chars")
+        )
+        memory_degraded_turns += int(
+            bool(event.get("degraded") or event.get("memory_degraded"))
+        )
+        memory_fallback_turns += int(
+            bool(event.get("fallback_used") or event.get("memory_fallback_used"))
+        )
+
+    memory_referenced = 0
+    behavioral_sources_not_measured = 0
+    referenced_by_source: Counter[str] = Counter()
+    for event in memory_reference_events:
+        memory_referenced += _count(
+            event.get("referenced_count") or event.get("memory_referenced_count")
+        )
+        behavioral_sources_not_measured += _count(
+            event.get("behavioral_sources_not_measured")
+        )
+        for row in event.get("referenced_refs") or []:
+            if isinstance(row, dict):
+                referenced_by_source[_text(row.get("source")) or "unknown"] += 1
+
+    model_turn_count = max(
+        0,
+        kind_counts.get("turn_start", 0) - cache_decisions.get("hit", 0),
+    )
+    if model_turn_count and len(memory_context_events) < model_turn_count:
+        missing_memory_traces = model_turn_count - len(memory_context_events)
+        insights.append(
+            _insight(
+                "missing_memory_supply_trace",
+                priority="P1",
+                component="Memory observability",
+                title="The model's supplied memory is not traceable",
+                finding="Agent turns are present, but no content-free memory supply event records history, retrieval, entity, preference, or writing-sample inputs.",
+                recommendation="Emit one memory_context event after context assembly and one memory_reference event after completion, using counts and hashed source ids rather than raw memory values.",
+                target="MemAgent memory context assembly",
+                evidence_count=missing_memory_traces,
+                effort="low",
+                confidence="high",
+            )
+        )
+
+    if memory_degraded_turns:
+        insights.append(
+            _insight(
+                "degraded_memory_retrieval",
+                priority="P1",
+                component="Memory retrieval",
+                title="Personalization memory is degrading",
+                finding=f"Detected {memory_degraded_turns} turn(s) where a memory source reported degraded retrieval.",
+                recommendation="Inspect the per-turn reason and fallback fields, verify vector-index health, and keep the exact tenant-scoped fallback enabled until semantic retrieval is healthy.",
+                target="entity and personalization retrieval",
+                evidence_count=memory_degraded_turns,
+                effort="medium",
+                confidence="high",
+            )
+        )
+
+    referenceable_supplied = sum(
+        memory_source_counts.get(source, 0)
+        for source in (
+            "semantic_memories",
+            "entity_attributes",
+            "conversation_memories",
+        )
+    )
+    if (
+        len(memory_context_events) >= 2
+        and referenceable_supplied >= 8
+        and memory_referenced == 0
+    ):
+        insights.append(
+            _insight(
+                "memory_supplied_without_explicit_reference",
+                priority="P2",
+                component="Personalization",
+                title="Memory supply may be broader than the answer needs",
+                finding=f"Supplied {referenceable_supplied} referenceable memory item(s) without a conservatively measurable explicit overlap in the resulting answers.",
+                recommendation="Review relevance thresholds and per-source limits against verified outcomes. Do not remove style preferences based on this signal because behavioral application is intentionally not inferred from text matching.",
+                target="PersonalizationPolicy limits and relevance threshold",
+                evidence_count=referenceable_supplied,
+                effort="low",
+            )
+        )
+
     if kind_counts.get("turn_start", 0) and not context_events:
         insights.append(
             _insight(
@@ -472,6 +693,36 @@ def analyze_trace_events(
                     recommendation="Review the tool schema, preconditions, timeout/retry policy, error taxonomy, and result contract; add a focused regression eval before changing the prompt.",
                     target=f"tool:{name}",
                     evidence_count=failures,
+                )
+            )
+        fallbacks = stat["outcomes"].get("fallback", 0)
+        degraded = stat["outcomes"].get("degraded", 0)
+        if fallbacks >= 2:
+            insights.append(
+                _insight(
+                    f"tool_fallback:{name}",
+                    priority="P1",
+                    component="Tool",
+                    title=f"{name} is repeatedly using a fallback",
+                    finding=f"Observed {fallbacks} usable fallback result(s) across {executions} execution(s).",
+                    recommendation="Inspect primary-provider availability and latency before removing the fallback; keep the alternate path but measure it separately from primary success.",
+                    target=f"tool:{name}",
+                    evidence_count=fallbacks,
+                    effort="low",
+                )
+            )
+        if degraded >= 2:
+            insights.append(
+                _insight(
+                    f"tool_degraded:{name}",
+                    priority="P1",
+                    component="Tool",
+                    title=f"{name} is repeatedly completing with limitations",
+                    finding=f"Observed {degraded} degraded result(s) across {executions} execution(s).",
+                    recommendation="Review the recorded reason codes and provider capability before treating these executions as clean training or promotion evidence.",
+                    target=f"tool:{name}",
+                    evidence_count=degraded,
+                    effort="low",
                 )
             )
 
@@ -655,10 +906,14 @@ def analyze_trace_events(
         key=lambda item: (-item[1]["failures"], -item[1]["calls"], item[0]),
     ):
         durations = stat.pop("durations")
+        outcomes = stat.pop("outcomes")
         results_for_tool = int(stat["results"])
         tool_health.append(
             {
                 **stat,
+                "outcomes": {
+                    outcome: int(outcomes.get(outcome, 0)) for outcome in _TOOL_OUTCOMES
+                },
                 "failure_rate": stat["failures"] / max(1, results_for_tool),
                 "average_duration_ms": (
                     round(sum(durations) / len(durations), 1) if durations else None
@@ -667,12 +922,61 @@ def analyze_trace_events(
         )
 
     failure_count = sum(row["failures"] for row in tool_health)
+    outcome_counts = Counter()
+    for row in tool_health:
+        outcome_counts.update(row["outcomes"])
     priority_counts = Counter(item["priority"] for item in insights)
     learning_candidates = [
         item for item in insights if item["component"] == "Continual learning"
     ]
+    memory_health_groups = (
+        (
+            "entity_memory",
+            memory_source_counts.get("entity_attributes", 0),
+            referenced_by_source.get("entity", 0),
+        ),
+        (
+            "conversation_context",
+            sum(
+                memory_source_counts.get(source, 0)
+                for source in (
+                    "history_messages",
+                    "semantic_memories",
+                    "conversation_memories",
+                )
+            ),
+            sum(
+                referenced_by_source.get(source, 0)
+                for source in ("conversation", "semantic_memory", "history")
+            ),
+        ),
+        (
+            "summaries",
+            memory_source_counts.get("summaries", 0),
+            referenced_by_source.get("summary", 0),
+        ),
+        (
+            "preferences",
+            memory_source_counts.get("preferences", 0),
+            0,
+        ),
+        (
+            "writing_samples",
+            memory_source_counts.get("writing_samples", 0),
+            0,
+        ),
+    )
+    memory_health = [
+        {
+            "source": source,
+            "supplied": int(supplied),
+            "explicit_references": int(referenced),
+        }
+        for source, supplied, referenced in memory_health_groups
+        if supplied
+    ]
     return {
-        "version": 1,
+        "version": 3,
         "agent_id": _text(agent_id),
         "agent_name": _text(agent_name),
         "scope": scope,
@@ -686,10 +990,24 @@ def analyze_trace_events(
             "tool_results": len(results),
             "tool_failures": failure_count,
             "tool_failure_rate": failure_count / max(1, len(results)),
+            "tool_successes": outcome_counts.get("success", 0),
+            "tool_empty_results": outcome_counts.get("empty", 0),
+            "tool_degraded_results": outcome_counts.get("degraded", 0),
+            "tool_fallbacks": outcome_counts.get("fallback", 0),
+            "tool_provider_errors": outcome_counts.get("provider_error", 0),
             "unique_tools": len(tool_health),
             "user_correction_signals": correction_count,
             "assistant_limitation_signals": limitation_count,
             "context_provenance_events": len(context_events),
+            "memory_context_events": len(memory_context_events),
+            "memory_reference_events": len(memory_reference_events),
+            "memory_candidates": memory_candidates,
+            "memory_supplied": memory_supplied,
+            "memory_explicit_references": memory_referenced,
+            "memory_behavioral_sources_not_measured": behavioral_sources_not_measured,
+            "memory_injected_chars": memory_injected_chars,
+            "memory_degraded_turns": memory_degraded_turns,
+            "memory_fallback_turns": memory_fallback_turns,
             "page_context_mismatches": context_mismatches,
             "unverified_page_ownership": ownership_failures,
             "missing_current_page_grounding": missing_grounding,
@@ -713,6 +1031,7 @@ def analyze_trace_events(
             },
         },
         "tool_health": tool_health,
+        "memory_health": memory_health,
         "insights": insights,
         "learning_candidates": learning_candidates,
         "methodology": (

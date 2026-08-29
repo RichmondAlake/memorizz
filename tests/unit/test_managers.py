@@ -136,8 +136,16 @@ class TestMemoryManager:
 
         mock_memory_provider.retrieve_by_query.side_effect = None
         mock_memory_provider.retrieve_by_query.return_value = [
-            {"content": "relevant memory 1"},
-            {"content": "relevant memory 2"},
+            {
+                "content": "relevant memory 1",
+                "memory_id": "test_memory",
+                "user_id": None,
+            },
+            {
+                "content": "relevant memory 2",
+                "memory_id": "test_memory",
+                "user_id": None,
+            },
         ]
 
         memories = manager.retrieve_relevant_memories(

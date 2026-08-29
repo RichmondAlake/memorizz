@@ -28,6 +28,13 @@ from typing import (
 
 from pydantic import TypeAdapter
 
+from .tool_outcomes import (
+    ToolOutcome,
+    ToolOutcomeStatus,
+    ToolResult,
+    normalize_tool_result,
+)
+
 
 def _json_default(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -761,12 +768,14 @@ class SemanticToolRouter:
             return prepared
         call_hash = str(prepared["call_hash"])
         result, _outcome = self.tool_manager.execute_tool(name, values)
-        failed = isinstance(result, str) and result.startswith("Error")
+        result, tool_outcome = normalize_tool_result(result)
+        failed = not tool_outcome.ok
         self.record_invocation(call_hash, success=not failed)
         return {
             "ok": not failed,
             "tool_name": name,
             "result": result,
+            "outcome": tool_outcome.to_dict(),
             "call_hash": call_hash,
             "warnings": warnings,
         }
@@ -837,10 +846,14 @@ class SemanticToolRouter:
 __all__ = [
     "ContextPolicy",
     "SemanticToolRouter",
+    "ToolOutcome",
+    "ToolOutcomeStatus",
     "ToolPolicy",
+    "ToolResult",
     "ToolResultPolicy",
     "callable_json_schema",
     "governed_tool",
+    "normalize_tool_result",
     "policy_for_callable",
     "serialize_tool_result",
     "tool_metadata_to_openai",

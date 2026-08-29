@@ -238,20 +238,24 @@ class LearningControlPlane:
         arguments: Any,
         result: Any,
         success: bool,
+        outcome: Optional[Mapping[str, Any]] = None,
         duration_ms: Optional[float] = None,
         scope: Optional[Mapping[str, Any]] = None,
     ) -> Optional[LearningEvent]:
         result_text = canonical_json(result)
+        payload = {
+            "tool_name": str(tool_name),
+            "argument_hash": content_digest(arguments),
+            "result_hash": content_digest(result),
+            "result_preview": result_text[:800],
+            "success": bool(success),
+            "duration_ms": duration_ms,
+        }
+        if outcome:
+            payload["outcome"] = dict(outcome)
         return self.emit(
             LearningEventType.TOOL_EXECUTED,
-            {
-                "tool_name": str(tool_name),
-                "argument_hash": content_digest(arguments),
-                "result_hash": content_digest(result),
-                "result_preview": result_text[:800],
-                "success": bool(success),
-                "duration_ms": duration_ms,
-            },
+            payload,
             scope=scope,
         )
 

@@ -18,6 +18,9 @@ This page covers the stable, high-value Python surface. Import public types from
         - generate_summaries
         - observability_summary
         - get_trace_context
+        - build_personalization_context
+        - last_memory_context_evidence
+        - last_tool_outcomes
         - record_feedback
         - record_task_outcome
         - has_automations
@@ -45,6 +48,78 @@ This page covers the stable, high-value Python surface. Import public types from
 `MemAgent.load(agent_id, memory_provider=provider, **overrides)` restores it;
 omit `memory_provider` only when the definition lives in the default filesystem
 provider.
+
+## Personalization context
+
+`PersonalizationContext` is the provider-neutral boundary between durable
+memory and a host application's generation prompt. Cross-thread conversation
+recall is disabled by default and becomes available only when the host opts in
+with an exact `memory_id` and authenticated `user_id`.
+
+```python
+from memorizz import PersonalizationPolicy
+
+personalization = agent.build_personalization_context(
+    "Draft a LinkedIn post about memory observability",
+    memory_id="workspace-7",
+    user_id="user-42",
+    exclude_thread_id="current-thread",
+    preferences={"preferred_tone": "concise and technical"},
+    policy=PersonalizationPolicy(
+        conversation_recall=True,
+        min_relevance_score=0.70,
+        max_conversation_memories=2,
+    ),
+)
+
+response = agent.run(
+    "Draft the post.",
+    memory_id="workspace-7",
+    user_id="user-42",
+    context={"personalization_context": personalization.to_dict()},
+)
+```
+
+The rendered prompt tells the model to use memories only when they naturally
+improve the current answer. `personalization.trace_summary()` and
+`agent.last_memory_context_evidence()` contain counts, scores, attribute names,
+and hashed references, not the underlying profile values or conversation text.
+
+### Canonical user entities and duplicate cleanup
+
+Use a stable application-owned `identity_key` for profile writes. Name changes
+then update one deterministic entity instead of creating a second profile.
+This field is deliberately absent from the model-facing `entity_memory_upsert`
+tool: only a trusted host or application may bind a canonical identity.
+Existing cross-name duplicates are never merged heuristically: preview an exact
+selection first, inspect conflicts, and only then apply a reversible soft
+supersession.
+
+```python
+from memorizz.long_term.semantic.entity_memory import EntityMemory
+
+entities = EntityMemory(provider)
+preview = entities.consolidate_duplicate_entities(
+    memory_id="workspace-7",
+    user_id="user-42",
+    entity_ids=["reviewed-id-1", "reviewed-id-2"],
+    canonical_identity_key="authenticated_user",
+)
+
+# After operator review of preview["groups"]:
+applied = entities.consolidate_duplicate_entities(
+    memory_id="workspace-7",
+    user_id="user-42",
+    entity_ids=["reviewed-id-1", "reviewed-id-2"],
+    canonical_identity_key="authenticated_user",
+    apply=True,
+)
+```
+
+The apply path writes and verifies the merged canonical row before setting
+`metadata.superseded_by` on aliases. It does not delete records. Anonymous
+legacy rows require the separate explicit `migrate_legacy_scope` operator step;
+authenticated runtime reads never adopt them automatically.
 
 ## MemAgentBuilder
 
@@ -149,6 +224,21 @@ adapter security matrix and complete SDK, CLI, UI, and MCP workflows.
       show_root_heading: true
 
 ::: memorizz.tooling.ToolResultPolicy
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.tool_outcomes.ToolOutcome
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.tool_outcomes.ToolOutcomeStatus
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.tool_outcomes.ToolResult
     options:
       show_source: false
       show_root_heading: true

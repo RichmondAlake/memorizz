@@ -100,7 +100,7 @@ def capabilities() -> Dict[str, Any]:
     return {
         "package": "memorizz",
         "version": __version__,
-        "capability_schema": 3,
+        "capability_schema": 4,
         "features": {
             "mcp_client": {
                 "available": mcp_client_ready,
@@ -111,7 +111,7 @@ def capabilities() -> Dict[str, Any]:
                 "available": mcp_server_ready,
                 "transports": ["stdio", "streamable-http"],
                 "install_extra": "mcp",
-                "tool_count": 23,
+                "tool_count": 24,
                 "strict_input_schemas": True,
                 "resources": 4,
                 "prompts": 1,
@@ -195,17 +195,41 @@ def capabilities() -> Dict[str, Any]:
             },
             "thread_scoped_summaries": {"available": True},
             "retrieval_policy": {"available": True},
+            "personalization_context": {
+                "available": True,
+                "provider_neutral": True,
+                "explicit_cross_thread_recall": True,
+                "natural_use_policy": True,
+                "surfaces": ["sdk", "mcp", "observability", "ui"],
+            },
             "concurrency_safe_run_state": {"available": True},
             "structured_context_provenance": {
                 "available": True,
                 "raw_request_content_persisted": False,
                 "cache_decisions": True,
             },
+            "memory_supply_observability": {
+                "available": True,
+                "stages": ["retrieved", "supplied", "referenced"],
+                "raw_memory_content_persisted": False,
+            },
             "logical_tool_trace_names": {"available": True},
             "semantic_cache_session_default": {"available": True},
             "durable_approvals": {"available": True, "single_use": True},
             "progressive_tool_disclosure": {"available": True},
             "tool_result_offloading": {"available": True, "size_aware": True},
+            "structured_tool_outcomes": {
+                "available": True,
+                "statuses": [
+                    "success",
+                    "empty",
+                    "degraded",
+                    "fallback",
+                    "provider_error",
+                    "error",
+                ],
+                "surfaces": ["sdk", "cli", "mcp", "ui", "observability"],
+            },
             "semantic_cache_governance": {"available": True},
             "entity_memory": {
                 "available": True,
@@ -213,6 +237,17 @@ def capabilities() -> Dict[str, Any]:
                 "bounded_exact_fallback": True,
                 "explicit_legacy_migration": True,
                 "control_plane_parity": True,
+                "canonical_identity_keys": True,
+                "dry_run_consolidation": True,
+                "soft_supersede_rollback": True,
+            },
+            "canonical_entity_identity": {
+                "available": True,
+                "deterministic_ids": True,
+                "identity_key_authority": "host_or_application",
+                "dry_run_consolidation": True,
+                "explicit_cross_name_selection": True,
+                "soft_supersede_rollback": True,
             },
             "structured_entity_memory_tools": {
                 "available": True,

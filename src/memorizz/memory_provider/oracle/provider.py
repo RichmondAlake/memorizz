@@ -263,6 +263,8 @@ def _tool_log_fields(ts_kind: str) -> tuple:
         _c("result", kind="lob"),
         _c("success", kind="bool", default=True),
         _c("error", kind="lob"),
+        _c("outcome"),
+        _c("outcome_details", kind="json", default=dict),
         _c("timestamp", kind=ts_kind),
         _c("agent_id"),
         _c("tool_call_id"),
@@ -1522,6 +1524,8 @@ class OracleProvider(MemoryProvider):
             ("result", "CLOB"),
             ("success", "NUMBER(1) DEFAULT 1"),
             ("error", "CLOB"),
+            ("outcome", "VARCHAR2(32) DEFAULT 'success'"),
+            ("outcome_details", "CLOB"),
             ("timestamp", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
             ("tool_call_id", "VARCHAR2(255)"),
             ("thread_id", "VARCHAR2(255)"),
@@ -3525,19 +3529,20 @@ class OracleProvider(MemoryProvider):
         with self._get_connection() as conn:
             cursor = conn.cursor()
             scope_columns = "memory_id, user_id" if include_user_id else "memory_id"
-            cursor.execute(
-                f"""
+            scope_sql = f"""
                 SELECT {scope_columns}
                 FROM {table_name}
                 WHERE entity_id = :entity_id
                 FOR UPDATE
-                """,
-                {"entity_id": entity_id},
-            )
-            existing_scope = cursor.fetchone()
-            if existing_scope:
-                existing_memory_id = existing_scope[0]
-                existing_user_id = existing_scope[1] if include_user_id else None
+            """
+
+            def _read_and_validate_scope() -> Any:
+                cursor.execute(scope_sql, {"entity_id": entity_id})
+                scope = cursor.fetchone()
+                if not scope:
+                    return None
+                existing_memory_id = scope[0]
+                existing_user_id = scope[1] if include_user_id else None
                 memory_scope_changed = existing_memory_id != params.get("memory_id")
                 user_scope_changed = include_user_id and existing_user_id != params.get(
                     "user_id"
@@ -3547,17 +3552,39 @@ class OracleProvider(MemoryProvider):
                         "Entity ownership mismatch: entity_id already belongs to "
                         "a different memory or user scope"
                     )
-            try:
-                cursor.execute(merge_sql, params)
-            except Exception as exc:
-                if params.get(
-                    "embedding"
-                ) is not None and self._is_embedding_dimension_mismatch_error(str(exc)):
-                    params["embedding"] = None
-                    self._handle_embedding_dimension_mismatch("Entity memory", exc)
+                return scope
+
+            _read_and_validate_scope()
+
+            def _execute_merge() -> None:
+                try:
                     cursor.execute(merge_sql, params)
-                else:
+                except Exception as merge_exc:
+                    if params.get(
+                        "embedding"
+                    ) is not None and self._is_embedding_dimension_mismatch_error(
+                        str(merge_exc)
+                    ):
+                        params["embedding"] = None
+                        self._handle_embedding_dimension_mismatch(
+                            "Entity memory", merge_exc
+                        )
+                        cursor.execute(merge_sql, params)
+                        return
                     raise
+
+            try:
+                _execute_merge()
+            except Exception as exc:
+                if "ORA-00001" not in str(exc).upper():
+                    raise
+                # A concurrent request may have inserted the same canonical
+                # entity after our initial SELECT. Retry only after the winning
+                # row is visible and its exact tenant ownership is validated.
+                # A collision in another scope raises PermissionError above.
+                if not _read_and_validate_scope():
+                    raise
+                _execute_merge()
             conn.commit()
 
         return entity_id
@@ -3578,6 +3605,13 @@ class OracleProvider(MemoryProvider):
             "result": data.get("result", ""),
             "success": 1 if data.get("success", True) else 0,
             "error": data.get("error"),
+            "outcome": data.get("outcome")
+            or ("success" if data.get("success", True) else "error"),
+            "outcome_details": json.dumps(
+                data.get("outcome_details") or {},
+                ensure_ascii=False,
+                default=str,
+            ),
             "timestamp": self._coerce_timestamp_bind(data.get("timestamp")),
             "agent_id": data.get("agent_id"),
             "tool_call_id": data.get("tool_call_id", ""),

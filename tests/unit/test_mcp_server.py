@@ -44,6 +44,7 @@ from memorizz.metaharness import (
     SQLiteHarnessRunStore,
 )
 from memorizz.metaharness.base import AdapterOutcome
+from memorizz.personalization import build_personalization_context
 
 
 def _identity(principal: str, *scopes: str) -> RequestIdentity:
@@ -218,6 +219,14 @@ class _FakeAgent:
     def __init__(self):
         self.calls = []
         self.saves = 0
+        self.last_tool_outcomes = [
+            {
+                "tool_name": "calendar_lookup",
+                "status": "fallback",
+                "ok": True,
+                "fallback_used": True,
+            }
+        ]
 
     def run(self, message, **kwargs):
         self.calls.append((message, kwargs))
@@ -261,6 +270,7 @@ def test_agent_execution_is_isolated_and_public_metadata_is_secret_free(tmp_path
 
     assert first["memory_id"] != second["memory_id"]
     assert first["thread_id"] != second["thread_id"]
+    assert first["tool_outcomes"][0]["status"] == "fallback"
     assert agent.calls[0][1]["user_id"] == "alice"
     assert agent.calls[1][1]["user_id"] == "bob"
     public = runtime.get_agent(agent.agent_id, alice)["agent"]
@@ -494,6 +504,73 @@ def test_runtime_operational_parity_calls_are_scoped(tmp_path):
 
 
 @pytest.mark.unit
+def test_personalization_preview_is_explicitly_tenant_scoped_and_content_safe(
+    tmp_path,
+):
+    class PersonalizationAgent(_FakeAgent):
+        memory_ids = ["memory-a"]
+
+        def build_personalization_context(self, query, **kwargs):
+            self.personalization_call = {"query": query, **kwargs}
+            return build_personalization_context(
+                entity_profiles=[
+                    {
+                        "entity_id": "private-entity-id",
+                        "attributes": {"role": "AI Memory Engineer"},
+                    }
+                ],
+                preferences=kwargs.get("preferences"),
+                conversation_memories=[
+                    {
+                        "id": "private-conversation-id",
+                        "text": "Memory-first observability",
+                        "score": 0.91,
+                    }
+                ],
+                policy=kwargs.get("policy"),
+            )
+
+    agent = PersonalizationAgent()
+    runtime = MemorizzRuntime(
+        MemorizzMCPServerConfig(exposed_agent_ids={agent.agent_id}),
+        provider=_FakeAgentProvider(agent),
+        approval_store=SQLiteApprovalStore(tmp_path / "personalization.sqlite3"),
+    )
+    runtime._agents[agent.agent_id] = agent
+
+    result = runtime.preview_personalization(
+        agent.agent_id,
+        "Draft a concise post",
+        _identity("alice", READ_SCOPE),
+        include_conversation_recall=True,
+        exclude_thread_id="current-thread",
+        min_relevance_score=0.8,
+        preferences={"preferred_tone": "concise"},
+        include_content=False,
+    )
+
+    assert agent.personalization_call["memory_id"] == "memory-a"
+    assert agent.personalization_call["user_id"] == "alice"
+    assert agent.personalization_call["exclude_thread_id"] == "current-thread"
+    assert agent.personalization_call["policy"]["conversation_recall"] is True
+    assert result["context_evidence"]["source_counts"]["entity_attributes"] == 1
+    assert "context" not in result
+    assert "prompt_block" not in result
+    serialized = json.dumps(result)
+    assert "AI Memory Engineer" not in serialized
+    assert "private-entity-id" not in serialized
+    assert "private-conversation-id" not in serialized
+
+    with pytest.raises(MemorizzServerError, match="not attached"):
+        runtime.preview_personalization(
+            agent.agent_id,
+            "Draft a concise post",
+            _identity("alice", READ_SCOPE),
+            memory_id="memory-from-another-agent",
+        )
+
+
+@pytest.mark.unit
 def test_mcp_runtime_harness_surface_is_tenant_scoped_and_approval_bound(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -673,7 +750,7 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
     tools = manager.list_tools("memorizz-server")
     names = {tool["name"] for tool in tools["tools"]}
     assert tools["ok"] is True
-    assert len(names) == 23
+    assert len(names) == 24
     assert all(
         tool["inputSchema"].get("additionalProperties") is False
         for tool in tools["tools"]
@@ -683,6 +760,7 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
         "memorizz_update_agent",
         "memorizz_delete_agent",
         "memorizz_inspect_agent",
+        "memorizz_preview_personalization",
         "memorizz_compile_memory",
         "memorizz_compact_conversation",
         "memorizz_execute_agent",

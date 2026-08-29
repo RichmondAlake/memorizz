@@ -29,6 +29,15 @@ from .. import __version__
 from . import commands
 from . import config as cfg
 
+_TOOL_OUTCOME_LABELS = {
+    "success": "Completed",
+    "empty": "Completed · no results",
+    "degraded": "Completed with limitations",
+    "fallback": "Completed via fallback",
+    "provider_error": "Provider error",
+    "error": "Failed",
+}
+
 
 class SlashCompleter(Completer):
     """Complete ``/command`` names, only when the line starts with ``/``."""
@@ -127,6 +136,17 @@ def _stream_turn(session, query: str) -> None:
                 turn["tools"].append(
                     str(ev.get("tool_name") or ev.get("title") or "tool")
                 )
+            elif kind == "tool_result" and ev.get("complete"):
+                name = str(ev.get("tool_name") or "tool")
+                outcome = str(ev.get("outcome") or "success").lower()
+                label = _TOOL_OUTCOME_LABELS.get(outcome, outcome.replace("_", " "))
+                display = f"{name} · {label}"
+                for index in range(len(turn["tools"]) - 1, -1, -1):
+                    if turn["tools"][index] == name:
+                        turn["tools"][index] = display
+                        break
+                else:
+                    turn["tools"].append(display)
         elif etype == "error":
             turn["error"] = ev.get("message") or turn["error"]
         refresh()

@@ -199,18 +199,26 @@ Summary creation and original-message marking are transactional. Retrieval by
 
 ## Upgrade an existing schema
 
-Back up first, then apply the migrations in numeric order. The current 0.5
-migrations are:
+Back up first, then apply every migration that has not yet been applied to the
+schema, in numeric order. The packaged migrations are:
 
 ```text
+src/memorizz/memory_provider/oracle/migrations/001_add_user_id.sql
+src/memorizz/memory_provider/oracle/migrations/002_add_skill_injection_role.sql
+src/memorizz/memory_provider/oracle/migrations/003_add_shadow_evaluations.sql
 src/memorizz/memory_provider/oracle/migrations/004_production_governance_050.sql
 src/memorizz/memory_provider/oracle/migrations/005_scoped_retrieval_052.sql
+src/memorizz/memory_provider/oracle/migrations/006_knowledge_base_provenance.sql
+src/memorizz/memory_provider/oracle/migrations/007_structured_tool_outcomes.sql
 ```
 
 Migration 005 adds/backfills exact summary thread scope and restores indexed
-knowledge-base namespace metadata on older schemas. The provider performs
-additive startup checks for availability, but the SQL files are the recommended
-review/change-control artifacts.
+knowledge-base namespace metadata on older schemas. Migration 006 preserves
+source provenance for grounded knowledge records. Migration 007 adds structured
+`outcome` and `outcome_details` fields to tool logs and backfills legacy rows;
+it is idempotent and can be rerun safely. The provider performs additive startup
+checks for availability, but the SQL files are the recommended review and
+change-control artifacts.
 
 ## Scoped cleanup
 
@@ -262,3 +270,7 @@ provider and rerun preflight/tests.
 `source_id`, `parent_source_id`, `linked_source_ids`, and `metadata` to
 `knowledge_base` so the same grounded evidence contract survives Filesystem,
 MongoDB, and Oracle round trips.
+
+**Missing structured tool outcomes:** apply migration 007, then restart the
+provider. It adds `outcome` and `outcome_details` to `tool_log` and maps legacy
+success/failure rows to `success`/`error` without changing their payloads.
