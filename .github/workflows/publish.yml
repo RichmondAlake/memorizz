@@ -342,19 +342,20 @@ jobs:
           done
           test -n "$URL"
           curl -fsSL "$URL" -o sdist.tar.gz
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum sdist.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Bump formula in tap
         if: steps.gate.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
           VER: ${{ steps.meta.outputs.version }}
+          URL: ${{ steps.meta.outputs.url }}
           SHA: ${{ steps.meta.outputs.sha256 }}
         run: |
           git clone "https://x-access-token:${GH_TOKEN}@github.com/RichmondAlake/homebrew-memorizz.git" tap
           F=tap/Formula/memorizz.rb
-          sed -i -E "s|memorizz-[0-9.]+\.tar\.gz|memorizz-${VER}.tar.gz|" "$F"
-          sed -i -E "s|sha256 \"[a-f0-9]*\"|sha256 \"${SHA}\"|" "$F"
-          sed -i -E "s|version \"[0-9.]+\"|version \"${VER}\"|" "$F"
+          sed -i -E "s|^  url \".*memorizz-[0-9.]+\.tar\.gz\"|  url \"${URL}\"|" "$F"
+          sed -i -E "s|^  sha256 \"[a-f0-9]*\"|  sha256 \"${SHA}\"|" "$F"
           cd tap
           git config user.name "github-actions"
           git config user.email "actions@github.com"
