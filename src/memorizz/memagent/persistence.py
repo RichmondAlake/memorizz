@@ -754,7 +754,7 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         is_favorite=overrides.get(
             "is_favorite", getattr(saved_memagent, "is_favorite", False)
         ),
-        streaming=overrides.get("streaming", False),
+        streaming=overrides.get("streaming", True),
         auto_register=overrides.get("auto_register", True),
     )
 

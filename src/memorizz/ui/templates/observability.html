@@ -1,12 +1,15 @@
 {% extends "base.html" %}
 
 {% block title %}Observability &amp; Monitoring - Memorizz{% endblock %}
+{% block head %}<script src="/static/js/observability.js?v=3" defer></script>{% endblock %}
 
 {% block content %}
 <div class="page-header">
     <span class="page-eyebrow">Operations / Observability</span>
     <h1>Observability &amp; monitoring</h1>
     <p>Follow context lineage, grounding, cache routing, tool execution, and verified outcomes by agent and thread.</p>
+    <a class="btn" id="trace-health-link" href="{{ selection_urls.health }}">Observability health</a>
+    <a class="btn" id="trace-compare-link" href="{{ selection_urls.compare }}">Compare recorded traces</a>
 </div>
 
 <div class="trace-access-banner">
@@ -20,18 +23,47 @@
     {% endif %}
 </div>
 
+<details class="detail-section" id="incident-finder-panel" {% if not selected_agent %}open{% endif %}>
+    <summary>Incident Finder</summary>
+    <h2>Incident Finder</h2>
+    <form id="incident-finder" class="traces-search-form">
+        <label>Trace, thread, job, source, artifact or error ID <input class="traces-search-input" name="q" maxlength="240" autocomplete="off"></label>
+        <label>From <input name="start_time" type="datetime-local"></label>
+        <label>Until <input name="end_time" type="datetime-local"></label>
+        <button class="btn" type="submit">Find incident</button>
+    </form>
+    {% if trace_permissions and trace_permissions['account.resolve'] %}
+    <form id="account-lookup" class="traces-search-form">
+        <label>Account email <input id="account-email" type="email" maxlength="320" autocomplete="off" required {% if not trace_capabilities['account.resolve'].available %}disabled{% endif %}></label>
+        <button class="btn" type="submit" {% if not trace_capabilities['account.resolve'].available %}disabled{% endif %}>Resolve account through host</button>
+    </form>
+    {% endif %}
+    <p id="incident-status" role="status">Search uses bounded, authorized event pages. Account addresses are resolved transiently, not stored in traces.</p>
+    <div id="incident-results"></div><button id="incident-next" class="btn" type="button" hidden>Load next page</button>
+</details>
+
+<details class="trace-access-banner" id="trace-capability-banner">
+    <summary>Host integration capabilities · {% if not trace_capabilities['account.resolve'].configured or not trace_capabilities['artifact.lookup'].configured or not trace_capabilities['replay.create'].configured %}setup required{% else %}configured{% endif %}</summary>
+    {% for permission, capability in trace_capabilities.items() %}
+    <p>{{ capability.setup }}: {{ 'Available' if capability.available else 'Not configured' if not capability.configured else 'Not permitted for this role' }}.{% if not capability.configured %} Supply a tenant-aware <code>{{ capability.setup }}</code> callback to <code>create_app</code>. No host lookup will run until configured.{% endif %}</p>
+    {% endfor %}
+    <p>Host source/artifact/parser/delivery recording is separate from these lookup hooks. Missing historical links cannot be reconstructed as facts.</p>
+</details>
+
 {% if error %}
 <div class="error-message">
     <span>!</span> {{ error }}
 </div>
 {% endif %}
 
-<div class="detail-section observability-section">
+<details class="detail-section observability-section trace-navigator" id="trace-agent-navigator" {% if not selected_agent %}open{% endif %}>
+    <summary>Agent and thread navigator</summary>
     <div class="traces-toolbar">
         <h2>Agents</h2>
         <form class="traces-search-form" method="get" action="/traces">
             {% if selected_agent_id %}
             <input type="hidden" name="agent_id" value="{{ selected_agent_id }}">
+            {% for key, value in selection_urls.params.items() %}{% if key != 'agent_id' %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
             {% endif %}
             <input
                 type="text"
@@ -39,7 +71,7 @@
                 name="q"
                 class="traces-search-input"
                 value="{{ agent_query }}"
-                placeholder="Search by name, ID, or mode"
+                placeholder="Search loaded agents, threads, traces, sources or artifacts"
             >
             <button type="submit" class="btn">Search</button>
         </form>
@@ -114,9 +146,17 @@
         <p class="empty-hint">Try a different search query.</p>
     </div>
     {% endif %}
-</div>
+</details>
 
 {% if selected_agent %}
+<nav class="trace-section-nav" aria-label="Selected incident sections">
+    <span>Root <code>{{ selected_root_trace_id or 'all loaded roots' }}</code>{% if selected_turn_id %} · Turn <code>{{ selected_turn_id }}</code>{% endif %}</span>
+    <a href="#trace-insights">Insights</a><a href="#trace-waterfall">Waterfall</a><a href="#trace-lineage-inspectors">Lineage</a><a href="#trace-output-contracts">Delivery</a>
+    <form method="get" action="/traces">
+        {% for key, value in selection_urls.params.items() %}{% if key not in ['root_trace_id', 'event_id', 'turn_id', 'task_id'] %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
+        <label>Root <input name="root_trace_id" value="{{ selected_root_trace_id or '' }}" maxlength="240"></label><button class="btn btn-sm" type="submit">Select root</button>
+    </form>
+</nav>
 <div class="agent-summary">
     <div class="summary-item">
         <span class="summary-label">Agent</span>
@@ -139,7 +179,7 @@
     {% if trace_summary %}
     <div class="summary-item">
         <span class="summary-label">Trace Events</span>
-        <span class="summary-value">{{ trace_summary.event_count }}</span>
+        <span class="summary-value">{{ trace_summary.event_count }} events · {{ trace_summary.bundle_count }} bundles</span>
     </div>
     <div class="summary-item">
         <span class="summary-label">Latest</span>
@@ -173,6 +213,16 @@
         {% endif %}
     </div>
 
+    <div class="trace-analysis-stat {% if trace_analysis.coverage.coverage != 'complete' %}trace-analysis-stat--warning{% endif %}" role="status">
+        <strong>{{ trace_analysis.coverage.headline }}</strong>
+        <p>Stored-event read: {{ trace_analysis.coverage.read_completeness }} · Instrumentation: {{ trace_analysis.coverage.instrumentation_coverage }} · Outcome evidence: {{ trace_analysis.coverage.outcome_verification }}.</p>
+        <p>{{ trace_analysis.coverage.bundle_count if trace_analysis.coverage.bundle_count is not none else 'Unknown' }} bundle records · {{ trace_analysis.summary.events_analyzed }} normalized events · {{ trace_analysis.coverage.normalization_errors or 0 }} normalization errors · Duplicates removed: {{ trace_analysis.coverage.duplicates_removed if trace_analysis.coverage.duplicates_removed is not none else 'unknown in selected scope' }}</p>
+        {% if trace_analysis.coverage.coverage != 'complete' %}<p>Counts are observed lower bounds. Missing evidence does not establish zero activity or task success.</p>{% endif %}
+        {% if not trace_analysis.coverage.profiles_declared %}<p>Coverage describes loaded events. The host has not declared required artifact or delivery stages.</p>{% endif %}
+        <p>Stores: {{ trace_analysis.coverage.store_selection|join(', ') }} · Source rows by store: {{ trace_analysis.coverage.source_counts|tojson }}. Counts describe recorded evidence, not task-level activity.</p>
+        {% if trace_analysis.coverage.parent_query_metadata %}<p>Deduplication and query diagnostics apply to the parent snapshot; the selected-root source totals use recorded provenance.</p>{% endif %}
+        {% for missing in trace_analysis.coverage.missing_stages %}<p>Missing {{ missing.stage }} ({{ missing.profile }})</p>{% endfor %}
+    </div>
     <div class="trace-analysis-grid" aria-label="Trace analysis summary">
         <div class="trace-analysis-stat">
             <span class="trace-analysis-stat-kicker">Trace volume</span>
@@ -182,7 +232,7 @@
         </div>
         <div class="trace-analysis-stat {% if trace_analysis.summary.verified_outcome_failures %}trace-analysis-stat--warning{% endif %}">
             <span class="trace-analysis-stat-kicker">Verified outcomes</span>
-            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.verified_outcome_successes }}/{{ trace_analysis.summary.verified_outcomes }}</span>
+            <span class="trace-analysis-stat-value">{% if trace_analysis.summary.verified_outcomes %}{{ trace_analysis.summary.verified_outcome_successes }}/{{ trace_analysis.summary.verified_outcomes }}{% else %}No recorded evidence{% endif %}</span>
             <span class="trace-analysis-stat-label">Successful outcomes</span>
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.verified_outcome_failures }} failed · {{ trace_analysis.summary.verified_negative_feedback }} negative feedback</span>
         </div>
@@ -200,7 +250,7 @@
         </div>
         <div class="trace-analysis-stat {% if trace_analysis.summary.tool_failures %}trace-analysis-stat--warning{% endif %}">
             <span class="trace-analysis-stat-kicker">Tool health</span>
-            <span class="trace-analysis-stat-value">{{ trace_analysis.summary.tool_calls }}</span>
+            <span class="trace-analysis-stat-value">{% if trace_analysis.metric_states.tool_calls.state == 'unknown' %}Unknown{% else %}{{ trace_analysis.summary.tool_calls }}{% if trace_analysis.metric_states.tool_calls.state == 'partial' %}+{% endif %}{% endif %}</span>
             <span class="trace-analysis-stat-label">Tool calls</span>
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.tool_failures }} failures · {{ trace_analysis.summary.tool_fallbacks }} fallback · {{ trace_analysis.summary.tool_degraded_results }} degraded</span>
         </div>
@@ -280,6 +330,7 @@
                 </div>
             </div>
             <p>{{ insight.finding }}</p>
+            {% if insight.evidence_anchors %}<p>Evidence: {% for anchor in insight.evidence_anchors %}<a href="#{{ anchor }}">Event {{ loop.index }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
             <div class="trace-insight-recommendation">
                 <span>Recommended change</span>
                 <p>{{ insight.recommendation }}</p>
@@ -308,7 +359,7 @@
     {% else %}
     <div class="empty-pane trace-analysis-empty">
         <div class="empty-icon">OK</div>
-        <p>No actionable signals in this trace window</p>
+        <p>No actionable signals in the available evidence</p>
         <p class="empty-hint">Broaden the trace window or add explicit outcome feedback before changing the agent.</p>
     </div>
     {% endif %}
@@ -327,13 +378,25 @@
 </div>
 {% endif %}
 
+{% include "trace_waterfall.html" %}
+{% include "trace_inspectors.html" %}
+{% if selected_agent_id and trace_waterfall and trace_permissions and trace_permissions['replay.create'] %}
+<div class="detail-section">
+    <h2>Safe Evalground replay draft</h2>
+    <p>Freeze content-free references after current access checks. This does not run models, tools, or production side effects.</p>
+    <label>Root trace <select id="trace-replay-root">{% for group in trace_waterfall %}<option value="{{ group.root_trace_id }}">{{ group.root_trace_id }}</option>{% endfor %}</select></label>
+    {% if not ui_read_only %}<button class="btn" id="trace-replay-create" data-agent-id="{{ selected_agent_id }}" type="button" {% if not trace_capabilities['replay.create'].available %}disabled{% endif %}>Create reviewable draft</button>{% else %}<p>Draft persistence is disabled in read-only mode.</p>{% endif %}
+    {% if not trace_capabilities['replay.create'].configured %}<p>Replay plans and drafts are unavailable until <code>resource_authorizer</code> is configured. No execution is enabled by configuring it.</p>{% endif %}
+    <p id="trace-replay-status" role="status"></p>
+</div>
+{% endif %}
 <div class="detail-section observability-section" id="trace-timeline">
     <h2>Trace Timeline</h2>
     {% if trace_events %}
     <div class="trace-timeline">
         <div class="conversation-messages">
             {% for event in trace_events %}
-            <div class="message {{ event.role or 'system' }}">
+            <div id="{{ event.anchor }}" class="message {{ event.role or 'system' }} {% if event.event_id == selected_event_id %}trace-selected-event{% endif %}" {% if event.event_id == selected_event_id %}data-selected-event="true" tabindex="-1"{% endif %}>
                 <div class="message-avatar">
                     {% if event.role == 'user' %}U{% elif event.role == 'assistant' %}A{% elif event.role == 'tool' %}T{% else %}S{% endif %}
                 </div>
@@ -348,6 +411,13 @@
                             </span>
                             {% endif %}
                             {% if event.tool_provider %}<span class="meta-tag trace-tag">Provider {{ event.tool_provider }}</span>{% endif %}
+                            {% if event.model %}<span class="meta-tag trace-tag">{{ event.provider or 'Provider unknown' }} · {{ event.model }}</span>{% endif %}
+                            {% if event.input_tokens is defined %}<span class="meta-tag trace-tag">{{ event.input_tokens }} input tokens · {{ event.output_tokens|default('unknown') }} output tokens</span>{% endif %}
+                            {% if event.finish_reason %}<span class="meta-tag trace-tag">Finish: {{ event.finish_reason }}</span>{% endif %}
+                            {% if event.max_output_tokens is defined %}<span class="meta-tag trace-tag">Output limit: {{ event.max_output_tokens }}</span>{% endif %}
+                            {% if event.response_chars is defined %}<span class="meta-tag trace-tag">{{ event.response_chars }} characters · {{ event.response_bytes }} bytes</span>{% endif %}
+                            {% if event.duration_ms is defined %}<span class="meta-tag trace-tag">{{ event.duration_ms }} ms</span>{% endif %}
+                            {% if event.status %}<span class="meta-tag trace-tag {% if event.status in ['error', 'partial'] %}trace-tag--warning{% endif %}">{{ event.status }}</span>{% endif %}
                             {% if event.outcome_reason_code %}<span class="meta-tag trace-tag trace-tag--muted">Reason {{ event.outcome_reason_code|replace('_', ' ') }}</span>{% endif %}
                             {% if event.canonical_page_type %}<span class="meta-tag trace-tag">Page {{ event.canonical_page_type }} · {{ event.canonical_page_id|default('—')|truncate(12) }}</span>{% endif %}
                             {% if event.thread_binding_status %}<span class="meta-tag trace-tag {% if event.thread_binding_status in ['matched', 'bound', 'verified'] %}trace-tag--ok{% else %}trace-tag--warning{% endif %}">Binding {{ event.thread_binding_status|replace('_', ' ') }}</span>{% endif %}
@@ -366,7 +436,29 @@
                             <span class="message-time">{{ event.timestamp }}</span>
                         </div>
                     </div>
-                    <div class="message-text">{{ event.content or 'No content' }}</div>
+                    {% if event.input_refs or event.output_refs %}
+                    <details {% if event.status in ['error', 'partial'] %}open{% endif %}>
+                        <summary>Memory lineage and artifact provenance</summary>
+                        <p>Producer span: <code>{{ event.parent_span_id or 'Not observed' }}</code></p>
+                        <table>
+                            <thead><tr><th>Direction</th><th>Resource</th><th>Reference</th><th>Role</th><th>Version</th><th>Provenance</th></tr></thead>
+                            <tbody>
+                            {% for ref in event.input_refs or [] %}<tr><td>Input</td><td>{{ ref.resource_type }}</td><td><code>{{ ref.ref }}</code></td><td>{{ ref.role or 'Unspecified' }}</td><td>{{ ref.version or 'Unknown' }}</td><td>{{ ref.provenance_status }}</td></tr>{% endfor %}
+                            {% for ref in event.output_refs or [] %}<tr><td>Output</td><td>{{ ref.resource_type }}</td><td><code>{{ ref.ref }}</code></td><td>{{ ref.role or 'Unspecified' }}</td><td>{{ ref.version or 'Unknown' }}</td><td>{{ ref.provenance_status }}</td></tr>{% endfor %}
+                            </tbody>
+                        </table>
+                        {% if event.kind == 'artifact_persisted' %}<p>Persistence verified: {{ event.persistence_verified }} · Sources: {{ event.input_refs|length }} · Task: {{ event.task_id or 'Unspecified' }}</p>{% endif %}
+                    </details>
+                    {% endif %}
+                    {% if event.kind in ['output_contract', 'ui_delivery'] %}
+                    <div class="message-text">
+                        <strong>Output contract: {{ event.contract_name }}</strong>
+                        {% if event.kind == 'output_contract' %}<p>Opening marker: {{ event.opening_marker_found }} · Closing marker: {{ event.closing_marker_found }} · Parser: {{ event.parser_status }} · Recovery: {{ event.recovery_status or ('used' if event.recovery_used else 'not used') }} · Nodes: {{ event.nodes|default('unknown') }} · Edges: {{ event.edges|default('unknown') }}</p>{% endif %}
+                        {% if event.kind == 'ui_delivery' %}<p>Emitted: {{ event.emitted }} · Browser acknowledged: {{ event.acknowledged|default('unknown', true) }}</p>{% endif %}
+                    </div>
+                    {% endif %}
+                    {% if trace_permissions and trace_permissions['trace.reveal'] and trace_content_mode != 'metadata' %}<button class="btn btn-sm" type="button" data-reveal-event="{{ event.event_id }}" data-agent-id="{{ event.agent_id }}" data-root-id="{{ event.root_trace_id }}" data-thread-id="{{ event.thread_id or '' }}" data-turn-id="{{ event.turn_id or '' }}" data-run-id="{{ event.run_id or '' }}">Reveal trace content</button><pre class="message-text" hidden></pre>{% endif %}
+                    <details><summary>Normalized metadata JSON</summary><pre class="message-text">{{ event|tojson(indent=2) }}</pre></details>
                 </div>
             </div>
             {% endfor %}
@@ -375,7 +467,7 @@
     {% else %}
     <div class="empty-pane">
         <div class="empty-icon">TRACE</div>
-        <p>No traces recorded yet</p>
+        <p>{% if trace_analysis and trace_analysis.coverage.normalization_errors %}Trace evidence is unavailable. Inspect the coverage errors above.{% else %}No traces recorded yet{% endif %}</p>
         <p class="empty-hint">Run the agent in Playground to generate trace logs.</p>
     </div>
     {% endif %}

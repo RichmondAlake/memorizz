@@ -115,6 +115,14 @@ def chat(
 def run(
     prompt: Optional[List[str]] = typer.Argument(None),
     code: bool = typer.Option(False, "--code", help="Enable coding tools."),
+    stream: bool = typer.Option(
+        True,
+        "--stream/--no-stream",
+        help="Stream by default; --no-stream waits for the complete reply.",
+    ),
+    output: str = typer.Option(
+        "text", "--output", help="Streaming output: text or jsonl."
+    ),
     browser_control: Optional[bool] = typer.Option(
         None,
         "--browser-control/--no-browser-control",
@@ -124,6 +132,18 @@ def run(
     if not prompt:
         _eprint('Usage: memorizz run "<prompt>"')
         raise typer.Exit(2)
+    if output not in {"text", "jsonl"} or (output != "text" and not stream):
+        _eprint("--output must be text or jsonl; jsonl requires --stream")
+        raise typer.Exit(2)
+    if stream:
+        _run_oneshot(
+            " ".join(prompt),
+            code_mode=code,
+            browser_control=browser_control,
+            stream=True,
+            output=output,
+        )
+        return
     _run_oneshot(
         " ".join(prompt),
         code_mode=code,
@@ -416,7 +436,28 @@ def _launch_repl(
     run_repl(session)
 
 
-def _run_oneshot(text, code_mode=False, browser_control=None):
+def _run_oneshot(
+    text, code_mode=False, browser_control=None, *, stream=False, output="text"
+):
+    if stream:
+        from contextlib import redirect_stdout
+
+        from rich.console import Console
+
+        from .streaming import consume_stream
+
+        destination = sys.stdout
+        with redirect_stdout(sys.stderr):
+            _load_env()
+            session = _build_or_wizard(
+                code_mode, console=Console(stderr=True), browser_control=browser_control
+            )
+            if session is None:
+                raise typer.Exit(1)
+            code = consume_stream(session, text, output=output, stdout=destination)
+        if code:
+            raise typer.Exit(code)
+        return
     _load_env()
     console = _make_console()
     session = _build_or_wizard(

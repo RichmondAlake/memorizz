@@ -1,5 +1,11 @@
 # Capabilities and Preflight
 
+Streaming is now the default delivery path. See the
+[streaming contract, defaults and compatibility modes](../guides/streaming.md)
+for the SDK event iterator, CLI opt-out, UI lifecycle and opt-in MCP answer events.
+Full-answer completion validators still buffer until acceptance; Python `run()`
+retains its complete-string return contract.
+
 Package versions do not prove that optional providers are installed,
 configured, or reachable. Use capability reports at startup and provider
 preflight before serving traffic.

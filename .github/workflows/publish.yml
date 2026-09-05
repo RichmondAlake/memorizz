@@ -63,8 +63,9 @@ jobs:
           blocked_suffixes = (
               ".local.md", ".key", ".pem", ".p12", ".pfx", ".secret"
           )
-          blocked_roots = {".venv", "dist", "research", "site"}
+          blocked_roots = {".venv", "dist", "reports", "research", "site"}
           blocked_segments = {
+              ("docs", "releases"),
               ("eval", "datasets"),
               ("src-tauri", "gen"),
               ("src-tauri", "target"),
@@ -82,6 +83,7 @@ jobs:
                   or basename in blocked_names
                   or basename.startswith(".env.")
                   or basename.endswith(blocked_suffixes)
+                  or ("docs" in parts and "report" in basename and basename.endswith(".md"))
                   or bool(pairs & blocked_segments)
               )
 

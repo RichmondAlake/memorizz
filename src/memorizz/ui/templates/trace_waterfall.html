@@ -1,0 +1,30 @@
+{% if trace_waterfall %}
+<div class="detail-section observability-section" id="trace-waterfall">
+    <h2>Causal waterfall</h2>
+    <label>Lane <select id="trace-category"><option value="all">All</option><option value="memory">Memory</option><option value="model">Model</option><option value="tool">Tool</option><option value="host">Host action</option><option value="artifact">Artifact</option><option value="delivery">Delivery / contract</option><option value="errors">Errors and gaps</option></select></label>
+    <label><input type="checkbox" id="trace-show-success"> Show successful low-level model/tool spans</label>
+    <p>Recorded parent links, grouped by root and turn. Bars show observed timing, not inferred model latency. Select an operation to inspect its evidence.</p>
+    {% for group in trace_waterfall %}
+    <details open>
+        <summary>Root <code>{{ group.root_trace_id or 'Unknown' }}</code> · Turn <code>{{ group.turn_id or 'Unknown' }}</code> · {{ group.nodes|length }} spans</summary>
+        <p class="trace-scroll-hint">Scroll the table horizontally to inspect timing and duration →</p>
+        <div class="traces-table-wrap" tabindex="0" role="region" aria-label="Causal waterfall, horizontally scrollable">
+        <table class="traces-agents-table trace-waterfall-table">
+            <thead><tr><th>Operation / causal parent</th><th>Status</th><th>Timing</th><th>Duration</th></tr></thead>
+            <tbody>{% for node in group.nodes %}
+                <tr data-waterfall-kind="{{ node.kind }}" data-waterfall-status="{{ node.status }}" data-waterfall-gap="{{ 'true' if node.missing_parent or node.missing_cause or node.cycle else 'false' }}">
+                    <td><div style="padding-left: {{ [node.depth, 10]|min * 12 }}px"><a href="#{{ node.anchor }}">{{ node.operation }}</a>
+                    {% if node.parent_span_id %}<small>Parent: {{ node.parent_span_id|truncate(24) }}</small>{% endif %}
+                    {% if node.caused_by_event_id %}<small>Caused by event: {{ node.caused_by_event_id|truncate(24) }}</small>{% endif %}
+                    {% if node.missing_parent or node.missing_cause or node.cycle %}<span class="badge badge-warning">{{ 'Cyclic parent chain' if node.cycle else 'Missing parent or cause' }}</span>{% endif %}</div></td>
+                    <td>{{ node.status }}</td>
+                    <td><div class="trace-waterfall-track" aria-label="Offset {{ node.offset_ms if node.offset_ms is not none else 'unknown' }} ms"><span style="left: {{ node.offset_percent }}%; width: {{ node.duration_percent }}%"></span></div></td>
+                    <td>{{ node.duration_ms if node.duration_ms is not none else 'Unknown' }}{% if node.duration_ms is not none %} ms{% endif %}</td>
+                </tr>
+            {% endfor %}</tbody>
+        </table>
+        </div>
+    </details>
+    {% endfor %}
+</div>
+{% endif %}

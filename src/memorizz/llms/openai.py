@@ -7,7 +7,7 @@ import inspect
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import openai
 
@@ -360,7 +360,7 @@ class OpenAI(LLMProvider):
         except Exception:
             return None
 
-    def _generate_responses(
+    def _responses_kwargs(
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]],
@@ -394,8 +394,22 @@ class OpenAI(LLMProvider):
         if self._prompt_cache_retention:
             kwargs["prompt_cache_retention"] = self._prompt_cache_retention
 
+        return kwargs
+
+    def _generate_responses(self, messages, tools, tool_choice):
+        kwargs = self._responses_kwargs(messages, tools, tool_choice)
+        self._last_usage = None
+        self._last_response_metadata = {}
         response = self.client.responses.create(**kwargs)
         self._last_usage = self._extract_responses_usage(response)
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            response,
+            max_output_tokens=kwargs.get("max_output_tokens")
+            or kwargs.get("max_completion_tokens")
+            or kwargs.get("max_tokens"),
+        )
 
         function_calls = [
             item
@@ -551,8 +565,18 @@ class OpenAI(LLMProvider):
         if self._prompt_cache_retention:
             kwargs["prompt_cache_retention"] = self._prompt_cache_retention
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         response = self.client.responses.create(**kwargs)
         self._last_usage = self._extract_responses_usage(response)
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            response,
+            max_output_tokens=kwargs.get("max_output_tokens")
+            or kwargs.get("max_completion_tokens")
+            or kwargs.get("max_tokens"),
+        )
         return response.output_text
 
     def generate(
@@ -589,8 +613,18 @@ class OpenAI(LLMProvider):
             kwargs.update(self._request_options)
         self._apply_cache_options(kwargs)
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         response = self._create_chat_completion(kwargs)
         self._last_usage = self._extract_usage(response)
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            response,
+            max_output_tokens=kwargs.get("max_output_tokens")
+            or kwargs.get("max_completion_tokens")
+            or kwargs.get("max_tokens"),
+        )
 
         # If there are tool calls, return the full response object
         if response.choices[0].message.tool_calls:
@@ -599,222 +633,40 @@ class OpenAI(LLMProvider):
         # Otherwise return just the text content
         return response.choices[0].message.content
 
-    def generate_stream(
-        self,
-        messages: List[Dict[str, str]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: str = "auto",
-    ) -> Generator[Dict[str, Any], None, None]:
-        """
-        Stream a response using OpenAI's chat completions API.
+    def generate_stream(self, messages, tools=None, tool_choice="auto"):
+        """Native provider deltas, completed tool calls, usage and terminal state."""
+        from .streaming import chat_events, responses_events
 
-        Yields dictionaries:
-            - {"type": "content", "content": "..."} for text delta chunks
-            - {"type": "reasoning", "content": "..."} for reasoning/thinking traces (when exposed by model)
-            - {"type": "tool_calls", "response": <reconstructed response>} when tool calls are detected
-            - {"type": "done", "content": "<full accumulated text>"} at the end
-        """
-
+        self._last_usage = None
+        self._last_response_metadata = {}
         if getattr(self, "api_mode", "chat_completions") == "responses":
-            response = self.generate(messages, tools=tools, tool_choice=tool_choice)
-            if isinstance(response, str):
-                if response:
-                    yield {"type": "content", "content": response}
-                yield {"type": "done", "content": response}
-            else:
-                yield {"type": "tool_calls", "response": response}
+            kwargs = self._responses_kwargs(messages, tools, tool_choice)
+            kwargs["stream"] = True
+            yield from responses_events(
+                self,
+                self.client.responses.create(**kwargs),
+                max_output_tokens=kwargs.get("max_output_tokens"),
+            )
             return
-
-        def _flatten_reasoning_text(value: Any) -> str:
-            if value is None:
-                return ""
-            if isinstance(value, str):
-                return value
-            if isinstance(value, list):
-                parts = [_flatten_reasoning_text(item).strip() for item in value]
-                return "\n".join([part for part in parts if part])
-            if isinstance(value, dict):
-                keys = (
-                    "text",
-                    "content",
-                    "summary",
-                    "reasoning",
-                    "reasoning_content",
-                    "value",
-                )
-                parts = []
-                for key in keys:
-                    if key in value:
-                        part = _flatten_reasoning_text(value.get(key)).strip()
-                        if part:
-                            parts.append(part)
-                if parts:
-                    return "\n".join(parts)
-                try:
-                    return json.dumps(value, ensure_ascii=False)
-                except Exception:
-                    return str(value)
-
-            text_attr = getattr(value, "text", None)
-            if isinstance(text_attr, str) and text_attr.strip():
-                return text_attr
-
-            content_attr = getattr(value, "content", None)
-            if content_attr is not None:
-                flattened = _flatten_reasoning_text(content_attr).strip()
-                if flattened:
-                    return flattened
-
-            model_dump = getattr(value, "model_dump", None)
-            if callable(model_dump):
-                try:
-                    dumped = model_dump(exclude_none=True)
-                    flattened = _flatten_reasoning_text(dumped).strip()
-                    if flattened:
-                        return flattened
-                except Exception:
-                    pass
-
-            return str(value)
-
-        def _extract_reasoning_delta(delta: Any) -> str:
-            candidates: List[Any] = []
-            for attr in (
-                "reasoning_content",
-                "reasoning",
-                "thinking",
-                "reasoning_summary",
-            ):
-                value = getattr(delta, attr, None)
-                if value:
-                    candidates.append(value)
-
-            model_dump = getattr(delta, "model_dump", None)
-            if callable(model_dump):
-                try:
-                    dumped = model_dump(exclude_none=True)
-                except Exception:
-                    dumped = {}
-                if isinstance(dumped, dict):
-                    for key in (
-                        "reasoning_content",
-                        "reasoning",
-                        "thinking",
-                        "reasoning_summary",
-                    ):
-                        value = dumped.get(key)
-                        if value:
-                            candidates.append(value)
-
-            for value in candidates:
-                text = _flatten_reasoning_text(value).strip()
-                if text:
-                    return text
-            return ""
-
-        provider_messages = (
-            developer_messages_to_system(messages) if self.base_url else messages
-        )
         kwargs = {
             "model": self.model,
-            "messages": provider_messages,
+            "messages": developer_messages_to_system(messages)
+            if self.base_url
+            else messages,
             "stream": True,
         }
-
         if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
-        if self._request_options:
-            kwargs.update(self._request_options)
+            kwargs.update(tools=tools, tool_choice=tool_choice)
+        kwargs.update(self._request_options)
         self._apply_cache_options(kwargs)
-        # Ask the official endpoint to append a final usage chunk so
-        # streaming turns report prompt/cached token counts like
-        # non-streaming ones. Skipped for local servers, some of which
-        # reject stream_options.
         if not self.base_url:
             kwargs.setdefault("stream_options", {"include_usage": True})
-
-        stream = self._create_chat_completion(kwargs)
-
-        accumulated_content = ""
-        tool_calls_acc: Dict[int, Dict[str, Any]] = {}
-
-        for chunk in stream:
-            # The final usage chunk has an empty choices list — capture it
-            # before the skip below.
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage is not None:
-                extracted = self._extract_usage(chunk)
-                if extracted:
-                    self._last_usage = extracted
-            if not chunk.choices:
-                continue
-
-            delta = chunk.choices[0].delta
-
-            # Emit reasoning/thinking traces when provider exposes them.
-            reasoning_text = _extract_reasoning_delta(delta)
-            if reasoning_text:
-                yield {"type": "reasoning", "content": reasoning_text}
-
-            # Accumulate text content
-            if delta.content:
-                accumulated_content += delta.content
-                yield {"type": "content", "content": delta.content}
-
-            # Accumulate tool calls across chunks
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_calls_acc:
-                        tool_calls_acc[idx] = {
-                            "id": tc_delta.id or "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    entry = tool_calls_acc[idx]
-                    if tc_delta.id:
-                        entry["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            entry["function"]["name"] += tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            entry["function"][
-                                "arguments"
-                            ] += tc_delta.function.arguments
-
-            # Stream finish: keep consuming — the final usage chunk (empty
-            # choices) arrives after the finish_reason chunk.
-            if chunk.choices[0].finish_reason:
-                continue
-
-        # If we accumulated tool calls, yield them as a reconstructed response-like object
-        if tool_calls_acc:
-            # Build a lightweight object that matches the structure _execute_llm_interaction expects
-            from types import SimpleNamespace
-
-            tool_calls_list = []
-            for idx in sorted(tool_calls_acc.keys()):
-                tc = tool_calls_acc[idx]
-                tool_calls_list.append(
-                    SimpleNamespace(
-                        id=tc["id"],
-                        type="function",
-                        function=SimpleNamespace(
-                            name=tc["function"]["name"],
-                            arguments=tc["function"]["arguments"],
-                        ),
-                    )
-                )
-
-            message_ns = SimpleNamespace(
-                content=accumulated_content or None,
-                tool_calls=tool_calls_list,
-            )
-            response_ns = SimpleNamespace(choices=[SimpleNamespace(message=message_ns)])
-            yield {"type": "tool_calls", "response": response_ns}
-        else:
-            yield {"type": "done", "content": accumulated_content}
+        yield from chat_events(
+            self,
+            self._create_chat_completion(kwargs),
+            max_output_tokens=kwargs.get("max_completion_tokens")
+            or kwargs.get("max_tokens"),
+        )
 
     def _extract_usage(self, response: Any) -> Optional[Dict[str, int]]:
         usage = getattr(response, "usage", None)
@@ -835,6 +687,11 @@ class OpenAI(LLMProvider):
             return extracted
         except Exception:
             return None
+
+    def get_last_response_metadata(self) -> Dict[str, Any]:
+        from .response_metadata import last_response_metadata
+
+        return last_response_metadata(self)
 
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage

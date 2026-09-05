@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.7.0"
+version = "0.8.0"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -243,6 +243,10 @@ exclude = [
     "apps/**/src-tauri/target/**",
     "dist/**",
     "research/**",
+    # Audit reports are kept outside the repository and release artifacts.
+    "reports/**",
+    "docs/releases/**",
+    "docs/**/*report*.md",
     "temp_unpack*",
     "eval/datasets/**",
     "eval/longmemeval/data/**",

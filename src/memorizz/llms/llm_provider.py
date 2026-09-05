@@ -98,5 +98,24 @@ class LLMProvider(Protocol):
             - {"type": "content", "content": "..."} for text chunks
             - {"type": "tool_calls", "response": <full response object>} when tool calls are detected
             - {"type": "done", "content": "<full accumulated text>"} at the end of the stream
+            - {"type": "usage", "usage": {...}} for known token accounting
+
+        Content deltas concatenate exactly to done.content, including whitespace.
+        Exactly one done or completed tool_calls event ends a successful request;
+        an incomplete/refused request raises, it must not invent success at EOF.
+        Reasoning is diagnostic only. Tool response objects are internal and
+        never serialized into public SDK events. Consumers close this generator;
+        adapters must close their raw provider stream and cooperate with the
+        current cancellation token. See llms.streaming.streaming_capabilities
+        for reliable detection (an inherited Protocol stub is not an iterator).
         """
+        ...
+
+
+@runtime_checkable
+class ResponseMetadataProvider(Protocol):
+    """Optional extension; existing LLMProvider implementations remain valid."""
+
+    def get_last_response_metadata(self) -> Optional[Dict[str, Any]]:
+        """Return bounded response metadata; omit unknown values."""
         ...

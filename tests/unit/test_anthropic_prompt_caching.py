@@ -15,7 +15,7 @@ from memorizz.llms.anthropic import Anthropic
 
 class _FakeStream:
     def __init__(self, events=None):
-        self._events = list(events or [])
+        self._events = list(events or []) + [SimpleNamespace(type="message_stop")]
 
     def __enter__(self):
         return iter(self._events)

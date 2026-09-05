@@ -3137,8 +3137,29 @@ async function sendMessage() {
         return;
     }
     const streamTarget = streamMessage.textElement;
-    const streamTraceTimeline = streamMessage.traceTimeline;
     let fullText = '';
+    let pendingPaint = null;
+    const statusElement = document.createElement('div');
+    statusElement.className = 'pg-stream-status';
+    statusElement.setAttribute('role', 'status');
+    streamMessage.container.appendChild(statusElement);
+    const showStatus = text => { statusElement.textContent = text; };
+    function paint(markdown = false) {
+        if (pendingPaint !== null) cancelAnimationFrame(pendingPaint);
+        pendingPaint = null;
+        const container = document.getElementById('playground-messages');
+        const atBottom = !container || container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+        if (markdown && fullText) {
+            streamTarget.innerHTML = renderMarkdown(fullText);
+            streamTarget.classList.add('md-rendered');
+        } else {
+            streamTarget.textContent = fullText;
+        }
+        if (atBottom) scrollToBottom();
+    }
+    function schedulePaint() {
+        if (pendingPaint === null) pendingPaint = requestAnimationFrame(() => paint());
+    }
 
     try {
         const modelSelect = document.getElementById('cfg-llm-model');
@@ -3180,62 +3201,37 @@ async function sendMessage() {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
-        // SSE plumbing lives in the shared readSseStream() (static/js/app.js).
+        // One ordered SDK contract; never append tool/private candidate text.
+        let runId = null, sequence = 0;
         await readSseStream(response, (payload) => {
-            if (payload === '[DONE]') {
-                const cursor = streamTarget.querySelector('.streaming-cursor');
-                if (cursor) cursor.remove();
-                return;
+            const event = JSON.parse(payload);
+            if (event.version !== 1 || (runId && event.run_id !== runId) || event.seq !== sequence + 1) {
+                throw new Error('Invalid stream sequence');
             }
-
-            try {
-                const parsed = JSON.parse(payload);
-
-                if (typeof parsed === 'string') {
-                    fullText += parsed;
-                    streamTarget.textContent = fullText;
-                    scrollToBottom();
-                    return;
-                }
-
-                if (parsed && typeof parsed === 'object') {
-                    const eventType = String(parsed.type || '').toLowerCase();
-
-                    if (String(parsed.status || '').toLowerCase() === 'approval_required') {
-                        fullText = String(
-                            parsed.message || 'Execution is paused for human approval.'
-                        );
-                        streamTarget.textContent = fullText;
-                        renderApprovalCard(streamMessage.container, parsed);
-                        scrollToBottom();
-                        return;
-                    }
-
-                    if (eventType === 'trace' || eventType === 'reasoning') {
-                        appendTraceBox(streamTraceTimeline, parsed);
-                        return;
-                    }
-
-                    if (eventType === 'warning') {
-                        appendTraceBox(streamTraceTimeline, {
-                            trace_kind: parsed.scope || 'warning',
-                            title: 'Warning',
-                            content: parsed.message || parsed.content || '',
-                        });
-                        return;
-                    }
-
-                    if (eventType === 'content') {
-                        const textChunk = String(parsed.content || parsed.text || '');
-                        if (textChunk) {
-                            fullText += textChunk;
-                            streamTarget.textContent = fullText;
-                            scrollToBottom();
-                        }
-                        return;
-                    }
-                }
-            } catch (e) {}
+            runId = event.run_id; sequence = event.seq;
+            if (event.memory_id) memoryEl.value = event.memory_id;
+            if (event.type === 'answer.delta') {
+                fullText += event.delta;
+                schedulePaint();
+            } else if (event.type === 'answer.done') {
+                paint(true);
+                showStatus('Answer ready — saving conversation…');
+            } else if (event.type === 'run.done') {
+                paint(true);
+                const failedWrites = Object.values(event.persistence || {}).includes('failed');
+                showStatus(event.status === 'completed'
+                    ? (failedWrites ? 'Answer complete; a state write failed.' : '')
+                    : (event.status === 'approval_required' ? 'Waiting for approval.' : 'Run ' + event.status + '. Partial answer retained.'));
+            } else if (event.type === 'approval.required') {
+                renderApprovalCard(streamMessage.container, event.proposal || event);
+                showStatus('Execution paused for approval.');
+            } else if (event.type === 'status') {
+                showStatus(event.message || String(event.stage || '').replaceAll('_', ' '));
+            } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
+                showStatus((event.type === 'tool.started' ? 'Running ' : 'Finished ') + event.tool_name);
+            } else if (event.type === 'completion.check' && !event.accepted) {
+                showStatus('Checking the answer; retrying.');
+            }
         });
 
         const cursor = streamTarget.querySelector('.streaming-cursor');
@@ -3247,20 +3243,20 @@ async function sendMessage() {
 
     } catch (err) {
         if (err.name === 'AbortError') {
-            streamTarget.textContent = '[Streaming stopped by user]';
-            streamTarget.classList.add('pg-message-system');
+            paint(true);
+            showStatus('Stopped by user. Partial answer retained.');
         } else {
-            streamTarget.textContent = `Error: ${err.message}`;
-            streamTarget.classList.add('pg-message-error');
+            paint(true);
+            showStatus(`Stream interrupted: ${err.message}. Partial answer retained.`);
         }
     } finally {
+        if (pendingPaint !== null) cancelAnimationFrame(pendingPaint);
         currentAbortController = null;
         setLoading(false);
         const activeMemoryId = (memoryEl.value || '').trim();
         if (activeMemoryId) {
             await loadThreadMessages(activeMemoryId, { renderChat: false });
         }
-        scrollToBottom();
     }
 }
 

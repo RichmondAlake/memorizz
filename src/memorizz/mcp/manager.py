@@ -740,7 +740,36 @@ class MCPClientManager:
         arguments: Dict[str, Any],
     ) -> Dict[str, Any]:
         async def operation(client):
-            result = await client.call_tool(tool_name, arguments)
+            from ..streaming import current_cancellation, current_stream
+
+            token = current_cancellation.get()
+            session = current_stream.get()
+
+            async def progress(value, total=None, message=None):
+                # External tool output is tool activity, never our answer text.
+                if session is not None:
+                    await asyncio.to_thread(
+                        session.emit,
+                        "status",
+                        stage="mcp_tool_progress",
+                        tool_name=tool_name,
+                        progress=value,
+                        total=total,
+                    )
+
+            task = asyncio.current_task()
+            loop = asyncio.get_running_loop()
+            unregister = (
+                token.register(lambda: loop.call_soon_threadsafe(task.cancel))
+                if token
+                else lambda: None
+            )
+            try:
+                result = await client.call_tool(
+                    tool_name, arguments, progress_callback=progress
+                )
+            finally:
+                unregister()
             payload = _model_dict(result)
             is_error = bool(getattr(result, "is_error", False))
             return self._ensure_payload_size(

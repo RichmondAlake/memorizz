@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Optional
 
 from mcp.server import MCPServer
 from mcp.server.auth.settings import AuthSettings
+from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
@@ -149,6 +150,29 @@ def create_memorizz_mcp_server(
             thread_id=thread_id,
             include_package_capabilities=include_package_capabilities,
         )
+
+    if resolved.allow_trace_queries:
+
+        @server.tool(annotations=read_only)
+        async def memorizz_query_traces(
+            agent_id: str,
+            thread_id: Optional[str] = None,
+            root_trace_id: Optional[str] = None,
+            cursor: Optional[str] = None,
+            limit: int = 250,
+            explain: bool = False,
+        ) -> Dict[str, Any]:
+            """Query/explain a bounded metadata-only trace page in the caller's tenant."""
+            return await _tool_call(
+                service.query_traces,
+                agent_id,
+                current_identity(),
+                thread_id=thread_id,
+                root_trace_id=root_trace_id,
+                cursor=cursor,
+                limit=limit,
+                explain=explain,
+            )
 
     @server.tool(annotations=read_only)
     async def memorizz_preview_personalization(
@@ -290,12 +314,35 @@ def create_memorizz_mcp_server(
     @server.tool(annotations=execute)
     async def memorizz_execute_agent(
         message: str,
+        ctx: Context,
         agent_id: Optional[str] = None,
         memory_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        event_format: Optional[str] = "progress",
+        delivery_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Run a tenant-scoped Memorizz agent turn and return conversation IDs."""
+        """Run a scoped turn. Opt into progress or memorizz.events.v1 notifications."""
+        if event_format is not None:
+            from .streaming import execute_stream
+
+            try:
+                return await execute_stream(
+                    service,
+                    message,
+                    current_identity(),
+                    ctx,
+                    event_format=event_format,
+                    agent_id=agent_id,
+                    memory_id=memory_id,
+                    thread_id=thread_id,
+                    context=context,
+                    delivery_mode=delivery_mode,
+                )
+            except MemorizzServerError as exc:
+                raise ToolError(f"{exc.code}: {exc.message}") from exc
+        if delivery_mode is not None:
+            raise ToolError("delivery_mode requires event_format")
         return await _tool_call(
             service.execute_agent,
             message,

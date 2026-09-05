@@ -1,6 +1,6 @@
 {
   "name": "memorizz",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "npm bootstrapper for the memory-first Memorizz agent CLI and meta-harness.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "homepage": "https://github.com/RichmondAlake/memorizz",

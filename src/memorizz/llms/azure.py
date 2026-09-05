@@ -208,8 +208,13 @@ class AzureOpenAI(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         response = self.client.chat.completions.create(**kwargs)
         self._last_usage = self._extract_usage(response)
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(response)
 
         # If there are tool calls, return the full response object
         if response.choices[0].message.tool_calls:
@@ -217,6 +222,22 @@ class AzureOpenAI(LLMProvider):
 
         # Otherwise return just the text content
         return response.choices[0].message.content
+
+    def generate_stream(self, messages, tools=None, tool_choice="auto"):
+        """Stream Azure chat deltas using the shared, closeable chat parser."""
+        from .streaming import chat_events
+
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs.update(tools=tools, tool_choice=tool_choice)
+        self._last_usage = None
+        self._last_response_metadata = {}
+        yield from chat_events(self, self.client.chat.completions.create(**kwargs))
 
     def _extract_usage(self, response: Any) -> Optional[Dict[str, int]]:
         usage = getattr(response, "usage", None)
@@ -233,6 +254,11 @@ class AzureOpenAI(LLMProvider):
 
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage
+
+    def get_last_response_metadata(self) -> Dict[str, Any]:
+        from .response_metadata import last_response_metadata
+
+        return last_response_metadata(self)
 
     def get_context_window_tokens(self) -> Optional[int]:
         return self.context_window_tokens

@@ -124,6 +124,7 @@ class MemorizzMCPServerConfig:
     stateless_http: bool = True
     allow_anonymous_http: bool = False
     allow_writes: Optional[bool] = None
+    allow_trace_queries: bool = False
     allow_agent_execution: Optional[bool] = None
     allow_harness_execution: Optional[bool] = None
     harness_workspace_roots: Optional[Set[str]] = None
@@ -239,6 +240,7 @@ class MemorizzMCPServerConfig:
             "auth_required": self.auth_required,
             "configured_principals": len(self.api_key_grants),
             "allow_writes": bool(self.allow_writes),
+            "allow_trace_queries": bool(self.allow_trace_queries),
             "allow_agent_execution": bool(self.allow_agent_execution),
             "allow_harness_execution": bool(self.allow_harness_execution),
             "harness_workspace_roots": sorted(self.harness_workspace_roots or []),
@@ -273,6 +275,7 @@ class MemorizzMCPServerConfig:
             "stateless_http": _env_bool("MEMORIZZ_MCP_SERVER_STATELESS_HTTP"),
             "allow_anonymous_http": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_ANONYMOUS"),
             "allow_writes": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_WRITES"),
+            "allow_trace_queries": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_TRACE_QUERIES"),
             "allow_agent_execution": _env_bool(
                 "MEMORIZZ_MCP_SERVER_ALLOW_AGENT_EXECUTION"
             ),

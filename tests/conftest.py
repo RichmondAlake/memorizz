@@ -3,7 +3,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -13,6 +13,10 @@ os.environ.setdefault("OPENAI_API_KEY", "test-api-key")
 # Bare MemAgent instances use filesystem memory by default. Keep that durable
 # behavior isolated from a developer's real ~/.memorizz store during tests.
 os.environ.setdefault("MEMORIZZ_HOME", tempfile.mkdtemp(prefix="memorizz-tests-"))
+os.environ.setdefault(
+    "MEMORIZZ_UI_AUDIT_LOG",
+    os.path.join(os.environ["MEMORIZZ_HOME"], "trace-audit.jsonl"),
+)
 
 # Add src to path for testing
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
@@ -295,7 +299,7 @@ def memory_types():
 @pytest.fixture
 def conversation_memory_setup(mock_memory_provider):
     """Setup for conversation memory testing."""
-    from memorizz.enums import MemoryType, Role
+    from memorizz.enums import Role
     from memorizz.memagent.managers import MemoryManager
 
     memory_manager = MemoryManager(mock_memory_provider)

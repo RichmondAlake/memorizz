@@ -112,6 +112,8 @@ class MLXLLM(LLMProvider):
 
         prompt = self._build_prompt(messages)
         sampler = self._build_sampler()
+        self._last_usage = None
+        self._last_response_metadata = {}
         output = generate(
             self._model,
             self._tokenizer,
@@ -127,6 +129,11 @@ class MLXLLM(LLMProvider):
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         }
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            None, text=text, max_output_tokens=self.max_new_tokens
+        )
         return text
 
     def generate_stream(
@@ -148,24 +155,33 @@ class MLXLLM(LLMProvider):
         prompt = self._build_prompt(messages)
         sampler = self._build_sampler()
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         accumulated: List[str] = []
         last_response: Any = None
-        for response in stream_generate(
-            self._model,
-            self._tokenizer,
-            prompt=prompt,
-            max_tokens=self.max_new_tokens,
-            sampler=sampler,
-        ):
-            last_response = response
-            chunk = getattr(response, "text", None)
-            if chunk is None and isinstance(response, dict):
-                chunk = response.get("text")
-            if chunk:
-                accumulated.append(chunk)
-                yield {"type": "content", "content": chunk}
+        from ..streaming import check_cancelled
+        from .streaming import closing_provider_stream
 
-        full = "".join(accumulated).strip()
+        with closing_provider_stream(
+            stream_generate(
+                self._model,
+                self._tokenizer,
+                prompt=prompt,
+                max_tokens=self.max_new_tokens,
+                sampler=sampler,
+            )
+        ) as stream:
+            for response in stream:
+                check_cancelled()
+                last_response = response
+                chunk = getattr(response, "text", None)
+                if chunk is None and isinstance(response, dict):
+                    chunk = response.get("text")
+                if chunk:
+                    accumulated.append(chunk)
+                    yield {"type": "content", "content": chunk}
+
+        full = "".join(accumulated)
 
         # mlx-lm's GenerationResponse exposes prompt_tokens / generation_tokens
         prompt_tokens = (
@@ -183,6 +199,12 @@ class MLXLLM(LLMProvider):
             "completion_tokens": int(completion_tokens),
             "total_tokens": int(prompt_tokens) + int(completion_tokens),
         }
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            last_response, text=full, max_output_tokens=self.max_new_tokens
+        )
+        yield {"type": "usage", "usage": self._last_usage}
         yield {"type": "done", "content": full}
 
     def generate_text(self, prompt: str, instructions: Optional[str] = None) -> str:
@@ -191,6 +213,11 @@ class MLXLLM(LLMProvider):
             messages.append({"role": "system", "content": instructions})
         messages.append({"role": "user", "content": prompt})
         return self.generate(messages)
+
+    def get_last_response_metadata(self) -> Dict[str, Any]:
+        from .response_metadata import last_response_metadata
+
+        return last_response_metadata(self)
 
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage

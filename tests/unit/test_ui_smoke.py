@@ -393,7 +393,8 @@ def test_traces_discovers_unregistered_runtime_and_renders_its_timeline(client):
     assert "thread-1" in overview.text
     assert timeline.status_code == 200
     assert "Trace Insights" in timeline.text
-    assert "Remember this exact article URL" in timeline.text
+    assert "Remember this exact article URL" not in timeline.text
+    assert "Reveal trace content" in timeline.text
     assert "Execution Log · ingest_url" in timeline.text
     assert "Completed via fallback" in timeline.text
     assert "Reason primary timeout" in timeline.text

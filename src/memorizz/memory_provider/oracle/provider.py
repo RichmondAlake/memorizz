@@ -1127,6 +1127,13 @@ class OracleProvider(MemoryProvider):
             logger.warning(f"Failed to generate embedding: {e}")
             return None
 
+    def get_observability_index(self):
+        from ...observability.sql_index import OracleSpanIndex
+
+        if not hasattr(self, "_observability_index"):
+            self._observability_index = OracleSpanIndex(self)
+        return self._observability_index
+
     def _get_connection(self):
         """Get a connection from the pool."""
         return self.pool.acquire()
@@ -3175,6 +3182,10 @@ class OracleProvider(MemoryProvider):
         """Store shared memory directly to base table."""
         memory_id = data.get("memory_id") or str(uuid.uuid4())
         table_name = self._get_table_name(MemoryType.SHARED_MEMORY)
+        immutable = (
+            data.get("immutable_trace") is True
+            and data.get("record_type") == "observability_trace_bundle"
+        )
 
         # Sanitize content to handle JsonId objects
         content = data.get("content")
@@ -3210,6 +3221,8 @@ class OracleProvider(MemoryProvider):
             existing = cursor.fetchone()
 
             if existing:
+                if immutable:
+                    return memory_id
                 # Update existing record
                 update_fields = ["content = :content", "updated_at = SYSTIMESTAMP"]
                 params = {"memory_id": memory_id, "content": content}
@@ -3241,7 +3254,11 @@ class OracleProvider(MemoryProvider):
                 )
             else:
                 # Insert new record
-                id_bytes = uuid.uuid4().bytes
+                id_bytes = (
+                    uuid.uuid5(uuid.NAMESPACE_URL, "memorizz:trace:" + memory_id).bytes
+                    if immutable
+                    else uuid.uuid4().bytes
+                )
                 insert_fields = [
                     "id",
                     "memory_id",
@@ -3292,13 +3309,16 @@ class OracleProvider(MemoryProvider):
                     insert_values.append(":access_list")
                     params["access_list"] = access_list_json
 
-                cursor.execute(
-                    f"""
-                    INSERT INTO {table_name} ({', '.join(insert_fields)})
-                    VALUES ({', '.join(insert_values)})
-                """,
-                    params,
-                )
+                try:
+                    cursor.execute(
+                        f"INSERT INTO {table_name} ({', '.join(insert_fields)}) VALUES ({', '.join(insert_values)})",
+                        params,
+                    )
+                except oracledb.IntegrityError as exc:
+                    if not immutable or getattr(exc.args[0], "code", None) != 1:
+                        raise
+                    # Deterministic RAW primary key serializes concurrent retries.
+                    conn.rollback()
 
             conn.commit()
 
@@ -4253,6 +4273,29 @@ class OracleProvider(MemoryProvider):
             if not include_embedding and "embedding" in record:
                 record.pop("embedding", None)
             return record
+
+    def delete_observability_bundle(self, record_id, fingerprint):
+        from ...observability.index import digest
+        from ...observability.normalization import read_payload
+
+        row = self.retrieve_by_id(record_id, MemoryType.SHARED_MEMORY)
+        payload = read_payload(row) if row else None
+        if (
+            not payload
+            or payload.get("record_type") != "observability_trace_bundle"
+            or digest(payload) != fingerprint
+        ):
+            return False
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.setinputsizes(expected=oracledb.DB_TYPE_CLOB)
+            cursor.execute(
+                f"DELETE FROM {self._get_table_name(MemoryType.SHARED_MEMORY)} WHERE memory_id = :record_id AND DBMS_LOB.COMPARE(content, :expected) = 0",
+                {"record_id": record_id, "expected": row["content"]},
+            )
+            removed = cursor.rowcount == 1
+            conn.commit()
+            return removed
 
     def delete_by_id(self, id: str, memory_store_type: MemoryType) -> bool:
         """Delete a document by ID."""

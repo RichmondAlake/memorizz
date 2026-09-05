@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Observability Health - Memorizz{% endblock %}
+{% block content %}
+<div class="page-header">
+    <span class="page-eyebrow">Operations / Observability</span>
+    <h1>Observability health</h1>
+    <p>Read-only checks of the bounded loaded window. These are not deployment-wide guarantees.</p>
+    <a class="btn" href="{{ selection_urls.traces }}">Traces</a>
+</div>
+<form class="traces-search-form" method="get">
+    {% for key, value in selection_urls.params.items() %}{% if key not in ['agent_id', 'thread_id'] %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
+    <label>Agent <input class="traces-search-input" name="agent_id" value="{{ agent_id or '' }}"></label>
+    <label>Thread <input class="traces-search-input" name="thread_id" value="{{ thread_id or '' }}"></label>
+    <button class="btn" type="submit">Inspect</button>
+</form>
+<div class="detail-section">
+    <h2>{{ health.headline }}</h2>
+    <p>Stored-event read: {{ health.read_completeness }} · Instrumentation: {{ health.instrumentation_coverage }} · Outcome evidence: {{ health.outcome_verification }}.</p>
+    <p>{{ health.normalized_events }} normalized events · {{ health.bundle_count }} bundles · {{ health.source_rows }} source rows</p>
+    <p>Stores: {{ health.store_selection|join(', ') }} · Counts: {{ health.source_counts|tojson }} · Count scope: {{ health.count_scope }}.</p>
+    {% if health.parent_query_metadata %}<details><summary>Parent-query diagnostics (not selected-root totals)</summary><pre>{{ health.parent_query_metadata|tojson(indent=2) }}</pre></details>{% endif %}
+    <p>Latest observed event: {{ health.latest_event_at or 'Unknown' }}. Window truncated: {{ health.truncated }}.</p>
+    {% if health.coverage != 'complete' %}<p class="error-message">Missing records cannot be interpreted as zero activity or successful delivery.</p>{% endif %}
+    <table class="traces-agents-table">
+        <thead><tr><th>Evidence check</th><th>Observed in this window</th></tr></thead>
+        <tbody>
+            <tr><td>Normalization errors</td><td>{{ health.normalization_errors }}</td></tr>
+            <tr><td>Duplicates removed</td><td>{{ health.duplicates_removed if health.duplicates_removed is not none else 'Unknown in selected scope; see parent-query diagnostics' }}</td></tr>
+            <tr><td>Events missing canonical identity</td><td>{{ health.missing_identity_events }}</td></tr>
+            <tr><td>Spans with missing parent</td><td>{{ health.orphan_spans }}</td></tr>
+            <tr><td>Missing causal event references</td><td>{{ health.missing_causal_events }}</td></tr>
+            <tr><td>Spans in cyclic parent chains</td><td>{{ health.cyclic_spans }}</td></tr>
+            <tr><td>Spans with unknown duration</td><td>{{ health.unknown_duration_spans }}</td></tr>
+            <tr><td>Timing classification</td><td>{{ health.timing_states|tojson }} — instantaneous events do not require span completion; unknown legacy timing remains unknown.</td></tr>
+            <tr><td>Write failures / dropped events</td><td>Unknown — inspect recorder.health in the host process</td></tr>
+        </tbody>
+    </table>
+</div>
+<div class="detail-section">
+    <h2>Provider query diagnostics</h2>
+    <p>Registration checks: {{ health.registration|tojson }}.</p>
+    {% if health.alerts %}<h3>Active telemetry alerts</h3><ul>{% for alert in health.alerts %}<li>{{ alert.code }} · {{ alert.severity }} · {{ alert.count or alert.duration_ms or '' }}</li>{% endfor %}</ul>{% endif %}
+    <p>Native span index: {{ 'ready' if health.index.ready else 'not provisioned' }}. Schema {{ health.index.schema_version or 'unknown' }}.</p>
+    <p>Instrumentation versions: {{ health.instrumentation_versions|join(', ') or 'Not reported' }}.</p>
+    <h3>Telemetry pipeline (this process only)</h3>
+    {% if health.pipeline.reported %}<pre>{{ health.pipeline|tojson(indent=2) }}</pre>{% else %}<p>No process-local counters are available in this scope. Unwritten events remain unknown.</p>{% endif %}
+    <table class="traces-agents-table">
+        <thead><tr><th>Store</th><th>Query path</th><th>Rows scanned</th><th>Duration (ms)</th><th>Truncated</th><th>Result</th></tr></thead>
+        <tbody>{% for store, query in health.queries.items() %}
+            <tr><td>{{ store }}</td><td>{{ 'Native' if query.provider_native else 'Compatibility' }}</td><td>{{ query.scanned_count if query.scanned_count is not none else 'Unknown' }}</td><td>{{ query.query_duration_ms if query.query_duration_ms is not none else 'Unknown' }}</td><td>{{ query.truncated }}</td><td>{{ 'Failed' if store in health.failed_queries else 'Read completed' }}</td></tr>
+        {% endfor %}</tbody>
+    </table>
+    <h3>Schema versions</h3>
+    <p>{% for version, count in health.schema_counts.items() %}v{{ version }}: {{ count }}{% if not loop.last %} · {% endif %}{% else %}No event schemas observed{% endfor %}</p>
+    {% if health.error_codes %}<h3>Normalization error codes</h3><ul>{% for code, count in health.error_codes.items() %}<li>{{ code }}: {{ count }}</li>{% endfor %}</ul>{% endif %}
+    {% if health.missing_stages %}<h3>Missing declared stages</h3><ul>{% for gap in health.missing_stages %}<li>Turn {{ gap.turn_id or 'unknown' }} · task {{ gap.task_id or 'unspecified' }} · {{ gap.profile }}: {{ gap.stage }}</li>{% endfor %}</ul>{% endif %}
+</div>
+{% endblock %}

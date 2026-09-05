@@ -204,8 +204,16 @@ class Anthropic(LLMProvider):
             kwargs["system"] = instructions
         kwargs.update(self._request_options)
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         response = self.client.messages.create(**kwargs)
         self._last_usage = self._extract_usage(response)
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            response,
+            max_output_tokens=kwargs.get("max_tokens"),
+        )
         return self._text_from_response(response)
 
     # ------------------------------------------------------------------
@@ -226,8 +234,16 @@ class Anthropic(LLMProvider):
         """
         kwargs = self._build_request_kwargs(messages, tools, tool_choice)
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         response = self.client.messages.create(**kwargs)
         self._last_usage = self._extract_usage(response)
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            response,
+            max_output_tokens=kwargs.get("max_tokens"),
+        )
 
         # Check for tool calls
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
@@ -256,6 +272,8 @@ class Anthropic(LLMProvider):
         """
         kwargs = self._build_request_kwargs(messages, tools, tool_choice)
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         accumulated_content = ""
         tool_calls_acc: Dict[int, Dict[str, Any]] = {}
         current_block_index = -1
@@ -264,15 +282,34 @@ class Anthropic(LLMProvider):
         # from merging fresh output tokens into a previous call's usage.
         stream_usage: Optional[Dict[str, Any]] = None
 
-        with self.client.messages.stream(**kwargs) as stream:
+        from contextlib import ExitStack
+
+        from ..streaming import check_cancelled
+        from .response_metadata import response_metadata
+        from .streaming import ProviderStreamError, closing_provider_stream
+
+        stopped = False
+        with ExitStack() as stack:
+            stream = stack.enter_context(self.client.messages.stream(**kwargs))
+            stack.enter_context(closing_provider_stream(stream))
             for event in stream:
+                check_cancelled()
                 event_type = getattr(event, "type", None)
 
-                if event_type == "message_start":
+                if event_type == "message_stop":
+                    stopped = True
+                elif event_type == "error":
+                    raise ProviderStreamError("provider_stream_error")
+                elif event_type == "message_start":
                     # message_start carries the authoritative input-side usage
                     # (including cache_read/cache_creation); output tokens
                     # arrive later via message_delta.
                     message_obj = getattr(event, "message", None)
+                    self._last_response_metadata.update(
+                        response_metadata(
+                            message_obj, max_output_tokens=kwargs.get("max_tokens")
+                        )
+                    )
                     usage = getattr(message_obj, "usage", None)
                     if usage is not None:
                         extracted = self._usage_to_dict(usage)
@@ -322,6 +359,9 @@ class Anthropic(LLMProvider):
                             ] += partial_json
 
                 elif event_type == "message_delta":
+                    self._last_response_metadata.update(
+                        response_metadata(getattr(event, "delta", None))
+                    )
                     usage = getattr(event, "usage", None)
                     if usage:
                         output_tokens = getattr(usage, "output_tokens", None)
@@ -337,6 +377,22 @@ class Anthropic(LLMProvider):
                             merged.setdefault("total_tokens", None)
                         self._last_usage = merged
 
+        if not stopped:
+            raise ProviderStreamError("provider_stream_incomplete")
+        if self._last_response_metadata.get("finish_reason") in {
+            "max_tokens",
+            "refusal",
+            "pause_turn",
+        }:
+            raise ProviderStreamError(
+                "provider_" + self._last_response_metadata["finish_reason"]
+            )
+        if self._last_usage:
+            yield {"type": "usage", "usage": self._last_usage}
+
+        self._last_response_metadata.update(
+            response_metadata(None, text=accumulated_content)
+        )
         # Yield final result
         if tool_calls_acc:
             tool_calls_list = []
@@ -596,6 +652,11 @@ class Anthropic(LLMProvider):
         if cache_creation:
             extracted["cache_creation_input_tokens"] = cache_creation
         return extracted
+
+    def get_last_response_metadata(self) -> Dict[str, Any]:
+        from .response_metadata import last_response_metadata
+
+        return last_response_metadata(self)
 
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage

@@ -20,6 +20,22 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ...observability import ObservabilityStore, analyze_trace_events
+from ...observability.coverage import trace_coverage
+from ...observability.inspection import (
+    build_causal_waterfall,
+    build_trace_health,
+    compare_trace_windows,
+    event_anchor,
+)
+from ...observability.lineage import build_lineage_inspectors
+from ...observability.normalization import (
+    TraceEvents,
+    TraceSnapshot,
+    is_bundle,
+    normalize_trace_snapshot,
+    query_trace_events,
+    select_trace_events,
+)
 from ..helpers import (
     _build_agent_nav_items,
     _build_agent_tool_count_map,
@@ -27,20 +43,19 @@ from ..helpers import (
     _extract_agent_identifier,
     _extract_agent_memory_ids,
     _extract_agent_persona_name,
-    _extract_message_timestamp,
     _load_agent_last_run_map,
-    _retrieve_conversation_history,
     _sort_agents_by_last_run_desc,
     _to_text,
 )
 from ..security import (
     audit_trace_view,
     redact_trace_events,
-    redact_value,
     trace_content_mode,
     ui_read_only,
 )
 from ..state import _state, templates
+from ..trace_access import current_principal, scoped_trace_filters
+from .trace_tools import trace_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +63,125 @@ router = APIRouter(tags=["traces"])
 
 _RUNTIME_TRACE_AGENT_ID = "__memorizz_runtime_traces__"
 _TRACE_BUNDLE_RECORD_TYPE = "observability_trace_bundle"
+
+
+def _selection_window(
+    *,
+    request=None,
+    agent_id=None,
+    selected_agent=None,
+    thread_id=None,
+    thread_memory_id=None,
+    root_trace_id=None,
+    turn_id=None,
+    task_id=None,
+    limit=500,
+    event_limit=1000,
+):
+    """One authorized identity/snapshot contract for every combined trace view."""
+    if selected_agent is None and agent_id and not current_principal.get().restricted:
+        try:
+            selected_agent = next(
+                (
+                    a
+                    for a in (_state["provider"].list_memagents() or [])
+                    if _extract_agent_identifier(a) == agent_id
+                ),
+                None,
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=503, detail="Trace agent associations are unavailable"
+            ) from None
+    ids = (
+        sorted(_trace_agent_ids(selected_agent))
+        if selected_agent
+        else [agent_id]
+        if agent_id
+        else None
+    )
+    memories = _extract_agent_memory_ids(selected_agent) if selected_agent else []
+    snapshot = _load_trace_snapshot(
+        agent_ids=ids,
+        memory_ids=memories,
+        thread_id=thread_id,
+        limit=max(1, min(limit, 1000)),
+    )
+    events = normalize_trace_snapshot(
+        snapshot,
+        agent_ids=set(ids or []),
+        memory_ids=set(memories),
+        thread_id=thread_id,
+        thread_memory_id=thread_memory_id,
+        **scoped_trace_filters(),
+    ).events
+    events.coverage["store_selection"] = ["conversation", "tool_log", "trace"]
+    extra = {
+        k: request.query_params[k]
+        for k in ("start_time", "end_time", "run_id")
+        if request is not None and k in request.query_params
+    }
+    try:
+        events = select_trace_events(
+            events,
+            root_trace_id=root_trace_id,
+            turn_id=turn_id,
+            task_id=task_id,
+            limit=event_limit,
+            **extra,
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid trace selection") from None
+    return snapshot, events
+
+
+def _selection_urls(request, **selection):
+    selection.update(
+        {
+            k: request.query_params[k]
+            for k in ("start_time", "end_time", "run_id")
+            if k in request.query_params
+        }
+    )
+    params = {k: v for k, v in selection.items() if v is not None and v != ""}
+    params.update(scoped_trace_filters())
+    return {
+        "params": params,
+        "traces": "/traces?" + urlencode(params),
+        "health": "/traces/health?" + urlencode(params),
+        "compare": "/traces/compare?"
+        + urlencode(
+            {
+                **params,
+                **(
+                    {"baseline_root": params["root_trace_id"]}
+                    if params.get("root_trace_id")
+                    else {}
+                ),
+                **(
+                    {"baseline_turn": params["turn_id"]}
+                    if params.get("turn_id")
+                    else {}
+                ),
+            }
+        ),
+    }
+
+
+def _targeted_runtime_agent(agent_id, thread_id=None):
+    snapshot = _load_trace_snapshot(agent_ids=[agent_id], thread_id=thread_id, limit=1)
+    window = normalize_trace_snapshot(
+        snapshot, agent_ids=[agent_id], **scoped_trace_filters()
+    )
+    if window.events:
+        return {
+            "agent_id": agent_id,
+            "name": agent_id,
+            "memory_ids": [],
+            "_is_virtual_trace_source": True,
+            "_runtime_agent_ids": [agent_id],
+        }
+    return None
 
 
 @router.get("/observability")
@@ -65,6 +199,13 @@ async def traces_page(
     thread_id: Optional[str] = None,
     thread_memory_id: Optional[str] = None,
     q: Optional[str] = None,
+    root_trace_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
 ):
     """Show traces dashboard with searchable agent table and per-agent timeline."""
     if not _state["provider"]:
@@ -72,9 +213,16 @@ async def traces_page(
 
     agents: List[Any] = []
     try:
-        agents = _state["provider"].list_memagents()
+        agents = (
+            []
+            if current_principal.get().restricted
+            else _state["provider"].list_memagents()
+        )
     except Exception as exc:
-        logger.error("Failed to list agents for traces: %s", exc)
+        logger.warning("Failed to list trace agents (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503, detail="Trace agent associations are unavailable"
+        ) from None
 
     conversation_docs, tool_log_docs, trace_query_metadata = _load_trace_snapshot()
     agents = _discover_runtime_trace_agents(
@@ -82,31 +230,95 @@ async def traces_page(
         conversation_docs=conversation_docs,
         tool_log_docs=tool_log_docs,
     )
+    indexed_summaries = None
+    from ...observability.index import read_path
+
+    if read_path() == "index":
+        try:
+            native = _state["provider"].get_observability_index()
+            indexed_summaries = native.summaries(limit=1000, **scoped_trace_filters())
+            known = {_extract_agent_identifier(agent) for agent in agents}
+            for row in indexed_summaries:
+                key = row.get("agent_id")
+                if key and key not in known:
+                    agents.append(
+                        {
+                            "agent_id": key,
+                            "name": key,
+                            "memory_ids": [],
+                            "_is_virtual_trace_source": True,
+                            "_runtime_agent_ids": [key],
+                        }
+                    )
+                    known.add(key)
+            trace_query_metadata[
+                "overview_scope"
+            ] = "indexed_agent_thread_groups_first_1000"
+        except Exception:
+            trace_query_metadata.setdefault("query_errors", []).append("summary")
 
     agent_query = _to_text(q).strip()
     trace_metrics = _build_agent_trace_metrics(
-        agents, conversation_docs=conversation_docs
+        agents, conversation_docs=conversation_docs, tool_log_docs=tool_log_docs
     )
+    if indexed_summaries is not None:
+        for agent in agents:
+            key = _extract_agent_identifier(agent)
+            groups = [
+                row
+                for row in indexed_summaries
+                if row.get("agent_id") in _trace_agent_ids(agent)
+            ]
+            trace_metrics[key].update(
+                event_count=sum(row["event_count"] for row in groups),
+                bundle_count=sum(row["bundle_count"] for row in groups),
+                last_ts=max(
+                    (_coerce_timestamp(row["latest_timestamp"]) or 0 for row in groups),
+                    default=0,
+                ),
+                coverage="partial" if len(indexed_summaries) == 1000 else "complete",
+            )
     last_run_by_agent = {
         row_agent_id: float(metrics.get("last_ts") or 0.0)
         for row_agent_id, metrics in trace_metrics.items()
         if float(metrics.get("last_ts") or 0.0) > 0
     }
-    if len(last_run_by_agent) < len(agents):
+    if len(last_run_by_agent) < len(agents) and not current_principal.get().restricted:
         fallback_last_run = _load_agent_last_run_map(agents)
         for row_agent_id, timestamp in fallback_last_run.items():
             last_run_by_agent.setdefault(row_agent_id, timestamp)
     agents = _sort_agents_by_last_run_desc(agents, last_run_by_agent=last_run_by_agent)
 
-    tool_counts = _build_agent_tool_count_map(agents)
+    tool_counts = (
+        {}
+        if current_principal.get().restricted
+        else _build_agent_tool_count_map(agents)
+    )
     for agent in agents:
         if not isinstance(agent, dict) or not agent.get("_is_virtual_trace_source"):
             continue
         runtime_tool_names = agent.get("_runtime_tool_names") or []
         tool_counts[_extract_agent_identifier(agent)] = len(runtime_tool_names)
     thread_rows_by_agent = _build_agent_thread_rows(
-        agents, conversation_docs=conversation_docs
+        agents, conversation_docs=conversation_docs, tool_log_docs=tool_log_docs
     )
+    if indexed_summaries is not None:
+        for agent in agents:
+            groups = [
+                row
+                for row in indexed_summaries
+                if row.get("agent_id") in _trace_agent_ids(agent)
+            ]
+            thread_rows_by_agent[_extract_agent_identifier(agent)] = [
+                {
+                    "thread_id": row["thread_id"] or "",
+                    "memory_id": "",
+                    "event_count": row["event_count"],
+                    "last_ts": _coerce_timestamp(row["latest_timestamp"]) or 0,
+                    "last_activity": _format_trace_timestamp(row["latest_timestamp"]),
+                }
+                for row in groups
+            ]
     agent_rows = _build_trace_agent_rows(
         agents=agents,
         tool_counts=tool_counts,
@@ -142,38 +354,41 @@ async def traces_page(
                 None,
             )
             if selected_agent is None:
-                selected_agent = _state["provider"].retrieve_memagent(selected_agent_id)
+                selected_agent = (
+                    None
+                    if current_principal.get().restricted
+                    else _state["provider"].retrieve_memagent(selected_agent_id)
+                )
+            if selected_agent is None:
+                selected_agent = _targeted_runtime_agent(
+                    selected_agent_id, selected_thread_id
+                )
             if not selected_agent:
                 raise HTTPException(status_code=404, detail="Agent not found")
 
-            (
-                selected_conversations,
-                selected_tool_logs,
-                selected_query_metadata,
-            ) = _load_trace_snapshot(
-                agent_ids=sorted(_trace_agent_ids(selected_agent)),
-                memory_ids=_extract_agent_memory_ids(selected_agent),
-                thread_id=selected_thread_id,
-                limit=500,
-            )
-            # Use the targeted page for the timeline. The overview page remains
-            # a separate bounded snapshot so an older agent cannot disappear
-            # merely because other agents are busier.
-            timeline_conversations = selected_conversations
-            timeline_tool_logs = selected_tool_logs
-            trace_query_metadata = selected_query_metadata
-
-            trace_events = _load_agent_trace_events(
-                selected_agent,
+            selected_snapshot, trace_events = _selection_window(
+                request=request,
+                agent_id=selected_agent_id,
+                selected_agent=selected_agent,
                 thread_id=selected_thread_id,
                 thread_memory_id=selected_thread_memory_id,
-                conversation_docs=timeline_conversations,
-                tool_log_docs=timeline_tool_logs,
+                root_trace_id=root_trace_id,
+                turn_id=turn_id,
+                task_id=task_id,
             )
+            trace_query_metadata = selected_snapshot.query_metadata
+            if event_id and not any(
+                e.get("event_id") == event_id for e in trace_events
+            ):
+                raise HTTPException(
+                    status_code=404,
+                    detail="Selected event is not in the authorized loaded window; narrow the trace selection",
+                )
             latest_timestamp = (
                 trace_events[-1].get("timestamp") if trace_events else None
             )
             trace_summary = {
+                **trace_events.coverage,
                 "event_count": len(trace_events),
                 "latest_timestamp": _format_trace_timestamp(latest_timestamp),
             }
@@ -186,10 +401,11 @@ async def traces_page(
             )
             window_truncated = (
                 bool(trace_query_metadata.get("truncated"))
-                or len(trace_events) >= 300
+                or bool(trace_events.coverage.get("truncated"))
                 or bool(
                     not selected_thread_id
                     and not selected_thread_memory_id
+                    and not (root_trace_id or turn_id or task_id)
                     and agent_event_count > len(trace_events)
                 )
             )
@@ -197,6 +413,10 @@ async def traces_page(
                 "thread" if selected_thread_id or selected_thread_memory_id else "agent"
             )
             try:
+                if current_principal.get().restricted:
+                    raise PermissionError(
+                        "Legacy learning records are outside the scoped trace view"
+                    )
                 root_trace_ids = {
                     _to_text(event.get("root_trace_id")).strip()
                     for event in trace_events
@@ -227,6 +447,25 @@ async def traces_page(
                 signals=trace_signals,
             )
             analysis_params = {"agent_id": selected_agent_id}
+            analysis_params.update(
+                {
+                    k: request.query_params[k]
+                    for k in ("start_time", "end_time", "run_id")
+                    if k in request.query_params
+                }
+            )
+            analysis_params.update(
+                {
+                    k: v
+                    for k, v in {
+                        "root_trace_id": root_trace_id,
+                        "turn_id": turn_id,
+                        "task_id": task_id,
+                        **scoped_trace_filters(),
+                    }.items()
+                    if v is not None
+                }
+            )
             if selected_thread_id:
                 analysis_params["thread_id"] = selected_thread_id
             if selected_thread_memory_id:
@@ -261,7 +500,16 @@ async def traces_page(
             error = str(exc)
 
     content_mode = trace_content_mode()
-    display_trace_events = redact_trace_events(trace_events, mode=content_mode)
+    # Payloads are fetched only after an explicit, permission-gated reveal.
+    display_trace_events = redact_trace_events(trace_events, mode="metadata")
+    for event in display_trace_events:
+        event["anchor"] = event_anchor(event.get("event_id"))
+        event.pop("content", None)
+    if trace_analysis:
+        for insight in trace_analysis["insights"]:
+            insight["evidence_anchors"] = [
+                event_anchor(value) for value in insight.get("evidence_event_ids", [])
+            ]
     audit_trace_view(
         request,
         "trace_timeline" if selected_agent_id else "trace_dashboard",
@@ -294,9 +542,36 @@ async def traces_page(
             ),
             "selected_agent_id": selected_agent_id,
             "selected_thread_id": selected_thread_id,
+            "selected_root_trace_id": root_trace_id,
+            "selected_turn_id": turn_id,
+            "selected_task_id": task_id,
+            "selected_event_id": event_id,
+            "selection_urls": _selection_urls(
+                request,
+                agent_id=selected_agent_id,
+                thread_id=selected_thread_id,
+                thread_memory_id=selected_thread_memory_id,
+                root_trace_id=root_trace_id,
+                turn_id=turn_id,
+                task_id=task_id,
+                event_id=event_id,
+            ),
+            "trace_capabilities": trace_capabilities(request),
             "selected_thread_memory_id": selected_thread_memory_id,
             "selected_thread_row": selected_thread_row,
             "trace_events": display_trace_events,
+            "trace_waterfall": build_causal_waterfall(display_trace_events),
+            "trace_inspectors": build_lineage_inspectors(display_trace_events),
+            "trace_permissions": {
+                permission: current_principal.get().allows(permission)
+                for permission in (
+                    "trace.reveal",
+                    "artifact.lookup",
+                    "account.resolve",
+                    "replay.create",
+                )
+            },
+            "inspection_scope": scoped_trace_filters(),
             "trace_summary": trace_summary,
             "trace_analysis": trace_analysis,
             "trace_analysis_export_url": trace_analysis_export_url,
@@ -310,12 +585,244 @@ async def traces_page(
     )
 
 
+def _inspection_context(request, **values):
+    return {
+        "request": request,
+        "provider_type": _state.get("provider_type"),
+        "connection_info": _state.get("connection_info"),
+        "agents_nav": [],
+        "active_page": "traces",
+        **values,
+    }
+
+
+@router.get("/traces/health", response_class=HTMLResponse)
+@router.get("/traces/health.json", response_class=JSONResponse)
+async def trace_health_page(
+    request: Request,
+    agent_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    limit: int = 500,
+    thread_memory_id: Optional[str] = None,
+    root_trace_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+):
+    """Read-only capture/query diagnostics, explicitly limited to loaded rows."""
+    if not _state.get("provider"):
+        raise HTTPException(status_code=503, detail="No memory provider connected")
+    snapshot, events = _selection_window(
+        request=request,
+        agent_id=agent_id,
+        thread_id=thread_id,
+        thread_memory_id=thread_memory_id,
+        root_trace_id=root_trace_id,
+        turn_id=turn_id,
+        task_id=task_id,
+        limit=limit,
+    )
+    health = build_trace_health(events)
+    health["queries"] = {
+        store: {
+            key: snapshot.query_metadata.get(store, {}).get(key)
+            for key in (
+                "provider_native",
+                "scanned_count",
+                "query_duration_ms",
+                "truncated",
+            )
+        }
+        for store in ("conversation", "tool_log", "trace")
+    }
+    health["failed_queries"] = snapshot.query_metadata.get("query_errors", [])
+    from ...observability.pipeline import pipeline_health
+
+    health["pipeline"] = (
+        pipeline_health(_state["provider"])
+        if not current_principal.get().restricted
+        else {"reported": False, "scope": "not_available_for_scoped_accounts"}
+    )
+    capabilities = getattr(_state["provider"], "observability_capabilities", None)
+    try:
+        health["index"] = (
+            capabilities()
+            if callable(capabilities)
+            else {"ready": False, "span_index": False}
+        )
+    except Exception:
+        health["index"] = {"ready": False, "state": "unavailable"}
+    health["instrumentation_versions"] = trace_coverage(events, events.coverage).get(
+        "instrumentation_versions", []
+    )
+    health["registration"] = {"state": "unknown"}
+    if not current_principal.get().restricted:
+        try:
+            registered = {
+                _extract_agent_identifier(row): set(_extract_agent_memory_ids(row))
+                for row in _state["provider"].list_memagents()
+            }
+            health["registration"] = {
+                "state": "observed",
+                "unregistered_agents": len(
+                    {
+                        e["agent_id"]
+                        for e in events
+                        if e.get("agent_id") and e["agent_id"] not in registered
+                    }
+                ),
+                "memory_id_mismatch_events": sum(
+                    bool(
+                        e.get("agent_id") in registered
+                        and registered[e["agent_id"]]
+                        and e.get("memory_id")
+                        and e["memory_id"] not in registered[e["agent_id"]]
+                    )
+                    for e in events
+                ),
+            }
+        except Exception:
+            pass
+    from ...observability.inspection import build_observability_alerts
+
+    health["alerts"] = build_observability_alerts(health)
+    audit_trace_view(
+        request,
+        "trace_health",
+        agent_id=agent_id,
+        thread_id=thread_id,
+        result_count=len(events),
+        content_mode="metadata",
+    )
+    if request.url.path.endswith(".json"):
+        return JSONResponse(_json_safe(health))
+    return templates.TemplateResponse(
+        "observability_health.html",
+        _inspection_context(
+            request,
+            health=health,
+            agent_id=agent_id,
+            thread_id=thread_id,
+            selection_urls=_selection_urls(
+                request,
+                agent_id=agent_id,
+                thread_id=thread_id,
+                thread_memory_id=thread_memory_id,
+                root_trace_id=root_trace_id,
+                turn_id=turn_id,
+                task_id=task_id,
+                event_id=event_id,
+            ),
+        ),
+    )
+
+
+@router.get("/traces/compare", response_class=HTMLResponse)
+@router.get("/traces/compare.json", response_class=JSONResponse)
+async def trace_compare_page(
+    request: Request,
+    agent_id: Optional[str] = None,
+    baseline_root: Optional[str] = None,
+    candidate_root: Optional[str] = None,
+    baseline_turn: Optional[str] = None,
+    candidate_turn: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    limit: int = 500,
+    thread_memory_id: Optional[str] = None,
+    root_trace_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+):
+    """Compare captured structures only; never replay application side effects."""
+    if not _state.get("provider"):
+        raise HTTPException(status_code=503, detail="No memory provider connected")
+    comparison = None
+    if agent_id and baseline_root and candidate_root:
+        snapshot, events = _selection_window(
+            request=request,
+            agent_id=agent_id,
+            thread_id=thread_id,
+            thread_memory_id=thread_memory_id,
+            limit=limit,
+            event_limit=0,
+        )
+
+        def select(root, turn):
+            rows = select_trace_events(
+                events, root_trace_id=root, turn_id=turn, task_id=task_id, limit=1000
+            )
+            if not rows:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Requested trace not found in the bounded loaded window; narrow the thread or increase the row limit",
+                )
+            return TraceEvents(
+                redact_trace_events(rows, mode="metadata"), coverage=rows.coverage
+            )
+
+        comparison = compare_trace_windows(
+            select(baseline_root, baseline_turn), select(candidate_root, candidate_turn)
+        )
+        audit_trace_view(
+            request,
+            "trace_compare",
+            agent_id=agent_id,
+            thread_id=thread_id,
+            result_count=comparison["baseline"]["normalized_events"]
+            + comparison["candidate"]["normalized_events"],
+            content_mode="metadata",
+        )
+    elif request.url.path.endswith(".json"):
+        raise HTTPException(
+            status_code=400,
+            detail="agent_id, baseline_root and candidate_root are required",
+        )
+    if request.url.path.endswith(".json"):
+        return JSONResponse(_json_safe(comparison))
+    return templates.TemplateResponse(
+        "observability_compare.html",
+        _inspection_context(
+            request,
+            comparison=comparison,
+            agent_id=agent_id,
+            thread_id=thread_id,
+            baseline_root=baseline_root,
+            candidate_root=candidate_root,
+            baseline_turn=baseline_turn,
+            candidate_turn=candidate_turn,
+            selection_urls=_selection_urls(
+                request,
+                agent_id=agent_id,
+                thread_id=thread_id,
+                thread_memory_id=thread_memory_id,
+                root_trace_id=root_trace_id or baseline_root,
+                turn_id=turn_id or baseline_turn,
+                task_id=task_id,
+                event_id=event_id,
+            ),
+        ),
+    )
+
+
 @router.get("/traces/analysis.json", response_class=JSONResponse)
 async def trace_analysis_export(
     request: Request,
     agent_id: str,
     thread_id: Optional[str] = None,
     thread_memory_id: Optional[str] = None,
+    root_trace_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
 ):
     """Export a deterministic, read-only improvement report as JSON."""
     provider = _state.get("provider")
@@ -323,7 +830,11 @@ async def trace_analysis_export(
         raise HTTPException(status_code=503, detail="No memory provider connected")
 
     try:
-        agents = provider.list_memagents() or []
+        agents = (
+            []
+            if current_principal.get().restricted
+            else provider.list_memagents() or []
+        )
     except Exception as exc:
         logger.error("Failed to list agents for trace analysis export: %s", exc)
         raise HTTPException(status_code=503, detail="Unable to load agents") from exc
@@ -344,26 +855,29 @@ async def trace_analysis_export(
     )
     if selected_agent is None and agent_id != _RUNTIME_TRACE_AGENT_ID:
         try:
-            selected_agent = provider.retrieve_memagent(agent_id)
+            selected_agent = (
+                None
+                if current_principal.get().restricted
+                else provider.retrieve_memagent(agent_id)
+            )
         except Exception as exc:
             logger.debug("Failed to retrieve trace export agent %s: %s", agent_id, exc)
+    if selected_agent is None:
+        selected_agent = _targeted_runtime_agent(agent_id, thread_id)
     if not selected_agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     selected_thread_id = _to_text(thread_id).strip() or None
     selected_thread_memory_id = _to_text(thread_memory_id).strip() or None
-    conversation_docs, tool_log_docs, query_metadata = _load_trace_snapshot(
-        agent_ids=sorted(_trace_agent_ids(selected_agent)),
-        memory_ids=_extract_agent_memory_ids(selected_agent),
-        thread_id=selected_thread_id,
-        limit=500,
-    )
-    events = _load_agent_trace_events(
-        selected_agent,
+    _snapshot, events = _selection_window(
+        request=request,
+        agent_id=agent_id,
+        selected_agent=selected_agent,
         thread_id=selected_thread_id,
         thread_memory_id=selected_thread_memory_id,
-        conversation_docs=conversation_docs,
-        tool_log_docs=tool_log_docs,
+        root_trace_id=root_trace_id,
+        turn_id=turn_id,
+        task_id=task_id,
     )
     source_is_virtual = bool(
         isinstance(selected_agent, dict)
@@ -371,6 +885,10 @@ async def trace_analysis_export(
     )
     scope = "thread" if selected_thread_id or selected_thread_memory_id else "agent"
     try:
+        if current_principal.get().restricted:
+            raise PermissionError(
+                "Legacy learning records are outside the scoped trace view"
+            )
         signal_store = ObservabilityStore(provider)
         root_trace_ids = {
             _to_text(event.get("root_trace_id")).strip()
@@ -391,7 +909,7 @@ async def trace_analysis_export(
         agent_name=_extract_agent_persona_name(selected_agent),
         scope=scope,
         source_is_virtual=source_is_virtual,
-        window_truncated=bool(query_metadata.get("truncated")) or len(events) >= 300,
+        window_truncated=bool(events.coverage.get("truncated")),
         signals=signals,
     )
     audit_trace_view(
@@ -410,11 +928,22 @@ async def trace_analysis_export(
 @router.get("/traces/events.json", response_class=JSONResponse)
 async def trace_events_page(
     request: Request,
-    store: str = "conversation",
+    store: str = "trace",
+    view: str = "events",
     agent_id: Optional[str] = None,
     memory_id: Optional[str] = None,
     thread_id: Optional[str] = None,
+    thread_memory_id: Optional[str] = None,
+    task_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    root_trace_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    resource_ref: Optional[str] = None,
+    event_kind: Optional[str] = None,
+    status: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
     tool_name: Optional[str] = None,
     success: Optional[bool] = None,
     limit: int = 250,
@@ -426,6 +955,63 @@ async def trace_events_page(
         raise HTTPException(status_code=503, detail="No memory provider connected")
     from ...enums.memory_type import MemoryType
 
+    if view not in {"events", "bundles"}:
+        raise HTTPException(status_code=400, detail="view must be events or bundles")
+
+    if store == "all":
+        if (
+            view != "events"
+            or cursor
+            or any(
+                (
+                    memory_id,
+                    resource_ref,
+                    event_kind,
+                    status,
+                    tool_name,
+                    success is not None,
+                )
+            )
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Combined export is a bounded snapshot; use per-store pagination for additional event filters",
+            )
+        scoped_trace_filters({"user_id": user_id} if user_id is not None else {})
+        _snapshot, events = _selection_window(
+            request=request,
+            agent_id=agent_id,
+            thread_id=thread_id,
+            thread_memory_id=thread_memory_id,
+            task_id=task_id,
+            root_trace_id=root_trace_id,
+            turn_id=turn_id,
+            limit=500,
+        )
+        audit_trace_view(
+            request,
+            "trace_combined_export",
+            result_count=len(events),
+            content_mode="metadata",
+        )
+        return JSONResponse(
+            _json_safe(
+                {
+                    **events.coverage,
+                    "evidence_coverage": trace_coverage(events, events.coverage),
+                    "items": redact_trace_events(events, mode="metadata"),
+                    "content_mode": "metadata",
+                    "view": "events",
+                    "store_selection": ["conversation", "tool_log", "trace"],
+                }
+            )
+        )
+
+    if thread_memory_id is not None or task_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Task and thread-memory selection require store=all",
+        )
     memory_type_by_name = {
         "conversation": MemoryType.CONVERSATION_MEMORY,
         "conversation_memory": MemoryType.CONVERSATION_MEMORY,
@@ -459,31 +1045,72 @@ async def trace_events_page(
         kwargs["record_type"] = _TRACE_BUNDLE_RECORD_TYPE
     if user_id is not None:
         kwargs["user_id"] = user_id
+    kwargs = scoped_trace_filters(kwargs)
+    event_filters = {
+        "root_trace_id": root_trace_id,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "resource_refs": [resource_ref] if resource_ref else None,
+        "event_kinds": [event_kind] if event_kind else None,
+        "statuses": [status] if status else None,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+    if view == "bundles" and any(value is not None for value in event_filters.values()):
+        raise HTTPException(status_code=400, detail="Event filters require view=events")
+    if view == "events":
+        kwargs.update(
+            {key: value for key, value in event_filters.items() if value is not None}
+        )
     try:
-        page = query(memory_type, **kwargs)
+        page = (
+            (
+                provider.query_trace_events(**kwargs)
+                if memory_type == MemoryType.SHARED_MEMORY
+                and callable(getattr(provider, "query_trace_events", None))
+                else query_trace_events(provider, memory_type, **kwargs)
+            )
+            if view == "events"
+            else query(memory_type, **kwargs)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Trace event query failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Trace query failed; evidence coverage is unavailable",
+        ) from exc
 
     mode = trace_content_mode()
+    if mode != "metadata" and not audit_trace_view(
+        request,
+        "trace_export_requested",
+        agent_id=agent_id,
+        thread_id=thread_id,
+        content_mode=mode,
+    ):
+        raise HTTPException(
+            status_code=503, detail="Audited trace access is unavailable"
+        )
     safe_items: List[Dict[str, Any]] = []
-    for raw_item in page.get("items") or []:
+    export_items = redact_trace_events(page.get("items") or [], mode=mode)
+    for raw_item in export_items:
         if not isinstance(raw_item, dict):
             continue
         item = dict(raw_item)
-        if mode == "metadata":
-            for key in ("content", "arguments", "result", "embedding"):
-                if key in item:
-                    item[key] = "[hidden]"
-        elif mode == "redacted":
-            item = redact_value(item)
-        if item.get("user_id"):
-            item["user_id"] = "[pseudonymized]"
         safe_items.append(_json_safe(item))
     response_payload = {
         key: _json_safe(value) for key, value in page.items() if key != "items"
     }
     response_payload["items"] = safe_items
     response_payload["content_mode"] = mode
+    response_payload["view"] = view
+    response_payload["store_selection"] = [store]
+    if view == "events":
+        response_payload["evidence_coverage"] = trace_coverage(
+            page.get("items", []), page
+        )
     audit_trace_view(
         request,
         "trace_events_page",
@@ -554,6 +1181,7 @@ def _analysis_for_selection(
         thread_memory_id=thread_memory_id,
         conversation_docs=conversations,
         tool_log_docs=tools,
+        query_metadata=query_metadata,
     )
     source_is_virtual = bool(
         isinstance(selected_agent, dict)
@@ -578,7 +1206,7 @@ def _analysis_for_selection(
         agent_name=_extract_agent_persona_name(selected_agent),
         scope="thread" if thread_id or thread_memory_id else "agent",
         source_is_virtual=source_is_virtual,
-        window_truncated=bool(query_metadata.get("truncated")) or len(events) >= 300,
+        window_truncated=bool(events.coverage.get("truncated")),
         signals=signals,
     )
     return report, events, selected_agent
@@ -783,15 +1411,30 @@ def _load_trace_snapshot(
     memory_ids: Optional[List[str]] = None,
     thread_id: Optional[str] = None,
     limit: int = 750,
-) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+) -> TraceSnapshot:
     """Load bounded trace pages and surface their query/freshness metadata."""
     provider = _state.get("provider")
     if not provider:
-        return [], [], {"truncated": False, "provider_native": False}
+        return TraceSnapshot(
+            query_metadata={"truncated": False, "provider_native": False}
+        )
 
     from ...enums.memory_type import MemoryType
 
     def _page(memory_type: MemoryType) -> Dict[str, Any]:
+        from ...observability.index import indexed_bundle_rows, read_path
+
+        if memory_type == MemoryType.SHARED_MEMORY and read_path() == "index":
+            page = provider.query_trace_events(
+                agent_ids=agent_ids,
+                memory_ids=memory_ids,
+                thread_id=thread_id,
+                limit=limit,
+                **scoped_trace_filters(),
+            )
+            if page.get("normalization_errors"):
+                raise RuntimeError("Indexed trace coverage is incomplete")
+            return {**page, "items": indexed_bundle_rows(page)}
         query = getattr(provider, "query_observability_records", None)
         if callable(query):
             kwargs: Dict[str, Any] = {
@@ -802,6 +1445,7 @@ def _load_trace_snapshot(
             }
             if memory_type == MemoryType.SHARED_MEMORY:
                 kwargs["record_type"] = _TRACE_BUNDLE_RECORD_TYPE
+            kwargs = scoped_trace_filters(kwargs)
             return query(
                 memory_type,
                 **kwargs,
@@ -811,6 +1455,14 @@ def _load_trace_snapshot(
         matching: List[Dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
+                continue
+            from ...observability.normalization import read_payload, row_identity
+
+            identity = row_identity(row, read_payload(row))
+            if any(
+                identity.get(key) != value
+                for key, value in scoped_trace_filters().items()
+            ):
                 continue
             if memory_type == MemoryType.SHARED_MEMORY:
                 try:
@@ -835,21 +1487,27 @@ def _load_trace_snapshot(
             "provider_native": False,
         }
 
+    query_errors = []
     try:
         conversation_page = _page(MemoryType.CONVERSATION_MEMORY)
     except Exception as exc:
-        logger.warning("Failed to query conversation trace documents: %s", exc)
+        logger.warning(
+            "Failed to query conversation trace documents (%s)", type(exc).__name__
+        )
         conversation_page = {"items": [], "truncated": False}
+        query_errors.append("conversation")
     try:
         tool_page = _page(MemoryType.TOOL_LOG)
     except Exception as exc:
-        logger.warning("Failed to query tool trace documents: %s", exc)
+        logger.warning("Failed to query tool trace documents (%s)", type(exc).__name__)
         tool_page = {"items": [], "truncated": False}
+        query_errors.append("tool_log")
     try:
         trace_page = _page(MemoryType.SHARED_MEMORY)
     except Exception as exc:
-        logger.warning("Failed to query private trace bundles: %s", exc)
+        logger.warning("Failed to query private trace bundles (%s)", type(exc).__name__)
         trace_page = {"items": [], "truncated": False}
+        query_errors.append("trace")
 
     conversations = conversation_page.get("items") or []
     tool_logs = tool_page.get("items") or []
@@ -864,6 +1522,7 @@ def _load_trace_snapshot(
         normalized.setdefault("role", "tool")
         trace_bundles.append(normalized)
     metadata = {
+        "query_errors": query_errors,
         "truncated": bool(conversation_page.get("truncated"))
         or bool(tool_page.get("truncated"))
         or bool(trace_page.get("truncated")),
@@ -908,10 +1567,11 @@ def _load_trace_snapshot(
         },
     }
 
-    return (
-        [row for row in conversations if isinstance(row, dict)] + trace_bundles,
-        [row for row in tool_logs if isinstance(row, dict)],
-        metadata,
+    return TraceSnapshot(
+        conversation_rows=[row for row in conversations if isinstance(row, dict)],
+        tool_rows=[row for row in tool_logs if isinstance(row, dict)],
+        bundle_rows=trace_bundles,
+        query_metadata=metadata,
     )
 
 
@@ -929,6 +1589,34 @@ def _discover_runtime_trace_agents(
     the observability page look empty or fragmenting it by ephemeral process
     IDs.
     """
+    if current_principal.get().restricted:
+        from ...observability.normalization import read_payload, row_identity
+
+        scoped_agents = {}
+        for row in [*conversation_docs, *tool_log_docs]:
+            identity = row_identity(row, read_payload(row))
+            if not identity.get("agent_id") or any(
+                identity.get(key) != value
+                for key, value in scoped_trace_filters().items()
+            ):
+                continue
+            key = identity["agent_id"]
+            agent = scoped_agents.setdefault(
+                key,
+                {
+                    "agent_id": key,
+                    "name": key,
+                    "memory_ids": [],
+                    "_is_virtual_trace_source": True,
+                    "_runtime_agent_ids": [key],
+                },
+            )
+            if (
+                identity.get("memory_id")
+                and identity["memory_id"] not in agent["memory_ids"]
+            ):
+                agent["memory_ids"].append(identity["memory_id"])
+        return list(scoped_agents.values())
     result = list(agents or [])
     saved_agent_ids = {
         agent_id
@@ -1030,209 +1718,85 @@ def _build_agent_thread_rows(
     agents: List[Any],
     *,
     conversation_docs: Optional[List[Dict[str, Any]]] = None,
+    tool_log_docs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Build per-agent thread rows for traces table child rows."""
-    provider = _state.get("provider")
-    if not provider or not agents:
-        return {}
-
-    agent_ids = {
-        _extract_agent_identifier(agent)
-        for agent in agents
-        if _extract_agent_identifier(agent)
-    }
-    memory_to_agent_ids: Dict[str, set[str]] = {}
-    runtime_to_virtual_id: Dict[str, str] = {}
+    """Derive thread counts from the same normalized window as the timeline."""
+    result = {}
     for agent in agents:
-        row_agent_id = _extract_agent_identifier(agent)
-        if not row_agent_id:
-            continue
-        for memory_id in _extract_agent_memory_ids(agent):
-            memory_to_agent_ids.setdefault(memory_id, set()).add(row_agent_id)
-        if isinstance(agent, dict) and agent.get("_is_virtual_trace_source"):
-            for runtime_agent_id in _trace_agent_ids(agent):
-                runtime_to_virtual_id[runtime_agent_id] = row_agent_id
-
-    aggregate: Dict[str, Dict[str, Dict[str, Any]]] = {}
-
-    # Fast path: aggregate directly from conversation documents.
-    try:
-        from ...enums.memory_type import MemoryType
-
-        docs = (
-            conversation_docs
-            if conversation_docs is not None
-            else provider.list_all(MemoryType.CONVERSATION_MEMORY) or []
+        events = _load_agent_trace_events(
+            agent,
+            total_limit=0,
+            conversation_docs=conversation_docs,
+            tool_log_docs=tool_log_docs or [],
         )
-        for doc in docs:
-            if not isinstance(doc, dict):
-                continue
-            memory_id = _extract_trace_memory_id(doc)
-            raw_agent_id = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
-            associated_agent_ids = set(memory_to_agent_ids.get(memory_id, set()))
-            if raw_agent_id in agent_ids:
-                associated_agent_ids.add(raw_agent_id)
-            virtual_id = runtime_to_virtual_id.get(raw_agent_id)
-            if virtual_id:
-                associated_agent_ids.add(virtual_id)
-            if not associated_agent_ids:
-                continue
-
-            thread_id = _extract_trace_thread_id(doc, fallback=memory_id)
+        rows = {}
+        for event in events:
+            memory_id = event.get("memory_id") or "—"
+            thread_id = event.get("thread_id") or memory_id
             key = _thread_row_key(thread_id, memory_id)
-            ts = _extract_message_timestamp(doc) or 0.0
-
-            for associated_agent_id in associated_agent_ids:
-                by_thread = aggregate.setdefault(associated_agent_id, {})
-                entry = by_thread.setdefault(
-                    key,
-                    {
-                        "thread_id": thread_id,
-                        "memory_id": memory_id,
-                        "event_count": 0,
-                        "last_ts": 0.0,
-                    },
-                )
-                entry["event_count"] += 1
-                if ts > entry["last_ts"]:
-                    entry["last_ts"] = ts
-    except Exception as exc:
-        logger.debug("Failed thread aggregation from docs: %s", exc)
-
-    # Fallback for agents missing doc-level association.
-    for agent in agents:
-        agent_id = _extract_agent_identifier(agent)
-        if not agent_id:
-            continue
-        if agent_id in aggregate and aggregate[agent_id]:
-            continue
-
-        by_thread: Dict[str, Dict[str, Any]] = {}
-        for memory_id in _extract_agent_memory_ids(agent):
-            history = _retrieve_conversation_history(memory_id=memory_id, limit=None)
-            for msg in history:
-                thread_id = _extract_trace_thread_id(msg, fallback=memory_id)
-                key = _thread_row_key(thread_id, memory_id)
-                ts = _extract_message_timestamp(msg) or 0.0
-                entry = by_thread.setdefault(
-                    key,
-                    {
-                        "thread_id": thread_id,
-                        "memory_id": memory_id,
-                        "event_count": 0,
-                        "last_ts": 0.0,
-                    },
-                )
-                entry["event_count"] += 1
-                if ts > entry["last_ts"]:
-                    entry["last_ts"] = ts
-        if by_thread:
-            aggregate[agent_id] = by_thread
-
-    thread_rows_by_agent: Dict[str, List[Dict[str, Any]]] = {}
-    for agent_id, by_thread in aggregate.items():
-        rows = []
-        for entry in by_thread.values():
-            rows.append(
+            row = rows.setdefault(
+                key,
                 {
-                    "thread_id": entry["thread_id"],
-                    "memory_id": entry["memory_id"],
-                    "event_count": int(entry["event_count"]),
-                    "last_ts": float(entry["last_ts"]),
-                    "last_activity": (
-                        _format_trace_timestamp(entry["last_ts"])
-                        if entry["last_ts"] > 0
-                        else "—"
-                    ),
-                }
+                    "thread_id": thread_id,
+                    "memory_id": memory_id,
+                    "event_count": 0,
+                    "last_ts": 0.0,
+                    "last_activity": "—",
+                },
             )
-        rows.sort(key=lambda item: item.get("last_ts", 0.0), reverse=True)
-        thread_rows_by_agent[agent_id] = rows
-
-    return thread_rows_by_agent
+            row["event_count"] += 1
+            ts = _coerce_timestamp(event.get("timestamp")) or 0.0
+            if ts > row["last_ts"]:
+                row.update(last_ts=ts, last_activity=_format_trace_timestamp(ts))
+        result[_extract_agent_identifier(agent)] = sorted(
+            rows.values(),
+            key=lambda row: row["last_ts"],
+            reverse=True,
+        )
+    return result
 
 
 def _build_agent_trace_metrics(
     agents: List[Any],
     *,
     conversation_docs: Optional[List[Dict[str, Any]]] = None,
+    tool_log_docs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Build per-agent trace metrics for the traces table."""
-    provider = _state.get("provider")
-    if not provider or not agents:
-        return {}
-
-    agent_ids = {
-        _extract_agent_identifier(agent)
-        for agent in agents
-        if _extract_agent_identifier(agent)
-    }
-    memory_to_agent_ids: Dict[str, set[str]] = {}
-    runtime_to_virtual_id: Dict[str, str] = {}
+    """Count child events separately from their storage envelopes."""
+    metrics = {}
     for agent in agents:
-        row_agent_id = _extract_agent_identifier(agent)
-        if not row_agent_id:
-            continue
-        for memory_id in _extract_agent_memory_ids(agent):
-            memory_to_agent_ids.setdefault(memory_id, set()).add(row_agent_id)
-        if isinstance(agent, dict) and agent.get("_is_virtual_trace_source"):
-            for runtime_agent_id in _trace_agent_ids(agent):
-                runtime_to_virtual_id[runtime_agent_id] = row_agent_id
-
-    metrics: Dict[str, Dict[str, Any]] = {}
-
-    # Fast path: aggregate from conversation docs in one pass.
-    try:
-        from ...enums.memory_type import MemoryType
-
-        docs = (
-            conversation_docs
-            if conversation_docs is not None
-            else provider.list_all(MemoryType.CONVERSATION_MEMORY) or []
+        events = _load_agent_trace_events(
+            agent,
+            total_limit=0,
+            conversation_docs=conversation_docs,
+            tool_log_docs=tool_log_docs or [],
         )
-        for doc in docs:
-            if not isinstance(doc, dict):
-                continue
-            memory_id = _extract_trace_memory_id(doc)
-            raw_agent_id = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
-            associated_agent_ids = set(memory_to_agent_ids.get(memory_id, set()))
-            if raw_agent_id in agent_ids:
-                associated_agent_ids.add(raw_agent_id)
-            virtual_id = runtime_to_virtual_id.get(raw_agent_id)
-            if virtual_id:
-                associated_agent_ids.add(virtual_id)
-            if not associated_agent_ids:
-                continue
-            ts = _extract_message_timestamp(doc) or 0.0
-            for associated_agent_id in associated_agent_ids:
-                entry = metrics.setdefault(
-                    associated_agent_id, {"event_count": 0, "last_ts": 0.0}
+        metrics[_extract_agent_identifier(agent)] = {
+            "event_count": len(events),
+            "bundle_count": events.coverage.get("bundle_count", 0),
+            "coverage": events.coverage.get("coverage", "unknown"),
+            "last_ts": max(
+                (_coerce_timestamp(e.get("timestamp")) or 0.0 for e in events),
+                default=0.0,
+            ),
+            "search_terms": " ".join(
+                str(value)
+                for event in events
+                for value in (
+                    event.get("thread_id", ""),
+                    event.get("root_trace_id", ""),
+                    event.get("run_id", ""),
+                    event.get("error_code", ""),
+                    *(
+                        ref.get("ref", "")
+                        for ref in [
+                            *(event.get("input_refs") or []),
+                            *(event.get("output_refs") or []),
+                        ]
+                    ),
                 )
-                entry["event_count"] += 1
-                if ts > entry["last_ts"]:
-                    entry["last_ts"] = ts
-    except Exception as exc:
-        logger.debug("Failed to aggregate traces from conversation docs: %s", exc)
-
-    # Fallback for agents not covered by doc-level metadata.
-    for agent in agents:
-        agent_id = _extract_agent_identifier(agent)
-        if not agent_id:
-            continue
-        if agent_id in metrics and metrics[agent_id].get("event_count", 0) > 0:
-            continue
-
-        event_count = 0
-        last_ts = 0.0
-        for memory_id in _extract_agent_memory_ids(agent):
-            history = _retrieve_conversation_history(memory_id=memory_id, limit=None)
-            event_count += len(history)
-            for message in history:
-                ts = _extract_message_timestamp(message) or 0.0
-                if ts > last_ts:
-                    last_ts = ts
-        metrics[agent_id] = {"event_count": event_count, "last_ts": last_ts}
-
+            ),
+        }
     return metrics
 
 
@@ -1266,6 +1830,8 @@ def _build_trace_agent_rows(
             "memory_count": len(_extract_agent_memory_ids(agent)),
             "tool_count": int(tool_counts.get(agent_id, 0)),
             "event_count": int(metrics.get("event_count") or 0),
+            "bundle_count": int(metrics.get("bundle_count") or 0),
+            "coverage": metrics.get("coverage", "unknown"),
             "last_ts": last_ts,
             "last_activity": _format_trace_timestamp(last_ts) if last_ts > 0 else "—",
             "thread_rows": (
@@ -1279,6 +1845,7 @@ def _build_trace_agent_rows(
                     row["name"],
                     row["agent_id"],
                     row["mode"],
+                    metrics.get("search_terms", ""),
                 ]
             ).lower()
             if query not in searchable:
@@ -1291,117 +1858,21 @@ def _build_trace_agent_rows(
 
 
 def _expand_trace_bundle(
-    message: Dict[str, Any], *, memory_id: str, thread_id: str
+    message: Dict[str, Any],
+    *,
+    memory_id: str,
+    thread_id: str,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Expand MemAgent.run_stream telemetry into first-class timeline events."""
-    raw = message.get("content") or message.get("text")
-    if not isinstance(raw, str):
+    """Compatibility shim for integrations importing the old router helper."""
+    if not is_bundle(message):
         return None
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict) or payload.get("type") != "trace_bundle":
-        return None
-    timestamp = _format_trace_timestamp(message.get("timestamp"))
-    expanded = []
-    for event in payload.get("events") or []:
-        if not isinstance(event, dict):
-            continue
-        kind = (
-            _to_text(event.get("trace_kind") or event.get("kind") or "trace")
-            .strip()
-            .lower()
+    return normalize_trace_snapshot(
+        TraceSnapshot(
+            bundle_rows=[
+                {**message, "trace_memory_id": memory_id, "thread_id": thread_id},
+            ]
         )
-        title = _to_text(event.get("title") or kind or "Trace").strip()
-        content = _to_text(event.get("content") or event.get("message")).strip()
-        expanded.append(
-            {
-                "memory_id": memory_id,
-                "thread_id": thread_id,
-                "role": "tool",
-                "kind": kind or "trace",
-                "title": title or "Trace",
-                "trace_id": _to_text(event.get("trace_id")).strip(),
-                "content": content,
-                "timestamp": timestamp,
-                **{
-                    field: event[field]
-                    for field in (
-                        "schema_version",
-                        "application_id",
-                        "agent_id",
-                        "run_id",
-                        "turn_id",
-                        "root_trace_id",
-                        "span_id",
-                        "parent_span_id",
-                        "user_id",
-                        "tool_name",
-                        "logical_tool_name",
-                        "model_tool_name",
-                        "tool_call_id",
-                        "success",
-                        "status",
-                        "outcome",
-                        "outcome_reason_code",
-                        "tool_provider",
-                        "primary_provider",
-                        "fallback_provider",
-                        "outcome_retryable",
-                        "result_count",
-                        "fallback_used",
-                        "degraded",
-                        "error_code",
-                        "duration_ms",
-                        "model",
-                        "provider",
-                        "input_tokens",
-                        "output_tokens",
-                        "cached_tokens",
-                        "cost_usd",
-                        "finish_reason",
-                        "iteration",
-                        "stage",
-                        "total_tokens",
-                        "request_id",
-                        "client_page_type",
-                        "client_page_id",
-                        "client_title_fingerprint",
-                        "canonical_page_type",
-                        "canonical_page_id",
-                        "canonical_title_fingerprint",
-                        "thread_binding_status",
-                        "expected_thread_id",
-                        "ownership_verified",
-                        "request_context_present",
-                        "request_context_fingerprint",
-                        "request_context_key_count",
-                        "content_version",
-                        "grounding_status",
-                        "grounding_source",
-                        "grounding_excerpt_count",
-                        "grounding_source_ids",
-                        "cache_decision",
-                        "cache_enabled",
-                        "cache_bypass_reason",
-                        "memory_history_count",
-                        "memory_candidate_count",
-                        "memory_supplied_count",
-                        "memory_referenced_count",
-                        "memory_injected_chars",
-                        "memory_degraded",
-                        "memory_fallback_used",
-                        "entity_profile_count",
-                        "preference_count",
-                        "conversation_memory_count",
-                        "writing_sample_count",
-                    )
-                    if event.get(field) is not None
-                },
-            }
-        )
-    return expanded
+    ).events
 
 
 def _load_agent_tool_log_events(
@@ -1412,95 +1883,18 @@ def _load_agent_tool_log_events(
     thread_memory_id: str = "",
     documents: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Load durable TOOL_LOG executions into the observability timeline."""
     provider = _state.get("provider")
-    agent_id = _extract_agent_identifier(agent)
-    represented_agent_ids = _trace_agent_ids(agent)
-    if not provider or not agent_id:
-        return []
     if documents is None:
-        try:
-            from ...enums.memory_type import MemoryType
+        from ...enums.memory_type import MemoryType
 
-            documents = provider.list_all(MemoryType.TOOL_LOG) or []
-        except Exception as exc:
-            logger.debug("Failed to load TOOL_LOG events for %s: %s", agent_id, exc)
-            return []
-
-    events = []
-    known_memory_ids = {str(item) for item in memory_ids if item}
-    for doc in documents:
-        if not isinstance(doc, dict):
-            continue
-        doc_agent_id = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
-        if represented_agent_ids and doc_agent_id not in represented_agent_ids:
-            continue
-        memory_id = _extract_trace_memory_id(doc, fallback="—")
-        event_thread_id = _extract_trace_thread_id(doc, fallback=memory_id)
-        if known_memory_ids and memory_id not in known_memory_ids:
-            continue
-        if thread_id and event_thread_id != thread_id and memory_id != thread_id:
-            continue
-        if thread_memory_id and memory_id != thread_memory_id:
-            continue
-        tool_name = _to_text(doc.get("tool_name") or "tool").strip()
-        arguments = doc.get("arguments")
-        result = doc.get("result")
-        outcome_details = doc.get("outcome_details") or {}
-        if isinstance(outcome_details, str):
-            try:
-                outcome_details = json.loads(outcome_details)
-            except (TypeError, ValueError):
-                outcome_details = {}
-        if not isinstance(outcome_details, dict):
-            outcome_details = {}
-        outcome = _to_text(doc.get("outcome")).strip().lower() or (
-            "success" if doc.get("success") is not False else "error"
-        )
-        content = json.dumps(
-            {
-                "tool_log_id": doc.get("tool_log_id")
-                or doc.get("id")
-                or doc.get("_id"),
-                "tool_call_id": doc.get("tool_call_id"),
-                "arguments": arguments,
-                "result": result,
-                "success": doc.get("success"),
-                "error": doc.get("error"),
-                "outcome": outcome,
-                "outcome_details": outcome_details,
-            },
-            ensure_ascii=False,
-            default=str,
-            indent=2,
-        )
-        events.append(
-            {
-                "memory_id": memory_id,
-                "thread_id": event_thread_id,
-                "role": "tool",
-                "kind": "execution_log",
-                "title": f"Execution Log · {tool_name}",
-                "tool_name": tool_name,
-                "logical_tool_name": tool_name,
-                "success": doc.get("success"),
-                "outcome": outcome,
-                "outcome_reason_code": outcome_details.get("reason_code"),
-                "tool_provider": outcome_details.get("provider"),
-                "primary_provider": outcome_details.get("primary_provider"),
-                "fallback_provider": outcome_details.get("fallback_provider"),
-                "outcome_retryable": outcome_details.get("retryable"),
-                "result_count": outcome_details.get("result_count"),
-                "fallback_used": outcome_details.get("fallback_used"),
-                "degraded": outcome_details.get("degraded"),
-                "error_code": doc.get("error_code") or doc.get("error"),
-                "duration_ms": doc.get("duration_ms"),
-                "trace_id": _to_text(doc.get("tool_call_id")).strip(),
-                "content": content,
-                "timestamp": _format_trace_timestamp(doc.get("timestamp")),
-            }
-        )
-    return events
+        documents = provider.list_all(MemoryType.TOOL_LOG) if provider else []
+    return normalize_trace_snapshot(
+        TraceSnapshot(tool_rows=documents or []),
+        agent_ids=_trace_agent_ids(agent),
+        memory_ids=set(memory_ids),
+        thread_id=thread_id,
+        thread_memory_id=thread_memory_id,
+    ).events
 
 
 def _load_agent_trace_events(
@@ -1511,153 +1905,37 @@ def _load_agent_trace_events(
     thread_memory_id: Optional[str] = None,
     conversation_docs: Optional[List[Dict[str, Any]]] = None,
     tool_log_docs: Optional[List[Dict[str, Any]]] = None,
-) -> List[Dict[str, Any]]:
-    """Load trace events for a selected agent."""
-    events: List[Dict[str, Any]] = []
-    agent_id = _extract_agent_identifier(agent)
+    query_metadata: Optional[Dict[str, Any]] = None,
+) -> TraceEvents:
+    """Normalize all returned identities, including unregistered memories.
+
+    The provider bounds storage rows; total_limit bounds normalized children.
+    per_memory_limit is retained for call compatibility and no longer silently
+    discards bundles before their children can be counted.
+    """
     memory_ids = _extract_agent_memory_ids(agent)
-    selected_thread_id = _to_text(thread_id).strip()
-    selected_thread_memory_id = _to_text(thread_memory_id).strip()
-
-    histories_by_memory: Dict[str, List[Dict[str, Any]]] = {}
-    if conversation_docs is not None:
-        represented_agent_ids = _trace_agent_ids(agent)
-        known_memory_ids = set(memory_ids)
-        for doc in conversation_docs:
-            if not isinstance(doc, dict):
-                continue
-            event_memory_id = _extract_trace_memory_id(doc, fallback="")
-            if event_memory_id == "—":
-                event_memory_id = ""
-            doc_agent_id = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
-            if (
-                event_memory_id not in known_memory_ids
-                and doc_agent_id not in represented_agent_ids
-            ):
-                continue
-            if not event_memory_id:
-                event_memory_id = "—"
-            histories_by_memory.setdefault(event_memory_id, []).append(doc)
-        for history in histories_by_memory.values():
-            history.sort(key=lambda row: _extract_message_timestamp(row) or 0.0)
-
-    selected_memory_ids = memory_ids
-    if selected_thread_memory_id:
-        selected_memory_ids = [
-            memory_id
-            for memory_id in memory_ids
-            if memory_id == selected_thread_memory_id
-        ]
-
-    for memory_id in selected_memory_ids:
-        history = (
-            histories_by_memory.get(memory_id, [])
-            if conversation_docs is not None
-            else _retrieve_conversation_history(memory_id=memory_id, limit=None)
+    if conversation_docs is None:
+        snapshot = _load_trace_snapshot(
+            agent_ids=sorted(_trace_agent_ids(agent)),
+            memory_ids=memory_ids,
+            thread_id=thread_id,
         )
-        if per_memory_limit > 0 and len(history) > per_memory_limit:
-            history = history[-per_memory_limit:]
-        for msg in history:
-            event_thread_id = _extract_trace_thread_id(msg, fallback=memory_id)
-            if (
-                selected_thread_id
-                and event_thread_id != selected_thread_id
-                and memory_id != selected_thread_id
-            ):
-                continue
-            if selected_thread_memory_id and memory_id != selected_thread_memory_id:
-                continue
-            expanded = _expand_trace_bundle(
-                msg, memory_id=memory_id, thread_id=event_thread_id
-            )
-            if expanded is not None:
-                events.extend(expanded)
-            else:
-                events.append(
-                    {
-                        "memory_id": memory_id,
-                        "thread_id": event_thread_id,
-                        "role": _to_text(msg.get("role")).strip().lower() or "system",
-                        "kind": "conversation",
-                        "title": "Conversation event",
-                        "content": _to_text(msg.get("content") or msg.get("text")),
-                        "timestamp": _format_trace_timestamp(msg.get("timestamp")),
-                    }
-                )
-
-    # Fallback for agents without memory_ids: load directly by agent_id.
-    if not events and agent_id and conversation_docs is None:
-        provider = _state.get("provider")
-        if provider:
-            try:
-                from ...enums.memory_type import MemoryType
-
-                docs = provider.list_all(MemoryType.CONVERSATION_MEMORY) or []
-                for doc in docs:
-                    if not isinstance(doc, dict):
-                        continue
-                    doc_agent_id = _to_text(
-                        doc.get("agent_id") or doc.get("agentId")
-                    ).strip()
-                    if doc_agent_id != agent_id:
-                        continue
-                    event_memory_id = _extract_trace_memory_id(doc, fallback="—")
-                    event_thread_id = _extract_trace_thread_id(
-                        doc, fallback=event_memory_id
-                    )
-                    if (
-                        selected_thread_id
-                        and event_thread_id != selected_thread_id
-                        and event_memory_id != selected_thread_id
-                    ):
-                        continue
-                    if (
-                        selected_thread_memory_id
-                        and event_memory_id != selected_thread_memory_id
-                    ):
-                        continue
-                    expanded = _expand_trace_bundle(
-                        doc, memory_id=event_memory_id, thread_id=event_thread_id
-                    )
-                    if expanded is not None:
-                        events.extend(expanded)
-                    else:
-                        events.append(
-                            {
-                                "memory_id": event_memory_id,
-                                "thread_id": event_thread_id,
-                                "role": _to_text(doc.get("role")).strip().lower()
-                                or "system",
-                                "kind": "conversation",
-                                "title": "Conversation event",
-                                "content": _to_text(
-                                    doc.get("content") or doc.get("text")
-                                ),
-                                "timestamp": _format_trace_timestamp(
-                                    doc.get("timestamp")
-                                ),
-                            }
-                        )
-            except Exception as exc:
-                logger.debug(
-                    "Failed direct trace fallback for agent %s: %s",
-                    agent_id,
-                    exc,
-                )
-
-    events.extend(
-        _load_agent_tool_log_events(
-            agent,
-            memory_ids,
-            thread_id=selected_thread_id,
-            thread_memory_id=selected_thread_memory_id,
-            documents=tool_log_docs,
-        )
-    )
-    events.sort(key=_trace_sort_key)
-    if total_limit > 0 and len(events) > total_limit:
-        return events[-total_limit:]
-    return events
+        conversation_docs, loaded_tools, loaded_metadata = snapshot
+        tool_log_docs = loaded_tools if tool_log_docs is None else tool_log_docs
+        query_metadata = loaded_metadata
+    return normalize_trace_snapshot(
+        TraceSnapshot(
+            conversation_rows=conversation_docs or [],
+            tool_rows=tool_log_docs or [],
+            query_metadata=query_metadata or {},
+        ),
+        agent_ids=_trace_agent_ids(agent),
+        memory_ids=set(memory_ids),
+        thread_id=thread_id,
+        thread_memory_id=thread_memory_id,
+        limit=total_limit,
+        **scoped_trace_filters(),
+    ).events
 
 
 def _trace_sort_key(event: Dict[str, Any]):

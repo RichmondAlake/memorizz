@@ -6,7 +6,6 @@ import inspect
 import json
 import logging
 import os
-from threading import Thread
 from typing import Any, Dict, Generator, List, Optional
 
 from ._hf_offline import enable_hf_offline_env, is_hf_offline
@@ -292,6 +291,8 @@ class HuggingFaceLLM(LLMProvider):
             )
 
         prompt = self._messages_to_prompt(messages)
+        self._last_usage = None
+        self._last_response_metadata = {}
         output_text = self._run_generation(prompt)
         prompt_tokens = self._count_tokens(prompt)
         completion_tokens = self._count_tokens(output_text)
@@ -300,6 +301,11 @@ class HuggingFaceLLM(LLMProvider):
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         }
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            None, text=output_text, max_output_tokens=self.max_new_tokens
+        )
         return output_text
 
     def generate_stream(
@@ -343,13 +349,48 @@ class HuggingFaceLLM(LLMProvider):
             yield {"type": "done", "content": text}
             return
 
-        streamer = TextIteratorStreamer(
-            tokenizer, skip_prompt=True, skip_special_tokens=True
+        from queue import Empty, Full, Queue
+        from threading import Event
+
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        from ..streaming import (
+            StreamCancelled,
+            check_cancelled,
+            current_cancellation,
+            start_owned_worker,
         )
 
-        gen_error: Dict[str, Optional[BaseException]] = {"exc": None}
+        cancelled, finished = Event(), Event()
+        channel = Queue(maxsize=64)
+        terminal = object()
+        token = current_cancellation.get()
+        unregister = token.register(cancelled.set) if token else lambda: None
 
-        def _run_pipeline() -> None:
+        class StopWhenCancelled(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs):
+                return cancelled.is_set()
+
+        class BoundedStreamer(TextIteratorStreamer):
+            def on_finalized_text(self, text, stream_end=False):
+                for value in [text, terminal] if stream_end else [text]:
+                    while not cancelled.is_set():
+                        try:
+                            channel.put(value, timeout=0.05)
+                            break
+                        except Full:
+                            continue
+                    else:
+                        raise StreamCancelled()
+
+        streamer = BoundedStreamer(
+            tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=0.1
+        )
+        gen_error = []
+        self._last_usage = None
+        self._last_response_metadata = {}
+
+        def generate():
             try:
                 self._pipeline(
                     prompt,
@@ -358,29 +399,43 @@ class HuggingFaceLLM(LLMProvider):
                     top_p=self.top_p,
                     do_sample=self.temperature > 0,
                     streamer=streamer,
+                    stopping_criteria=StoppingCriteriaList([StopWhenCancelled()]),
                 )
-            except BaseException as exc:  # noqa: BLE001 - surface to main thread
-                gen_error["exc"] = exc
-                # Unblock the iterator on failure so the caller doesn't hang.
+            except BaseException as exc:
+                gen_error.append(exc)
+            finally:
+                finished.set()
+
+        worker = start_owned_worker(generate, name="memorizz-huggingface-stream")
+        accumulated = []
+        try:
+            while True:
+                check_cancelled()
                 try:
-                    streamer.end()
-                except Exception:
-                    pass
+                    chunk = channel.get(timeout=0.1)
+                except Empty:
+                    if finished.is_set():
+                        if gen_error:
+                            raise gen_error[0]
+                        from .streaming import ProviderStreamError
 
-        worker = Thread(target=_run_pipeline, daemon=True)
-        worker.start()
-
-        accumulated: List[str] = []
-        for chunk in streamer:
-            if chunk:
-                accumulated.append(chunk)
-                yield {"type": "content", "content": chunk}
-
-        worker.join()
-        if gen_error["exc"] is not None:
-            raise gen_error["exc"]  # type: ignore[misc]
-
-        full = "".join(accumulated).strip()
+                        raise ProviderStreamError("provider_stream_incomplete")
+                    continue
+                if chunk is terminal:
+                    # A final streamer callback can precede pipeline failure.
+                    while not finished.wait(0.1):
+                        check_cancelled()
+                    if gen_error:
+                        raise gen_error[0]
+                    break
+                if chunk:
+                    accumulated.append(chunk)
+                    yield {"type": "content", "content": chunk}
+        finally:
+            cancelled.set()
+            unregister()
+            worker.join(timeout=2)
+        full = "".join(accumulated)
         prompt_tokens = self._count_tokens(prompt)
         completion_tokens = self._count_tokens(full)
         self._last_usage = {
@@ -388,6 +443,12 @@ class HuggingFaceLLM(LLMProvider):
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         }
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            None, text=full, max_output_tokens=self.max_new_tokens
+        )
+        yield {"type": "usage", "usage": self._last_usage}
         yield {"type": "done", "content": full}
 
     def generate_text(self, prompt: str, instructions: Optional[str] = None) -> str:
@@ -481,6 +542,11 @@ class HuggingFaceLLM(LLMProvider):
 
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage
+
+    def get_last_response_metadata(self) -> Dict[str, Any]:
+        from .response_metadata import last_response_metadata
+
+        return last_response_metadata(self)
 
     def get_context_window_tokens(self) -> Optional[int]:
         return self.context_window_tokens

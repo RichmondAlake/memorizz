@@ -615,7 +615,9 @@ async def lifespan(app: FastAPI):
     logger.info("Memorizz UI shutting down...")
 
 
-def create_app() -> FastAPI:
+def create_app(
+    *, identity_resolver=None, artifact_resolver=None, resource_authorizer=None
+) -> FastAPI:
     """Create and configure the FastAPI application."""
     # Load layered env (~/.memorizz/.env, then $CWD/.env) so the UI sees the
     # same keys the CLI configured. override=False keeps real env vars winning.
@@ -627,12 +629,51 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     access = UIAccessController()
+    app.state.trace_identity_resolver = identity_resolver
+    app.state.trace_artifact_resolver = artifact_resolver
+    app.state.trace_resource_authorizer = resource_authorizer
     read_only_mode = ui_read_only()
+
+    from fastapi.exception_handlers import request_validation_exception_handler
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def trace_validation_error(request, exc):
+        if request.url.path.startswith("/traces"):
+            # Never echo transient account addresses or rejected secret values.
+            return JSONResponse(
+                {"detail": "Invalid trace request"},
+                status_code=422,
+                headers={"Cache-Control": "no-store"},
+            )
+        return await request_validation_exception_handler(request, exc)
 
     @app.middleware("http")
     async def secure_local_ui(request: Request, call_next):
+        from .security import audit_trace_view
+        from .trace_access import current_principal
+
         path = request.url.path
         public_path = path == "/login" or path.startswith("/static/")
+        principal = access.principal_for_request(request)
+
+        def denied(detail, status_code=403):
+            audit_token = (
+                current_principal.set(principal) if principal is not None else None
+            )
+            try:
+                audit_trace_view(
+                    request, "trace_access_denied", content_mode="metadata"
+                )
+            finally:
+                if audit_token is not None:
+                    current_principal.reset(audit_token)
+            return JSONResponse(
+                {"detail": detail},
+                status_code=status_code,
+                headers={"Cache-Control": "no-store, max-age=0"},
+            )
+
         if (
             access.enabled
             and not public_path
@@ -652,13 +693,64 @@ def create_app() -> FastAPI:
         if (
             read_only_mode
             and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
-            and path not in {"/login", "/connect"}
+            and path
+            not in {"/login", "/connect", "/traces/account/resolve", "/traces/reveal"}
         ):
-            return JSONResponse(
-                {"detail": "This Memorizz UI is running in read-only mode"},
-                status_code=403,
-            )
-        response = await call_next(request)
+            return denied("This Memorizz UI is running in read-only mode")
+        principal = access.principal_for_request(request)
+        if principal is not None and path.startswith("/traces"):
+            from dataclasses import replace
+
+            from ..observability.privacy import validate_opaque
+
+            updates = {}
+            for key in ("application_id", "user_id"):
+                if key not in request.query_params:
+                    continue
+                value = request.query_params[key]
+                try:
+                    validate_opaque(value)
+                    if not value or len(value) > 240:
+                        raise ValueError()
+                except ValueError:
+                    return denied("Invalid trace scope", 400)
+                if key in principal.filters() and principal.filters()[key] != value:
+                    return denied("Requested trace scope is not authorized")
+                updates[key] = value
+                if key == "user_id":
+                    updates["user_bound"] = True
+            if updates:
+                principal = replace(principal, **updates)
+        if principal is not None and principal.restricted and not public_path:
+            allowed_posts = {
+                "/traces/account/resolve",
+                "/traces/reveal",
+                "/traces/replays",
+            }
+            if not path.startswith("/traces") or (
+                request.method not in {"GET", "HEAD", "OPTIONS"}
+                and path not in allowed_posts
+            ):
+                return denied("This account is restricted to trace inspection")
+        # Prevent cross-origin form submissions to privileged trace actions.
+        if path.startswith("/traces") and request.method not in {
+            "GET",
+            "HEAD",
+            "OPTIONS",
+        }:
+            origin = request.headers.get("origin")
+            if origin and origin != str(request.base_url).rstrip("/"):
+                return denied("Cross-origin trace action denied")
+        token = current_principal.set(principal) if principal is not None else None
+        try:
+            response = await call_next(request)
+            if path.startswith("/traces") and response.status_code in {401, 403}:
+                audit_trace_view(
+                    request, "trace_access_denied", content_mode="metadata"
+                )
+        finally:
+            if token is not None:
+                current_principal.reset(token)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         if path.startswith("/traces"):
@@ -672,6 +764,9 @@ def create_app() -> FastAPI:
     app.include_router(oracle_docker_router)
     app.include_router(agents_api_router)
     app.include_router(traces_router)
+    from .routers.trace_tools import router as trace_tools_router
+
+    app.include_router(trace_tools_router)
     app.include_router(continual_learning_router)
     app.include_router(learning_control_plane_router)
     app.include_router(harnesses_router)
@@ -738,7 +833,7 @@ def create_app() -> FastAPI:
         response = RedirectResponse(url=next_path, status_code=303)
         response.set_cookie(
             access.cookie_name,
-            access.issue_session(),
+            access.issue_session(token=candidate),
             max_age=access.ttl_seconds,
             httponly=True,
             secure=os.getenv("MEMORIZZ_UI_COOKIE_SECURE", "").strip().lower()

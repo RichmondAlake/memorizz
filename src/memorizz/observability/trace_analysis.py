@@ -14,6 +14,9 @@ import re
 from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from .coverage import trace_coverage
+from .diagnostics import diagnose_trace
+
 _PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2}
 _TOOL_OUTCOMES = (
     "success",
@@ -200,6 +203,7 @@ def _insight(
     evidence_count: int,
     effort: str = "medium",
     confidence: Optional[str] = None,
+    evidence_event_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     return {
         "id": insight_id,
@@ -212,6 +216,7 @@ def _insight(
         "evidence_count": max(0, int(evidence_count)),
         "confidence": confidence or _confidence(evidence_count),
         "effort": effort,
+        **({"evidence_event_ids": evidence_event_ids} if evidence_event_ids else {}),
     }
 
 
@@ -234,6 +239,7 @@ def analyze_trace_events(
     window_truncated: bool = False,
     signals: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     max_insights: int = 14,
+    normalization_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a JSON-safe improvement report for normalized trace events.
 
@@ -242,7 +248,10 @@ def analyze_trace_events(
     connected to production data.
     """
 
+    metadata = dict(normalization_metadata or getattr(events, "coverage", {}))
+    metadata["truncated"] = bool(metadata.get("truncated")) or window_truncated
     normalized = [event for event in events if isinstance(event, dict)]
+    coverage = trace_coverage(normalized, metadata)
     threads = {_text(event.get("thread_id")) or "—" for event in normalized}
     role_counts: Counter[str] = Counter()
     kind_counts: Counter[str] = Counter()
@@ -266,6 +275,11 @@ def analyze_trace_events(
         for row in (signal_payload.get("outcomes") or [])
         if isinstance(row, dict) and row.get("verified") is True
     ]
+    verified_outcomes.extend(
+        event
+        for event in normalized
+        if event.get("kind") == "verified_outcome" and event.get("verified") is True
+    )
     negative_feedback = 0
     for row in verified_feedback:
         label = _text(row.get("label")).lower()
@@ -378,6 +392,7 @@ def analyze_trace_events(
                 "calls": 0,
                 "results": 0,
                 "failures": 0,
+                "failure_event_ids": [],
                 "outcomes": Counter(),
                 "durations": [],
             },
@@ -398,6 +413,8 @@ def analyze_trace_events(
         stat["outcomes"][_tool_outcome(event)] += 1
         if _failure(event):
             stat["failures"] += 1
+            if event.get("event_id"):
+                stat["failure_event_ids"].append(event["event_id"])
         duration = event.get("duration_ms")
         try:
             duration_value = float(duration)
@@ -693,6 +710,7 @@ def analyze_trace_events(
                     recommendation="Review the tool schema, preconditions, timeout/retry policy, error taxonomy, and result contract; add a focused regression eval before changing the prompt.",
                     target=f"tool:{name}",
                     evidence_count=failures,
+                    evidence_event_ids=stat["failure_event_ids"][:20],
                 )
             )
         fallbacks = stat["outcomes"].get("fallback", 0)
@@ -793,7 +811,10 @@ def analyze_trace_events(
                 )
             )
 
-    if normalized and not any(
+    if any(
+        e.get("kind") in {"model_call", "model_result", "conversation"}
+        for e in normalized
+    ) and not any(
         any(
             event.get(field) is not None
             for field in (
@@ -890,6 +911,34 @@ def analyze_trace_events(
             )
         )
 
+    insights.extend(diagnose_trace(normalized, metadata=coverage))
+    if coverage["coverage"] != "complete":
+        if coverage.get("normalization_errors"):
+            coverage_finding = "Some stored events could not be normalized; repair invalid evidence before drawing conclusions."
+        elif (
+            coverage.get("truncated") or coverage.get("read_completeness") == "partial"
+        ):
+            coverage_finding = "The trace read is incomplete; narrow the selection or load the remaining events."
+        elif coverage.get("instrumentation_coverage") == "unknown":
+            coverage_finding = "Capture profiles were not declared; loading all stored events does not establish end-to-end instrumentation."
+        else:
+            coverage_finding = "Required evidence stages are missing; inspect the declared capture profiles and missing-stage list."
+        insights.append(
+            _insight(
+                "trace_coverage_incomplete",
+                priority="P0" if coverage["coverage"] == "untrusted" else "P1",
+                component="observability",
+                title="Trace evidence is incomplete",
+                finding=coverage_finding,
+                recommendation="Inspect trace coverage and instrument missing stages before treating absent evidence as success.",
+                target="trace capture and normalization",
+                evidence_count=max(
+                    1,
+                    len(coverage.get("missing_stages", []))
+                    + int(coverage.get("normalization_errors", 0)),
+                ),
+            )
+        )
     insights.sort(
         key=lambda item: (
             _PRIORITY_ORDER.get(item["priority"], 9),
@@ -907,6 +956,9 @@ def analyze_trace_events(
     ):
         durations = stat.pop("durations")
         outcomes = stat.pop("outcomes")
+        stat.pop(
+            "failure_event_ids", None
+        )  # Internal evidence links, not a tool-health schema change.
         results_for_tool = int(stat["results"])
         tool_health.append(
             {
@@ -982,6 +1034,34 @@ def analyze_trace_events(
         "scope": scope,
         "read_only": True,
         "window_truncated": bool(window_truncated),
+        "coverage": coverage,
+        "metric_scope": "observed_evidence_window",
+        "metric_states": {
+            name: {
+                "value": value if value else None,
+                "state": (
+                    "known"
+                    if coverage["read_completeness"] == "complete"
+                    else "partial"
+                )
+                if value
+                else "no_recorded_evidence"
+                if coverage["read_completeness"] == "complete"
+                else "unknown",
+            }
+            for name, value in {
+                "tool_calls": len(tool_calls),
+                "tool_results": len(results),
+                "tool_failures": failure_count,
+                "model_results": kind_counts.get("model_result", 0),
+                "memory_candidates": memory_candidates,
+                "memory_supplied": memory_supplied,
+                "artifacts": kind_counts.get("artifact_persisted", 0),
+                "output_contracts": kind_counts.get("output_contract", 0),
+                "ui_deliveries": kind_counts.get("ui_delivery", 0),
+                "verified_outcomes": len(verified_outcomes),
+            }.items()
+        },
         "summary": {
             "events_analyzed": len(normalized),
             "threads_analyzed": len(threads),

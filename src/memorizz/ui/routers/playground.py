@@ -19,10 +19,8 @@ handlers this module replaced.
 import json
 import logging
 import os
-import threading
 from datetime import datetime
-from queue import Empty, Queue
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -1398,356 +1396,293 @@ async def agent_playground_stream(request: Request, agent_id: str):
     if not query:
         raise HTTPException(status_code=400, detail="No query provided")
 
+    import asyncio
+    import time
+
     from ...memagent import MemAgent
+    from ...streaming import agent_event_stream, check_cancelled, execution_lock
 
-    def _event_stream():
-        trace_queue: Queue = Queue()
-        chunk_queue: Queue = Queue()
-        stream_done = object()
-        stream_state: Dict[str, Optional[str]] = {}
+    def prepare(session):
+        # Keep follow-up turns behind prior conversation/agent-state commits.
+        lock = execution_lock(("ui", agent_id))
+        while not lock.acquire(timeout=0.1):
+            check_cancelled()
+        session.stack.callback(lock.release)
+        check_cancelled()
+        overrides: Dict[str, Any] = {"streaming": True}
+        if override_instruction:
+            overrides["instruction"] = override_instruction
+        agent_instance = MemAgent.load(
+            agent_id, memory_provider=_state["provider"], **overrides
+        )
+        # Apply runtime model override if user changed the model in the playground
+        if override_model:
+            try:
+                from ...llms.llm_factory import create_llm_provider
 
-        def _queue_trace_event(event: Dict[str, Any]) -> None:
-            if not isinstance(event, dict):
-                return
-            trace_queue.put(dict(event))
-
-        def _drain_trace_events() -> Iterator[str]:
-            while True:
-                try:
-                    event = trace_queue.get_nowait()
-                except Empty:
-                    break
-                if not isinstance(event, dict):
-                    continue
-                event["type"] = "trace"
-                escaped_event = json.dumps(event)
-                yield f"data: {escaped_event}\n\n"
-
-        agent_instance = None
-        try:
-            overrides: Dict[str, Any] = {"streaming": True}
-            if override_instruction:
-                overrides["instruction"] = override_instruction
-            agent_instance = MemAgent.load(
-                agent_id, memory_provider=_state["provider"], **overrides
-            )
-            # Apply runtime model override if user changed the model in the playground
-            if override_model:
-                try:
-                    from ...llms.llm_factory import create_llm_provider
-
-                    llm_config = (
-                        getattr(
-                            _state["provider"].retrieve_memagent(agent_id),
-                            "llm_config",
-                            {},
-                        )
-                        or {}
+                llm_config = (
+                    getattr(
+                        _state["provider"].retrieve_memagent(agent_id),
+                        "llm_config",
+                        {},
                     )
-                    llm_config["model"] = override_model
+                    or {}
+                )
+                llm_config["model"] = override_model
 
-                    # Carry over the API key from the already-loaded
-                    # provider so that saved configs (which deliberately
-                    # omit secrets) don't cause auth failures.
-                    existing_model = getattr(agent_instance, "model", None)
-                    if existing_model is not None:
-                        for attr in ("api_key", "_api_key"):
-                            key = getattr(existing_model, attr, None)
-                            if key and "api_key" not in llm_config:
+                # Carry over the API key from the already-loaded
+                # provider so that saved configs (which deliberately
+                # omit secrets) don't cause auth failures.
+                existing_model = getattr(agent_instance, "model", None)
+                if existing_model is not None:
+                    for attr in ("api_key", "_api_key"):
+                        key = getattr(existing_model, attr, None)
+                        if key and "api_key" not in llm_config:
+                            llm_config["api_key"] = key
+                            break
+                    # Also check the underlying client object
+                    if "api_key" not in llm_config:
+                        client = getattr(existing_model, "client", None)
+                        if client is not None:
+                            key = getattr(client, "api_key", None)
+                            if key:
                                 llm_config["api_key"] = key
-                                break
-                        # Also check the underlying client object
-                        if "api_key" not in llm_config:
-                            client = getattr(existing_model, "client", None)
-                            if client is not None:
-                                key = getattr(client, "api_key", None)
-                                if key:
-                                    llm_config["api_key"] = key
 
-                    agent_instance.model = create_llm_provider(llm_config)
-                    # Override succeeded — clear any prior init error
-                    # carried over from MemAgent.load().
-                    agent_instance._llm_init_error = None
-                except Exception as exc:
-                    # Stash the cause on the instance so chat can show
-                    # the real reason instead of "No LLM model configured".
-                    agent_instance._llm_init_error = f"{type(exc).__name__}: {exc}"
-                    logger.warning("Could not apply model override: %s", exc)
+                agent_instance.model = create_llm_provider(llm_config)
+                # Override succeeded — clear any prior init error
+                # carried over from MemAgent.load().
+                agent_instance._llm_init_error = None
+            except Exception as exc:
+                # Stash the cause on the instance so chat can show
+                # the real reason instead of "No LLM model configured".
+                agent_instance._llm_init_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("Could not apply model override: %s", exc)
 
-            # Load stored agent config for sandbox, internet, and entity-memory checks.
-            stored_agent = _state["provider"].retrieve_memagent(agent_id)
+        # Load stored agent config for sandbox, internet, and entity-memory checks.
+        stored_agent = _state["provider"].retrieve_memagent(agent_id)
 
-            # Apply sandbox provider from agent config or global default.
-            # Skip if the agent already attempted sandbox init during load()
-            # — no need to retry and log the same warning twice.
-            if not agent_instance.has_sandbox():
-                sandbox_cfg = (
-                    getattr(stored_agent, "sandbox_provider", None)
-                    if stored_agent
-                    else None
-                )
-                if not sandbox_cfg:
-                    sandbox_cfg = os.environ.get(
-                        "MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", ""
-                    )
-                resolved_sandbox_cfg = _resolve_sandbox_provider_config(sandbox_cfg)
-                # Only attempt if no sandbox config was already tried during load
-                stored_sandbox = (
-                    getattr(stored_agent, "sandbox_provider", None)
-                    if stored_agent
-                    else None
-                )
-                sandbox_already_attempted = bool(stored_sandbox)
-                if resolved_sandbox_cfg and not sandbox_already_attempted:
-                    try:
-                        validation_error = _validate_sandbox_provider_choice(
-                            resolved_sandbox_cfg
-                        )
-                        if validation_error:
-                            raise ValueError(validation_error)
-                        agent_instance.with_sandbox_provider(resolved_sandbox_cfg)
-                    except Exception as exc:
-                        logger.debug(f"Sandbox provider not available: {exc}")
-
-            # Apply internet provider from agent config or global default.
-            browser_apply_error = None
-            browser_config = (
-                getattr(stored_agent, "browser_control", None) if stored_agent else None
+        # Apply sandbox provider from agent config or global default.
+        # Skip if the agent already attempted sandbox init during load()
+        # — no need to retry and log the same warning twice.
+        if not agent_instance.has_sandbox():
+            sandbox_cfg = (
+                getattr(stored_agent, "sandbox_provider", None)
+                if stored_agent
+                else None
             )
-            stored_browser_config = browser_config
-            if not browser_config:
-                browser_name = _normalize_browser_control_provider_name(
-                    os.environ.get("MEMORIZZ_BROWSER_CONTROL_PROVIDER", "")
-                )
-                browser_config = _build_browser_control_config(browser_name)
-            if browser_config and not agent_instance.has_browser_control():
-                # MemAgent.load already attempted persisted config. Only apply
-                # the global fallback here to avoid retrying the same failure.
-                if not stored_browser_config:
-                    try:
-                        agent_instance.with_browser_control(browser_config)
-                    except Exception as exc:
-                        browser_apply_error = (
-                            "Browser control unavailable: " + _to_text(exc).strip()
-                        )
-                else:
-                    browser_apply_error = getattr(
-                        agent_instance, "_browser_control_init_error", None
+            if not sandbox_cfg:
+                sandbox_cfg = os.environ.get("MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", "")
+            resolved_sandbox_cfg = _resolve_sandbox_provider_config(sandbox_cfg)
+            # Only attempt if no sandbox config was already tried during load
+            stored_sandbox = (
+                getattr(stored_agent, "sandbox_provider", None)
+                if stored_agent
+                else None
+            )
+            sandbox_already_attempted = bool(stored_sandbox)
+            if resolved_sandbox_cfg and not sandbox_already_attempted:
+                try:
+                    validation_error = _validate_sandbox_provider_choice(
+                        resolved_sandbox_cfg
                     )
+                    if validation_error:
+                        raise ValueError(validation_error)
+                    agent_instance.with_sandbox_provider(resolved_sandbox_cfg)
+                except Exception as exc:
+                    logger.debug(f"Sandbox provider not available: {exc}")
 
-            if browser_apply_error:
-                escaped_warning = json.dumps(
-                    {
-                        "type": "warning",
-                        "message": browser_apply_error,
-                        "scope": "browser_control",
-                    }
+        # Apply internet provider from agent config or global default.
+        browser_apply_error = None
+        browser_config = (
+            getattr(stored_agent, "browser_control", None) if stored_agent else None
+        )
+        stored_browser_config = browser_config
+        if not browser_config:
+            browser_name = _normalize_browser_control_provider_name(
+                os.environ.get("MEMORIZZ_BROWSER_CONTROL_PROVIDER", "")
+            )
+            browser_config = _build_browser_control_config(browser_name)
+        if browser_config and not agent_instance.has_browser_control():
+            # MemAgent.load already attempted persisted config. Only apply
+            # the global fallback here to avoid retrying the same failure.
+            if not stored_browser_config:
+                try:
+                    agent_instance.with_browser_control(browser_config)
+                except Exception as exc:
+                    browser_apply_error = (
+                        "Browser control unavailable: " + _to_text(exc).strip()
+                    )
+            else:
+                browser_apply_error = getattr(
+                    agent_instance, "_browser_control_init_error", None
                 )
-                yield f"data: {escaped_warning}\n\n"
 
-            # Apply internet provider from agent config or global default.
-            internet_apply_error = None
+        if browser_apply_error:
+            session.emit(
+                "status",
+                stage="configuration_warning",
+                scope="browser_control",
+                message="Browser control unavailable",
+            )
+
+        # Apply internet provider from agent config or global default.
+        internet_apply_error = None
+        internet_provider_name = _normalize_internet_provider_name(
+            getattr(stored_agent, "internet_access_provider", None)
+            if stored_agent
+            else None
+        )
+        internet_provider_config = (
+            getattr(stored_agent, "internet_access_config", None)
+            if stored_agent
+            else None
+        )
+        if not internet_provider_name:
             internet_provider_name = _normalize_internet_provider_name(
-                getattr(stored_agent, "internet_access_provider", None)
-                if stored_agent
-                else None
+                os.environ.get("MEMORIZZ_DEFAULT_INTERNET_PROVIDER", "")
             )
-            internet_provider_config = (
-                getattr(stored_agent, "internet_access_config", None)
-                if stored_agent
-                else None
-            )
-            if not internet_provider_name:
-                internet_provider_name = _normalize_internet_provider_name(
-                    os.environ.get("MEMORIZZ_DEFAULT_INTERNET_PROVIDER", "")
+            internet_provider_config = None
+
+        if internet_provider_name and not agent_instance.has_internet_access():
+            try:
+                from ...internet_access import create_internet_access_provider
+
+                resolved_internet_config = _build_internet_provider_config(
+                    internet_provider_name, internet_provider_config
                 )
-                internet_provider_config = None
-
-            if internet_provider_name and not agent_instance.has_internet_access():
-                try:
-                    from ...internet_access import create_internet_access_provider
-
-                    resolved_internet_config = _build_internet_provider_config(
-                        internet_provider_name, internet_provider_config
-                    )
-                    provider_instance = create_internet_access_provider(
-                        internet_provider_name,
-                        resolved_internet_config or {},
-                    )
-                    if provider_instance:
-                        agent_instance.with_internet_access_provider(provider_instance)
-                    else:
-                        internet_apply_error = (
-                            f"Internet provider '{internet_provider_name}' is unknown."
-                        )
-                except Exception as exc:
+                provider_instance = create_internet_access_provider(
+                    internet_provider_name,
+                    resolved_internet_config or {},
+                )
+                if provider_instance:
+                    agent_instance.with_internet_access_provider(provider_instance)
+                else:
                     internet_apply_error = (
-                        "Internet unavailable: " + _to_text(exc).strip()
+                        f"Internet provider '{internet_provider_name}' is unknown."
                     )
-                    logger.warning(f"Could not apply internet provider: {exc}")
+            except Exception as exc:
+                internet_apply_error = "Internet unavailable: " + _to_text(exc).strip()
+                logger.warning(f"Could not apply internet provider: {exc}")
 
-            if internet_apply_error:
-                escaped_warning = json.dumps(
-                    {
-                        "type": "warning",
-                        "message": internet_apply_error,
-                        "scope": "internet",
-                    }
-                )
-                yield f"data: {escaped_warning}\n\n"
-
-            # Validate entity-memory runtime tool availability.
-            entity_memory_warning = _entity_memory_status_error(stored_agent)
-            if (
-                not entity_memory_warning
-                and _agent_entity_memory_enabled(stored_agent)
-                and getattr(agent_instance, "tool_manager", None) is not None
-            ):
-                try:
-                    runtime_tools = set(agent_instance.tool_manager.list_tools())
-                except Exception:
-                    runtime_tools = set()
-                if (
-                    "entity_memory_lookup" not in runtime_tools
-                    or "entity_memory_upsert" not in runtime_tools
-                ):
-                    entity_memory_warning = (
-                        "Entity memory is enabled in config, but runtime entity-memory "
-                        "tools are unavailable in this session."
-                    )
-            if entity_memory_warning:
-                escaped_warning = json.dumps(
-                    {
-                        "type": "warning",
-                        "message": entity_memory_warning,
-                        "scope": "entity_memory",
-                    }
-                )
-                yield f"data: {escaped_warning}\n\n"
-
-            # Validate persona runtime tool availability. Mirrors the
-            # entity-memory check above: if the stored agent has a
-            # persona configured but update_persona/read_persona didn't
-            # register on the runtime, surface it instead of silently
-            # leaving the LLM without its own persona-evolution tools.
-            persona_warning = None
-            stored_persona = (
-                getattr(stored_agent, "persona", None) if stored_agent else None
+        if internet_apply_error:
+            session.emit(
+                "status",
+                stage="configuration_warning",
+                scope="internet",
+                message="Internet access unavailable",
             )
+
+        # Validate entity-memory runtime tool availability.
+        entity_memory_warning = _entity_memory_status_error(stored_agent)
+        if (
+            not entity_memory_warning
+            and _agent_entity_memory_enabled(stored_agent)
+            and getattr(agent_instance, "tool_manager", None) is not None
+        ):
+            try:
+                runtime_tools = set(agent_instance.tool_manager.list_tools())
+            except Exception:
+                runtime_tools = set()
             if (
-                stored_persona
-                and getattr(agent_instance, "tool_manager", None) is not None
+                "entity_memory_lookup" not in runtime_tools
+                or "entity_memory_upsert" not in runtime_tools
             ):
-                try:
-                    runtime_tools = set(agent_instance.tool_manager.list_tools())
-                except Exception:
-                    runtime_tools = set()
-                if (
-                    "update_persona" not in runtime_tools
-                    or "read_persona" not in runtime_tools
-                ):
-                    persona_warning = (
-                        "A persona is configured on this agent, but the persona "
-                        "evolution tools (update_persona, read_persona) are not "
-                        "available in this session."
-                    )
-            if persona_warning:
-                escaped_warning = json.dumps(
-                    {
-                        "type": "warning",
-                        "message": persona_warning,
-                        "scope": "persona",
-                    }
+                entity_memory_warning = (
+                    "Entity memory is enabled in config, but runtime entity-memory "
+                    "tools are unavailable in this session."
                 )
-                yield f"data: {escaped_warning}\n\n"
-
-            def _run_agent_stream() -> None:
-                try:
-                    stream_kwargs: Dict[str, Any] = {
-                        "memory_id": memory_id,
-                        "event_callback": _queue_trace_event,
-                    }
-                    if user_id:
-                        stream_kwargs["user_id"] = user_id
-                    for chunk in agent_instance.run_stream(query, **stream_kwargs):
-                        chunk_queue.put(chunk)
-                except Exception as stream_exc:
-                    chunk_queue.put({"__stream_error__": _to_text(stream_exc)})
-                finally:
-                    # MemAgent execution IDs are context-local. Capture them in
-                    # the worker before crossing back to the SSE generator.
-                    stream_state["memory_id"] = agent_instance.get_current_memory_id()
-                    stream_state["thread_id"] = agent_instance.get_current_thread_id()
-                    chunk_queue.put(stream_done)
-
-            stream_worker = threading.Thread(
-                target=_run_agent_stream,
-                name=f"memagent-stream-{agent_id}",
-                daemon=True,
+        if entity_memory_warning:
+            session.emit(
+                "status",
+                stage="configuration_warning",
+                scope="entity_memory",
+                message="Entity memory tools unavailable",
             )
-            stream_worker.start()
 
+        # Validate persona runtime tool availability. Mirrors the
+        # entity-memory check above: if the stored agent has a
+        # persona configured but update_persona/read_persona didn't
+        # register on the runtime, surface it instead of silently
+        # leaving the LLM without its own persona-evolution tools.
+        persona_warning = None
+        stored_persona = (
+            getattr(stored_agent, "persona", None) if stored_agent else None
+        )
+        if stored_persona and getattr(agent_instance, "tool_manager", None) is not None:
+            try:
+                runtime_tools = set(agent_instance.tool_manager.list_tools())
+            except Exception:
+                runtime_tools = set()
+            if (
+                "update_persona" not in runtime_tools
+                or "read_persona" not in runtime_tools
+            ):
+                persona_warning = (
+                    "A persona is configured on this agent, but the persona "
+                    "evolution tools (update_persona, read_persona) are not "
+                    "available in this session."
+                )
+        if persona_warning:
+            session.emit(
+                "status",
+                stage="configuration_warning",
+                scope="persona",
+                message="Persona tools unavailable",
+            )
+        return agent_instance, {"user_id": user_id} if user_id else {}
+
+    def finalize(session):
+        current_memory_id = session.identity["memory_id"]
+        agent_instance = session.agent
+        if current_memory_id not in (agent_instance.memory_ids or []):
+            agent_instance.memory_ids.append(current_memory_id)
+        update = getattr(_state["provider"], "update_memagent_memory_ids", None)
+        if callable(update):
+            result = update(agent_id, agent_instance.memory_ids)
+            session.persistence["adapter_state"] = (
+                "failed" if result is False else "written"
+            )
+        else:
+            session.persistence["adapter_state"] = "not_configured"
+
+    async def event_stream():
+        stream = agent_event_stream(
+            None,
+            query,
+            _prepare=prepare,
+            _finalize=finalize,
+            _agent_id=agent_id,
+            memory_id=memory_id,
+        )
+        last_frame = time.monotonic()
+        sentinel = object()
+
+        def poll():
+            try:
+                return stream.poll(timeout=0.5)
+            except StopIteration:
+                return sentinel
+
+        try:
             while True:
-                for trace_payload in _drain_trace_events():
-                    yield trace_payload
-
-                try:
-                    stream_item = chunk_queue.get(timeout=0.1)
-                except Empty:
-                    if stream_worker.is_alive():
-                        continue
-                    stream_item = stream_done
-
-                if stream_item is stream_done:
+                event = await asyncio.to_thread(poll)
+                if event is sentinel:
                     break
-
-                if isinstance(stream_item, dict) and "__stream_error__" in stream_item:
-                    raise RuntimeError(
-                        _to_text(stream_item.get("__stream_error__")).strip()
-                    )
-
-                escaped = json.dumps(stream_item)
-                yield f"data: {escaped}\n\n"
-
-                for trace_payload in _drain_trace_events():
-                    yield trace_payload
-
-            for trace_payload in _drain_trace_events():
-                yield trace_payload
-
-            current_memory_id = stream_state.get("memory_id")
-            if current_memory_id:
-                current_memory_id = _to_text(current_memory_id).strip()
-            if current_memory_id:
-                if current_memory_id not in (agent_instance.memory_ids or []):
-                    agent_instance.memory_ids.append(current_memory_id)
-                if hasattr(_state["provider"], "update_memagent_memory_ids"):
-                    try:
-                        _state["provider"].update_memagent_memory_ids(
-                            agent_id, agent_instance.memory_ids
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to persist memory_ids for agent %s: %s",
-                            agent_id,
-                            exc,
-                        )
-
-            yield "data: [DONE]\n\n"
-        except Exception as exc:
-            logger.error(f"Streaming error for agent {agent_id}: {exc}")
-            error_msg = json.dumps(f"Error: {exc}")
-            yield f"data: {error_msg}\n\n"
-            yield "data: [DONE]\n\n"
+                if event is None:
+                    if time.monotonic() - last_frame >= 10:
+                        yield ": heartbeat\n\n"
+                        last_frame = time.monotonic()
+                    continue
+                yield f"id: {event['run_id']}:{event['seq']}\nevent: {event['type']}\ndata: {event.to_json()}\n\n"
+                last_frame = time.monotonic()
+        finally:
+            # Explicit browser abort cancels this request's producer, never another run.
+            await asyncio.to_thread(stream.close)
 
     return StreamingResponse(
-        _event_stream(),
+        event_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 

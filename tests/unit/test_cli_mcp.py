@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from memorizz import __version__
 from memorizz.cli.app import app
 
 SERVER = Path(__file__).parents[1] / "fixtures" / "mcp_stdio_server.py"
@@ -92,7 +93,7 @@ def test_cli_capability_report_matches_current_mcp_surface():
 
     assert result.exit_code == 0, result.output
     report = json.loads(result.output)
-    assert report["version"] == "0.7.0"
+    assert report["version"] == __version__
     assert report["features"]["mcp_client"]["available"] is True
     assert report["features"]["mcp_server"]["available"] is True
     assert report["features"]["mcp_server"]["tool_count"] == 24

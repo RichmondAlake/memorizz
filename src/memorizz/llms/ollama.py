@@ -266,8 +266,16 @@ class OllamaLLM(LLMProvider):
         messages.append({"role": "user", "content": prompt})
 
         kwargs = self._chat_kwargs(messages=messages)
+        self._last_usage = None
+        self._last_response_metadata = {}
         response = self.client.chat(**kwargs)
         self._last_usage = self._extract_usage(response)
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            response,
+            max_output_tokens=(kwargs.get("options") or {}).get("num_predict"),
+        )
         # Thinking models (Gemma 4, deepseek-r1, …) leave ``content`` empty
         # and put the answer-prefix in ``thinking`` when generation truncates
         # mid-trace. Fall back so callers don't get an empty string.
@@ -296,8 +304,16 @@ class OllamaLLM(LLMProvider):
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         response = self.client.chat(**kwargs)
         self._last_usage = self._extract_usage(response)
+        from .response_metadata import response_metadata
+
+        self._last_response_metadata = response_metadata(
+            response,
+            max_output_tokens=(kwargs.get("options") or {}).get("num_predict"),
+        )
 
         # Check for tool calls
         tool_calls = getattr(response.message, "tool_calls", None)
@@ -324,51 +340,80 @@ class OllamaLLM(LLMProvider):
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
 
+        self._last_usage = None
+        self._last_response_metadata = {}
         accumulated_content = ""
         tool_calls_acc: List[Dict[str, Any]] = []
 
-        for chunk in self.client.chat(**kwargs):
-            msg = (
-                chunk.message if hasattr(chunk, "message") else chunk.get("message", {})
-            )
+        from ..streaming import check_cancelled
+        from .streaming import ProviderStreamError, closing_provider_stream
 
-            # Text content
-            text = getattr(msg, "content", None) or (
-                msg.get("content") if isinstance(msg, dict) else None
-            )
-            if text:
-                accumulated_content += text
-                yield {"type": "content", "content": text}
+        finished = False
+        with closing_provider_stream(self.client.chat(**kwargs)) as stream:
+            for chunk in stream:
+                check_cancelled()
+                msg = (
+                    chunk.message
+                    if hasattr(chunk, "message")
+                    else chunk.get("message", {})
+                )
 
-            # Thinking/reasoning traces
-            thinking = getattr(msg, "thinking", None)
-            if thinking:
-                yield {"type": "reasoning", "content": thinking}
+                # Text content
+                text = getattr(msg, "content", None) or (
+                    msg.get("content") if isinstance(msg, dict) else None
+                )
+                if text:
+                    accumulated_content += text
+                    yield {"type": "content", "content": text}
 
-            # Tool calls
-            tc_list = getattr(msg, "tool_calls", None)
-            if tc_list:
-                for tc in tc_list:
-                    func = (
-                        tc.function
-                        if hasattr(tc, "function")
-                        else tc.get("function", {})
+                # Thinking/reasoning traces
+                thinking = getattr(msg, "thinking", None)
+                if thinking:
+                    yield {"type": "reasoning", "content": thinking}
+
+                # Tool calls
+                tc_list = getattr(msg, "tool_calls", None) or (
+                    msg.get("tool_calls") if isinstance(msg, dict) else None
+                )
+                if tc_list:
+                    for tc in tc_list:
+                        func = (
+                            tc.function
+                            if hasattr(tc, "function")
+                            else tc.get("function", {})
+                        )
+                        name = getattr(func, "name", None) or (
+                            func.get("name") if isinstance(func, dict) else ""
+                        )
+                        args = getattr(func, "arguments", None) or (
+                            func.get("arguments") if isinstance(func, dict) else {}
+                        )
+                        tool_calls_acc.append({"name": name, "arguments": args})
+
+                # Check for done
+                done = getattr(chunk, "done", None) or (
+                    chunk.get("done") if isinstance(chunk, dict) else False
+                )
+                if done:
+                    finished = True
+                    # Extract final usage from the last chunk
+                    self._last_usage = self._extract_usage(chunk)
+                    from .response_metadata import response_metadata
+
+                    self._last_response_metadata = response_metadata(
+                        chunk,
+                        text=accumulated_content,
+                        max_output_tokens=(kwargs.get("options") or {}).get(
+                            "num_predict"
+                        ),
                     )
-                    name = getattr(func, "name", None) or (
-                        func.get("name") if isinstance(func, dict) else ""
-                    )
-                    args = getattr(func, "arguments", None) or (
-                        func.get("arguments") if isinstance(func, dict) else {}
-                    )
-                    tool_calls_acc.append({"name": name, "arguments": args})
 
-            # Check for done
-            done = getattr(chunk, "done", None) or (
-                chunk.get("done") if isinstance(chunk, dict) else False
-            )
-            if done:
-                # Extract final usage from the last chunk
-                self._last_usage = self._extract_usage(chunk)
+        if not finished:
+            raise ProviderStreamError("provider_stream_incomplete")
+        if self._last_response_metadata.get("finish_reason") == "length":
+            raise ProviderStreamError("provider_length")
+        if self._last_usage:
+            yield {"type": "usage", "usage": self._last_usage}
 
         if tool_calls_acc:
             tool_calls_list = []
@@ -417,6 +462,11 @@ class OllamaLLM(LLMProvider):
             "completion_tokens": completion_tokens,
             "total_tokens": (prompt_tokens or 0) + (completion_tokens or 0),
         }
+
+    def get_last_response_metadata(self) -> Dict[str, Any]:
+        from .response_metadata import last_response_metadata
+
+        return last_response_metadata(self)
 
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage

@@ -260,6 +260,23 @@ def capabilities() -> Dict[str, Any]:
                 "cache_hits_revalidated": True,
                 "runtime_validator_code_persisted": False,
             },
+            "answer_streaming": {
+                "available": True,
+                "event_contract_version": 1,
+                "sdk": ["run_stream_events", "arun_stream_events"],
+                "default": True,
+                "delivery_modes": ["final_stream", "buffered"],
+                "gated_default": "buffered",
+                "cli_opt_out": "--no-stream",
+                "mcp_default": "progress",
+                "mcp_answer_extension": "memorizz.events.v1",
+                "mcp_extension_opt_in_required": True,
+                "mcp_tested_sdk": "2.0.0",
+                "resumption": False,
+                "bounded_queue": True,
+                "cancellation": "cooperative",
+                "synchronous_compatibility_api": "run",
+            },
             "evaluation_suite": {
                 "available": True,
                 "adapters": [

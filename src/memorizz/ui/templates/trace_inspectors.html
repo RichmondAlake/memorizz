@@ -1,0 +1,61 @@
+{% if trace_inspectors %}
+<div class="detail-section" id="trace-lineage-inspectors">
+    <h2>Memory lineage</h2>
+    <p>Expected sources, retrieval candidates, supplied context and persisted output bindings are separate evidence stages.</p>
+    {% for row in trace_inspectors.memory %}
+    <details open>
+        <summary>Task {{ row.task_id or 'Unspecified' }}{% if row.root_trace_id %} · Root <code title="{{ row.root_trace_id }}">{{ row.root_trace_id[:8] }}</code>{% endif %}{% if row.turn_id %} · Turn <code title="{{ row.turn_id }}">{{ row.turn_id[:8] }}</code>{% endif %} · <span class="badge {{ 'badge-success' if row.state == 'exact_match' else 'badge-warning' }}">{{ row.state|replace('_', ' ') }}</span></summary>
+        <div class="trace-lineage-grid">
+        {% for label, refs in [('Expected / authoritative', row.expected), ('Retrieved', row.retrieved), ('Supplied', row.supplied), ('Output-bound', row.output_bound)] %}
+            <section><h3>{{ label }}</h3>{% for ref in refs %}<p><code>{{ ref.ref }}</code><br>{{ ref.resource_type }} · version {{ ref.version or 'unknown' }} · {{ ref.role or 'unspecified role' }}</p>{% else %}<p>Not observed</p>{% endfor %}</section>
+        {% endfor %}
+        </div>
+        {% if row.capture_note %}<p>{{ row.capture_note }} Observed supplied items: {{ row.observed_supplied_count }}. Recorded legacy source IDs: {{ row.legacy_source_ids|join(', ') or 'none recorded' }}.</p>{% endif %}
+    </details>
+    {% else %}
+    <p class="trace-evidence-empty">Not captured for this trace: authoritative <code>input_refs</code>, retrieval candidates and exact supplied references. Host intent/context events and memory-selection instrumentation are needed; absence is not proof that no memory was used.</p>
+    {% endfor %}
+    {% if trace_inspectors.selection_ledger %}
+    <details><summary>Why one memory outranked another — candidate decisions</summary>
+        <div class="traces-table-wrap"><table class="traces-agents-table">
+            <thead><tr><th>Candidate</th><th>Rank</th><th>Score</th><th>Selected</th><th>Recorded reason</th></tr></thead>
+            <tbody>{% for entry in trace_inspectors.selection_ledger %}<tr><td><code>{{ entry.resource.ref }}</code></td><td>{{ entry.candidate_rank }}</td><td>{{ entry.relevance_score if entry.relevance_score is not none else 'Unknown' }}</td><td>{{ entry.selected }}</td><td>{{ entry.selection_reason|replace('_', ' ') }}</td></tr>{% endfor %}</tbody>
+        </table></div>
+    </details>
+    {% endif %}
+</div>
+{% endif %}
+{% if trace_inspectors %}
+<div class="detail-section" id="trace-artifact-provenance">
+    <h2>Artifact provenance</h2>
+    {% for row in trace_inspectors.artifacts %}
+    <details open>
+        <summary>{% for ref in row.artifact_refs %}{{ ref.resource_type }} · {{ ref.ref }}{% endfor %}</summary>
+        {% if row.outside_observed_execution %}<p class="error-message">Created outside the observed execution path. No producer span was recorded.</p>
+        <p>Untraced interval: {{ row.untraced_interval.before or 'unknown start' }} → {{ row.untraced_interval.after or 'unknown end' }}.</p>{% endif %}
+        <p>Task {{ row.task_id or 'unspecified' }} · Producer {{ row.producer_span_id or 'not observed' }} · {{ row.producer_component or 'component unknown' }} · {{ row.producer_status }}.</p>
+        <p>Persisted {{ row.created_at }} · State {{ row.artifact_status }} · Persistence verified {{ row.persistence_verified }} · Delivered and acknowledged {{ row.delivered }} · Verified outcome {{ row.verified_outcome }}.</p>
+        <p>Credit decisions: {{ row.credit_decisions|join(', ') or 'Not observed' }}.</p>
+        {% if trace_permissions and trace_permissions['artifact.lookup'] %}{% for ref in row.artifact_refs %}<button type="button" class="btn btn-sm" data-artifact-type="{{ ref.resource_type }}" data-artifact-ref="{{ ref.ref }}" {% if not trace_capabilities['artifact.lookup'].available %}disabled{% endif %}>Check current artifact state</button><pre hidden></pre>{% endfor %}{% endif %}
+        {% if not trace_capabilities['artifact.lookup'].configured %}<p>Current-state lookup requires the host <code>artifact_resolver</code> callback.</p>{% endif %}
+    </details>
+    {% else %}
+    <p class="trace-evidence-empty">Not captured for this trace: <code>artifact_persisted</code> with source <code>input_refs</code>, artifact <code>output_refs</code>, persistence verification and producer <code>parent_span_id</code>. Instrument the host persistence path, including fallback generation. No source-to-artifact link can be verified.</p>
+    {% endfor %}
+</div>
+{% endif %}
+{% if trace_inspectors %}
+<div class="detail-section" id="trace-output-contracts">
+    <h2>Output contract boundaries</h2>
+    {% for row in trace_inspectors.contracts %}
+    <details open><summary>{{ row.contract_name }} · parser {{ row.parser_status or 'unknown' }}</summary>
+        <p>Model {{ row.model_evidence.provider or 'unknown' }} / {{ row.model_evidence.model or 'unknown' }} · Stop {{ row.model_evidence.finish_reason or 'unknown' }} · Output tokens {{ row.model_evidence.output_tokens if row.model_evidence.output_tokens is not none else 'unknown' }} / limit {{ row.model_evidence.max_output_tokens or row.output_limit or 'unknown' }} · Response {{ row.model_evidence.response_chars if row.model_evidence.response_chars is not none else 'unknown' }} characters.</p>
+        <p>Model relation: {{ row.model_relation|replace('_', ' ') }}.</p>
+        <p>Opening marker {{ row.opening_marker_found }} → Closing marker {{ row.closing_marker_found }} → Parser {{ row.parser_status }} → Recovery {{ row.recovery_status or ('used' if row.recovery_used else 'not used') }} → Emitted {{ row.emitted }} → Browser acknowledged {{ row.acknowledged if row.acknowledged is not none else 'unknown' }}.</p>
+        <p>Nodes {{ row.nodes if row.nodes is not none else 'unknown' }} · Edges {{ row.edges if row.edges is not none else 'unknown' }}.</p>
+    </details>
+    {% else %}
+    <p class="trace-evidence-empty">Not captured for this trace: <code>output_contract</code> parser/closing-marker results and <code>ui_delivery</code> emission/browser acknowledgement. Instrument the host parser, transport and browser acknowledgement path. A model response alone does not establish interactive delivery.</p>
+    {% endfor %}
+</div>
+{% endif %}

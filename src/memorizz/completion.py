@@ -112,6 +112,7 @@ class CompletionPolicy:
     validator: Optional[CompletionValidator] = field(default=None, repr=False)
     validator_name: Optional[str] = None
     validator_required: bool = False
+    delivery_mode: str = "buffered"
     retry_instruction: str = (
         "The host rejected that proposed final response: {reason} "
         "Continue working from the current state, use the available tools, and "
@@ -132,6 +133,23 @@ class CompletionPolicy:
             self.validator_required = True
             if not self.validator_name:
                 self.validator_name = getattr(self.validator, "__name__", None)
+        self.validate_delivery_mode(self.delivery_mode)
+
+    def validate_delivery_mode(self, mode):
+        if mode not in {"buffered", "final_stream"}:
+            raise ValueError("delivery_mode must be buffered or final_stream")
+        if (
+            mode == "final_stream"
+            and self.enabled
+            and (
+                self.validator is not None
+                or self.validator_required
+                or self.forbidden_response_patterns
+            )
+        ):
+            raise ValueError(
+                "final_stream is incompatible with complete-answer validators or forbidden-response patterns"
+            )
 
     @classmethod
     def from_value(
@@ -153,6 +171,7 @@ class CompletionPolicy:
                 "validator",
                 "validator_name",
                 "validator_required",
+                "delivery_mode",
                 "retry_instruction",
             }
             return cls(**{key: item for key, item in value.items() if key in allowed})
@@ -295,5 +314,6 @@ class CompletionPolicy:
             "forbidden_response_patterns": list(self.forbidden_response_patterns),
             "validator_name": self.validator_name,
             "validator_required": self.validator_required,
+            "delivery_mode": self.delivery_mode,
             "retry_instruction": self.retry_instruction,
         }

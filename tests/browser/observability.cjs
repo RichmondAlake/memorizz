@@ -1,0 +1,74 @@
+/* Run against observability_app.py with a locally installed Playwright. */
+const assert = require('node:assert/strict');
+const {chromium} = require(process.env.MEMORIZZ_PLAYWRIGHT_MODULE || 'playwright');
+(async () => {
+    const browser = await chromium.launch({headless: true, ...(process.env.MEMORIZZ_BROWSER_EXECUTABLE ? {executablePath: process.env.MEMORIZZ_BROWSER_EXECUTABLE} : {})});
+    try {
+        const page = await browser.newPage({extraHTTPHeaders: {Authorization: 'Bearer memorizz-browser-fixture-token'}});
+        const errors = [];
+        page.on('pageerror', error => errors.push(error.message));
+        await page.goto(process.env.MEMORIZZ_BROWSER_TEST_URL || 'http://127.0.0.1:8779/traces');
+        await page.locator('#incident-finder input[name=q]').fill('browser-root');
+        await page.locator('#incident-finder button[type=submit]').click();
+        await page.locator('#incident-results a').first().waitFor();
+        const selectedResult = page.locator('#incident-results a[href*="turn_id=turn"]').first();
+        const destination = new URL(await selectedResult.getAttribute('href'), page.url());
+        assert.equal(destination.searchParams.get('root_trace_id'), 'browser-root');
+        assert(destination.searchParams.get('event_id'));
+        assert(destination.hash.startsWith('#trace-event-'));
+        await selectedResult.click();
+        assert.equal(new URL(page.url()).searchParams.get('event_id'), destination.searchParams.get('event_id'));
+        assert(await page.locator('[data-selected-event]').count());
+        const healthUrl = await page.locator('#trace-health-link').getAttribute('href');
+        assert(healthUrl.includes('root_trace_id=browser-root') && healthUrl.includes('event_id='));
+        assert((await page.locator('#trace-compare-link').getAttribute('href')).includes('baseline_root=browser-root'));
+        assert.equal(await page.locator('#trace-agent-navigator').getAttribute('open'), null);
+        await page.locator('#trace-lineage-inspectors').waitFor();
+        assert((await page.content()).includes('Expected / authoritative'));
+        assert(!(await page.content()).includes('SYNTHETIC PRIVATE PREVIEW'));
+        // Root-only selection must put diagnosis near the top even when no
+        // event anchor scrolls there. Width alone is not a usability gate.
+        const rootOnly = new URL(page.url());
+        rootOnly.searchParams.delete('event_id');
+        rootOnly.searchParams.set('task_id', 'slides');
+        rootOnly.searchParams.set('run_id', 'run');
+        rootOnly.hash = '';
+        await page.goto(rootOnly.toString());
+        assert(await page.locator('#trace-insights').evaluate(node => node.getBoundingClientRect().top + window.scrollY < 1200));
+        await page.locator('#trace-category').selectOption('delivery');
+        assert(await page.locator('[data-waterfall-kind="output_contract"]:visible').count());
+        await page.locator('#trace-category').selectOption('all');
+        await page.locator('[data-artifact-ref]').first().click();
+        await page.waitForFunction(() => document.querySelector('[data-artifact-ref]').nextElementSibling.textContent.includes('ownership_verified'));
+        const revealRequest = page.waitForRequest(request => new URL(request.url()).pathname === '/traces/reveal');
+        await page.locator('[data-reveal-event="preview"]').click();
+        const revealSelection = (await revealRequest).postDataJSON();
+        assert.equal(revealSelection.turn_id, 'turn');
+        assert.equal(revealSelection.thread_id, 'thread');
+        assert.equal(revealSelection.task_id, 'slides');
+        assert.equal(revealSelection.run_id, 'run');
+        await page.waitForFunction(() => document.querySelector('[data-reveal-event="preview"]').nextElementSibling.textContent.includes('SYNTHETIC PRIVATE PREVIEW'));
+        assert(!(await page.locator('[data-reveal-event="preview"] + pre').textContent()).includes('user@example.com'));
+        const replayResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/traces/replays');
+        await page.locator('#trace-replay-create').click();
+        const replay = await replayResponse;
+        const replaySelection = replay.request().postDataJSON();
+        assert.equal(replaySelection.turn_id, 'turn');
+        assert.equal(replaySelection.thread_id, 'thread');
+        assert.equal(replaySelection.task_id, 'slides');
+        assert.equal(replaySelection.run_id, 'run');
+        const draft = await replay.json();
+        assert(draft.evidence_refs.length > 0);
+        assert(draft.evidence_refs.every(event => event.turn_id === 'turn'));
+        assert(!draft.resource_refs.some(ref => ref.ref === 'other-turn-source'));
+        await page.waitForFunction(() => document.querySelector('#trace-replay-status').textContent.includes('Execution is disabled'));
+        await page.setViewportSize({width: 390, height: 844});
+        await page.locator('#trace-lineage-inspectors').scrollIntoViewIfNeeded();
+        const layout = await page.locator('.main-content').boundingBox();
+        assert(layout.x < 30 && layout.width > 330, JSON.stringify(layout));
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= 390));
+        await page.screenshot({path: process.env.MEMORIZZ_BROWSER_SCREENSHOT || '/private/tmp/memorizz-observability-mobile.png'});
+        assert.deepEqual(errors, []);
+        console.log('PASS: incident search, navigation, lineage, lane filters, artifact lookup, explicit reveal, inert replay, mobile rendering; no browser errors');
+    } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

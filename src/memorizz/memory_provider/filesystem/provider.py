@@ -350,6 +350,21 @@ class FileSystemProvider(MemoryProvider):
                         return document
         return None
 
+    def delete_observability_bundle(self, record_id, fingerprint):
+        from ...observability.index import digest
+        from ...observability.normalization import read_payload
+
+        with self._locks[MemoryType.SHARED_MEMORY]:
+            row = self.retrieve_by_id(record_id, MemoryType.SHARED_MEMORY)
+            payload = read_payload(row) if row else None
+            if (
+                not payload
+                or payload.get("record_type") != "observability_trace_bundle"
+                or digest(payload) != fingerprint
+            ):
+                return False
+            return self.delete_by_id(record_id, MemoryType.SHARED_MEMORY)
+
     def delete_by_id(
         self, id: str, memory_store_type: Union[str, MemoryType, None]
     ) -> bool:
@@ -485,6 +500,13 @@ class FileSystemProvider(MemoryProvider):
             document["updated_at"] = datetime.utcnow().isoformat()
             self._write_document(memory_type, id, document)
             return True
+
+    def get_observability_index(self):
+        from ...observability.sql_index import SQLiteSpanIndex
+
+        if not hasattr(self, "_observability_index"):
+            self._observability_index = SQLiteSpanIndex(self.root_path)
+        return self._observability_index
 
     def close(self) -> None:
         """No persistent connections to close; provided for API parity."""
@@ -862,7 +884,21 @@ class FileSystemProvider(MemoryProvider):
             tmp_path = file_path.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
             with tmp_path.open("w", encoding="utf-8") as handle:
                 json.dump(document, handle, ensure_ascii=False)
-            os.replace(tmp_path, file_path)
+            if (
+                document.get("immutable_trace") is True
+                and document.get("record_type") == "observability_trace_bundle"
+            ):
+                try:
+                    # Atomic no-replace publication, including across processes.
+                    os.link(tmp_path, file_path)
+                except FileExistsError:
+                    document = self._read_document(memory_type, document_id)
+                    if not document:
+                        raise RuntimeError("Existing immutable trace cannot be read")
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+            else:
+                os.replace(tmp_path, file_path)
 
             metadata = self._indexes[memory_type]
             metadata[document_id] = self._build_metadata(document)

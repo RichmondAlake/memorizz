@@ -348,6 +348,7 @@ def dedupe_and_select(
     max_items: int = 5,
     max_chars_per_item: int = 600,
     dedupe_parent_sources: bool = False,
+    selection_ledger: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Dedupe retrieved memory rows and select a diverse, budgeted subset.
 
@@ -391,20 +392,52 @@ def dedupe_and_select(
     fingerprint_indexes: Dict[str, int] = {}
     pool: List[Dict[str, Any]] = []
 
-    for source, row in candidates:
+    def mark(candidate, reason, selected=False):
+        entry = candidate.get("_decision")
+        if entry is not None:
+            entry.update(selection_reason=reason, selected=selected)
+
+    for rank, (source, row) in enumerate(candidates, 1):
+        decision = None
+        if selection_ledger is not None and len(selection_ledger) < 64:
+            from ...observability.privacy import pseudonym
+
+            score = _candidate_score(row)
+            decision = {
+                "resource": {
+                    "resource_type": "memory",
+                    "ref": pseudonym(
+                        _candidate_id(row) or content_fingerprint(candidate_text(row)),
+                        scope="memory-ref",
+                    ),
+                    "role": "retrieved_supporting_evidence",
+                },
+                "candidate_rank": rank,
+                "relevance_score": score if math.isfinite(score) else None,
+                "selected": False,
+                "selection_reason": "selection_not_observed",
+            }
+            selection_ledger.append(decision)
         text = candidate_text(row).strip()
         if not text:
+            if decision is not None:
+                decision["selection_reason"] = "not_ready"
             continue
         normalized = normalize_text(text)
         fingerprint = content_fingerprint(normalized)
 
         # 2. Already in the conversation window (verbatim or contained).
         if fingerprint in history_fingerprints:
+            if decision is not None:
+                decision["selection_reason"] = "already_in_history"
             continue
         if any(normalized in h for h in history_normalized):
+            if decision is not None:
+                decision["selection_reason"] = "already_in_history"
             continue
 
         shaped = {
+            "_decision": decision,
             "source": source,
             "text": text,
             "normalized": normalized,
@@ -422,7 +455,10 @@ def dedupe_and_select(
         if existing_index is not None:
             current = pool[existing_index]
             if shaped["score"] > current["score"]:
+                mark(current, "exact_duplicate")
                 pool[existing_index] = shaped
+            else:
+                mark(shaped, "exact_duplicate")
             continue
         fingerprint_indexes[fingerprint] = len(pool)
         pool.append(shaped)
@@ -447,7 +483,11 @@ def dedupe_and_select(
                 _provenance_width(current),
                 current["score"],
             ):
+                if current is not None:
+                    mark(current, "parent_source_duplicate")
                 representatives[identity] = candidate
+            else:
+                mark(candidate, "parent_source_duplicate")
         pool = [*representatives.values(), *ungrouped]
     pool.sort(key=lambda c: (-c["score"], c["id"]))
     kept: List[Dict[str, Any]] = []
@@ -457,6 +497,7 @@ def dedupe_and_select(
             cand.get("parent_source_id") or cand.get("source_id") or ""
         ).strip()
         if dedupe_parent_sources and parent_source in seen_parent_sources:
+            mark(cand, "parent_source_duplicate")
             continue
         is_dup = False
         if cand["embedding"] is not None:
@@ -471,6 +512,8 @@ def dedupe_and_select(
             kept.append(cand)
             if dedupe_parent_sources and parent_source:
                 seen_parent_sources.add(parent_source)
+        else:
+            mark(cand, "near_duplicate")
 
     # 4. Selection. With a query embedding, run MMR over relevance
     # (cosine-to-query blended with recency); otherwise fall back to the
@@ -521,6 +564,15 @@ def dedupe_and_select(
             remaining.remove(best)
     else:
         selected = kept[:max_items]
+
+    for candidate in kept:
+        mark(candidate, "budget_exceeded")
+    for candidate in selected:
+        mark(
+            candidate,
+            "mmr_selected" if query_embedding is not None else "provider_rank_selected",
+            selected=True,
+        )
 
     # 5. Deterministic, chronology-preserving render order.
     selected.sort(key=lambda c: (c["timestamp"] or 0.0, c["id"], c["normalized"]))

@@ -1,5 +1,11 @@
 # Python SDK Quickstart
 
+Streaming is now the default delivery path. See the
+[streaming contract, defaults and compatibility modes](../guides/streaming.md)
+for the SDK event iterator, CLI opt-out, UI lifecycle and opt-in MCP answer events.
+Full-answer completion validators still buffer until acceptance; Python `run()`
+retains its complete-string return contract.
+
 This quickstart builds a tenant-scoped agent whose definition and conversation
 survive process restarts.
 

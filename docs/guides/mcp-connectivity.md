@@ -1,5 +1,11 @@
 # MCP Connectivity
 
+Streaming is now the default delivery path. See the
+[streaming contract, defaults and compatibility modes](streaming.md)
+for the SDK event iterator, CLI opt-out, UI lifecycle and opt-in MCP answer events.
+Full-answer completion validators still buffer until acceptance; Python `run()`
+retains its complete-string return contract.
+
 Memorizz has a first-class Model Context Protocol client built on the official
 Python SDK. Agents can discover and call tools, list/read resources, expand
 resource templates, and list/get prompts over:

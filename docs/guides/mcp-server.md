@@ -1,5 +1,11 @@
 # Expose MemoRizz as an MCP server
 
+Streaming is now the default delivery path. See the
+[streaming contract, defaults and compatibility modes](streaming.md)
+for the SDK event iterator, CLI opt-out, UI lifecycle and opt-in MCP answer events.
+Full-answer completion validators still buffer until acceptance; Python `run()`
+retains its complete-string return contract.
+
 MemoRizz includes a first-party MCP server built on the official Python SDK.
 Any standards-compliant MCP host can use MemoRizz memory, agents, and
 conversations through local `stdio` or remote Streamable HTTP.

@@ -56,6 +56,11 @@ src/memorizz/examples/
 # Bug reports
 .bug_tracking/
 
+# Keep audit reports outside the repository and public release artifacts.
+/reports/
+/docs/releases/
+/docs/*report*.md
+
 # Build artifacts
 site/
 *.map

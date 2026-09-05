@@ -52,6 +52,7 @@ from ..enums import ApplicationMode, ApplicationModeConfig, MemoryType, Role
 from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
 from ..long_term.semantic.entity_memory import EntityAttributeInput, EntityRelationInput
+from ..streaming import StreamCancelled, check_cancelled, session_for
 from ..task_decomposition import normalize_delegation_config
 from ..tooling import (
     ContextPolicy,
@@ -240,6 +241,7 @@ class MemAgent:
     _last_tool_outcomes = _ContextLocal(list)
     _last_retrieved_memories = _ContextLocal(list)
     _last_retrieval_stats = _ContextLocal(dict)
+    _last_selection_ledger = _ContextLocal(list)
     _last_memory_context_evidence = _ContextLocal(dict)
     _last_memory_attribution_context = _ContextLocal()
     _thread_ids_by_memory = _ContextLocal(dict)
@@ -316,7 +318,7 @@ class MemAgent:
         application_id: Optional[str] = None,
         auto_register: bool = True,
         is_favorite: bool = False,
-        streaming: bool = False,
+        streaming: bool = True,
     ):
         """Initialize the MemAgent with configuration."""
         self.streaming = streaming
@@ -4012,13 +4014,21 @@ class MemAgent:
     ) -> None:
         """Initialize an isolated trace collector and durable turn identity."""
         self._current_user_id = user_id
-        self._current_run_id = str(uuid.uuid4())
-        self._current_turn_id = str(uuid.uuid4())
-        self._current_root_trace_id = str(uuid.uuid4())
+        session = session_for(self)
+        self._current_run_id = (
+            session.identity["run_id"] if session else str(uuid.uuid4())
+        )
+        self._current_turn_id = (
+            session.identity["turn_id"] if session else str(uuid.uuid4())
+        )
+        self._current_root_trace_id = (
+            session.identity["root_trace_id"] if session else str(uuid.uuid4())
+        )
         self._current_parent_span_id = self._current_root_trace_id
         self._stream_trace_events = []
         self._last_tool_outcomes = []
         self._last_memory_context_evidence = {}
+        self._last_selection_ledger = []
         self._last_memory_attribution_context = None
         self._last_trace_context = self._trace_identity_payload()
         if query is not None and self.learning_control_plane is not None:
@@ -4410,6 +4420,20 @@ class MemAgent:
             "personalization_retrieval": personalization_diagnostics,
         }
         self._last_memory_context_evidence = dict(payload)
+        selection_ledger = getattr(self, "_last_selection_ledger", [])
+        if selection_ledger:
+            self._emit_stream_event(
+                "trace",
+                {
+                    "trace_kind": "memory_selection",
+                    "title": "Memory selection decisions",
+                    "trace_id": f"selection:{self._current_turn_id}",
+                    "span_id": str(uuid.uuid4()),
+                    "parent_span_id": self._current_root_trace_id,
+                    "status": "success",
+                    "selection_ledger": selection_ledger,
+                },
+            )
 
         def _attribution_rows(
             rows: List[Dict[str, Any]], source: str
@@ -4442,6 +4466,9 @@ class MemAgent:
             "trace",
             {
                 "trace_kind": "memory_context",
+                "input_refs": [
+                    entry["resource"] for entry in selection_ledger if entry["selected"]
+                ][:32],
                 "title": "Memory supplied",
                 "trace_id": f"memory:{self._current_turn_id}:supplied",
                 "span_id": str(uuid.uuid4()),
@@ -4571,6 +4598,14 @@ class MemAgent:
             if value is not None
         }
 
+    def observe(self, operation: str, *, trace_context=None, **kwargs):
+        """Observe a host action using this agent's provider and turn identity."""
+        from ..observability import ObservabilityRecorder
+
+        return ObservabilityRecorder(
+            self.memory_provider, trace_context or self.get_trace_context()
+        ).start_span(operation, **kwargs)
+
     @property
     def last_tool_outcomes(self) -> List[Dict[str, Any]]:
         """Structured outcomes from the most recent turn, in execution order."""
@@ -4671,6 +4706,22 @@ class MemAgent:
         if provider_name:
             metadata["provider"] = str(provider_name)[:120]
 
+        response_getter = getattr(self.model, "get_last_response_metadata", None)
+        if callable(response_getter):
+            try:
+                from ..observability.models import LastResponseMetadata
+
+                response_metadata = response_getter() or {}
+                if isinstance(response_metadata, LastResponseMetadata):
+                    response_metadata = response_metadata.model_dump(exclude_none=True)
+                metadata.update(
+                    LastResponseMetadata.model_validate(response_metadata).model_dump(
+                        exclude_none=True
+                    )
+                )
+            except Exception:
+                logger.debug("Provider returned invalid response metadata")
+
         usage_getter = getattr(self.model, "get_last_usage", None)
         if callable(usage_getter):
             try:
@@ -4710,7 +4761,11 @@ class MemAgent:
                 "stage": stage,
                 "status": "started",
                 "content": "",
-                **self._model_trace_metadata(),
+                **{
+                    key: value
+                    for key, value in self._model_trace_metadata().items()
+                    if key in {"model", "provider", "max_output_tokens"}
+                },
             },
         )
         return span_id, time.perf_counter()
@@ -4724,7 +4779,16 @@ class MemAgent:
         stage: str,
         error: Optional[BaseException] = None,
         duration_ms: Optional[float] = None,
+        response_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        model_metadata = self._model_trace_metadata()
+        if error:
+            # Optional providers may retain usage from their previous response.
+            model_metadata = {
+                key: value
+                for key, value in model_metadata.items()
+                if key in {"model", "provider", "max_output_tokens"}
+            }
         self._emit_stream_event(
             "trace",
             {
@@ -4745,7 +4809,8 @@ class MemAgent:
                     3,
                 ),
                 "content": "",
-                **self._model_trace_metadata(),
+                **model_metadata,
+                **(response_metadata or {}),
             },
         )
         self._current_parent_span_id = self._current_root_trace_id
@@ -4760,8 +4825,15 @@ class MemAgent:
     ) -> Any:
         span_id, started_at = self._start_model_trace(iteration=iteration, stage=stage)
         error: Optional[BaseException] = None
+        response_metadata = {}
         try:
-            return self.model.generate(messages, tools=tools)
+            response = self.model.generate(messages, tools=tools)
+            from ..llms.response_metadata import response_metadata as describe_response
+
+            response_metadata = describe_response(
+                response, text=response if isinstance(response, str) else None
+            )
+            return response
         except BaseException as exc:
             error = exc
             raise
@@ -4772,6 +4844,7 @@ class MemAgent:
                 iteration=iteration,
                 stage=stage,
                 error=error,
+                response_metadata=response_metadata,
             )
 
     def _generate_stream_with_trace(
@@ -4785,10 +4858,15 @@ class MemAgent:
         """Yield provider events while measuring only time spent in the provider."""
         span_id, started_at = self._start_model_trace(iteration=iteration, stage=stage)
         provider_duration_ms = 0.0
+        response_chars = response_bytes = 0
+        ttft_ms = None
+        terminal_received = False
+        stream = None
         error: Optional[BaseException] = None
         try:
             stream = iter(self.model.generate_stream(messages, tools=tools))
             while True:
+                check_cancelled()
                 next_started_at = time.perf_counter()
                 try:
                     event = next(stream)
@@ -4803,15 +4881,41 @@ class MemAgent:
                     ) * 1000
                     raise
                 provider_duration_ms += (time.perf_counter() - next_started_at) * 1000
+                if event.get("type") == "content" and isinstance(
+                    event.get("content"), str
+                ):
+                    response_chars += len(event["content"])
+                    response_bytes += len(event["content"].encode("utf-8"))
+                    if ttft_ms is None:
+                        ttft_ms = provider_duration_ms
+                        session = session_for(self)
+                        if session is not None:
+                            session.emit(
+                                "status",
+                                stage="provider_first_delta",
+                                span_id=span_id,
+                                attempt=iteration,
+                                provider_ttft_ms=round(ttft_ms, 3),
+                            )
+                if event.get("type") in {"done", "tool_calls"}:
+                    terminal_received = True
                 yield event
         except GeneratorExit:
             # A consumer returning after the provider's terminal event closes
             # this wrapper at its yield point; that is a successful model call.
+            if not terminal_received:
+                error = GeneratorExit()
             raise
         except BaseException as exc:
             error = exc
             raise
         finally:
+            if stream is not None and callable(getattr(stream, "close", None)):
+                try:
+                    stream.close()
+                except Exception as close_error:
+                    if error is None:
+                        error = close_error
             self._finish_model_trace(
                 span_id,
                 started_at,
@@ -4819,6 +4923,13 @@ class MemAgent:
                 stage=stage,
                 error=error,
                 duration_ms=provider_duration_ms,
+                response_metadata={
+                    **(getattr(error, "response_metadata", {}) or {}),
+                    "response_chars": response_chars,
+                    "response_bytes": response_bytes,
+                    "stream_duration_ms": round(provider_duration_ms, 3),
+                    **({"ttft_ms": round(ttft_ms, 3)} if ttft_ms is not None else {}),
+                },
             )
 
     def run(
@@ -4896,6 +5007,10 @@ class MemAgent:
                 ),
                 execution_backend=(tool_context or {}).get("harness_execution_backend"),
             )
+            if session_for(self) is not None and result.status.value != "succeeded":
+                from ..llms.streaming import ProviderStreamError
+
+                raise ProviderStreamError("harness_" + str(result.status.value))
             return (
                 result.final_response
                 if result.status.value == "succeeded"
@@ -5036,6 +5151,11 @@ class MemAgent:
                 user_id=user_id,
                 request_context=context,
             )
+            check_cancelled()
+            stream_session = session_for(self)
+            if stream_session is not None and stream_session.outcome != "completed":
+                turn_status = stream_session.outcome
+                return ""
             self._emit_memory_reference_trace(response)
 
             # 5. Cache the response
@@ -5066,6 +5186,8 @@ class MemAgent:
         except Exception as e:
             logger.error(f"MemAgent execution failed: {e}")
             turn_error_code = type(e).__name__
+            if session_for(self) is not None:
+                raise
             error_response = f"I apologize, but I encountered an error: {str(e)}"
             return error_response
         finally:
@@ -5593,6 +5715,27 @@ class MemAgent:
             consumed=True,
         )
 
+    def run_stream_events(
+        self, query, *, delivery_mode=None, cancellation=None, queue_size=64, **kwargs
+    ):
+        """Return a closeable, ordered v1 event stream (no private reasoning)."""
+        from ..streaming import agent_event_stream
+
+        return agent_event_stream(
+            self,
+            query,
+            delivery_mode=delivery_mode,
+            cancellation=cancellation,
+            queue_size=queue_size,
+            **kwargs,
+        )
+
+    async def arun_stream_events(self, query, **kwargs):
+        """Async event iterator backed by one owned execution context/worker."""
+        stream = self.run_stream_events(query, **kwargs)
+        async for event in stream.async_events():
+            yield event
+
     def run_stream(
         self,
         query: str,
@@ -5671,7 +5814,13 @@ class MemAgent:
             yield serialize_tool_result(result)
             return
 
-        if not self.model or not hasattr(self.model, "generate_stream"):
+        from ..llms.streaming import streaming_capabilities
+
+        if self.model is None and session_for(self) is not None:
+            from ..llms.streaming import ProviderStreamError
+
+            raise ProviderStreamError("model_not_configured")
+        if not self.model or not streaming_capabilities(self.model)["text_deltas"]:
             # Fallback: run synchronously and yield the full result
             yield self.run(
                 query,
@@ -5695,7 +5844,9 @@ class MemAgent:
         trace_finished = False
         turn_status = "error"
         turn_error_code: Optional[str] = None
+        session = session_for(self)
         try:
+            check_cancelled()
             # 1. Prepare IDs with per-thread state isolation.
             memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
             self._begin_trace_turn(user_id, query=query, emit_start=False)
@@ -5761,6 +5912,10 @@ class MemAgent:
                         tool_call_count=0,
                     )
                     if cache_decision.accepted:
+                        yield cached
+                        if session:
+                            session.answer_done()
+                        check_cancelled()
                         if self.learning_control_plane is not None:
                             try:
                                 self.learning_control_plane.record_cache(
@@ -5781,7 +5936,6 @@ class MemAgent:
                             "stream_end",
                             {"reason": "cache_hit", "agent_id": self.agent_id},
                         )
-                        yield cached
                         return
                     logger.info(
                         "Cached stream response rejected by completion policy "
@@ -5806,6 +5960,8 @@ class MemAgent:
             built_context = self._attach_personalization_context(built_context, context)
             self._emit_memory_context_trace(built_context)
             system_prompt = self._build_system_prompt()
+            if session:
+                session.emit("status", stage="context_ready")
 
             # 4. Stream the LLM interaction
             full_response = ""
@@ -5818,10 +5974,19 @@ class MemAgent:
             ):
                 full_response += chunk
                 yield chunk
+            if session and session.outcome != "completed":
+                turn_status = session.outcome
+                turn_error_code = session.error_code
+                return
+            check_cancelled()
+            if session:
+                session.answer_done()
             self._emit_memory_reference_trace(full_response)
 
             # 5. Cache the response
             if self.cache_manager.enabled:
+                if session:
+                    session.persistence["cache"] = "unknown"
                 self.cache_manager.cache_response(
                     query,
                     full_response,
@@ -5849,6 +6014,9 @@ class MemAgent:
                 },
             )
 
+        except StreamCancelled:
+            turn_status, turn_error_code = "cancelled", "cancelled"
+            raise
         except Exception as e:
             # Include full traceback so we can pinpoint which step in the
             # streaming pipeline failed (LOB-serialization bugs surface here
@@ -5891,6 +6059,8 @@ class MemAgent:
                 },
             )
             if isinstance(e, CompletionRejectedError):
+                raise
+            if session:
                 raise
             if raise_on_provider_error and is_provider_error:
                 raise
@@ -5940,6 +6110,7 @@ class MemAgent:
         stream_end    ``reason`` (``completed``/``cache_hit``/``error``),
                       ``agent_id``, optional ``response_length``. Fired once
                       when the stream terminates.
+        completion_check  Candidate acceptance, code, digest and attempt evidence.
         ============  =================================================================
 
         Text chunks themselves are yielded by the generator, not surfaced via
@@ -5974,7 +6145,10 @@ class MemAgent:
         try:
             callback(event)
         except Exception as exc:
-            logger.debug("Stream event callback failed: %s", exc)
+            from ..observability.pipeline import record_pipeline_metric
+
+            record_pipeline_metric(self.memory_provider, "callback_failures")
+            logger.debug("Stream event callback failed (%s)", type(exc).__name__)
 
     def _preview_stream_payload(self, value: Any, limit: int = 1800) -> str:
         """Serialize arbitrary event data into a bounded preview string."""
@@ -6079,6 +6253,13 @@ class MemAgent:
             "cached_tokens",
             "cost_usd",
             "finish_reason",
+            "max_output_tokens",
+            "response_chars",
+            "response_bytes",
+            "ttft_ms",
+            "stream_duration_ms",
+            "retry_count",
+            "fallback_count",
             "iteration",
             "stage",
             "total_tokens",
@@ -6143,8 +6324,34 @@ class MemAgent:
             if trace_id:
                 entry["trace_id"] = trace_id
                 by_trace_id[trace_id] = entry
+            from ..observability.models import ResourceRef, SelectionDecision
+
+            for field, model, maximum in (
+                ("selection_ledger", SelectionDecision, 64),
+                ("input_refs", ResourceRef, 32),
+                ("output_refs", ResourceRef, 32),
+            ):
+                if isinstance(event.get(field), list):
+                    try:
+                        entry[field] = [
+                            model.model_validate(value).model_dump(
+                                mode="json", exclude_none=True
+                            )
+                            for value in event[field][:maximum]
+                        ]
+                    except ValueError:
+                        from ..observability.pipeline import record_pipeline_metric
+
+                        record_pipeline_metric(
+                            self.memory_provider, "dropped_metadata_fields"
+                        )
             for field in metadata_fields:
                 value = event.get(field)
+                if field == "grounding_source_ids" and isinstance(value, (list, tuple)):
+                    entry[field] = [
+                        item[:240] for item in value[:16] if isinstance(item, str)
+                    ]
+                    continue
                 if value is None or not isinstance(value, (str, int, float, bool)):
                     continue
                 entry[field] = value[:240] if isinstance(value, str) else value
@@ -6159,7 +6366,10 @@ class MemAgent:
         user_id: Optional[str] = None,
     ) -> None:
         """Persist reasoning/tool traces outside the conversational recall path."""
+        session = session_for(self)
         if not self.memory_provider:
+            if session:
+                session.persistence["trace"] = "not_configured"
             return
         # A handful of legacy provider-like integrations expose ``store`` but
         # no way to list or query a memory type. Writing trace bundles there
@@ -6188,6 +6398,8 @@ class MemAgent:
                 trace_context=context,
                 events=trace_events,
             )
+            if session:
+                session.persistence["trace"] = "written"
             logger.debug(
                 "Recorded private trace bundle: %s events for thread %s",
                 len(trace_events),
@@ -6195,6 +6407,8 @@ class MemAgent:
             )
         except Exception as exc:
             logger.warning("Failed to record trace bundle: %s", exc)
+            if session:
+                session.persistence["trace"] = "failed"
 
     def _format_recent_tool_logs_digest(self, limit: int = 10) -> str:
         """Build a compact, agent-facing digest of this thread's tool_log entries.
@@ -6989,6 +7203,212 @@ class MemAgent:
         return result
 
     def _execute_llm_interaction_stream(
+        self, system_prompt, query, context, user_id=None, request_context=None
+    ):
+        session = session_for(self)
+        if session is None:
+            yield from self._execute_llm_interaction_stream_legacy(
+                system_prompt,
+                query,
+                context,
+                user_id=user_id,
+                request_context=request_context,
+            )
+            return
+        from ..llms.streaming import ProviderStreamError, streaming_capabilities
+
+        workflow = self._init_workflow_capture(query, user_id)
+        messages = self._build_prompt_messages(
+            system_prompt, query, context, request_context=request_context
+        )
+        if getattr(self, "semantic_tool_router", None) is not None:
+            self.semantic_tool_router.begin_turn(user_id=user_id)
+        tools = list(self._build_llm_tools(query, user_id=user_id) or [])
+        if tools and not streaming_capabilities(self.model)["tool_calls"]:
+            raise ProviderStreamError("provider_tools_unsupported")
+        self._set_provider_cache_scope()
+        finalize = "memorizz_finalize_answer"
+        final_phase = not tools
+        if session.mode == "final_stream" and tools:
+            if any(tool.get("function", {}).get("name") == finalize for tool in tools):
+                raise ProviderStreamError("reserved_finalizer_tool_name")
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": finalize,
+                        "description": "Finish the private tool phase. Call alone after collecting all required evidence; the host then enables public answer generation with tools disabled. Do not draft the answer before this call.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            )
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "Use tools to collect evidence, then call memorizz_finalize_answer alone. Do not draft the public answer until the host accepts finalization.",
+                }
+            )
+        tool_count = rejections = 0
+        try:
+            for iteration in range(self._get_tool_iteration_limit()):
+                check_cancelled()
+                session.attempt = iteration + 1
+                # Only evidence-only policies are valid for this phase. No final
+                # text validator is bypassed to obtain irreversible live output.
+                if session.mode == "final_stream" and final_phase:
+                    decision = self._evaluate_completion_candidate(
+                        query=query,
+                        response="",
+                        iteration=iteration + 1,
+                        tool_call_count=tool_count,
+                    )
+                    if not decision.accepted:
+                        raise CompletionRejectedError(decision, rejections)
+                pending, had_tools, terminal = [], False, False
+                session.emit(
+                    "status",
+                    stage="answer_generation" if final_phase else "tool_phase",
+                    attempt=iteration + 1,
+                )
+                provider = self._generate_stream_with_trace(
+                    _to_jsonable(messages),
+                    tools=None if final_phase else tools,
+                    iteration=iteration + 1,
+                    stage="agent_stream",
+                )
+                try:
+                    for event in provider:
+                        check_cancelled()
+                        kind = event.get("type")
+                        if kind == "content":
+                            delta = event.get("content", "")
+                            pending.append(delta)
+                            if session.mode == "final_stream" and final_phase:
+                                yield delta
+                        elif kind == "usage":
+                            usage = {
+                                k: v
+                                for k, v in (event.get("usage") or {}).items()
+                                if k
+                                in {
+                                    "prompt_tokens",
+                                    "completion_tokens",
+                                    "total_tokens",
+                                    "cached_tokens",
+                                }
+                                and (v is None or type(v) is int)
+                            }
+                            session.emit("usage", usage=usage, attempt=iteration + 1)
+                        elif kind == "tool_calls":
+                            self._record_context_window_usage(
+                                stage=f"stream_iteration_{iteration + 1}"
+                            )
+                            terminal, had_tools = True, True
+                            if final_phase:
+                                raise ProviderStreamError(
+                                    "unexpected_tool_call_in_final_answer"
+                                )
+                            message = event["response"].choices[0].message
+                            self._append_assistant_tool_calls(messages, message)
+                            for call in message.tool_calls:
+                                check_cancelled()
+                                if (
+                                    call.function.name == finalize
+                                    and session.mode == "final_stream"
+                                ):
+                                    decision = self._evaluate_completion_candidate(
+                                        query=query,
+                                        response="",
+                                        iteration=iteration + 1,
+                                        tool_call_count=tool_count,
+                                    )
+                                    accepted = (
+                                        decision.accepted
+                                        and len(message.tool_calls) == 1
+                                    )
+                                    messages.append(
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": call.id,
+                                            "content": "Finalization accepted. Produce the public answer now; tools are disabled."
+                                            if accepted
+                                            else "Finalization rejected. Complete prerequisites and call this tool alone.",
+                                        }
+                                    )
+                                    final_phase = accepted
+                                else:
+                                    tool_count += 1
+                                    self._execute_and_record_tool_call(
+                                        call,
+                                        messages,
+                                        workflow,
+                                        user_id,
+                                        streaming=True,
+                                        query=query,
+                                    )
+                        elif kind == "done":
+                            self._record_context_window_usage(
+                                stage=f"stream_iteration_{iteration + 1}"
+                            )
+                            terminal = True
+                            if had_tools:
+                                continue
+                            candidate = "".join(pending)
+                            if event.get("content", candidate) != candidate:
+                                raise ProviderStreamError("provider_delta_mismatch")
+                            if session.mode == "final_stream" and not final_phase:
+                                messages.append(
+                                    {
+                                        "role": "system",
+                                        "content": "Finish tool evidence collection and call memorizz_finalize_answer alone; do not draft the answer.",
+                                    }
+                                )
+                                break
+                            decision = self._evaluate_completion_candidate(
+                                query=query,
+                                response=candidate,
+                                iteration=iteration + 1,
+                                tool_call_count=tool_count,
+                            )
+                            if not decision.accepted:
+                                rejections += 1
+                                if rejections > self.completion_policy.max_rejections:
+                                    raise CompletionRejectedError(decision, rejections)
+                                self._append_completion_rejection(
+                                    messages,
+                                    candidate,
+                                    self.completion_policy.retry_message(decision),
+                                )
+                                break
+                            if session.mode == "buffered" and candidate:
+                                yield candidate
+                            session.answer_done()
+                            return
+                finally:
+                    provider.close()
+                if not terminal:
+                    raise ProviderStreamError("provider_stream_incomplete")
+            raise ProviderStreamError("iteration_limit")
+        except ApprovalRequired as approval:
+            session.outcome = "approval_required"
+            proposal = approval.proposal
+            session.emit(
+                "approval.required", proposal=proposal.to_dict(include_arguments=False)
+            )
+        finally:
+            session.persistence["workflow"] = (
+                "written"
+                if self._persist_workflow_run(workflow)
+                else "unknown"
+                if workflow and workflow.steps
+                else "not_requested"
+            )
+
+    def _execute_llm_interaction_stream_legacy(
         self,
         system_prompt: str,
         query: str,
@@ -7171,6 +7591,7 @@ class MemAgent:
         """Build context for the query using memory manager."""
         context = {"query": query}
         self._last_retrieved_memories = []
+        self._last_selection_ledger = []
         self._last_retrieval_stats = {
             "duration_ms": 0.0,
             "candidate_count": 0,
@@ -7372,6 +7793,7 @@ class MemAgent:
                         query_embedding=query_embedding,
                         max_items=policy.max_items,
                         dedupe_parent_sources=policy.dedupe_parent_sources,
+                        selection_ledger=self._last_selection_ledger,
                     )
                     if selected:
                         context["retrieved_memories"] = selected
@@ -7895,10 +8317,18 @@ class MemAgent:
 
                 # Fallback: return any content we got
                 fallback_response = "I encountered an unexpected response format."
+                if session_for(self) is not None:
+                    from ..llms.streaming import ProviderStreamError
+
+                    raise ProviderStreamError("unexpected_response_format")
                 self._persist_workflow_run(workflow)
                 return fallback_response
 
             # If we exhausted iterations
+            if session_for(self) is not None:
+                from ..llms.streaming import ProviderStreamError
+
+                raise ProviderStreamError("iteration_limit")
             final_response = (
                 "I reached the maximum number of tool-call iterations "
                 f"({max_iterations}). Please try again."
@@ -7912,6 +8342,14 @@ class MemAgent:
         except ApprovalRequired as approval:
             if "workflow" in locals():
                 self._persist_workflow_run(workflow)
+            session = session_for(self)
+            if session is not None:
+                session.outcome = "approval_required"
+                session.emit(
+                    "approval.required",
+                    proposal=approval.proposal.to_dict(include_arguments=False),
+                )
+                return ""
             return self._approval_required_payload(approval.proposal)
         except CompletionRejectedError:
             if "workflow" in locals():
@@ -7919,6 +8357,8 @@ class MemAgent:
             raise
         except Exception as e:
             logger.error(f"LLM interaction failed: {e}")
+            if session_for(self) is not None:
+                raise
 
             # Store workflow even on error if it exists
             if "workflow" in locals():
@@ -8842,7 +9282,10 @@ class MemAgent:
         user_id: Optional[str] = None,
     ):
         """Record the interaction in memory."""
+        session = session_for(self)
         if not self.memory_manager:
+            if session:
+                session.persistence["conversation"] = "not_configured"
             return
 
         try:
@@ -8868,6 +9311,8 @@ class MemAgent:
                         "Skipping duplicate interaction write for memory %s",
                         memory_id,
                     )
+                    if session:
+                        session.persistence["conversation"] = "deduplicated"
                     return
             except Exception:
                 pass
@@ -8895,6 +9340,10 @@ class MemAgent:
             assistant_unit_id = self.memory_manager.save_memory_unit(
                 assistant_memory, memory_id
             )
+            if session:
+                session.persistence["conversation"] = (
+                    "written" if user_unit_id and assistant_unit_id else "unknown"
+                )
 
             # Backfill embeddings off the hot path so episodic semantic
             # recall (vector search over conversation rows) has vectors to
@@ -8911,6 +9360,8 @@ class MemAgent:
 
         except Exception as e:
             logger.warning(f"Failed to record interaction: {e}")
+            if session:
+                session.persistence["conversation"] = "failed"
 
     def _schedule_conversation_embedding_backfill(
         self, unit_texts: List[Tuple[Optional[str], str]]

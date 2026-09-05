@@ -986,6 +986,23 @@ class MongoDBProvider(MemoryProvider):
     ) -> Any:
         if (
             memory_type == MemoryType.SHARED_MEMORY
+            and data.get("immutable_trace") is True
+            and data.get("record_type") == "observability_trace_bundle"
+        ):
+            from pymongo.errors import DuplicateKeyError
+
+            logical_id = str(data["memory_id"])
+            existing = collection.find_one({"memory_id": logical_id}, {"_id": 1})
+            if existing:
+                return existing["_id"]
+            data = {**data, "_id": logical_id}
+            try:
+                collection.insert_one(data)
+            except DuplicateKeyError:
+                pass  # The concurrent first writer owns this immutable ID.
+            return logical_id
+        if (
+            memory_type == MemoryType.SHARED_MEMORY
             and str(data.get("record_type") or "").startswith("observability_")
             and data.get("memory_id")
         ):
@@ -1980,6 +1997,25 @@ class MongoDBProvider(MemoryProvider):
             logger.warning(f"Failed to clear semantic cache: {e}")
             return 0
 
+    def delete_observability_bundle(self, record_id, fingerprint):
+        from ...observability.index import digest
+        from ...observability.normalization import read_payload
+
+        row = self.shared_memory_collection.find_one({"memory_id": record_id})
+        payload = read_payload(row) if row else None
+        if (
+            not payload
+            or payload.get("record_type") != "observability_trace_bundle"
+            or digest(payload) != fingerprint
+        ):
+            return False
+        return (
+            self.shared_memory_collection.delete_one(
+                {"_id": row["_id"], "content": row["content"]}
+            ).deleted_count
+            == 1
+        )
+
     def delete_by_id(self, id: str, memory_store_type: MemoryType) -> bool:
         """
         Delete a document from MongoDB by _id.
@@ -2121,6 +2157,13 @@ class MongoDBProvider(MemoryProvider):
             raise ValueError("Invalid observability cursor") from exc
         return ObjectId(decoded) if ObjectId.is_valid(decoded) else decoded
 
+    def get_observability_index(self):
+        from ...observability.mongo_index import MongoSpanIndex
+
+        if not hasattr(self, "_observability_index"):
+            self._observability_index = MongoSpanIndex(self.db)
+        return self._observability_index
+
     def query_observability_records(
         self,
         memory_store_type: Any,
@@ -2129,6 +2172,7 @@ class MongoDBProvider(MemoryProvider):
         memory_ids: Optional[List[str]] = None,
         thread_id: Optional[str] = None,
         user_id: Any = _MONGO_UNSET,
+        application_id: Optional[str] = None,
         record_type: Optional[str] = None,
         tool_name: Optional[str] = None,
         success: Optional[bool] = None,
@@ -2180,6 +2224,8 @@ class MongoDBProvider(MemoryProvider):
             clauses.append({"thread_id": str(thread_id)})
         if user_id is not _MONGO_UNSET:
             clauses.append(_mongo_user_id_predicate(user_id))
+        if application_id is not None:
+            clauses.append({"application_id": application_id})
         if record_type is not None:
             clauses.append({"record_type": str(record_type)})
         if tool_name is not None:

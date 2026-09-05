@@ -3,6 +3,7 @@
 # See LICENSE file in the project root for full license information.
 
 import base64
+import hashlib
 import json
 import time
 from abc import ABC, abstractmethod
@@ -279,6 +280,7 @@ class MemoryProvider(ABC):
         memory_ids: Optional[List[str]] = None,
         thread_id: Optional[str] = None,
         user_id: Any = _UNSET,
+        application_id: Optional[str] = None,
         record_type: Optional[str] = None,
         tool_name: Optional[str] = None,
         success: Optional[bool] = None,
@@ -350,6 +352,11 @@ class MemoryProvider(ABC):
                 continue
             if user_id is not _UNSET and filter_row.get("user_id") != user_id:
                 continue
+            if (
+                application_id is not None
+                and filter_row.get("application_id") != application_id
+            ):
+                continue
             if tool_name is not None and str(filter_row.get("tool_name") or "") != str(
                 tool_name
             ):
@@ -378,15 +385,34 @@ class MemoryProvider(ABC):
                     result_row[key] = filter_row[key]
             filtered.append(result_row)
 
-        filtered.sort(
-            key=lambda item: str(item.get("timestamp") or item.get("_id") or ""),
-            reverse=True,
-        )
+        def sort_key(item):
+            identifier = str(
+                item.get("_id") or item.get("id") or item.get("memory_id") or ""
+            )
+            if not identifier:
+                identifier = hashlib.sha256(
+                    json.dumps(item, sort_keys=True, default=str).encode()
+                ).hexdigest()
+            return (str(item.get("timestamp") or ""), identifier)
+
+        filtered.sort(key=sort_key, reverse=True)
         offset = 0
         if cursor:
             try:
                 padded = cursor + "=" * (-len(cursor) % 4)
-                offset = int(base64.urlsafe_b64decode(padded).decode("ascii"))
+                decoded = json.loads(base64.urlsafe_b64decode(padded))
+                if isinstance(decoded, int) and decoded >= 0:
+                    offset = decoded  # Older offset cursors remain readable.
+                elif (
+                    isinstance(decoded, dict)
+                    and decoded.get("v") == 2
+                    and isinstance(decoded.get("last"), list)
+                    and len(decoded["last"]) == 2
+                ):
+                    boundary = tuple(decoded["last"])
+                    filtered = [item for item in filtered if sort_key(item) < boundary]
+                else:
+                    raise ValueError("Invalid observability cursor")
             except Exception as exc:
                 raise ValueError("Invalid observability cursor") from exc
         page = filtered[offset : offset + safe_limit]
@@ -395,7 +421,9 @@ class MemoryProvider(ABC):
         next_cursor = None
         if has_more:
             next_cursor = (
-                base64.urlsafe_b64encode(str(next_offset).encode("ascii"))
+                base64.urlsafe_b64encode(
+                    json.dumps({"v": 2, "last": sort_key(page[-1])}).encode()
+                )
                 .decode("ascii")
                 .rstrip("=")
             )
@@ -409,6 +437,56 @@ class MemoryProvider(ABC):
             "freshness": str(page[0].get("timestamp") or "") if page else None,
             "provider_native": False,
         }
+
+    def query_trace_events(self, *, limit=250, cursor=None, **filters):
+        """Return normalized private trace children with a stable child cursor.
+
+        Uses native bundle queries when available; older providers retain the
+        compatibility implementation. This method does not authorize tenants.
+        """
+        from ..enums.memory_type import MemoryType
+        from ..observability.index import read_path
+        from ..observability.normalization import query_trace_events
+
+        selected_path = filters.pop("read_path", None) or read_path()
+        filters.pop("record_type", None)
+        if selected_path not in {"bundles", "index"}:
+            raise ValueError("read_path must be bundles or index")
+        if selected_path == "index":
+            index = self.get_observability_index()
+            if index is None:
+                raise NotImplementedError("Provider has no native observability index")
+            return index.query(limit=limit, cursor=cursor, **filters)
+
+        return query_trace_events(
+            self,
+            MemoryType.SHARED_MEMORY,
+            record_type="observability_trace_bundle",
+            limit=limit,
+            cursor=cursor,
+            **filters,
+        )
+
+    def get_observability_index(self):
+        """Optional private native span index. Provisioning is always explicit."""
+        return None
+
+    def delete_observability_bundle(self, record_id, fingerprint):
+        """Atomic compare-and-delete used only by reviewed source-expiry plans."""
+        raise NotImplementedError("Provider does not support safe source expiry")
+
+    def observability_capabilities(self):
+        index = self.get_observability_index()
+        return (
+            index.capabilities()
+            if index is not None
+            else {
+                "provider": type(self).__name__,
+                "span_index": False,
+                "ready": False,
+                "compatibility_queries": True,
+            }
+        )
 
     @abstractmethod
     def retrieve_conversation_history_ordered_by_timestamp(

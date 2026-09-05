@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
+import time
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -17,6 +20,7 @@ _FEEDBACK = "observability_feedback"
 _OUTCOME = "observability_outcome"
 _TRACE_BUNDLE = "observability_trace_bundle"
 _DECISIONS = {"accepted", "rejected", "deferred", "pending"}
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -123,13 +127,22 @@ class ObservabilityStore:
         return None
 
     def _put(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from .index import enabled, metadata_envelope, prepare_bundle
+        from .pipeline import record_pipeline_metric
+
+        started = time.perf_counter()
         value = dict(payload)
         record_id = str(value.get("record_id") or "").strip()
         if not record_id:
             raise ValueError("Observability record_id is required")
-        value["schema_version"] = 1
+        value.setdefault("schema_version", 1)
         value.setdefault("created_at", _now())
         value["updated_at"] = _now()
+        is_bundle = value.get("record_type") == _TRACE_BUNDLE
+        dual_write = is_bundle and enabled("MEMORIZZ_OBSERVABILITY_DUAL_WRITE")
+        original = value
+        if dual_write:
+            value = metadata_envelope(value)
         document = {
             "_id": record_id,
             "memory_id": record_id,
@@ -161,7 +174,53 @@ class ObservabilityStore:
         document.update(
             {key: item for key, item in metadata.items() if item is not None}
         )
-        self.provider.store(document, MemoryType.SHARED_MEMORY)
+        if is_bundle:
+            document["immutable_trace"] = True
+        for key in (
+            "event_count",
+            "event_kind_counts",
+            "tool_names",
+            "models",
+            "has_error",
+            "started_at",
+            "ended_at",
+            "schema_versions",
+            "resource_ref_hashes",
+            "coverage_profiles",
+        ):
+            if key in value:
+                document[key] = value[key]
+        try:
+            self.provider.store(document, MemoryType.SHARED_MEMORY)
+            if is_bundle:
+                # Built-in providers use atomic first-write-wins storage. Read
+                # back the winner before indexing a potentially concurrent retry.
+                value = self._get(record_id) or value
+            record_pipeline_metric(
+                self.provider,
+                "records_written",
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
+        except Exception:
+            record_pipeline_metric(self.provider, "write_failures")
+            raise
+        if dual_write:
+            try:
+                getter = getattr(self.provider, "get_observability_index", None)
+                index = getter() if callable(getter) else None
+                if index is None:
+                    raise NotImplementedError("Provider has no observability index")
+                winner = prepare_bundle(value)[0]["fingerprint"]
+                candidate = prepare_bundle(original)[0]["fingerprint"]
+                index.write_bundle(original if winner == candidate else value)
+                record_pipeline_metric(self.provider, "bundles_indexed")
+            except Exception as exc:
+                record_pipeline_metric(self.provider, "index_write_failures")
+                logger.warning(
+                    "Observability index write failed (%s); source bundle remains available",
+                    type(exc).__name__,
+                )
+                value["index_persisted"] = False
         return value
 
     def record_trace_bundle(
@@ -178,7 +237,15 @@ class ObservabilityStore:
         root_trace_id = context["root_trace_id"]
         return self._put(
             {
-                "record_id": _record_id("obs-trace", root_trace_id),
+                "record_id": _record_id(
+                    "obs-trace",
+                    context.get("application_id"),
+                    context.get("agent_id"),
+                    context.get("user_id"),
+                    context.get("thread_id"),
+                    root_trace_id,
+                    context.get("turn_id"),
+                ),
                 "record_type": _TRACE_BUNDLE,
                 "type": "trace_bundle",
                 "version": 2,
@@ -186,8 +253,126 @@ class ObservabilityStore:
                 **context,
                 "trace_memory_id": context.get("memory_id"),
                 "events": normalized_events,
+                **self._bundle_summary(normalized_events),
             }
         )
+
+    @staticmethod
+    def _bundle_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+        from .index import resource_hash
+        from .normalization import timestamp
+
+        times = sorted(
+            filter(None, (timestamp(event.get("timestamp")) for event in events))
+        )
+        return {
+            "resource_ref_hashes": sorted(
+                {
+                    resource_hash(ref["ref"])
+                    for event in events
+                    for side in ("input_refs", "output_refs")
+                    for ref in event.get(side, [])
+                    if isinstance(ref, dict) and ref.get("ref")
+                }
+            )[:128],
+            "coverage_profiles": sorted(
+                {
+                    str(
+                        event.get("coverage_profile")
+                        or (event.get("attributes") or {}).get("coverage_profile")
+                    )
+                    for event in events
+                    if event.get("coverage_profile")
+                    or (event.get("attributes") or {}).get("coverage_profile")
+                }
+            )[:32],
+            "event_count": len(events),
+            "event_kind_counts": dict(
+                Counter(
+                    str(
+                        e.get("event_kind")
+                        or e.get("trace_kind")
+                        or e.get("kind")
+                        or "unknown"
+                    )
+                    for e in events
+                )
+            ),
+            "tool_names": sorted(
+                {
+                    str(e.get("logical_tool_name") or e.get("tool_name"))[:240]
+                    for e in events
+                    if e.get("logical_tool_name") or e.get("tool_name")
+                }
+            )[:64],
+            "models": sorted({str(e["model"])[:240] for e in events if e.get("model")})[
+                :32
+            ],
+            "has_error": any(
+                e.get("status") == "error" or e.get("success") is False for e in events
+            ),
+            "started_at": times[0] if times else None,
+            "ended_at": times[-1] if times else None,
+            "schema_versions": sorted(
+                {int(e.get("schema_version") or 1) for e in events}
+            ),
+        }
+
+    def record_trace_event(self, event) -> Dict[str, Any]:
+        """Upsert a typed event using a stable per-event envelope.
+
+        The envelope remains a v2 bundle so every existing provider can query
+        host events without migrations or dual-write races.
+        """
+        from .models import TraceEventV3
+
+        typed = TraceEventV3.model_validate(event)
+        child = typed.model_dump(mode="json", exclude_none=True)
+        context = {
+            key: child[key]
+            for key in (
+                "agent_id",
+                "application_id",
+                "user_id",
+                "memory_id",
+                "thread_id",
+                "root_trace_id",
+                "run_id",
+                "turn_id",
+                "timestamp",
+            )
+            if key in child
+        }
+        return self._put(
+            {
+                "record_id": _record_id(
+                    "obs-event",
+                    typed.application_id,
+                    typed.agent_id,
+                    typed.user_id,
+                    typed.thread_id,
+                    typed.root_trace_id,
+                    typed.turn_id,
+                    typed.event_id,
+                ),
+                "record_type": _TRACE_BUNDLE,
+                "type": "trace_bundle",
+                "version": 2,
+                "role": "tool",
+                **context,
+                "trace_memory_id": typed.memory_id,
+                "events": [child],
+                **self._bundle_summary([child]),
+            }
+        )
+
+    def record_artifact(self, *, trace_context, **kwargs):
+        """Typed artifact evidence; see ObservabilityRecorder.record_artifact."""
+        from .recorder import ObservabilityRecorder
+
+        return ObservabilityRecorder(
+            self.provider, trace_context, strict=True
+        ).record_artifact(**kwargs)
 
     def sync_recommendations(
         self,
@@ -370,6 +555,100 @@ class ObservabilityStore:
         if agent_id:
             rows = [row for row in rows if row.get("agent_id") == agent_id]
         return rows
+
+    def create_replay_draft(
+        self, events, *, created_by, authorize_resource=None, persist=True
+    ):
+        """Freeze authorized content-free evidence for an inert Evalground draft.
+
+        This method never invokes tools, models, subprocesses or host side effects.
+        Current resource access must be rechecked by the host, not inferred from
+        historical ownership flags. Unversioned refs remain explicitly unresolved.
+        """
+        from .index import _opaque_fields
+        from .privacy import validate_opaque
+        from .references import event_resource_refs
+
+        metadata = getattr(events, "coverage", {})
+        if (
+            metadata.get("read_completeness", metadata.get("coverage")) != "complete"
+            or metadata.get("truncated")
+            or metadata.get("normalization_errors")
+            or metadata.get("window_complete") is False
+        ):
+            raise ValueError("Replay drafts require a complete trusted evidence window")
+        validate_opaque(created_by)
+        if not isinstance(created_by, str) or not created_by or len(created_by) > 240:
+            raise ValueError("created_by must be an opaque operator ID")
+        scopes = {
+            (event.get("application_id"), event.get("user_id")) for event in events
+        }
+        if not events or len(scopes) != 1:
+            raise ValueError("Select exactly one authorized tenant scope for replay")
+        application_id, user_id = next(iter(scopes))
+        refs = {}
+        for event in events:
+            for ref in event_resource_refs(event):
+                refs[_canonical_hash(ref)] = ref
+        if len(refs) > 256:
+            raise ValueError("Replay references exceed the bounded draft limit")
+        for ref in refs.values():
+            if (
+                not callable(authorize_resource)
+                or authorize_resource(
+                    ref, {"application_id": application_id, "user_id": user_id}
+                )
+                is not True
+            ):
+                raise PermissionError("Current resource access was not verified")
+        frozen = [_opaque_fields(event) for event in events]
+        fingerprint = _canonical_hash(frozen)
+        record_id = _record_id(
+            "obs-replay", created_by, application_id, user_id, fingerprint
+        )
+        payload = {
+            "record_id": record_id,
+            "record_type": _EXPERIMENT,
+            "experiment_id": record_id,
+            "experiment_version": 1,
+            "status": "draft",
+            "kind": "trace_replay",
+            "agent_id": events[0].get("agent_id"),
+            "application_id": application_id,
+            "user_id": user_id,
+            "created_by": created_by,
+            "component": "Trace replay",
+            "target": "isolated Evalground review",
+            "hypothesis": "Compare a candidate against frozen trace evidence under an approved sandbox policy",
+            "baseline_config": {},
+            "evidence_fingerprint": fingerprint,
+            "resource_refs": list(refs.values()),
+            "unversioned_refs": sum(not ref.get("version") for ref in refs.values()),
+            "evidence_refs": [
+                {
+                    key: event.get(key)
+                    for key in ("event_id", "root_trace_id", "turn_id", "run_id")
+                }
+                for event in events
+            ],
+            "replay_policy": {
+                "execution_enabled": False,
+                "network": False,
+                "side_effects": False,
+                "requires_sandbox": True,
+                "requires_operator_approval": True,
+            },
+            "evaluation_plan": {
+                "source": "frozen_trace_refs",
+                "primary_metrics": [
+                    "verified_task_success_rate",
+                    "source_provenance",
+                    "contract_delivery",
+                ],
+                "promotion_gate": "explicit operator review",
+            },
+        }
+        return self._put(payload) if persist else payload
 
     def record_feedback(
         self,

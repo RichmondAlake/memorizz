@@ -4,6 +4,54 @@
 
 _No unreleased changes._
 
+## 0.8.0 — 2026-09-05
+
+### Added
+
+- Added ordered, bounded `StreamEvent` delivery through `run_stream_events()`
+  and `arun_stream_events()`, including answer digests, cancellation, explicit
+  terminal status, provider usage, and separate answer/persistence completion.
+- Added default incremental answer delivery to the CLI, REPL, Playground and
+  its desktop webview, plus MCP progress with an opt-in versioned answer-event
+  extension. Added flushed CLI text/JSONL output and `--no-stream` compatibility.
+- Added concrete provider streaming adapters, including native OpenAI Responses
+  and Azure Chat streaming, with interruption, backpressure and incomplete-stream
+  checks across supported providers.
+- Added typed host observability events, trace propagation, memory-selection
+  ledgers, artifact lineage, output contracts, browser-acknowledgement evidence,
+  coverage profiles, and conservative outcome diagnostics.
+- Added native SQLite, MongoDB and Oracle observability indexes, explicit
+  migrations, scoped pagination, retention, backfill/parity checks, and operator
+  tooling. Added an isolated local Oracle setup and live database test fixtures.
+- Added Incident Finder, causal waterfall, memory/artifact/contract inspectors,
+  selected-event navigation, structural comparison, health views and responsive
+  mobile layouts, with synthetic browser and native WebKit regression fixtures.
+
+### Fixed
+
+- Historical bundled traces now retain child events, tool names, timestamps and
+  model metadata. Health and insights share authorized selection/count semantics.
+- Read completeness no longer implies end-to-end instrumentation or verified
+  outcomes. Missing host hooks are shown as unavailable instead of usable actions.
+- Search and cross-view links retain trace selection. Legacy JSON-string replay
+  source lists no longer become individual-character resource identifiers.
+- Streaming failures and cancellation preserve partial text without adding
+  exception prose to answers; dumb-terminal REPL output now flushes incrementally.
+- Oracle observability initialization now handles its first-install dynamic SQL
+  correctly. Audit reports are kept outside the repository and release archives.
+
+### Security and compatibility
+
+- Added tenant-scoped, fail-closed operator access, audited explicit reveals,
+  transient account/artifact resolver hooks, immutable event envelopes and inert
+  replay drafts. MCP observability queries remain opt-in and read-scoped.
+- `MemAgent.run()` still returns a complete string. Whole-answer validators
+  continue to buffer until acceptance; streaming does not expose private tool
+  drafts or rejected answers. Third-party cancellation remains cooperative.
+- Host instrumentation, production migration/backfill and signed desktop
+  distribution require separate deployment acceptance. This release does not
+  change OpenSpeech or invent missing historical evidence.
+
 ## 0.7.0 — 2026-08-29
 
 ### Added

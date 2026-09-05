@@ -1119,6 +1119,71 @@ class MemorizzRuntime:
         self._agent_locks.setdefault(normalized, threading.RLock())
         return agent
 
+    def query_traces(
+        self,
+        agent_id,
+        identity,
+        *,
+        thread_id=None,
+        root_trace_id=None,
+        cursor=None,
+        limit=250,
+        explain=False,
+    ):
+        """Opt-in metadata-only inspection; caller cannot supply another tenant."""
+        self._require_scope(identity, READ_SCOPE)
+        if not self.config.allow_trace_queries:
+            raise MemorizzServerError(
+                "trace_queries_disabled", "Trace queries are disabled by server policy"
+            )
+        self._assert_agent_exposed(agent_id, identity)
+        from ..observability.index import _opaque_fields, validate_filters
+        from ..observability.normalization import TraceEvents
+        from ..observability.privacy import pseudonym
+
+        try:
+            filters = validate_filters(
+                {
+                    "agent_ids": [agent_id],
+                    "user_id": identity.principal,
+                    "thread_id": thread_id,
+                    "root_trace_id": root_trace_id,
+                }
+            )
+            page = self.provider.query_trace_events(
+                limit=self._bounded_limit(limit), cursor=cursor, **filters
+            )
+        except ValueError:
+            raise MemorizzServerError(
+                "invalid_trace_query",
+                "Use bounded opaque trace IDs and a valid scoped cursor",
+            ) from None
+        except Exception:
+            raise MemorizzServerError(
+                "trace_query_failed", "Trace evidence is unavailable"
+            ) from None
+        rows = [_opaque_fields(event) for event in page["items"]]
+        for row in rows:
+            if row.get("user_id"):
+                row["user_id"] = pseudonym(row["user_id"])
+        result = {"ok": True, **page, "items": rows}
+        if explain:
+            from ..observability.lineage import build_lineage_inspectors
+            from ..observability.trace_analysis import analyze_trace_events
+
+            window = TraceEvents(
+                rows,
+                coverage={key: value for key, value in page.items() if key != "items"},
+            )
+            result["lineage"] = build_lineage_inspectors(window)
+            result["analysis"] = analyze_trace_events(window, agent_id=agent_id)
+        logger.info(
+            "MCP metadata trace query: caller=%s events=%d",
+            pseudonym(identity.principal or "anonymous"),
+            len(rows),
+        )
+        return result
+
     def inspect_agent(
         self,
         agent_id: str,
@@ -1427,6 +1492,97 @@ class MemorizzRuntime:
             "response": str(response),
             "tool_outcomes": tool_outcomes,
         }
+
+    def execute_agent_events(
+        self,
+        message,
+        identity,
+        *,
+        agent_id=None,
+        memory_id=None,
+        thread_id=None,
+        context=None,
+        delivery_mode=None,
+    ):
+        """Authorized native stream; the agent lock covers generation AND saving."""
+        from ..streaming import agent_event_stream, check_cancelled
+
+        self._require_scope(identity, EXECUTE_SCOPE)
+        self._require_scope(identity, WRITE_SCOPE)
+        text = str(message or "").strip()
+        if not text:
+            raise MemorizzServerError("invalid_message", "Message cannot be empty")
+        if len(text) > self.config.max_text_chars:
+            raise MemorizzServerError(
+                "message_too_large", "Message exceeds configured limit"
+            )
+        agent = self._load_runnable_agent(agent_id, identity)
+        resolved_agent_id = str(agent.agent_id)
+        key = (identity.principal or "local", resolved_agent_id)
+        # Reserve stable principal-local IDs before another request starts.
+        previous = self._conversation_state.setdefault(
+            key, (str(uuid.uuid4()), str(uuid.uuid4()))
+        )
+        resolved_memory_id = str(memory_id or previous[0])
+        resolved_thread_id = str(thread_id or previous[1])
+        lock = self._agent_locks.setdefault(resolved_agent_id, threading.RLock())
+        result = {}
+
+        def prepare(session):
+            session.emit("status", stage="waiting_for_agent")
+            while not lock.acquire(timeout=0.1):
+                check_cancelled()
+            session.stack.callback(lock.release)
+            check_cancelled()
+            return agent, {
+                "user_id": identity.principal,
+                "context": context or {},
+                "tool_context": {
+                    "user_id": identity.principal,
+                    "mcp_principal": identity.principal,
+                },
+            }
+
+        def finalize(session):
+            saved = "not_configured"
+            if getattr(agent, "memory_provider", None) is not None:
+                try:
+                    value = agent.save()
+                    saved = "failed" if value is False else "written"
+                except Exception:
+                    saved = "failed"
+            session.persistence["adapter_state"] = saved
+            self._conversation_state[key] = (resolved_memory_id, resolved_thread_id)
+            raw = getattr(agent, "last_tool_outcomes", [])
+            if callable(raw):
+                raw = raw()
+            result.update(
+                ok=session.outcome == "completed" and saved != "failed",
+                status=session.outcome,
+                error_code=session.error_code,
+                agent_id=resolved_agent_id,
+                memory_id=resolved_memory_id,
+                thread_id=resolved_thread_id,
+                response=session.answer,
+                proposal=session.approval,
+                persistence=session.persistence,
+                tool_outcomes=[
+                    _json_value(item) for item in (raw or []) if isinstance(item, dict)
+                ],
+            )
+
+        stream = agent_event_stream(
+            None,
+            text,
+            _prepare=prepare,
+            _finalize=finalize,
+            _agent_id=resolved_agent_id,
+            memory_id=resolved_memory_id,
+            thread_id=resolved_thread_id,
+            delivery_mode=delivery_mode,
+        )
+        stream.result = result
+        return stream
 
     def _bounded_limit(self, limit: int) -> int:
         return max(1, min(int(limit or 20), self.config.max_result_items))

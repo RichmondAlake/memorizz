@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Compare Traces - Memorizz{% endblock %}
+{% block content %}
+<div class="page-header">
+    <span class="page-eyebrow">Operations / Observability</span>
+    <h1>Compare recorded traces</h1>
+    <p>Compare operations, source references, artifacts, parser results and delivery evidence. No actions are replayed.</p>
+    <a class="btn" href="{{ selection_urls.traces }}">Traces</a>
+</div>
+<form class="detail-section" method="get">
+    {% for key, value in selection_urls.params.items() %}{% if key not in ['agent_id', 'thread_id'] %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
+    <p><label>Agent ID <input class="traces-search-input" name="agent_id" value="{{ agent_id or '' }}" required></label></p>
+    <p><label>Thread (optional) <input class="traces-search-input" name="thread_id" value="{{ thread_id or '' }}"></label></p>
+    <p><label>Baseline root <input class="traces-search-input" name="baseline_root" value="{{ baseline_root or '' }}" required></label>
+    <label>Turn (optional) <input class="traces-search-input" name="baseline_turn" value="{{ baseline_turn or '' }}"></label></p>
+    <p><label>Candidate root <input class="traces-search-input" name="candidate_root" value="{{ candidate_root or '' }}" required></label>
+    <label>Turn (optional) <input class="traces-search-input" name="candidate_turn" value="{{ candidate_turn or '' }}"></label></p>
+    <button class="btn" type="submit">Compare</button>
+</form>
+{% if comparison %}
+<div class="detail-section">
+    <h2>Evidence coverage</h2>
+    <p>Baseline: {{ comparison.baseline.headline }} ({{ comparison.baseline.normalized_events }} events; {{ comparison.baseline.bundle_count if comparison.baseline.bundle_count is not none else 'unknown' }} bundles). Candidate: {{ comparison.candidate.headline }} ({{ comparison.candidate.normalized_events }} events; {{ comparison.candidate.bundle_count if comparison.candidate.bundle_count is not none else 'unknown' }} bundles).</p>
+    <p>Root-local source totals use recorded event provenance. Deduplication and normalization diagnostics may describe the parent query, not an individual root.</p>
+    <p>{{ comparison.warning }}</p>
+    <h3>Diagnostic differences</h3>
+    <p>Only in baseline: {{ comparison.findings.only_in_baseline|join(', ') or 'None observed' }}</p>
+    <p>Only in candidate: {{ comparison.findings.only_in_candidate|join(', ') or 'None observed' }}</p>
+    <p>In both: {{ comparison.findings.in_both|join(', ') or 'None observed' }}</p>
+</div>
+{% for category, change in comparison.changes.items() %}
+<details class="detail-section" {% if change.added or change.removed %}open{% endif %}>
+    <summary>{{ category|title }} · {{ change.removed|length }} removed structures · {{ change.added|length }} added structures</summary>
+    <table class="traces-agents-table">
+        <thead><tr><th>Side</th><th>Count</th><th>Captured structure (content-free)</th></tr></thead>
+        <tbody>{% for entry in change.removed %}<tr><td>Baseline only</td><td>{{ entry.count }}</td><td><pre>{{ entry.value|tojson(indent=2) }}</pre></td></tr>{% endfor %}
+        {% for entry in change.added %}<tr><td>Candidate only</td><td>{{ entry.count }}</td><td><pre>{{ entry.value|tojson(indent=2) }}</pre></td></tr>{% endfor %}</tbody>
+    </table>
+</details>
+{% endfor %}
+{% endif %}
+{% endblock %}

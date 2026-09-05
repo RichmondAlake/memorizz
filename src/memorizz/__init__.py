@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
@@ -52,6 +52,9 @@ _LAZY = {
     "CompletionDecision": (".completion", "CompletionDecision"),
     "CompletionPolicy": (".completion", "CompletionPolicy"),
     "CompletionRejectedError": (".completion", "CompletionRejectedError"),
+    "StreamEvent": (".streaming", "StreamEvent"),
+    "EventStream": (".streaming", "EventStream"),
+    "CancellationToken": (".streaming", "CancellationToken"),
     "RetrievalPolicy": (".retrieval", "RetrievalPolicy"),
     "PersonalizationContext": (".personalization", "PersonalizationContext"),
     "PersonalizationContextBuilder": (

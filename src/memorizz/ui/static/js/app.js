@@ -617,27 +617,61 @@ async function handleLocalModelAction(button, action, provider, model, refresh) 
 
 /*
  * Read a fetch() Response whose body is a Server-Sent-Events stream and
- * invoke `onEvent(payload)` with the raw string payload of every
- * `data: ` line — including the literal '[DONE]' sentinel, which callers
- * decide how to handle. Resolves when the stream ends.
+ * Dispatch complete frames, preserving IDs and multiline data. EOF without
+ * run.done (or the legacy [DONE] sentinel) is an interrupted response.
  */
 async function readSseStream(response, onEvent) {
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    const decoder = new TextDecoder('utf-8', { fatal: true });
     let buffer = '';
-
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            onEvent(line.slice(6));
+    let data = [], event = '', id = '', terminal = false, frameSize = 0;
+    function line(value) {
+        if (value === '') {
+            if (data.length) {
+                const payload = data.join('\n');
+                if (terminal) throw new Error('Event received after stream completion');
+                let parsed;
+                try { parsed = JSON.parse(payload); } catch (_) {}
+                terminal = payload === '[DONE]' || (parsed && parsed.type === 'run.done');
+                onEvent(payload, { event: event || 'message', id });
+            }
+            data = []; event = ''; frameSize = 0;
+            return;
         }
+        frameSize += value.length;
+        if (frameSize > 131072) throw new Error('SSE frame exceeds size limit');
+        if (value.startsWith(':')) return;
+        const separator = value.indexOf(':');
+        const field = separator < 0 ? value : value.slice(0, separator);
+        let content = separator < 0 ? '' : value.slice(separator + 1);
+        if (content.startsWith(' ')) content = content.slice(1);
+        if (field === 'data') data.push(content);
+        if (field === 'event') event = content;
+        if (field === 'id' && !content.includes('\u0000')) id = content;
+    }
+    function consume(final = false) {
+        while (true) {
+            const index = buffer.search(/[\r\n]/);
+            if (index < 0) break;
+            if (!final && buffer[index] === '\r' && index === buffer.length - 1) break;
+            const width = buffer[index] === '\r' && buffer[index + 1] === '\n' ? 2 : 1;
+            const value = buffer.slice(0, index);
+            buffer = buffer.slice(index + width);
+            line(value);
+        }
+        if (buffer.length > 131072) throw new Error('SSE line exceeds size limit');
+    }
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+            consume(done);
+            if (done) break;
+        }
+        // An unterminated frame is discarded by SSE, never treated as completion.
+        if (!terminal) throw new Error('Stream interrupted before run.done');
+    } finally {
+        try { await reader.cancel(); } finally { reader.releaseLock(); }
     }
 }
 

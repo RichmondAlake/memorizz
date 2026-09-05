@@ -6009,3 +6009,65 @@ body.theme-light .connect-btn {
         justify-content: flex-start;
     }
 }
+/* Content-free causal span inspection. */
+.trace-waterfall-table small {
+    display: block;
+    opacity: .7;
+}
+
+.trace-lineage-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 16px;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+    .trace-lineage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 540px) {
+    .trace-lineage-grid { grid-template-columns: 1fr; }
+}
+
+.trace-waterfall-track {
+    position: relative;
+    min-width: 120px;
+    height: 12px;
+    background: rgba(128, 128, 128, .15);
+    overflow: hidden;
+}
+
+.trace-waterfall-track span {
+    position: absolute;
+    top: 2px;
+    height: 8px;
+    min-width: 2px;
+    max-width: 100%;
+    background: currentColor;
+    opacity: .7;
+}
+.trace-navigator > .traces-table-wrap, #incident-results {
+    max-height: 24rem;
+    overflow: auto;
+}
+.trace-section-nav {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+    align-items: center;
+    padding: 0.75rem;
+    background: var(--bg-primary, #10141c);
+    border: 1px solid var(--border-color, #3c4352);
+}
+.main-content:has(.trace-section-nav) { overflow-x: clip; overflow-y: visible; }
+.trace-section-nav span, .trace-section-nav form { min-width: 0; overflow-wrap: anywhere; }
+.trace-section-nav input { max-width: 100%; }
+.trace-selected-event { outline: 2px solid #8bafff; scroll-margin-top: 12rem; }
+.trace-evidence-empty { padding: 0.75rem; border-left: 3px solid #c8a150; }
+#trace-lineage-inspectors, #trace-waterfall, #trace-insights, #trace-output-contracts { scroll-margin-top: 12rem; }
+#incident-results code, #incident-results summary, #incident-results a { overflow-wrap: anywhere; }
+.trace-scroll-hint { font-size: 0.85rem; }

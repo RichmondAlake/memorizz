@@ -8,6 +8,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from memorizz import __version__
 from memorizz.approval import SQLiteApprovalStore
 from memorizz.cli.app import app
 from memorizz.metaharness import (
@@ -147,7 +148,7 @@ def test_cli_version_uses_source_package_version():
     result = CliRunner().invoke(app, ["--version"])
 
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "memorizz 0.7.0"
+    assert result.output.strip() == f"memorizz {__version__}"
 
 
 @pytest.mark.unit

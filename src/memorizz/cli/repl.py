@@ -2,7 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-"""Interactive REPL: stdin → ``agent.run_stream`` → live rich render.
+"""Interactive REPL: stdin → canonical answer events → live Rich render.
 
 Design notes:
 - ``patch_stdout()`` keeps stray library logging from corrupting the prompt.
@@ -94,122 +94,80 @@ def _banner(console: Console, session) -> None:
 
 
 def _stream_turn(session, query: str) -> None:
-    """Stream one turn: dim reasoning + tool activity above the live answer."""
-    console = session.console
-    agent = session.agent
+    """Render public deltas and tool status with bounded refresh frequency."""
+    import time
 
-    turn = {"reasoning": "", "answer": "", "tools": [], "error": None}
-    live = None
+    from .streaming import consume_stream, save_stream_session
 
-    def renderable():
-        parts = []
-        if turn["reasoning"].strip():
-            parts.append(
-                Panel(
-                    Text(turn["reasoning"].strip(), style="dim italic"),
-                    title="reasoning",
-                    border_style="grey42",
-                    expand=False,
+    console = session.console or Console()
+    if not console.is_terminal or console.is_dumb_terminal:
+        # Rich intentionally defers Live output on dumb terminals/pipes.
+        # Preserve incremental delivery there using the plain-text projection.
+        consume_stream(session, query, stdout=console.file)
+        return
+
+    answer, status, tools = "", "preparing", []
+    stream = None
+    last_refresh = 0.0
+    with Live(console=console, refresh_per_second=12, auto_refresh=False) as live:
+
+        def refresh(force=False):
+            nonlocal last_refresh
+            now = time.monotonic()
+            if not force and now - last_refresh < 1 / 12:
+                return
+            parts = [Text(status, style="dim")]
+            if tools:
+                parts.append(
+                    Text("Tools: " + ", ".join(dict.fromkeys(tools)), style="dim cyan")
                 )
-            )
-        if turn["tools"]:
-            uniq = list(dict.fromkeys(turn["tools"]))
-            parts.append(Text("⚙ " + ", ".join(uniq), style="dim cyan"))
-        if turn["error"]:
-            parts.append(Text("⚠ " + str(turn["error"]), style="red"))
-        elif turn["answer"].strip():
-            parts.append(Markdown(turn["answer"]))
-        return Group(*parts) if parts else Text("thinking…", style="dim")
+            if answer:
+                parts.append(Markdown(answer))
+            live.update(Group(*parts), refresh=True)
+            last_refresh = now
 
-    def refresh():
-        if live is not None:
-            live.update(renderable())
-            live.refresh()
-
-    def on_event(ev):
-        etype = ev.get("type")
-        if etype == "trace":
-            kind = ev.get("trace_kind")
-            if kind == "reasoning":
-                turn["reasoning"] += ev.get("content", "") or ""
-            elif kind == "tool_call":
-                turn["tools"].append(
-                    str(ev.get("tool_name") or ev.get("title") or "tool")
-                )
-            elif kind == "tool_result" and ev.get("complete"):
-                name = str(ev.get("tool_name") or "tool")
-                outcome = str(ev.get("outcome") or "success").lower()
-                label = _TOOL_OUTCOME_LABELS.get(outcome, outcome.replace("_", " "))
-                display = f"{name} · {label}"
-                for index in range(len(turn["tools"]) - 1, -1, -1):
-                    if turn["tools"][index] == name:
-                        turn["tools"][index] = display
-                        break
-                else:
-                    turn["tools"].append(display)
-        elif etype == "error":
-            turn["error"] = ev.get("message") or turn["error"]
-        refresh()
-
-    gen = None
-    interrupted = False
-    agent.set_stream_event_callback(on_event)
-    live = Live(console=console, refresh_per_second=12, auto_refresh=False)
-    live.start()
-    refresh()
-    try:
-        gen = agent.run_stream(
-            query,
-            memory_id=session.memory_id,
-            thread_id=session.thread_id,
-            user_id=session.user_id,
-        )
-        for chunk in gen:
-            if chunk:
-                turn["answer"] += chunk
-                refresh()
-    except KeyboardInterrupt:
-        interrupted = True
-        if gen is not None:
-            try:
-                gen.close()
-            except Exception:
-                pass
-    except Exception as exc:  # surface, don't crash the REPL
-        turn["error"] = turn["error"] or str(exc)
-        refresh()
-    finally:
         try:
-            live.stop()
-        except Exception:
-            pass
-        try:
-            agent.set_stream_event_callback(None)
-        except Exception:
-            pass
-
-    if turn["error"]:
-        if "does not support tools" in str(turn["error"]).lower():
-            console.print(
-                "[yellow]This model can't tool-call.[/yellow] Try a tool-capable "
-                "model, e.g. [cyan]ollama pull llama3.1:8b[/cyan] then "
-                "[cyan]/model llama3.1:8b[/cyan]."
+            stream = session.agent.run_stream_events(
+                query,
+                memory_id=session.memory_id,
+                thread_id=session.thread_id,
+                user_id=session.user_id,
             )
-    elif interrupted:
-        console.print("[yellow]⏹ interrupted[/yellow]")
-    elif not turn["answer"].strip() and not turn["reasoning"].strip():
-        console.print("[dim](no output)[/dim]")
-
-    session.sync_ids()
-    try:
-        cfg.save_state(
-            {
-                "memory_id": session.memory_id,
-                "thread_id": session.thread_id,
-            }
-        )
-    except Exception:
-        pass
+            while True:
+                try:
+                    event = stream.poll(timeout=1 / 12)
+                except StopIteration:
+                    break
+                if event is None:
+                    refresh()
+                    continue
+                kind = event["type"]
+                if kind in {"run.started", "run.done"}:
+                    session.memory_id = event.get("memory_id") or session.memory_id
+                    session.thread_id = event.get("thread_id") or session.thread_id
+                if kind == "answer.delta":
+                    answer += event["delta"]
+                elif kind == "status":
+                    status = event.get("stage", "working").replace("_", " ")
+                elif kind == "tool.started":
+                    tools.append(event.get("tool_name", "tool"))
+                elif kind == "approval.required":
+                    status = "paused for approval"
+                elif kind == "answer.done":
+                    status = "answer complete; saving"
+                elif kind == "run.done":
+                    status = event["status"]
+                refresh(force=kind in {"answer.done", "run.done"})
+        except KeyboardInterrupt:
+            status = "interrupted; partial answer retained"
+        except Exception:
+            status = "stream failed; partial answer retained"
+        finally:
+            if stream is not None:
+                stream.close()
+            refresh(force=True)
+    if save_stream_session(session) == "failed":
+        session.console.print("[yellow]Session state could not be saved.[/yellow]")
 
 
 def run_repl(session) -> None:

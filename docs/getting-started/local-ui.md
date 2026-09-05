@@ -1,5 +1,11 @@
 # Local UI Guide
 
+Streaming is now the default delivery path. See the
+[streaming contract, defaults and compatibility modes](../guides/streaming.md)
+for the SDK event iterator, CLI opt-out, UI lifecycle and opt-in MCP answer events.
+Full-answer completion validators still buffer until acceptance; Python `run()`
+retains its complete-string return contract.
+
 The Memorizz local UI gives you a browser-based workflow for connecting to your memory provider, creating/editing agents, running conversations, and inspecting memory state without writing extra code.
 
 ## What You Can Do
