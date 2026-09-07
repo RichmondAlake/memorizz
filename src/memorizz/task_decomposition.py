@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import copy
 import inspect
 import json
 import logging
@@ -49,6 +50,9 @@ class SubTask:
         """Restore a sub-task from its JSON-safe persisted representation."""
         if not isinstance(value, dict):
             raise TypeError("SubTask.from_dict() requires a dictionary")
+        for key in ("task_id", "description", "assigned_agent_id"):
+            if key in value and not isinstance(value[key], str):
+                raise TypeError(f"SubTask {key} must be a string")
         task_id = str(value.get("task_id") or "").strip()
         description = str(value.get("description") or "").strip()
         assigned_agent_id = str(value.get("assigned_agent_id") or "").strip()
@@ -58,9 +62,17 @@ class SubTask:
             raise ValueError("A persisted SubTask requires description")
         if not assigned_agent_id:
             raise ValueError("A persisted SubTask requires assigned_agent_id")
-        dependencies = value.get("dependencies") or []
-        if not isinstance(dependencies, list):
-            raise TypeError("SubTask dependencies must be a list")
+        dependencies = value.get("dependencies", [])
+        if dependencies is None:
+            dependencies = []
+        if not isinstance(dependencies, list) or any(
+            not isinstance(item, str) or not item.strip() for item in dependencies
+        ):
+            raise TypeError(
+                "SubTask dependencies must be a list of nonempty string IDs"
+            )
+        if "status" in value and not isinstance(value["status"], str):
+            raise TypeError("SubTask status must be a string")
         task = cls(
             task_id=task_id,
             description=description,
@@ -76,6 +88,9 @@ class SubTask:
             "failed",
             "skipped",
             "blocked",
+            "waiting",
+            "cancelled",
+            "cancelling",
         }:
             raise ValueError(f"Unsupported SubTask status '{status}'")
         task.status = status
@@ -95,13 +110,11 @@ def normalize_delegation_plan(plan: Any) -> Any:
     if not isinstance(plan, (list, tuple)):
         raise TypeError("A deterministic delegation plan must be a list")
     normalized: List[Dict[str, Any]] = []
-    for index, item in enumerate(plan):
+    for item in plan:
         if isinstance(item, SubTask):
-            task = item
+            task = SubTask.from_dict(copy.deepcopy(item.to_dict()))
         elif isinstance(item, dict):
-            value = dict(item)
-            value.setdefault("task_id", f"task_{index + 1}")
-            task = SubTask.from_dict(value)
+            task = SubTask.from_dict(copy.deepcopy(item))
         else:
             raise TypeError("Delegation plan entries must be SubTask or dict")
         normalized.append(task.to_dict())
@@ -117,6 +130,16 @@ def normalize_delegation_config(
     if not isinstance(config, dict):
         raise TypeError("Delegation configuration must be a dictionary")
     normalized = dict(config)
+    for key in (
+        "on_task_event",
+        "on_task_result",
+        "task_completion_policy",
+        "cancellation",
+    ):
+        if key in normalized:
+            raise TypeError(f"{key} is runtime-only; pass it to MemAgent.delegate()")
+    if normalized.get("thread_strategy", "task") not in {"task", "shared"}:
+        raise ValueError("thread_strategy must be task or shared")
     if "plan" in normalized:
         plan = normalized["plan"]
         if callable(plan) and for_persistence:
@@ -307,12 +330,15 @@ class TaskDecomposer:
         Returns:
             List[SubTask]: List of decomposed sub-tasks
         """
-        try:
+        # An explicit plan is an admission boundary, not a planner suggestion.
+        # Do not turn validation errors (or a callable's empty result) into a
+        # broader root-agent action.
+        if plan is not None:
             if callable(plan):
                 plan = plan(user_query, delegates)
-            if plan is not None:
-                capabilities = self.analyze_delegate_capabilities(delegates)
-                return self._coerce_plan(plan, capabilities)
+            capabilities = self.analyze_delegate_capabilities(delegates)
+            return self._coerce_plan(plan, capabilities)
+        try:
             logger.info(f"Starting task decomposition for query: {user_query}")
             logger.info(f"Number of delegates: {len(delegates)}")
 
@@ -376,15 +402,14 @@ class TaskDecomposer:
     def _coerce_plan(
         self, plan: Any, capabilities: Dict[str, Dict[str, Any]]
     ) -> List[SubTask]:
-        if not isinstance(plan, list):
+        if not isinstance(plan, (list, tuple)) or not plan:
             raise TypeError("A deterministic delegation plan must be a list")
         values: List[SubTask] = []
-        for index, item in enumerate(plan):
+        for item in plan:
             if isinstance(item, SubTask):
-                task = item
+                task = SubTask.from_dict(copy.deepcopy(item.to_dict()))
             elif isinstance(item, dict):
-                item_value = dict(item)
-                item_value.setdefault("task_id", f"task_{index + 1}")
+                item_value = copy.deepcopy(item)
                 task = SubTask.from_dict(item_value)
             else:
                 raise TypeError("Delegation plan entries must be SubTask or dict")
@@ -395,7 +420,46 @@ class TaskDecomposer:
             if not task.description.strip():
                 raise ValueError("Delegation task descriptions cannot be empty")
             values.append(task)
+        self.validate_plan(values, capabilities)
         return values
+
+    @staticmethod
+    def validate_plan(tasks: List[SubTask], delegates) -> None:
+        """Admit the entire pending graph before any delegate can execute."""
+        ids = [task.task_id for task in tasks]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Delegation plans must use unique task IDs")
+        known = set(ids)
+        dependencies = {}
+        for task in tasks:
+            if not task.task_id or not task.description.strip():
+                raise ValueError(
+                    "Delegation tasks require nonempty IDs and descriptions"
+                )
+            if task.assigned_agent_id not in delegates:
+                raise ValueError(
+                    f"Unknown delegate '{task.assigned_agent_id}' in delegation plan"
+                )
+            if task.status != "pending" or task.result is not None:
+                raise ValueError(
+                    "Executable delegation tasks must be pending with no prior result"
+                )
+            if not isinstance(task.dependencies, list) or any(
+                not isinstance(dep, str) or not dep for dep in task.dependencies
+            ):
+                raise ValueError("Dependencies must be nonempty task IDs")
+            missing = set(task.dependencies) - known
+            if missing:
+                raise ValueError(f"Unknown dependencies: {', '.join(sorted(missing))}")
+            dependencies[task.task_id] = set(task.dependencies)
+        remaining = dict(dependencies)
+        while remaining:
+            ready = {key for key, deps in remaining.items() if not deps}
+            if not ready:
+                raise ValueError("Delegation plan contains a dependency cycle")
+            remaining = {
+                key: deps - ready for key, deps in remaining.items() if key not in ready
+            }
 
     def _create_decomposition_prompt(
         self, user_query: str, capabilities: Dict[str, Dict[str, Any]]

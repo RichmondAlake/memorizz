@@ -2365,6 +2365,18 @@ class MongoDBProvider(MemoryProvider):
             logger.warning("list_summaries query failed: %s", exc)
             return []
 
+    def compare_and_swap_shared_memory(self, memory_id, expected_content, content):
+        if not ObjectId.is_valid(memory_id):
+            return False
+        collection = self._collection(MemoryType.SHARED_MEMORY)
+        if collection is None:
+            raise RuntimeError("Shared-memory collection is unavailable")
+        result = collection.update_one(
+            {"_id": ObjectId(memory_id), "content": expected_content},
+            {"$set": {"content": content}},
+        )
+        return result.matched_count == 1
+
     def update_by_id(
         self, id: str, data: Dict[str, Any], memory_store_type: MemoryType
     ) -> bool:

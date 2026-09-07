@@ -36,6 +36,7 @@ def test_local_audit_reports_are_excluded_from_public_sources():
     sdist = project.split("[tool.hatch.build.targets.sdist]", 1)[1]
     assert '"reports/**"' in sdist
     assert '"docs/releases/**"' in sdist
+    assert '"docs/reports/**"' in sdist
     assert '"docs/**/*report*.md"' in sdist
     assert not (ROOT / "docs/releases").exists()
     assert not list((ROOT / "docs").rglob("*report*.md"))

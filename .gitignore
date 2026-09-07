@@ -59,6 +59,7 @@ src/memorizz/examples/
 # Keep audit reports outside the repository and public release artifacts.
 /reports/
 /docs/releases/
+/docs/reports/
 /docs/*report*.md
 
 # Build artifacts

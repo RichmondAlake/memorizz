@@ -84,6 +84,7 @@ jobs:
                   or basename.startswith(".env.")
                   or basename.endswith(blocked_suffixes)
                   or ("docs" in parts and "report" in basename and basename.endswith(".md"))
+                  or ("docs", "reports") in pairs
                   or bool(pairs & blocked_segments)
               )
 

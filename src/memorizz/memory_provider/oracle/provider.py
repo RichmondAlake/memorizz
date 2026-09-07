@@ -4186,8 +4186,8 @@ class OracleProvider(MemoryProvider):
                     content = row[2]
                     if hasattr(content, "read"):
                         content = content.read()
-                    elif content:
-                        content = self._deserialize_json_field(content)
+                    # Preserve the exact serialized snapshot for conditional
+                    # writes, including whitespace and key order.
 
                     # Handle access_list
                     access_list = row[9] if len(row) > 9 else None
@@ -5088,6 +5088,27 @@ class OracleProvider(MemoryProvider):
             memory_store_type.value,
         )
         return False
+
+    def compare_and_swap_shared_memory(self, memory_id, expected_content, content):
+        table = self._get_table_name(MemoryType.SHARED_MEMORY)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.setinputsizes(
+                expected=oracledb.DB_TYPE_CLOB, content=oracledb.DB_TYPE_CLOB
+            )
+            cursor.execute(
+                f"UPDATE {table} SET content = :content, updated_at = SYSTIMESTAMP "
+                "WHERE memory_id = :memory_id AND "
+                "((content IS NULL AND :expected IS NULL) OR DBMS_LOB.COMPARE(content, :expected) = 0)",
+                {
+                    "memory_id": memory_id,
+                    "expected": expected_content,
+                    "content": content,
+                },
+            )
+            updated = cursor.rowcount == 1
+            conn.commit()
+            return updated
 
     def _update_shared_memory_by_id(self, memory_id: str, data: Dict[str, Any]) -> bool:
         """Update shared memory entry directly in base table by memory_id."""

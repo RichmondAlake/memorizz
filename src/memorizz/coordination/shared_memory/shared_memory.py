@@ -4,6 +4,7 @@
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -98,6 +99,8 @@ class SharedMemory:
         }
 
         memory_id = self.memory_provider.store(shared_session, MemoryType.SHARED_MEMORY)
+        if not memory_id:
+            raise RuntimeError("Shared memory provider did not return a session ID")
         return str(memory_id)
 
     @staticmethod
@@ -183,33 +186,43 @@ class SharedMemory:
             }
         return payload
 
-    def _persist_payload(self, memory_id: str, payload: Dict[str, Any]) -> bool:
-        """Persist payload updates to storage."""
-        payload["updated_at"] = datetime.now().isoformat()
+    def _mutate_payload(
+        self, memory_id: str, mutate, *, max_attempts: int = 16
+    ) -> bool:
+        """Retry only conflicting snapshots, never an unconditional replacement.
+
+        The mutation is reapplied to a fresh snapshot on each attempt. Entry IDs
+        must be allocated outside it so retries cannot duplicate an append.
+        Unsupported providers explicitly fail instead of losing concurrent data.
+        """
         try:
-            sanitized_payload = SharedMemory._sanitize_payload(payload)
-            if not isinstance(sanitized_payload, dict):
-                raise TypeError(
-                    f"Shared memory payload must be dict after sanitization, got {type(sanitized_payload)}"
-                )
-            storage_payload = self._build_storage_payload(sanitized_payload)
-            # Sanitize storage_payload one more time to catch any JsonId objects that might have been missed
-            storage_payload = SharedMemory._sanitize_payload(storage_payload)
-            if not isinstance(storage_payload, dict):
-                raise TypeError(
-                    f"Storage payload must be dict after sanitization, got {type(storage_payload)}"
-                )
-            payload_serialized = json.dumps(storage_payload, default=str)
-            return self.memory_provider.update_by_id(
-                memory_id,
-                {
-                    "content": payload_serialized,
-                    "updated_at": sanitized_payload.get(
-                        "updated_at", payload["updated_at"]
-                    ),
-                },
-                MemoryType.SHARED_MEMORY,
+            compare_and_swap = getattr(
+                self.memory_provider, "compare_and_swap_shared_memory", None
             )
+            if not callable(compare_and_swap):
+                raise NotImplementedError(
+                    "Provider does not support atomic shared-memory updates"
+                )
+            for attempt in range(max_attempts):
+                session = self.memory_provider.retrieve_by_id(
+                    memory_id, MemoryType.SHARED_MEMORY
+                )
+                if not session:
+                    return False
+                expected_content = session.get("content")
+                payload = self._decode_payload(session)
+                if mutate(payload) is False:
+                    return True  # already applied, with the same idempotency key
+                payload["updated_at"] = datetime.now().isoformat()
+                payload["revision"] = int(payload.get("revision", 0)) + 1
+                serialized = json.dumps(
+                    self._sanitize_payload(self._build_storage_payload(payload)),
+                    default=str,
+                )
+                if compare_and_swap(memory_id, expected_content, serialized):
+                    return True
+                time.sleep(min(0.002 * (attempt + 1), 0.025))
+            raise RuntimeError("Shared-memory update conflict retry budget exhausted")
         except Exception as exc:
             logger.error(f"Failed to persist shared memory payload: {exc}")
             return False
@@ -229,6 +242,9 @@ class SharedMemory:
             "workflow_id": payload.get("workflow_id"),
             "user_id": payload.get("user_id"),
             "trace_id": payload.get("trace_id"),
+            "revision": payload.get("revision", 0),
+            "outcome": payload.get("outcome"),
+            "counts": payload.get("counts", {}),
         }
 
     @staticmethod
@@ -273,7 +289,13 @@ class SharedMemory:
         return str(value)
 
     def add_blackboard_entry(
-        self, memory_id: str, agent_id: str, content: Any, entry_type: str
+        self,
+        memory_id: str,
+        agent_id: str,
+        content: Any,
+        entry_type: str,
+        *,
+        entry_id: Optional[str] = None,
     ) -> bool:
         """
         Add an entry to the shared blackboard.
@@ -287,43 +309,26 @@ class SharedMemory:
         Returns:
             bool: Success status
         """
-        try:
-            logger.info(
-                f"Adding blackboard entry - memory_id: {memory_id}, agent_id: {agent_id}, entry_type: {entry_type}"
-            )
+        entry = BlackboardEntry(agent_id, content, entry_type)
+        if entry_id is not None:
+            entry.memory_id = str(entry_id)
+        value = entry.to_dict()
 
-            # Get the shared session
-            session = self.memory_provider.retrieve_by_id(
-                memory_id, MemoryType.SHARED_MEMORY
-            )
-            if not session:
-                logger.error(f"Session not found: {memory_id}")
-                return False
+        def append(payload):
+            entries = payload.setdefault("blackboard", [])
+            for existing in entries:
+                if existing.get("memory_id") == entry.memory_id:
+                    if any(
+                        existing.get(key) != value[key]
+                        for key in ("agent_id", "content", "entry_type")
+                    ):
+                        raise ValueError(
+                            "Shared-memory entry ID reused with different content"
+                        )
+                    return False
+            entries.append(value)
 
-            payload = self._decode_payload(session)
-
-            logger.info(
-                f"Retrieved session with {len(payload.get('blackboard', []))} existing entries"
-            )
-
-            # Create blackboard entry
-            entry = BlackboardEntry(agent_id, content, entry_type)
-            logger.info(f"Created blackboard entry with memory_id: {entry.memory_id}")
-
-            # Add to blackboard
-            payload.setdefault("blackboard", []).append(entry.to_dict())
-            logger.info(
-                f"Added entry to session blackboard, now has {len(payload['blackboard'])} entries"
-            )
-
-            update_result = self._persist_payload(memory_id, payload)
-            logger.info(f"Memory provider update result: {update_result}")
-
-            return update_result
-
-        except Exception as e:
-            logger.error(f"Error adding blackboard entry: {e}", exc_info=True)
-            return False
+        return self._mutate_payload(memory_id, append)
 
     # Structured message helpers -------------------------------------------------
     def post_message(
@@ -454,21 +459,19 @@ class SharedMemory:
                 results.append(content)
         return results
 
-    def update_session_status(self, memory_id: str, status: str) -> bool:
+    def update_session_status(
+        self, memory_id: str, status: str, *, outcome=None, counts=None
+    ) -> bool:
         """Update the status of a shared session."""
-        try:
-            session = self.memory_provider.retrieve_by_id(
-                memory_id, MemoryType.SHARED_MEMORY
-            )
-            if not session:
-                return False
 
-            payload = self._decode_payload(session)
+        def update(payload):
             payload["status"] = status
-            return self._persist_payload(memory_id, payload)
-        except Exception as e:
-            logger.error(f"Error updating session status: {e}")
-            return False
+            if outcome is not None:
+                payload["outcome"] = outcome
+            if counts is not None:
+                payload["counts"] = dict(counts)
+
+        return self._mutate_payload(memory_id, update)
 
     def find_active_session_for_agent(
         self,
@@ -506,7 +509,7 @@ class SharedMemory:
                     and payload.get("workflow_id") != workflow_id
                 ):
                     continue
-                if user_id is not None and payload.get("user_id") != user_id:
+                if payload.get("user_id") != user_id:
                     continue
 
                 if (
@@ -542,68 +545,32 @@ class SharedMemory:
         Returns:
             bool: Success status
         """
-        try:
-            logger.info(
-                f"Registering sub-agents {sub_agent_ids} under parent {parent_agent_id} in session {memory_id}"
-            )
+        entry = BlackboardEntry(parent_agent_id, {}, "hierarchy_update")
 
-            # Get the shared session
-            session = self.memory_provider.retrieve_by_id(
-                memory_id, MemoryType.SHARED_MEMORY
-            )
-            if not session:
-                logger.error(f"Session not found: {memory_id}")
-                return False
-
-            payload = self._decode_payload(session)
-
-            if payload.get("root_agent_id") != parent_agent_id:
-                logger.warning(
-                    "Delegates cannot register new sub-agents. "
-                    f"parent_agent_id={parent_agent_id} is not the root for session {memory_id}"
-                )
-                return False
-
-            # Ensure sub_agent_ids field exists and is a list
-            if "sub_agent_ids" not in session:
-                session["sub_agent_ids"] = []
-
+        def register(payload):
+            participants = {
+                payload.get("root_agent_id"),
+                *payload.get("delegate_agent_ids", []),
+                *payload.get("sub_agent_ids", []),
+            }
+            if parent_agent_id not in participants:
+                raise ValueError("Only a session participant can register sub-agents")
             sub_agents = payload.setdefault("sub_agent_ids", [])
-            existing_sub_agents = set(sub_agents)
-            new_sub_agents = [
+            new = [
                 agent_id
-                for agent_id in sub_agent_ids
-                if agent_id not in existing_sub_agents
+                for agent_id in dict.fromkeys(sub_agent_ids)
+                if agent_id not in sub_agents
             ]
+            if not new:
+                return False
+            sub_agents.extend(new)
+            entry.content = {
+                "parent_agent": parent_agent_id,
+                "registered_sub_agents": new,
+            }
+            payload.setdefault("blackboard", []).append(entry.to_dict())
 
-            if new_sub_agents:
-                sub_agents.extend(new_sub_agents)
-
-                # Log the hierarchy registration for debugging
-                self.add_blackboard_entry(
-                    memory_id=memory_id,
-                    agent_id=parent_agent_id,
-                    content={
-                        "action": "sub_agent_registration",
-                        "parent_agent": parent_agent_id,
-                        "registered_sub_agents": new_sub_agents,
-                        "total_sub_agents": len(session["sub_agent_ids"]),
-                    },
-                    entry_type="hierarchy_update",
-                )
-
-                update_result = self._persist_payload(memory_id, payload)
-                logger.info(
-                    f"Successfully registered {len(new_sub_agents)} new sub-agents"
-                )
-                return update_result
-            else:
-                logger.info("All sub-agents already registered")
-                return True
-
-        except Exception as e:
-            logger.error(f"Error registering sub-agents: {e}", exc_info=True)
-            return False
+        return self._mutate_payload(memory_id, register)
 
     def get_agent_hierarchy(self, memory_id: str) -> Dict[str, Any]:
         """

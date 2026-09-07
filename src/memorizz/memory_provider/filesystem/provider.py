@@ -7,9 +7,11 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -482,6 +484,34 @@ class FileSystemProvider(MemoryProvider):
         if limit:
             return final_docs[-limit:]
         return final_docs
+
+    def compare_and_swap_shared_memory(self, memory_id, expected_content, content):
+        """Use a bounded cross-process lock, then atomically replace the JSON row.
+
+        SQLite supplies crash-released locking on all supported platforms. No
+        network-filesystem locking guarantees are implied. Content-only updates
+        leave the discovery index unchanged (its metadata has not changed).
+        """
+        memory_type = MemoryType.SHARED_MEMORY
+        with self._locks[memory_type]:
+            with closing(
+                sqlite3.connect(
+                    self.root_path / ".shared-memory-lock.sqlite3", timeout=5
+                )
+            ) as lock:
+                lock.execute("BEGIN IMMEDIATE")
+                try:
+                    document = self._read_document(memory_type, memory_id)
+                    if not document or document.get("content") != expected_content:
+                        return False
+                    document["content"] = content
+                    document["updated_at"] = datetime.utcnow().isoformat()
+                    self._write_document(
+                        memory_type, memory_id, document, persist_index=False
+                    )
+                    return True
+                finally:
+                    lock.rollback()
 
     def update_by_id(
         self,

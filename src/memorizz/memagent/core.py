@@ -49,10 +49,21 @@ from ..completion import (
 )
 from ..conversation_history import is_trace_bundle_entry
 from ..enums import ApplicationMode, ApplicationModeConfig, MemoryType, Role
+from ..execution import (
+    AgentExecutionError,
+    delegated_execution,
+    recording_warning,
+    report_recording_warning,
+)
 from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
 from ..long_term.semantic.entity_memory import EntityAttributeInput, EntityRelationInput
-from ..streaming import StreamCancelled, check_cancelled, session_for
+from ..streaming import (
+    StreamCancelled,
+    check_cancelled,
+    current_cancellation,
+    session_for,
+)
 from ..task_decomposition import normalize_delegation_config
 from ..tooling import (
     ContextPolicy,
@@ -3909,7 +3920,11 @@ class MemAgent:
         logger.info("Unregistered self-awareness tools")
 
     def _resolve_execution_state(
-        self, memory_id: Optional[str], thread_id: Optional[str]
+        self,
+        memory_id: Optional[str],
+        thread_id: Optional[str],
+        *,
+        register_memory: bool = True,
     ) -> Tuple[str, str]:
         """Resolve active memory/thread IDs and keep thread state isolated."""
         requested_memory_id = str(memory_id).strip() if memory_id else ""
@@ -3925,7 +3940,12 @@ class MemAgent:
 
         self._current_memory_id = resolved_memory_id
 
-        if resolved_memory_id and resolved_memory_id not in self.memory_ids:
+        register_memory = register_memory and not delegated_execution.get()
+        if (
+            register_memory
+            and resolved_memory_id
+            and resolved_memory_id not in self.memory_ids
+        ):
             self.memory_ids.append(resolved_memory_id)
 
         requested_thread_id = str(thread_id).strip() if thread_id else ""
@@ -3949,7 +3969,8 @@ class MemAgent:
                 agent_id=self.agent_id, memory_id=resolved_memory_id
             )
 
-        self._ensure_agent_registered()
+        if register_memory:
+            self._ensure_agent_registered()
 
         return resolved_memory_id, resolved_thread_id
 
@@ -5022,15 +5043,41 @@ class MemAgent:
             and self.delegation_config.get("mode", "auto") in {"auto", "deterministic"}
             and not (tool_context or {}).get("_memorizz_skip_delegation")
         ):
-            return self.delegate(
+            result = self.delegate(
                 query,
                 memory_id=memory_id,
                 thread_id=thread_id,
                 user_id=user_id,
                 context=context,
                 tool_context=tool_context,
-                return_report=bool(self.delegation_config.get("return_report", False)),
+                return_report=delegated_execution.get()
+                or bool(self.delegation_config.get("return_report", False)),
             )
+            if delegated_execution.get():
+                for warning in result.get("recording_warnings", []):
+                    report_recording_warning(
+                        "nested_" + warning["operation"], RuntimeError(warning["error"])
+                    )
+                if result.get("execution", {}).get("workers_still_running"):
+                    report_recording_warning(
+                        "nested_workers_running",
+                        RuntimeError("Nested workers still require settlement"),
+                    )
+                if not result["ok"]:
+                    status = (
+                        result["outcome"]
+                        if result["outcome"] in {"waiting", "cancelled"}
+                        else "failed"
+                    )
+                    raise AgentExecutionError(
+                        result.get("error_code") or "nested_delegation_failed",
+                        result.get("error")
+                        or "Nested delegation did not complete successfully",
+                        status=status,
+                        metadata={"workflow_report": result},
+                    )
+                return result["response"]
+            return result
         logger.info(f"MemAgent {self.agent_id} executing query: {query[:50]}...")
 
         # M4: scope per-call tool context for tools reading via get_tool_context().
@@ -5180,13 +5227,21 @@ class MemAgent:
             turn_status = "success"
             return response
 
+        except StreamCancelled:
+            turn_status = "cancelled"
+            turn_error_code = "cancelled"
+            raise
+        except ApprovalRequired:
+            turn_status = "approval_required"
+            turn_error_code = "approval_required"
+            raise
         except CompletionRejectedError:
             turn_error_code = "CompletionRejectedError"
             raise
         except Exception as e:
             logger.error(f"MemAgent execution failed: {e}")
             turn_error_code = type(e).__name__
-            if session_for(self) is not None:
+            if session_for(self) is not None or delegated_execution.get():
                 raise
             error_response = f"I apologize, but I encountered an error: {str(e)}"
             return error_response
@@ -5217,6 +5272,14 @@ class MemAgent:
         plan: Any = None,
         trace_id: Optional[str] = None,
         return_report: bool = False,
+        allow_root_fallback: Optional[bool] = None,
+        thread_strategy: Optional[str] = None,
+        max_workers: Optional[int] = None,
+        timeout: Optional[float] = None,
+        cancellation: Any = None,
+        on_task_event: Any = None,
+        on_task_result: Any = None,
+        task_completion_policy: Any = None,
     ) -> Any:
         """Execute a configured deterministic or model-generated delegation plan."""
         if not self.delegates:
@@ -5226,13 +5289,44 @@ class MemAgent:
 
         from ..multi_agent_orchestrator import MultiAgentOrchestrator
 
-        memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
+        memory_id, thread_id = self._resolve_execution_state(
+            memory_id,
+            thread_id,
+            register_memory=bool(
+                self.delegation_config.get("persist_participants", False)
+            ),
+        )
         configured_plan = (
             plan if plan is not None else self.delegation_config.get("plan")
         )
         cache_context, cache_bypass_reason = self._delegation_cache_context(
             context, configured_plan
         )
+        if any(
+            value is not None
+            for value in (
+                task_completion_policy,
+                on_task_event,
+                on_task_result,
+                cancellation,
+                timeout,
+                allow_root_fallback,
+                thread_strategy,
+                max_workers,
+            )
+        ):
+            cache_bypass_reason = "runtime_delegation_contract"
+        if current_cancellation.get() is not None:
+            cache_bypass_reason = "runtime_delegation_contract"
+        if configured_plan is not None and not callable(configured_plan):
+            from ..task_decomposition import TaskDecomposer
+
+            try:
+                TaskDecomposer(self)._coerce_plan(
+                    configured_plan, {agent.agent_id: {} for agent in self.delegates}
+                )
+            except (TypeError, ValueError):
+                cache_bypass_reason = "invalid_explicit_plan"
         cache_metadata = self._semantic_cache_metadata(cache_context)
         if self.cache_manager.enabled:
             cached_response = self.cache_manager.get_cached_response(
@@ -5242,6 +5336,8 @@ class MemAgent:
                 metadata=cache_metadata,
                 bypass_reason=cache_bypass_reason,
             )
+            if cache_bypass_reason:
+                cached_response = None
             if cached_response:
                 cache_decision = self._evaluate_completion_candidate(
                     query=query,
@@ -5266,18 +5362,59 @@ class MemAgent:
                         )
                     except Exception:
                         pass
-                self._record_interaction(
-                    query,
-                    cached_response,
-                    memory_id,
-                    thread_id,
-                    user_id=user_id,
-                )
+                warnings = []
+
+                def warn(operation, error):
+                    warnings.append(
+                        {
+                            "operation": operation,
+                            "task_id": None,
+                            "error_code": type(error).__name__,
+                            "error": str(error),
+                        }
+                    )
+
+                warning_token = recording_warning.set(warn)
+                try:
+                    self._record_interaction(
+                        query, cached_response, memory_id, thread_id, user_id=user_id
+                    )
+                except Exception as exc:
+                    warn("parent_interaction", exc)
+                finally:
+                    recording_warning.reset(warning_token)
                 if return_report:
                     return {
                         "ok": True,
                         "partial": False,
                         "cached": True,
+                        "status": "completed",
+                        "outcome": "succeeded",
+                        "fallback": False,
+                        "shared_memory_id": None,
+                        "parent_thread_id": thread_id,
+                        "counts": {
+                            key: 0
+                            for key in (
+                                "total",
+                                "completed",
+                                "failed",
+                                "blocked",
+                                "waiting",
+                                "cancelled",
+                                "cancelling",
+                                "skipped",
+                            )
+                        },
+                        "recording_warnings": warnings,
+                        "reconciliation_required": bool(warnings),
+                        "execution": {
+                            "strategy": "semantic_cache",
+                            "workers_still_running": [],
+                            "cancellation_reason": None,
+                        },
+                        "error": None,
+                        "error_code": None,
                         "workflow_id": None,
                         "trace_id": trace_id,
                         "user_id": user_id,
@@ -5321,6 +5458,23 @@ class MemAgent:
             ),
             required_finding_ids=self.delegation_config.get("required_finding_ids", []),
             adaptive_escalation=self.delegation_config.get("adaptive_escalation", {}),
+            allow_root_fallback=(
+                allow_root_fallback
+                if allow_root_fallback is not None
+                else self.delegation_config.get("allow_root_fallback", False)
+            ),
+            thread_strategy=thread_strategy
+            or self.delegation_config.get("thread_strategy", "task"),
+            max_workers=max_workers
+            if max_workers is not None
+            else self.delegation_config.get("max_workers"),
+            timeout=timeout
+            if timeout is not None
+            else self.delegation_config.get("timeout"),
+            cancellation=cancellation,
+            on_task_event=on_task_event,
+            on_task_result=on_task_result,
+            task_completion_policy=task_completion_policy,
         )
         result = orchestrator.execute_multi_agent_workflow(
             query,
@@ -5344,29 +5498,44 @@ class MemAgent:
             else dict(orchestrator.last_workflow_report or {})
         )
         workflow_ok = bool(workflow_report.get("ok", not workflow_report))
-        if response and workflow_ok:
-            if self.cache_manager.enabled and cache_bypass_reason is None:
-                self.cache_manager.cache_response(
+        warning_token = recording_warning.set(orchestrator._warning)
+        try:
+            if response and workflow_ok:
+                if self.cache_manager.enabled and cache_bypass_reason is None:
+                    orchestrator._record(
+                        "delegation_cache",
+                        self.cache_manager.cache_response,
+                        query,
+                        response,
+                        thread_id,
+                        user_id=user_id,
+                        metadata=cache_metadata,
+                        deterministic=True,
+                        read_only=True,
+                    )
+                orchestrator._record(
+                    "parent_interaction",
+                    self._record_interaction,
                     query,
                     response,
+                    memory_id,
                     thread_id,
                     user_id=user_id,
-                    metadata=cache_metadata,
-                    deterministic=True,
-                    read_only=True,
                 )
-            self._record_interaction(
-                query, response, memory_id, thread_id, user_id=user_id
+            orchestrator._record(
+                "delegation_learning",
+                self._record_delegation_learning,
+                query=query,
+                response=response,
+                result=workflow_report or result,
+                memory_id=memory_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                cache_bypass_reason=cache_bypass_reason,
             )
-        self._record_delegation_learning(
-            query=query,
-            response=response,
-            result=workflow_report or result,
-            memory_id=memory_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            cache_bypass_reason=cache_bypass_reason,
-        )
+        finally:
+            recording_warning.reset(warning_token)
+        orchestrator._attach_recording_warnings(orchestrator.last_workflow_report)
         return result
 
     def _delegation_cache_context(
@@ -6801,6 +6970,7 @@ class MemAgent:
         """
         from ..long_term.procedural.workflow.workflow import WorkflowOutcome
 
+        check_cancelled()
         # Keep context tools and direct/internal execution paths on the same
         # tenant boundary as ``run``/``run_stream``.  Approval resumption and
         # host-driven tool execution both enter through this shared method and
@@ -6992,6 +7162,7 @@ class MemAgent:
                         routed_call_hash = str(prepared["call_hash"])
 
                 if result is None:
+                    check_cancelled()
                     logger.info("Executing tool: %s", logical_tool_name)
                     if self.tool_manager:
                         result, _ = self.tool_manager.execute_tool(
@@ -7744,6 +7915,7 @@ class MemAgent:
                             "episodic",
                             self._current_thread_id
                             if policy.conversation_scope == "thread"
+                            or delegated_execution.get()
                             else None,
                             None,
                         )
@@ -8214,6 +8386,10 @@ class MemAgent:
         and is *not* persisted to ``conversation_memory``.
         """
         if not self.model:
+            if delegated_execution.get():
+                raise AgentExecutionError(
+                    "model_unavailable", "Delegate has no configured model"
+                )
             return self._no_llm_message()
 
         try:
@@ -8236,6 +8412,7 @@ class MemAgent:
             tool_call_count = 0
             rejection_count = 0
             for iteration in range(max_iterations):
+                check_cancelled()
                 # Coerce LOBs to strings before every LLM call; matches the
                 # streaming path's guarantee.
                 messages = _to_jsonable(messages)
@@ -8251,6 +8428,10 @@ class MemAgent:
                 # Check if response is a string (no tool calls)
                 if isinstance(response, str):
                     final_content = response
+                    if delegated_execution.get() and not final_content.strip():
+                        raise AgentExecutionError(
+                            "empty_response", "Delegate model returned no answer"
+                        )
                     decision = self._evaluate_completion_candidate(
                         query=query,
                         response=final_content,
@@ -8276,6 +8457,13 @@ class MemAgent:
 
                     # If no tool calls, return the content
                     if not message.tool_calls:
+                        if (
+                            delegated_execution.get()
+                            and not str(message.content or "").strip()
+                        ):
+                            raise AgentExecutionError(
+                                "empty_response", "Delegate model returned no answer"
+                            )
                         final_content = (
                             message.content
                             if message.content
@@ -8317,6 +8505,10 @@ class MemAgent:
 
                 # Fallback: return any content we got
                 fallback_response = "I encountered an unexpected response format."
+                if delegated_execution.get():
+                    raise AgentExecutionError(
+                        "unexpected_response_format", fallback_response
+                    )
                 if session_for(self) is not None:
                     from ..llms.streaming import ProviderStreamError
 
@@ -8325,6 +8517,11 @@ class MemAgent:
                 return fallback_response
 
             # If we exhausted iterations
+            if delegated_execution.get():
+                raise AgentExecutionError(
+                    "iteration_limit",
+                    "Delegate exhausted its iteration budget before completion",
+                )
             if session_for(self) is not None:
                 from ..llms.streaming import ProviderStreamError
 
@@ -8342,6 +8539,8 @@ class MemAgent:
         except ApprovalRequired as approval:
             if "workflow" in locals():
                 self._persist_workflow_run(workflow)
+            if delegated_execution.get():
+                raise
             session = session_for(self)
             if session is not None:
                 session.outcome = "approval_required"
@@ -8357,7 +8556,7 @@ class MemAgent:
             raise
         except Exception as e:
             logger.error(f"LLM interaction failed: {e}")
-            if session_for(self) is not None:
+            if session_for(self) is not None or delegated_execution.get():
                 raise
 
             # Store workflow even on error if it exists
@@ -9340,6 +9539,11 @@ class MemAgent:
             assistant_unit_id = self.memory_manager.save_memory_unit(
                 assistant_memory, memory_id
             )
+            if not user_unit_id or not assistant_unit_id:
+                report_recording_warning(
+                    "conversation_persistence",
+                    RuntimeError("Conversation write did not return both record IDs"),
+                )
             if session:
                 session.persistence["conversation"] = (
                     "written" if user_unit_id and assistant_unit_id else "unknown"
@@ -9360,6 +9564,7 @@ class MemAgent:
 
         except Exception as e:
             logger.warning(f"Failed to record interaction: {e}")
+            report_recording_warning("conversation_persistence", e)
             if session:
                 session.persistence["conversation"] = "failed"
 

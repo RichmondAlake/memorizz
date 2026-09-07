@@ -3,25 +3,41 @@
 # See LICENSE file in the project root for full license information.
 
 import concurrent.futures
+import copy
+import json
 import logging
 import threading
 import time
 import uuid
+from contextvars import copy_context
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional
 
-from .completion import CompletionCandidate, CompletionRejectedError
+from .approval import ApprovalRequired
+from .completion import CompletionCandidate, CompletionPolicy, CompletionRejectedError
 from .coordination.shared_memory.shared_memory import SharedMemory
 from .coordination.structured_results import (
     consolidate_structured_findings,
     finding_ids,
 )
+from .execution import AgentExecutionError, delegated_execution, recording_warning
+from .streaming import (
+    CancellationToken,
+    StreamCancelled,
+    current_cancellation,
+    current_stream,
+)
 from .task_decomposition import SubTask, TaskDecomposer
+from .tool_context import reset_tool_context, set_tool_context
+from .tool_outcomes import ToolResult
 
 if TYPE_CHECKING:
     from .memagent import MemAgent
 
 logger = logging.getLogger(__name__)
+_worker_slots = threading.BoundedSemaphore(32)
+_supervised_workers = set()
+_supervised_lock = threading.Lock()
 
 
 class MultiAgentOrchestrator:
@@ -49,9 +65,49 @@ class MultiAgentOrchestrator:
         max_consolidation_result_chars: int = 12_000,
         required_finding_ids: Optional[Iterable[str]] = None,
         adaptive_escalation: Optional[Mapping[str, Any]] = None,
+        allow_root_fallback: bool = False,
+        thread_strategy: str = "task",
+        max_workers: Optional[int] = None,
+        timeout: Optional[float] = None,
+        cancellation=None,
+        on_task_event=None,
+        on_task_result=None,
+        task_completion_policy=None,
     ):
         self.root_agent = root_agent
         self.delegates = delegates
+        if thread_strategy not in {"task", "shared"}:
+            raise ValueError("thread_strategy must be task or shared")
+        if max_workers is not None and (
+            isinstance(max_workers, bool) or int(max_workers) < 1
+        ):
+            raise ValueError("max_workers must be positive")
+        if timeout is not None and (
+            float(timeout) <= 0 or not float(timeout) < float("inf")
+        ):
+            raise ValueError("timeout must be a finite positive number")
+        for callback in (on_task_event, on_task_result):
+            if callback is not None and not callable(callback):
+                raise TypeError("Task callbacks must be callable")
+        self.allow_root_fallback = bool(allow_root_fallback)
+        self.thread_strategy = thread_strategy
+        self.max_workers = min(32, int(max_workers or max(1, len(delegates))))
+        self.timeout = float(timeout) if timeout is not None else None
+        self.cancellation = (
+            cancellation or current_cancellation.get() or CancellationToken()
+        )
+        self.on_task_event = on_task_event
+        self.on_task_result = on_task_result
+        self.task_completion_policy = CompletionPolicy.from_value(
+            task_completion_policy
+        )
+        self._deadline = None
+        self._cancel_reason = None
+        self._recording_warnings = []
+        self._recording_lock = threading.Lock()
+        self._worker_metadata = {}
+        self._child_threads = {}
+        self._task_results = {}
         self.shared_memory = SharedMemory(root_agent.memory_provider)
         self.task_decomposer = TaskDecomposer(root_agent)
         self.shared_memory_id = None
@@ -109,6 +165,7 @@ class MultiAgentOrchestrator:
         self.is_nested_orchestrator = (
             False  # Flag to track if this is a sub-level orchestrator
         )
+        self._owns_session_outcome = True
 
     def execute_multi_agent_workflow(
         self,
@@ -168,22 +225,93 @@ class MultiAgentOrchestrator:
         self._last_execution_report = None
         with self._delegate_context_lock:
             self._delegate_context_packs.clear()
-        if self.persist_participants:
-            self._prepare_participants()
-
         try:
+            self._deadline = (
+                time.monotonic() + self.timeout if self.timeout is not None else None
+            )
+            selected_plan = (
+                delegation_plan if delegation_plan is not None else self.delegation_plan
+            )
+            if (selected_plan is None or callable(selected_plan)) and self._stopped():
+                raise StreamCancelled()
+            delegate_ids = [agent.agent_id for agent in self.delegates]
+            if len(set(delegate_ids)) != len(delegate_ids):
+                raise ValueError("Delegates must use unique agent IDs")
+            sub_tasks = self.task_decomposer.decompose_task(
+                user_query, self.delegates, plan=selected_plan
+            )
+            self.task_decomposer.validate_plan(sub_tasks, set(delegate_ids))
+            if not sub_tasks:
+                if (
+                    selected_plan is None
+                    and self.allow_root_fallback
+                    and not self._stopped()
+                ):
+                    fallback_context = dict(tool_context or {})
+                    fallback_context["_memorizz_skip_delegation"] = True
+                    strict_token = delegated_execution.set(True)
+                    try:
+                        response = self.root_agent.run(
+                            user_query,
+                            memory_id,
+                            thread_id,
+                            user_id=user_id,
+                            context=context,
+                            tool_context=fallback_context,
+                        )
+                    finally:
+                        delegated_execution.reset(strict_token)
+                    return self._finish_workflow(
+                        [], response, return_report=return_report, fallback=True
+                    )
+                raise ValueError(
+                    "No executable delegation tasks; root fallback is disabled"
+                )
+            # Validate adaptive routing before any primary task can have effects.
+            escalation_ids = set(
+                self.adaptive_escalation.get("escalation_task_ids") or []
+            )
+            if self.adaptive_escalation.get("enabled"):
+                if not escalation_ids <= {task.task_id for task in sub_tasks}:
+                    raise ValueError("Unknown adaptive escalation task IDs")
+                if escalation_ids and all(
+                    task.task_id in escalation_ids for task in sub_tasks
+                ):
+                    raise ValueError(
+                        "Adaptive escalation requires at least one primary task"
+                    )
+                if any(
+                    set(task.dependencies) & escalation_ids
+                    for task in sub_tasks
+                    if task.task_id not in escalation_ids
+                ):
+                    raise ValueError(
+                        "Primary tasks cannot depend on adaptive escalation tasks"
+                    )
+            if self.persist_participants:
+                self._prepare_participants()
             # HIERARCHICAL COORDINATION: Check if we should join an existing session
             existing_session = self._find_or_create_shared_session()
 
             if existing_session:
-                self.shared_memory_id = str(existing_session.get("_id"))
+                self.shared_memory_id = str(
+                    existing_session.get("memory_id") or existing_session.get("_id")
+                )
                 logger.info(f"Joining existing shared session: {self.shared_memory_id}")
                 self.is_nested_orchestrator = True
+                self._owns_session_outcome = (
+                    self.shared_memory._decode_payload(existing_session).get(
+                        "root_agent_id"
+                    )
+                    == self.root_agent.agent_id
+                )
 
                 # Register our delegates as sub-agents in the existing session
                 delegate_ids = [agent.agent_id for agent in self.delegates]
                 if delegate_ids:
-                    self.shared_memory.register_sub_agents(
+                    self._record(
+                        "register_sub_agents",
+                        self.shared_memory.register_sub_agents,
                         memory_id=self.shared_memory_id,
                         parent_agent_id=self.root_agent.agent_id,
                         sub_agent_ids=delegate_ids,
@@ -192,7 +320,8 @@ class MultiAgentOrchestrator:
             # **FIX: Add shared memory ID to root agent's memory_ids array**
             # This ensures consistency between single-agent and multi-agent memory management
             if (
-                self.shared_memory_id
+                self.persist_participants
+                and self.shared_memory_id
                 and self.root_agent.agent_id
                 and self.shared_memory_id not in (self.root_agent.memory_ids or [])
             ):
@@ -225,7 +354,7 @@ class MultiAgentOrchestrator:
 
             # **FIX: Also add shared memory ID to delegate agents' memory_ids arrays**
             # This ensures all participating agents have access to the shared memory
-            for delegate in self.delegates:
+            for delegate in self.delegates if self.persist_participants else []:
                 if (
                     self.shared_memory_id
                     and delegate.agent_id
@@ -260,7 +389,9 @@ class MultiAgentOrchestrator:
                         )
 
             # Log the start of multi-agent execution with hierarchy context
-            self.shared_memory.add_blackboard_entry(
+            self._record(
+                "workflow_start",
+                self.shared_memory.add_blackboard_entry,
                 memory_id=self.shared_memory_id,
                 agent_id=self.root_agent.agent_id,
                 content={
@@ -274,55 +405,21 @@ class MultiAgentOrchestrator:
                 entry_type="workflow_start",
             )
 
-            # 2. Decompose task into sub-tasks
-            logger.info("Starting task decomposition...")
-            sub_tasks = self._enhance_task_decomposition_with_hierarchy(
-                user_query,
-                plan=(
-                    delegation_plan
-                    if delegation_plan is not None
-                    else self.delegation_plan
-                ),
-            )
-            logger.info(f"Task decomposition resulted in {len(sub_tasks)} sub-tasks")
-
-            if not sub_tasks:
-                # Fallback to single agent execution
-                logger.warning("Task decomposition failed, falling back to root agent")
-                logger.info("Executing fallback with root agent...")
-                fallback_tool_context = dict(tool_context or {})
-                fallback_tool_context["_memorizz_skip_delegation"] = True
-                result = self.root_agent.run(
-                    user_query,
-                    memory_id,
-                    thread_id,
-                    user_id=user_id,
-                    context=context,
-                    tool_context=fallback_tool_context,
-                )
-                logger.info(
-                    f"Root agent returned: {result[:100]}..."
-                    if result
-                    else "No result from root agent"
-                )
-                self.last_workflow_report = {
-                    "ok": True,
-                    "workflow_id": self.workflow_id,
-                    "trace_id": self._trace_id,
-                    "fallback": True,
-                    "response": result,
-                    "tasks": [],
-                }
-                return self.last_workflow_report if return_report else result
-
             # Log task decomposition
-            self.shared_memory.add_blackboard_entry(
+            self._record(
+                "task_decomposition",
+                self.shared_memory.add_blackboard_entry,
                 memory_id=self.shared_memory_id,
                 agent_id=self.root_agent.agent_id,
                 content={"sub_tasks": [task.to_dict() for task in sub_tasks]},
                 entry_type="task_decomposition",
             )
-            self._after_task_decomposition(sub_tasks, user_query)
+            self._record(
+                "after_task_decomposition",
+                self._after_task_decomposition,
+                sub_tasks,
+                user_query,
+            )
 
             # 3. Execute sub-tasks in parallel
             logger.info(f"Executing {len(sub_tasks)} sub-tasks in parallel...")
@@ -336,93 +433,335 @@ class MultiAgentOrchestrator:
             consolidation_inputs = [
                 item for item in sub_task_results if item.get("status") == "completed"
             ]
-            consolidated_response = self._consolidate_results(
-                user_query, consolidation_inputs
-            )
+            if self._stopped():
+                consolidated_response = self._deterministic_consolidation(
+                    user_query, consolidation_inputs
+                )
+                self._last_consolidation_report = {
+                    "status": "cancelled",
+                    "model_used": False,
+                }
+            elif not consolidation_inputs:
+                consolidated_response = ""
+                self._last_consolidation_report = {
+                    "status": "failed",
+                    "model_used": False,
+                    "reason": "no_completed_tasks",
+                }
+            else:
+                consolidated_response = self._consolidate_results(
+                    user_query, consolidation_inputs
+                )
             logger.info(
                 f"Consolidation completed: {consolidated_response[:100]}..."
                 if consolidated_response
                 else "No consolidated response"
             )
 
-            # 5. Update shared memory with final result
-            self.shared_memory.add_blackboard_entry(
-                memory_id=self.shared_memory_id,
-                agent_id=self.root_agent.agent_id,
-                content={
-                    "consolidated_response": consolidated_response,
-                    "completed_at": datetime.now().isoformat(),
-                },
-                entry_type="workflow_complete",
+            return self._finish_workflow(
+                sub_task_results, consolidated_response, return_report=return_report
             )
 
-            # Mark session as completed
-            self.shared_memory.update_session_status(self.shared_memory_id, "completed")
-
-            failed = [
-                item
-                for item in sub_task_results
-                if item.get("status") not in {"completed", "skipped"}
-            ]
-            consolidation = dict(self._last_consolidation_report or {})
-            consolidation_failed = consolidation.get("status") == "failed"
-            if failed or consolidation_failed:
-                logger.warning("Multi-agent workflow completed with partial results")
-            else:
-                logger.info("Multi-agent workflow completed successfully")
-            self.last_workflow_report = {
-                "ok": not failed and not consolidation_failed,
-                "partial": bool(failed) or consolidation_failed,
-                "workflow_id": self.workflow_id,
-                "shared_memory_id": self.shared_memory_id,
-                "trace_id": self._trace_id,
-                "user_id": user_id,
-                "response": consolidated_response,
-                "consolidation": consolidation,
-                "execution": dict(self._last_execution_report or {}),
-                "tasks": sub_task_results,
-                "failures": failed,
-            }
-            return self.last_workflow_report if return_report else consolidated_response
-
-        except Exception as e:
+        except (Exception, StreamCancelled) as e:
             logger.error(f"Error in multi-agent workflow: {e}", exc_info=True)
-            # Mark session as failed
-            if self.shared_memory_id:
-                self.shared_memory.update_session_status(
-                    self.shared_memory_id, "failed"
-                )
+            if isinstance(e, StreamCancelled):
+                self._cancel_reason = "cancelled"
+            # Successful worker effects are never retried because orchestration
+            # or recording failed. Preserve the one authoritative task ledger.
+            results = list(self._task_results.values())
+            response = self._deterministic_consolidation(
+                user_query, [row for row in results if row["status"] == "completed"]
+            )
+            return self._finish_workflow(
+                results, response, return_report=return_report, error=e
+            )
 
-            # Fallback to single agent execution
-            logger.info("Attempting fallback to root agent due to error...")
+    def _stopped(self) -> bool:
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            self._cancel_reason = "deadline_exceeded"
+            self.cancellation.cancel()
+        if self.cancellation.cancelled:
+            self._cancel_reason = self._cancel_reason or "cancelled"
+        return self._cancel_reason is not None
+
+    def _warning(self, operation, error, task_id=None):
+        warning = {
+            "operation": operation,
+            "task_id": task_id,
+            "error_code": type(error).__name__,
+            "error": str(error),
+        }
+        with self._recording_lock:
+            self._recording_warnings.append(warning)
+        logger.warning("Delegation recording failed (%s): %s", operation, error)
+
+    def _record(self, operation, callback, *args, **kwargs):
+        try:
+            result = callback(*args, **kwargs)
+            if result is False:
+                raise RuntimeError("Recording operation returned False")
+            return result
+        except Exception as exc:
+            self._warning(operation, exc)
+            return None
+
+    def _task_event(
+        self, task, event_type, *, execution_context="coordinator", **values
+    ):
+        event = {
+            "type": event_type,
+            "workflow_id": self.workflow_id,
+            "trace_id": self._trace_id,
+            "task_id": task.task_id,
+            "agent_id": task.assigned_agent_id,
+            "user_id": self._request_user_id,
+            "memory_id": self._request_memory_id,
+            "parent_thread_id": self._request_thread_id,
+            "thread_id": self._child_threads.get(task.task_id, self._request_thread_id),
+            "execution_context": execution_context,
+            **values,
+        }
+        if self.on_task_event is not None:
+            # Runtime context is for the trusted host callback, not the shared
+            # ledger. Copy it so one child/callback cannot mutate another's scope.
             try:
-                fallback_tool_context = dict(tool_context or {})
-                fallback_tool_context["_memorizz_skip_delegation"] = True
-                result = self.root_agent.run(
-                    user_query,
-                    memory_id,
-                    thread_id,
-                    user_id=user_id,
-                    context=context,
-                    tool_context=fallback_tool_context,
+                self.on_task_event(
+                    {
+                        **copy.deepcopy(event),
+                        "context": copy.deepcopy(self._request_context),
+                    }
                 )
-                logger.info(
-                    f"Fallback completed: {result[:100]}..."
-                    if result
-                    else "No result from fallback"
-                )
-                self.last_workflow_report = {
-                    "ok": False,
-                    "fallback": True,
+            except Exception as exc:
+                self._warning("on_task_event", exc, task.task_id)
+        return event
+
+    def _finish_workflow(
+        self, tasks, response, *, return_report, error=None, fallback=False
+    ):
+        counts = {
+            state: sum(row.get("status") == state for row in tasks)
+            for state in (
+                "completed",
+                "failed",
+                "blocked",
+                "waiting",
+                "cancelled",
+                "cancelling",
+                "skipped",
+            )
+        }
+        counts["total"] = len(tasks)
+        failures = [
+            row for row in tasks if row.get("status") not in {"completed", "skipped"}
+        ]
+        consolidation = dict(self._last_consolidation_report or {})
+        if self._stopped() or counts["cancelled"] or counts["cancelling"]:
+            outcome = "cancelled"
+        elif counts["waiting"]:
+            outcome = "waiting"
+        elif error is not None or failures or consolidation.get("status") == "failed":
+            outcome = "partial" if counts["completed"] else "failed"
+        else:
+            outcome = "succeeded" if tasks or fallback else "failed"
+        ok = outcome == "succeeded"
+        status = "completed" if ok else outcome
+        execution = dict(self._last_execution_report or {})
+        execution.update(
+            {
+                "workers_still_running": [
+                    row["task_id"] for row in tasks if row.get("status") == "cancelling"
+                ],
+                "cancellation_reason": self._cancel_reason,
+            }
+        )
+        report = {
+            "ok": ok,
+            "partial": bool(counts["completed"] and not ok),
+            "status": status,
+            "outcome": outcome,
+            "counts": counts,
+            "fallback": fallback,
+            "workflow_id": self.workflow_id,
+            "shared_memory_id": self.shared_memory_id,
+            "trace_id": self._trace_id,
+            "parent_thread_id": self._request_thread_id,
+            "user_id": self._request_user_id,
+            "response": response,
+            "tasks": tasks,
+            "failures": failures,
+            "consolidation": consolidation,
+            "execution": execution,
+            "error": str(error) if error is not None else None,
+            "error_code": getattr(error, "code", type(error).__name__)
+            if error is not None
+            else None,
+        }
+        if self.shared_memory_id and self._owns_session_outcome:
+            self._record(
+                "workflow_outcome",
+                self.shared_memory.update_session_status,
+                self.shared_memory_id,
+                status,
+                outcome=outcome,
+                counts=counts,
+            )
+        if self.shared_memory_id:
+            self._record(
+                "workflow_complete",
+                self.shared_memory.add_blackboard_entry,
+                self.shared_memory_id,
+                self.root_agent.agent_id,
+                {
+                    "status": status,
+                    "outcome": outcome,
+                    "counts": counts,
+                    "response": response,
+                },
+                "workflow_complete",
+            )
+        if self.on_task_event is not None:
+            self._record(
+                "on_task_event",
+                self.on_task_event,
+                {
+                    "type": "workflow_finished",
                     "workflow_id": self.workflow_id,
                     "trace_id": self._trace_id,
-                    "error": str(e),
-                    "response": result,
+                    "parent_thread_id": self._request_thread_id,
+                    "user_id": self._request_user_id,
+                    "status": status,
+                    "outcome": outcome,
+                    "counts": dict(counts),
+                    "execution_context": "coordinator",
+                },
+            )
+        self._attach_recording_warnings(report)
+        self.last_workflow_report = report
+        return report if return_report else response
+
+    def _attach_recording_warnings(self, report):
+        with self._recording_lock:
+            report["recording_warnings"] = copy.deepcopy(self._recording_warnings)
+        report["reconciliation_required"] = bool(
+            report["recording_warnings"] or report["counts"]["cancelling"]
+        )
+
+    def _run_task(self, task, agent, memory_id, thread_id, dependency_results):
+        """Worker boundary: propagate cancellation, but isolate answer streaming."""
+        strict_token = delegated_execution.set(True)
+        stream_token = current_stream.set(None)
+        cancel_token = current_cancellation.set(self.cancellation)
+        warning_token = recording_warning.set(
+            lambda operation, error: self._warning(operation, error, task.task_id)
+        )
+        result = None
+        status = "failed"
+        error = None
+        tool_token = None
+        try:
+            tool_token = set_tool_context(
+                {
+                    **copy.deepcopy(self._tool_context or {}),
+                    "workflow_id": self.workflow_id,
+                    "trace_id": self._trace_id,
+                    "delegated_task_id": task.task_id,
+                    "delegated_by": self.root_agent.agent_id,
+                    "parent_thread_id": self._request_thread_id,
+                    "thread_id": thread_id,
+                    "user_id": self._request_user_id,
                 }
-                return self.last_workflow_report if return_report else result
-            except Exception as fallback_error:
-                logger.error(f"Fallback also failed: {fallback_error}", exc_info=True)
-                return f"Multi-agent workflow failed: {str(e)}. Fallback also failed: {str(fallback_error)}"
+            )
+            self.cancellation.check()
+            self._task_event(
+                task, "task_started", execution_context="worker", status="in_progress"
+            )
+            self.cancellation.check()
+            result = self._execute_single_task(
+                task, agent, memory_id, thread_id, dependency_results
+            )
+            if isinstance(result, ToolResult):
+                if not result.outcome.ok:
+                    raise AgentExecutionError(
+                        result.outcome.reason_code or result.outcome.status.value,
+                        "Delegate returned an unsuccessful typed outcome",
+                    )
+                result = result.value
+            if self.task_completion_policy.enabled:
+                decision = self.task_completion_policy.evaluate(
+                    CompletionCandidate(
+                        query=task.description,
+                        response=result
+                        if isinstance(result, str)
+                        else json.dumps(result, default=str),
+                        iteration=1,
+                        metadata={
+                            "task_id": task.task_id,
+                            "workflow_id": self.workflow_id,
+                            "thread_id": thread_id,
+                            "user_id": self._request_user_id,
+                        },
+                    )
+                )
+                if not decision.accepted:
+                    raise CompletionRejectedError(decision, 1)
+            status = "completed"
+            return result
+        except ApprovalRequired as exc:
+            status, error = "waiting", exc
+            raise
+        except StreamCancelled as exc:
+            status, error = "cancelled", exc
+            raise
+        except AgentExecutionError as exc:
+            status, error = exc.status, exc
+            raise
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            event = self._task_event(
+                task,
+                "task_settled",
+                execution_context="worker",
+                status=status,
+                result=result,
+                error_code=type(error).__name__ if error else None,
+            )
+            if self.on_task_result is not None:
+                try:
+                    metadata = self.on_task_result(
+                        {
+                            **copy.deepcopy(event),
+                            "context": copy.deepcopy(self._request_context),
+                        }
+                    )
+                    if metadata is not None:
+                        if not isinstance(metadata, Mapping):
+                            raise TypeError(
+                                "on_task_result must return a mapping or None"
+                            )
+                        metadata = json.loads(
+                            json.dumps(dict(metadata), allow_nan=False)
+                        )
+                        with self._recording_lock:
+                            self._worker_metadata[task.task_id] = metadata
+                        event["metadata"] = metadata
+                except Exception as exc:
+                    self._warning("on_task_result", exc, task.task_id)
+            self._record(
+                "task_settled",
+                self.shared_memory.add_blackboard_entry,
+                self.shared_memory_id,
+                task.assigned_agent_id,
+                event,
+                "task_settled",
+            )
+            current_cancellation.reset(cancel_token)
+            current_stream.reset(stream_token)
+            delegated_execution.reset(strict_token)
+            recording_warning.reset(warning_token)
+            if tool_token is not None:
+                reset_tool_context(tool_token)
 
     def _participant_is_persisted(self, agent: "MemAgent") -> bool:
         provider = getattr(agent, "memory_provider", None)
@@ -597,7 +936,12 @@ class MultiAgentOrchestrator:
                 "dependencies": list(task.dependencies),
             }
             failed_tasks.add(task.task_id)
-            results.append(task.to_dict())
+            value = task.to_dict()
+            value["thread_id"] = self._child_threads.get(task.task_id)
+            value["parent_thread_id"] = thread_id
+            results.append(value)
+            self._task_results[task.task_id] = value
+            self._task_event(task, "task_" + status, status=status, reason=reason)
 
         for task in sorted_tasks:
             missing = [dep for dep in task.dependencies if dep not in known_ids]
@@ -612,12 +956,99 @@ class MultiAgentOrchestrator:
                     f"Unknown delegate: {task.assigned_agent_id}",
                 )
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=max(1, len(self.delegates))
-        ) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
+        try:
             future_to_task: Dict[Any, SubTask] = {}
             future_started: Dict[Any, float] = {}
             while True:
+                # Consume finished work first so cancellation never discards a
+                # result that is already available. Pop timing exactly once.
+                for future in [item for item in future_to_task if item.done()]:
+                    task = future_to_task.pop(future)
+                    duration_ms = int(
+                        (time.monotonic() - future_started.pop(future)) * 1_000
+                    )
+                    try:
+                        task.result = future.result()
+                        task.status = "completed"
+                        completed_tasks.add(task.task_id)
+                    except ApprovalRequired as exc:
+                        task.status = "waiting"
+                        task.result = {
+                            "error_code": "approval_required",
+                            "proposal": exc.proposal.to_dict(include_arguments=False),
+                        }
+                        failed_tasks.add(task.task_id)
+                    except (StreamCancelled, concurrent.futures.CancelledError):
+                        task.status = "cancelled"
+                        task.result = {"error_code": self._cancel_reason or "cancelled"}
+                        failed_tasks.add(task.task_id)
+                    except AgentExecutionError as exc:
+                        task.status = exc.status
+                        task.result = {
+                            **exc.metadata,
+                            "error": str(exc),
+                            "error_code": exc.code,
+                        }
+                        failed_tasks.add(task.task_id)
+                    except Exception as exc:
+                        task.status = "failed"
+                        task.result = {
+                            "error": str(exc),
+                            "error_code": getattr(exc, "code", type(exc).__name__),
+                        }
+                        failed_tasks.add(task.task_id)
+                    task_value = task.to_dict()
+                    task_value.update(
+                        {
+                            "duration_ms": duration_ms,
+                            "thread_id": self._child_threads.get(task.task_id),
+                            "parent_thread_id": thread_id,
+                        }
+                    )
+                    with self._recording_lock:
+                        if task.task_id in self._worker_metadata:
+                            task_value["metadata"] = copy.deepcopy(
+                                self._worker_metadata[task.task_id]
+                            )
+                    results.append(task_value)
+                    results_by_task[task.task_id] = task_value
+                    self._task_results[task.task_id] = task_value
+                    self._record(
+                        "task_completion",
+                        self.shared_memory.add_blackboard_entry,
+                        self.shared_memory_id,
+                        task.assigned_agent_id,
+                        task_value,
+                        "task_completion",
+                    )
+                    if task.status == "completed":
+                        self._record(
+                            "after_task_completion",
+                            self._after_task_completion,
+                            task,
+                            task.result,
+                        )
+                    self._task_event(
+                        task, "task_finished", status=task.status, result=task.result
+                    )
+
+                if self._stopped():
+                    for task in sorted_tasks:
+                        if task.status == "pending":
+                            mark_unrunnable(task, "cancelled", self._cancel_reason)
+                    for future, task in future_to_task.items():
+                        cancelled = future.cancel()
+                        mark_unrunnable(
+                            task,
+                            "cancelled" if cancelled else "cancelling",
+                            self._cancel_reason,
+                        )
+                        self._task_results[task.task_id][
+                            "execution_still_running"
+                        ] = not cancelled
+                    break
+
                 for task in sorted_tasks:
                     if task.status != "pending":
                         continue
@@ -626,21 +1057,56 @@ class MultiAgentOrchestrator:
                             task, "blocked", "One or more dependencies failed"
                         )
                         continue
+                    if len(future_to_task) >= self.max_workers:
+                        break
                     if all(dep in completed_tasks for dep in task.dependencies):
+                        if not _worker_slots.acquire(blocking=False):
+                            mark_unrunnable(
+                                task, "blocked", "Delegation worker capacity exhausted"
+                            )
+                            continue
                         task.status = "in_progress"
+                        child_thread = thread_id
+                        if self.thread_strategy == "task":
+                            identity = json.dumps(
+                                [
+                                    self.workflow_id,
+                                    self._request_user_id,
+                                    memory_id,
+                                    thread_id,
+                                    task.task_id,
+                                ]
+                            )
+                            child_thread = str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
+                        self._child_threads[task.task_id] = child_thread
                         dependency_results = {
                             dependency: results_by_task[dependency].get("result")
                             for dependency in task.dependencies
                             if dependency in results_by_task
                         }
-                        future = executor.submit(
-                            self._execute_single_task,
-                            task,
-                            agent_map[task.assigned_agent_id],
-                            memory_id,
-                            thread_id,
-                            dependency_results,
-                        )
+                        worker_context = copy_context()  # a distinct Context per future
+                        try:
+                            future = executor.submit(
+                                worker_context.run,
+                                self._run_task,
+                                task,
+                                agent_map[task.assigned_agent_id],
+                                memory_id,
+                                child_thread,
+                                dependency_results,
+                            )
+                        except BaseException:
+                            _worker_slots.release()
+                            raise
+                        with _supervised_lock:
+                            _supervised_workers.add(future)
+
+                        def release(done):
+                            with _supervised_lock:
+                                _supervised_workers.discard(done)
+                            _worker_slots.release()
+
+                        future.add_done_callback(release)
                         future_to_task[future] = task
                         future_started[future] = time.monotonic()
 
@@ -656,39 +1122,14 @@ class MultiAgentOrchestrator:
 
                 done, _ = concurrent.futures.wait(
                     future_to_task,
+                    timeout=0.05,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
-                for future in done:
-                    task = future_to_task.pop(future)
-                    try:
-                        result = future.result()
-                        task.result = result
-                        task.status = "completed"
-                        completed_tasks.add(task.task_id)
-                        task_value = task.to_dict()
-                        task_value["duration_ms"] = int(
-                            (time.monotonic() - future_started.pop(future)) * 1_000
-                        )
-                        results.append(task_value)
-                        results_by_task[task.task_id] = task_value
-                        self.shared_memory.add_blackboard_entry(
-                            memory_id=self.shared_memory_id,
-                            agent_id=task.assigned_agent_id,
-                            content={"task_id": task.task_id, "result": result},
-                            entry_type="task_completion",
-                        )
-                        self._after_task_completion(task, result)
-                    except Exception as exc:
-                        duration_ms = int(
-                            (time.monotonic() - future_started.pop(future)) * 1_000
-                        )
-                        logger.error("Error executing task %s: %s", task.task_id, exc)
-                        task.status = "failed"
-                        task.result = {"error": str(exc)}
-                        failed_tasks.add(task.task_id)
-                        task_value = task.to_dict()
-                        task_value["duration_ms"] = duration_ms
-                        results.append(task_value)
+        finally:
+            # Python cannot kill an arbitrary blocking tool. Running futures
+            # retain their capacity slot and worker settlement callback until
+            # they exit; the report explicitly identifies these unfinished tasks.
+            executor.shutdown(wait=False, cancel_futures=True)
 
         by_id = {result["task_id"]: result for result in results}
         return [by_id[task.task_id] for task in sorted_tasks if task.task_id in by_id]
@@ -705,7 +1146,9 @@ class MultiAgentOrchestrator:
 
         try:
             # Log task start
-            self.shared_memory.add_blackboard_entry(
+            self._record(
+                "task_start",
+                self.shared_memory.add_blackboard_entry,
                 memory_id=self.shared_memory_id,
                 agent_id=agent.agent_id,
                 content={
@@ -716,13 +1159,20 @@ class MultiAgentOrchestrator:
                 entry_type="task_start",
             )
 
-            request_context = dict(self._request_context or {})
+            request_context = copy.deepcopy(self._request_context or {})
             request_context["delegation"] = {
                 "workflow_id": self.workflow_id,
                 "trace_id": self._trace_id,
                 "task_id": task.task_id,
                 "dependencies": list(task.dependencies),
             }
+            if task.task_id in self._child_threads:
+                request_context["delegation"].update(
+                    {
+                        "parent_thread_id": self._request_thread_id,
+                        "thread_id": thread_id,
+                    }
+                )
             if dependency_results:
                 bounded_dependencies: Dict[str, Any] = {}
                 used = 0
@@ -744,15 +1194,20 @@ class MultiAgentOrchestrator:
                         "supported material unless the task asks for a rewrite."
                     ),
                 }
-            tool_context = dict(self._tool_context or {})
+            tool_context = copy.deepcopy(self._tool_context or {})
             tool_context.update(
                 {
                     "workflow_id": self.workflow_id,
                     "trace_id": self._trace_id,
                     "delegated_task_id": task.task_id,
                     "delegated_by": self.root_agent.agent_id,
+                    "parent_thread_id": self._request_thread_id,
+                    "thread_id": thread_id,
+                    "user_id": self._request_user_id,
                 }
             )
+            if delegated_execution.get():
+                self.cancellation.check()
             if (
                 getattr(agent, "meta_harness", None) is not None
                 and getattr(agent, "meta_harness_mode", None) == "runtime"
@@ -767,7 +1222,19 @@ class MultiAgentOrchestrator:
                 if not harness_result.ok:
                     code = harness_result.error_code or harness_result.status.value
                     detail = harness_result.error or "runtime harness delegate failed"
-                    raise RuntimeError(f"Delegate harness failed ({code}): {detail}")
+                    status = {
+                        "pending_approval": "waiting",
+                        "queued": "waiting",
+                        "running": "waiting",
+                        "canceled": "cancelled",
+                        "interrupted": "cancelled",
+                    }.get(harness_result.status.value, "failed")
+                    raise AgentExecutionError(
+                        code,
+                        f"Delegate harness failed ({code}): {detail}",
+                        status=status,
+                        metadata={"harness_run_id": harness_result.run_id},
+                    )
                 if harness_result.context_pack is not None:
                     with self._delegate_context_lock:
                         self._delegate_context_packs[

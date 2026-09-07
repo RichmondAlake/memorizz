@@ -523,6 +523,18 @@ class MemoryProvider(ABC):
     ) -> bool:
         """Update a document in a memory store type in the memory provider by id."""
 
+    def compare_and_swap_shared_memory(
+        self, memory_id: str, expected_content: Any, content: str
+    ) -> bool:
+        """Atomically replace shared content only if the read snapshot matches.
+
+        False means a missing row or a conflicting writer; storage errors must
+        raise. Providers must not emulate this with an unprotected read/write.
+        """
+        raise NotImplementedError(
+            "Provider does not support atomic shared-memory updates"
+        )
+
     def clear_semantic_cache(
         self, agent_id: Optional[str] = None, memory_id: Optional[str] = None
     ) -> int:

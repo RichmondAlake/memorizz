@@ -7,6 +7,7 @@ edit_uri: edit/main/docs/
 exclude_docs: |
   README.md
   issues/*
+  reports/**
   observability-roadmap.md
 
 nav:
@@ -21,6 +22,7 @@ nav:
       - Local UI Guide: getting-started/local-ui.md
   - Build Agents:
       - Memory-First Meta-Harness: guides/meta-harness.md
+      - Safe Parallel Delegation: guides/delegation.md
       - Tools, Safety & Approvals: guides/tools-and-approvals.md
       - Scheduled Automations: guides/automations.md
       - Agent Modes:

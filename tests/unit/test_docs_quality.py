@@ -18,7 +18,12 @@ EXCLUDED_PAGES = {
 
 
 def _markdown_files() -> list[Path]:
-    return sorted(DOCS_ROOT.rglob("*.md"))
+    # Local audit inputs are ignored and excluded from the published site.
+    return sorted(
+        path
+        for path in DOCS_ROOT.rglob("*.md")
+        if path.relative_to(DOCS_ROOT).parts[0] != "reports"
+    )
 
 
 def _developer_documentation_files() -> list[Path]:

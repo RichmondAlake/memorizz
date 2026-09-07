@@ -27,7 +27,7 @@ def verify_process(client, process, directory):
     return status["version"]
 
 
-def run(binary):
+def run(binary, suite="observability"):
     binary = Path(binary).expanduser().resolve(strict=True)
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise ValueError("--mongod must name an executable standalone mongod binary")
@@ -89,6 +89,7 @@ def run(binary):
                 **os.environ,
                 "PYTHONPATH": str(root / "src"),
                 "MEMORIZZ_OBSERVABILITY_LIVE": "1",
+                "MEMORIZZ_DELEGATION_LIVE": "1",
                 "MEMORIZZ_OBS_TEST_MONGODB_URI": uri,
             }
             return subprocess.run(
@@ -96,7 +97,11 @@ def run(binary):
                     sys.executable,
                     "-m",
                     "pytest",
-                    "tests/integration/test_observability_live.py",
+                    (
+                        "tests/integration/test_shared_memory_atomic.py"
+                        if suite == "delegation"
+                        else "tests/integration/test_observability_live.py"
+                    ),
                     "-k",
                     "mongodb",
                     "-q",
@@ -127,4 +132,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mongod", required=True, help="Path to a trusted mongod executable"
     )
-    raise SystemExit(run(parser.parse_args().mongod))
+    parser.add_argument(
+        "--suite", choices=["observability", "delegation"], default="observability"
+    )
+    args = parser.parse_args()
+    raise SystemExit(run(args.mongod, args.suite))

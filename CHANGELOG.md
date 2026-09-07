@@ -4,6 +4,35 @@
 
 _No unreleased changes._
 
+## 0.9.0 — 2026-09-07
+
+### Fixed
+
+- Delegation now validates complete pending plans before work, propagates runtime
+  failures and approval waits, and never reruns the root after child effects.
+  Empty automatic plans require explicit root-fallback opt-in.
+- Child conversation threads are isolated by default, with copied request and
+  cancellation contexts, bounded worker supervision, runtime receipt/lifecycle
+  callbacks and host completion-policy gates. Shared cached agents retain their
+  memory-ID configuration unless participant persistence is explicitly enabled.
+- Shared coordination writes use conditional atomic updates on filesystem,
+  MongoDB and Oracle providers. Reports and sessions agree on outcome/counts;
+  recording errors remain distinct from successful execution.
+- Added public-API artifact/tenant/cancellation regressions, cross-process and
+  live database concurrency tests, and a developer delegation guide. Local audit
+  inputs under `docs/reports/` are excluded from source packages and documentation.
+
+### Compatibility
+
+- Delegation now defaults to task-scoped child threads and disables automatic
+  root fallback. Set `allow_root_fallback=True` explicitly when that behavior is
+  appropriate; participant configuration persistence is also opt-in.
+- Hosts must supply a completion policy to verify their own artifact receipts
+  and business outcomes. Cancellation remains cooperative for third-party
+  blocking calls, which stay supervised until they settle.
+- Streaming remains enabled by default. This release changes Memorizz only;
+  consuming applications still need their own integration acceptance tests.
+
 ## 0.8.0 — 2026-09-05
 
 ### Added
