@@ -16,6 +16,7 @@ def last_response_metadata(provider):
         ("total_tokens", "total_tokens"),
         ("cached_tokens", "cached_tokens"),
         ("cache_read_input_tokens", "cached_tokens"),
+        ("cache_write_tokens", "cache_write_tokens"),
     ):
         item = usage.get(source)
         if type(item) is int and item >= 0:
@@ -46,6 +47,28 @@ def response_metadata(response, *, text=None, max_output_tokens=None):
                     if value(block, "type") == "text"
                 )
     kwargs = {}
+    tier = value(response, "service_tier")
+    if isinstance(tier, str):
+        kwargs["service_tier"] = tier[:240]
+    usage = value(response, "usage")
+    if usage is not None:
+        for sources, target in (
+            (("input_tokens", "prompt_tokens"), "input_tokens"),
+            (("output_tokens", "completion_tokens"), "output_tokens"),
+            (("total_tokens",), "total_tokens"),
+        ):
+            for source in sources:
+                count = value(usage, source)
+                if type(count) is int and count >= 0:
+                    kwargs[target] = count
+                    break
+        details = value(usage, "input_tokens_details") or value(
+            usage, "prompt_tokens_details"
+        )
+        for field in ("cached_tokens", "cache_write_tokens"):
+            count = value(details, field)
+            if type(count) is int and count >= 0:
+                kwargs[field] = count
     request_id = value(response, "id")
     if isinstance(request_id, str):
         kwargs["request_id"] = request_id[:240]

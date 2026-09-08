@@ -1,0 +1,45 @@
+name: Browser acceptance
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit or release tag to verify
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install synthetic browser test dependencies
+        run: |
+          python -m pip install -e '.[dev,ui]'
+          npm install --prefix "$RUNNER_TEMP/browser" --no-save --ignore-scripts playwright@1.60.0
+          "$RUNNER_TEMP/browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Verify traces, usage analytics and host-persona UI
+        env:
+          MEMORIZZ_PLAYWRIGHT_MODULE: ${{ runner.temp }}/browser/node_modules/playwright
+          MEMORIZZ_NO_UPDATE_CHECK: "1"
+        run: python tests/browser/run_suite.py --output-dir "$RUNNER_TEMP/browser-results"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-acceptance
+          path: ${{ runner.temp }}/browser-results/
+          if-no-files-found: ignore
+          retention-days: 7

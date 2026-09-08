@@ -89,6 +89,25 @@ def test_delete_by_name_and_delete_all(provider):
     assert provider.list_all(memory_store_type=MemoryType.TOOLBOX) == []
 
 
+@pytest.mark.parametrize("bulk", [False, True])
+def test_conversation_writers_preserve_agent_and_account_scope(provider, bulk):
+    record = {
+        "agent_id": "agent-a",
+        "user_id": "alice",
+        "thread_id": "thread-a",
+        "memory_id": "primary_alice",
+        "role": "user",
+        "content": "Use examples",
+    }
+    if bulk:
+        provider.store_many([record], MemoryType.CONVERSATION_MEMORY)
+    else:
+        provider.store(record, MemoryType.CONVERSATION_MEMORY)
+    row = provider.db.conversation_memory.find_one({})
+    for key, value in record.items():
+        assert row[key] == value
+
+
 @pytest.mark.unit
 def test_canonical_entity_identity_uses_one_mongodb_storage_key(provider, monkeypatch):
     provider.entity_memory_collection = provider.db[MemoryType.ENTITY_MEMORY.value]

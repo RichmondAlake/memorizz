@@ -109,7 +109,9 @@ _PRESERVED_MONGO_ID_FIELDS = {
     MemoryType.TOOLBOX: frozenset({"agent_id", "tool_id"}),
     MemoryType.SKILLBOX: frozenset({"agent_id"}),
     MemoryType.WORKFLOW_MEMORY: frozenset({"agent_id", "workflow_id"}),
-    MemoryType.CONVERSATION_MEMORY: frozenset({"thread_id", "memory_id"}),
+    # Agent ownership is metadata, not a Mongo primary key. Retain it for
+    # account-scoped persona evidence and conversation/trace attribution.
+    MemoryType.CONVERSATION_MEMORY: frozenset({"agent_id", "thread_id", "memory_id"}),
     MemoryType.KNOWLEDGE_BASE: frozenset({"knowledge_base_id", "memory_id"}),
     MemoryType.ENTITY_MEMORY: frozenset({"memory_id"}),
 }

@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ...observability import ObservabilityStore, analyze_trace_events
+from ...observability.analytics import aggregate_usage
 from ...observability.coverage import trace_coverage
 from ...observability.inspection import (
     build_causal_waterfall,
@@ -36,6 +37,8 @@ from ...observability.normalization import (
     query_trace_events,
     select_trace_events,
 )
+from ...observability.pricing import DEFAULT_PRICING
+from ..analytics import usage_charts
 from ..helpers import (
     _build_agent_nav_items,
     _build_agent_tool_count_map,
@@ -149,6 +152,7 @@ def _selection_urls(request, **selection):
         "params": params,
         "traces": "/traces?" + urlencode(params),
         "health": "/traces/health?" + urlencode(params),
+        "usage": "/traces/usage?" + urlencode(params),
         "compare": "/traces/compare?"
         + urlencode(
             {
@@ -443,6 +447,7 @@ async def traces_page(
                 agent_name=_extract_agent_persona_name(selected_agent),
                 scope=analysis_scope,
                 source_is_virtual=source_is_virtual,
+                source_registration_known=not current_principal.get().restricted,
                 window_truncated=window_truncated,
                 signals=trace_signals,
             )
@@ -573,6 +578,13 @@ async def traces_page(
             },
             "inspection_scope": scoped_trace_filters(),
             "trace_summary": trace_summary,
+            "usage": (
+                usage := aggregate_usage(
+                    trace_events,
+                    pricing=request.app.state.usage_pricing or DEFAULT_PRICING,
+                )
+            ),
+            "usage_charts": usage_charts(usage),
             "trace_analysis": trace_analysis,
             "trace_analysis_export_url": trace_analysis_export_url,
             "trace_signals": trace_signals,
@@ -909,6 +921,7 @@ async def trace_analysis_export(
         agent_name=_extract_agent_persona_name(selected_agent),
         scope=scope,
         source_is_virtual=source_is_virtual,
+        source_registration_known=not current_principal.get().restricted,
         window_truncated=bool(events.coverage.get("truncated")),
         signals=signals,
     )
@@ -1206,6 +1219,7 @@ def _analysis_for_selection(
         agent_name=_extract_agent_persona_name(selected_agent),
         scope="thread" if thread_id or thread_memory_id else "agent",
         source_is_virtual=source_is_virtual,
+        source_registration_known=not current_principal.get().restricted,
         window_truncated=bool(events.coverage.get("truncated")),
         signals=signals,
     )

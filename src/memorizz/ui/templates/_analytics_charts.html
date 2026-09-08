@@ -1,0 +1,51 @@
+{% macro bars(data, title, unit='') %}
+<figure class="usage-chart">
+    <figcaption>{{ title }} <small>{{ unit }}</small></figcaption>
+    {% for row in data.rows %}
+    <div class="usage-bar-row"><span title="{{ row.label }}">{{ row.label }}</span><div class="usage-bar-track" aria-hidden="true"><span style="width:{{ row.width }}%"></span></div><output>{{ '%.6g'|format(row.value) }}</output></div>
+    {% else %}<p class="usage-empty">No recorded measurements.</p>{% endfor %}
+    {% if data.omitted %}<small>Top {{ data.rows|length }} shown; {{ data.omitted }} more in the tables.</small>{% endif %}
+</figure>
+{% endmacro %}
+
+{% macro trend(data, title, unit='') %}
+<figure class="usage-chart">
+    <figcaption>{{ title }} <small>{{ unit }}</small></figcaption>
+    {% if data.rows %}
+    <svg viewBox="0 0 600 205" role="img" aria-label="{{ title }}; values available in the data table below">
+        <line x1="20" y1="180" x2="580" y2="180" class="usage-axis" />
+        <polyline points="{{ data.points }}" class="usage-line" />
+        {% for row in data.rows %}<circle cx="{{ row.x }}" cy="{{ row.y }}" r="4" class="usage-dot"><title>{{ row.label }}: {{ '%.6g'|format(row.value) }} {{ unit }}</title></circle>{% endfor %}
+        <text x="20" y="200">{{ data.rows[0].label }}</text><text x="580" y="200" text-anchor="end">{{ data.rows[-1].label }}</text>
+    </svg>
+    <details><summary>Chart data</summary><table><thead><tr><th>Date</th><th>{{ unit }}</th></tr></thead><tbody>{% for row in data.rows %}<tr><td>{{ row.label }}</td><td>{{ '%.6g'|format(row.value) }}</td></tr>{% endfor %}</tbody></table></details>
+    {% if data.omitted %}<small>{{ data.omitted }} dates omitted from chart; use the date filter or JSON export.</small>{% endif %}
+    {% else %}<p class="usage-empty">No recorded measurements.</p>{% endif %}
+</figure>
+{% endmacro %}
+
+{% macro donut(data, title) %}
+<figure class="usage-chart">
+    <figcaption>{{ title }} <small>Approximate tokens</small></figcaption>
+    {% if data.total %}
+    <div class="usage-donut-layout">
+        <svg viewBox="0 0 120 120" role="img" aria-label="{{ title }}; values listed alongside">
+            {% for row in data.rows %}<circle class="usage-slice usage-color-{{ loop.index0 % 10 }}" cx="60" cy="60" r="44" pathLength="100" stroke-dasharray="{{ row.share }} {{ 100 - row.share }}" stroke-dashoffset="{{ -row.offset }}"><title>{{ row.label }}: {{ row.share|round(1) }}%</title></circle>{% endfor %}
+        </svg>
+        <ul>{% for row in data.rows %}<li><span class="usage-swatch usage-color-{{ loop.index0 % 10 }}"></span>{{ row.label }}: {{ row.value|int }} ({{ row.share|round(1) }}%)</li>{% endfor %}</ul>
+    </div>
+    {% else %}<p class="usage-empty">No attributed memory measurements.</p>{% endif %}
+</figure>
+{% endmacro %}
+
+{% macro usage_table(rows, title, links=false) %}
+<details class="usage-table" open><summary>{{ title }}</summary><div class="usage-table-scroll"><table>
+    <thead><tr><th>Scope</th><th>Calls</th><th>Recorded tokens</th><th>Known charge (USD)</th><th>Priced / calls</th><th>Mean / p95 latency (ms)</th></tr></thead>
+    <tbody>{% for row in rows[:200] %}<tr>
+        <th>{% if row.trace_url %}<a href="{{ row.trace_url }}">{{ row.label }}</a>{% else %}{{ row.label }}{% endif %}</th>
+        <td>{{ row.calls }}</td><td>{{ row.total_tokens }}{% if row.unknown_usage_calls %} · {{ row.unknown_usage_calls }} unknown{% endif %}</td>
+        <td>{{ '$%.6f'|format(row.cost_usd|float) if row.cost_usd is not none else 'Unknown' }}</td><td>{{ row.priced_calls }} / {{ row.calls }}</td>
+        <td>{{ '%.1f / %.1f'|format(row.mean_latency_ms, row.p95_latency_ms) if row.mean_latency_ms is not none else 'Unknown' }}</td>
+    </tr>{% else %}<tr><td colspan="6">No recorded calls in this window.</td></tr>{% endfor %}</tbody>
+</table></div>{% if rows|length > 200 %}<p>First 200 rows shown. Use filters or JSON export for the full bounded window.</p>{% endif %}</details>
+{% endmacro %}

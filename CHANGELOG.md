@@ -2,7 +2,69 @@
 
 ## Unreleased
 
-_No unreleased changes._
+## 0.10.0 — 2026-09-08
+
+### Added
+
+- Added usage dashboards, accessible charts and structured tables in
+  Observability, selected traces and Evalground: daily tokens and known charges,
+  agent/model/interaction breakdowns, memory prompt share and retrieval latency.
+- Added public `aggregate_usage`, `query_usage`, `RateCard`, `PricingRegistry`
+  and `MemAgent.last_usage_analytics()` APIs. Bounded, tenant-scoped reads and
+  offline decimal pricing avoid network pricing lookups on the agent path.
+- Added versioned OpenAI text rate cards, cache-write and service-tier telemetry,
+  long-context pricing, and durable cost provenance. Other providers and custom
+  billing agreements can supply explicit rate cards.
+- Added request-local `PersonaManager.use_snapshot()` contexts for account-owned
+  personas, safe persistence of shared agent configuration, versioned persona
+  trace references and a distinct approximate persona-token category.
+- Added a host-adapter Persona Evolution UI for profile inspection, evidence,
+  reviewed proposals, version history and optional reflection/approval/undo/
+  scheduling controls. Private profiles require authentication and audited
+  unrestricted administrator access; actions are disabled unless enabled by
+  the host.
+- Interactive CLI sessions now announce newer stable PyPI releases with an
+  installer-specific upgrade command. Checks run in the background, cache
+  successful results for 24 hours, tolerate offline use, and can be disabled
+  with `MEMORIZZ_NO_UPDATE_CHECK=1`.
+
+### Changed
+
+- Persona goals are explicitly treated as style preferences, not authority over
+  application instructions, grounding, permissions or the user's current request.
+- Semantic-cache identity now incorporates rendered persona text, preventing
+  reuse across different goals that happen to share a name and version.
+- Condensed the README around memory management, the agent framework,
+  MetaHarness, and continual learning, positioning Memorizz as the intelligence
+  plane for memory-first agents with links to detailed setup and feature guides.
+
+### Fixed
+
+- Preserved persona identity/version through persisted trace compaction, not
+  only live callbacks, and kept persona style supply separate from claimed
+  behavioral adoption.
+- Preserved MongoDB conversation `agent_id` ownership metadata, including bulk
+  writes. Existing rows are not silently backfilled or broadened across tenants.
+- Scoped trace views now distinguish uninspected agent registration from a
+  genuinely missing registration.
+- Rejected oversized and malformed persona actions before invoking host hooks,
+  including non-boolean settings and invalid revision/proposal identifiers.
+- Added the IANA timezone dependency on Windows for timezone-aware analytics.
+
+### Compatibility and release checks
+
+- Token charges are calculated from dated rates, not reconciled invoices.
+  Missing usage/prices remain unknown; memory token attribution is approximate.
+  Bounded recorded windows are not complete historical account billing.
+- Persona persistence, scheduling, approval policy and account authorization
+  remain host responsibilities. This release does not bundle an application
+  scheduler or automatically apply persona changes.
+- Streaming remains enabled by default. No provider data migration is required
+  for the new scalar telemetry; an uninitialized native trace index still needs
+  the existing explicit migration before index-mode reads are enabled.
+- Added synthetic browser release gates for usage analytics, Persona Evolution
+  and existing trace inspection. Audit reports and local data stay excluded from
+  release archives.
 
 ## 0.9.0 — 2026-09-07
 

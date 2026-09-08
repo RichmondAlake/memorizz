@@ -46,6 +46,31 @@ This comprehensive test suite covers all aspects of the refactored MemAgent arch
 
 ## Running Tests
 
+### Synthetic browser acceptance
+
+The CI and release browser gate covers trace navigation, usage charts, JSON
+exports, Evalground and host-adapter Persona Evolution workflows on desktop and
+mobile. Fixtures use temporary storage and synthetic data, not live databases,
+provider credentials or paid LLM calls.
+
+Install `memorizz[dev,ui]` from this checkout and Node 24, then run from the
+repository root:
+
+```bash
+python -m pip install -e '.[dev,ui]'
+npm install --prefix /tmp/memorizz-browser-tools --no-save --ignore-scripts playwright@1.60.0
+/tmp/memorizz-browser-tools/node_modules/.bin/playwright install chromium
+MEMORIZZ_PLAYWRIGHT_MODULE=/tmp/memorizz-browser-tools/node_modules/playwright \
+  python tests/browser/run_suite.py
+```
+
+The runner prints the temporary screenshot/log directory and stops its fixture
+servers on success or failure. Use `--output-dir /path/to/results` to retain a
+chosen output location, or `--node /path/to/node` to select a different Node
+installation. Linux CI uses Playwright's `install --with-deps chromium` to install
+the required system libraries. These checks do not replace live-provider or
+consuming-application acceptance tests.
+
 ### Run All Tests
 ```bash
 pytest

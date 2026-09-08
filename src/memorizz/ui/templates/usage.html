@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block title %}Usage &amp; memory analytics - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1">{% endblock %}
+{% block content %}
+<div class="page-header"><span class="page-eyebrow">Observability / Usage</span><h1>Usage &amp; memory analytics</h1><p>See where recorded tokens, charges and retrieval time go.</p><a class="btn" href="{{ trace_url }}">Back to traces</a> <a class="btn" href="{{ export_url }}">Export JSON</a></div>
+<form method="get" class="usage-filters">
+    {% for key, value in preserved_filters.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+    <label>Agent ID<input name="agent_id" value="{{ filters.agent_id or '' }}" maxlength="240" placeholder="All authorized agents"></label>
+    <label>From (UTC)<input type="datetime-local" name="start_time" value="{{ filters.start_time or '' }}"></label>
+    <label>Until (UTC)<input type="datetime-local" name="end_time" value="{{ filters.end_time or '' }}"></label>
+    <label>Model<input name="model" value="{{ filters.model or '' }}" maxlength="240" placeholder="All models"></label>
+    <label>Daily timezone<input name="timezone_name" value="{{ usage.timezone }}" maxlength="100"></label>
+    <label>Event budget<select name="max_events">{% for count in [1000, 5000, 10000] %}<option value="{{ count }}" {{ 'selected' if count == max_events else '' }}>{{ count }}</option>{% endfor %}</select></label>
+    <button class="btn" type="submit">Apply filters</button>
+</form>
+{% if preserved_filters %}<p class="usage-notice">Trace selection retained: {% for key, value in preserved_filters.items() %}{{ key }}={{ value }} {% endfor %}. <a href="/traces/usage">Clear trace selection</a></p>{% endif %}
+{% include '_usage_panel.html' %}
+{% endblock %}

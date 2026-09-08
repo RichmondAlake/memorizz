@@ -117,7 +117,9 @@ def save_agent(agent):
             knowledge_base_ids=getattr(agent, "knowledge_base_ids", None) or None,
             agent_id=agent.agent_id,
             persona=(
-                agent.persona_manager.current_persona if agent.persona_manager else None
+                agent.persona_manager.configuration_persona
+                if agent.persona_manager
+                else None
             ),
             tools=tools_to_save,
             delegates=delegate_ids if delegate_ids else None,

@@ -348,6 +348,9 @@ class OpenAI(LLMProvider):
             )
             if cached is not None:
                 extracted["cached_tokens"] = cached
+            writes = getattr(input_details, "cache_write_tokens", None)
+            if writes is not None:
+                extracted["cache_write_tokens"] = writes
             output_details = getattr(usage, "output_tokens_details", None)
             reasoning = (
                 getattr(output_details, "reasoning_tokens", None)
@@ -684,6 +687,9 @@ class OpenAI(LLMProvider):
             cached = getattr(details, "cached_tokens", None) if details else None
             if cached is not None:
                 extracted["cached_tokens"] = cached
+            writes = getattr(details, "cache_write_tokens", None)
+            if writes is not None:
+                extracted["cache_write_tokens"] = writes
             return extracted
         except Exception:
             return None

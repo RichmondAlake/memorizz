@@ -1,9 +1,29 @@
 """Canonical bounded reference parsing shared by capture, replay and inspection."""
 
+import hashlib
 import json
 
 from .models import ResourceRef, SelectionDecision
 from .privacy import validate_opaque
+
+
+def persona_reference(persona):
+    """Versioned style input; no persona text or user-chosen identifier leaks.
+
+    Hosts may use this same reference for a proposed/applied version's lineage.
+    A supplied persona is not evidence that the answer followed that style.
+    """
+    value = persona if isinstance(persona, dict) else persona.to_dict()
+    identifier = value.get("persona_id")
+    if not identifier:
+        return None
+    return {
+        "resource_type": "memory",
+        "ref": "persona:" + hashlib.sha256(str(identifier).encode()).hexdigest()[:32],
+        "version": str(value.get("version", 1)),
+        "role": "persona_style",
+        "provenance_status": "verified",
+    }
 
 
 def source_ids(value):

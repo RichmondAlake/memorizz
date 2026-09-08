@@ -42,7 +42,7 @@
 
             <nav class="sidebar-nav">
                 {% set memory_pages = ['personas', 'toolbox', 'conversations', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
-                {% set continual_learning_pages = ['workflows', 'skills', 'learning-control-plane'] %}
+                {% set continual_learning_pages = ['workflows', 'skills', 'learning-control-plane', 'persona-evolution'] %}
                 <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -231,6 +231,10 @@
                         <a href="/learning-control-plane{% if active_agent_id %}?agent_id={{ active_agent_id }}{% endif %}" class="nav-item nav-item--sub {% if active_page == 'learning-control-plane' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">◎</span>
                             <span>Control Plane</span>
+                        </a>
+                        <a href="/persona-evolution" class="nav-item nav-item--sub {% if active_page == 'persona-evolution' %}active{% endif %}">
+                            <span class="nav-icon" aria-hidden="true">↗</span>
+                            <span>Persona Evolution</span>
                         </a>
                     </div>
                 </details>

@@ -28,6 +28,7 @@ from rich.text import Text
 from .. import __version__
 from . import commands
 from . import config as cfg
+from .updates import update_notifier
 
 _TOOL_OUTCOME_LABELS = {
     "success": "Completed",
@@ -185,24 +186,24 @@ def run_repl(session) -> None:
 
     _banner(console, session)
 
-    while True:
-        prompt_text = "code> " if session.code_mode else "memorizz> "
-        try:
-            with patch_stdout():
+    with patch_stdout(raw=True), update_notifier(console):
+        while True:
+            prompt_text = "code> " if session.code_mode else "memorizz> "
+            try:
                 line = ptk.prompt(prompt_text)
-        except (KeyboardInterrupt, EOFError):
-            # Ctrl-C or Ctrl-D at the prompt: exit. (Ctrl-C *during* a streaming
-            # reply only aborts that reply — handled in _stream_turn.)
-            commands.cmd_exit(session, "")
-            break
-
-        line = line.strip()
-        if not line:
-            continue
-
-        if line.startswith("/"):
-            if not commands.dispatch(line, session):
+            except (KeyboardInterrupt, EOFError):
+                # Ctrl-C or Ctrl-D at the prompt exits; _stream_turn handles
+                # interrupts during a reply without ending the session.
+                commands.cmd_exit(session, "")
                 break
-            continue
 
-        _stream_turn(session, line)
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith("/"):
+                if not commands.dispatch(line, session):
+                    break
+                continue
+
+            _stream_turn(session, line)

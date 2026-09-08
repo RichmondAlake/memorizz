@@ -36,6 +36,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ...benchmarks.memory_suite import BENCHMARK_CATALOG, get_benchmark_spec
 from ...observability import ObservabilityStore
+from ...observability.analytics import finite_number
+from ..analytics import eval_charts
 from ..helpers import _extract_agent_persona_name
 from ..state import _state, templates
 
@@ -264,6 +266,20 @@ def _build_eval_run_history_rows(
                 "agent_id": agent_id,
                 "agent_name": agent_name,
                 "overall_accuracy": overall_accuracy,
+                "cost_usd": finite_number(
+                    (eval_results_payload or {})
+                    .get("metadata", {})
+                    .get("external_api_cost_usd")
+                )
+                if isinstance(eval_results_payload, dict)
+                else None,
+                "processing_seconds": finite_number(
+                    (eval_results_payload or {})
+                    .get("metadata", {})
+                    .get("total_processing_time")
+                )
+                if isinstance(eval_results_payload, dict)
+                else None,
             }
         )
 
@@ -515,6 +531,7 @@ async def evalground(request: Request):
             "ollama_host": ollama_host,
             "num_samples": num_samples,
             "eval_results": eval_results,
+            "eval_charts": eval_charts(eval_results, runs_history),
             "eval_output_path": eval_output_path,
             "run_output": run_output,
             "error": error,
@@ -1270,6 +1287,7 @@ async def evalground_download(request: Request):
             "dataset_variant": default_variant,
             "num_samples": 10,
             "eval_results": None,
+            "eval_charts": eval_charts(None, runs_history),
             "eval_output_path": None,
             "run_output": None,
             "error": None,

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Evalground - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1">{% endblock %}
 
 {% block content %}
 <div class="page-header">
@@ -257,6 +258,8 @@
 
 <div class="detail-section evalground-section">
     <h2>Run History</h2>
+    {% if eval_charts %}{% from '_analytics_charts.html' import bars %}
+    <div class="usage-dashboard"><div class="usage-grid">{{ bars(eval_charts.cost, 'Recent evaluation charges', 'USD · benchmark-reported estimates') }}</div><p class="usage-notice">Charges are benchmark estimates, not provider invoices. Runs may differ in samples, model and configuration; compare like for like. Local hardware cost is not measured.</p></div>{% endif %}
     {% if runs_history %}
     <div class="traces-table-wrap">
         <table class="traces-agents-table evalground-runs-table">
@@ -270,6 +273,7 @@
                     <th>Dataset</th>
                     <th>Samples</th>
                     <th>Accuracy</th>
+                    <th>API cost estimate / time</th>
                     <th>Created</th>
                     <th>Finished</th>
                     <th>Actions</th>
@@ -299,6 +303,7 @@
                             -
                         {% endif %}
                     </td>
+                    <td>{{ '$%.6f'|format(run.cost_usd) if run.cost_usd is not none else 'Unknown' }} / {{ '%.2fs'|format(run.processing_seconds) if run.processing_seconds is not none else 'Unknown' }}</td>
                     <td>{{ run.created_at or '-' }}</td>
                     <td>{{ run.finished_at or '-' }}</td>
                     <td>
@@ -349,6 +354,8 @@
 {% if eval_results %}
 <div class="detail-section evalground-section">
     <h2>Results</h2>
+    {% if eval_charts %}{% from '_analytics_charts.html' import bars %}
+    <div class="usage-dashboard"><div class="usage-grid">{{ bars(eval_charts.categories, 'Quality by category', 'reported accuracy') }}{{ bars(eval_charts.latency, 'Evaluation latency', 'mean seconds; stages may overlap') }}</div></div>{% endif %}
     <div class="eval-summary-grid">
         <div class="eval-summary-card">
             <div class="eval-summary-label">Overall Accuracy</div>
@@ -421,7 +428,7 @@
             <td class="info-value">{{ eval_results.metadata.model_provider }}:{{ eval_results.metadata.reader_model }} reader · {{ eval_results.metadata.judge_model }} judge · {{ eval_results.metadata.embedding_model }} embeddings</td>
         </tr>
         <tr>
-            <td class="info-label">External API cost</td>
+            <td class="info-label">External API cost estimate</td>
             <td class="info-value"><span class="badge badge-success">${{ eval_results.metadata.external_api_cost_usd }}</span></td>
         </tr>
         <tr>

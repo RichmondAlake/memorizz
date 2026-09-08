@@ -74,12 +74,14 @@ function findCompatibleCliOnPath() {
 }
 
 const args = process.argv.slice(2);
+// The Python CLI must upgrade this wrapper as well as its pinned uv runtime.
+const childEnv = { ...process.env, MEMORIZZ_INSTALL_METHOD: "npm" };
 const uv = findExe("uv");
 const exe = (uv && findUvManagedCli(uv)) || findCompatibleCliOnPath();
 
 let res;
 if (exe) {
-  res = spawnSync(exe, args, { stdio: "inherit" });
+  res = spawnSync(exe, args, { stdio: "inherit", env: childEnv });
 } else {
   if (!uv) {
     process.stderr.write(
@@ -92,7 +94,7 @@ if (exe) {
   res = spawnSync(
     uv,
     ["tool", "run", "--python", PYTHON_VERSION, "--from", PACKAGE_SPEC, "memorizz", ...args],
-    { stdio: "inherit" }
+    { stdio: "inherit", env: childEnv }
   );
 }
 

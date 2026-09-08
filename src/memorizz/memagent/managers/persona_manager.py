@@ -18,11 +18,14 @@ a single agent, including:
 """
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, Optional, Union
 
 from ...long_term.semantic.persona.persona import Persona
 
 logger = logging.getLogger(__name__)
+_NO_SNAPSHOT = object()
 
 
 class PersonaManager:
@@ -38,8 +41,50 @@ class PersonaManager:
             memory_provider: Optional memory provider for persona storage.
         """
         self.memory_provider = memory_provider
-        self.current_persona: Optional[Persona] = None
+        self._default_persona: Optional[Persona] = None
+        self._snapshot = ContextVar(
+            f"persona_snapshot_{id(self)}", default=_NO_SNAPSHOT
+        )
         self._persona_cache: Dict[str, Persona] = {}
+
+    @property
+    def current_persona(self) -> Optional[Persona]:
+        snapshot = self._snapshot.get()
+        return self._default_persona if snapshot is _NO_SNAPSHOT else snapshot
+
+    @current_persona.setter
+    def current_persona(self, value: Optional[Persona]) -> None:
+        if self._snapshot.get() is not _NO_SNAPSHOT:
+            raise RuntimeError("Request-local persona snapshots are read-only")
+        self._default_persona = value
+
+    @property
+    def configuration_persona(self) -> Optional[Persona]:
+        """Persistent agent configuration, never a host's account snapshot."""
+        return self._default_persona
+
+    @contextmanager
+    def use_snapshot(self, persona: Union[Persona, Dict[str, Any], None]):
+        """Bind a read-only, request-local persona without changing agent config.
+
+        Multi-tenant hosts own authentication, storage and evolution policy.
+        Pass their canonical account snapshot here for the lifetime of a run
+        (including stream iteration). Context propagation into MemAgent stream
+        workers preserves the snapshot; unrelated requests see no mutation.
+        No persona tools are registered and no embedding/storage calls occur.
+        """
+        if isinstance(persona, Persona):
+            persona = persona.to_dict()
+        if persona is not None and not isinstance(persona, dict):
+            raise TypeError("persona must be a Persona, dict, or None")
+        from copy import deepcopy
+
+        snapshot = Persona.from_dict(deepcopy(persona)) if persona is not None else None
+        token = self._snapshot.set(snapshot)
+        try:
+            yield snapshot
+        finally:
+            self._snapshot.reset(token)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -62,6 +107,8 @@ class PersonaManager:
         also stored in the PERSONAS collection so it becomes discoverable via
         the saved-personas picker in the UI.
         """
+        if self._snapshot.get() is not _NO_SNAPSHOT:
+            raise RuntimeError("Request-local persona snapshots are read-only")
         try:
             if persona is None:
                 self.current_persona = None
@@ -131,6 +178,8 @@ class PersonaManager:
         ``save`` is accepted for call-site symmetry with ``set_persona``; clearing
         is in-memory only, so it is currently a no-op.
         """
+        if self._snapshot.get() is not _NO_SNAPSHOT:
+            raise RuntimeError("Request-local persona snapshots are read-only")
         try:
             self.current_persona = None
             if agent_id in self._persona_cache:
@@ -158,6 +207,11 @@ class PersonaManager:
         downstream snapshot (e.g. MemAgentModel.persona) via
         :attr:`current_persona` afterwards.
         """
+        if self._snapshot.get() is not _NO_SNAPSHOT:
+            return {
+                "updated": False,
+                "error": "Request-local persona snapshots are read-only; use the host's reviewed evolution flow.",
+            }
         if self.current_persona is None:
             return {
                 "updated": False,

@@ -11,7 +11,9 @@ from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from typing import Any
 
+from .analytics import MEMORY_FIELDS
 from .models import IDENTITY_FIELDS, ResourceRef, SelectionDecision, TraceEventV3
+from .pricing import PRICING_FIELDS
 from .references import source_ids
 
 _USER_UNSET = object()
@@ -80,6 +82,8 @@ LEGACY_FIELDS = frozenset(
         "request_context_fingerprint",
         "request_context_key_count",
         "content_version",
+        "persona_id",
+        "persona_version",
         "grounding_status",
         "grounding_source",
         "grounding_excerpt_count",
@@ -112,7 +116,7 @@ LEGACY_FIELDS = frozenset(
         "input_refs",
         "output_refs",
     ]
-)
+) | frozenset(PRICING_FIELDS + MEMORY_FIELDS)
 
 
 def timestamp(value: Any) -> str:

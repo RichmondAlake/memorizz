@@ -28,5 +28,7 @@ for (const forwarded of [['run', '--stream', '--output', 'jsonl', 'hello'], ['ru
     assert.equal(exit, 0);
     assert.deepEqual(Array.from(calls.at(-1).args), forwarded);
     assert.equal(calls.at(-1).options.stdio, 'inherit');
+    assert.equal(calls.at(-1).options.env.MEMORIZZ_INSTALL_METHOD, 'npm');
+    assert.equal(calls.at(-1).options.env.PATH, '/fixture/bin');
 }
 console.log('npm launcher forwards streaming flags, inherited stdio and exit status');

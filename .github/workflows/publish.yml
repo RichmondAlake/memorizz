@@ -19,6 +19,11 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
+  browser:
+    uses: ./.github/workflows/browser.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -36,7 +41,7 @@ jobs:
       - run: pytest tests/unit tests/integration -q
 
   build:
-    needs: test
+    needs: [test, browser]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -279,7 +284,7 @@ jobs:
         run: |
           if [ -z "$NPM_TOKEN" ]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "NPM_TOKEN not configured - skipping npm shim publication."
+            echo "::warning::NPM_TOKEN not configured - skipping npm shim publication."
           else
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
@@ -327,7 +332,7 @@ jobs:
         run: |
           if [ -z "$TAP_PUSH_TOKEN" ]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "TAP_PUSH_TOKEN not configured - skipping Homebrew tap bump."
+            echo "::warning::TAP_PUSH_TOKEN not configured - skipping Homebrew tap bump. See packaging/README.md for tap prerequisites."
           else
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi

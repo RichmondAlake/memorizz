@@ -122,6 +122,37 @@ def selection(**extra):
     return {"agent_id": "agent", "root_trace_id": "root", **extra}
 
 
+def test_usage_is_tenant_scoped_content_free_and_audited(operator_ui):
+    client = operator_ui["client"]
+    response = client.get("/traces/usage.json", headers=headers(operator_ui))
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["totals"]["calls"] == 1
+    assert payload["totals"]["unpriced_calls"] == 1
+    assert "PRIVATE" not in response.text
+    assert "secret@example.com" not in response.text
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert (
+        client.get(
+            "/traces/usage.json?user_id=bob", headers=headers(operator_ui)
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            "/traces/usage.json?application_id=app-B", headers=headers(operator_ui)
+        ).status_code
+        == 403
+    )
+    page = client.get(
+        "/traces/usage?root_trace_id=root&turn_id=turn", headers=headers(operator_ui)
+    )
+    assert page.status_code == 200, page.text
+    assert 'name="root_trace_id" value="root"' in page.text
+    assert 'name="turn_id" value="turn"' in page.text
+    assert "trace_usage" in operator_ui["audit"].read_text()
+
+
 def test_tenant_scope_is_conjunctive_and_alternate_routes_are_closed(operator_ui):
     ui = operator_ui
     response = ui["client"].get("/traces/find.json?q=root", headers=headers(ui))

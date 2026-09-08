@@ -616,7 +616,13 @@ async def lifespan(app: FastAPI):
 
 
 def create_app(
-    *, identity_resolver=None, artifact_resolver=None, resource_authorizer=None
+    *,
+    identity_resolver=None,
+    artifact_resolver=None,
+    resource_authorizer=None,
+    usage_pricing=None,
+    persona_evolution=None,
+    persona_evolution_actions=False,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     # Load layered env (~/.memorizz/.env, then $CWD/.env) so the UI sees the
@@ -629,9 +635,18 @@ def create_app(
         lifespan=lifespan,
     )
     access = UIAccessController()
+    if persona_evolution is not None and not access.enabled:
+        raise ValueError(
+            "Host-owned persona profiles require Memorizz UI authentication"
+        )
     app.state.trace_identity_resolver = identity_resolver
     app.state.trace_artifact_resolver = artifact_resolver
     app.state.trace_resource_authorizer = resource_authorizer
+    app.state.usage_pricing = usage_pricing
+    app.state.persona_evolution = persona_evolution
+    app.state.persona_evolution_actions = bool(
+        persona_evolution and persona_evolution_actions
+    )
     read_only_mode = ui_read_only()
 
     from fastapi.exception_handlers import request_validation_exception_handler
@@ -695,6 +710,10 @@ def create_app(
             and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
             and path
             not in {"/login", "/connect", "/traces/account/resolve", "/traces/reveal"}
+            and not (
+                path == "/persona-evolution/action"
+                and app.state.persona_evolution_actions
+            )
         ):
             return denied("This Memorizz UI is running in read-only mode")
         principal = access.principal_for_request(request)
@@ -733,7 +752,9 @@ def create_app(
             ):
                 return denied("This account is restricted to trace inspection")
         # Prevent cross-origin form submissions to privileged trace actions.
-        if path.startswith("/traces") and request.method not in {
+        if (
+            path.startswith("/traces") or path.startswith("/persona-evolution")
+        ) and request.method not in {
             "GET",
             "HEAD",
             "OPTIONS",
@@ -764,9 +785,15 @@ def create_app(
     app.include_router(oracle_docker_router)
     app.include_router(agents_api_router)
     app.include_router(traces_router)
+    from .routers.usage import router as usage_router
+
+    app.include_router(usage_router)
     from .routers.trace_tools import router as trace_tools_router
 
     app.include_router(trace_tools_router)
+    from .routers.persona_evolution import router as persona_evolution_router
+
+    app.include_router(persona_evolution_router)
     app.include_router(continual_learning_router)
     app.include_router(learning_control_plane_router)
     app.include_router(harnesses_router)

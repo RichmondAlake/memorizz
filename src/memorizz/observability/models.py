@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .pricing import PRICING_FIELDS
 from .privacy import validate_opaque
 
 IDENTITY_FIELDS = (
@@ -27,59 +28,70 @@ IDENTITY_FIELDS = (
     "parent_span_id",
     "caused_by_event_id",
 )
-ATTRIBUTE_FIELDS = frozenset(
-    {
-        "fallback_reason",
-        "side_effect",
-        "credit_decision",
-        "error_code",
-        "task_id",
-        "expected_artifact_types",
-        "required_contracts",
-        "coverage_profile",
-        "source_independent",
-        "persistence_verified",
-        "artifact_status",
-        "delivery_target",
-        "required",
-        "contract_name",
-        "opening_marker_found",
-        "closing_marker_found",
-        "parser_status",
-        "recovery_used",
-        "recovery_status",
-        "nodes",
-        "edges",
-        "emitted",
-        "acknowledged",
-        "output_limit",
-        "verified",
-        "context_missing",
-        "queue_status",
-        "job_ref",
-        "candidate_rank",
-        "relevance_score",
-        "selected",
-        "selection_reason",
-        "ownership_verified",
-        "content_version",
-        "instrumentation_version",
-        "model",
-        "provider",
-        "request_id",
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "cached_tokens",
-        "max_output_tokens",
-        "finish_reason",
-        "response_chars",
-        "response_bytes",
-        "ttft_ms",
-        "stream_duration_ms",
-        "retry_count",
-        "fallback_count",
-    }
+ATTRIBUTE_FIELDS = (
+    frozenset(
+        {
+            "fallback_reason",
+            "side_effect",
+            "credit_decision",
+            "error_code",
+            "task_id",
+            "expected_artifact_types",
+            "required_contracts",
+            "coverage_profile",
+            "source_independent",
+            "persistence_verified",
+            "artifact_status",
+            "delivery_target",
+            "required",
+            "contract_name",
+            "opening_marker_found",
+            "closing_marker_found",
+            "parser_status",
+            "recovery_used",
+            "recovery_status",
+            "nodes",
+            "edges",
+            "emitted",
+            "acknowledged",
+            "output_limit",
+            "verified",
+            "context_missing",
+            "queue_status",
+            "job_ref",
+            "candidate_rank",
+            "relevance_score",
+            "selected",
+            "selection_reason",
+            "ownership_verified",
+            "content_version",
+            "instrumentation_version",
+            "model",
+            "provider",
+            "request_id",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "max_output_tokens",
+            "finish_reason",
+            "response_chars",
+            "response_bytes",
+            "ttft_ms",
+            "stream_duration_ms",
+            "retry_count",
+            "fallback_count",
+        }
+    )
+    | frozenset(PRICING_FIELDS)
+    | frozenset(
+        {
+            "memory_type",
+            "memory_chars",
+            "memory_tokens_estimate",
+            "token_estimation_method",
+        }
+    )
 )
 
 
@@ -230,6 +242,8 @@ class LastResponseMetadata(_BoundedModel):
     output_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int | None = Field(default=None, ge=0)
     cached_tokens: int | None = Field(default=None, ge=0)
+    cache_write_tokens: int | None = Field(default=None, ge=0)
+    service_tier: str | None = None
     max_output_tokens: int | None = Field(default=None, ge=0)
     response_chars: int | None = Field(default=None, ge=0)
     response_bytes: int | None = Field(default=None, ge=0)

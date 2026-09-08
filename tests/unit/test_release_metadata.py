@@ -43,3 +43,12 @@ def test_local_audit_reports_are_excluded_from_public_sources():
     navigation = (ROOT / "mkdocs.yml").read_text()
     assert "Observability Incident Report:" not in navigation
     assert "Release Verification:" not in navigation
+
+
+def test_windows_usage_analytics_has_an_iana_database_dependency():
+    from packaging.requirements import Requirement
+
+    project = (ROOT / "pyproject.toml").read_text()
+    requirement = Requirement(re.search(r'"(tzdata[^\"]+)"', project).group(1))
+    assert requirement.marker.evaluate({"sys_platform": "win32"})
+    assert not requirement.marker.evaluate({"sys_platform": "linux"})

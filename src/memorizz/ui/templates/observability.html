@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Observability &amp; Monitoring - Memorizz{% endblock %}
-{% block head %}<script src="/static/js/observability.js?v=3" defer></script>{% endblock %}
+{% block head %}<script src="/static/js/observability.js?v=3" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=1">{% endblock %}
 
 {% block content %}
 <div class="page-header">
@@ -10,6 +10,7 @@
     <p>Follow context lineage, grounding, cache routing, tool execution, and verified outcomes by agent and thread.</p>
     <a class="btn" id="trace-health-link" href="{{ selection_urls.health }}">Observability health</a>
     <a class="btn" id="trace-compare-link" href="{{ selection_urls.compare }}">Compare recorded traces</a>
+    <a class="btn" id="trace-usage-link" href="{{ selection_urls.usage }}">Usage &amp; memory analytics</a>
 </div>
 
 <div class="trace-access-banner">
@@ -378,6 +379,7 @@
 </div>
 {% endif %}
 
+<details class="detail-section" id="trace-usage"><summary>Tokens, charges &amp; memory · selected trace window</summary>{% include '_usage_panel.html' %}</details>
 {% include "trace_waterfall.html" %}
 {% include "trace_inspectors.html" %}
 {% if selected_agent_id and trace_waterfall and trace_permissions and trace_permissions['replay.create'] %}
@@ -412,6 +414,7 @@
                             {% endif %}
                             {% if event.tool_provider %}<span class="meta-tag trace-tag">Provider {{ event.tool_provider }}</span>{% endif %}
                             {% if event.model %}<span class="meta-tag trace-tag">{{ event.provider or 'Provider unknown' }} · {{ event.model }}</span>{% endif %}
+                            {% if event.persona_version is defined and event.persona_version is not none %}<span class="meta-tag trace-tag" title="{{ event.persona_id or '' }}">Persona v{{ event.persona_version }}</span>{% endif %}
                             {% if event.input_tokens is defined %}<span class="meta-tag trace-tag">{{ event.input_tokens }} input tokens · {{ event.output_tokens|default('unknown') }} output tokens</span>{% endif %}
                             {% if event.finish_reason %}<span class="meta-tag trace-tag">Finish: {{ event.finish_reason }}</span>{% endif %}
                             {% if event.max_output_tokens is defined %}<span class="meta-tag trace-tag">Output limit: {{ event.max_output_tokens }}</span>{% endif %}

@@ -41,6 +41,28 @@ the complete CLI surface.
     bootstrapper (`npm i -g memorizz`, which installs the real tool via `uv`) are
     also available for non-Python-first workflows.
 
+## Update notices
+
+Interactive sessions (`memorizz` and `memorizz chat`) check PyPI in the
+background for a newer stable release compatible with your Python version.
+When one is available, a notice above the prompt shows the installed and
+latest versions and an upgrade command for your installer (pip, uv, pipx,
+npm, or Homebrew). The CLI never installs updates automatically.
+
+Successful checks are cached for 24 hours in
+`~/.memorizz/update-check.json` (or under `MEMORIZZ_HOME`). An available update
+is shown on each launch until you upgrade. Network failures stay quiet and
+the check never holds up startup or exit. One-shot commands, JSON output, MCP
+stdio, help, and version output do not perform update checks.
+
+To disable the check, including its network request:
+
+```bash
+export MEMORIZZ_NO_UPDATE_CHECK=1
+```
+
+Checks are also skipped in CI and when output is redirected.
+
 ## Quickstart
 
 ### Option A — Local, no API key (Ollama)

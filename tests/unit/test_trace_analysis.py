@@ -5,6 +5,38 @@ import pytest
 from memorizz.observability import analyze_trace_events
 
 
+def test_scoped_virtual_source_does_not_imply_missing_registration():
+    report = analyze_trace_events(
+        [], source_is_virtual=True, source_registration_known=False
+    )
+    insights = {item["id"] for item in report["insights"]}
+    assert "missing_trace_identity" not in insights
+    assert "trace_registration_not_inspected" in insights
+    registered = analyze_trace_events([], source_is_virtual=False)
+    assert "trace_registration_not_inspected" not in {
+        item["id"] for item in registered["insights"]
+    }
+
+
+def test_persona_supply_has_its_own_memory_health_counter():
+    report = analyze_trace_events(
+        [
+            {
+                "kind": "memory_context",
+                "memory_supplied_count": 1,
+                "content": json.dumps(
+                    {"source_counts": {"persona_snapshots": 1}, "supplied_count": 1}
+                ),
+            }
+        ]
+    )
+    assert report["summary"]["memory_supplied"] == 1
+    assert any(
+        row["source"] == "persona_snapshots" and row["supplied"] == 1
+        for row in report["memory_health"]
+    )
+
+
 def _event(thread_id, kind, title, content="", **extra):
     return {
         "thread_id": thread_id,

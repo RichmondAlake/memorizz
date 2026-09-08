@@ -58,9 +58,11 @@ nav:
   - Continual Learning:
       - Workflows to Skills: guides/continual-learning.md
       - Learning Control Plane: guides/learning-control-plane.md
+      - Account-Owned Persona Evolution: persona-evolution-hosts.md
   - Operate:
       - Configuration & Secrets: reference/configuration.md
       - Observability & Trace Inspection: observability-ui.md
+      - Usage, Cost & Memory Analytics: usage-analytics.md
       - Observability Rollout & Operator Guide: observability-rollout.md
       - Production Governance: guides/production-governance.md
       - Capabilities & Preflight: reference/capabilities.md

@@ -6,6 +6,9 @@ on:
   pull_request:
 
 jobs:
+  browser:
+    uses: ./.github/workflows/browser.yml
+
   test:
     runs-on: ubuntu-latest
     strategy:

@@ -1,0 +1,29 @@
+{% from '_analytics_charts.html' import bars, trend, donut, usage_table %}
+<section class="usage-dashboard" aria-label="Usage and memory analytics">
+    <div class="usage-kpis">
+        <div><span>Recorded model calls</span><strong>{{ usage.totals.calls }}</strong></div>
+        <div><span>Measured tokens</span><strong>{{ usage.totals.total_tokens }}</strong><small>{{ usage.totals.unknown_usage_calls }} calls missing usage</small></div>
+        <div><span>Known calculated charge</span><strong>{{ '$%.6f'|format(usage.totals.cost_usd|float) if usage.totals.cost_usd is not none else 'Unknown' }}</strong><small>{{ usage.totals.unpriced_calls }} unpriced calls · USD</small></div>
+        <div><span>Mean model latency</span><strong>{{ '%.1f ms'|format(usage.totals.mean_latency_ms) if usage.totals.mean_latency_ms is not none else 'Unknown' }}</strong><small>{{ usage.totals.latency_samples }} measured calls</small></div>
+    </div>
+    <p class="usage-notice">Recorded window only · {{ usage.coverage.events_scanned }} events · {{ usage.timezone }}. {% if not usage.coverage.read_complete %}Read completeness is partial or not established. Narrow the filters for a more complete window.{% endif %} Unpriced calls are excluded from charges, not treated as free.</p>
+    <div class="usage-grid">
+        {{ trend(usage_charts.daily_tokens, 'Daily token consumption', 'tokens') }}
+        {{ trend(usage_charts.daily_cost, 'Daily known charge', 'USD') }}
+        {{ bars(usage_charts.agent_cost, 'Agent charges', 'USD · known portion') }}
+        {{ donut(usage_charts.memory_tokens, 'Memory prompt share') }}
+        {{ bars(usage_charts.memory_latency, 'Memory retrieval latency', 'mean ms per operation') }}
+    </div>
+    <div class="usage-flow" aria-label="Measurement stages"><span>Memory reads<br><small>Measured retrieval latency</small></span><span aria-hidden="true">→</span><span>Rendered prompt<br><small>Approximate memory tokens</small></span><span aria-hidden="true">→</span><span>Model result<br><small>Provider tokens × rate card</small></span></div>
+    {{ usage_table(usage.agents, 'Usage by agent') }}
+    {{ usage_table(usage.models, 'Usage by provider and model') }}
+    {{ usage_table(usage.interactions, 'Usage by interaction') }}
+    <details class="usage-table" open><summary>Memory measurements</summary><div class="usage-table-scroll"><table><thead><tr><th>Memory type</th><th>Rendered characters</th><th>Approx. tokens</th><th>Supply samples</th><th>Retrievals / errors</th><th>Total retrieval ms</th><th>Mean / p95 retrieval ms</th></tr></thead><tbody>
+    {% for row in usage.memory %}<tr><th>{{ row.label }}</th><td>{{ row.memory_chars if row.supply_samples else 'Unknown' }}</td><td>{{ row.memory_tokens_estimate if row.supply_samples else 'Unknown' }}</td><td>{{ row.supply_samples }}</td><td>{{ row.retrieval_samples }} / {{ row.retrieval_errors }}</td><td>{{ '%.1f'|format(row.retrieval_total_ms) if row.retrieval_samples else 'Unknown' }}</td><td>{{ '%.1f / %.1f'|format(row.retrieval_mean_ms, row.retrieval_p95_ms) if row.retrieval_samples else 'Unknown' }}</td></tr>{% else %}<tr><td colspan="7">No per-type instrumentation was recorded. Historical attribution cannot be reconstructed.</td></tr>{% endfor %}
+    </tbody></table></div></details>
+    <details class="usage-methods"><summary>Accuracy, coverage and pricing sources</summary><ul>{% for note in usage.notes %}<li>{{ note }}</li>{% endfor %}</ul>
+        <p>Standard direct-API rates only unless a custom registry is configured. Current-catalog calculations apply today's configured rates to older events; they are not historical invoices. Region, batch, priority, discounts and non-token fees require matching cards or billing reconciliation.</p>
+        <ul>{% for price in usage.pricing %}<li>{{ price.pricing_version }} · {{ price.pricing_as_of }} · {{ price.basis }} · {{ price.pricing_source }}</li>{% endfor %}</ul>
+        <ul>{% for reason, count in usage.unpriced_reasons.items() %}<li>{{ count }} calls: {{ reason }}</li>{% endfor %}</ul>
+    </details>
+</section>

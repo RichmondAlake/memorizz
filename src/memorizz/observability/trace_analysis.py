@@ -236,6 +236,7 @@ def analyze_trace_events(
     agent_name: str = "",
     scope: str = "agent",
     source_is_virtual: bool = False,
+    source_registration_known: bool = True,
     window_truncated: bool = False,
     signals: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     max_insights: int = 14,
@@ -325,9 +326,25 @@ def analyze_trace_events(
                     context_event[field] = event.get(field)
             context_event["thread_id"] = event.get("thread_id")
             context_events.append(context_event)
-        elif kind == "memory_context":
+        elif kind == "memory_context" or (
+            kind == "memory_supply" and event.get("input_refs")
+        ):
             structured = _payload(event.get("content"))
             memory_event = dict(structured) if isinstance(structured, dict) else {}
+            if kind == "memory_supply":
+                # Public host recorder spans carry typed references, not the
+                # legacy JSON payload. Include those inputs in the same view.
+                counts = Counter(
+                    "persona_snapshots"
+                    if ref.get("role") == "persona_style"
+                    else "conversation_memories"
+                    if ref.get("role") == "reflection_evidence"
+                    else "semantic_memories"
+                    for ref in event["input_refs"]
+                )
+                memory_event.update(
+                    source_counts=dict(counts), supplied_count=sum(counts.values())
+                )
             for field in (
                 "memory_history_count",
                 "memory_candidate_count",
@@ -443,7 +460,7 @@ def analyze_trace_events(
             signature_counts[signature] += 1
 
     insights: List[Dict[str, Any]] = []
-    if source_is_virtual:
+    if source_is_virtual and source_registration_known:
         insights.append(
             _insight(
                 "missing_trace_identity",
@@ -455,6 +472,22 @@ def analyze_trace_events(
                 target="MemAgent lifecycle and trace envelope",
                 evidence_count=max(1, len(normalized)),
                 effort="medium",
+                confidence="high",
+            )
+        )
+
+    if source_is_virtual and not source_registration_known:
+        insights.append(
+            _insight(
+                "trace_registration_not_inspected",
+                priority="P2",
+                component="Observability",
+                title="Agent registration is not inspected in this scope",
+                finding="This account-scoped view reads authorized trace identities without loading global agent configurations. Registration is unknown, not missing.",
+                recommendation="Diagnose the recorded account and turn identities here. Only an authorized unscoped operator view can separately inspect agent registration.",
+                target="Scoped trace access",
+                evidence_count=max(1, len(normalized)),
+                effort="small",
                 confidence="high",
             )
         )
@@ -1010,6 +1043,11 @@ def analyze_trace_events(
         (
             "preferences",
             memory_source_counts.get("preferences", 0),
+            0,
+        ),
+        (
+            "persona_snapshots",
+            memory_source_counts.get("persona_snapshots", 0),
             0,
         ),
         (

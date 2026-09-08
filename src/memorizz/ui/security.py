@@ -385,6 +385,7 @@ def audit_trace_view(
     thread_id: Optional[str] = None,
     result_count: int = 0,
     content_mode: Optional[str] = None,
+    target_user_id: Optional[str] = None,
 ) -> bool:
     """Append a content-free trace-access event to a permission-restricted log."""
     configured = os.getenv("MEMORIZZ_UI_AUDIT_LOG", "").strip()
@@ -410,6 +411,9 @@ def audit_trace_view(
                 current_principal.get().principal_id, scope="operator"
             ),
             "role": current_principal.get().role,
+            "target_account_hash": pseudonym(target_user_id, scope="account")
+            if target_user_id
+            else None,
         }
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")

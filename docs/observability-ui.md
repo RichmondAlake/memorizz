@@ -1,5 +1,8 @@
 # Observability and Trace Inspection
 
+For charts, daily token/charge totals and per-memory-type latency, see
+[Usage, Cost and Memory Analytics](usage-analytics.md).
+
 Memorizz records scoped operational evidence so developers can explain a turn
 without scanning and deserializing every conversation row. Traces cover the
 model/tool loop, context provenance, semantic-cache decisions, verified host
