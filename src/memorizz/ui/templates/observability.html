@@ -190,6 +190,7 @@
 </div>
 
 {% if trace_analysis %}
+{% include '_prompt_cache.html' %}
 <div class="detail-section observability-section trace-analysis" id="trace-insights">
     <div class="trace-analysis-header">
         <div>
@@ -413,9 +414,13 @@
                             </span>
                             {% endif %}
                             {% if event.tool_provider %}<span class="meta-tag trace-tag">Provider {{ event.tool_provider }}</span>{% endif %}
-                            {% if event.model %}<span class="meta-tag trace-tag">{{ event.provider or 'Provider unknown' }} · {{ event.model }}</span>{% endif %}
+                            {% if event.model or event.response_model %}<span class="meta-tag trace-tag">{{ event.provider or 'Provider unknown' }} · Requested: {{ event.model or 'unknown' }}</span>{% endif %}
+                            {% if event.response_model %}<span class="meta-tag trace-tag">Returned: {{ event.response_model }}</span>{% elif event.kind == 'model_result' %}<span class="meta-tag trace-tag trace-tag--muted">Returned: unknown</span>{% endif %}
                             {% if event.persona_version is defined and event.persona_version is not none %}<span class="meta-tag trace-tag" title="{{ event.persona_id or '' }}">Persona v{{ event.persona_version }}</span>{% endif %}
                             {% if event.input_tokens is defined %}<span class="meta-tag trace-tag">{{ event.input_tokens }} input tokens · {{ event.output_tokens|default('unknown') }} output tokens</span>{% endif %}
+                            {% if event.cached_tokens is defined %}<span class="meta-tag trace-tag">Cache read: {{ event.cached_tokens }} tokens</span>{% endif %}
+                            {% if event.cache_write_tokens is defined %}<span class="meta-tag trace-tag">Cache write: {{ event.cache_write_tokens }} tokens</span>{% endif %}
+                            {% if event.prompt_cache_enabled is defined and event.prompt_cache_enabled == false %}<span class="meta-tag trace-tag trace-tag--warning">Prompt cache disabled</span>{% endif %}
                             {% if event.finish_reason %}<span class="meta-tag trace-tag">Finish: {{ event.finish_reason }}</span>{% endif %}
                             {% if event.max_output_tokens is defined %}<span class="meta-tag trace-tag">Output limit: {{ event.max_output_tokens }}</span>{% endif %}
                             {% if event.response_chars is defined %}<span class="meta-tag trace-tag">{{ event.response_chars }} characters · {{ event.response_bytes }} bytes</span>{% endif %}

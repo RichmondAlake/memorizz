@@ -24,7 +24,14 @@ backwards-compatibility with the old CLI behavior (``override=False`` so the
 real process environment always wins).
 """
 
+import io
 import os
+import re
+import stat
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -39,9 +46,15 @@ __all__ = [
     "format_env_value",
     "update_env_file",
     "apply_env_updates",
+    "validate_env_updates",
+    "environment_source",
+    "env_override_warnings",
 ]
 
 DEFAULT_HOME = "~/.memorizz"
+_ENV_SOURCES = {}
+_WRITE_LOCK = threading.RLock()
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def memorizz_home() -> Path:
@@ -110,7 +123,11 @@ def load_layered_env(extra_paths: Optional[Iterable[Path]] = None) -> List[Path]
             continue
         seen.add(key)
         if path.exists():
+            before = dict(os.environ)
             load_dotenv(path, override=False)
+            for name, value in os.environ.items():
+                if name not in before:
+                    _ENV_SOURCES[name] = (value, "file", str(path.resolve()))
             loaded.append(path)
     return loaded
 
@@ -138,58 +155,188 @@ def resolve_oracle_in_database_embedding_from_env() -> bool:
     return not bool(external_provider)
 
 
-def format_env_value(value: str) -> str:
-    """Format an env var value for safe storage in a ``.env`` file.
+def validate_env_updates(updates: Dict[str, str]) -> None:
+    """Reject invalid keys and values without putting credentials in errors."""
+    for key, value in updates.items():
+        if not isinstance(key, str) or not _ENV_KEY.fullmatch(key):
+            raise ValueError(
+                "Use a variable name containing letters, digits and underscores, not an assignment."
+            )
+        if not isinstance(value, str) or "\0" in value:
+            raise ValueError("Setting values must be strings without NUL characters.")
+        # python-dotenv interpolates even single-quoted ${...}. Reject these
+        # new values rather than silently changing a password on the next load.
+        # Existing interpolated bindings are preserved unchanged.
+        if "${" in value:
+            raise ValueError(
+                "Enter a concrete value; ${...} expansion cannot be safely saved by this editor."
+            )
 
-    Verbatim port of ``ui/app.py:_format_env_value`` so the CLI and UI write
-    byte-identical files.
-    """
-    if value == "":
-        return ""
-    if any(ch.isspace() for ch in value) or "#" in value or "=" in value:
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
-    return value
+
+def format_env_value(value: str) -> str:
+    """Round-trip quotes, slashes and multiline values through python-dotenv."""
+    validate_env_updates({"VALUE": value})
+    if not value or re.fullmatch(r"[A-Za-z0-9_./:@,+%-]+", value):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    for actual, encoded in (
+        ("\n", "\\n"),
+        ("\r", "\\r"),
+        ("\t", "\\t"),
+        ("\b", "\\b"),
+        ("\f", "\\f"),
+        ("\v", "\\v"),
+        ("\a", "\\a"),
+    ):
+        escaped = escaped.replace(actual, encoded)
+    return f'"{escaped}"'
+
+
+@contextmanager
+def _env_file_lock(path: Path):
+    """Serialize cooperating CLI/UI writers, including separate processes."""
+    lock_path = path.with_name(path.name + ".lock")
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    with _WRITE_LOCK:
+        descriptor = os.open(lock_path, flags, 0o600)
+        locked = False
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("Configuration lock must be a regular file.")
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            deadline = time.monotonic() + 10
+            if os.name == "nt":  # pragma: no cover - Windows CI
+                import msvcrt
+
+                if os.fstat(descriptor).st_size == 0:
+                    os.write(descriptor, b"\0")
+            else:
+                import fcntl
+            while not locked:
+                try:
+                    if os.name == "nt":  # pragma: no cover - Windows CI
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                    else:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "Another process is updating configuration."
+                        ) from None
+                    time.sleep(0.05)
+            yield
+        finally:
+            try:
+                if locked:
+                    if os.name == "nt":  # pragma: no cover - Windows CI
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
 
 def update_env_file(env_path: Path, updates: Dict[str, str]) -> None:
     """Update or append environment variables in a ``.env`` file.
 
-    Creates the file (and parent directories) if missing. Preserves comments,
-    blank lines, and unrelated entries. Verbatim port of
-    ``ui/app.py:_update_env_file`` with directory auto-creation added.
+    Atomic, owner-only writes preserve unrelated bindings (including multiline
+    values), comments and blank lines. Symlink targets are rejected. The small
+    owner-only lock file is retained so concurrent writers use one lock inode.
     """
-    env_path = Path(env_path).expanduser()
-    env_path.parent.mkdir(parents=True, exist_ok=True)
+    from dotenv.parser import parse_stream
 
-    if env_path.exists():
-        lines = env_path.read_text().splitlines()
-    else:
-        lines = []
+    validate_env_updates(updates)
+    if not updates:
+        return
+    env_path = Path(env_path).expanduser().absolute()
+    env_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _env_file_lock(env_path):
+        if env_path.is_symlink():
+            raise ValueError(
+                "Refusing to replace a symlink; choose its intended target explicitly."
+            )
+        if env_path.exists() and not env_path.is_file():
+            raise ValueError("Configuration must be a regular file.")
+        original = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        parts, seen = [], set()
+        for binding in parse_stream(io.StringIO(original)):
+            if binding.error:
+                raise ValueError(
+                    "The existing .env has invalid syntax; correct it before saving."
+                )
+            if binding.key in updates:
+                if binding.key not in seen:
+                    prefix = re.match(r"\s*", binding.original.string).group()
+                    parts.append(
+                        prefix
+                        + binding.key
+                        + "="
+                        + format_env_value(updates[binding.key])
+                        + "\n"
+                    )
+                    seen.add(binding.key)
+            else:
+                parts.append(binding.original.string)
+        content = "".join(parts)
+        if content and not content.endswith("\n"):
+            content += "\n"
+        for key, value in updates.items():
+            if key not in seen:
+                content += key + "=" + format_env_value(value) + "\n"
+        descriptor, temporary = tempfile.mkstemp(
+            prefix="." + env_path.name + ".", suffix=".tmp", dir=env_path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, env_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
-    updated_lines: List[str] = []
-    seen = set()
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            updated_lines.append(line)
-            continue
-        key, _value = line.split("=", 1)
-        key = key.strip()
-        if key in updates:
-            updated_lines.append(f"{key}={format_env_value(updates[key])}")
-            seen.add(key)
-        else:
-            updated_lines.append(line)
 
+def environment_source(key: str) -> Dict[str, str]:
+    """Describe effective provenance without returning the setting's value."""
+    if key not in os.environ:
+        return {"kind": "unset"}
+    recorded = _ENV_SOURCES.get(key)
+    if recorded and recorded[0] == os.environ[key]:
+        return {"kind": recorded[1], "path": recorded[2]}
+    return {"kind": "process environment"}
+
+
+def env_override_warnings(
+    updates: Dict[str, str], env_path: Optional[Path] = None
+) -> List[str]:
+    """Warn before saving defaults that higher-priority configuration can mask."""
+    from dotenv import dotenv_values
+
+    validate_env_updates(updates)
+    target = Path(env_path or resolve_env_file()).expanduser().resolve()
+    project = (Path.cwd() / ".env").resolve()
+    project_values = (
+        dotenv_values(project, interpolate=False) if project.exists() else {}
+    )
+    warnings = []
     for key, value in updates.items():
-        if key in seen:
-            continue
-        if updated_lines and updated_lines[-1].strip():
-            updated_lines.append("")
-        updated_lines.append(f"{key}={format_env_value(value)}")
-
-    env_path.write_text("\n".join(updated_lines) + "\n")
+        if (
+            environment_source(key)["kind"] == "process environment"
+            and os.environ.get(key) != value
+        ):
+            warnings.append(
+                f"{key}: a process environment value may override this saved default on restart; update or unset its export."
+            )
+        if target != project and key in project_values and project_values[key] != value:
+            warnings.append(
+                f"{key}: the project .env takes precedence over this file; use --project or update that project setting."
+            )
+    return warnings
 
 
 def apply_env_updates(updates: Dict[str, str]) -> Optional[str]:
@@ -198,10 +345,15 @@ def apply_env_updates(updates: Dict[str, str]) -> Optional[str]:
     Returns ``None`` on success, or a human-readable error string if the file
     could not be written (the in-process env is still updated either way).
     """
+    try:
+        validate_env_updates(updates)
+    except ValueError as exc:
+        return str(exc)
     for key, value in updates.items():
         os.environ[key] = value
+        _ENV_SOURCES[key] = (value, "session", str(resolve_env_file().resolve()))
     try:
         update_env_file(resolve_env_file(), updates)
     except Exception as exc:  # pragma: no cover - filesystem dependent
-        return str(exc)
+        return f"Configuration could not be saved ({type(exc).__name__}); check the target path and permissions."
     return None

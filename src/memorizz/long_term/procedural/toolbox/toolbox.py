@@ -129,8 +129,14 @@ class Toolbox:
                     self._get_tool_metadata(f),
                     description=augmented_docstring,
                 )
-                embedding = get_embedding(
-                    f"{f.__name__} {augmented_docstring} {signature} {queries}"
+                from ....memory_provider.base import provider_manages_embeddings
+
+                embedding = (
+                    None
+                    if provider_manages_embeddings(self.memory_provider)
+                    else get_embedding(
+                        f"{f.__name__} {augmented_docstring} {signature} {queries}"
+                    )
                 )
                 tool_dict = {
                     "_id": object_id_str,

@@ -48,11 +48,46 @@ class SlashCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        if not text.startswith("/") or " " in text:
+        if not text.startswith("/"):
             return
         for name in self.names:
             if name.startswith(text):
                 yield Completion(name, start_position=-len(text))
+
+
+class SafeFileHistory(FileHistory):
+    """Never retain credential/configuration input, including abbreviations."""
+
+    @staticmethod
+    def safe(value):
+        for line in value.splitlines():
+            stripped = line.lstrip()
+            if not stripped.startswith("/"):
+                continue
+            name = (
+                stripped[1:].split(maxsplit=1)[0].lower()
+                if stripped[1:].strip()
+                else ""
+            )
+            if name and any(
+                command.startswith(name)
+                for command in ("login", "config", "memory-provider")
+            ):
+                return False
+        return True
+
+    def append_string(self, string):
+        if self.safe(string):
+            super().append_string(string)
+
+    def store_string(self, string):
+        if self.safe(string):
+            super().store_string(string)
+
+    def load_history_strings(self):
+        for string in super().load_history_strings():
+            if self.safe(string):
+                yield string
 
 
 def _quiet_logging() -> None:
@@ -86,7 +121,8 @@ def _banner(console: Console, session) -> None:
         f"memory:   {store_line}\n"
         f"learning: continual {learning_status}\n"
         f"browser:  {browser_status}\n"
-        f"[dim]Type /help for commands · /browser for browser control · "
+        f"[dim]Type /help for commands · /config for settings · "
+        f"/memory-provider for memory setup · "
         f"/exit to quit[/dim]"
     )
     console.print(Panel(body, expand=False, border_style="green"))
@@ -98,6 +134,7 @@ def _stream_turn(session, query: str) -> None:
     """Render public deltas and tool status with bounded refresh frequency."""
     import time
 
+    from ..llms.streaming import provider_error_message
     from .streaming import consume_stream, save_stream_session
 
     console = session.console or Console()
@@ -157,7 +194,10 @@ def _stream_turn(session, query: str) -> None:
                 elif kind == "answer.done":
                     status = "answer complete; saving"
                 elif kind == "run.done":
-                    status = event["status"]
+                    status = (
+                        provider_error_message(event.get("error_code"))
+                        or event["status"]
+                    )
                 refresh(force=kind in {"answer.done", "run.done"})
         except KeyboardInterrupt:
             status = "interrupted; partial answer retained"
@@ -179,7 +219,7 @@ def run_repl(session) -> None:
 
     cfg.ensure_home()
     ptk = PromptSession(
-        history=FileHistory(str(cfg.history_file())),
+        history=SafeFileHistory(str(cfg.history_file())),
         completer=SlashCompleter(commands.command_completions()),
         complete_while_typing=True,
     )

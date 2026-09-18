@@ -608,7 +608,7 @@ class TestMemAgentRun:
     def test_prepare_history_messages_respects_budget(self, memagent_with_mocks):
         """History assembly should trim for tight context windows while keeping recency."""
         agent = memagent_with_mocks
-        agent._context_window_tokens = 256
+        agent._context_window_tokens = 1024
 
         history = [
             {

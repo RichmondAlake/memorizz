@@ -112,6 +112,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v4
         with:
           name: dist
@@ -140,19 +143,26 @@ jobs:
         run: |
           /tmp/clean/bin/memorizz --version
           /tmp/clean/bin/memorizz --help >/dev/null
-      - name: MCP extra closes the optional dependency set
+      - name: UI and MCP extras close the optional dependency set
         run: |
           python -m venv /tmp/mcp
           /tmp/mcp/bin/python -m pip install --quiet --upgrade pip
           WHEEL_PATH=$(find "$PWD/dist" -name '*.whl' -print -quit)
-          /tmp/mcp/bin/python -m pip install --quiet "${WHEEL_PATH}[mcp]"
+          /tmp/mcp/bin/python -m pip install --quiet "${WHEEL_PATH}[ui,mcp]" pytest
           /tmp/mcp/bin/python -c "
           import memorizz
+          from memorizz.ui.app import create_app
           report = memorizz.capabilities()
           assert report['features']['mcp_client']['available'], report
           assert report['features']['mcp_server']['available'], report
-          print('mcp extra OK:', memorizz.__version__)
+          print('UI/MCP extras OK:', memorizz.__version__)
           "
+      - name: Exercise the installed wheel's Notion and configuration flows
+        env:
+          MEMORIZZ_NO_UPDATE_CHECK: "1"
+        run: |
+          INSTALLED_ROOT=$(/tmp/mcp/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          /tmp/mcp/bin/python tests/integration/run_notion_installed.py --installed-root "$INSTALLED_ROOT"
 
   pypi:
     needs: smoke
@@ -316,7 +326,7 @@ jobs:
           npm publish --provenance --access public
 
   # Bumping the Homebrew tap requires the published sdist's sha256. This job
-  # computes it and opens a bump in the tap repo. Requires a TAP_PUSH_TOKEN
+  # computes it and pushes a bump to the tap repo. Requires a TAP_PUSH_TOKEN
   # secret with write access to RichmondAlake/homebrew-memorizz.
   homebrew:
     needs: pypi
@@ -336,6 +346,10 @@ jobs:
           else
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - name: Compute version + sdist sha256
         if: steps.gate.outputs.enabled == 'true'
         id: meta
@@ -361,10 +375,13 @@ jobs:
           SHA: ${{ steps.meta.outputs.sha256 }}
         run: |
           git clone "https://x-access-token:${GH_TOKEN}@github.com/RichmondAlake/homebrew-memorizz.git" tap
-          F=tap/Formula/memorizz.rb
-          sed -i -E "s|^  url \".*memorizz-[0-9.]+\.tar\.gz\"|  url \"${URL}\"|" "$F"
-          sed -i -E "s|^  sha256 \"[a-f0-9]*\"|  sha256 \"${SHA}\"|" "$F"
+          python3 scripts/bump_homebrew_formula.py tap/Formula/memorizz.rb \
+            --version "$VER" --url "$URL" --sha256 "$SHA"
           cd tap
+          if git diff --quiet -- Formula/memorizz.rb; then
+            echo "Homebrew already contains memorizz ${VER}; no update needed."
+            exit 0
+          fi
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git commit -am "memorizz ${VER}" && git push

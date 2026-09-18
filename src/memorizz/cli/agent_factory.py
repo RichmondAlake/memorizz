@@ -236,20 +236,56 @@ def _choose_embedding(llm_config: Dict[str, Any]) -> Dict[str, Any]:
 def detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> Any:
     """Build a MemoryProvider, defaulting to a local FileSystem store."""
     backend = (_env("MEMORIZZ_BACKEND") or "").lower()
+    if backend not in {"", "filesystem", "mongodb", "oracle", "notion"}:
+        raise ValueError(
+            "Unknown MEMORIZZ_BACKEND. Run 'memorizz memory configure' to choose a supported provider."
+        )
 
-    if backend == "mongodb" and _env("MONGODB_URI"):
+    if backend == "notion":
+        from ..memory_provider.notion.factory import create_notion_provider_from_env
+
+        embed = _choose_embedding(llm_config)
+        return create_notion_provider_from_env(
+            embedding_provider=embed.get("embedding_provider"),
+            embedding_config=embed.get("embedding_config"),
+        )
+
+    if backend == "mongodb":
+        if not _env("MONGODB_URI"):
+            raise ValueError(
+                "MONGODB_URI is required for the selected MongoDB backend. Run 'memorizz memory configure mongodb'."
+            )
         from ..memory_provider.mongodb import MongoDBConfig, MongoDBProvider
 
+        embed = (
+            _choose_embedding(llm_config)
+            if _env("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER")
+            else {}
+        )
         return MongoDBProvider(
             MongoDBConfig(
                 uri=_env("MONGODB_URI"),
                 db_name=_env("MONGODB_DB_NAME") or "memorizz",
+                embedding_provider=embed.get("embedding_provider"),
+                embedding_config=embed.get("embedding_config"),
             )
         )
 
-    if backend == "oracle" and _env("ORACLE_DSN"):
+    if backend == "oracle":
+        if not all(
+            _env(key) for key in ("ORACLE_DSN", "ORACLE_USER", "ORACLE_PASSWORD")
+        ):
+            raise ValueError(
+                "ORACLE_DSN, ORACLE_USER and ORACLE_PASSWORD are required for the selected Oracle backend. Run 'memorizz memory configure oracle'."
+            )
         from ..memory_provider.oracle import OracleConfig, OracleProvider
 
+        in_database = resolve_oracle_in_database_embedding_from_env()
+        embed = (
+            _choose_embedding(llm_config)
+            if not in_database and _env("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER")
+            else {}
+        )
         return OracleProvider(
             OracleConfig(
                 user=_env("ORACLE_USER"),
@@ -257,7 +293,9 @@ def detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> A
                 dsn=_env("ORACLE_DSN"),
                 schema=_env("ORACLE_SCHEMA"),
                 lazy_vector_indexes=True,
-                in_database_embedding=resolve_oracle_in_database_embedding_from_env(),
+                in_database_embedding=in_database,
+                embedding_provider=embed.get("embedding_provider"),
+                embedding_config=embed.get("embedding_config"),
             )
         )
 
@@ -496,6 +534,9 @@ def build_session_agent(
 
             agent.model = create_llm_provider(resolved_llm)
             agent.llm_config = dict(resolved_llm)
+            agent._context_window_tokens = agent._initialize_context_window_tokens(
+                None, resolved_llm
+            )
             agent._llm_init_error = None
         except Exception as exc:
             agent._llm_init_error = f"{type(exc).__name__}: {exc}"

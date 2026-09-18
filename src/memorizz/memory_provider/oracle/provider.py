@@ -732,6 +732,7 @@ class OracleProvider(MemoryProvider):
             result_scores=True,
             provenance=True,
             native_vector_search=True,
+            vector_store=True,
             native_hybrid_search=False,
         )
 
@@ -4045,6 +4046,10 @@ class OracleProvider(MemoryProvider):
         spec = _BY_ID_SPECS.get(memory_store_type)
         if spec is not None:
             id_column, fields = spec
+            if memory_store_type == MemoryType.KNOWLEDGE_BASE:
+                # Match list/vector reads: a by-ID expansion must preserve its
+                # namespace and chunk identity for scope/provenance checks.
+                fields = fields + self._knowledge_base_chunk_fields()
             bound_id = id
             if id_column == "id":
                 try:
@@ -4063,7 +4068,10 @@ class OracleProvider(MemoryProvider):
                     {id_column: bound_id},
                 )
                 row = cursor.fetchone()
-                if row is None and memory_store_type == MemoryType.WORKFLOW_MEMORY:
+                if row is None and memory_store_type in {
+                    MemoryType.WORKFLOW_MEMORY,
+                    MemoryType.TOOL_LOG,
+                }:
                     try:
                         row_id = uuid.UUID(str(id)).bytes
                     except (ValueError, TypeError):
@@ -5858,6 +5866,131 @@ class OracleProvider(MemoryProvider):
             filters=filters,
             user_id=user_id,
         )
+
+    def upsert_vector(self, namespace, source_id, embedding, *, metadata, scope=None):
+        from ..vectors import VECTOR_MARKER, vector_document
+
+        row = vector_document(namespace, source_id, embedding, metadata, scope or {})
+        table = self._get_table_name(MemoryType.KNOWLEDGE_BASE)
+        params = {
+            "id": self._normalize_raw_uuid(row["id"]),
+            "memory_id": row["id"],
+            "namespace": namespace,
+            "source_id": source_id,
+            "format": VECTOR_MARKER,
+            "metadata": json.dumps(row["metadata"], ensure_ascii=False),
+            "embedding": self._prepare_vector_value(row["embedding"]),
+        }
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            self._set_vector_input_size(cursor, "embedding")
+            cursor.execute(
+                f"""
+                MERGE INTO {table} target
+                USING (SELECT :id AS id FROM dual) source
+                ON (target.id = source.id)
+                WHEN MATCHED THEN UPDATE SET
+                    target.embedding = :embedding, target.metadata = :metadata,
+                    target.updated_at = SYSTIMESTAMP
+                    WHERE target.namespace = :namespace
+                      AND JSON_VALUE(target.metadata, '$.format') = :format
+                WHEN NOT MATCHED THEN INSERT
+                    (id, memory_id, namespace, source_id, content, memory_type, metadata, embedding)
+                    VALUES (:id, :memory_id, :namespace, :source_id, :format, :format, :metadata, :embedding)
+            """,
+                params,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Vector identity collides with an unrelated document")
+            connection.commit()
+        return row["id"]
+
+    def delete_vector(self, namespace, source_id):
+        from ..vectors import VECTOR_MARKER, vector_id
+
+        table = self._get_table_name(MemoryType.KNOWLEDGE_BASE)
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                DELETE FROM {table} WHERE id = :id AND namespace = :namespace
+                AND JSON_VALUE(metadata, '$.format') = :format
+            """,
+                {
+                    "id": self._normalize_raw_uuid(vector_id(namespace, source_id)),
+                    "namespace": namespace,
+                    "format": VECTOR_MARKER,
+                },
+            )
+            deleted = cursor.rowcount > 0
+            connection.commit()
+            return deleted
+
+    def query_vectors(
+        self, namespace, embedding, *, limit=10, scope=None, include_embedding=False
+    ):
+        """Native cosine search with strict JSON scope predicates before top-k.
+
+        Unlike legacy best-effort retrieval, missing columns/index support and
+        dimension errors propagate: a composed provider must not claim a miss.
+        """
+        from ..vectors import (
+            VECTOR_MARKER,
+            scope_hash,
+            validate_scope,
+            validate_vector,
+            vector_hit,
+        )
+
+        vector = validate_vector(embedding)
+        filters = validate_scope(scope or {})
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        table = self._get_table_name(MemoryType.KNOWLEDGE_BASE)
+        clauses = [
+            "namespace = :namespace",
+            "embedding IS NOT NULL",
+            "JSON_VALUE(metadata, '$.format') = :format",
+        ]
+        params = {
+            "namespace": namespace,
+            "format": VECTOR_MARKER,
+            "query_vec": array.array("f", vector),
+            "limit": limit,
+        }
+        # JSON paths come only from validate_scope's closed allowlist; values
+        # are always bound. Hashed predicates distinguish empty strings from
+        # null even on Oracle, whose VARCHAR2 treats empty strings as SQL NULL.
+        for index, (key, value) in enumerate(sorted(filters.items())):
+            expression = f"JSON_VALUE(metadata, '$.scope_hashes.{key}')"
+            values = value if isinstance(value, list) else [value]
+            alternatives = []
+            for offset, item in enumerate(values):
+                bind = f"scope_{index}_{offset}"
+                params[bind] = scope_hash(item)
+                alternatives.append(f"{expression} = :{bind}")
+            clauses.append("(" + " OR ".join(alternatives) + ")")
+        sql = f"""
+            SELECT metadata, 1 - VECTOR_DISTANCE(embedding, :query_vec, COSINE){', embedding' if include_embedding else ''}
+            FROM {table}
+            WHERE {' AND '.join(clauses)}
+            ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE), id
+            FETCH FIRST :limit ROWS ONLY
+        """
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(sql, params)
+            return [
+                vector_hit(
+                    {
+                        "metadata": self._deserialize_json_field(row[0]),
+                        "score": row[1],
+                        "embedding": row[2] if include_embedding else None,
+                    },
+                    include_embedding=include_embedding,
+                )
+                for row in cursor
+            ]
 
     def _vector_search(
         self,

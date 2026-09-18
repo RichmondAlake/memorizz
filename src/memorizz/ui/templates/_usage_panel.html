@@ -1,5 +1,6 @@
 {% from '_analytics_charts.html' import bars, trend, donut, usage_table %}
 <section class="usage-dashboard" aria-label="Usage and memory analytics">
+    {% if not trace_analysis %}{% include '_prompt_cache.html' %}{% endif %}
     <div class="usage-kpis">
         <div><span>Recorded model calls</span><strong>{{ usage.totals.calls }}</strong></div>
         <div><span>Measured tokens</span><strong>{{ usage.totals.total_tokens }}</strong><small>{{ usage.totals.unknown_usage_calls }} calls missing usage</small></div>

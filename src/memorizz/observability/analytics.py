@@ -14,6 +14,7 @@ from itertools import islice
 from zoneinfo import ZoneInfo
 
 from .pricing import DEFAULT_PRICING, token_count
+from .prompt_cache import summarize_prompt_cache
 
 MEMORY_FIELDS = (
     "memory_type",
@@ -151,6 +152,7 @@ def aggregate_usage(
     totals = _bucket("Recorded model calls")
     groups = {"agents": {}, "models": {}, "daily": {}, "interactions": {}}
     memories, seen, prices, reasons = {}, set(), {}, {}
+    cache_events = []
     scanned = duplicates = missing_timestamps = 0
     truncated = False
     for index, raw in enumerate(islice(events, max_events + 1)):
@@ -222,6 +224,7 @@ def aggregate_usage(
                 row["retrieval_errors"] += event.get("status") == "error"
             continue
         quote = _quote(event, pricing)
+        cache_events.append(event)
         if quote.get("pricing_version"):
             prices[(quote["pricing_version"], quote["basis"])] = {
                 key: quote.get(key)
@@ -311,6 +314,7 @@ def aggregate_usage(
         "schema_version": 1,
         "timezone": timezone_name,
         "totals": _finish(totals),
+        "prompt_cache": summarize_prompt_cache(cache_events),
         **{
             group: [
                 _finish(bucket)

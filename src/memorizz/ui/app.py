@@ -22,11 +22,13 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from .._env_io import apply_env_updates as _shared_apply_env_updates
+from .._env_io import env_override_warnings
 from .._env_io import load_layered_env as _load_layered_env
 from .._env_io import resolve_env_file as _resolve_env_file
 from .._env_io import (
     resolve_oracle_in_database_embedding_from_env as _resolve_oracle_embedding_mode,
 )
+from .._env_io import validate_env_updates
 from .helpers import (
     DEFAULT_LLM_MODEL_BY_PROVIDER,
     DEFAULT_LLM_PROVIDER,
@@ -74,6 +76,56 @@ DEFAULT_GRAALPY_INTERNET_ACCESS = "0"
 
 SETTINGS_SECTIONS = [
     {
+        "title": "Memory Provider & Notion",
+        "description": "Saved defaults do not reconnect the current UI or migrate memory. Use Connect to switch this UI's provider. For guided Notion setup, run memorizz notion connect in a terminal.",
+        "fields": [
+            {
+                "env": "MEMORIZZ_BACKEND",
+                "label": "Default Memory Provider",
+                "field_type": "select",
+                "options": [{"value": "", "label": "Keep unchanged"}]
+                + [
+                    {"value": name, "label": name.title()}
+                    for name in ("filesystem", "mongodb", "oracle", "notion")
+                ],
+                "hint": "Memory storage, not the LLM provider. Applies to new CLI / MCP processes.",
+            },
+            {
+                "env": "NOTION_TOKEN",
+                "label": "Notion Connection Token",
+                "placeholder": "Leave blank to keep the configured token",
+                "hint": "Share the exact parent page or library with this Notion connection. The token is never prefilled.",
+            },
+            {
+                "env": "MEMORIZZ_NOTION_DATA_SOURCE_ID",
+                "label": "Notion Memory Data Source ID",
+                "field_type": "text",
+                "placeholder": "Data-source UUID (not the enclosing database ID)",
+                "hint": "memorizz notion connect resolves database URLs and checks the managed memory columns.",
+            },
+            {
+                "env": "MEMORIZZ_NOTION_SEMANTIC_BACKEND",
+                "label": "Notion Semantic / Vector Backend",
+                "field_type": "select",
+                "options": [
+                    {"value": "", "label": "Keep unchanged (default: filesystem)"}
+                ]
+                + [
+                    {"value": name, "label": name.title()}
+                    for name in ("filesystem", "mongodb", "oracle", "none")
+                ],
+                "hint": "Notion stores documents; this provider stores vectors. None disables semantic search. Configure its credentials separately using the CLI wizard.",
+            },
+            {
+                "env": "MEMORIZZ_NOTION_VECTOR_PATH",
+                "label": "Notion Filesystem Vector Directory",
+                "field_type": "text",
+                "placeholder": "Automatic separate directory per library when unset",
+                "hint": "Requires the filesystem extra and a configured embedding provider/model.",
+            },
+        ],
+    },
+    {
         "title": "LLM & Embeddings",
         "description": "Keys used by OpenAI, Anthropic, Azure OpenAI, Ollama, Voyage AI, and Hugging Face integrations.",
         "fields": [
@@ -116,7 +168,7 @@ SETTINGS_SECTIONS = [
             {
                 "env": "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER",
                 "label": "Default Embedding Provider",
-                "hint": "Used by Oracle provider connections when embedding provider is not set explicitly.",
+                "hint": "Default for filesystem, MongoDB, Oracle external embeddings, and Notion's separate vector store when not explicitly overridden.",
                 "field_type": "select",
                 "options": [
                     {"value": "", "label": "Not set"},
@@ -130,14 +182,16 @@ SETTINGS_SECTIONS = [
             {
                 "env": "MEMORIZZ_DEFAULT_EMBEDDING_MODEL",
                 "label": "Default Embedding Model",
+                "field_type": "text",
                 "placeholder": "text-embedding-3-small",
                 "hint": "Optional model id used with the default embedding provider.",
             },
             {
                 "env": "MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS",
                 "label": "Default Embedding Dimensions",
+                "field_type": "text",
                 "placeholder": "1536",
-                "hint": "Optional output dimension override (must match Oracle VECTOR column dimensions).",
+                "hint": "Optional output dimensions; must match the selected model and vector index/schema. Changing dimensions may require a new index and sync.",
             },
             {
                 "env": "MEMORIZZ_ORACLE_IN_DATABASE_EMBEDDING",
@@ -897,6 +951,13 @@ def create_app(
                 "env_oracle_schema": os.environ.get("ORACLE_SCHEMA", ""),
                 "has_env_mongodb_uri": bool(env_mongodb_uri),
                 "env_mongodb_db_name": os.environ.get("MONGODB_DB_NAME", ""),
+                "env_notion_data_source_id": os.environ.get(
+                    "MEMORIZZ_NOTION_DATA_SOURCE_ID", ""
+                ),
+                "has_env_notion_token": bool(os.environ.get("NOTION_TOKEN")),
+                "env_notion_semantic_backend": os.environ.get(
+                    "MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"
+                ),
                 "ui_read_only": read_only_mode,
             },
         )
@@ -915,6 +976,10 @@ def create_app(
         mongodb_db_name: Optional[str] = Form(None),
         # FileSystem fields
         filesystem_path: Optional[str] = Form(None),
+        # Notion records and independently selected semantic storage
+        notion_token: Optional[str] = Form(None),
+        notion_data_source_id: Optional[str] = Form(None),
+        notion_semantic_backend: Optional[str] = Form(None),
     ):
         """Handle connection form submission."""
         error = None
@@ -992,6 +1057,27 @@ def create_app(
                 _state["connection_info"] = {"path": filesystem_path}
                 _state["provider_secrets"] = {}
 
+            elif provider_type == "notion":
+                from starlette.concurrency import run_in_threadpool
+
+                from ..memory_provider.notion.factory import (
+                    create_notion_provider_from_env,
+                )
+
+                provider = await run_in_threadpool(
+                    create_notion_provider_from_env,
+                    token=notion_token,
+                    data_source_id=notion_data_source_id,
+                    semantic_backend=notion_semantic_backend,
+                    read_only=read_only_mode,
+                )
+                _state["connection_info"] = {
+                    "data_source_id": provider.config.data_source_id,
+                    "semantic_backend": notion_semantic_backend
+                    or os.getenv("MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"),
+                }
+                _state["provider_secrets"] = {}
+
             else:
                 raise ValueError(f"Unknown provider type: {provider_type}")
 
@@ -1031,6 +1117,13 @@ def create_app(
                     "env_oracle_schema": os.environ.get("ORACLE_SCHEMA", ""),
                     "has_env_mongodb_uri": bool(os.environ.get("MONGODB_URI", "")),
                     "env_mongodb_db_name": os.environ.get("MONGODB_DB_NAME", ""),
+                    "env_notion_data_source_id": os.environ.get(
+                        "MEMORIZZ_NOTION_DATA_SOURCE_ID", ""
+                    ),
+                    "has_env_notion_token": bool(os.environ.get("NOTION_TOKEN")),
+                    "env_notion_semantic_backend": os.environ.get(
+                        "MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"
+                    ),
                     "ui_read_only": read_only_mode,
                 },
             )
@@ -1058,7 +1151,9 @@ def create_app(
             return RedirectResponse(url="/connect", status_code=302)
 
         # Get counts for each memory type
-        stats = _get_memory_stats()
+        from starlette.concurrency import run_in_threadpool
+
+        stats = await run_in_threadpool(_get_memory_stats)
 
         return templates.TemplateResponse(
             "dashboard.html",
@@ -1084,6 +1179,8 @@ def create_app(
                 "provider_type": _state["provider_type"],
                 "connection_info": _state["connection_info"],
                 "settings_sections": _build_settings_sections(),
+                "env_file_path": str(_resolve_env_file().expanduser().absolute()),
+                "config_warnings": [],
                 "message": None,
                 "error": None,
                 "active_page": "settings",
@@ -1109,13 +1206,40 @@ def create_app(
 
         message = None
         error = None
+        config_warnings = []
         if updates:
-            env_error = _apply_env_updates(updates)
-            if env_error:
-                message = f"Saved {len(updates)} setting(s) for this session."
-                error = f"Failed to update .env: {env_error}"
-            else:
-                message = f"Saved {len(updates)} setting(s)."
+            try:
+                validate_env_updates(updates)
+                for key in ("MEMORIZZ_BACKEND", "MEMORIZZ_NOTION_SEMANTIC_BACKEND"):
+                    if key in updates:
+                        field = next(
+                            field for field in SETTINGS_FIELDS if field["env"] == key
+                        )
+                        if updates[key] not in {
+                            option["value"] for option in field["options"]
+                        }:
+                            raise ValueError(
+                                "Choose a supported memory/vector backend from the dropdown."
+                            )
+                if "MEMORIZZ_NOTION_DATA_SOURCE_ID" in updates:
+                    try:
+                        updates["MEMORIZZ_NOTION_DATA_SOURCE_ID"] = str(
+                            uuid.UUID(updates["MEMORIZZ_NOTION_DATA_SOURCE_ID"])
+                        )
+                    except ValueError:
+                        raise ValueError(
+                            "Enter a Notion data-source UUID; use memorizz notion connect to resolve database URLs."
+                        ) from None
+                config_warnings = env_override_warnings(updates)
+            except ValueError as exc:
+                error = str(exc)
+            if error is None:
+                env_error = _apply_env_updates(updates)
+                if env_error:
+                    message = f"Applied {len(updates)} setting(s) to this process, but NOT saved. Existing connections are unchanged."
+                    error = f"Failed to update .env: {env_error}"
+                else:
+                    message = f"Saved {len(updates)} setting(s). Reconnect existing clients to use changed credentials; restart CLI/MCP processes to load saved defaults."
         else:
             message = "No changes to save."
 
@@ -1138,6 +1262,8 @@ def create_app(
                 "provider_type": _state["provider_type"],
                 "connection_info": _state["connection_info"],
                 "settings_sections": _build_settings_sections(),
+                "env_file_path": str(_resolve_env_file().expanduser().absolute()),
+                "config_warnings": config_warnings,
                 "message": message,
                 "error": error,
                 "active_page": "settings",
@@ -2191,7 +2317,9 @@ def _build_settings_sections() -> List[Dict[str, Any]]:
             enriched = {
                 **field,
                 "is_set": is_set,
-                "current_value": current_value,
+                "current_value": current_value
+                if field.get("field_type") in {"text", "timezone", "checkbox", "select"}
+                else "",
             }
             if field.get("field_type") == "checkbox":
                 enriched["checkbox_checked"] = current_value == "1"
@@ -2254,6 +2382,11 @@ def _get_memory_stats() -> Dict[str, int]:
     stats = {}
     if not _state["provider"]:
         return stats
+
+    if _state.get("provider_type") == "notion":
+        # Notion has no cheap COUNT endpoint. Display explicitly labelled local
+        # journal counts, not thirteen full remote scans on every page load.
+        return _state["provider"].index_status()["tracked_by_memory_type"]
 
     for mem_type in MemoryType:
         try:

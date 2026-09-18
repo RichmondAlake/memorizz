@@ -188,8 +188,116 @@ class MongoDBProvider(MemoryProvider):
             result_scores=True,
             provenance=True,
             native_vector_search=True,
+            vector_store=True,
             native_hybrid_search=False,
         )
+
+    def upsert_vector(self, namespace, source_id, embedding, *, metadata, scope=None):
+        from ..vectors import VECTOR_MARKER, vector_document
+
+        if self.config.read_only:
+            raise PermissionError("The semantic provider is read-only")
+        row = vector_document(namespace, source_id, embedding, metadata, scope or {})
+        # The vector interface owns UUID string IDs. The legacy document API
+        # uses ObjectIds, so do not round-trip these through retrieve_by_id.
+        self.knowledge_base_collection.replace_one(
+            {
+                "_id": row["_id"],
+                "namespace": namespace,
+                "metadata.format": VECTOR_MARKER,
+            },
+            row,
+            upsert=True,
+        )
+        return row["id"]
+
+    def delete_vector(self, namespace, source_id):
+        from ..vectors import VECTOR_MARKER, vector_id
+
+        if self.config.read_only:
+            raise PermissionError("The semantic provider is read-only")
+        result = self.knowledge_base_collection.delete_one(
+            {
+                "_id": vector_id(namespace, source_id),
+                "namespace": namespace,
+                "metadata.format": VECTOR_MARKER,
+            }
+        )
+        return bool(result.deleted_count)
+
+    def query_vectors(
+        self, namespace, embedding, *, limit=10, scope=None, include_embedding=False
+    ):
+        from ..vectors import (
+            VECTOR_MARKER,
+            VECTOR_SCOPE_FIELDS,
+            scope_hash,
+            validate_scope,
+            validate_vector,
+            vector_hit,
+        )
+
+        vector = validate_vector(embedding)
+        filters = validate_scope(scope or {})
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        index_name = "memorizz_semantic_index"
+        if not getattr(self, "_composed_vector_index_ready", False):
+            indexes = list(
+                self.knowledge_base_collection.list_search_indexes(name=index_name)
+            )
+            if not any(index.get("queryable") for index in indexes):
+                if self.config.read_only or indexes:
+                    raise VectorSearchUnavailableError(
+                        "The composed semantic index is not queryable"
+                    )
+                created = self._setup_vector_search_index(
+                    self.knowledge_base_collection,
+                    index_name=index_name,
+                    filter_fields=["namespace", "metadata.format"]
+                    + [
+                        "metadata.scope_hashes." + field
+                        for field in sorted(VECTOR_SCOPE_FIELDS)
+                    ],
+                )
+                if not created:
+                    raise VectorSearchUnavailableError(
+                        "Could not create the composed semantic index"
+                    )
+                indexes = list(
+                    self.knowledge_base_collection.list_search_indexes(name=index_name)
+                )
+                if not any(index.get("queryable") for index in indexes):
+                    raise VectorSearchUnavailableError(
+                        "The composed semantic index is not queryable"
+                    )
+            self._composed_vector_index_ready = True
+        predicate = {"namespace": namespace, "metadata.format": VECTOR_MARKER}
+        for key, value in filters.items():
+            predicate["metadata.scope_hashes." + key] = (
+                {"$in": [scope_hash(item) for item in value]}
+                if isinstance(value, list)
+                else scope_hash(value)
+            )
+        pipeline = self._build_vector_search_pipeline(
+            vector,
+            limit,
+            index_name=index_name,
+            search_filter=predicate,
+            include_embedding=include_embedding,
+        )
+        # Fail closed: the ordinary KB helper can fall back to recent documents,
+        # which is not a valid substitute for the vector-only contract.
+        # Atlas reports (1 + cosine) / 2. This optional cross-provider contract
+        # returns cosine consistently with filesystem and Oracle; legacy APIs
+        # retain their existing provider-specific scores.
+        return [
+            vector_hit(
+                {**row, "score": 2 * float(row["score"]) - 1},
+                include_embedding=include_embedding,
+            )
+            for row in self.knowledge_base_collection.aggregate(pipeline)
+        ]
 
     def __init__(self, config: MongoDBConfig):
         """

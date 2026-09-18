@@ -24,15 +24,22 @@ from .eval_commands import eval_app
 from .harness_commands import harness_app
 from .learning_commands import learning_app
 from .mcp_commands import mcp_app
+from .memory_commands import memory_app
+from .notion_commands import notion_app
+from .settings_commands import config_app
 
 app = typer.Typer(
     name="memorizz",
     help="memorizz — a local agent CLI with persistent memory.",
     no_args_is_help=False,
     add_completion=True,
+    pretty_exceptions_show_locals=False,
 )
 
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(notion_app, name="notion")
+app.add_typer(memory_app, name="memory")
+app.add_typer(config_app, name="config")
 app.add_typer(learning_app, name="learning")
 app.add_typer(agents_app, name="agents")
 app.add_typer(harness_app, name="harness")
@@ -172,8 +179,8 @@ def init(
     _init(local=local, force=force)
 
 
-@app.command(name="config", help="Show resolved configuration and paths.")
 def config_cmd():
+    """Compatibility entry point; the config group owns CLI dispatch."""
     _show_config()
 
 
@@ -367,16 +374,27 @@ def _wizard(console, code_mode, depth: int = 0, browser_control=None):
     except (EOFError, KeyboardInterrupt):
         return None
 
-    import getpass
+    from .settings_commands import secret_prompt
+
+    def save_login(values):
+        from .._env_io import env_override_warnings
+
+        for warning in env_override_warnings(values):
+            console.print("Warning: " + warning, markup=False)
+        error = cfg.apply_env_updates(values)
+        if error:
+            console.print("Not saved: " + error, markup=False)
+        else:
+            console.print(f"Saved to {cfg.resolve_env_file()}", markup=False)
 
     if choice == "1":
-        key = getpass.getpass("OPENAI_API_KEY (hidden): ").strip()
+        key = secret_prompt("OPENAI_API_KEY").strip()
         if key:
-            cfg.apply_env_updates({"OPENAI_API_KEY": key})
+            save_login({"OPENAI_API_KEY": key})
     elif choice == "2":
-        key = getpass.getpass("ANTHROPIC_API_KEY (hidden): ").strip()
+        key = secret_prompt("ANTHROPIC_API_KEY").strip()
         if key:
-            cfg.apply_env_updates({"ANTHROPIC_API_KEY": key})
+            save_login({"ANTHROPIC_API_KEY": key})
     elif choice == "3":
         host = ollama_probe.resolve_host()
         if not ollama_probe.reachable(host):
@@ -386,7 +404,7 @@ def _wizard(console, code_mode, depth: int = 0, browser_control=None):
                 f"`ollama pull {cfg.DEFAULT_OLLAMA_LLM}`."
             )
             return None
-        cfg.apply_env_updates({"MEMORIZZ_DEFAULT_LLM_PROVIDER": "ollama"})
+        save_login({"MEMORIZZ_DEFAULT_LLM_PROVIDER": "ollama"})
     else:
         return None
 
@@ -467,12 +485,18 @@ def _run_oneshot(
     )
     if session is None:
         raise typer.Exit(1)
-    result = session.agent.run(
-        text,
-        memory_id=session.memory_id,
-        thread_id=session.thread_id,
-        user_id=session.user_id,
-    )
+    from ..llms.streaming import ProviderStreamError
+
+    try:
+        result = session.agent.run(
+            text,
+            memory_id=session.memory_id,
+            thread_id=session.thread_id,
+            user_id=session.user_id,
+        )
+    except ProviderStreamError as exc:
+        print(str(exc), file=sys.stderr)
+        raise typer.Exit(1) from None
     print(result)
     outcome_labels = {
         "empty": "completed with no results",
@@ -510,15 +534,30 @@ def _init(local, force):
     home = cfg.ensure_home()
     console.print(f"[green]memorizz home:[/green] {home}")
     if local:
-        cfg.apply_env_updates({"MEMORIZZ_DEFAULT_LLM_PROVIDER": "ollama"})
+        from .._env_io import env_override_warnings
+
+        values = {"MEMORIZZ_DEFAULT_LLM_PROVIDER": "ollama"}
+        for warning in env_override_warnings(values):
+            console.print("Warning: " + warning, markup=False)
+        error = cfg.apply_env_updates(values)
+        if error:
+            console.print("Not saved: " + error, markup=False)
+            raise typer.Exit(1)
         console.print("Configured the fully-local Ollama stack. Next steps:")
         console.print("  • install Ollama: https://ollama.com")
         console.print("  • ollama serve")
         console.print(f"  • ollama pull {cfg.DEFAULT_OLLAMA_LLM}")
         console.print(f"  • ollama pull {cfg.DEFAULT_OLLAMA_EMBED_MODEL}")
     else:
-        _wizard(console, code_mode=False)
-    console.print(f"[green]Done.[/green] Config file: {cfg.resolve_env_file()}")
+        if _wizard(console, code_mode=False) is None:
+            console.print(
+                "Setup did not finish. Use memorizz config path to inspect the save target."
+            )
+            return
+    console.print(f"Config file: {cfg.resolve_env_file()}", markup=False)
+    console.print(
+        "Next: memorizz memory configure to choose a memory provider; memorizz config set KEY to edit a setting."
+    )
 
 
 def _show_config():
@@ -530,6 +569,18 @@ def _show_config():
     console.print(f"  memory root: {cfg.memory_root()}")
     backend = os.environ.get("MEMORIZZ_BACKEND", "").strip().lower() or "filesystem"
     console.print(f"  memory backend: [green]{backend}[/green]")
+    from .settings_commands import describe_target
+
+    describe_target(cfg.resolve_env_file().expanduser().absolute())
+    console.print(
+        "Use memorizz config get KEY for effective/saved values, config set KEY [VALUE] to edit, or memorizz memory configure for guided setup."
+    )
+    if backend == "notion":
+        console.print(
+            "  Notion vector backend: "
+            + os.environ.get("MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"),
+            markup=False,
+        )
 
     embedding_provider = os.environ.get(
         "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", ""

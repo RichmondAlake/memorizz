@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import os
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Generator, List, Optional
 
@@ -13,6 +14,17 @@ from .llm_provider import LLMProvider
 from .message_roles import developer_messages_to_system
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CONTEXT_WINDOW_TOKENS = 8192
+
+# Only daemon options belong in persisted configuration, never credentials or
+# arbitrary client kwargs that a caller put in additional_config.
+_PERSISTED_OPTIONS = frozenset(
+    "num_keep seed num_predict top_k top_p min_p typical_p repeat_last_n "
+    "temperature repeat_penalty presence_penalty frequency_penalty mirostat "
+    "mirostat_tau mirostat_eta penalize_newline stop num_ctx num_batch num_gpu "
+    "main_gpu use_mmap num_thread".split()
+)
 
 
 class OllamaLLM(LLMProvider):
@@ -40,7 +52,9 @@ class OllamaLLM(LLMProvider):
     seed : int, optional
         Random seed for reproducibility.
     context_window_tokens : int, optional
-        Override context-window size (default 128 000).
+        Context window sent to Ollama as ``options.num_ctx``. Defaults to
+        ``additional_config['num_ctx']``, then ``OLLAMA_CONTEXT_LENGTH``, then
+        8192. The same value is used for MemAgent's history budget.
     timeout : float, optional
         Request timeout in seconds.
     think : bool, optional
@@ -89,7 +103,26 @@ class OllamaLLM(LLMProvider):
         self.client = _ollama.Client(**client_kwargs)
         self.model = model
         self._host = host
-        self.context_window_tokens = context_window_tokens or 128_000
+        self._timeout = timeout
+        context_window = context_window_tokens
+        if context_window is None:
+            context_window = (additional_config or {}).get("num_ctx")
+        if context_window is None:
+            context_window = (
+                os.getenv("OLLAMA_CONTEXT_LENGTH") or DEFAULT_CONTEXT_WINDOW_TOKENS
+            )
+        try:
+            if isinstance(context_window, bool) or not isinstance(
+                context_window, (int, str)
+            ):
+                raise ValueError
+            self.context_window_tokens = int(context_window)
+            if self.context_window_tokens <= 0:
+                raise ValueError
+        except ValueError:
+            raise ValueError(
+                "Ollama context_window_tokens must be a positive integer"
+            ) from None
         self._last_usage: Optional[Dict[str, int]] = None
 
         # Build options dict for Ollama requests
@@ -119,6 +152,11 @@ class OllamaLLM(LLMProvider):
             for key, value in cfg.items():
                 if value is not None:
                     self._options[key] = value
+
+        # Reporting a large model limit without setting num_ctx lets the
+        # daemon silently truncate prompts using its much smaller default.
+        # An explicit context_window_tokens wins over additional_config.
+        self._options["num_ctx"] = self.context_window_tokens
 
         # Reasoning models (qwen3 / deepseek-r1 / qwq / magistral / *thinking*)
         # must run with `think` enabled — otherwise Ollama returns truncated or
@@ -213,7 +251,13 @@ class OllamaLLM(LLMProvider):
             "provider": "ollama",
             "model": self.model,
             "host": self._host,
+            "context_window_tokens": self.context_window_tokens,
+            "additional_config": deepcopy(
+                {k: v for k, v in self._options.items() if k in _PERSISTED_OPTIONS}
+            ),
         }
+        if self._timeout is not None:
+            cfg["timeout"] = self._timeout
         if self.think is not None:
             cfg["think"] = self.think
         return cfg
@@ -346,12 +390,14 @@ class OllamaLLM(LLMProvider):
         tool_calls_acc: List[Dict[str, Any]] = []
 
         from ..streaming import check_cancelled
+        from .response_metadata import response_metadata
         from .streaming import ProviderStreamError, closing_provider_stream
 
         finished = False
         with closing_provider_stream(self.client.chat(**kwargs)) as stream:
             for chunk in stream:
                 check_cancelled()
+                self._last_response_metadata.update(response_metadata(chunk))
                 msg = (
                     chunk.message
                     if hasattr(chunk, "message")
@@ -398,20 +444,24 @@ class OllamaLLM(LLMProvider):
                     finished = True
                     # Extract final usage from the last chunk
                     self._last_usage = self._extract_usage(chunk)
-                    from .response_metadata import response_metadata
-
-                    self._last_response_metadata = response_metadata(
-                        chunk,
-                        text=accumulated_content,
-                        max_output_tokens=(kwargs.get("options") or {}).get(
-                            "num_predict"
-                        ),
+                    self._last_response_metadata.update(
+                        response_metadata(
+                            chunk,
+                            text=accumulated_content,
+                            max_output_tokens=(kwargs.get("options") or {}).get(
+                                "num_predict"
+                            ),
+                        )
                     )
 
         if not finished:
-            raise ProviderStreamError("provider_stream_incomplete")
+            raise ProviderStreamError(
+                "provider_stream_incomplete", self.get_last_response_metadata()
+            )
         if self._last_response_metadata.get("finish_reason") == "length":
-            raise ProviderStreamError("provider_length")
+            raise ProviderStreamError(
+                "provider_length", self.get_last_response_metadata()
+            )
         if self._last_usage:
             yield {"type": "usage", "usage": self._last_usage}
 

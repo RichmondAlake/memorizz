@@ -38,17 +38,27 @@ artifacts under the same version.
   `RichmondAlake/homebrew-memorizz`. Without it, the job skips the tap update;
   a green Publish workflow alone does not prove that every channel was updated.
 
-## Homebrew prerequisite for 0.10.0
+## Homebrew preparation
 
-The existing formula updater changes only the main source URL and SHA-256. It
-does not refresh Python resource dependencies or rebuild bottles. Before using
-it for 0.10.0, update the separate tap formula to include the new `packaging`
-base dependency and its verified source checksum. Remove the old-version bottle
-block or replace it with bottles built and tested for the new version. The
-Windows-only `tzdata` dependency is not needed on Homebrew's macOS/Linux targets.
+The formula updater changes the main source URL and SHA-256 and removes bottles
+when advancing to a new version. Repeated updates preserve bottles built for the
+current version and succeed without an empty commit. It does not refresh Python
+resource dependencies or build new bottles.
+
+Compare the base dependency list with the separate tap before every release.
+The 0.10.0 formula already includes `packaging` and Typer 0.27.2 (the new minimum);
+0.11.0 adds no base dependencies.
+The Windows-only `tzdata` dependency is not needed on Homebrew's macOS/Linux
+targets. Publish new bottles only after building and testing the new version.
 
 Verify source installation and the formula's tests in the tap, then verify any
 new bottles on their target platforms. Configure `TAP_PUSH_TOKEN` or update the
 tap through its own authorized release workflow; do not copy credentials into
 this repository. Finally, check the published PyPI, npm, GitHub and Homebrew
 versions individually.
+
+When `TAP_PUSH_TOKEN` is unavailable, use the tap's separate pull-request flow
+after PyPI publication: its `brew bump` workflow proposes the update, tap tests
+build the new bottles, and `brew pr-pull` publishes the tested pull request.
+The package repository's successful Publish run alone does not complete that
+Homebrew release.

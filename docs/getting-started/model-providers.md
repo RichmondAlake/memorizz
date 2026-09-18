@@ -70,6 +70,12 @@ limits change independently of Memorizz.
     )
     ```
 
+    The local context window defaults to 8,192 tokens and is sent to Ollama as
+    `options.num_ctx`. Set `context_window_tokens` in `llm_config` to change it.
+    Without that setting, `additional_config.num_ctx` takes precedence over
+    `OLLAMA_CONTEXT_LENGTH`, followed by the default. The provider saves and
+    reports the same effective window so history budgeting matches the request.
+
 === "Azure OpenAI"
 
     ```python
@@ -87,6 +93,18 @@ limits change independently of Memorizz.
 
 The snippets assume `from memorizz import MemAgentBuilder` and provider
 credentials in the environment.
+
+## Saving and changing models
+
+Saved provider configuration preserves the effective context window and
+supported generation settings. API credentials are supplied separately through
+the environment when reloading.
+
+`MemAgent.load(agent_id, memory_provider=provider, llm_config=new_config)` uses
+the replacement configuration for both the runtime model and reported metadata.
+A normal reload preserves an agent-level `context_window_tokens` cap. Replacing
+the model uses its own context budget unless you pass a new agent-level cap;
+that cap cannot exceed the provider's configured window.
 
 ## Bring an initialized provider
 

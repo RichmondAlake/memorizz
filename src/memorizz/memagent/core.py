@@ -57,6 +57,8 @@ from ..execution import (
 )
 from ..internet_access import get_default_internet_access_provider
 from ..llms.llm_factory import create_llm_provider
+from ..llms.response_metadata import validate_response_completion
+from ..llms.streaming import ProviderStreamError
 from ..long_term.semantic.entity_memory import EntityAttributeInput, EntityRelationInput
 from ..observability.analytics import MEMORY_FIELDS
 from ..observability.analytics import memory_type as usage_memory_type
@@ -103,6 +105,7 @@ from .managers import (
     ToolManager,
 )
 from .utils.context_dedup import dedupe_and_select, filter_skill_covered_workflows
+from .utils.prompt_budget import fit_prompt
 from .utils.tool_log import (  # noqa: F401  — re-exported for compatibility
     _TOOL_LOG_PLACEHOLDER_PREFIX,
     _build_tool_log_placeholder,
@@ -1486,14 +1489,18 @@ class MemAgent:
         self, explicit_value: Optional[int], llm_config: Optional[Dict[str, Any]]
     ) -> Optional[int]:
         """Configure the context window token budget from overrides/config/provider."""
-        if explicit_value and explicit_value > 0:
-            return explicit_value
-
-        config_value = self._extract_context_window_from_config(llm_config)
-        if config_value:
-            return config_value
-
-        return self._get_model_context_window()
+        configured = (
+            int(explicit_value)
+            if type(explicit_value) is int and explicit_value > 0
+            else self._extract_context_window_from_config(llm_config)
+        )
+        provider_limit = self._get_model_context_window()
+        limits = [
+            value
+            for value in (configured, provider_limit)
+            if type(value) is int and value > 0
+        ]
+        return min(limits) if limits else None
 
     def _get_tool_iteration_limit(self) -> int:
         """Return the max tool-calling iterations allowed in one run loop."""
@@ -1676,27 +1683,28 @@ class MemAgent:
             + self._estimate_text_tokens(query)
             + _PROMPT_BUFFER_TOKENS
         )
-        prompt_budget = max(512, int(context_window * _PROMPT_WINDOW_RATIO))
-        history_budget = max(160, prompt_budget - base_tokens)
+        prompt_budget = int(context_window * _PROMPT_WINDOW_RATIO)
+        history_budget = max(0, prompt_budget - base_tokens)
 
         # Find the earliest message index whose suffix fits the token budget
         # (and the message-count limit).
         total = len(normalized)
         ideal_start = max(0, total - history_limit)
         consumed = 0
-        budget_start = total - 1  # always keep at least the newest message
+        budget_start = total
         for index in range(total - 1, -1, -1):
             message_cost = (
                 self._estimate_text_tokens(normalized[index].get("content")) + 6
             )
-            if index < total - 1 and (consumed + message_cost) > history_budget:
+            if (consumed + message_cost) > history_budget:
                 break
             consumed += message_cost
             budget_start = index
             if consumed >= history_budget:
                 break
         ideal_start = max(ideal_start, budget_start)
-
+        if ideal_start >= total:
+            return []
         return normalized[self._quantize_history_start(ideal_start, normalized) :]
 
     @staticmethod
@@ -1797,7 +1805,16 @@ class MemAgent:
         # Sanitize once at the boundary so any LOB that slipped through from
         # memory loaders (conversation history, KB retrievals, summaries…)
         # doesn't blow up the LLM provider's json.dumps during streaming.
-        return _to_jsonable(messages)
+        return self._fit_prompt(_to_jsonable(messages), tools=None)
+
+    def _fit_prompt(self, messages, tools):
+        """Use the smaller agent/provider limit for the complete request."""
+        limits = [
+            value
+            for value in (self._context_window_tokens, self._get_model_context_window())
+            if type(value) is int and value > 0
+        ]
+        return fit_prompt(messages, tools, min(limits) if limits else None)
 
     def _render_activated_skill_sections(
         self, context: Dict[str, Any]
@@ -4966,15 +4983,18 @@ class MemAgent:
         error: Optional[BaseException] = None
         response_metadata = {}
         try:
+            messages = self._fit_prompt(messages, tools)
             response = self.model.generate(messages, tools=tools)
             from ..llms.response_metadata import response_metadata as describe_response
 
             response_metadata = describe_response(
                 response, text=response if isinstance(response, str) else None
             )
+            validate_response_completion(self.model, response)
             return response
         except BaseException as exc:
             error = exc
+            response_metadata.update(getattr(exc, "response_metadata", {}) or {})
             raise
         finally:
             self._finish_model_trace(
@@ -5003,6 +5023,7 @@ class MemAgent:
         stream = None
         error: Optional[BaseException] = None
         try:
+            messages = self._fit_prompt(messages, tools)
             stream = iter(self.model.generate_stream(messages, tools=tools))
             while True:
                 check_cancelled()
@@ -5037,6 +5058,12 @@ class MemAgent:
                                 provider_ttft_ms=round(ttft_ms, 3),
                             )
                 if event.get("type") in {"done", "tool_calls"}:
+                    validate_response_completion(
+                        self.model,
+                        event.get("response")
+                        if event["type"] == "tool_calls"
+                        else event.get("content", ""),
+                    )
                     terminal_received = True
                 yield event
         except GeneratorExit:
@@ -5147,8 +5174,6 @@ class MemAgent:
                 execution_backend=(tool_context or {}).get("harness_execution_backend"),
             )
             if session_for(self) is not None and result.status.value != "succeeded":
-                from ..llms.streaming import ProviderStreamError
-
                 raise ProviderStreamError("harness_" + str(result.status.value))
             return (
                 result.final_response
@@ -5353,8 +5378,8 @@ class MemAgent:
             turn_status = "approval_required"
             turn_error_code = "approval_required"
             raise
-        except CompletionRejectedError:
-            turn_error_code = "CompletionRejectedError"
+        except (CompletionRejectedError, ProviderStreamError) as exc:
+            turn_error_code = getattr(exc, "code", type(exc).__name__)
             raise
         except Exception as e:
             logger.error(f"MemAgent execution failed: {e}")
@@ -6104,8 +6129,6 @@ class MemAgent:
         from ..llms.streaming import streaming_capabilities
 
         if self.model is None and session_for(self) is not None:
-            from ..llms.streaming import ProviderStreamError
-
             raise ProviderStreamError("model_not_configured")
         if not self.model or not streaming_capabilities(self.model)["text_deltas"]:
             # Fallback: run synchronously and yield the full result
@@ -6321,6 +6344,8 @@ class MemAgent:
                 if is_provider_error
                 else "stream_error"
             )
+            if isinstance(e, ProviderStreamError):
+                error_code = e.code
             turn_error_code = error_code
             if trace_initialized:
                 self._finish_trace_turn("error", error_code=turn_error_code)
@@ -6345,7 +6370,7 @@ class MemAgent:
                     "agent_id": self.agent_id,
                 },
             )
-            if isinstance(e, CompletionRejectedError):
+            if isinstance(e, (CompletionRejectedError, ProviderStreamError)):
                 raise
             if session:
                 raise
@@ -6535,6 +6560,11 @@ class MemAgent:
                 "error_code",
                 "duration_ms",
                 "model",
+                "response_model",
+                "prompt_cache_enabled",
+                "prompt_cache_prefix",
+                "prompt_cache_key",
+                "prompt_cache_warning",
                 "provider",
                 "persona_id",
                 "persona_version",
@@ -7377,9 +7407,9 @@ class MemAgent:
             },
         )
 
-        # Serialize exactly once and decide before persistence. Small results
-        # remain inline and create no tool-log row; expansion tools can never
-        # create pointer-to-pointer loops.
+        # Serialize once. Durable capture is independent from prompt offloading:
+        # callers may retain small results without replacing them by pointers.
+        # Expansion reads do not create another copy of the original evidence.
         tool_log_id = None
         result_str = serialize_tool_result(result)
         is_expansion_tool = (
@@ -7389,7 +7419,10 @@ class MemAgent:
             not is_expansion_tool
             and self.tool_result_policy.should_offload(logical_tool_name, result_str)
         )
-        if offload_eligible and self.memory_manager and self._current_memory_id:
+        persist_eligible = not is_expansion_tool and (
+            offload_eligible or self.tool_result_policy.persist_all_results
+        )
+        if persist_eligible and self.memory_manager and self._current_memory_id:
             try:
                 tool_log_id = self.memory_manager.store_tool_log(
                     tool_name=logical_tool_name,
@@ -7408,7 +7441,7 @@ class MemAgent:
             except Exception as log_exc:
                 logger.debug("Tool log storage failed: %s", log_exc)
 
-        should_offload = bool(tool_log_id)
+        should_offload = offload_eligible and bool(tool_log_id)
         if should_offload and tool_log_id:
             compact_result = self.tool_result_policy.pointer(
                 tool_name=logical_tool_name,
@@ -7510,7 +7543,7 @@ class MemAgent:
                 request_context=request_context,
             )
             return
-        from ..llms.streaming import ProviderStreamError, streaming_capabilities
+        from ..llms.streaming import streaming_capabilities
 
         workflow = self._init_workflow_capture(query, user_id)
         messages = self._build_prompt_messages(
@@ -7656,10 +7689,38 @@ class MemAgent:
                             if event.get("content", candidate) != candidate:
                                 raise ProviderStreamError("provider_delta_mismatch")
                             if session.mode == "final_stream" and not final_phase:
+                                # Some tool-capable models end the tool phase
+                                # with text instead of calling our synthetic
+                                # finalizer. Treat that as a completion proposal
+                                # under the same host evidence gate. Discard the
+                                # draft and generate the public answer in a new
+                                # request with tools disabled.
+                                decision = self._evaluate_completion_candidate(
+                                    query=query,
+                                    response="",
+                                    iteration=iteration + 1,
+                                    tool_call_count=tool_count,
+                                )
+                                if not decision.accepted:
+                                    rejections += 1
+                                    if (
+                                        rejections
+                                        > self.completion_policy.max_rejections
+                                    ):
+                                        raise CompletionRejectedError(
+                                            decision, rejections
+                                        )
+                                final_phase = decision.accepted
                                 messages.append(
                                     {
                                         "role": "system",
-                                        "content": "Finish tool evidence collection and call memorizz_finalize_answer alone; do not draft the answer.",
+                                        "content": (
+                                            "Tool evidence collection is complete. Answer the user's current request now using the available evidence; tools are disabled."
+                                            if final_phase
+                                            else self.completion_policy.retry_message(
+                                                decision
+                                            )
+                                        ),
                                     }
                                 )
                                 break
@@ -8652,8 +8713,6 @@ class MemAgent:
                         "unexpected_response_format", fallback_response
                     )
                 if session_for(self) is not None:
-                    from ..llms.streaming import ProviderStreamError
-
                     raise ProviderStreamError("unexpected_response_format")
                 self._persist_workflow_run(workflow)
                 return fallback_response
@@ -8665,8 +8724,6 @@ class MemAgent:
                     "Delegate exhausted its iteration budget before completion",
                 )
             if session_for(self) is not None:
-                from ..llms.streaming import ProviderStreamError
-
                 raise ProviderStreamError("iteration_limit")
             final_response = (
                 "I reached the maximum number of tool-call iterations "
@@ -8692,7 +8749,7 @@ class MemAgent:
                 )
                 return ""
             return self._approval_required_payload(approval.proposal)
-        except CompletionRejectedError:
+        except (CompletionRejectedError, ProviderStreamError):
             if "workflow" in locals():
                 self._persist_workflow_run(workflow)
             raise
@@ -9721,6 +9778,13 @@ class MemAgent:
         episodic vector recall (the pre-fix status quo for every row).
         """
         if not self._conversation_embedding_enabled or not self.memory_provider:
+            return
+        from ..memory_provider.base import provider_manages_embeddings
+
+        if provider_manages_embeddings(self.memory_provider):
+            # Composed stores have already indexed with their selected model.
+            # Global-model backfill would duplicate paid work and asynchronously
+            # rewrite canonical Notion records after the turn has completed.
             return
         pairs = [
             (unit_id, text)

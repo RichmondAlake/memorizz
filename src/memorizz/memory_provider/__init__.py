@@ -67,6 +67,10 @@ def _lazy_import_oracle():
 
 # Make providers available via module-level getattr
 def __getattr__(name):
+    if name in ("NotionProvider", "NotionConfig"):
+        from .notion import NotionConfig, NotionProvider
+
+        return NotionProvider if name == "NotionProvider" else NotionConfig
     if name == "MongoDBProvider":
         return _lazy_import_mongodb()
     elif name == "OracleProvider":
@@ -93,6 +97,8 @@ __all__ = [
     "OracleProvider",
     "FileSystemProvider",
     "FileSystemConfig",
+    "NotionProvider",
+    "NotionConfig",
     "create_default_memory_provider",
     "MemoryType",
 ]

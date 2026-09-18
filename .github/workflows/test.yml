@@ -26,7 +26,8 @@ jobs:
         # tests/unit is offline + deterministic. tests/performance is timing/
         # stress (flaky on shared CI runners) and tests/integration may need
         # live services — run those locally/manually, not as the merge gate.
-        run: pytest tests/unit -q
+        # The Notion and CLI configuration E2E files use local fixtures only.
+        run: pytest tests/unit tests/integration/test_notion_provider_e2e.py tests/integration/test_notion_demo.py tests/integration/test_cli_configuration_e2e.py -q
 
   lint:
     runs-on: ubuntu-latest

@@ -44,4 +44,4 @@ repos:
         # First-party tutorials are executed, sanitized release evidence. Keep
         # their bounded outputs so readers can inspect results without rerunning
         # paid providers or Oracle; other notebooks remain output-free by default.
-        exclude: ^examples/(metaharness|zero_to_hero)/
+        exclude: ^examples/(metaharness|zero_to_hero|context_engineering)/

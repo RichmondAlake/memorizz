@@ -35,7 +35,11 @@ def _to_jsonable(value: Any) -> Any:
             read_value = reader()
         except Exception:
             return str(value)
-        return _to_jsonable(read_value)
+        # LOB/file readers return text or bytes. Do not recursively follow
+        # arbitrary reader objects (including a reader returning itself).
+        if isinstance(read_value, (str, bytes)):
+            return _to_jsonable(read_value)
+        return str(value)
     if isinstance(value, bytes):
         try:
             return value.decode("utf-8")

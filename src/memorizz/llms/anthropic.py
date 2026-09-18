@@ -151,7 +151,14 @@ class Anthropic(LLMProvider):
     # ------------------------------------------------------------------
 
     def get_config(self) -> Dict[str, Any]:
-        return {"provider": "anthropic", "model": self.model}
+        return {
+            "provider": "anthropic",
+            "model": self.model,
+            "context_window_tokens": self.context_window_tokens,
+            "max_tokens": self._max_tokens,
+            "enable_prompt_caching": self._enable_prompt_caching,
+            "additional_config": copy.deepcopy(self._request_options),
+        }
 
     # ------------------------------------------------------------------
     # Tool metadata helpers (delegate to a simple LLM call)
@@ -195,14 +202,11 @@ class Anthropic(LLMProvider):
     # ------------------------------------------------------------------
 
     def generate_text(self, prompt: str, instructions: Optional[str] = None) -> str:
-        kwargs: Dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": self._max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        messages = []
         if instructions:
-            kwargs["system"] = instructions
-        kwargs.update(self._request_options)
+            messages.append({"role": "system", "content": instructions})
+        messages.append({"role": "user", "content": prompt})
+        kwargs = self._build_request_kwargs(messages)
 
         self._last_usage = None
         self._last_response_metadata = {}
@@ -299,7 +303,9 @@ class Anthropic(LLMProvider):
                 if event_type == "message_stop":
                     stopped = True
                 elif event_type == "error":
-                    raise ProviderStreamError("provider_stream_error")
+                    raise ProviderStreamError(
+                        "provider_stream_error", self.get_last_response_metadata()
+                    )
                 elif event_type == "message_start":
                     # message_start carries the authoritative input-side usage
                     # (including cache_read/cache_creation); output tokens
@@ -378,14 +384,17 @@ class Anthropic(LLMProvider):
                         self._last_usage = merged
 
         if not stopped:
-            raise ProviderStreamError("provider_stream_incomplete")
+            raise ProviderStreamError(
+                "provider_stream_incomplete", self.get_last_response_metadata()
+            )
         if self._last_response_metadata.get("finish_reason") in {
             "max_tokens",
             "refusal",
             "pause_turn",
         }:
             raise ProviderStreamError(
-                "provider_" + self._last_response_metadata["finish_reason"]
+                "provider_" + self._last_response_metadata["finish_reason"],
+                self.get_last_response_metadata(),
             )
         if self._last_usage:
             yield {"type": "usage", "usage": self._last_usage}
@@ -451,6 +460,9 @@ class Anthropic(LLMProvider):
         kwargs.update(copy.deepcopy(self._request_options))
         self._apply_cache_control(kwargs)
         self._validate_cache_control_budget(kwargs)
+        from .prompt_cache import cache_request_metadata
+
+        self._last_prompt_cache_metadata = cache_request_metadata(kwargs, "anthropic")
         return kwargs
 
     def _apply_cache_control(self, kwargs: Dict[str, Any]) -> None:
@@ -646,11 +658,12 @@ class Anthropic(LLMProvider):
             "completion_tokens": output_tokens,
             "total_tokens": total,
         }
-        if cache_read:
+        if getattr(usage, "cache_read_input_tokens", None) is not None:
             extracted["cached_tokens"] = cache_read
             extracted["cache_read_input_tokens"] = cache_read
-        if cache_creation:
+        if getattr(usage, "cache_creation_input_tokens", None) is not None:
             extracted["cache_creation_input_tokens"] = cache_creation
+            extracted["cache_write_tokens"] = cache_creation
         return extracted
 
     def get_last_response_metadata(self) -> Dict[str, Any]:

@@ -4,6 +4,7 @@ import json
 import os
 import sys
 
+from ..llms.streaming import provider_error_message
 from . import config as cfg
 
 
@@ -28,7 +29,7 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
         thread_id=session.thread_id,
         user_id=session.user_id,
     )
-    status, state_saved = "error", "unknown"
+    status, state_saved, failure_message = "error", "unknown", None
     try:
         for event in stream:
             kind = event["type"]
@@ -37,6 +38,7 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
                 session.thread_id = event.get("thread_id") or session.thread_id
             if kind == "run.done":
                 status = event["status"]
+                failure_message = provider_error_message(event.get("error_code"))
                 state_saved = save_stream_session(session)
                 event = {
                     **event,
@@ -61,6 +63,8 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
             stdout.flush()
         if status != "completed" or state_saved == "failed":
             stderr.write(f"Run {status}; CLI state {state_saved}.\n")
+            if output == "text" and failure_message:
+                stderr.write(failure_message + "\n")
         return (
             130
             if status == "cancelled"

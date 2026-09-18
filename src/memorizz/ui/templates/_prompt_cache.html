@@ -1,0 +1,12 @@
+{% if usage.prompt_cache is defined %}
+{% set cache = usage.prompt_cache %}
+<section class="detail-section" id="provider-prompt-cache" aria-label="Provider prompt cache">
+    <h2>Provider prompt cache {% if cache.attention %}<span class="badge badge-warning">Needs attention</span>{% endif %}</h2>
+    <p><strong>{{ '%.1f%%'|format(cache.read_percent) if cache.read_percent is not none else 'Unknown' }}</strong> of measured input tokens read from cache · {{ cache.hit }} call{{ '' if cache.hit == 1 else 's' }} with reuse · {{ cache.write }} cache write{{ '' if cache.write == 1 else 's' }} without reuse · {{ cache.no_reuse }} call{{ '' if cache.no_reuse == 1 else 's' }} without reuse.</p>
+    {% if cache.disabled %}<p class="error-message">Caching was disabled on {{ cache.disabled }} call{{ '' if cache.disabled == 1 else 's' }}. Enable provider prompt caching on that request path.</p>{% endif %}
+    {% if cache.configuration_warning %}<p class="error-message">Cache options were dropped or unsupported on {{ cache.configuration_warning }} call{{ '' if cache.configuration_warning == 1 else 's' }}. Check provider SDK compatibility.</p>{% endif %}
+    {% if cache.unknown %}<p>{{ cache.unknown }} {{ 'call has' if cache.unknown == 1 else 'calls have' }} unknown cache usage. Capture the provider's cache read/write counters to diagnose them.</p>{% endif %}
+    {% for warning in cache.warnings %}<p class="badge-warning">{{ warning.model }}: {{ warning.message }}</p>{% endfor %}
+    <p>First requests, short prompts and expired entries may have no reuse. Warnings identify configuration problems or observed drops; they do not prove the provider cache is broken. Prompt caching reduces repeated input processing; generated output is still billed.</p>
+</section>
+{% endif %}

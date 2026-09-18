@@ -91,7 +91,95 @@ class FileSystemProvider(MemoryProvider):
             provenance=True,
             native_vector_search=bool(self.config.use_faiss),
             native_hybrid_search=False,
+            vector_store=True,
         )
+
+    def query_vectors(
+        self, namespace, embedding, *, limit=10, scope=None, include_embedding=False
+    ):
+        """Exact cosine ranking of content-free vectors, scoped before top-k."""
+        from ..vectors import (
+            VECTOR_MARKER,
+            scope_matches,
+            validate_scope,
+            validate_vector,
+            vector_hit,
+        )
+
+        query = validate_vector(embedding)
+        filters = validate_scope(scope or {})
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        ranked = []
+        with self._locks[MemoryType.KNOWLEDGE_BASE]:
+            # CLI sync can run in another process. One cheap catalog stat keeps
+            # readers coherent without rereading every vector on warm queries.
+            index_path = self._store_paths[MemoryType.KNOWLEDGE_BASE] / "index.json"
+            try:
+                stat = index_path.stat()
+                revision = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+            except FileNotFoundError:
+                if self._indexes[MemoryType.KNOWLEDGE_BASE]:
+                    raise RuntimeError(
+                        "The semantic vector catalog is missing"
+                    ) from None
+                revision = None
+            if revision != getattr(self, "_composed_vector_revision", None):
+                with index_path.open(encoding="utf-8") as handle:
+                    catalog = json.load(handle)
+                if not isinstance(catalog, dict) or not isinstance(
+                    catalog.get("items"), dict
+                ):
+                    raise ValueError(
+                        "Invalid semantic vector catalog; rebuild the index"
+                    )
+                self._indexes[MemoryType.KNOWLEDGE_BASE] = catalog["items"]
+                self._composed_vector_cache = None
+            cache = getattr(self, "_composed_vector_cache", None)
+            if cache is None:
+                cache = {}
+                for identifier in self._indexes[MemoryType.KNOWLEDGE_BASE]:
+                    row = self._read_document(MemoryType.KNOWLEDGE_BASE, identifier)
+                    if (
+                        row
+                        and (row.get("metadata") or {}).get("format") == VECTOR_MARKER
+                    ):
+                        cache.setdefault(row.get("namespace"), []).append(row)
+                self._composed_vector_cache = cache
+                self._composed_vector_revision = revision
+            eligible = []
+            for row in cache.get(namespace, []):
+                if not scope_matches(row["metadata"], filters):
+                    continue
+                stored = validate_vector(row.get("embedding"))
+                if len(stored) != len(query):
+                    raise ValueError(
+                        "Embedding dimensions changed; rebuild this semantic index"
+                    )
+                eligible.append(row)
+            if eligible and np is not None:
+                matrix = np.asarray(
+                    [row["embedding"] for row in eligible], dtype="float64"
+                )
+                query_array = np.asarray(query, dtype="float64")
+                scores = (matrix @ query_array) / (
+                    np.linalg.norm(matrix, axis=1) * np.linalg.norm(query_array)
+                )
+            else:
+                scores = [
+                    self._cosine_similarity(query, row["embedding"]) for row in eligible
+                ]
+            # Only materialize the requested result vectors; all ranking and
+            # scope checks run from the warmed vector cache, not per-file reads.
+            order = sorted(
+                range(len(eligible)),
+                key=lambda index: (-float(scores[index]), eligible[index]["id"]),
+            )[:limit]
+            for index in order:
+                row = {**eligible[index], "score": float(scores[index])}
+                ranked.append(vector_hit(row, include_embedding=include_embedding))
+        ranked.sort(key=lambda hit: (-hit["score"], hit["source_id"]))
+        return ranked[:limit]
 
     def __init__(self, config: FileSystemConfig):
         self.config = config
@@ -1299,6 +1387,11 @@ class FileSystemProvider(MemoryProvider):
                     str(document.get("name", "")),
                     str(document.get("title", "")),
                 ]
+                if memory_type == MemoryType.TOOL_LOG:
+                    haystacks.extend(
+                        str(document.get(field) or "")
+                        for field in ("tool_name", "arguments", "result", "error")
+                    )
                 searchable = "\n".join(haystacks).lower()
                 if needle in searchable:
                     score = 2.0
@@ -1361,6 +1454,8 @@ class FileSystemProvider(MemoryProvider):
         return index, doc_ids
 
     def _mark_vector_index_dirty(self, memory_type: MemoryType) -> None:
+        if memory_type == MemoryType.KNOWLEDGE_BASE:
+            self._composed_vector_cache = None
         if memory_type not in self._vector_state:
             return
         self._vector_state[memory_type]["dirty"] = True

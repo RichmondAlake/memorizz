@@ -90,6 +90,36 @@ memorizz
 Cloud keys are auto-detected (Anthropic → OpenAI → Azure → local Ollama). You can
 also save a key from inside the REPL with `/login`.
 
+### Choose a memory provider (including Notion)
+
+Memory storage is independent of the LLM. `--provider` and `/provider` select
+the **LLM**; use these commands for memory:
+
+```bash
+memorizz memory configure          # guided filesystem / MongoDB / Oracle / Notion
+memorizz notion connect            # shortcut to the guided Notion setup
+memorizz notion connect --project  # explicitly save to this directory's .env
+```
+
+Inside the REPL, use `/memory-provider notion`. The wizard prompts for the
+token with hidden input, accepts a Notion database URL or data-source ID,
+checks access and managed columns, and lets you choose a separate vector
+backend and embedding model. Choose **create** to provision an isolated area
+below a page you have shared with the connection; nothing is created until
+you confirm. Keep the printed resource IDs and local `notion-setup-*.json`
+manifest; do not blindly rerun creation after a partial failure.
+
+Setup checks Notion read access/schema, not vector connectivity, model
+availability or write permissions on an existing library. It makes no paid
+embedding calls or model downloads. After restart, run `memorizz notion status`
+and then `memorizz notion sync` (which can incur embedding charges).
+The `none` vector backend disables semantic search. See the
+[Notion provider guide](../memory-providers/notion.md) for limits and installation extras.
+
+Saved defaults do not switch the current agent, migrate existing memories,
+or rewrite saved agent model configurations. `/memory [id]` still selects a
+conversation's memory ID, not a provider.
+
 During tool-using turns, the REPL displays the normalized terminal state beside
 each tool: **Completed**, **Completed · no results**, **Completed with
 limitations**, **Completed via fallback**, **Provider error**, or **Failed**.
@@ -271,8 +301,9 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/tools` | List the agent's registered tools. |
 | `/ingest <file>` | Ingest a file into the knowledge base. |
 | `/ui [--port N] [--host H]` | Launch the local web UI. |
-| `/login [provider]` | Log in / save an API key — lists platforms to pick from if none given. |
-| `/config` | Show resolved config + paths. |
+| `/login [provider\|ENV_VARIABLE]` | Save a credential using hidden input. `/login notion` writes `NOTION_TOKEN`; it does not select memory storage. |
+| `/config [get\|set\|path\|keys]` | Inspect active/saved settings, show the save target, or edit defaults. |
+| `/memory-provider [filesystem\|mongodb\|oracle\|notion]` | Guided memory setup for the next launch; add `--project` for this project's `.env`. |
 | `/docs [cli\|ui]` | Open the documentation in your browser. |
 | `/exit` | Save the agent and quit. |
 
@@ -352,9 +383,54 @@ Memorizz centralizes config under `~/.memorizz/`:
 | `~/.memorizz/history` | REPL input history. |
 
 Overrides: `MEMORIZZ_HOME` (the home dir) and `MEMORIZZ_ENV_FILE` (the env file).
-A project-local `./.env` is still honored for backwards compatibility. The CLI
-and the Local UI read/write the **same** `.env`, so configuring once applies to
-both.
+A project-local `./.env` is still honored. Precedence is **process exports >
+project `.env` > canonical Memorizz `.env`**. The default save target is
+`$MEMORIZZ_ENV_FILE`, otherwise `$MEMORIZZ_HOME/.env`, otherwise
+`~/.memorizz/.env`. CLI, UI and MCP use this shared loader; SDK applications
+must load their environment or supply explicit configuration themselves.
+
+You do not need to find or edit `.env` manually:
+
+```bash
+memorizz config path
+memorizz config keys
+memorizz config set MEMORIZZ_BACKEND notion
+memorizz config set MEMORIZZ_NOTION_DATA_SOURCE_ID YOUR_DATA_SOURCE_UUID
+memorizz config set NOTION_TOKEN  # hidden prompt; never put the token here
+memorizz config get NOTION_TOKEN # status/source only; credential stays hidden
+memorizz config set MEMORIZZ_BACKEND notion --project
+```
+
+The REPL equivalents are `/config path`, `/config keys`, `/config set KEY [VALUE]`
+and `/config get KEY`. Omit VALUE to be prompted. Known ordinary settings use
+visible input; credentials and unknown integration variables use hidden input.
+Do not put tokens in command arguments, chat, screenshots or shell history.
+`/login` accepts provider shortcuts or any environment-variable name;
+use `/config set` for ordinary settings. An old `NOTION` entry is not a token
+alias: run `/login notion` again to save `NOTION_TOKEN` correctly.
+
+New config commands save **for the next launch**. `/config` reports the active
+memory/vector providers; `/config get KEY` distinguishes the current process's
+value/source from the value saved in the target file. `/login` and UI Settings
+also update the current process environment for compatibility, but cached
+clients still require reconnection. Existing `/login tavily` / `firecrawl`
+behavior continues to attach internet access immediately.
+
+Use `--project` to edit a project override explicitly, or `--env-file PATH` for
+another file. A custom file is not automatically loaded unless it is selected
+by `MEMORIZZ_ENV_FILE` at launch. Set `MEMORIZZ_HOME` and `MEMORIZZ_ENV_FILE` in
+the launch environment, not through `config set`. Warnings explain when a
+project value or export may hide your saved change.
+
+Writes are atomic and serialized across CLI/UI processes, preserve unrelated
+comments and multiline values, and set owner-only file permissions on POSIX
+(0600). On Windows, also secure the directory with your account's ACLs. Symlink
+targets and malformed existing dotenv files are rejected without replacement.
+Literal `${...}` input is rejected because dotenv would expand it on reload;
+use a secret manager/process export for such credentials. Files are plaintext,
+not encrypted: never commit them. Sensitive slash commands and abbreviations
+are excluded from new REPL history and filtered out when recalling old history;
+this does not erase existing history files or your shell's history.
 
 Useful commands:
 

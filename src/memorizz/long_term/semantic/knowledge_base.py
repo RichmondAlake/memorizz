@@ -130,6 +130,7 @@ DEFAULT_SEMANTIC_BREAKPOINT_PERCENTILE = 95.0
 def _chunk_semantic(
     corpus: str,
     breakpoint_percentile: float = DEFAULT_SEMANTIC_BREAKPOINT_PERCENTILE,
+    embedding_function=None,
     **_: Any,
 ) -> List[str]:
     """Split by semantic similarity of adjacent sentences.
@@ -154,9 +155,8 @@ def _chunk_semantic(
     if len(sentences) <= 1:
         return sentences
 
-    embeddings = np.array(
-        [get_embedding(sentence) for sentence in sentences], dtype=float
-    )
+    embed = embedding_function or get_embedding
+    embeddings = np.array([embed(sentence) for sentence in sentences], dtype=float)
     norms = np.linalg.norm(embeddings, axis=1)
     # Guard against zero-vectors (unusual but possible for empty-ish sentences).
     norms[norms == 0] = 1.0
@@ -287,12 +287,19 @@ class KnowledgeBase:
         """
         knowledge_base_id = str(uuid.uuid4())
 
+        from ...memory_provider.base import provider_manages_embeddings
+
+        managed = provider_manages_embeddings(self.memory_provider)
         chunker = _resolve_chunker(chunking_strategy)
+        chunker_options = {}
+        if managed and chunker is _chunk_semantic:
+            chunker_options["embedding_function"] = self.memory_provider.embed_text
         chunks = chunker(
             corpus,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             breakpoint_percentile=breakpoint_percentile,
+            **chunker_options,
         )
         if not chunks:
             # Nothing to store; still return the id so callers can detect
@@ -311,7 +318,7 @@ class KnowledgeBase:
         now = datetime.now().isoformat()
 
         for index, chunk_text in enumerate(chunks):
-            embedding = get_embedding(chunk_text)
+            embedding = None if managed else get_embedding(chunk_text)
             entry = {
                 "content": chunk_text,
                 "embedding": embedding,
@@ -380,6 +387,23 @@ class KnowledgeBase:
         List[Dict[str, Any]]
             A list of knowledge documents that are semantically similar to the query.
         """
+        capabilities = getattr(self.memory_provider, "memory_capabilities", None)
+        if (
+            callable(capabilities)
+            and getattr(capabilities(), "manages_embeddings", False) is True
+        ):
+            # The document and vector providers may use different models. Let
+            # the selected semantic backend embed both stored text and queries.
+            return (
+                self.memory_provider.retrieve_by_query(
+                    query,
+                    memory_store_type=MemoryType.KNOWLEDGE_BASE,
+                    namespace=namespace,
+                    limit=limit,
+                )
+                or []
+            )
+
         # Generate embedding for the query
         query_embedding = get_embedding(query)
 

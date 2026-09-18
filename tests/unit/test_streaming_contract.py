@@ -328,6 +328,68 @@ def test_tool_phase_never_becomes_public_answer(streaming_agent, monkeypatch):
     assert "PRIVATE TOOL PHASE" not in json.dumps(events)
 
 
+def test_plain_tool_phase_answer_can_finish_without_a_finalizer_call(
+    streaming_agent, monkeypatch
+):
+    monkeypatch.setattr(
+        streaming_agent,
+        "_build_llm_tools",
+        lambda *a, **k: [{"type": "function", "function": {"name": "read_persona"}}],
+    )
+    streaming_agent.max_steps = 2
+    query = "What is 17 multiplied by 19?"
+    calls = []
+
+    def provider(messages, tools=None, **kwargs):
+        calls.append(tools)
+        assert any(
+            m.get("role") == "user" and query in m.get("content", "") for m in messages
+        )
+        yield from text_provider("PRIVATE DRAFT" if tools else "323")
+
+    streaming_agent.model.generate_stream = provider
+    events = list(streaming_agent.run_stream_events(query))
+
+    assert_contract(events)
+    assert events[-1]["status"] == "completed"
+    assert len(calls) == 2 and calls[-1] is None
+    assert "PRIVATE DRAFT" not in json.dumps(events)
+    assert [e["delta"] for e in events if e["type"] == "answer.delta"] == ["323"]
+
+
+def test_plain_tool_phase_answer_cannot_bypass_required_tool_evidence(
+    streaming_agent, monkeypatch
+):
+    monkeypatch.setattr(
+        streaming_agent,
+        "_build_llm_tools",
+        lambda *a, **k: [{"type": "function", "function": {"name": "lookup"}}],
+    )
+    streaming_agent.max_steps = 2
+    streaming_agent.completion_policy = CompletionPolicy(
+        enabled=True,
+        require_tool_calls=True,
+        delivery_mode="final_stream",
+        max_rejections=0,
+    )
+    calls = []
+
+    def provider(messages, tools=None, **kwargs):
+        calls.append(tools)
+        yield from text_provider("PRIVATE UNVERIFIED DRAFT")
+
+    streaming_agent.model.generate_stream = provider
+    events = list(streaming_agent.run_stream_events("Look up the current status."))
+
+    assert_contract(events)
+    assert events[-1]["status"] == "error"
+    assert events[-1]["error_code"] == "stream_error"
+    assert len(calls) == 1 and calls[0]
+    assert not any(e["type"] == "answer.delta" for e in events)
+    assert "PRIVATE UNVERIFIED DRAFT" not in json.dumps(events)
+    assert any(e["type"] == "completion.check" and not e["accepted"] for e in events)
+
+
 def test_whitespace_digest_matches_exact_deltas(streaming_agent):
     streaming_agent.model.generate_stream = lambda *a, **k: text_provider(" hello \n")
     events = list(streaming_agent.run_stream_events("hello"))

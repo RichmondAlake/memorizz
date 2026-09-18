@@ -233,6 +233,7 @@
                         <option value="oracle" {% if provider_type == 'oracle' %}selected{% endif %}>Oracle Database</option>
                         <option value="mongodb" {% if provider_type == 'mongodb' %}selected{% endif %}>MongoDB</option>
                         <option value="filesystem" {% if provider_type == 'filesystem' %}selected{% endif %}>FileSystem</option>
+                        <option value="notion" {% if provider_type == 'notion' %}selected{% endif %}>Notion + separate semantic provider</option>
                     </select>
                 </div>
 
@@ -288,6 +289,28 @@
                     <div class="form-group">
                         <label for="filesystem_path">Storage Path</label>
                         <input type="text" name="filesystem_path" id="filesystem_path" placeholder="~/.memorizz/data">
+                    </div>
+                </div>
+
+                <div id="notion-fields" class="provider-fields" style="display: none;">
+                    <div class="form-group">
+                        <label for="notion_data_source_id">Notion memory data source ID</label>
+                        <input type="text" name="notion_data_source_id" id="notion_data_source_id" value="{{ env_notion_data_source_id }}" placeholder="Data source UUID, not a database or page ID">
+                        <small>Provision once with <code>memorizz notion init --parent-page-id …</code>. Connecting does not create or replace databases.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="notion_token">Notion integration token</label>
+                        <input type="password" name="notion_token" id="notion_token" value="" autocomplete="off" placeholder="{% if has_env_notion_token %}Configured via NOTION_TOKEN{% else %}Notion integration token{% endif %}">
+                        <small>The token is never prefilled or saved in browser storage.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="notion_semantic_backend">Vector storage only</label>
+                        <select name="notion_semantic_backend" id="notion_semantic_backend">
+                            {% for backend, label in [('filesystem', 'Filesystem (local)'), ('mongodb', 'MongoDB Atlas'), ('oracle', 'Oracle'), ('none', 'None — structured reads only')] %}
+                            <option value="{{ backend }}" {% if env_notion_semantic_backend == backend %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                        <small>Uses server-side embedding/database configuration. Run <code>memorizz notion sync</code> after human memory edits. Notion does not support atomic shared-memory delegation.</small>
                     </div>
                 </div>
 

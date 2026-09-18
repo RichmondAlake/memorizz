@@ -203,7 +203,9 @@ class EntityMemory:
             return record["entity_id"]
 
         embedding_payload = self._build_embedding_text(record)
-        if embedding_payload:
+        from ....memory_provider.base import provider_manages_embeddings
+
+        if embedding_payload and not provider_manages_embeddings(self.memory_provider):
             record["embedding"] = get_embedding(embedding_payload)
 
         if existing and existing.get("_id") is not None:
@@ -797,7 +799,9 @@ class EntityMemory:
             raise ValueError("Canonical entity escaped the requested scope")
         canonical_payload = dict(canonical)
         embedding_text = self._build_embedding_text(canonical_payload)
-        if embedding_text:
+        from ....memory_provider.base import provider_manages_embeddings
+
+        if embedding_text and not provider_manages_embeddings(self.memory_provider):
             canonical_payload["embedding"] = get_embedding(embedding_text)
         self.memory_provider.store(
             data=canonical_payload,

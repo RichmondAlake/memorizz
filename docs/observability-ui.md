@@ -344,6 +344,56 @@ where available. MemAgent adds stream TTFT and provider time. Providers that
 do not expose a field leave it unknown; retry counts and stop reasons are not
 inferred. This optional method does not change the existing LLMProvider protocol.
 
+Model-call traces keep `model` as the requested ID (including aliases or Azure
+deployment names) and record `response_model` from the provider's response
+`model` field. The Trace Timeline and output-contract inspector display both as
+**Requested** and **Returned**; trace comparisons also include the returned ID.
+This works for regular responses and streaming responses, including OpenAI Chat
+Completions/Responses, Azure OpenAI, Anthropic and Ollama. For streaming,
+[OpenAI response lifecycle events](https://developers.openai.com/api/reference/resources/responses/streaming-events)
+and [Anthropic message events](https://platform.claude.com/docs/en/build-with-claude/streaming)
+can supply the model before the final output. Missing or invalid returned IDs
+remain unknown, including in older traces. If a provider returns an alias, that
+alias is recorded verbatim; Memorizz cannot infer an unreported model snapshot.
+Existing requested-model filters and pricing remain compatible.
+
+### Provider prompt-cache health
+
+The **Provider prompt cache** panel appears on Observability and Usage pages.
+It reports cache reads, writes without reuse, calls without reuse, and unknown
+usage from the selected trace window. The cached-input percentage includes
+only calls with both measured input and cache-read counts. This is separate
+from Memorizz's semantic response cache.
+
+OpenAI caching is automatic. For GPT-5.6 and GPT-6 Responses calls, Memorizz
+also places an explicit boundary after the initial reusable instructions,
+while retaining implicit conversation caching. Existing caller breakpoints
+are preserved. Anthropic chat, streaming, and `generate_text` use the same
+enabled-by-default cache-marker policy. Cache lifetime and eviction remain
+provider-controlled; see [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+and [Anthropic prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+
+Provider metadata retains zero-valued read/write counters, so a measured miss
+is distinguishable from missing telemetry. Anthropic `input_tokens` in traces
+includes uncached input, cache reads, and cache writes. The raw provider
+`cache_creation_input_tokens` maps to `cache_write_tokens`.
+
+**Needs attention** flags disabled caching or cache options dropped by an old
+SDK. It also flags a successful call with zero cache reads following a measured
+hit within four minutes in the same application, user, agent, thread, requested
+and returned model, and operation. Hashed static-prefix/settings and routing-key
+evidence distinguish changed instructions/tools/settings, a changed key, and
+an unexplained drop. No prompt text or raw routing key is stored in these fields.
+The warning is evidence of a drop, not proof of a provider fault: history edits,
+compaction, cache boundaries, and eviction can explain it. First calls, short
+prompts, expired comparison windows, model changes, and missing counters alone
+do not trigger drop warnings. Older traces retain unknown configuration/usage;
+there is no historical inference or backfill.
+
+These fields and UI changes require this updated Memorizz build. Cache health
+does not require a price card; cost remains unknown for models without a
+configured card, including Anthropic in the current default catalog.
+
 Set `MEMORIZZ_UI_PSEUDONYM_KEY` to a secret and `MEMORIZZ_UI_AUDIT_SCOPE` to an
 audit-domain identifier for stable HMAC display and memory-reference pseudonyms.
 Without a key they are stable only within the current process. Production hosts

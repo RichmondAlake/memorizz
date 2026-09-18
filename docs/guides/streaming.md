@@ -5,8 +5,9 @@ the desktop wrapper), the REPL, one-shot CLI and MCP agent execution. Streaming
 means incremental **accepted public answer text**, not private reasoning or tool
 drafts. Text deltas are not necessarily individual tokenizer tokens.
 
-Python's existing `run()` still returns one complete string. Its compatibility
-contract is unchanged; use the event API for incremental delivery:
+Python's `run()` returns one complete string on success. Empty or truncated
+provider responses raise `ProviderStreamError`; use the event API for
+incremental delivery and structured terminal status:
 
 ```python
 with agent.run_stream_events("Explain this document", user_id="alice") as events:
@@ -39,9 +40,24 @@ Deferred UI/service loading starts with `delivery_mode=initializing`; its
 candidate text are excluded. An error preserves delivered partial text and adds
 a safe code in the terminal event, never exception prose in the answer.
 
+`empty_response` means the model produced no public answer, including when it
+only produced reasoning. `provider_length` means generation hit its output
+token limit. Neither result emits `answer.done`, is stored as a completed
+conversation answer, or enters the answer cache. Live partial text remains
+visible with `run.done.status=error`;
+increase the output limit or request a shorter answer before retrying.
+
+Before each model request, MemoRizz estimates the complete prompt, including
+context, tool schemas and accumulated tool results. It reserves 20% of the
+context window for generation and template overhead and evicts older turns
+together. Instructions, the current question and its tool evidence stay intact.
+If those required parts alone exceed the budget, `context_window_exceeded`
+stops the request before calling the model. Token counts are estimates; actual
+tokenization depends on the provider.
+
 | Delivery | Behavior |
 |---|---|
-| Default, no completion gate | `final_stream`: private tool phase, host-controlled finalize-answer tool, then incremental answer generation with tools disabled |
+| Default, no completion gate | `final_stream`: private tool phase, host-checked finalization, then incremental answer generation with tools disabled |
 | Existing/enabled completion policy | `buffered` by default: accept the whole candidate before exposing any text |
 | Evidence-only completion policy | Explicit `delivery_mode="final_stream"` is supported |
 | Complete-answer validator or forbidden-response patterns | `final_stream` is rejected; required validators are never silently bypassed |
@@ -49,8 +65,12 @@ a safe code in the terminal event, never exception prose in the answer.
 
 `CompletionPolicy(enabled=True, delivery_mode="final_stream",
 require_tool_calls=True)` checks evidence at the finalization boundary.
-The reserved `memorizz_finalize_answer` tool must be called alone; application
-tools must not use that name. This extra phase can add model work. Cache hits
+The reserved `memorizz_finalize_answer` tool must be called alone when used;
+application tools must not use that name. A model that ends its tool phase with
+text instead is checked against the same host evidence requirements. Its draft
+stays private; after acceptance, a new request generates the public answer with
+tools disabled. Missing required evidence still blocks finalization. This extra
+phase can add model work. Cache hits
 are revalidated and delivered as an already-available answer; cache compatibility
 includes delivery policy. Persisted required runtime validators still fail
 closed until rebound by the host.

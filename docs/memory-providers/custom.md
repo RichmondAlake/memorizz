@@ -76,6 +76,13 @@ cleanup, transactions, indexes, serialization, and error mapping.
 
 ## Three-state tenant filters
 
+For a vector-only role behind another document provider, see the optional
+[`NotionProvider` composition contract](notion.md#select-a-different-semantic-provider).
+Existing custom providers need not implement it unless they opt in with
+`vector_store=True`. Document providers can advertise `manages_embeddings=True`
+to avoid duplicate helper embeddings, and `requires_live_read=True` when local
+semantic-cache hits must not bypass current source permissions/content.
+
 Provider reads use three distinct states:
 
 | Call | Meaning |

@@ -20,6 +20,12 @@ if TYPE_CHECKING:
 _UNSET = object()
 
 
+def provider_manages_embeddings(provider) -> bool:
+    """Whether helpers should leave embedding generation to the provider."""
+    getter = getattr(provider, "memory_capabilities", None)
+    return callable(getter) and getattr(getter(), "manages_embeddings", False) is True
+
+
 @dataclass(frozen=True)
 class MemoryProviderCapabilities:
     """Portable retrieval and storage behavior exposed by a provider."""
@@ -32,6 +38,9 @@ class MemoryProviderCapabilities:
     provenance: bool = True
     native_vector_search: bool = False
     native_hybrid_search: bool = False
+    vector_store: bool = False
+    manages_embeddings: bool = False
+    requires_live_read: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -82,6 +91,105 @@ class MemoryProvider(ABC):
         """Describe the portable contract without probing optional internals."""
 
         return MemoryProviderCapabilities(provider=type(self).__name__)
+
+    def embed_text(self, text: str) -> List[float]:
+        """Embed with this provider's configured model, for vector composition.
+
+        This optional interface does not alter legacy document retrieval. Custom
+        providers can override it without exposing their embedding internals.
+        """
+        from .vectors import validate_vector
+
+        resolver = getattr(self, "_get_embedding_provider", None)
+        embedder = resolver() if callable(resolver) else None
+        if embedder is None:
+            raise NotImplementedError(
+                "Configure an embedding model on the semantic provider"
+            )
+        return validate_vector(embedder.get_embedding(text))
+
+    def semantic_identity(self) -> str:
+        """Opaque backend/model identity used to detect index rebuilds.
+
+        Custom vector providers should override this when their connection or
+        embedding model is not represented by these conventional fields.
+        """
+        resolver = getattr(self, "_get_embedding_provider", None)
+        embedder = resolver() if callable(resolver) else None
+        info_getter = getattr(embedder, "get_provider_info", None)
+        info = info_getter() if callable(info_getter) else {}
+        info = info if isinstance(info, dict) else {"provider": str(info)}
+        config = getattr(self, "config", None)
+        identity = {
+            "provider_class": type(self).__module__ + "." + type(self).__qualname__,
+            "embedder_class": type(embedder).__module__
+            + "."
+            + type(embedder).__qualname__,
+            "embedding": {
+                key: info.get(key) for key in ("provider", "model", "dimensions")
+            },
+            "location": {
+                key: str(getattr(config, key, ""))
+                for key in ("root_path", "uri", "db_name", "dsn", "schema", "user")
+            },
+        }
+        # Connection strings can contain credentials: persist only the digest.
+        return hashlib.sha256(
+            json.dumps(identity, sort_keys=True, default=str).encode()
+        ).hexdigest()
+
+    def upsert_vector(self, namespace, source_id, embedding, *, metadata, scope=None):
+        """Persist a vector/reference only; never persist the source memory text."""
+        from ..enums.memory_type import MemoryType
+        from .vectors import VECTOR_MARKER, vector_document
+
+        if not self.memory_capabilities().vector_store:
+            raise NotImplementedError(
+                "This provider does not implement the vector-store contract"
+            )
+        row = vector_document(namespace, source_id, embedding, metadata, scope or {})
+        identifier = row["id"]
+        existing = self.retrieve_by_id(identifier, MemoryType.KNOWLEDGE_BASE)
+        if existing:
+            if (
+                existing.get("namespace") != namespace
+                or (existing.get("metadata") or {}).get("format") != VECTOR_MARKER
+            ):
+                raise ValueError("Vector identity collides with an unrelated document")
+            if not self.update_by_id(identifier, row, MemoryType.KNOWLEDGE_BASE):
+                raise RuntimeError("Vector update did not persist")
+            return identifier
+        return self.store(row, MemoryType.KNOWLEDGE_BASE)
+
+    def query_vectors(
+        self, namespace, embedding, *, limit=10, scope=None, include_embedding=False
+    ):
+        """Rank vectors after applying scope, returning source IDs and references.
+
+        Implementations must raise on unavailable vector search, not substitute
+        keyword matches, unscoped records, or arbitrary recent documents.
+        """
+        raise NotImplementedError("This provider does not implement vector queries")
+
+    def delete_vector(self, namespace, source_id):
+        """Delete only the vector owned by this namespace and source."""
+        from ..enums.memory_type import MemoryType
+        from .vectors import VECTOR_MARKER, vector_id
+
+        if not self.memory_capabilities().vector_store:
+            raise NotImplementedError(
+                "This provider does not implement vector deletion"
+            )
+        identifier = vector_id(namespace, source_id)
+        row = self.retrieve_by_id(identifier, MemoryType.KNOWLEDGE_BASE)
+        if row is None:
+            return False
+        if (
+            row.get("namespace") != namespace
+            or (row.get("metadata") or {}).get("format") != VECTOR_MARKER
+        ):
+            raise ValueError("Refusing to delete an unrelated document")
+        return self.delete_by_id(identifier, MemoryType.KNOWLEDGE_BASE)
 
     def store_many(
         self,

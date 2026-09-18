@@ -353,6 +353,7 @@ def compare_trace_windows(baseline, candidate):
                     "phase",
                     "status",
                     "model",
+                    "response_model",
                     "provider",
                     "finish_reason",
                 )

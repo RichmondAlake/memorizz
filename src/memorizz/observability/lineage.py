@@ -275,6 +275,7 @@ def build_lineage_inspectors(events):
                         for field in (
                             "provider",
                             "model",
+                            "response_model",
                             "output_tokens",
                             "max_output_tokens",
                             "finish_reason",

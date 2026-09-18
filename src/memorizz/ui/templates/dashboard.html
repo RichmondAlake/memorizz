@@ -7,6 +7,9 @@
     <span class="page-eyebrow">Memory control plane</span>
     <h1>System overview</h1>
     <p>Inspect the active provider and every memory surface from one place.</p>
+    {% if provider_type == 'notion' %}
+    <p role="status">Notion counts cover this local repair journal, not a verified workspace total. Run <code>memorizz notion sync</code> to discover external changes; memory reads still check Notion.</p>
+    {% endif %}
 </div>
 
 <div class="connection-info-card">

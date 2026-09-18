@@ -4,14 +4,30 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 from .llm_provider import LLMProvider
-from .response_metadata import response_metadata
+from .response_metadata import last_response_metadata, response_metadata
+
+
+def provider_error_message(code):
+    """Actionable, content-free messages shared by the SDK and CLI."""
+    return {
+        "context_window_exceeded": (
+            "The current request and tools exceed the model's context budget. "
+            "Shorten the supplied context or increase context_window_tokens."
+        ),
+        "empty_response": "The model returned no answer. Retry the request or select another model.",
+        "provider_length": (
+            "The model reached its output token limit before finishing. "
+            "Increase the output limit or request a shorter answer."
+        ),
+    }.get(code)
 
 
 class ProviderStreamError(RuntimeError):
     def __init__(self, code, metadata=None):
         self.code = code
         self.response_metadata = metadata or {}
-        super().__init__(code)
+        detail = provider_error_message(code)
+        super().__init__(f"{code}: {detail}" if detail else code)
 
 
 def streaming_capabilities(provider):
@@ -114,7 +130,9 @@ def chat_events(provider, stream, *, max_output_tokens=None):
                 text += content
                 yield {"type": "content", "content": content}
             if getattr(delta, "refusal", None):
-                raise ProviderStreamError("provider_refusal")
+                raise ProviderStreamError(
+                    "provider_refusal", last_response_metadata(provider)
+                )
             for call in getattr(delta, "tool_calls", None) or []:
                 entry = calls.setdefault(
                     call.index, {"id": "", "name": "", "arguments": ""}
@@ -147,7 +165,9 @@ def chat_events(provider, stream, *, max_output_tokens=None):
     if calls:
         ordered = [calls[k] for k in sorted(calls)]
         if any(not c["id"] or not c["name"] for c in ordered):
-            raise ProviderStreamError("invalid_tool_call")
+            raise ProviderStreamError(
+                "invalid_tool_call", last_response_metadata(provider)
+            )
         yield {"type": "tool_calls", "response": tool_response(ordered, text)}
     else:
         yield {"type": "done", "content": text}
@@ -158,11 +178,17 @@ def responses_events(provider, stream, *, max_output_tokens=None):
     with closing_provider_stream(stream):
         for event in stream:
             kind = event.type
-            if kind == "response.output_text.delta":
+            if kind in {"response.created", "response.in_progress"}:
+                provider._last_response_metadata.update(
+                    response_metadata(event.response)
+                )
+            elif kind == "response.output_text.delta":
                 text += event.delta
                 yield {"type": "content", "content": event.delta}
             elif kind in {"response.refusal.delta", "response.refusal.done"}:
-                raise ProviderStreamError("provider_refusal")
+                raise ProviderStreamError(
+                    "provider_refusal", last_response_metadata(provider)
+                )
             elif (
                 kind == "response.output_item.added"
                 and event.item.type == "function_call"
@@ -176,13 +202,19 @@ def responses_events(provider, stream, *, max_output_tokens=None):
                 }
             elif kind == "response.function_call_arguments.delta":
                 if event.item_id not in calls:
-                    raise ProviderStreamError("unknown_tool_call_item")
+                    raise ProviderStreamError(
+                        "unknown_tool_call_item", last_response_metadata(provider)
+                    )
                 calls[event.item_id]["arguments"] += event.delta
             elif kind == "response.function_call_arguments.done":
                 if event.item_id not in calls:
-                    raise ProviderStreamError("unknown_tool_call_item")
+                    raise ProviderStreamError(
+                        "unknown_tool_call_item", last_response_metadata(provider)
+                    )
                 if calls[event.item_id]["arguments"] != event.arguments:
-                    raise ProviderStreamError("tool_argument_delta_mismatch")
+                    raise ProviderStreamError(
+                        "tool_argument_delta_mismatch", last_response_metadata(provider)
+                    )
             elif kind in {
                 "response.completed",
                 "response.failed",
@@ -199,12 +231,19 @@ def responses_events(provider, stream, *, max_output_tokens=None):
                     kind != "response.completed"
                     or getattr(response, "status", "completed") != "completed"
                 ):
-                    raise ProviderStreamError("provider_" + kind.split(".")[-1])
+                    raise ProviderStreamError(
+                        "provider_" + kind.split(".")[-1],
+                        last_response_metadata(provider),
+                    )
                 finished = True
             elif kind == "error":
-                raise ProviderStreamError("provider_stream_error")
+                raise ProviderStreamError(
+                    "provider_stream_error", last_response_metadata(provider)
+                )
     if not finished:
-        raise ProviderStreamError("provider_stream_incomplete")
+        raise ProviderStreamError(
+            "provider_stream_incomplete", last_response_metadata(provider)
+        )
     if provider._last_usage:
         yield {"type": "usage", "usage": provider._last_usage}
     if calls:

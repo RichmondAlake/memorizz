@@ -34,4 +34,19 @@ uv tool uninstall memorizz   # the npm shim does not remove the uv-managed tool
 
 ## Env
 
+The npm launcher forwards all commands to the same Python CLI, including:
+
+```bash
+memorizz config path
+memorizz config set NOTION_TOKEN  # hidden input; never append the token
+memorizz notion connect          # guided Notion memory + vector-store setup
+memorizz memory configure        # choose another memory provider
+```
+
+Settings normally save to `~/.memorizz/.env` (`MEMORIZZ_HOME` and
+`MEMORIZZ_ENV_FILE` override this). Use `--project` to explicitly edit the
+current directory's `.env`. Exports and project settings take precedence over
+shared defaults. Restart existing CLI/MCP processes after saving; existing
+memory is not migrated. These commands do not require an active LLM session.
+
 - `MEMORIZZ_SKIP_POSTINSTALL=1` — skip the bootstrap during `npm install`.

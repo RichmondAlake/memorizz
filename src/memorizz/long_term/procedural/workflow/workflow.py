@@ -41,6 +41,8 @@ class Workflow:
         skills_activated: List[str] = None,
         shadow_evaluations: List[Dict[str, Any]] = None,
         embedding: List[float] = None,
+        *,
+        generate_embedding: bool = True,
     ):
         """
         Initialize a new Workflow instance.
@@ -119,7 +121,9 @@ class Workflow:
         # Reuse a stored embedding when one is supplied (round-tripping via
         # from_dict) so loading never re-bills the embedding API.
         self.embedding = (
-            embedding if embedding is not None else self._generate_embedding()
+            embedding
+            if embedding is not None or not generate_embedding
+            else self._generate_embedding()
         )
 
     def _generate_embedding(self):
@@ -210,6 +214,7 @@ class Workflow:
             skills_activated=data.get("skills_activated"),
             shadow_evaluations=data.get("shadow_evaluations"),
             embedding=data.get("embedding"),
+            generate_embedding=False,
         )
 
     def refresh_canonical_fields(self, force: bool = False) -> None:

@@ -5,10 +5,12 @@
 {% block content %}
 <div class="page-header">
     <h1>{{ memory_type_display }}</h1>
-    <p>{{ items|length }} item{% if items|length != 1 %}s{% endif %} found</p>
+    {% if not load_error %}<p>{{ items|length }} item{% if items|length != 1 %}s{% endif %} shown{% if has_more %}; more records exist. Narrow the query through the SDK or open the provider's database view.{% endif %}</p>{% endif %}
 </div>
 
-{% if items %}
+{% if load_error %}
+<p role="alert">{{ load_error }}</p>
+{% elif items %}
 <div class="memory-items">
     {% for item in items %}
     <div class="memory-item">

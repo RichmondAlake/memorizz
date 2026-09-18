@@ -1,5 +1,9 @@
 # Filesystem Provider
 
+Need a human-editable document store? The [Notion provider](notion.md) keeps
+memory in Notion and accepts filesystem, MongoDB or Oracle as a separate
+vector-only provider. Filesystem remains the default primary provider.
+
 The filesystem provider persists every MemoRizz memory type as JSON files on disk and uses FAISS for vector similarity search. It is ideal for local development, CI runs, or lightweight deployments where running MongoDB/Oracle would be overkill.
 
 ## Highlights

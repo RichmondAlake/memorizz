@@ -352,6 +352,16 @@ def capabilities() -> Dict[str, Any]:
                 **mcp,
             },
             "oracle": {"ready": bool(oracle["installed"]), **oracle},
+            "notion": {
+                "available": True,
+                "configured": bool(
+                    os.getenv("NOTION_TOKEN")
+                    and os.getenv("MEMORIZZ_NOTION_DATA_SOURCE_ID")
+                ),
+                "live_connection_verified": False,
+                "semantic_provider_separate": True,
+                "atomic_shared_memory": False,
+            },
             "e2b": {
                 "ready": bool(
                     e2b["installed"]

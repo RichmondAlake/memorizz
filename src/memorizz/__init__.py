@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
@@ -106,6 +106,8 @@ _LAZY = {
     "LocalOracleRuntime": (".memory_provider.oracle", "LocalOracleRuntime"),
     "FileSystemProvider": (".memory_provider.filesystem", "FileSystemProvider"),
     "FileSystemConfig": (".memory_provider.filesystem", "FileSystemConfig"),
+    "NotionProvider": (".memory_provider.notion", "NotionProvider"),
+    "NotionConfig": (".memory_provider.notion", "NotionConfig"),
     # LLM providers
     "OpenAI": (".llms", "OpenAI"),
     "AzureOpenAI": (".llms", "AzureOpenAI"),
@@ -245,6 +247,8 @@ __all__ = [
     "LocalOracleRuntime",
     "FileSystemProvider",
     "FileSystemConfig",
+    "NotionProvider",
+    "NotionConfig",
     # LLM providers
     "OpenAI",
     "AzureOpenAI",

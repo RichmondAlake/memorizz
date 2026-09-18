@@ -93,6 +93,7 @@ class MLXLLM(LLMProvider):
             "temperature": self.temperature,
             "top_p": self.top_p,
             "adapter_path": self.adapter_path,
+            "context_window_tokens": self.context_window_tokens,
         }
 
     def generate(

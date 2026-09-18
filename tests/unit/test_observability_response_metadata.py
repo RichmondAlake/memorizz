@@ -5,6 +5,7 @@ import pytest
 from memorizz import MemAgent
 from memorizz.llms.openai import OpenAI
 from memorizz.llms.response_metadata import response_metadata
+from memorizz.llms.streaming import ProviderStreamError
 
 
 def openai_model():
@@ -30,15 +31,14 @@ def test_nonstreaming_finish_reason_limits_and_usage_survive_compaction():
     )
     agent = MemAgent(model=model)
     agent._begin_trace_turn(None)
-    assert (
+    with pytest.raises(ProviderStreamError, match="provider_length"):
         agent._generate_with_trace([], tools=None, iteration=0, stage="test")
-        == "é<learning_map>"
-    )
     rows = agent._build_trace_bundle_events(agent._stream_trace_events)
     call = next(e for e in rows if e["trace_kind"] == "model_call")
     result = next(e for e in rows if e["trace_kind"] == "model_result")
     assert "input_tokens" not in call
     assert result["finish_reason"] == "length"
+    assert result["status"] == "error"
     assert result["request_id"] == "request-1"
     assert result["max_output_tokens"] == 2200
     assert result["response_chars"] == 15

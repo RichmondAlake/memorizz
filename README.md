@@ -25,7 +25,8 @@ refine what an agent knows over time.
 | [Shared](docs/memory-types/shared.md) | A shared workspace for agent coordination and handoffs. |
 
 - **Persist and isolate:** scope memory by agent, user, and conversation. Start
-  with local filesystem storage, or use MongoDB or Oracle through the same
+  with local filesystem storage, or use MongoDB, Oracle, or
+  [Notion with separate vector storage](docs/memory-providers/notion.md) through the same
   provider contract.
 - **Ingest and retrieve:** turn files and folders into a knowledge base with
   configurable chunking, embeddings, and semantic or hybrid search.
@@ -101,6 +102,19 @@ For a fully local setup, use [Ollama](docs/getting-started/cli.md#option-a-local
 The [installation guide](docs/getting-started/installation.md) covers `uv`,
 `pipx`, npm, Homebrew, and optional integrations.
 
+Save credentials without putting them in shell history, and choose memory
+storage independently from the model:
+
+```bash
+memorizz config set OPENAI_API_KEY  # hidden prompt
+memorizz memory configure          # guided memory-provider setup
+memorizz notion connect            # Notion library + separate vector provider
+memorizz config path               # actual save target and precedence
+```
+
+These commands save defaults for the next launch; they do not switch a running
+agent or migrate memory. See [CLI configuration](docs/getting-started/cli.md#configuration).
+
 Build a memory-first agent in Python using the same environment:
 
 ```python
@@ -126,6 +140,7 @@ Memory persists under `~/.memorizz/memory` by default. Save `agent.agent_id` to
 ## Explore
 
 - [Memory-first tutorials](examples/zero_to_hero/README.md)
+- [Persistent notes and searchable history: filesystem and Oracle notebooks](examples/context_engineering/README.md)
 - [MCP connectivity](docs/guides/mcp-connectivity.md) and [MCP server](docs/guides/mcp-server.md)
 - [Automations](docs/guides/automations.md) and [multi-user applications](docs/guides/multi-tenant.md)
 - [Observability](docs/observability-ui.md) and [evaluation suite](docs/evaluation-suite.md)

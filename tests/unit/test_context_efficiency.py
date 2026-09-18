@@ -805,13 +805,14 @@ def test_openai_reasoning_effort_is_forwarded_and_persisted():
     assert provider.get_config()["reasoning_effort"] == "none"
 
 
-def test_openai_gpt_5_6_translates_legacy_max_tokens():
+@pytest.mark.parametrize("model", ["gpt-5.6-terra", "gpt-6-astra"])
+def test_openai_reasoning_models_translate_legacy_max_tokens(model):
     from memorizz.llms.openai import OpenAI as MemorizzOpenAI
 
     with patch("memorizz.llms.openai.openai.OpenAI"):
         provider = MemorizzOpenAI(
             api_key="test-key",
-            model="gpt-5.6-terra",
+            model=model,
             max_tokens=32_000,
         )
 

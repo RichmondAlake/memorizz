@@ -1,5 +1,31 @@
 # Troubleshooting
 
+## A saved CLI setting is not taking effect
+
+Run `memorizz config path` to see the save target and `memorizz config get KEY`
+to compare the effective source with the saved value (credentials remain
+hidden). Process exports take precedence over project `.env`, which takes
+precedence over the shared Memorizz file. Use `memorizz config set KEY --project`
+to edit an intentional project override, or update/unset its shell export.
+An empty assignment in a project `.env` also masks a shared value.
+
+Restart after `config set` or `memory configure`; they do not reconnect a
+running agent or migrate its memory. `/config` shows the active provider.
+`/provider` selects the LLM, `/memory` selects a memory ID, and
+`/memory-provider` configures memory storage for the next launch.
+
+For Notion, run `memorizz notion connect` to check the exact shared library and
+select the vector backend. `/login notion` saves `NOTION_TOKEN`, not `NOTION`.
+A 404 can mean the connection cannot access the page/database: share it with
+the connection, even if you can open it in your browser. Setup's read-only
+check is not a write-permission or vector-service readiness test.
+
+If a save fails, inspect the shown target's permissions, invalid dotenv syntax
+or symlinks. Nothing is overwritten on a failed atomic config save. Hidden
+input requires an interactive terminal; use a secret manager/process export
+in headless environments. Never pass a credential as a command argument.
+
+
 Start with the two structured diagnostics:
 
 ```bash
@@ -17,6 +43,39 @@ is configured.
 Configure a provider in the process environment or rebuild/update the agent
 with an `llm_config`. A no-LLM agent is useful for configuration and discovery,
 but it cannot execute a turn.
+
+## Ollama repeats its persona or ignores a new question
+
+Check `ollama ps` for the active context size and the Ollama server log for
+`truncating input prompt`. Earlier Memorizz versions reported a 128,000-token
+window without sending `num_ctx` to Ollama. The daemon could truncate the agent
+instructions, tool schemas, or conversation using a much smaller window.
+
+The Ollama provider now explicitly requests 8,192 tokens by default and uses
+that same value for history budgeting. Set `context_window_tokens` in the model
+configuration, or `OLLAMA_CONTEXT_LENGTH` before launching the CLI, to choose
+another window. Resuming the CLI or switching models refreshes the history
+budget. See [model configuration](getting-started/model-providers.md).
+
+If a local model answers directly during the private tool phase, the streaming
+loop now checks completion requirements and proceeds to public generation with
+tools disabled. It does not repeatedly demand the internal finalization tool.
+See the [streaming contract](guides/streaming.md).
+
+## Context budget or incomplete-answer errors
+
+- `context_window_exceeded`: shorten supplied context or tool descriptions, or
+  increase `llm_config["context_window_tokens"]` within your model's capacity.
+  Older conversation turns are removed first; the current question and its
+  tool evidence are preserved.
+- `empty_response`: the model returned no answer. Retry or select another model.
+- `provider_length`: increase the provider's output-token limit (`num_predict`
+  for Ollama, `max_tokens` or `max_completion_tokens` as supported by the
+  provider), or ask for a shorter answer.
+
+These errors do not count as completed answers and are not cached. Streaming
+retains any partial text already displayed. Synchronous `run()` raises
+`ProviderStreamError` with the same `code`.
 
 ## Semantic recall or cache is degraded
 
@@ -103,6 +162,12 @@ Follow the [Oracle troubleshooting guide](memory-providers/oracle.md#troubleshoo
   key are present.
 - Browser Use should be installed in an isolated tool environment. Run
   `browser-use doctor` and inspect `agent.capability_report()`.
+
+Browser Use has its own model configuration. An Ollama chat session does not
+supply credentials for its default OpenAI browser model. If enabling it reports
+`OPENAI_API_KEY is required`, configure that key or select another supported
+browser model provider with `MEMORIZZ_BROWSER_USE_LLM_PROVIDER` and its matching
+credentials. This configuration error does not disable ordinary chat.
 
 See [E2B](sandbox/e2b.md) and [browser control](browser-control/index.md).
 

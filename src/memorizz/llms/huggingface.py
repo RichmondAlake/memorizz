@@ -180,6 +180,8 @@ class HuggingFaceLLM(LLMProvider):
             "top_p": self.top_p,
             "trust_remote_code": self.trust_remote_code,
             "revision": self.revision,
+            "context_window_tokens": self.context_window_tokens,
+            "local_files_only": self.local_files_only,
         }
 
     def _messages_to_prompt(self, messages: List[Dict[str, str]]) -> str:

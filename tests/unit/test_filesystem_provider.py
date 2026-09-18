@@ -26,6 +26,85 @@ class DummyEmbeddingProvider:
         return "dummy"
 
 
+def test_tool_log_search_recovers_old_output_with_bounded_scoped_excerpt(tmp_path):
+    from memorizz.memagent.managers.memory_manager import MemoryManager
+
+    provider = _make_provider(tmp_path)
+    manager = MemoryManager(provider)
+    original = (
+        "setup\n" * 300 + "FAILED test_clock_skew expected 7 got 9\n" + "tail\n" * 300
+    )
+    source_id = manager.store_tool_log(
+        "pytest",
+        {"path": "tests/test_clock.py"},
+        original,
+        memory_id="task",
+        user_id="alice",
+        thread_id="window-1",
+    )
+    for i in range(30):
+        manager.store_tool_log(
+            "pytest",
+            {},
+            f"new passing test {i}",
+            memory_id="task",
+            user_id="alice",
+            thread_id="window-2",
+        )
+    for task, user in [("other-task", "alice"), ("task", "bob"), ("task", None)]:
+        manager.store_tool_log(
+            "pytest",
+            {},
+            "test_clock_skew PRIVATE",
+            memory_id=task,
+            user_id=user,
+            thread_id="window-1",
+        )
+    hits = manager.search_tool_logs(
+        "test_clock_skew",
+        memory_id="task",
+        user_id="alice",
+        excerpt_chars=100,
+    )
+    assert len(hits) == 1
+    assert hits[0]["tool_log_id"] == source_id
+    assert "test_clock_skew" in hits[0]["excerpt"]
+    assert len(hits[0]["excerpt"]) <= 100
+    assert hits[0]["excerpt_start"] > 0
+    assert manager.retrieve_tool_log(source_id, user_id="alice")["result"] == original
+    assert (
+        manager.search_tool_logs(
+            "test_clock_skew", memory_id="task", user_id="alice", thread_id="window-2"
+        )
+        == []
+    )
+    assert manager.search_tool_logs("  ", memory_id="task", user_id="alice") == []
+    assert (
+        manager.search_tool_logs(
+            "tests/test_clock.py", memory_id="task", user_id="alice"
+        )[0]["matched_field"]
+        == "arguments"
+    )
+
+    # The raw filesystem query also searches the actual result field.
+    hits = provider.retrieve_by_query(
+        "test_clock_skew", MemoryType.TOOL_LOG, memory_id="task", user_id="alice"
+    )
+    assert len(hits) == 1
+    assert hits[0]["result"] == original
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"limit": 0}, {"excerpt_chars": 0}, {"limit": True}]
+)
+def test_tool_log_search_rejects_unbounded_output(tmp_path, kwargs):
+    from memorizz.memagent.managers.memory_manager import MemoryManager
+
+    manager = MemoryManager(_make_provider(tmp_path))
+    with pytest.raises(ValueError):
+        manager.search_tool_logs("failure", memory_id="task", user_id="alice", **kwargs)
+
+
 def _make_provider(tmp_path, embedding_provider=None) -> FileSystemProvider:
     root = Path(tmp_path) / "fs-memory"
     config = FileSystemConfig(

@@ -321,3 +321,62 @@ def test_tool_results_offload_only_when_large_and_never_reoffload_expansion():
     )
     assert messages[-1]["content"] == "E" * 900
     assert len(tool_log_writes()) == 1
+
+
+@pytest.mark.unit
+def test_persist_all_results_keeps_small_outputs_inline_and_skips_expansion():
+    provider = MockMemoryProvider()
+
+    def run_test() -> str:
+        """Return a small but important failure."""
+        return "FAILED test_clock_skew: expected 7, got 9"
+
+    policy = ToolResultPolicy(persist_all_results=True, offload_above_chars=256)
+    assert ToolResultPolicy.from_value(policy.to_dict()).persist_all_results is True
+    agent = MemAgent(
+        tools=[run_test],
+        memory_provider=provider,
+        memory_ids=["capture-task"],
+        tool_result_policy=policy,
+    )
+    agent._current_memory_id = "capture-task"
+    agent._current_thread_id = "window-1"
+    messages = []
+    _prepare_direct_tool(agent, "run test", user_id="alice")
+    agent._execute_and_record_tool_call(
+        _tool_call("run_test", {}, "short-test"), messages, None, "alice"
+    )
+    assert messages[-1]["content"] == run_test()
+    writes = [
+        call
+        for call in provider.call_history
+        if call[0] == "store" and call[3] == MemoryType.TOOL_LOG
+    ]
+    assert len(writes) == 1
+    assert writes[0][2]["result"] == run_test()
+    assert writes[0][2]["user_id"] == "alice"
+    assert writes[0][2]["thread_id"] == "window-1"
+
+    def retrieve_tool_log_entry(tool_log_id: str) -> str:
+        """Read already archived evidence."""
+        return "E" * 900
+
+    agent.tool_manager.add_tool(retrieve_tool_log_entry)
+    _prepare_direct_tool(agent, "retrieve tool log entry", user_id="alice")
+    agent._execute_and_record_tool_call(
+        _tool_call("retrieve_tool_log_entry", {"tool_log_id": "saved"}),
+        messages,
+        None,
+        "alice",
+    )
+    assert messages[-1]["content"] == "E" * 900
+    assert (
+        len(
+            [
+                call
+                for call in provider.call_history
+                if call[0] == "store" and call[3] == MemoryType.TOOL_LOG
+            ]
+        )
+        == 1
+    )

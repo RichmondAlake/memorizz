@@ -7,6 +7,7 @@
 import inspect
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -784,6 +785,102 @@ class MemoryManager:
             logger.error("Failed to list tool logs for %s: %s", memory_id, e)
             return []
 
+    def search_tool_logs(
+        self,
+        query: str,
+        *,
+        memory_id: str,
+        user_id: Optional[str],
+        thread_id: Optional[str] = None,
+        limit: int = 5,
+        excerpt_chars: int = 800,
+    ) -> List[Dict[str, Any]]:
+        """Search stored tool names, arguments, results and errors in a task.
+
+        ``user_id`` is required: pass ``None`` for anonymous records. Omitting
+        ``thread_id`` searches earlier threads within this exact memory/user
+        scope. Results contain bounded excerpts and an ID that can be passed
+        to :meth:`retrieve_tool_log`; they never inline the full tool output.
+
+        This portable lexical implementation scans all scoped logs before
+        ranking, so an old failure cannot disappear behind a recent-N cutoff.
+        It is intended for modest histories; large installations should use
+        a source-linked full-text or vector index. It does not claim semantic
+        matching or a bound on provider read cost.
+        """
+        if not isinstance(memory_id, str) or not memory_id.strip():
+            raise ValueError("memory_id is required for tool-log search")
+        if user_id is not None and not isinstance(user_id, str):
+            raise TypeError("user_id must be a string or None")
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("limit must be an integer between 1 and 20")
+        if type(excerpt_chars) is not int or not 1 <= excerpt_chars <= 4000:
+            raise ValueError("excerpt_chars must be an integer between 1 and 4000")
+        needle = query.strip().lower()
+        terms = set(re.findall(r"\w+", needle))
+        if not needle or not terms:
+            return []
+
+        rows = self.list_tool_logs(
+            memory_id, limit=0, user_id=user_id, thread_id=thread_id
+        )
+        # Recheck native-provider results before exposing content or IDs.
+        rows = filter_tool_log_rows(
+            rows, memory_id=memory_id, user_id=user_id, thread_id=thread_id, limit=0
+        )
+        matches: List[Dict[str, Any]] = []
+        for row in rows:
+            best = None
+            for field in ("result", "arguments", "error", "tool_name"):
+                value = row.get(field)
+                if value is None:
+                    continue
+                text = (
+                    value if isinstance(value, str) else json.dumps(value, default=str)
+                )
+                lowered = text.lower()
+                words = list(re.finditer(r"\w+", lowered))
+                overlapping = terms.intersection(match.group() for match in words)
+                if not overlapping:
+                    continue
+                exact = lowered.find(needle)
+                score = (2.0 if exact >= 0 else 0.0) + len(overlapping) / len(terms)
+                position = (
+                    exact
+                    if exact >= 0
+                    else next(
+                        match.start() for match in words if match.group() in overlapping
+                    )
+                )
+                start = max(0, position - excerpt_chars // 4)
+                candidate = {
+                    "score": score,
+                    "matched_field": field,
+                    "excerpt": text[start : start + excerpt_chars],
+                    "excerpt_start": start,
+                    "field_chars": len(text),
+                }
+                if best is None or score > best["score"]:
+                    best = candidate
+            if best:
+                identifier = row.get("id") or row.get("_id") or row.get("tool_log_id")
+                if identifier is None:
+                    continue
+                matches.append(
+                    {
+                        "tool_log_id": str(identifier),
+                        "tool_name": row.get("tool_name"),
+                        "thread_id": row.get("thread_id"),
+                        "timestamp": row.get("timestamp"),
+                        **best,
+                    }
+                )
+        # Python's stable sort retains recency order for equal scores.
+        matches.sort(key=lambda item: item["score"], reverse=True)
+        return matches[:limit]
+
     def load_summaries_for_thread(
         self,
         memory_id: str,
@@ -1248,6 +1345,8 @@ class MemoryManager:
                         if msg_id:
                             source_message_ids.append(str(msg_id))
 
+                    from ...memory_provider.base import provider_manages_embeddings
+
                     # Create summary document with source references
                     summary_doc = {
                         "memory_id": chunk_memory_id,
@@ -1261,7 +1360,9 @@ class MemoryManager:
                         "source_message_ids": source_message_ids,
                         "summary_type": "automatic",
                         "created_at": current_time,
-                        "embedding": get_embedding(summary_content),
+                        "embedding": None
+                        if provider_manages_embeddings(self.memory_provider)
+                        else get_embedding(summary_content),
                     }
 
                     # Store summary

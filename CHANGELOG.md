@@ -2,6 +2,112 @@
 
 ## Unreleased
 
+## 0.11.0 — 2026-09-18
+
+### Added
+
+- Added provider prompt-cache health panels with measured reads/writes, unknown
+  usage, configuration warnings and scoped cache-drop diagnostics. Prefixes
+  and routing keys are hashed; prompt text is not stored in these fields.
+- Added requested-versus-returned model IDs to model-call traces, inspectors
+  and comparisons, including metadata received before a stream finishes.
+- Added filesystem and Oracle context-engineering notebooks demonstrating
+  persistent note revisions, searchable source history, and context rollover
+  with real GPT-6 Astra calls and OpenAI text-embedding-3-small vectors. Both
+  notebooks are standalone, use the published PyPI package, and keep each
+  code cell to at most 25 lines.
+- Added opt-in `ToolResultPolicy.persist_all_results` and scoped
+  `MemoryManager.search_tool_logs()` with bounded source excerpts.
+- Added guided `memorizz memory configure`, `memorizz notion connect` and
+  `/memory-provider` setup with hidden credentials, database URL resolution,
+  read-only schema checks, explicit provisioning confirmation and recovery IDs.
+- Added standalone and REPL `config set/get/path/keys`, explicit project/custom
+  save targets, override warnings, active/saved provider labels and restart
+  guidance. UI Settings exposes Notion defaults and the real shared save path.
+- Added optional `NotionProvider(config, semantic_provider=...)`: Notion owns
+  memory documents; filesystem, MongoDB or Oracle stores vectors and scoped
+  references without a second copy of memory text. Existing providers and
+  streaming defaults remain unchanged.
+- Added explicit Notion workspace provisioning, per-memory-type and linked
+  agent/conversation/trace/tool views, CLI init/status/sync/repair commands,
+  local UI selection and shared CLI/MCP environment configuration.
+- Added durable write-intent/index repair, bounded native observability queries,
+  verified webhook synchronization and live hydration of semantic results.
+- Added provider-managed embedding and live-read capability contracts, including
+  Notion-aware knowledge/entity/summary ingestion and semantic-cache revocation.
+- Avoided redundant global-model conversation backfills for provider-managed
+  embeddings; vectorless workflow rehydration also no longer re-embeds on read.
+- Added deterministic transport, vector, recovery, CLI/UI/MCP and streaming
+  MemAgent tests, plus opt-in live Notion and local Oracle tests.
+- Release smoke checks now exercise Notion and configuration flows from the
+  built wheel in a clean environment with UI/MCP extras.
+
+### Fixed
+
+- Guided setup and REPL configuration use Typer's public prompts and exceptions,
+  so clean CLI installs work without an undeclared external Click dependency.
+- JSON conversion reads text/binary LOBs once and stops following non-text reader
+  results, preventing recursive reader chains from stalling cache fingerprints.
+- OpenAI GPT-5.6/GPT-6 Responses calls now preserve a reusable instruction cache
+  boundary alongside implicit conversation caching. Anthropic text helpers use
+  the same cache policy as chat/streaming; zero read/write counters remain visible.
+- Homebrew release updates remove bottles belonging to the previous version
+  and tolerate a repeated update without publishing a redundant commit.
+- OpenAI GPT-6 Astra context-window detection and legacy output-token translation
+  now match the model configuration used by the context-engineering examples.
+- Filesystem tool-log text queries now include tool arguments and results.
+- Oracle knowledge-base reads by ID preserve namespace and chunk identity;
+  tool-log reads also accept the physical row IDs returned by list/search.
+- `/login notion` now writes `NOTION_TOKEN`. Credential/configuration slash
+  commands are excluded from REPL history; hidden input fails closed without
+  a secure prompt, and credentials are not exposed by config reads or UI fields.
+- Shared env writes are atomic, serialized and owner-only on POSIX, preserving
+  unrelated multiline bindings/comments and refusing malformed/symlink targets.
+  Failed saves no longer produce misleading unconditional success messages.
+- Explicit invalid/misconfigured CLI memory backends no longer silently fall
+  back to filesystem. MongoDB/Oracle CLI connections honor configured external
+  embedding defaults; saved provider changes never hot-switch the running agent.
+- Fixed a live Notion date-precision mismatch that rejected freshly saved
+  memories. Precise timestamps now drive ordering and exact time-window checks;
+  minute-level date buckets no longer omit subminute observations. Added live
+  regression coverage and a persistent, explicitly synthetic Notion walkthrough.
+- Ollama now sends its effective context window to the daemon, defaults to
+  8,192 tokens, and preserves the setting on reload. CLI resume and model
+  switches refresh the history budget instead of retaining a stale 128k limit.
+- Streaming accepts a model's direct tool-phase answer as a finalization
+  proposal under the existing host evidence checks. Drafts stay private and
+  public generation uses a separate request with tools disabled, preventing
+  repeated finalizer retries on local models.
+- Complete model requests now budget context, tool schemas and accumulated
+  tool evidence on every iteration. Old turns are evicted together; oversized
+  required input stops with `context_window_exceeded` before a provider call.
+- Provider context limits and supported generation options survive reload.
+  SDK model overrides now replace the actual runtime model and its budget,
+  while normal reloads preserve agent-level context caps.
+- Empty and token-truncated model responses cannot complete or enter the
+  answer cache in either streaming or synchronous runs. Errors retain partial
+  streamed text, expose stable codes and explain recovery in the CLI.
+
+### Compatibility
+
+- Requires Python 3.10+ and Typer 0.27.2+. Python and npm versions are both 0.11.0;
+  the npm package bootstraps the matching Python CLI. No new base dependency is
+  required; package installers update Typer automatically when needed.
+- Explicit invalid or incomplete CLI backend settings now fail with setup
+  guidance instead of silently selecting filesystem memory. Configuration
+  saves take effect on the next launch and do not migrate existing memory.
+- Empty/truncated model output and requests that exceed the context budget now
+  raise explicit errors. Applications using synchronous runs should handle
+  `ProviderStreamError`; streamed runs expose a terminal error event.
+- Provider-cache telemetry is additive. Missing counters and returned model
+  IDs remain unknown in older traces; cache diagnostics do not imply a price.
+- Notion requires explicit provisioning, access configuration and reconciliation
+  after human edits. Local journal status is not workspace-wide completeness.
+  Live service tests require credentials and remain opt-in.
+- Notion is not an atomic coordination provider: concurrent shared-memory
+  delegation, leases and coordination-dependent automation must use an existing
+  atomic primary provider. The semantic backend remains vector-only.
+
 ## 0.10.0 — 2026-09-08
 
 ### Added

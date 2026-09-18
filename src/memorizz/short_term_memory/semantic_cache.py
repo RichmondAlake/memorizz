@@ -167,6 +167,14 @@ class SemanticCache:
         """
         self.config = config or SemanticCacheConfig()
         self.memory_provider = memory_provider
+        capabilities = getattr(memory_provider, "memory_capabilities", None)
+        capabilities = capabilities() if callable(capabilities) else None
+        self._provider_manages_embeddings = (
+            getattr(capabilities, "manages_embeddings", False) is True
+        )
+        self._requires_provider_reads = (
+            getattr(capabilities, "requires_live_read", False) is True
+        )
         # One MemAgent (and therefore one SemanticCache) is often shared by a
         # threaded web server. Scope is per execution context, not mutable
         # singleton state.
@@ -186,7 +194,11 @@ class SemanticCache:
         self.memory_id = memory_id
 
         # Initialize embedding manager - prioritize passed manager for consistency
-        if embedding_manager:
+        if self._provider_manages_embeddings:
+            # A composed provider owns its model; do not initialize a different
+            # global embedder or mix its vectors into the local cache.
+            self.embedding_manager = None
+        elif embedding_manager:
             # Use the provided embedding manager (ensures consistency with agent)
             self.embedding_manager = embedding_manager
             logger.debug("Using provided embedding manager for consistency")
@@ -245,7 +257,11 @@ class SemanticCache:
             The query embedding
         """
         if query not in self._embedding_cache:
-            self._embedding_cache[query] = self.embedding_manager.get_embedding(query)
+            self._embedding_cache[query] = (
+                self.memory_provider.embed_text(query)
+                if self._provider_manages_embeddings
+                else self.embedding_manager.get_embedding(query)
+            )
         return self._embedding_cache[query]
 
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
@@ -294,6 +310,9 @@ class SemanticCache:
         """
         if not self.memory_provider:
             return False
+
+        if self._requires_provider_reads:
+            return True
 
         # Check if this is a known provider with vector search support
         provider_class_name = self.memory_provider.__class__.__name__
@@ -491,6 +510,9 @@ class SemanticCache:
         or a backend-specific score rounding to precisely ``1.0``. Freshness,
         tenant scope, and every configured fingerprint remain mandatory.
         """
+        # An exact in-process hit must not bypass canonical human edits/revocation.
+        if self._requires_provider_reads:
+            return None
         key = self._generate_cache_key(query, session_id, user_id)
         entry = self.cache.get(key)
         if entry is None:
@@ -940,7 +962,11 @@ class SemanticCache:
                 self.record_bypass("cache_admission_policy")
                 return False
             # Generate embedding for query (with caching to avoid duplication)
-            query_embedding = self._get_or_generate_embedding(query)
+            query_embedding = (
+                []
+                if self._requires_provider_reads
+                else self._get_or_generate_embedding(query)
+            )
 
             # Generate cache key
             cache_key = self._generate_cache_key(query, session_id, user_id)
@@ -960,14 +986,19 @@ class SemanticCache:
             )
 
             # Store in memory cache
-            self.cache[cache_key] = entry
+            if not self._requires_provider_reads:
+                self.cache[cache_key] = entry
 
             # Clean up if necessary
             self._evict_lru_entries()
 
             # Sync to memory provider if enabled
             if self.memory_provider and self.config.enable_memory_provider_sync:
-                self._sync_to_memory_provider(cache_key, entry)
+                synced = self._sync_to_memory_provider(cache_key, entry)
+                if self._requires_provider_reads and not synced:
+                    return False
+            elif self._requires_provider_reads:
+                return False
 
             logger.debug(f"Cache SET: stored query: {query[:50]}...")
             self._stats["writes"] += 1
@@ -1013,6 +1044,9 @@ class SemanticCache:
 
     def _load_from_memory_provider(self) -> int:
         """Load existing cache entries from memory provider."""
+        if self._requires_provider_reads:
+            # No unscoped preload of revocable Notion data into a stale cache.
+            return 0
         try:
             if not self.memory_provider:
                 return 0

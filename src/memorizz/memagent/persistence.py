@@ -444,15 +444,15 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
                     resolved_llm_config = candidate_config
             except Exception:
                 pass
-    elif saved_llm_config:
+    elif resolved_llm_config:
         try:
-            model_to_load = _core.create_llm_provider(saved_llm_config)
+            model_to_load = _core.create_llm_provider(resolved_llm_config)
         except Exception as e:
             load_llm_error = f"{type(e).__name__}: {e}"
             logger.warning(
                 "Could not load model from config: %s. Model will be None.", e
             )
-    elif hasattr(saved_memagent, "model") and saved_memagent.model:
+    elif "llm_config" not in overrides and getattr(saved_memagent, "model", None):
         model_to_load = saved_memagent.model
 
     # Load delegates if they exist
@@ -671,6 +671,14 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         # agent report an empty ``llm_config`` (and therefore no provider or
         # model) to the SDK, CLI, MCP server, and UI.
         llm_config=resolved_llm_config,
+        # An agent-level cap survives a normal reload. A replacement model or
+        # provider configuration gets its own budget unless explicitly capped.
+        context_window_tokens=overrides.get(
+            "context_window_tokens",
+            None
+            if "llm_config" in overrides or override_model is not None
+            else getattr(saved_memagent, "context_window_tokens", None),
+        ),
         tools=overrides.get("tools", getattr(saved_memagent, "tools", None)),
         persona=overrides.get("persona", getattr(saved_memagent, "persona", None)),
         name=overrides.get("name", getattr(saved_memagent, "name", None)),

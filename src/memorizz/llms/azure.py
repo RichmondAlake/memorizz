@@ -73,6 +73,7 @@ class AzureOpenAI(LLMProvider):
             "deployment_name": self.model,
             "azure_endpoint": self.azure_endpoint,
             "api_version": self.api_version,
+            "context_window_tokens": self.context_window_tokens,
             # Note: We don't save the API key for security. It should be loaded from env vars.
         }
 

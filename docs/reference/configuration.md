@@ -14,8 +14,19 @@ For CLI and UI processes, values resolve in this order:
 
 Environment files load with `override=False`, so a deployed process variable
 cannot be silently replaced by a developer `.env` file. The CLI and UI write
-only the canonical MemoRizz environment file; they do not rewrite a project
-`.env` unless `MEMORIZZ_ENV_FILE` points there.
+the canonical MemoRizz environment file by default. CLI editors also accept
+`--project` or `--env-file PATH` as explicit write targets; a custom file is
+only loaded when selected by `MEMORIZZ_ENV_FILE` at launch.
+
+Run `memorizz config path`, `memorizz config keys`, `memorizz config get KEY`, or
+`memorizz config set KEY [VALUE]`. Omit VALUE for a prompt; credentials and
+unknown keys always require hidden input. `memorizz memory configure` guides
+memory setup, and `memorizz notion connect` handles Notion specifically.
+The [CLI configuration guide](../getting-started/cli.md#configuration) covers
+REPL equivalents, override warnings, atomic/private file writes and history safety.
+Saved defaults require restart; existing clients/agents are not reconnected
+or migrated. UI Settings and `/login` additionally update the current process's
+environment, without replacing already constructed clients.
 
 ## Paths
 
@@ -39,7 +50,7 @@ isolation declaration. Create it with `memorizz harness init`; see the
 | `MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER` | `openai`, `ollama`, or another registered provider |
 | `MEMORIZZ_DEFAULT_EMBEDDING_MODEL` | Embedding model name |
 | `MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS` | Dimension matching the persisted vector schema |
-| `MEMORIZZ_BACKEND` | `filesystem`, `mongodb`, or `oracle` |
+| `MEMORIZZ_BACKEND` | `filesystem`, `mongodb`, `oracle`, or `notion` |
 
 ## Meta-harness
 
@@ -72,6 +83,7 @@ MONGODB_URI=
 ORACLE_USER=
 ORACLE_PASSWORD=
 ORACLE_DSN=
+NOTION_TOKEN=
 ```
 
 Use a deployment secret manager for production. Do not put secrets in
@@ -108,6 +120,23 @@ multi-instance deployments. Losing that key makes stored tokens unrecoverable.
 
     Run `memorizz oracle preflight --json` before traffic. See the
     [Oracle guide](../memory-providers/oracle.md).
+
+=== "Notion"
+
+    Run `memorizz notion connect` for guided setup, or configure:
+
+    ```dotenv
+    MEMORIZZ_BACKEND=notion
+    NOTION_TOKEN=
+    MEMORIZZ_NOTION_DATA_SOURCE_ID=
+    MEMORIZZ_NOTION_SEMANTIC_BACKEND=filesystem
+    MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER=ollama
+    MEMORIZZ_DEFAULT_EMBEDDING_MODEL=nomic-embed-text
+    ```
+
+    The LLM remains independently configured. See the
+    [Notion guide](../memory-providers/notion.md) for secondary storage options,
+    explicit provisioning, permissions, synchronization and operational limits.
 
 ## UI security controls
 

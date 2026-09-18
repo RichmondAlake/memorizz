@@ -258,8 +258,13 @@ class ToolResultPolicy:
         )
     )
     digest_chars: int = 360
+    # Persistence and prompt offloading are separate decisions. Opt in when
+    # even a short test failure must remain available in a later context.
+    persist_all_results: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.persist_all_results, bool):
+            raise TypeError("persist_all_results must be a boolean")
         self.offload_above_chars = max(256, int(self.offload_above_chars))
         if self.offload_above_tokens is not None:
             self.offload_above_tokens = max(64, int(self.offload_above_tokens))
@@ -295,6 +300,7 @@ class ToolResultPolicy:
             "offload_above_tokens": self.offload_above_tokens,
             "expansion_tool_names": sorted(self.expansion_tool_names),
             "digest_chars": self.digest_chars,
+            "persist_all_results": self.persist_all_results,
         }
 
     def pointer(

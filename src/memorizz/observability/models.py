@@ -67,6 +67,11 @@ ATTRIBUTE_FIELDS = (
             "content_version",
             "instrumentation_version",
             "model",
+            "response_model",
+            "prompt_cache_enabled",
+            "prompt_cache_prefix",
+            "prompt_cache_key",
+            "prompt_cache_warning",
             "provider",
             "request_id",
             "input_tokens",
@@ -236,6 +241,11 @@ class TraceEventV3(TraceContext):
 class LastResponseMetadata(_BoundedModel):
     """Optional provider response envelope. Missing values remain unknown."""
 
+    response_model: str | None = Field(default=None, min_length=1)
+    prompt_cache_enabled: bool | None = None
+    prompt_cache_prefix: str | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_warning: str | None = None
     request_id: str | None = None
     finish_reason: str | None = None
     input_tokens: int | None = Field(default=None, ge=0)

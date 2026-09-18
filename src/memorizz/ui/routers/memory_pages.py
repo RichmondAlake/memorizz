@@ -12,6 +12,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..state import _state, templates
 
@@ -48,10 +49,17 @@ async def memory_list(request: Request, memory_type: str):
         raise HTTPException(status_code=404, detail="Unknown memory type")
 
     items = []
+    load_error = None
     try:
-        items = _state["provider"].list_all(mem_type)
+        if _state.get("provider_type") == "notion":
+            items = await run_in_threadpool(
+                _state["provider"].retrieve_by_query, {}, mem_type, limit=101
+            )
+        else:
+            items = await run_in_threadpool(_state["provider"].list_all, mem_type)
     except Exception as e:
-        logger.error(f"Failed to list {memory_type}: {e}")
+        logger.error("Failed to list %s (%s)", memory_type, type(e).__name__)
+        load_error = "Memory could not be loaded. Check provider access and query limits; this is not an empty-result confirmation."
 
     return templates.TemplateResponse(
         "memory_list.html",
@@ -62,6 +70,8 @@ async def memory_list(request: Request, memory_type: str):
             "memory_type": memory_type,
             "memory_type_display": memory_type.replace("-", " ").title(),
             "items": items[:100],  # Limit to 100 items
+            "has_more": len(items) > 100,
+            "load_error": load_error,
             "active_page": memory_type,
         },
     )

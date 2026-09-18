@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import openai
@@ -64,13 +65,15 @@ class OpenAI(LLMProvider):
             for llama.cpp's ``llama-server``, or LM Studio's local URL).
             Falls back to the official OpenAI endpoint when unset.
         reasoning_effort : str, optional
-            Reasoning effort forwarded to Chat Completions. GPT-5.6
+            Reasoning effort forwarded to the selected API. GPT-5.6
             function tools on this endpoint can use ``"none"``; Responses
-            API text helpers keep their provider defaults.
+            API text helpers keep their provider defaults. GPT-6 Astra
+            requires at least ``"low"`` and Responses for function tools.
         max_completion_tokens : int, optional
             Maximum generated tokens for current reasoning models. For the
-            GPT-5.6 family, the legacy ``max_tokens`` argument is translated
-            to this parameter automatically for backwards compatibility.
+            GPT-5.5, GPT-5.6 and GPT-6 families, the legacy ``max_tokens``
+            argument is translated to this parameter automatically for
+            backwards compatibility.
         prompt_cache_retention : str, optional
             OpenAI prompt-cache retention policy (``"in_memory"`` or
             ``"24h"``). Only sent to the official OpenAI endpoint; local
@@ -78,7 +81,8 @@ class OpenAI(LLMProvider):
         api_mode : str, optional
             Tool-loop endpoint: ``"chat_completions"`` (legacy/default) or
             ``"responses"``. The Responses API is required for GPT-5.6
-            function tools combined with non-zero reasoning effort.
+            function tools combined with non-zero reasoning effort and for
+            all GPT-6 Astra function tools.
         """
         # Local OpenAI-compatible servers don't authenticate but the SDK
         # still requires a non-empty api_key. Substitute a placeholder so
@@ -114,9 +118,11 @@ class OpenAI(LLMProvider):
         self._prompt_cache_key: Optional[str] = None
         self._prompt_cache_retention = prompt_cache_retention
         self._request_options: Dict[str, Any] = {}
-        # GPT-5.6 rejects the legacy ``max_tokens`` field. Preserve the public
-        # MemoRizz constructor while translating it to the current API name.
-        uses_completion_limit = model.lower().startswith(("gpt-5.5", "gpt-5.6"))
+        # Current reasoning models reject the legacy ``max_tokens`` field.
+        # Preserve the public constructor while translating to the API name.
+        uses_completion_limit = model.lower().startswith(
+            ("gpt-5.5", "gpt-5.6", "gpt-6")
+        )
         if uses_completion_limit:
             if max_completion_tokens is None:
                 max_completion_tokens = max_tokens
@@ -164,6 +170,8 @@ class OpenAI(LLMProvider):
     def _infer_context_window_tokens(self, model: str) -> int:
         """Best-effort mapping of well-known OpenAI models to their context window."""
         normalized = model.lower() if model else ""
+        if normalized == "gpt-6-astra" or normalized.startswith("gpt-6-astra-"):
+            return 1_050_000
         context_map = {
             # GPT-5 family
             "gpt-5.5": 1_050_000,
@@ -198,6 +206,11 @@ class OpenAI(LLMProvider):
     def get_config(self) -> Dict[str, Any]:
         """Returns a serializable configuration for the OpenAI provider."""
         config: Dict[str, Any] = {"provider": "openai", "model": self.model}
+        config["context_window_tokens"] = self.context_window_tokens
+        if self._request_options:
+            config["additional_config"] = deepcopy(self._request_options)
+        if self._prompt_cache_retention is not None:
+            config["prompt_cache_retention"] = self._prompt_cache_retention
         if self.api_mode != "chat_completions":
             config["api_mode"] = self.api_mode
         if self.base_url:
@@ -231,12 +244,65 @@ class OpenAI(LLMProvider):
         those servers don't implement OpenAI's prompt-cache routing and some
         reject unknown parameters.
         """
-        if self.base_url:
+        if getattr(self, "base_url", None):
+            self._last_prompt_cache_metadata = {}
             return
         if self._prompt_cache_key:
             kwargs["prompt_cache_key"] = self._prompt_cache_key
         if self._prompt_cache_retention:
             kwargs["prompt_cache_retention"] = self._prompt_cache_retention
+        self._apply_responses_cache_boundary(kwargs)
+        from .prompt_cache import cache_request_metadata
+
+        self._last_prompt_cache_metadata = cache_request_metadata(kwargs, "openai")
+
+    def _apply_responses_cache_boundary(self, kwargs: Dict[str, Any]) -> None:
+        """Keep a reusable instruction boundary on GPT-5.6/6 Responses calls.
+
+        Their implicit write ends at the latest eligible message, which may
+        include a changing user question. An explicit instruction breakpoint
+        also writes the stable prefix. Keep implicit conversation caching and
+        respect caller-supplied breakpoints; never mutate caller message blocks.
+        """
+        if "input" not in kwargs or not self.model.startswith(("gpt-5.6", "gpt-6")):
+            return
+        items = kwargs["input"]
+        if isinstance(items, str) and kwargs.get("instructions"):
+            items = [
+                {"role": "developer", "content": kwargs.pop("instructions")},
+                {"role": "user", "content": items},
+            ]
+        if not isinstance(items, list):
+            return
+        if any(
+            isinstance(block, dict) and block.get("prompt_cache_breakpoint")
+            for item in items
+            if isinstance(item, dict)
+            for field in ("content", "output")
+            for block in (item.get(field) if isinstance(item.get(field), list) else [])
+        ):
+            return
+        items = deepcopy(items)
+        target = None
+        for item in items:
+            if not isinstance(item, dict) or item.get("role") not in {
+                "system",
+                "developer",
+            }:
+                break
+            content = item.get("content")
+            if isinstance(content, str) and content:
+                item["content"] = [{"type": "input_text", "text": content}]
+            for block in item.get("content") or []:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "input_text"
+                    and block.get("text")
+                ):
+                    target = block
+        if target is not None:
+            target["prompt_cache_breakpoint"] = {"mode": "explicit"}
+            kwargs["input"] = items
 
     def _create_chat_completion(self, kwargs: Dict[str, Any]) -> Any:
         """Call chat.completions.create, dropping cache params on old SDKs.
@@ -255,6 +321,10 @@ class OpenAI(LLMProvider):
             }
             if len(trimmed) == len(kwargs):
                 raise
+            self._last_prompt_cache_metadata[
+                "prompt_cache_warning"
+            ] = "cache_options_dropped"
+            self._last_prompt_cache_metadata.pop("prompt_cache_key", None)
             return self.client.chat.completions.create(**trimmed)
 
     @staticmethod
@@ -392,11 +462,7 @@ class OpenAI(LLMProvider):
             value = self._request_options.get(key)
             if value is not None:
                 kwargs[key] = value
-        if self._prompt_cache_key:
-            kwargs["prompt_cache_key"] = self._prompt_cache_key
-        if self._prompt_cache_retention:
-            kwargs["prompt_cache_retention"] = self._prompt_cache_retention
-
+        self._apply_cache_options(kwargs)
         return kwargs
 
     def _generate_responses(self, messages, tools, tool_choice):
@@ -563,11 +629,7 @@ class OpenAI(LLMProvider):
             value = self._request_options.get(key)
             if value is not None:
                 kwargs[key] = value
-        if self._prompt_cache_key:
-            kwargs["prompt_cache_key"] = self._prompt_cache_key
-        if self._prompt_cache_retention:
-            kwargs["prompt_cache_retention"] = self._prompt_cache_retention
-
+        self._apply_cache_options(kwargs)
         self._last_usage = None
         self._last_response_metadata = {}
         response = self.client.responses.create(**kwargs)

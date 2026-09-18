@@ -213,12 +213,61 @@ available and use the same durable store semantics.
 
 ## Size-aware tool results
 
-Small tool results remain inline. A full result is persisted exactly once only
+Small tool results remain inline. By default, a full result is persisted only
 when it crosses `offload_above_chars` or `offload_above_tokens`; the returned
 pointer includes its log ID, SHA-256 digest, size, identifiers, and audit time.
 `retrieve_tool_log_entry` and other configured expansion tools are never
 offloaded, so expansion cannot create pointer-to-pointer loops. Missing or
 invalid expansions return structured failures.
+
+For tasks that must recover short test failures or other small outputs after a
+context rollover, opt into durable capture independently of prompt offloading:
+
+```python
+agent = MemAgent(
+    model=model,
+    memory_provider=provider,
+    tool_result_policy=ToolResultPolicy(
+        offload_above_chars=8_000,
+        persist_all_results=True,
+    ),
+)
+```
+
+With `persist_all_results=True`, normal small outputs also receive a `TOOL_LOG`
+record, while their full inline prompt representation stays the same. Configured
+expansion tools are excluded from both capture and offloading to avoid repeated
+copies of the same evidence. The default remains `False`. This policy records
+normal tool execution results; it is not a complete archive of every model
+request, interrupted turn, or intermediate message. Persistence failures retain
+the existing best-effort behavior and must be monitored by the application.
+
+Search original tool names, arguments, results, and errors across a task:
+
+```python
+hits = agent.memory_manager.search_tool_logs(
+    "test_clock_skew",
+    memory_id="retry-investigation",
+    user_id="user-42",
+    limit=5,
+    excerpt_chars=800,
+)
+```
+
+`user_id` is required; explicitly pass `None` for anonymous records. Supply a
+`thread_id` to narrow the search, or omit it to include earlier threads inside
+the specified memory/user scope. Each result contains a fetchable `tool_log_id`,
+matched field, excerpt, offset, score, and source-field size. Expand an authorized
+result with `retrieve_tool_log(id, user_id=...)` and verify its task scope before
+exposing it to a caller. Limit model-facing expansion to the needed source slice.
+
+The portable lexical search scans all scoped logs before ranking, so an old
+failure remains discoverable behind newer records. Its output is bounded; its
+read cost is linear in history size, and some providers scan the full log store
+before filtering. Larger workloads should use a source-linked full-text or
+vector index. The [context-engineering examples](https://github.com/RichmondAlake/memorizz/tree/main/examples/context_engineering)
+demonstrate persistent notes, indexed history, and source expansion with both
+filesystem and Oracle storage.
 
 ## Semantic cache correctness
 

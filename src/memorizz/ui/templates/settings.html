@@ -19,7 +19,7 @@
 </style>
 <div class="page-header">
     <h1>Settings</h1>
-    <p>Manage API keys for providers and integrations.</p>
+    <p>Manage provider credentials and saved defaults.</p>
 </div>
 
 {% if message %}
@@ -34,10 +34,16 @@
 </div>
 {% endif %}
 
+{% for warning in config_warnings %}
+<div class="error-message" role="status">Warning: {{ warning }}</div>
+{% endfor %}
+
 <form method="post" action="/settings" class="agent-form">
     <div class="detail-section">
         <h2>Notes</h2>
-        <p class="form-hint">Leave a field blank to keep the current value. Keys apply immediately to this UI session and are written to the <code>.env</code> file for reuse.</p>
+        <p>Save target: <code>{{ env_file_path }}</code>. Active UI memory provider: <strong>{{ provider_type }}</strong>.</p>
+        <p class="form-hint">Leave a field blank to keep its value. Saving updates this process's environment, but does not reconnect existing agents or switch their memory provider. Reconnect through <a href="/connect">Connect</a>; restart CLI/MCP processes to load saved defaults. No memory is migrated.</p>
+        <p class="form-hint">Precedence: process exports &gt; project <code>.env</code> &gt; Memorizz <code>.env</code>. A project setting may override this save after restart; use <code>memorizz config set KEY --project</code> to edit it explicitly. Keep credential files out of version control; on POSIX, saves use owner-only permissions (0600).</p>
     </div>
 
     {% for section in settings_sections %}
@@ -154,7 +160,7 @@
     {% endfor %}
 
     <div class="form-actions">
-        <button type="submit" class="btn btn-primary">Save Keys</button>
+        <button type="submit" class="btn btn-primary">Save Settings</button>
     </div>
 </form>
 {% endblock %}

@@ -72,6 +72,9 @@ def _swap_model(session, new_config: Dict[str, object], carry_key: bool) -> None
         _carry_api_key(getattr(agent, "model", None), new_config)
     agent.model = create_llm_provider(new_config)
     agent.llm_config = dict(new_config)
+    agent._context_window_tokens = agent._initialize_context_window_tokens(
+        None, new_config
+    )
     agent._llm_init_error = None
     session.llm_config = dict(new_config)
 
@@ -838,6 +841,7 @@ _LOGIN_PROVIDERS = [
     ("firecrawl", "FIRECRAWL_API_KEY", "Firecrawl — internet search"),
     ("browseruse", "BROWSER_USE_API_KEY", "Browser Use — browser-control model"),
     ("voyage", "VOYAGE_API_KEY", "Voyage AI — embeddings"),
+    ("notion", "NOTION_TOKEN", "Notion — memory documents and agent views"),
 ]
 
 
@@ -881,7 +885,8 @@ def _login_ollama(console) -> None:
 
 def cmd_login(session, args: str):
     console = _con(session)
-    import getpass
+    from .._env_io import env_override_warnings, validate_env_updates
+    from .settings_commands import secret_prompt, setting_key
 
     by_name = {p[0]: p for p in _LOGIN_PROVIDERS}
     choice = args.strip().lower()
@@ -924,20 +929,35 @@ def cmd_login(session, args: str):
         return
 
     try:
-        value = getpass.getpass(f"Paste {key_name} (hidden): ").strip()
+        key_name = setting_key(key_name)
+        console.print(f"Save target: {cfg.resolve_env_file()}", markup=False)
+        value = secret_prompt(f"Paste {key_name}").strip()
+        validate_env_updates({key_name: value})
     except (EOFError, KeyboardInterrupt):
         console.print("\n[yellow]Cancelled.[/yellow]")
+        return
+    except ValueError as exc:
+        console.print(str(exc), markup=False)
         return
     if not value:
         console.print("[yellow]No value entered; nothing saved.[/yellow]")
         return
+    for warning in env_override_warnings({key_name: value}):
+        console.print("Warning: " + warning, markup=False)
     err = cfg.apply_env_updates({key_name: value})
     if err:
         console.print(
             f"[yellow]Set for this session, but failed to persist:[/yellow] {err}"
         )
     else:
-        console.print(f"[green]Saved[/green] {key_name} → {cfg.resolve_env_file()}")
+        console.print(f"Saved {key_name} → {cfg.resolve_env_file()}", markup=False)
+    console.print(
+        "Restart to reconnect existing clients with the new credential. Memory providers are not switched by /login."
+    )
+    if key_name == "NOTION_TOKEN":
+        console.print(
+            "Next: /memory-provider notion to choose a library and vector store. /login notion saves NOTION_TOKEN only."
+        )
 
     # Internet keys take effect immediately: attach the provider to the live
     # agent so the user doesn't also have to run /web.
@@ -950,12 +970,21 @@ def cmd_login(session, args: str):
                     "[green]Internet access enabled →[/green] "
                     f"{session.agent.get_internet_access_provider_name()}"
                 )
-        except Exception as exc:
-            console.print(f"[yellow]Saved, but enabling web failed:[/yellow] {exc}")
+        except Exception:
+            console.print(
+                "[yellow]Credential saved for this session, but enabling web failed. Check the provider configuration.[/yellow]"
+            )
 
 
 def cmd_config(session, args: str):
     console = _con(session)
+    if args.strip():
+        from .settings_commands import config_app, run_repl_command
+
+        run_repl_command(config_app, args, "/config", console)
+        return
+    from dotenv import dotenv_values
+
     provider_type = type(session.provider).__name__ if session.provider else "(none)"
     console.print("[bold]memorizz config[/bold]")
     console.print(f"  home:          {cfg.memorizz_home()}")
@@ -963,9 +992,21 @@ def cmd_config(session, args: str):
     console.print(f"  memory root:   {cfg.memory_root()}")
     console.print(f"  llm provider:  {session.provider_name}")
     console.print(f"  llm model:     {session.model_name}")
-    console.print(f"  memory store:  {provider_type}")
+    console.print(f"  active memory store: {provider_type}")
+    saved_path = cfg.resolve_env_file()
+    saved = dotenv_values(saved_path, interpolate=False) if saved_path.is_file() else {}
+    # Restrict labels rather than rendering arbitrary .env contents as markup.
+    saved_backend = saved.get("MEMORIZZ_BACKEND")
+    if saved_backend not in {"filesystem", "mongodb", "oracle", "notion"}:
+        saved_backend = "not set or invalid"
+    console.print(f"  saved default backend: {saved_backend}")
     console.print(f"  coding mode:   {'on' if session.code_mode else 'off'}")
-    provider_config = getattr(session.provider, "config", None)
+    semantic_provider = getattr(session.provider, "semantic_provider", None)
+    provider_config = getattr(semantic_provider or session.provider, "config", None)
+    if hasattr(session.provider, "semantic_provider"):
+        console.print(
+            f"  active vector store: {type(semantic_provider).__name__ if semantic_provider else 'none (semantic search disabled)'}"
+        )
     if getattr(provider_config, "in_database_embedding", False):
         embedding_label = "Oracle in-database ONNX"
     else:
@@ -992,6 +1033,24 @@ def cmd_config(session, args: str):
     except Exception:
         browser = None
     console.print(f"  browser control: {browser or 'off'}")
+    console.print(
+        "Precedence: process exports > project .env > Memorizz .env. Saved defaults require restart and do not migrate memory."
+    )
+    console.print(
+        "Use /config get KEY for effective/saved values, /config set KEY [VALUE] to edit, or /memory-provider for guided setup."
+    )
+
+
+def cmd_memory_provider(session, args: str):
+    import typer
+
+    from .memory_commands import configure
+    from .settings_commands import run_repl_command
+
+    # Keep REPL help accurate: /memory-provider notion, without "configure".
+    memory_repl_app = typer.Typer(pretty_exceptions_show_locals=False)
+    memory_repl_app.command()(configure)
+    run_repl_command(memory_repl_app, args, "/memory-provider", _con(session))
 
 
 _DOCS_BASE = "https://richmondalake.github.io/memorizz"
@@ -1279,6 +1338,11 @@ COMMANDS: Dict[str, Command] = {
     "memory": Command(
         cmd_memory, "Show or switch the active memory id.", "/memory [id]"
     ),
+    "memory-provider": Command(
+        cmd_memory_provider,
+        "Set up a memory backend for the next launch (does not migrate memory).",
+        "/memory-provider [filesystem|mongodb|oracle|notion] [--project]",
+    ),
     "history": Command(
         cmd_history, "Print the current conversation history.", "/history"
     ),
@@ -1306,9 +1370,13 @@ COMMANDS: Dict[str, Command] = {
     "login": Command(
         cmd_login,
         "Log in / save an API key (lists platforms if none given).",
-        "/login [provider]",
+        "/login [provider|ENV_VARIABLE]",
     ),
-    "config": Command(cmd_config, "Show resolved config + paths.", "/config"),
+    "config": Command(
+        cmd_config,
+        "Inspect or save defaults; credentials use hidden input.",
+        "/config [get|set|path|keys]",
+    ),
     "docs": Command(
         cmd_docs, "Open the documentation in your browser.", "/docs [cli|ui]"
     ),
@@ -1332,6 +1400,10 @@ COMMANDS: Dict[str, Command] = {
 }
 
 ALIASES: Dict[str, str] = {
+    # These were unambiguous before /memory-provider was introduced.
+    "mem": "memory",
+    "memo": "memory",
+    "memor": "memory",
     "quit": "exit",
     "q": "exit",
     "h": "help",
@@ -1346,7 +1418,25 @@ ALIASES: Dict[str, str] = {
 
 def command_completions() -> List[str]:
     """Return ``/name`` strings for the prompt_toolkit completer."""
-    return [f"/{name}" for name in sorted(COMMANDS)]
+    from .settings_commands import PUBLIC_SETTINGS
+
+    return (
+        [f"/{name}" for name in sorted(COMMANDS)]
+        + [f"/config {verb}" for verb in ("get", "set", "path", "keys")]
+        + [
+            f"/config {verb} {key}"
+            for verb in ("get", "set")
+            for key in sorted(
+                PUBLIC_SETTINGS
+                | {"NOTION_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
+            )
+        ]
+        + [f"/login {name}" for name, _, _ in _LOGIN_PROVIDERS]
+        + [
+            f"/memory-provider {name}"
+            for name in ("filesystem", "mongodb", "oracle", "notion")
+        ]
+    )
 
 
 def dispatch(line: str, session) -> bool:

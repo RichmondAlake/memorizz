@@ -180,6 +180,60 @@ def test_oracle_record_memory_types_have_raw_by_id_projections(memory_type):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("has_chunking", [True, False])
+def test_oracle_knowledge_by_id_returns_namespace_and_chunk_identity(has_chunking):
+    cursor = _Cursor()
+    provider = _bare_provider(_Connection(cursor))
+    provider._memory_type_has_column = lambda *_args: has_chunking
+    identifier = uuid.uuid4()
+    values = {
+        "id": identifier.bytes,
+        "memory_id": "task",
+        "user_id": "alice",
+        "content": "source-backed note",
+        "metadata": '{"revision": 2}',
+        "namespace": "task/notes",
+        "knowledge_base_id": "notes",
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "chunking_strategy": "none",
+    }
+    fields = (
+        _BY_ID_SPECS[MemoryType.KNOWLEDGE_BASE][1]
+        + provider._knowledge_base_chunk_fields()
+    )
+    cursor._fetchone_value = tuple(values.get(field.col) for field in fields)
+    row = provider.retrieve_by_id(str(identifier), MemoryType.KNOWLEDGE_BASE)
+    assert row["namespace"] == ("task/notes" if has_chunking else None)
+    assert row["chunk_index"] == (0 if has_chunking else None)
+    assert row["metadata"] == {"revision": 2}
+    assert row["user_id"] == "alice"
+    assert row["_id"] == str(identifier)
+
+
+@pytest.mark.unit
+def test_oracle_tool_log_search_row_id_can_be_expanded():
+    cursor = _Cursor()
+    provider = _bare_provider(_Connection(cursor))
+    identifier = uuid.uuid4()
+    values = {
+        "id": identifier.bytes,
+        "tool_log_id": "logical-log-id",
+        "result": "FAILED test_clock_skew",
+        "memory_id": "task",
+        "user_id": "alice",
+    }
+    fields = _BY_ID_SPECS[MemoryType.TOOL_LOG][1]
+    responses = iter([None, tuple(values.get(field.col) for field in fields)])
+    cursor.fetchone = lambda: next(responses)
+    row = provider.retrieve_by_id(str(identifier), MemoryType.TOOL_LOG)
+    assert row["result"] == "FAILED test_clock_skew"
+    assert row["user_id"] == "alice"
+    assert cursor.calls[0][1] == {"tool_log_id": str(identifier)}
+    assert cursor.calls[1][1] == {"row_id": identifier.bytes}
+
+
+@pytest.mark.unit
 def test_oracle_shared_memory_has_a_complete_list_projection():
     fields, order_by = _LIST_SPECS[MemoryType.SHARED_MEMORY]
     assert {

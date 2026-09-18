@@ -37,6 +37,12 @@ Thumbs.db
 # Test Notebooks
 dev_test.ipynb
 
+# Local test coverage output
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
 # Environment variables and secrets
 .env
 .env.*

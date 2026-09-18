@@ -115,7 +115,16 @@ Once connected, the sidebar is your main navigation.
 | Agent Harnesses | `/harnesses` | Probe adapters, launch bounded runs, decide exact approvals, cancel work, and inspect verification evidence. |
 | Traces | `/traces` | Filter/search agents and inspect thread-level trace timelines. |
 | Evalground | `/evalground` | Run local open-model memory suites, monitor logs, and review run history/results. |
-| Settings | `/settings` | Save API keys and runtime defaults into the UI session and `.env`. |
+| Settings | `/settings` | Save credentials and defaults; shows the actual `.env` target, precedence warnings and the active memory provider. Existing clients need reconnection. |
+
+Settings includes Notion credentials, its memory data-source ID and separate
+vector backend. For guided access checks or explicitly creating a new Notion
+area, use `memorizz notion connect` in a terminal. Saving settings does not
+switch the active UI provider or migrate memories: use **Connect** to reconnect.
+Restart other CLI/MCP processes to load changed defaults. Tokens are never
+prefilled into the page. The shared env writer uses atomic, owner-only POSIX
+files; keep them out of version control and review warnings about project
+`.env` or exported values overriding your save.
 
 ## 5. Suggested First Run Workflow
 
