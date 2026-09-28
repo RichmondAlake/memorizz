@@ -8,23 +8,51 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from ..._env_io import memorizz_home
 from ...mcp import MCPClientError, MCPClientManager
+from ...mcp.audit import MCPAuditLogger
+from .. import integrations_view as view
+from ..dashboard import relative_time
 from ..helpers import (
     _build_agent_nav_items,
     _extract_agent_identifier,
     _extract_agent_persona_name,
+    _list_agents,
 )
 from ..state import _state, templates
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["mcp"])
+
+
+def _tool_cache_path():
+    return memorizz_home() / "mcp_tools_cache.json"
+
+
+def _remember_tools(
+    agent_id: str, manager: MCPClientManager, server_name: str, result: Any
+) -> None:
+    """Keep the last tool list so the grid shows tool counts on the next load."""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return
+    server = next(
+        (item for item in manager.server_dicts() if item.get("name") == server_name),
+        None,
+    )
+    if server is None:
+        return
+    try:
+        view.store_tool_list(_tool_cache_path(), agent_id, server, result)
+    except OSError as exc:
+        logger.warning("Could not store the MCP tool list: %s", exc)
 
 
 def _require_provider():
@@ -102,7 +130,7 @@ async def mcp_page(request: Request, agent_id: Optional[str] = None):
     if not _state.get("provider"):
         return RedirectResponse(url="/connect", status_code=302)
     try:
-        agents = list(_state["provider"].list_memagents() or [])
+        agents = list(_list_agents() or [])
     except Exception as exc:
         logger.error("Failed to list agents for MCP page: %s", exc)
         agents = []
@@ -113,14 +141,26 @@ async def mcp_page(request: Request, agent_id: Optional[str] = None):
     selected_agent = _load_agent(selected_id) if selected_id else None
     manager = _manager(selected_id, selected_agent) if selected_agent else None
     statuses = manager.connection_status().get("servers", []) if manager else []
+    servers = manager.server_dicts() if manager else []
     agent_rows = [
         {
             "agent_id": _extract_agent_identifier(agent),
             "name": _extract_agent_persona_name(agent),
+            "servers": _agent_servers(agent),
         }
         for agent in agents
         if _extract_agent_identifier(agent)
     ]
+    now = datetime.now(timezone.utc)
+    monitor = view.build_mcp_view(
+        servers,
+        statuses,
+        view.read_jsonl_tail(MCPAuditLogger().path) if servers else [],
+        owner_id=selected_id,
+        tool_cache=view.load_tool_cache(_tool_cache_path()) if servers else {},
+        agents=agent_rows,
+        now=now,
+    )
     return templates.TemplateResponse(
         "mcp.html",
         {
@@ -135,8 +175,12 @@ async def mcp_page(request: Request, agent_id: Optional[str] = None):
             "agents": agent_rows,
             "selected_agent": selected_agent,
             "selected_agent_id": selected_id,
-            "servers": manager.server_dicts() if manager else [],
+            "servers": servers,
             "server_statuses": statuses,
+            "monitor": monitor,
+            "error_hints": view.ERROR_HINTS,
+            "generated_at": now,
+            "relative_time": relative_time,
             "oauth_result": request.query_params.get("oauth"),
             "oauth_server": request.query_params.get("server"),
         },
@@ -185,15 +229,16 @@ async def api_mcp_remove_server(agent_id: str, server_name: str):
 async def api_mcp_test_server(agent_id: str, server_name: str):
     manager = _manager(agent_id, _load_agent(agent_id))
     result = await _manager_call(manager.test_connection, server_name)
-    if not result.get("ok"):
-        return result
+    _remember_tools(agent_id, manager, server_name, result)
     return result
 
 
 @router.get("/api/mcp/agents/{agent_id}/servers/{server_name}/tools")
 async def api_mcp_list_tools(agent_id: str, server_name: str):
     manager = _manager(agent_id, _load_agent(agent_id))
-    return await _manager_call(manager.list_tools, server_name)
+    result = await _manager_call(manager.list_tools, server_name)
+    _remember_tools(agent_id, manager, server_name, result)
+    return result
 
 
 @router.post("/api/mcp/agents/{agent_id}/servers/{server_name}/call")

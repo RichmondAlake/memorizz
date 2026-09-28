@@ -1,0 +1,335 @@
+/* Settings: a configuration console. Status tape, a sticky section index on
+   wide screens, and a compact field grid. Loaded before console.css, so
+   refinements of shared rules are scoped under .settings-console. */
+
+/* Sticky children need a page that is not a scroll container. */
+.main-content:has(.settings-console) {
+    overflow-x: clip;
+    overflow-y: visible;
+}
+
+/* Local-model manager: when the manage-list is the active selector for a
+   local provider, hide the redundant dropdown, custom input and hint. The
+   label row (with the Set / Not set pill) stays visible. */
+.form-group.is-local-provider #MEMORIZZ_DEFAULT_LLM_MODEL_select,
+.form-group.is-local-provider #MEMORIZZ_DEFAULT_LLM_MODEL_custom,
+.form-group.is-local-provider > .form-hint {
+    display: none !important;
+}
+
+/* ---------- Tape ---------- */
+
+.settings-tape {
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+}
+
+.settings-tape strong.settings-tape-text {
+    overflow: hidden;
+    font-size: 14px;
+    line-height: 23px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.settings-tape strong small {
+    margin-left: 5px;
+}
+
+/* ---------- Layout ---------- */
+
+.settings-console {
+    display: grid;
+    grid-template-columns: 232px minmax(0, 1fr);
+    align-items: start;
+    gap: 16px;
+}
+
+.settings-index {
+    position: sticky;
+    top: 16px;
+    display: grid;
+    gap: 10px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+}
+
+.settings-index .settings-filter {
+    max-width: none;
+}
+
+.settings-index ol {
+    display: grid;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--console-radius);
+}
+
+.settings-index li[hidden] {
+    display: none;
+}
+
+.settings-index a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 10px;
+    color: var(--text-secondary);
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.3;
+    text-decoration: none;
+}
+
+.settings-index a:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.settings-index a[aria-current="true"] {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent-primary);
+}
+
+.settings-count {
+    flex: none;
+    color: var(--text-muted);
+    font-family: var(--console-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+.settings-count.is-set {
+    color: var(--accent-secondary);
+}
+
+.settings-none {
+    margin: 0;
+    padding: 0 4px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.settings-none[hidden] {
+    display: none;
+}
+
+.settings-console .settings-form {
+    min-width: 0;
+}
+
+/* ---------- Sections ---------- */
+
+.settings-console .settings-section {
+    margin: 0 0 12px;
+    padding: 16px 18px;
+    scroll-margin-top: 16px;
+}
+
+.settings-console .settings-section[hidden] {
+    display: none;
+}
+
+.settings-console .settings-section .panel-header {
+    margin: 0 0 14px;
+    flex-wrap: nowrap;
+}
+
+.settings-console .settings-section .panel-title {
+    font-size: 15px;
+}
+
+.settings-console .settings-section .panel-description {
+    max-width: 96ch;
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.settings-section-count {
+    flex: none;
+    font-family: var(--console-mono);
+    font-size: 11.5px;
+    white-space: nowrap;
+}
+
+.settings-notes .detail-list {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+.settings-notes .detail-list dd.mono {
+    font-size: 12px;
+}
+
+.settings-notes .form-hint {
+    max-width: 110ch;
+    margin: 10px 0 0;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+/* ---------- Field grid ---------- */
+
+.settings-console .settings-grid {
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 14px 16px;
+}
+
+.settings-console .form-group {
+    gap: 5px;
+    min-width: 0;
+}
+
+.settings-console .form-group.is-filtered-out {
+    display: none;
+}
+
+.settings-console .form-group .label-row {
+    align-items: flex-start;
+    min-height: 22px;
+}
+
+.settings-console .form-group label {
+    font-size: 12.5px;
+    line-height: 1.35;
+}
+
+.settings-console .form-group .label-row .pill {
+    flex: none;
+    padding: 0 7px;
+    font-size: 11px;
+    line-height: 1.7;
+}
+
+.settings-console .form-group input:not([type="checkbox"]),
+.settings-console .form-group select {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    height: 32px;
+    padding-top: 0;
+    padding-bottom: 0;
+    font-size: 13px;
+}
+
+.settings-console .form-group .form-hint {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.settings-env {
+    color: var(--text-muted);
+    font-size: 10.5px;
+    overflow-wrap: anywhere;
+    opacity: 0.8;
+}
+
+.settings-console .checkbox-group label {
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.settings-console .sandbox-status-list {
+    margin: 0 0 14px;
+}
+
+/* ---------- Save bar ---------- */
+
+.settings-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0;
+    background: var(--bg-primary);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.settings-actions-note {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+/* ---------- Narrow screens: one column ---------- */
+
+@media (max-width: 960px) {
+    .settings-console {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+    }
+
+    .settings-index {
+        position: static;
+        max-height: none;
+        overflow: visible;
+    }
+
+    /* The index becomes a row of jump links that scrolls sideways. */
+    .settings-index ol {
+        display: flex;
+        gap: 4px;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+    }
+
+    .settings-index ol::-webkit-scrollbar {
+        display: none;
+    }
+
+    .settings-index li {
+        flex: none;
+    }
+
+    .settings-index a {
+        white-space: nowrap;
+    }
+}
+
+@media (max-width: 640px) {
+    /* Text values keep their full width in the scrolling ticker row. */
+    .fleet-tape.settings-tape {
+        grid-auto-columns: max-content;
+    }
+
+    .fleet-tape.settings-tape > div {
+        min-width: 110px;
+    }
+
+    .settings-tape strong.settings-tape-text {
+        overflow: visible;
+    }
+
+    .settings-console .settings-section {
+        padding: 14px;
+    }
+
+    .settings-console .settings-section .panel-header {
+        flex-wrap: wrap;
+    }
+
+    .settings-notes .detail-list,
+    .settings-console .settings-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .settings-notes .detail-list dd.mono {
+        overflow-wrap: anywhere;
+    }
+
+    .settings-actions-note {
+        display: none;
+    }
+
+    .settings-actions .btn {
+        flex: 1;
+    }
+}

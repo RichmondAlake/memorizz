@@ -1,13 +1,17 @@
 {% extends "base.html" %}
 
-{% block title %}{{ form_title }} - Memorizz{% endblock %}
+{% block title %}{{ form_title|capitalize }} - Memorizz{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <a href="{% if is_edit %}/agents/{{ agent_id }}/playground{% else %}/agents{% endif %}" class="back-link">← Back to Agents</a>
-    <h1>{{ form_title }}</h1>
-    <p>Configure how this agent behaves and runs.</p>
-</div>
+{% from '_ui.html' import page_header, id_chip %}
+{% set form_back = ('/agents/' ~ agent_id ~ '/playground', 'Agent playground') if is_edit else ('/agents', 'All agents') %}
+{% if is_edit %}
+{% call page_header(form_title|capitalize, 'Configure how this agent behaves and runs.', 'Agents', back=form_back) %}
+    <span class="panel-meta">Agent ID</span>{{ id_chip(agent_id|string, 40) }}
+{% endcall %}
+{% else %}
+{{ page_header(form_title|capitalize, 'Configure how this agent behaves and runs.', 'Agents', back=form_back) }}
+{% endif %}
 
 {% if error %}
 <div class="error-message">
@@ -16,37 +20,28 @@
 {% endif %}
 
 <form method="post" action="{{ form_action }}" class="agent-form">
-    {% if is_edit %}
-    <div class="detail-section">
-        <h2>Agent ID</h2>
-        <div class="form-group">
-            <code class="agent-id-display">{{ agent_id }}</code>
-        </div>
-    </div>
-    {% endif %}
-
     <!-- Basics — always visible -->
-    <div class="detail-section">
-        <h2>Basics</h2>
+    <section class="panel agent-form-section" aria-labelledby="agent-form-basics-title">
+        <div class="panel-header"><h2 class="panel-title" id="agent-form-basics-title">Basics</h2></div>
         <div class="form-group">
-            <label for="agent_name">Agent Name</label>
+            <label for="agent_name">Agent name</label>
             <input id="agent_name" name="agent_name" type="text" value="{{ agent_name }}" placeholder="Agent name shown in the UI">
         </div>
         <div class="form-group">
-            <label for="instruction">System Instruction</label>
+            <label for="instruction">System instruction</label>
             <textarea id="instruction" name="instruction" rows="5">{{ instruction }}</textarea>
         </div>
         <div class="form-grid">
             <div class="form-group">
-                <label for="application_mode">Application Mode</label>
+                <label for="application_mode">Application mode</label>
                 <select id="application_mode" name="application_mode">
                     <option value="assistant" {% if application_mode == 'assistant' %}selected{% endif %}>Assistant</option>
                     <option value="workflow" {% if application_mode == 'workflow' %}selected{% endif %}>Workflow</option>
-                    <option value="deep_research" {% if application_mode == 'deep_research' %}selected{% endif %}>Deep Research</option>
+                    <option value="deep_research" {% if application_mode == 'deep_research' %}selected{% endif %}>Deep research</option>
                 </select>
             </div>
             <div class="form-group">
-                <label for="max_steps">Max Tool Iterations</label>
+                <label for="max_steps">Max tool iterations</label>
                 <div class="form-group checkbox-group" style="margin-bottom: 8px;">
                     <label>
                         <input type="checkbox" id="continuous_mode" value="1"
@@ -60,13 +55,13 @@
                     {% if max_steps == 0 %}disabled{% endif %}>
                 <p class="form-hint">Maximum tool-calling rounds per run (default: 20).</p>
                 <p id="continuous-warning" class="form-hint"
-                    style="color: #e67e22; display: {% if max_steps == 0 %}block{% else %}none{% endif %};">
+                    style="color: var(--accent-warning); display: {% if max_steps == 0 %}block{% else %}none{% endif %};">
                     Continuous mode may consume a very large number of tokens.
                     The agent will keep running tool loops until the task is complete.
                 </p>
             </div>
             <div class="form-group">
-                <label for="tool_access">Tool Access</label>
+                <label for="tool_access">Tool access</label>
                 <select id="tool_access" name="tool_access">
                     <option value="private" {% if tool_access == 'private' %}selected{% endif %}>Private</option>
                     <option value="public" {% if tool_access == 'public' %}selected{% endif %}>Public</option>
@@ -152,14 +147,11 @@
                 </p>
             </div>
         </div>
-    </div>
+    </section>
 
     <!-- LLM Configuration — collapsible -->
-    <details class="detail-section collapsible-section" open>
-        <summary class="section-toggle">
-            <h2>LLM Configuration</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" open>
+        <summary>LLM configuration</summary>
         <div class="section-body">
             <div class="form-grid">
                 <div class="form-group">
@@ -175,7 +167,7 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label for="llm_model_select">Model / Deployment</label>
+                    <label for="llm_model_select">Model or deployment</label>
                     <select id="llm_model_select"></select>
                     <input id="llm_model_custom" type="text" value="{{ llm_model }}" style="display:none; margin-top: 8px;">
                     <input id="llm_model" name="llm_model" type="hidden" value="{{ llm_model }}">
@@ -205,7 +197,7 @@
                 <p class="form-hint">When on, Gemma 4 / DeepSeek-R1 / Qwen3-thinking emit a separate reasoning trace before the final answer (shown in the playground's trace timeline). Off by default for snappier replies — thinking can take 30–60 s before any visible content on CPU-only setups.</p>
             </div>
             <div class="form-group">
-                <label for="llm_config_json">Advanced LLM Config (JSON)</label>
+                <label for="llm_config_json">Advanced LLM config (JSON)</label>
                 <textarea id="llm_config_json" name="llm_config_json" rows="4">{{ llm_config_json }}</textarea>
                 <p class="form-hint">Optional provider-specific fields (e.g. azure_endpoint, api_version, ollama host, HuggingFace settings, temperature, base_url for local-openai).</p>
             </div>
@@ -527,11 +519,8 @@
     </script>
 
     <!-- Persona — collapsible -->
-    <details class="detail-section collapsible-section" {% if persona_name %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>Persona</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if persona_name %}open{% endif %}>
+        <summary>Persona</summary>
         <div class="section-body">
             <input id="persona_id" name="persona_id" type="hidden" value="{{ persona_id|default('', true) }}">
             <div class="form-grid">
@@ -679,11 +668,8 @@
     </details>
 
     <!-- Memory — collapsible -->
-    <details class="detail-section collapsible-section" {% if memory_ids_raw %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>Memory</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if memory_ids_raw %}open{% endif %}>
+        <summary>Memory</summary>
         <div class="section-body">
             <div class="form-group">
                 <label for="memory_ids">Memory IDs</label>
@@ -694,11 +680,8 @@
     </details>
 
     <!-- Meta-harness — collapsible -->
-    <details class="detail-section collapsible-section" {% if meta_harness_mode %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>Agent Harness Runtime</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if meta_harness_mode %}open{% endif %}>
+        <summary>Agent harness runtime</summary>
         <div class="section-body">
             <div class="form-grid">
                 <div class="form-group">
@@ -710,7 +693,7 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label for="default_harness">Default Harness</label>
+                    <label for="default_harness">Default harness</label>
                     <select id="default_harness" name="default_harness">
                         <option value="auto" {% if default_harness == 'auto' %}selected{% endif %}>Auto route</option>
                         <option value="codex" {% if default_harness == 'codex' %}selected{% endif %}>Codex</option>
@@ -719,7 +702,7 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label for="harness_workspace">Default Workspace <span class="optional">optional</span></label>
+                    <label for="harness_workspace">Default workspace <span class="optional">optional</span></label>
                     <input id="harness_workspace" name="harness_workspace" value="{{ harness_workspace }}" placeholder="/absolute/path/to/project">
                 </div>
             </div>
@@ -729,14 +712,11 @@
     </details>
 
     <!-- Sandbox — collapsible -->
-    <details class="detail-section collapsible-section" {% if sandbox_provider %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>Sandbox</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if sandbox_provider %}open{% endif %}>
+        <summary>Sandbox</summary>
         <div class="section-body">
             <div class="form-group">
-                <label for="sandbox_provider">Sandbox Provider</label>
+                <label for="sandbox_provider">Sandbox provider</label>
                 <select id="sandbox_provider" name="sandbox_provider">
                     <option value="" {% if not sandbox_provider %}selected{% endif %}>None (disabled)</option>
                     <option value="e2b" {% if sandbox_provider == 'e2b' %}selected{% endif %}>E2B (Cloud — Firecracker microVMs)</option>
@@ -749,14 +729,11 @@
     </details>
 
     <!-- Browser Control — collapsible -->
-    <details class="detail-section collapsible-section" {% if browser_control_provider %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>Browser Control</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if browser_control_provider %}open{% endif %}>
+        <summary>Browser control</summary>
         <div class="section-body">
             <div class="form-group">
-                <label for="browser_control_provider">Browser Control Provider</label>
+                <label for="browser_control_provider">Browser control provider</label>
                 <select id="browser_control_provider" name="browser_control_provider">
                     <option value="" {% if not browser_control_provider %}selected{% endif %}>None (disabled)</option>
                     <option value="browseruse" {% if browser_control_provider == 'browseruse' %}selected{% endif %}>Browser Use (isolated tool)</option>
@@ -767,14 +744,11 @@
     </details>
 
     <!-- Internet Access — collapsible -->
-    <details class="detail-section collapsible-section" {% if internet_provider %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>Internet Access</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if internet_provider %}open{% endif %}>
+        <summary>Internet access</summary>
         <div class="section-body">
             <div class="form-group">
-                <label for="internet_provider">Internet Provider</label>
+                <label for="internet_provider">Internet provider</label>
                 <select id="internet_provider" name="internet_provider">
                     <option value="" {% if not internet_provider %}selected{% endif %}>None (disabled)</option>
                     <option value="tavily" {% if internet_provider == 'tavily' %}selected{% endif %}>Tavily (Search + extract)</option>
@@ -787,11 +761,8 @@
     </details>
 
     <!-- Automations — collapsible -->
-    <details class="detail-section collapsible-section" {% if default_timezone or not automations_enabled %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>Automations</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if default_timezone or not automations_enabled %}open{% endif %}>
+        <summary>Automations</summary>
         <div class="section-body">
             <div class="form-grid">
                 <div class="form-group checkbox-group">
@@ -802,7 +773,7 @@
                     <p class="form-hint">When enabled (and Oracle is connected), the agent can create durable scheduled jobs from chat.</p>
                 </div>
                 <div class="form-group">
-                    <label for="default_timezone">Default Timezone</label>
+                    <label for="default_timezone">Default timezone</label>
                     <input id="default_timezone" name="default_timezone" type="text" value="{{ default_timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
                     <p class="form-hint">IANA timezone name used when timezone is omitted for automations.</p>
                 </div>
@@ -811,11 +782,8 @@
     </details>
 
     <!-- WhatsApp Chat — collapsible -->
-    <details class="detail-section collapsible-section" {% if whatsapp_enabled %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>WhatsApp Chat</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if whatsapp_enabled %}open{% endif %}>
+        <summary>WhatsApp chat</summary>
         <div class="section-body">
             <div class="form-grid">
                 <div class="form-group checkbox-group">
@@ -826,7 +794,7 @@
                     <p class="form-hint">When enabled, this agent can be set as the active WhatsApp communicator. Users can then chat with this agent via WhatsApp.</p>
                 </div>
                 <div class="form-group">
-                    <label for="whatsapp_welcome_message">Welcome Message (Optional)</label>
+                    <label for="whatsapp_welcome_message">Welcome message <span class="optional">optional</span></label>
                     <textarea
                         id="whatsapp_welcome_message"
                         name="whatsapp_welcome_message"
@@ -840,13 +808,10 @@
 
     <!-- Self-Awareness — collapsible -->
     <details
-        class="detail-section collapsible-section"
+        class="panel agent-form-section"
         {% if self_aware or self_aware_root_paths or self_aware_allow_writes or self_aware_allow_deletes %}open{% endif %}
     >
-        <summary class="section-toggle">
-            <h2>Self-Awareness</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+        <summary>Self-awareness</summary>
         <div class="section-body">
             <div class="form-grid">
                 <div class="form-group checkbox-group">
@@ -857,7 +822,7 @@
                     <p class="form-hint">When enabled, the agent can inspect files and run allowlisted commands within configured roots.</p>
                 </div>
                 <div class="form-group">
-                    <label for="self_aware_root_paths">Allowed Root Paths</label>
+                    <label for="self_aware_root_paths">Allowed root paths</label>
                     <textarea id="self_aware_root_paths" name="self_aware_root_paths" rows="4" placeholder="/path/to/project&#10;./relative/path">{{ self_aware_root_paths }}</textarea>
                     <p class="form-hint">One path per line (or comma-separated). Empty uses the current working directory.</p>
                 </div>
@@ -880,14 +845,11 @@
     </details>
 
     <!-- Skills Marketplace — collapsible -->
-    <details class="detail-section collapsible-section" {% if skills_marketplace_provider %}open{% endif %}>
-        <summary class="section-toggle">
-            <h2>Skills Marketplace</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section" {% if skills_marketplace_provider %}open{% endif %}>
+        <summary>Skills marketplace</summary>
         <div class="section-body">
             <div class="form-group">
-                <label for="skills_marketplace_provider">Marketplace Provider</label>
+                <label for="skills_marketplace_provider">Marketplace provider</label>
                 <select id="skills_marketplace_provider" name="skills_marketplace_provider">
                     <option value="" {% if not skills_marketplace_provider %}selected{% endif %}>None (disabled)</option>
                     <option value="skillsmp" {% if skills_marketplace_provider == 'skillsmp' %}selected{% endif %}>SkillsMP (skillsmp.com)</option>
@@ -959,11 +921,8 @@
 
     <!-- Tools — collapsible, read-only -->
     {% if agent_tools %}
-    <details class="detail-section collapsible-section">
-        <summary class="section-toggle">
-            <h2>Tools ({{ agent_tools|length }})</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel agent-form-section">
+        <summary>Tools ({{ agent_tools|length }})</summary>
         <div class="section-body">
             <div class="config-tools-list">
                 {% for tool in agent_tools %}
@@ -981,7 +940,7 @@
     {% endif %}
 
     <div class="form-actions">
-        <button type="submit" class="btn btn-primary">Save Agent</button>
+        <button type="submit" class="btn btn-primary">Save agent</button>
         <a href="{% if is_edit %}/agents/{{ agent_id }}/playground{% else %}/agents{% endif %}" class="btn">Cancel</a>
     </div>
 </form>

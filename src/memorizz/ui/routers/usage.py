@@ -10,6 +10,7 @@ from ...observability.analytics import aggregate_usage
 from ...observability.pricing import DEFAULT_PRICING
 from ...observability.usage_query import query_usage
 from ..analytics import usage_charts
+from ..observability_view import usage_tape
 from ..security import audit_trace_view
 from ..state import _state, templates
 from ..trace_access import require_trace_permission, scoped_trace_filters
@@ -146,6 +147,7 @@ def usage_page(
             "connection_info": _state.get("connection_info"),
             "usage": usage,
             "usage_charts": usage_charts(usage),
+            "usage_tape": usage_tape(usage),
             "filters": params,
             "preserved_filters": {
                 key: value

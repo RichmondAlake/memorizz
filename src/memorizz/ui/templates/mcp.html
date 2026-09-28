@@ -1,79 +1,90 @@
 {% extends "base.html" %}
 
-{% block title %}MCP Connections - Memorizz{% endblock %}
+{% block title %}MCP connections - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/mcp.css?v=4">{% endblock %}
 
 {% block content %}
-<style>
-    .mcp-page { max-width: 1180px; margin: 0 auto; padding: 28px; }
-    .mcp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 22px; }
-    .mcp-head h1 { margin: 0 0 6px; }
-    .mcp-subtitle { color: var(--text-secondary); margin: 0; max-width: 760px; }
-    .mcp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    .mcp-toolbar select { min-width: 230px; }
-    .mcp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; }
-    .mcp-server-panel { border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-secondary); padding: 18px; margin-bottom: 22px; }
-    .mcp-server-panel h2 { margin: 0 0 6px; }
-    .mcp-server-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; margin-top: 14px; }
-    .mcp-server-option { background: var(--bg-primary); border-radius: 9px; padding: 14px; min-width: 0; }
-    .mcp-server-option h3 { margin: 0 0 8px; }
-    .mcp-server-code { overflow: auto; white-space: pre; font-size: 12px; margin: 10px 0; padding: 12px; border-radius: 7px; background: var(--bg-tertiary); }
-    .mcp-card { border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-secondary); padding: 18px; }
-    .mcp-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
-    .mcp-card h3 { margin: 0; }
-    .mcp-meta { color: var(--text-secondary); font-size: 13px; margin: 8px 0 14px; word-break: break-all; }
-    .mcp-badge { display: inline-flex; border-radius: 999px; padding: 3px 9px; font-size: 12px; background: var(--bg-tertiary); }
-    .mcp-badge.ready { color: #24b47e; }
-    .mcp-badge.reauth_required { color: #e5a43a; }
-    .mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-    .mcp-output { margin-top: 14px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-size: 12px; background: var(--bg-primary); border-radius: 8px; padding: 12px; }
-    .mcp-empty { border: 1px dashed var(--border-color); border-radius: 12px; padding: 42px; text-align: center; color: var(--text-secondary); }
-    .mcp-modal { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; background: rgba(0,0,0,.58); padding: 20px; }
-    .mcp-modal[hidden] { display: none; }
-    .mcp-dialog { width: min(760px, 96vw); max-height: 92vh; overflow: auto; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 14px; padding: 22px; }
-    .mcp-dialog-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-    .mcp-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-    .mcp-field { display: flex; flex-direction: column; gap: 6px; }
-    .mcp-field.wide { grid-column: 1 / -1; }
-    .mcp-field label { font-size: 13px; font-weight: 600; }
-    .mcp-field small { color: var(--text-secondary); }
-    .mcp-checkbox { display: flex; gap: 8px; align-items: center; }
-    .mcp-form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
-    .mcp-alert { border-radius: 8px; padding: 11px 13px; margin-bottom: 16px; }
-    .mcp-alert.success { background: rgba(36,180,126,.14); color: #24b47e; }
-    .mcp-alert.pending { background: rgba(229,164,58,.14); color: #e5a43a; }
-    .mcp-alert.error { background: rgba(220,70,70,.14); color: #dc4646; }
-    @media (max-width: 720px) {
-        .mcp-page { padding: 18px; }
-        .mcp-head { flex-direction: column; }
-        .mcp-form-grid { grid-template-columns: 1fr; }
-        .mcp-field.wide { grid-column: auto; }
-    }
-</style>
+{% from '_ui.html' import page_header, empty_state %}
+{% set t = monitor.totals %}
+{% set window_label = 'last ' ~ monitor.window_days ~ ' days' %}
+{% call page_header('MCP connections', 'Connect agents to Notion, Google Calendar and custom MCP servers, or expose MemoRizz memory and agents to other MCP clients.', 'Integrations', actions_class='mcp-header-actions') %}
+    {% if agents %}
+    <div class="agents-sort-controls">
+        <label for="mcp-agent-select">Agent</label>
+        <select id="mcp-agent-select">
+            {% for agent in agents %}
+            <option value="{{ agent.agent_id }}" {% if agent.agent_id == selected_agent_id %}selected{% endif %}>{{ agent.name }} · {{ agent.agent_id[:8] }}{% if agent.servers %} · {{ agent.servers|length }} server{{ '' if agent.servers|length == 1 else 's' }}{% endif %}</option>
+            {% endfor %}
+        </select>
+    </div>
+    {% endif %}
+    {% if selected_agent_id %}<button class="btn btn-primary" type="button" onclick="openMcpDialog()">Add connection</button>{% endif %}
+{% endcall %}
 
-<div class="mcp-page">
-    <div class="mcp-head">
-        <div>
-            <h1>MCP Connections</h1>
-            <p class="mcp-subtitle">Connect agents to Notion, Google Calendar, and custom MCP services—or expose MemoRizz memory and agents to other MCP clients.</p>
-        </div>
+{% if oauth_result %}
+{% set oauth_target = oauth_server or 'this server' %}
+{% if oauth_result == 'success' %}
+<div class="success-message" role="status">Authorized {{ oauth_target }}. Select Test to verify the connection.</div>
+{% elif oauth_result == 'pending' %}
+<div class="warning-message" role="status">Authorization for {{ oauth_target }} is still pending. Select Test to check the connection.</div>
+{% elif oauth_result == 'error' %}
+<div class="error-message" role="status">Authorization for {{ oauth_target }} failed. Check the OAuth client ID, client secret and redirect URI, then select Authorize to try again.</div>
+{% else %}
+<div class="warning-message" role="status">OAuth {{ oauth_result }} for {{ oauth_target }}. Select Test to verify the connection.</div>
+{% endif %}
+{% endif %}
+
+{% macro editor_panel() %}
+<details class="panel mcp-editor" id="mcp-modal">
+    <summary><span id="mcp-dialog-title">Add MCP connection</span><span class="mcp-editor-meta">{% if servers %}Add a server, or edit one from its detail pane{% else %}Streamable HTTP, SSE or stdio{% endif %}</span></summary>
+    <form id="mcp-form" class="mcp-dialog">
         <div class="mcp-toolbar">
-            <select id="mcp-agent-select" aria-label="Select agent">
-                {% for agent in agents %}
-                <option value="{{ agent.agent_id }}" {% if agent.agent_id == selected_agent_id %}selected{% endif %}>{{ agent.name }} · {{ agent.agent_id[:8] }}</option>
-                {% endfor %}
-            </select>
-            {% if selected_agent_id %}<button class="btn btn-primary" type="button" onclick="openMcpDialog()">Add connection</button>{% endif %}
+            <span>Start from</span>
+            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('notion')">Notion</button>
+            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('calendar')">Google Calendar</button>
+            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('stdio')">Local stdio</button>
+        </div>
+        <div class="mcp-form-grid">
+            <div class="field mcp-field"><label for="mcp-name">Name</label><input id="mcp-name" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"></div>
+            <div class="field mcp-field"><label for="mcp-transport">Transport</label><select id="mcp-transport"><option value="streamable_http">Streamable HTTP</option><option value="sse">SSE (legacy)</option><option value="stdio">stdio</option></select></div>
+            <div class="field mcp-field wide remote-field"><label for="mcp-url">Server URL</label><input id="mcp-url" type="url" placeholder="https://example.com/mcp"></div>
+            <div class="field mcp-field stdio-field"><label for="mcp-command">Command</label><input id="mcp-command" placeholder="npx"></div>
+            <div class="field mcp-field stdio-field"><label for="mcp-args">Arguments (JSON array)</label><input id="mcp-args" placeholder='["-y","package"]'></div>
+            <div class="field mcp-field wide stdio-field"><label for="mcp-env">Environment (JSON object)</label><input id="mcp-env" placeholder='{"API_KEY":"value"}'><small>Values are moved into the encrypted credential store.</small></div>
+            <div class="field mcp-field"><label for="mcp-auth-type">Authentication</label><select id="mcp-auth-type"><option value="none">None</option><option value="oauth">OAuth 2.0 + PKCE</option><option value="bearer">Bearer token / PAT</option></select></div>
+            <div class="field mcp-field"><label for="mcp-timeout">Request timeout (seconds)</label><input id="mcp-timeout" type="number" min="1" max="300" value="30"></div>
+            <div class="field mcp-field wide bearer-field"><label for="mcp-token">Bearer token / PAT</label><input id="mcp-token" type="password" autocomplete="new-password"><small>Leave blank when editing to retain the existing token.</small></div>
+            <div class="field mcp-field oauth-field"><label for="mcp-client-id">OAuth client ID</label><input id="mcp-client-id" autocomplete="off"><small>Required for Google Calendar; Notion can register dynamically.</small></div>
+            <div class="field mcp-field oauth-field"><label for="mcp-client-secret">OAuth client secret</label><input id="mcp-client-secret" type="password" autocomplete="new-password"></div>
+            <div class="field mcp-field wide oauth-field"><label for="mcp-redirect-uri">OAuth redirect URI</label><input id="mcp-redirect-uri" type="url"></div>
+            <div class="field mcp-field wide oauth-field"><label for="mcp-scopes">OAuth scopes (space-separated)</label><input id="mcp-scopes"></div>
+            <div class="field mcp-field wide remote-field"><label for="mcp-headers">Custom headers (JSON object)</label><input id="mcp-headers" placeholder='{"X-Tenant":"example"}'><small>Header values are encrypted and never stored in agent memory.</small></div>
+            <div class="field mcp-field wide"><label for="mcp-allowed-tools">Allowed tools (comma-separated, blank means all)</label><input id="mcp-allowed-tools"></div>
+            <div class="field mcp-field wide"><label for="mcp-blocked-tools">Blocked tools (comma-separated)</label><input id="mcp-blocked-tools"></div>
+            <div class="field mcp-field wide"><label for="mcp-read-only-tools">Explicit read-only tools (comma-separated)</label><input id="mcp-read-only-tools"><small>Overrides conservative name classification.</small></div>
+            <div class="field mcp-field wide"><label for="mcp-mutation-tools">Explicit mutation tools (comma-separated)</label><input id="mcp-mutation-tools"><small>Always requires durable approval when approval policy is enabled.</small></div>
+            <label class="mcp-checkbox"><input id="mcp-require-approval" type="checkbox" checked> Require approval for mutating tools</label>
+            <label class="mcp-checkbox"><input id="mcp-allow-private" type="checkbox"> Allow HTTP/private network destination</label>
+        </div>
+        <div id="mcp-form-error" class="error-message" role="alert" hidden></div>
+        <div class="mcp-form-actions"><button class="btn" type="button" onclick="closeMcpDialog()">Cancel</button><button class="btn btn-primary" type="submit">Save connection</button></div>
+    </form>
+</details>
+{% endmacro %}
+
+{% macro expose_panel() %}
+<section class="panel mcp-expose" aria-labelledby="mcp-server-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="mcp-server-title">Expose MemoRizz as an MCP server</h2>
+            <p class="panel-description">Server credentials are process-level deployment secrets. Configure them in the CLI or your platform's secret manager; this browser never stores them.</p>
         </div>
     </div>
-
-    <section class="mcp-server-panel" aria-labelledby="mcp-server-title">
-        <h2 id="mcp-server-title">Expose MemoRizz as an MCP server</h2>
-        <p class="mcp-subtitle">Server credentials are process-level deployment secrets, so they are configured in the CLI or your platform secret manager—not stored in this browser.</p>
-        <div class="mcp-server-options">
-            <div class="mcp-server-option">
-                <h3>Local MCP host</h3>
-                <p class="mcp-meta">Add this server definition to Claude Desktop, Codex, or another MCP host.</p>
-                <pre id="mcp-local-server-config" class="mcp-server-code">{
+    <div class="mcp-server-options">
+        <div class="mcp-server-option">
+            <h3>Local MCP host</h3>
+            <p class="mcp-meta">Add this server definition to Claude Desktop, Codex or another MCP host.</p>
+            <pre id="mcp-local-server-config" class="mcp-server-code">{
   "mcpServers": {
     "memorizz": {
       "command": "memorizz",
@@ -81,73 +92,220 @@
     }
   }
 }</pre>
+            <div class="mcp-actions">
                 <button class="btn btn-sm" type="button" onclick="copyMcpSetup('mcp-local-server-config', this)">Copy config</button>
             </div>
-            <div class="mcp-server-option">
-                <h3>Authenticated remote server</h3>
-                <p class="mcp-meta">Remote mode defaults to read-only. Use a long random bearer token and an HTTPS reverse proxy.</p>
-                <pre id="mcp-remote-server-command" class="mcp-server-code">export MEMORIZZ_MCP_SERVER_API_KEYS='{"client":"replace-with-a-long-random-token"}'
+        </div>
+        <div class="mcp-server-option">
+            <h3>Authenticated remote server</h3>
+            <p class="mcp-meta">Remote mode is read-only by default. Use a long random bearer token and serve it behind an HTTPS reverse proxy.</p>
+            <pre id="mcp-remote-server-command" class="mcp-server-code">export MEMORIZZ_MCP_SERVER_API_KEYS='{"client":"replace-with-a-long-random-token"}'
 memorizz mcp serve --transport streamable-http --host 0.0.0.0 --public-url https://memory.example.com{% if selected_agent_id %} --agent-id {{ selected_agent_id }}{% endif %}</pre>
+            <div class="mcp-actions">
                 <button class="btn btn-sm" type="button" onclick="copyMcpSetup('mcp-remote-server-command', this)">Copy command</button>
                 <a class="btn btn-sm" href="https://richmondalake.github.io/memorizz/guides/mcp-server/" target="_blank" rel="noopener">Deployment guide</a>
             </div>
         </div>
-    </section>
+    </div>
+</section>
+{% endmacro %}
 
-    {% if oauth_result %}
-    <div class="mcp-alert {{ oauth_result }}">OAuth {{ oauth_result }}{% if oauth_server %} for {{ oauth_server }}{% endif %}. Use Test to verify the connection.</div>
-    {% endif %}
-
-    {% if not selected_agent_id %}
-    <div class="mcp-empty">Create an agent before configuring MCP connections.</div>
-    {% elif not servers %}
-    <div class="mcp-empty">
-        <p>No MCP servers are configured for this agent.</p>
-        <button class="btn btn-primary" type="button" onclick="openMcpDialog('notion')">Connect Notion</button>
+{% if not selected_agent_id %}
+{{ empty_state('No agents yet', 'MCP connections belong to an agent. Create an agent, then return here to connect it to MCP servers.', '/agents/new', 'Create agent') }}
+{{ expose_panel() }}
+{% elif not servers %}
+<div class="empty-state">
+    <strong>No MCP servers connected to this agent</strong>
+    <p>Connect a hosted server with OAuth, or use Add connection for any Streamable HTTP, SSE or stdio server.{% if t.agents_with_mcp %} {{ t.agents_with_mcp }} of {{ t.agents }} agents already use MCP; pick one above to see its servers.{% endif %}</p>
+    <div class="mcp-empty-actions">
+        <button class="btn" type="button" onclick="openMcpDialog('notion')">Connect Notion</button>
         <button class="btn" type="button" onclick="openMcpDialog('calendar')">Connect Google Calendar</button>
     </div>
-    {% else %}
-    <div id="mcp-grid" class="mcp-grid"></div>
-    {% endif %}
+</div>
+{{ editor_panel() }}
+{{ expose_panel() }}
+{% else %}
+<div class="fleet-tape" role="list" aria-label="MCP connection summary for this agent">
+    <div role="listitem"><span>Servers</span><strong>{{ t.servers }}</strong></div>
+    <div role="listitem"><span>Ready</span><strong class="{{ 'is-good' if t.ready and t.ready == t.servers else '' }}">{{ t.ready }}</strong></div>
+    <div role="listitem"><span>Needs sign-in</span><strong class="{{ 'is-warn' if t.needs_auth else '' }}">{{ t.needs_auth }}</strong></div>
+    <div role="listitem"><span>Failing</span><strong class="{{ 'is-bad' if t.failing else '' }}">{{ t.failing }}</strong></div>
+    <div role="listitem"><span>Tools exposed</span><strong id="mcp-tape-tools">{% if t.tools is none %}—{% else %}{{ t.tools }}{% if t.tools_known < t.servers %}<small>{{ t.tools_known }}/{{ t.servers }} listed</small>{% endif %}{% endif %}</strong></div>
+    <div role="listitem"><span>Tool calls, 7d</span><strong>{{ t.calls }}{% if t.failed_calls %}<small class="is-bad">{{ t.failed_calls }} failed</small>{% endif %}</strong></div>
+    <div role="listitem"><span>Errors, 7d</span><strong class="{{ 'is-bad' if t.errors else '' }}">{{ t.errors }}</strong></div>
+    <div role="listitem"><span>Agents using MCP</span><strong>{{ t.agents_with_mcp }}<small>of {{ t.agents }}</small></strong></div>
+    <div role="listitem" class="fleet-tape-meta"><span>Last check</span><strong>{{ relative_time(t.last_check, generated_at) if t.last_check else 'Never' }}</strong></div>
 </div>
 
-<div id="mcp-modal" class="mcp-modal" hidden>
-    <form id="mcp-form" class="mcp-dialog">
-        <div class="mcp-dialog-head">
-            <h2 id="mcp-dialog-title">Add MCP connection</h2>
-            <button class="btn btn-sm" type="button" onclick="closeMcpDialog()">Close</button>
-        </div>
-        <div class="mcp-toolbar" style="margin-bottom:14px">
-            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('notion')">Notion</button>
-            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('calendar')">Google Calendar</button>
-            <button class="btn btn-sm" type="button" onclick="applyMcpPreset('stdio')">Local stdio</button>
-        </div>
-        <div class="mcp-form-grid">
-            <div class="mcp-field"><label>Name</label><input id="mcp-name" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"></div>
-            <div class="mcp-field"><label>Transport</label><select id="mcp-transport"><option value="streamable_http">Streamable HTTP</option><option value="sse">SSE (legacy)</option><option value="stdio">stdio</option></select></div>
-            <div class="mcp-field wide remote-field"><label>Server URL</label><input id="mcp-url" type="url" placeholder="https://example.com/mcp"></div>
-            <div class="mcp-field stdio-field"><label>Command</label><input id="mcp-command" placeholder="npx"></div>
-            <div class="mcp-field stdio-field"><label>Arguments (JSON array)</label><input id="mcp-args" placeholder='["-y","package"]'></div>
-            <div class="mcp-field wide stdio-field"><label>Environment (JSON object)</label><input id="mcp-env" placeholder='{"API_KEY":"value"}'><small>Values are moved into the encrypted credential store.</small></div>
-            <div class="mcp-field"><label>Authentication</label><select id="mcp-auth-type"><option value="none">None</option><option value="oauth">OAuth 2.0 + PKCE</option><option value="bearer">Bearer token / PAT</option></select></div>
-            <div class="mcp-field"><label>Request timeout (seconds)</label><input id="mcp-timeout" type="number" min="1" max="300" value="30"></div>
-            <div class="mcp-field wide bearer-field"><label>Bearer token / PAT</label><input id="mcp-token" type="password" autocomplete="new-password"><small>Leave blank when editing to retain the existing token.</small></div>
-            <div class="mcp-field oauth-field"><label>OAuth client ID</label><input id="mcp-client-id" autocomplete="off"><small>Required for Google Calendar; Notion can register dynamically.</small></div>
-            <div class="mcp-field oauth-field"><label>OAuth client secret</label><input id="mcp-client-secret" type="password" autocomplete="new-password"></div>
-            <div class="mcp-field wide oauth-field"><label>OAuth redirect URI</label><input id="mcp-redirect-uri" type="url"></div>
-            <div class="mcp-field wide oauth-field"><label>OAuth scopes (space-separated)</label><input id="mcp-scopes"></div>
-            <div class="mcp-field wide remote-field"><label>Custom headers (JSON object)</label><input id="mcp-headers" placeholder='{"X-Tenant":"example"}'><small>Header values are encrypted and never stored in agent memory.</small></div>
-            <div class="mcp-field wide"><label>Allowed tools (comma-separated, blank means all)</label><input id="mcp-allowed-tools"></div>
-            <div class="mcp-field wide"><label>Blocked tools (comma-separated)</label><input id="mcp-blocked-tools"></div>
-            <div class="mcp-field wide"><label>Explicit read-only tools (comma-separated)</label><input id="mcp-read-only-tools"><small>Overrides conservative name classification.</small></div>
-            <div class="mcp-field wide"><label>Explicit mutation tools (comma-separated)</label><input id="mcp-mutation-tools"><small>Always requires durable approval when approval policy is enabled.</small></div>
-            <label class="mcp-checkbox"><input id="mcp-require-approval" type="checkbox" checked> Require approval for mutating tools</label>
-            <label class="mcp-checkbox"><input id="mcp-allow-private" type="checkbox"> Allow HTTP/private network destination</label>
-        </div>
-        <div id="mcp-form-error" class="mcp-alert error" hidden></div>
-        <div class="mcp-form-actions"><button class="btn" type="button" onclick="closeMcpDialog()">Cancel</button><button class="btn btn-primary" type="submit">Save connection</button></div>
-    </form>
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="mcp-filter" data-monitor-filter-for="mcp-table" placeholder="Filter by name, URL or command" aria-label="Filter servers" autocomplete="off">
+    </label>
+    <div class="segmented" role="group" aria-label="Show servers">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ t.servers }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="ready" aria-pressed="false">Ready <span>{{ t.ready }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="needs_auth" aria-pressed="false">Needs sign-in <span>{{ t.needs_auth }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="failing" aria-pressed="false">Failing <span>{{ t.failing }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="unchecked" aria-pressed="false">Not checked <span>{{ t.unchecked }}</span></button>
+        {% if t.disabled %}<button type="button" class="segmented-item" data-monitor-tag="disabled" aria-pressed="false">Disabled <span>{{ t.disabled }}</span></button>{% endif %}
+    </div>
+    <button type="button" class="btn btn-sm" id="mcp-test-all">Test all</button>
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>t</kbd> test</span><span><kbd>↵</kbd> tools</span><span><kbd>e</kbd> edit</span></p>
 </div>
+<p class="mcp-live" id="mcp-live" role="status" aria-live="polite"></p>
+
+<div class="fleet mcp" id="mcp">
+    <div class="fleet-main">
+        <div class="fleet-table-wrap">
+            <table class="fleet-table" id="mcp-table">
+                <caption class="visually-hidden">MCP servers connected to this agent, worst status first. Select a row to see its tools, errors and configuration.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" aria-sort="none"><button type="button" data-sort="name" data-sort-type="text">Server</button></th>
+                        <th scope="col" class="mcp-col-transport">Transport</th>
+                        <th scope="col" class="mcp-col-auth">Auth</th>
+                        <th scope="col" aria-sort="none"><button type="button" data-sort="state">Status</button></th>
+                        <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="tools">Tools</button></th>
+                        <th scope="col" class="num mcp-col-calls" aria-sort="none"><button type="button" data-sort="calls">Calls 7d</button></th>
+                        <th scope="col" class="num mcp-col-errors" aria-sort="none"><button type="button" data-sort="errors">Errors 7d</button></th>
+                        <th scope="col" class="num mcp-col-last" aria-sort="none"><button type="button" data-sort="last">Last check</button></th>
+                        <th scope="col" class="mcp-col-endpoint">Endpoint</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in monitor.rows %}
+                    <tr data-key="{{ row.name }}"
+                        data-tags="{{ row.tags }}"
+                        data-search="{{ row.search }}"
+                        data-name="{{ row.name|lower }}"
+                        data-transport="{{ row.transport }}"
+                        data-state="{{ row.rank }}"
+                        data-tools="{{ row.tool_count if row.tool_count is not none else -1 }}"
+                        data-calls="{{ row.calls }}"
+                        data-errors="{{ row.error_count }}"
+                        data-last="{{ row.last_check.timestamp() if row.last_check else 0 }}"
+                        data-oauth="{{ 1 if row.auth_type == 'oauth' else 0 }}"
+                        tabindex="-1">
+                        <th scope="row" class="fleet-name mcp-name">{{ row.name }}</th>
+                        <td class="mcp-col-transport">{{ row.transport_label }}</td>
+                        <td class="mcp-col-auth">{{ row.auth_label }}</td>
+                        <td><span class="fleet-health fleet-health--{{ row.health }}" data-mcp-status="{{ row.name }}">{{ row.state_label }}</span></td>
+                        <td class="num" data-mcp-tools="{{ row.name }}">{{ row.tool_count if row.tool_count is not none else '—' }}</td>
+                        <td class="num mcp-col-calls">{{ row.calls }}{% if row.failed_calls %} <span class="is-bad">({{ row.failed_calls }})</span>{% endif %}</td>
+                        <td class="num mcp-col-errors">{% if row.error_count %}<span class="is-bad">{{ row.error_count }}</span>{% else %}0{% endif %}</td>
+                        <td class="num mcp-col-last" data-mcp-last="{{ row.name }}" {% if row.last_check %}title="{{ row.last_check.strftime('%Y-%m-%d %H:%M:%S') }} UTC"{% endif %}>{{ relative_time(row.last_check, generated_at) if row.last_check else 'Never' }}</td>
+                        <td class="mcp-col-endpoint mono" title="{{ row.endpoint }}">{{ row.endpoint or '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="fleet-none" id="mcp-none" hidden>No servers match this filter.</p>
+        </div>
+        {{ editor_panel() }}
+        {{ expose_panel() }}
+    </div>
+
+    <aside class="fleet-pane" aria-label="Selected server">
+        {% for row in monitor.rows %}
+        <section class="fleet-detail" id="mcp-detail-{{ row.name }}" data-key="{{ row.name }}" hidden>
+            <header class="fleet-detail-head">
+                <div>
+                    <h2>{{ row.name }}</h2>
+                    <p class="fleet-detail-sub"><span>{{ row.transport_label }}</span>{% if row.server_info %}<span class="mono">{{ row.server_info }}</span>{% endif %}</p>
+                </div>
+                <span class="fleet-health fleet-health--{{ row.health }}" data-mcp-status="{{ row.name }}">{{ row.state_label }}</span>
+            </header>
+            <p class="mcp-endpoint mono" title="{{ row.endpoint }}">{{ row.endpoint or 'No endpoint' }}</p>
+            <div class="fleet-detail-actions">
+                {% if row.auth_type == 'oauth' %}<button type="button" class="btn btn-sm{% if row.state == 'needs_auth' %} btn-primary{% endif %}" data-mcp-action="authorize" data-server="{{ row.name }}">Authorize</button>{% endif %}
+                <button type="button" class="btn btn-sm{% if row.state != 'needs_auth' %} btn-primary{% endif %}" data-mcp-action="test" data-server="{{ row.name }}">Test</button>
+                <button type="button" class="btn btn-sm" data-mcp-action="tools" data-server="{{ row.name }}">Tools</button>
+                <button type="button" class="btn btn-sm" data-mcp-action="resources" data-server="{{ row.name }}">Resources</button>
+                <button type="button" class="btn btn-sm" data-mcp-action="prompts" data-server="{{ row.name }}">Prompts</button>
+                <button type="button" class="btn btn-sm" data-mcp-action="edit" data-server="{{ row.name }}">Edit</button>
+                <button type="button" class="btn btn-sm" data-mcp-action="disconnect" data-server="{{ row.name }}">Disconnect</button>
+                <button type="button" class="btn btn-sm btn-danger" data-mcp-action="remove" data-server="{{ row.name }}">Remove</button>
+            </div>
+
+            {% set latest = row.errors[0] if row.errors else none %}
+            <div class="mcp-alert{% if row.state == 'needs_auth' %} is-warn{% else %} is-bad{% endif %}" id="mcp-alert-{{ row.name }}"{% if row.state not in ['needs_auth', 'failing'] %} hidden{% endif %}>
+                {% if row.state == 'needs_auth' and not (latest and latest.code == 'authorization_required') %}
+                <strong>Sign-in needed</strong>
+                <p>{% if row.auth_type == 'oauth' %}No OAuth tokens are stored for this server. Select Authorize to sign in, then select Test.{% else %}No bearer token is stored for this server. Select Edit, paste a token and save, then select Test.{% endif %}</p>
+                {% elif latest %}
+                <strong><span class="mono">{{ latest.code }}</span> · {{ relative_time(latest.when, generated_at) }}</strong>
+                <p>{{ latest.hint }}</p>
+                {% else %}
+                <strong>The last check failed</strong>
+                <p>Select Test to retry. If it keeps failing, check the server's own logs.</p>
+                {% endif %}
+            </div>
+
+            <dl class="fleet-stats">
+                <div><dt>Tools</dt><dd data-mcp-tools="{{ row.name }}">{{ row.tool_count if row.tool_count is not none else '—' }}</dd></div>
+                <div><dt>Calls, 7d</dt><dd>{{ row.calls }}{% if row.failed_calls %}<small class="is-bad">{{ row.failed_calls }} failed</small>{% endif %}</dd></div>
+                <div><dt>Errors, 7d</dt><dd class="{{ 'is-bad' if row.error_count else '' }}">{{ row.error_count }}</dd></div>
+                <div><dt>Last check</dt><dd data-mcp-last="{{ row.name }}">{{ relative_time(row.last_check, generated_at) if row.last_check else 'Never' }}</dd></div>
+                <div><dt>Auth</dt><dd class="mcp-stat-text">{{ row.auth_label }}</dd></div>
+                <div><dt>Approval</dt><dd class="mcp-stat-text">{{ 'Required' if row.server.require_approval is not sameas false else 'Off' }}</dd></div>
+            </dl>
+
+            <div class="mem-body-head" id="mcp-output-head-{{ row.name }}" hidden>
+                <h3 class="fleet-detail-title">Response</h3>
+                <button type="button" class="btn btn-sm" data-copy-target="mcp-output-{{ row.name }}">Copy</button>
+            </div>
+            <pre id="mcp-output-{{ row.name }}" class="mcp-output mem-body" hidden></pre>
+
+            <h3 class="fleet-detail-title">Tools{% if row.tool_count is not none and row.last_check %} <span class="mcp-title-meta">listed {{ relative_time(row.last_check, generated_at) }}</span>{% endif %}</h3>
+            <ul class="mcp-tools" id="mcp-tools-{{ row.name }}">
+                {% for tool in row.tools %}
+                <li>
+                    <div><code>{{ tool.name }}</code>{% if tool.description %}<p>{{ tool.description }}</p>{% endif %}</div>
+                    <button type="button" class="btn btn-sm" data-mcp-call="{{ tool.name }}" data-server="{{ row.name }}">Call</button>
+                </li>
+                {% else %}
+                <li class="mcp-tools-empty">Not listed yet. Select Tools or Test to fetch what this server exposes.</li>
+                {% endfor %}
+            </ul>
+
+            {% if row.tools_used %}
+            <h3 class="fleet-detail-title">Tools used, 7d</h3>
+            <ol class="mcp-usage">
+                {% for tool in row.tools_used %}
+                <li><code>{{ tool.name }}</code><span class="num">{{ tool.calls }} call{{ '' if tool.calls == 1 else 's' }}</span>{% if tool.failed %}<span class="num is-bad">{{ tool.failed }} failed</span>{% else %}<span></span>{% endif %}</li>
+                {% endfor %}
+            </ol>
+            {% endif %}
+
+            {% if row.errors %}
+            <h3 class="fleet-detail-title">Recent errors</h3>
+            <ol class="mcp-errors">
+                {% for error in row.errors %}
+                <li>
+                    <div class="mcp-error-head"><span class="fleet-run-dot fleet-run-dot--failed"></span><code>{{ error.code }}</code><span class="mcp-error-op">{{ error.operation }}{% if error.tool %} · {{ error.tool }}{% endif %}</span><span class="num" title="{{ error.when.strftime('%Y-%m-%d %H:%M:%S') }} UTC">{{ relative_time(error.when, generated_at) }}</span></div>
+                    <p>{{ error.hint }}</p>
+                </li>
+                {% endfor %}
+            </ol>
+            {% endif %}
+
+            <h3 class="fleet-detail-title">Configuration</h3>
+            <dl class="mem-fields mcp-config">
+                {% for item in row.config %}
+                <div><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div>
+                {% endfor %}
+            </dl>
+
+            {% if row.shared_with %}
+            <h3 class="fleet-detail-title">Also connected on</h3>
+            <p class="mcp-shared">{% for agent in row.shared_with %}<a href="/mcp?agent_id={{ agent.agent_id|urlencode }}">{{ agent.name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+            {% endif %}
+        </section>
+        {% endfor %}
+    </aside>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -155,6 +313,7 @@ memorizz mcp serve --transport streamable-http --host 0.0.0.0 --public-url https
 const MCP_AGENT_ID = {{ selected_agent_id|tojson }};
 const MCP_SERVERS = {{ servers|tojson }};
 const MCP_STATUSES = {{ server_statuses|tojson }};
+const MCP_ERROR_HINTS = {{ error_hints|tojson }};
 const MCP_CALLBACK_URL = `${window.location.origin}/api/mcp/oauth/callback`;
 
 async function copyMcpSetup(id, button) {
@@ -184,50 +343,67 @@ async function mcpFetch(url, options = {}) {
     return body;
 }
 
+function serverFor(name) { return MCP_SERVERS.find(item => item.name === name) || null; }
 function statusFor(name) { return MCP_STATUSES.find(item => item.name === name) || {}; }
 function endpointFor(server) { return server.url || [server.command].concat(server.args || []).filter(Boolean).join(' '); }
-
-function renderMcpCards() {
-    const grid = document.getElementById('mcp-grid');
-    if (!grid) return;
-    grid.textContent = '';
-    MCP_SERVERS.forEach(server => {
-        const status = statusFor(server.name);
-        const card = document.createElement('section');
-        card.className = 'mcp-card';
-        const head = document.createElement('div');
-        head.className = 'mcp-card-head';
-        const title = document.createElement('div');
-        const h3 = document.createElement('h3'); h3.textContent = server.name;
-        const badges = document.createElement('div');
-        const transport = document.createElement('span'); transport.className = 'mcp-badge'; transport.textContent = server.transport;
-        const state = document.createElement('span'); state.className = `mcp-badge ${status.state || ''}`; state.textContent = status.state || 'configured';
-        badges.append(transport, document.createTextNode(' '), state); title.append(h3, badges);
-        const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'btn btn-sm'; edit.textContent = 'Edit'; edit.onclick = () => openMcpDialog(null, server);
-        head.append(title, edit);
-        const meta = document.createElement('div'); meta.className = 'mcp-meta'; meta.textContent = endpointFor(server) || 'No endpoint';
-        const actions = document.createElement('div'); actions.className = 'mcp-actions';
-        const entries = [
-            ['Test', () => runMcpAction(server.name, 'test')],
-            ['Tools', () => runMcpAction(server.name, 'tools')],
-            ['Resources', () => runMcpAction(server.name, 'resources')],
-            ['Prompts', () => runMcpAction(server.name, 'prompts')],
-        ];
-        if ((server.auth || {}).type === 'oauth') entries.unshift(['Authorize', () => authorizeMcp(server.name)]);
-        entries.forEach(([label, handler]) => { const b=document.createElement('button'); b.type='button'; b.className='btn btn-sm'; b.textContent=label; b.onclick=handler; actions.appendChild(b); });
-        const disconnect = document.createElement('button'); disconnect.type='button'; disconnect.className='btn btn-sm'; disconnect.textContent='Disconnect'; disconnect.onclick=()=>disconnectMcp(server.name);
-        const remove = document.createElement('button'); remove.type='button'; remove.className='btn btn-sm'; remove.textContent='Remove'; remove.onclick=()=>removeMcp(server.name);
-        actions.append(disconnect, remove);
-        const output = document.createElement('pre'); output.id = `mcp-output-${server.name}`; output.className='mcp-output'; output.hidden=true;
-        card.append(head, meta, actions, output); grid.appendChild(card);
-    });
-}
+function each(selector, fn) { document.querySelectorAll(selector).forEach(fn); }
 
 function outputFor(name, value) {
     const output = document.getElementById(`mcp-output-${name}`);
     if (!output) return;
     output.hidden = false;
+    const head = document.getElementById(`mcp-output-head-${name}`);
+    if (head) head.hidden = false;
     output.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+// Reflect a live result in the grid row, the pane and the tape.
+function setServerState(name, health, label) {
+    each(`[data-mcp-status="${name}"]`, el => { el.className = `fleet-health fleet-health--${health}`; el.textContent = label; });
+}
+
+function markChecked(name) {
+    each(`[data-mcp-last="${name}"]`, el => { el.textContent = 'Just now'; el.removeAttribute('title'); });
+    const row = document.querySelector(`#mcp-table tr[data-key="${name}"]`);
+    if (row) row.dataset.last = String(Date.now() / 1000);
+}
+
+function showProblem(name, body) {
+    const alert = document.getElementById(`mcp-alert-${name}`);
+    if (!alert) return;
+    const code = (body && body.error_code) || 'error';
+    const auth = code === 'authorization_required';
+    setServerState(name, auth ? 'degraded' : 'failing', auth ? 'Needs sign-in' : 'Failing');
+    alert.className = `mcp-alert ${auth ? 'is-warn' : 'is-bad'}`;
+    alert.textContent = '';
+    const title = document.createElement('strong');
+    const codeEl = document.createElement('span'); codeEl.className = 'mono'; codeEl.textContent = code;
+    title.append(codeEl, document.createTextNode(' · just now'));
+    const hint = document.createElement('p');
+    hint.textContent = (body && body.error ? body.error + ' ' : '') + (MCP_ERROR_HINTS[code] || 'Select Test to retry. If it keeps failing, check the server\'s own logs.');
+    alert.append(title, hint);
+    alert.hidden = false;
+}
+
+function clearProblem(name) {
+    const alert = document.getElementById(`mcp-alert-${name}`);
+    if (alert) alert.hidden = true;
+    setServerState(name, 'healthy', 'Ready');
+}
+
+function updateToolTotals() {
+    let total = 0, known = 0, servers = 0;
+    each('#mcp-table tbody tr[data-key]', row => {
+        servers += 1;
+        const count = Number(row.dataset.tools);
+        if (count >= 0) { total += count; known += 1; }
+    });
+    const tape = document.getElementById('mcp-tape-tools');
+    if (!tape || !known) return;
+    tape.textContent = String(total);
+    if (known < servers) {
+        const small = document.createElement('small'); small.textContent = `${known}/${servers} listed`; tape.appendChild(small);
+    }
 }
 
 async function runMcpAction(name, action) {
@@ -237,19 +413,42 @@ async function runMcpAction(name, action) {
     try {
         const body = await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(name)}/${path}`, {method});
         outputFor(name, body);
-        if (action === 'tools' && body.ok) renderToolButtons(name, body.tools || []);
-    } catch (error) { outputFor(name, {ok:false, error:error.message}); }
+        if (action === 'test' || action === 'tools') {
+            markChecked(name);
+            if (body.ok) { clearProblem(name); renderToolButtons(name, body.tools || []); }
+            else showProblem(name, body);
+        }
+        return body;
+    } catch (error) {
+        outputFor(name, {ok:false, error:error.message});
+        if (action === 'test' || action === 'tools') showProblem(name, {error: error.message});
+        return {ok:false, error:error.message};
+    }
 }
 
+// The tools list doubles as the call surface: one Call button per tool.
 function renderToolButtons(name, tools) {
-    const output = document.getElementById(`mcp-output-${name}`);
-    const card = output && output.closest('.mcp-card');
-    if (!card) return;
-    let box = card.querySelector('.mcp-tool-actions');
-    if (box) box.remove();
-    box = document.createElement('div'); box.className='mcp-actions mcp-tool-actions'; box.style.marginTop='10px';
-    tools.forEach(tool => { const button=document.createElement('button'); button.type='button'; button.className='btn btn-sm'; button.textContent=`Call ${tool.name}`; button.onclick=()=>callMcpTool(name,tool.name); box.appendChild(button); });
-    card.appendChild(box);
+    const list = document.getElementById(`mcp-tools-${name}`);
+    if (!list) return;
+    list.textContent = '';
+    if (!tools.length) {
+        const empty = document.createElement('li'); empty.className = 'mcp-tools-empty'; empty.textContent = 'This server exposes no tools.';
+        list.appendChild(empty);
+    }
+    tools.forEach(tool => {
+        const item = document.createElement('li');
+        const text = document.createElement('div');
+        const code = document.createElement('code'); code.textContent = tool.name; text.appendChild(code);
+        if (tool.description) { const p = document.createElement('p'); p.textContent = tool.description; text.appendChild(p); }
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'btn btn-sm'; button.textContent = 'Call';
+        button.dataset.mcpCall = tool.name; button.dataset.server = name;
+        item.append(text, button); list.appendChild(item);
+    });
+    each(`[data-mcp-tools="${name}"]`, el => { el.textContent = String(tools.length); });
+    const row = document.querySelector(`#mcp-table tr[data-key="${name}"]`);
+    if (row) row.dataset.tools = String(tools.length);
+    updateToolTotals();
 }
 
 async function callMcpTool(serverName, toolName) {
@@ -309,12 +508,13 @@ async function removeMcp(name) {
 function setField(id, value) { const element=document.getElementById(id); if (element) element.value = value == null ? '' : value; }
 function csv(values) { return Array.isArray(values) ? values.join(', ') : ''; }
 function syncMcpFields() {
-    const transport=document.getElementById('mcp-transport').value;
-    const auth=document.getElementById('mcp-auth-type').value;
-    document.querySelectorAll('.stdio-field').forEach(el=>el.style.display=transport==='stdio'?'':'none');
-    document.querySelectorAll('.remote-field').forEach(el=>el.style.display=transport==='stdio'?'none':'');
-    document.querySelectorAll('.oauth-field').forEach(el=>el.style.display=auth==='oauth'?'':'none');
-    document.querySelectorAll('.bearer-field').forEach(el=>el.style.display=auth==='bearer'?'':'none');
+    const transport=document.getElementById('mcp-transport');
+    const auth=document.getElementById('mcp-auth-type');
+    if (!transport || !auth) return;
+    document.querySelectorAll('.stdio-field').forEach(el=>el.style.display=transport.value==='stdio'?'':'none');
+    document.querySelectorAll('.remote-field').forEach(el=>el.style.display=transport.value==='stdio'?'none':'');
+    document.querySelectorAll('.oauth-field').forEach(el=>el.style.display=auth.value==='oauth'?'':'none');
+    document.querySelectorAll('.bearer-field').forEach(el=>el.style.display=auth.value==='bearer'?'':'none');
 }
 
 function applyMcpPreset(preset) {
@@ -328,15 +528,28 @@ function applyMcpPreset(preset) {
     syncMcpFields();
 }
 
+// The add/edit form lives in a collapsible panel; opening it scrolls it into view.
 function openMcpDialog(preset = null, server = null) {
+    const panel = document.getElementById('mcp-modal');
+    if (!panel) return;
     document.getElementById('mcp-form').reset();
     setField('mcp-redirect-uri', MCP_CALLBACK_URL); setField('mcp-timeout','30'); document.getElementById('mcp-require-approval').checked=true;
+    document.getElementById('mcp-dialog-title').textContent = server ? `Edit ${server.name}` : 'Add MCP connection';
     if (server) {
         setField('mcp-name',server.name); setField('mcp-transport',server.transport); setField('mcp-url',server.url); setField('mcp-command',server.command); setField('mcp-args',JSON.stringify(server.args||[])); setField('mcp-timeout',server.timeout||30); setField('mcp-auth-type',(server.auth||{}).type||'none'); setField('mcp-client-id',(server.auth||{}).client_id||''); setField('mcp-redirect-uri',(server.auth||{}).redirect_uri||MCP_CALLBACK_URL); setField('mcp-scopes',((server.auth||{}).scopes||[]).join(' ')); setField('mcp-allowed-tools',csv(server.allowed_tools)); setField('mcp-blocked-tools',csv(server.blocked_tools)); setField('mcp-read-only-tools',csv(server.read_only_tools)); setField('mcp-mutation-tools',csv(server.mutation_tools)); document.getElementById('mcp-require-approval').checked=server.require_approval!==false; document.getElementById('mcp-allow-private').checked=!!server.allow_private_network;
     } else if (preset) applyMcpPreset(preset);
-    document.getElementById('mcp-form-error').hidden=true; syncMcpFields(); document.getElementById('mcp-modal').hidden=false;
+    document.getElementById('mcp-form-error').hidden=true; syncMcpFields();
+    panel.open = true;
+    const motion = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+    panel.scrollIntoView({behavior: motion, block: 'start'});
+    document.getElementById('mcp-name').focus({preventScroll: true});
 }
-function closeMcpDialog() { document.getElementById('mcp-modal').hidden=true; }
+function closeMcpDialog() {
+    const panel = document.getElementById('mcp-modal');
+    if (!panel) return;
+    panel.open = false;
+    document.getElementById('mcp-dialog-title').textContent = 'Add MCP connection';
+}
 function parseJsonInput(id, fallback) { const raw=document.getElementById(id).value.trim(); return raw ? JSON.parse(raw) : fallback; }
 function commaList(id) { return document.getElementById(id).value.split(',').map(v=>v.trim()).filter(Boolean); }
 
@@ -352,9 +565,55 @@ document.getElementById('mcp-form')?.addEventListener('submit', async event => {
     } catch (error) { errorBox.textContent=error.message; errorBox.hidden=false; }
 });
 
+const MCP_ACTIONS = {
+    authorize: name => authorizeMcp(name),
+    test: name => runMcpAction(name, 'test'),
+    tools: name => runMcpAction(name, 'tools'),
+    resources: name => runMcpAction(name, 'resources'),
+    prompts: name => runMcpAction(name, 'prompts'),
+    edit: name => openMcpDialog(null, serverFor(name)),
+    disconnect: name => disconnectMcp(name),
+    remove: name => removeMcp(name),
+};
+document.addEventListener('click', event => {
+    const call = event.target.closest('[data-mcp-call]');
+    if (call) { callMcpTool(call.dataset.server, call.dataset.mcpCall); return; }
+    const button = event.target.closest('[data-mcp-action]');
+    if (button && MCP_ACTIONS[button.dataset.mcpAction]) MCP_ACTIONS[button.dataset.mcpAction](button.dataset.server);
+});
+
+// Test all: one server at a time, so slow stdio servers do not pile up.
+document.getElementById('mcp-test-all')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    const live = document.getElementById('mcp-live');
+    const names = Array.from(document.querySelectorAll('#mcp-table tbody tr[data-key]')).map(row => row.dataset.key);
+    button.disabled = true;
+    let failed = 0;
+    for (let i = 0; i < names.length; i += 1) {
+        live.textContent = `Testing ${names[i]} (${i + 1} of ${names.length})…`;
+        const body = await runMcpAction(names[i], 'test');
+        if (!body || !body.ok) failed += 1;
+    }
+    live.textContent = failed ? `${failed} of ${names.length} servers failed the test. Select a server to see why and how to fix it.` : `All ${names.length} servers answered.`;
+    button.disabled = false;
+});
+
 document.getElementById('mcp-agent-select')?.addEventListener('change', event => { window.location.assign(`/mcp?agent_id=${encodeURIComponent(event.target.value)}`); });
 document.getElementById('mcp-transport')?.addEventListener('change',syncMcpFields);
 document.getElementById('mcp-auth-type')?.addEventListener('change',syncMcpFields);
-renderMcpCards(); syncMcpFields();
+syncMcpFields();
+
+document.addEventListener('DOMContentLoaded', function() {
+    MemorizzMonitor.init({
+        table: 'mcp-table',
+        storageKey: 'memorizz.mcp.selected.' + MCP_AGENT_ID,
+        keys: {
+            Enter: row => runMcpAction(row.dataset.key, 'tools'),
+            t: row => runMcpAction(row.dataset.key, 'test'),
+            // preventDefault keeps the key out of the name field the form focuses.
+            e: (row, event) => { event.preventDefault(); openMcpDialog(null, serverFor(row.dataset.key)); },
+        },
+    });
+});
 </script>
 {% endblock %}

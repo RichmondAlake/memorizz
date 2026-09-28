@@ -10,7 +10,7 @@ const path = require('node:path')
     await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort())
     await page.goto(`${process.env.MEMORIZZ_PERSONA_TEST_URL || 'http://127.0.0.1:8783'}/persona-evolution?user_id=synthetic-learner`)
     await page.getByRole('button', { name: 'Reflect now', exact: true }).click()
-    await page.getByText('SUGGESTED ADAPTATION · NOT APPLIED', { exact: true }).waitFor()
+    await page.getByText('Suggested adaptation · not applied', { exact: true }).waitFor()
     assert(await page.getByText('Version 1', { exact: true }).count())
     assert((await page.locator('.pe-evidence a').getAttribute('href')).includes('thread_id=synthetic-thread'))
     const output = process.env.PERSONA_SCREENSHOT_DIR || '/private/tmp'

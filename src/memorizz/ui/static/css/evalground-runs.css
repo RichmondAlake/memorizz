@@ -1,0 +1,128 @@
+#run-library {
+  margin-top: 24px;
+}
+.run-library-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.run-library-heading h2 {
+  margin-bottom: 8px;
+}
+/* A focused evaluation workspace; benchmark configuration is disclosed on demand. */
+.evaluation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+.evaluation-header .evaluation-eyebrow {
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.evaluation-header h1 {
+  margin-bottom: 8px;
+}
+.evaluation-header > div > p:last-child {
+  margin: 0;
+}
+.evaluation-actions {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.evaluation-starts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 24px 0 32px;
+}
+.evaluation-starts > a {
+  color: var(--text-primary);
+  text-decoration: none;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  border-radius: 12px;
+  padding: 20px;
+  transition: border-color 0.15s;
+}
+.evaluation-starts > a:hover {
+  border-color: #47d7cb;
+}
+.evaluation-starts strong {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.95rem;
+  margin: 14px 0 8px;
+}
+.evaluation-starts p {
+  color: var(--text-muted);
+  line-height: 1.6;
+  font-size: 0.8rem;
+  margin: 0;
+}
+.start-icon {
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: #47d7cb;
+  border: 1px solid rgba(71, 215, 203, 0.22);
+  background: rgba(71, 215, 203, 0.08);
+  padding: 5px 8px;
+  border-radius: 5px;
+}
+.evaluation-resource > summary {
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 4px 0;
+}
+.evaluation-resource[open] > summary {
+  margin-bottom: 22px;
+}
+.evaluation-help,
+.history-scope {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+.history-scope > summary {
+  cursor: pointer;
+  padding: 10px 0 0;
+}
+.dataset-tag {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 0.65rem;
+  border: 1px solid var(--border-color);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+@media (max-width: 1050px) {
+  .evaluation-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 18px;
+  }
+}
+@media (max-width: 700px) {
+  .evaluation-starts {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .evaluation-starts > a {
+    padding: 16px;
+  }
+  .evaluation-starts strong {
+    margin-top: 10px;
+  }
+  .evaluation-actions {
+    flex-wrap: wrap;
+  }
+}

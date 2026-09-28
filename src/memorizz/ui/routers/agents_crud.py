@@ -36,6 +36,7 @@ from ..helpers import (
     _build_memory_types_for_agent,
     _build_self_aware_config,
     _build_skills_marketplace_provider_config,
+    _duplicate_agent_notes,
     _extract_agent_identifier,
     _extract_agent_memory_ids,
     _extract_agent_tools,
@@ -54,6 +55,7 @@ from ..helpers import (
     _retrieve_conversation_history,
     _sort_agents_by_last_run_desc,
     _to_text,
+    _unique_agents,
     _validate_browser_control_choice,
     _validate_internet_provider_choice,
     _validate_sandbox_provider_choice,
@@ -514,17 +516,70 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
     }
 
 
+def _with_duplicate_notes(overview, agent_copies: Dict[str, int]):
+    """List duplicate-record notes first: they change how every figure reads."""
+    if overview:
+        overview["attention"][:0] = _duplicate_agent_notes(agent_copies)
+    return overview
+
+
+def _fleet_rows(agents, overview) -> List[Dict[str, Any]]:
+    """One monitor row per agent: configuration plus run health in the window."""
+    from ...observability.overview import agent_health
+
+    stats_by_agent = {
+        row["agent_id"]: row for row in ((overview or {}).get("agents") or [])
+    }
+    rows = []
+    for agent in agents:
+        agent_id = _to_text(getattr(agent, "agent_id", "")).strip()
+        llm_config = getattr(agent, "llm_config", None) or {}
+        provider = _normalize_llm_provider(llm_config.get("provider", "openai"))
+        stats = stats_by_agent.get(agent_id)
+        rows.append(
+            {
+                "agent_id": agent_id,
+                "model": llm_config.get("model")
+                or llm_config.get("deployment_name")
+                or _get_default_llm_model(provider),
+                "provider": provider,
+                "stats": stats,
+                "health": agent_health(stats),
+            }
+        )
+    return rows
+
+
 @router.get("/agents", response_class=HTMLResponse)
-async def agents_list(request: Request):
-    """Show list of all agents."""
+async def agents_list(request: Request, window: str = "7d", load: bool = False):
+    """Fleet monitor: every agent with its run health, plus a quick chat."""
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
+
+    from datetime import datetime, timezone
+
+    from starlette.concurrency import run_in_threadpool
+
+    from ...observability.overview import WINDOWS
+    from .. import dashboard as dash
+
+    window = window if window in WINDOWS else "7d"
+    now = datetime.now(timezone.utc)
+    health = await run_in_threadpool(
+        dash.load_run_health,
+        request,
+        window,
+        now=now,
+        action="agents_fleet",
+        load=load,
+    )
 
     sort_by = _normalize_agent_sort_option(request.query_params.get("sort_by"))
     agents = []
     last_run_by_agent: Dict[str, float] = {}
+    agent_copies: Dict[str, int] = {}
     try:
-        agents = _state["provider"].list_memagents()
+        agents, agent_copies = _unique_agents(_state["provider"].list_memagents())
         last_run_by_agent = _load_agent_last_run_map(agents)
         if sort_by == AGENT_SORT_LAST_CREATED:
             agents = _sort_agents_by_created_at_desc(agents)
@@ -560,6 +615,18 @@ async def agents_list(request: Request):
             "provider_type": _state["provider_type"],
             "connection_info": _state["connection_info"],
             "agents": agents,
+            "fleet": {
+                row["agent_id"]: row for row in _fleet_rows(agents, health["overview"])
+            },
+            "fleet_overview": _with_duplicate_notes(health["overview"], agent_copies),
+            "agent_copies": agent_copies,
+            "fleet_error": health["error"],
+            "fleet_deferred": health["deferred"],
+            "window": window,
+            "windows": list(WINDOWS),
+            "loaded": load,
+            "generated_at": now,
+            **dash.template_helpers(),
             "agent_recent_messages": agent_recent_messages,
             "agent_default_memory_ids": agent_default_memory_ids,
             "agent_threads": agent_threads,

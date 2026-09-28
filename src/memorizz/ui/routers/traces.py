@@ -12,6 +12,7 @@ paths, response classes, and behavior are unchanged.
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
@@ -38,6 +39,7 @@ from ...observability.normalization import (
     select_trace_events,
 )
 from ...observability.pricing import DEFAULT_PRICING
+from .. import observability_view
 from ..analytics import usage_charts
 from ..helpers import (
     _build_agent_nav_items,
@@ -46,6 +48,7 @@ from ..helpers import (
     _extract_agent_identifier,
     _extract_agent_memory_ids,
     _extract_agent_persona_name,
+    _list_agents,
     _load_agent_last_run_map,
     _sort_agents_by_last_run_desc,
     _to_text,
@@ -87,7 +90,7 @@ def _selection_window(
             selected_agent = next(
                 (
                     a
-                    for a in (_state["provider"].list_memagents() or [])
+                    for a in (_list_agents() or [])
                     if _extract_agent_identifier(a) == agent_id
                 ),
                 None,
@@ -217,11 +220,7 @@ async def traces_page(
 
     agents: List[Any] = []
     try:
-        agents = (
-            []
-            if current_principal.get().restricted
-            else _state["provider"].list_memagents()
-        )
+        agents = [] if current_principal.get().restricted else _list_agents()
     except Exception as exc:
         logger.warning("Failed to list trace agents (%s)", type(exc).__name__)
         raise HTTPException(
@@ -329,6 +328,24 @@ async def traces_page(
         trace_metrics=trace_metrics,
         thread_rows_by_agent=thread_rows_by_agent,
         search_query=agent_query,
+    )
+    now = time.time()
+    # The summary strip describes every loaded agent, not only search matches.
+    all_agent_rows = (
+        _build_trace_agent_rows(
+            agents=agents,
+            tool_counts=tool_counts,
+            trace_metrics=trace_metrics,
+            thread_rows_by_agent=thread_rows_by_agent,
+        )
+        if agent_query
+        else agent_rows
+    )
+    navigator_rows = observability_view.navigator_rows(agent_rows, now=now)
+    all_navigator_rows = (
+        observability_view.navigator_rows(all_agent_rows, now=now)
+        if agent_query
+        else navigator_rows
     )
 
     selected_agent = None
@@ -538,7 +555,15 @@ async def traces_page(
             "active_agent_id": selected_agent_id,
             "active_page": "traces",
             "agent_query": agent_query,
-            "agent_rows": agent_rows,
+            "agent_rows": navigator_rows,
+            "navigator_counts": observability_view.navigator_counts(navigator_rows),
+            "trace_tape": observability_view.navigator_tape(
+                all_navigator_rows,
+                now=now,
+                read_only=ui_read_only(),
+                content_mode=content_mode,
+                query_metadata=trace_query_metadata,
+            ),
             "selected_agent": selected_agent,
             "selected_agent_name": (
                 _extract_agent_persona_name(selected_agent)
@@ -585,6 +610,7 @@ async def traces_page(
                 )
             ),
             "usage_charts": usage_charts(usage),
+            "usage_tape": observability_view.usage_tape(usage),
             "trace_analysis": trace_analysis,
             "trace_analysis_export_url": trace_analysis_export_url,
             "trace_signals": trace_signals,
@@ -675,7 +701,7 @@ async def trace_health_page(
         try:
             registered = {
                 _extract_agent_identifier(row): set(_extract_agent_memory_ids(row))
-                for row in _state["provider"].list_memagents()
+                for row in _list_agents()
             }
             health["registration"] = {
                 "state": "observed",
@@ -716,6 +742,7 @@ async def trace_health_page(
         _inspection_context(
             request,
             health=health,
+            health_tape=observability_view.health_tape(health, now=time.time()),
             agent_id=agent_id,
             thread_id=thread_id,
             selection_urls=_selection_urls(
@@ -803,6 +830,12 @@ async def trace_compare_page(
         _inspection_context(
             request,
             comparison=comparison,
+            compare_tape=observability_view.compare_tape(
+                comparison,
+                agent_id=agent_id,
+                baseline_root=baseline_root,
+                candidate_root=candidate_root,
+            ),
             agent_id=agent_id,
             thread_id=thread_id,
             baseline_root=baseline_root,

@@ -1,123 +1,286 @@
 {% extends "base.html" %}
-{% import "_macros.html" as macros %}
 
 {% block title %}Agents - Memorizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="agents" data-sidebar-default="collapsed"{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Agents</h1>
-    <p>{{ agents|length }} agent{% if agents|length != 1 %}s{% endif %} found</p>
+{% from '_ui.html' import page_header, empty_state, id_chip %}
+{% from '_run_health.html' import runs_chart, attention_panel, recent_runs with context %}
+{% set window_labels = {'24h': 'last 24 hours', '7d': 'last 7 days', '30d': 'last 30 days'} %}
+{% set ov = fleet_overview %}
+{% set rows = fleet.values()|list %}
+{% set active_count = rows|selectattr('stats')|list|length %}
+{% set attention_count = rows|selectattr('health', 'in', ['failing', 'degraded'])|list|length %}
+{% set idle_count = rows|selectattr('health', 'equalto', 'idle')|list|length %}
+{% set favorite_count = agents|selectattr('is_favorite')|list|length %}
+{% set query_suffix = ('&sort_by=' ~ sort_by) ~ ('&load=1' if loaded else '') %}
+{% call page_header('Agents', 'Fleet health for every agent in this memory provider. Select an agent to inspect it or send a quick message.', 'Agents') %}
+    <nav class="segmented" aria-label="Time range">
+        {% for key in windows %}<a class="segmented-item" href="/agents?window={{ key }}{{ query_suffix }}"{% if key == window %} aria-current="page"{% endif %}>{{ key }}</a>{% endfor %}
+    </nav>
+    <a href="/agents/new" class="btn btn-primary">Create agent</a>
+{% endcall %}
+
+{% if agents %}
+<div class="fleet-tape" role="list" aria-label="Fleet summary for the {{ window_labels[window] }}">
+    <div role="listitem"><span>Agents</span><strong>{{ agents|length }}</strong></div>
+    {% if ov %}
+    {% set t = ov.totals %}
+    <div role="listitem"><span>Active</span><strong>{{ active_count }}</strong></div>
+    <div role="listitem"><span>Needs attention</span><strong class="{{ 'is-bad' if attention_count else '' }}">{{ attention_count }}</strong></div>
+    <div role="listitem"><span>Runs</span><strong>{{ '{:,}'.format(t.runs) }}</strong></div>
+    <div role="listitem"><span>Success</span>{% if t.success_rate is none %}<strong>—</strong>{% else %}<strong class="{{ 'is-good' if t.success_rate >= 99 else ('is-warn' if t.success_rate >= 90 else 'is-bad') }}">{{ '%.1f'|format(t.success_rate) }}%</strong>{% endif %}</div>
+    <div role="listitem"><span>Run time p95</span><strong>{{ fmt_duration(t.p95_ms) }}</strong></div>
+    <div role="listitem"><span>Tokens</span><strong>{{ fmt_compact(t.input_tokens + t.output_tokens) }}</strong></div>
+    <div role="listitem"><span>From cache</span><strong>{% if t.cache_read_percent is not none %}{{ '%.0f'|format(t.cache_read_percent) }}%{% else %}—{% endif %}</strong></div>
+    <div role="listitem"><span>Spend</span><strong>{{ fmt_usd(t.cost_usd) }}</strong></div>
+    {% endif %}
+    <div role="listitem" class="fleet-tape-meta"><span>{{ window_labels[window]|capitalize }}</span><strong>{{ generated_at.strftime('%H:%M') }} UTC</strong></div>
 </div>
 
-<div class="page-actions page-actions--split">
-    <form method="get" action="/agents" class="agents-sort-controls">
-        <label for="agent-sort">Sort by</label>
+{% if fleet_deferred %}
+<p class="form-note" role="status">Run health is not read automatically for this provider. <a href="/agents?window={{ window }}&sort_by={{ sort_by }}&load=1">Load run health</a></p>
+{% elif fleet_error %}
+<p class="form-note" role="status">{{ fleet_error }} Configuration and quick chat still work.</p>
+{% endif %}
+
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="fleet-filter" data-monitor-filter-for="fleet-table" placeholder="Filter by name, model or ID" aria-label="Filter agents" autocomplete="off">
+    </label>
+    <div class="segmented" role="group" aria-label="Show agents">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ agents|length }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="active" aria-pressed="false">Active <span>{{ active_count }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="attention" aria-pressed="false">Needs attention <span>{{ attention_count }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="idle" aria-pressed="false">Idle <span>{{ idle_count }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="favorite" aria-pressed="false">Favorites <span>{{ favorite_count }}</span></button>
+    </div>
+    <form method="get" action="/agents" class="fleet-order">
+        <input type="hidden" name="window" value="{{ window }}">
+        {% if loaded %}<input type="hidden" name="load" value="1">{% endif %}
+        <label for="agent-sort">Order</label>
         <select id="agent-sort" name="sort_by" onchange="this.form.submit()">
             <option value="last_run" {% if sort_by == 'last_run' %}selected{% endif %}>Last run</option>
             <option value="last_created" {% if sort_by == 'last_created' %}selected{% endif %}>Last created</option>
         </select>
     </form>
-    <a href="/agents/new" class="btn btn-primary">Create Agent</a>
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>↵</kbd> playground</span><span><kbd>t</kbd> traces</span><span><kbd>e</kbd> edit</span></p>
 </div>
 
-{% if agents %}
-<div class="agents-grid">
-    {% for agent in agents %}
-    {% set agent_id_value = agent.agent_id|string %}
-    {% set agent_display_name = agent.name if agent.name else (agent.persona.name if agent.persona and agent.persona.name else 'Agent') %}
-    {% set agent_is_favorite = agent.is_favorite if agent and agent.is_favorite is not none else false %}
-    {% set thread_rows = agent_threads.get(agent_id_value, []) %}
-    {% set selected_memory_id = agent_default_memory_ids.get(agent_id_value, '') %}
-    {% set meta_items = [] %}
-    {% if agent.memory_ids %}
-        {% set _ = meta_items.append({'label': 'Memories:', 'value': agent.memory_ids|length}) %}
+<div class="fleet" id="fleet">
+    <div class="fleet-main">
+    <div class="fleet-table-wrap">
+        <table class="fleet-table" id="fleet-table">
+            <caption class="visually-hidden">Agents with run health for the {{ window_labels[window] }}. Select a row to see details.</caption>
+            <thead>
+                <tr>
+                    <th scope="col" class="fleet-fav"><span class="visually-hidden">Favorite</span></th>
+                    <th scope="col" aria-sort="none"><button type="button" data-sort="name" data-sort-type="text">Agent</button></th>
+                    <th scope="col" class="fleet-col-model" aria-sort="none"><button type="button" data-sort="model" data-sort-type="text">Model</button></th>
+                    <th scope="col" aria-sort="none"><button type="button" data-sort="health">Health</button></th>
+                    <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="runs">Runs</button></th>
+                    <th scope="col" class="fleet-col-trend">Trend</th>
+                    <th scope="col" class="num fleet-col-success" aria-sort="none"><button type="button" data-sort="success">Success</button></th>
+                    <th scope="col" class="num fleet-col-p95" aria-sort="none"><button type="button" data-sort="p95">p95</button></th>
+                    <th scope="col" class="num fleet-col-tokens" aria-sort="none"><button type="button" data-sort="tokens">Tokens</button></th>
+                    <th scope="col" class="num fleet-col-cache" aria-sort="none"><button type="button" data-sort="cache">Cache</button></th>
+                    <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="spend">Spend</button></th>
+                    <th scope="col" class="num fleet-col-last" aria-sort="none"><button type="button" data-sort="last">Last run</button></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for agent in agents %}
+                {% set agent_id_value = agent.agent_id|string %}
+                {% set agent_display_name = agent.name if agent.name else (agent.persona.name if agent.persona and agent.persona.name else 'Agent') %}
+                {% set row = fleet.get(agent_id_value, {}) %}
+                {% set st = row.stats %}
+                {% set health = row.health or 'idle' %}
+                {% set tags = [] %}
+                {% if st and st.runs %}{% set _ = tags.append('active') %}{% endif %}
+                {% if health in ['failing', 'degraded'] %}{% set _ = tags.append('attention') %}{% endif %}
+                {% if health == 'idle' %}{% set _ = tags.append('idle') %}{% endif %}
+                {% if agent.is_favorite %}{% set _ = tags.append('favorite') %}{% endif %}
+                <tr data-key="{{ agent_id_value }}"
+                    data-agent-id="{{ agent_id_value }}"
+                    data-tags="{{ tags|join(' ') }}"
+                    data-name="{{ agent_display_name|lower }}"
+                    data-model="{{ (row.model or '')|lower }}"
+                    data-health="{{ {'failing': 0, 'degraded': 1, 'healthy': 2, 'idle': 3}[health] }}"
+                    data-health-label="{{ health }}"
+                    data-runs="{{ st.runs if st else 0 }}"
+                    data-success="{{ st.success_rate if st and st.success_rate is not none else -1 }}"
+                    data-p95="{{ st.p95_ms if st and st.p95_ms is not none else -1 }}"
+                    data-tokens="{{ st.tokens if st else 0 }}"
+                    data-cache="{{ st.cache_read_percent if st and st.cache_read_percent is not none else -1 }}"
+                    data-spend="{{ st.cost_usd if st else 0 }}"
+                    data-last="{{ st.last_run_at.timestamp() if st else 0 }}"
+                    data-favorite="{{ 1 if agent.is_favorite else 0 }}"
+                    data-search="{{ (agent_display_name ~ ' ' ~ (row.model or '') ~ ' ' ~ agent_id_value)|lower }}"
+                    tabindex="-1">
+                    <td class="fleet-fav">
+                        <form method="post" action="/agents/{{ agent_id_value }}/favorite">
+                            <input type="hidden" name="redirect_to" value="{{ request.url.path ~ (('?' ~ request.url.query) if request.url.query else '') }}">
+                            <input type="hidden" name="is_favorite" value="{% if agent.is_favorite %}0{% else %}1{% endif %}">
+                            <button type="submit" class="fleet-star{% if agent.is_favorite %} is-active{% endif %}" aria-pressed="{{ 'true' if agent.is_favorite else 'false' }}" title="{% if agent.is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}">★</button>
+                        </form>
+                    </td>
+                    <th scope="row" class="fleet-name">
+                        <a href="/agents/{{ agent_id_value }}/playground">{{ agent_display_name }}</a>
+                        <span class="fleet-id">{{ agent_id_value[:8] }}</span>
+                        {% if agent_copies.get(agent_id_value, 1) > 1 %}<span class="pill pill--warning fleet-copies" title="{{ agent_copies[agent_id_value] }} stored records share this agent ID">{{ agent_copies[agent_id_value] }} copies</span>{% endif %}
+                    </th>
+                    <td class="fleet-col-model mono" title="{{ row.provider }} / {{ row.model }}">{{ row.model }}</td>
+                    <td><span class="fleet-health fleet-health--{{ health }}">{{ health|capitalize }}</span></td>
+                    <td class="num">{{ st.runs if st else 0 }}</td>
+                    <td class="fleet-col-trend">
+                        {% if st %}
+                        {% set peak = [st.series|map(attribute='runs')|max, 1]|max %}
+                        <svg class="fleet-trend" viewBox="0 0 {{ st.series|length * 4 }} 20" preserveAspectRatio="none" role="img" aria-label="{{ st.runs }} runs, {{ st.failed }} failed">
+                            {% for b in st.series %}{% if b.runs %}{% set h = [20 * b.runs / peak, 2]|max %}{% set fh = h * b.failed / b.runs %}<rect class="ok" x="{{ loop.index0 * 4 }}" y="{{ 20 - h }}" width="3" height="{{ h - fh }}"/>{% if b.failed %}<rect class="bad" x="{{ loop.index0 * 4 }}" y="{{ 20 - fh }}" width="3" height="{{ fh }}"/>{% endif %}{% endif %}{% endfor %}
+                        </svg>
+                        {% else %}<span class="fleet-flat" aria-label="No runs"></span>{% endif %}
+                    </td>
+                    <td class="num fleet-col-success">{% if st and st.success_rate is not none %}<span class="{{ 'is-good' if st.success_rate >= 99 else ('is-warn' if st.success_rate >= 90 else 'is-bad') }}">{{ '%.0f'|format(st.success_rate) }}%</span>{% else %}—{% endif %}</td>
+                    <td class="num fleet-col-p95">{{ fmt_duration(st.p95_ms) if st else '—' }}</td>
+                    <td class="num fleet-col-tokens">{{ fmt_compact(st.tokens) if st else '—' }}</td>
+                    <td class="num fleet-col-cache">{% if st and st.cache_read_percent is not none %}{{ '%.0f'|format(st.cache_read_percent) }}%{% else %}—{% endif %}</td>
+                    <td class="num">{{ fmt_usd(st.cost_usd) if st else '—' }}</td>
+                    <td class="num fleet-col-last" {% if st %}title="{{ st.last_run_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC"{% endif %}>{{ relative_time(st.last_run_at, generated_at) if st else '—' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <p class="fleet-none" id="fleet-none" hidden>No agents match this filter.</p>
+    </div>
+
+    {% if ov %}
+    {# Fleet-wide activity fills the column under the grid. #}
+    {% set agent_names = {} %}
+    {% for agent in agents %}{% set _ = agent_names.update({agent.agent_id|string: agent.name or (agent.persona.name if agent.persona and agent.persona.name else agent.agent_id|string)}) %}{% endfor %}
+    <div class="ov-grid ov-grid--activity">
+        {{ runs_chart(ov, window, window_labels[window], title='Fleet runs over time', prefix='fleet') }}
+        {{ attention_panel(ov.attention, prefix='fleet', limit=6) }}
+    </div>
+    {{ recent_runs(ov.recent, agent_names, title='Recent runs across the fleet', prefix='fleet') }}
     {% endif %}
-    {% if agent.persona and agent.persona.role %}
-        {% set _ = meta_items.append({'label': 'Role:', 'value': agent.persona.role}) %}
-    {% endif %}
-    {% if agent.max_steps %}
-        {% set _ = meta_items.append({'label': 'Max Tool Iterations:', 'value': agent.max_steps}) %}
-    {% endif %}
-    {% set _ = meta_items.append({'label': 'Tools:', 'value': agent_tool_counts.get(agent_id_value, (agent.tools or [])|length)}) %}
-    {% if agent.whatsapp_enabled %}
-        {% set whatsapp_active = agent_id_value == active_whatsapp_agent_id %}
-        {% set _ = meta_items.append({'label': 'WhatsApp:', 'value': 'Active' if whatsapp_active else 'Enabled', 'class': 'badge badge-success' if whatsapp_active else 'badge'}) %}
-    {% endif %}
-    {% call macros.agent_card(
-        agent,
-        agent_id_value,
-        agent_display_name,
-        icon='robot-svg',
-        favorite=agent_is_favorite,
-        favorite_redirect=request.url.path ~ (('?' ~ request.url.query) if request.url.query else ''),
-        meta_items=meta_items,
-        footer_links=[
-            {'href': '/agents/' ~ agent_id_value ~ '/playground', 'class': 'btn btn-primary', 'label': 'Playground →'},
-            {'href': '/agents/' ~ agent_id_value ~ '/edit', 'class': 'btn', 'label': 'Edit'},
-        ]
-    ) %}
-        <!-- Inline mini-chat -->
-        <div class="agent-inline-chat" id="chat-{{ agent_id_value }}">
-            <div class="inline-chat-toolbar">
-                {% if thread_rows|length > 1 %}
-                <label class="inline-thread-label" for="thread-{{ agent_id_value }}">Thread</label>
-                <select
-                    id="thread-{{ agent_id_value }}"
-                    class="inline-thread-select"
-                    onchange="switchInlineThread('{{ agent_id_value }}', this.value)"
-                >
-                    {% for thread in thread_rows %}
-                    {% set option_memory_id = thread.memory_id|string %}
-                    <option value="{{ option_memory_id }}" {% if option_memory_id == selected_memory_id %}selected{% endif %}>
-                        {% if loop.first %}Latest{% else %}Thread {{ loop.index }}{% endif %} · {{ thread.message_count }} msg{% if thread.message_count != 1 %}s{% endif %}
-                    </option>
-                    {% endfor %}
-                </select>
-                {% elif selected_memory_id %}
-                <span class="inline-thread-chip" title="{{ selected_memory_id }}">Latest thread</span>
-                {% endif %}
+    </div>
+
+    <aside class="fleet-pane" aria-label="Selected agent">
+        {% for agent in agents %}
+        {% set agent_id_value = agent.agent_id|string %}
+        {% set agent_display_name = agent.name if agent.name else (agent.persona.name if agent.persona and agent.persona.name else 'Agent') %}
+        {% set row = fleet.get(agent_id_value, {}) %}
+        {% set st = row.stats %}
+        {% set health = row.health or 'idle' %}
+        {% set thread_rows = agent_threads.get(agent_id_value, []) %}
+        {% set selected_memory_id = agent_default_memory_ids.get(agent_id_value, '') %}
+        <section class="fleet-detail" id="fleet-detail-{{ agent_id_value }}" data-key="{{ agent_id_value }}" hidden>
+            <header class="fleet-detail-head">
+                <div>
+                    <h2>{{ agent_display_name }}</h2>
+                    <p class="fleet-detail-sub">{{ id_chip(agent_id_value) }} <span class="mono">{{ row.provider }} / {{ row.model }}</span></p>
+                </div>
+                <span class="fleet-health fleet-health--{{ health }}">{{ health|capitalize }}</span>
+            </header>
+            <div class="fleet-detail-actions">
+                <a class="btn btn-primary" href="/agents/{{ agent_id_value }}/playground">Open playground</a>
+                <a class="btn" href="/traces?agent_id={{ agent_id_value|urlencode }}">Traces</a>
+                <a class="btn" href="/agents/{{ agent_id_value }}/edit">Edit</a>
             </div>
 
-            <div class="inline-chat-messages" id="messages-{{ agent_id_value }}" data-memory-id="{{ selected_memory_id }}">
-                {% set recent = agent_recent_messages.get(agent_id_value, []) %}
-                {% if recent %}
-                    {% for msg in recent %}
-                    <div class="inline-msg inline-msg--{{ msg.role }}">{{ msg.content or msg.get('text', '') }}</div>
-                    {% endfor %}
-                {% else %}
-                <div class="inline-chat-placeholder">Send a message to start chatting&hellip;</div>
-                {% endif %}
+            <dl class="fleet-stats">
+                <div><dt>Runs</dt><dd>{{ st.runs if st else 0 }}{% if st and st.failed %} <small class="is-bad">{{ st.failed }} failed</small>{% endif %}</dd></div>
+                <div><dt>Success</dt><dd>{% if st and st.success_rate is not none %}{{ '%.1f'|format(st.success_rate) }}%{% else %}—{% endif %}</dd></div>
+                <div><dt>Run time p95</dt><dd>{{ fmt_duration(st.p95_ms) if st else '—' }}</dd></div>
+                <div><dt>Tokens</dt><dd>{{ fmt_compact(st.tokens) if st else '—' }}</dd></div>
+                <div><dt>From cache</dt><dd>{% if st and st.cache_read_percent is not none %}{{ '%.0f'|format(st.cache_read_percent) }}%{% else %}—{% endif %}</dd></div>
+                <div><dt>Spend</dt><dd>{{ fmt_usd(st.cost_usd) if st else '—' }}</dd></div>
+            </dl>
+
+            <h3 class="fleet-detail-title">Recent runs</h3>
+            {% if st and st.recent %}
+            <ol class="fleet-runs">
+                {% for run in st.recent %}
+                <li>
+                    <span class="fleet-run-dot fleet-run-dot--{{ run.status }}" title="{{ run.status|capitalize }}{% if run.error_code %} · {{ run.error_code }}{% endif %}"></span>
+                    <span class="fleet-run-time" title="{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC">{{ relative_time(run.started_at, generated_at) }}</span>
+                    <span class="num">{{ fmt_duration(run.duration_ms) }}</span>
+                    <span class="num fleet-run-calls">{{ run.model_calls }} call{{ '' if run.model_calls == 1 else 's' }}</span>
+                    <span class="num fleet-run-tools">{% if run.tool_failures %}<span class="is-bad">{{ run.tool_failures }}/{{ run.tool_calls }} tools failed</span>{% else %}{{ run.tool_calls }} tool{{ '' if run.tool_calls == 1 else 's' }}{% endif %}</span>
+                    <a href="{{ run.trace_url }}">Trace</a>
+                </li>
+                {% endfor %}
+            </ol>
+            {% else %}
+            <p class="panel-empty">No runs in the {{ window_labels[window] }}.</p>
+            {% endif %}
+
+            <h3 class="fleet-detail-title">Configuration</h3>
+            <dl class="fleet-config">
+                <div><dt>Mode</dt><dd>{{ agent.application_mode or 'assistant' }}</dd></div>
+                <div><dt>Tools</dt><dd>{{ agent_tool_counts.get(agent_id_value, (agent.tools or [])|length) }}</dd></div>
+                <div><dt>Memories</dt><dd>{{ (agent.memory_ids or [])|length }}</dd></div>
+                <div><dt>Max tool iterations</dt><dd>{{ agent.max_steps or '—' }}</dd></div>
+                {% if agent.persona and agent.persona.role %}<div><dt>Role</dt><dd>{{ agent.persona.role }}</dd></div>{% endif %}
+                {% if agent.whatsapp_enabled %}<div><dt>WhatsApp</dt><dd>{{ 'Active' if agent_id_value == active_whatsapp_agent_id else 'Enabled' }}</dd></div>{% endif %}
+            </dl>
+            {% if agent.instruction %}<p class="fleet-instruction" title="{{ agent.instruction }}">{{ agent.instruction }}</p>{% endif %}
+
+            <h3 class="fleet-detail-title">Quick chat</h3>
+            <div class="agent-inline-chat" id="chat-{{ agent_id_value }}">
+                <div class="inline-chat-toolbar">
+                    {% if thread_rows|length > 1 %}
+                    <label class="inline-thread-label" for="thread-{{ agent_id_value }}">Thread</label>
+                    <select id="thread-{{ agent_id_value }}" class="inline-thread-select" onchange="switchInlineThread('{{ agent_id_value }}', this.value)">
+                        {% for thread in thread_rows %}
+                        {% set option_memory_id = thread.memory_id|string %}
+                        <option value="{{ option_memory_id }}" {% if option_memory_id == selected_memory_id %}selected{% endif %}>{{ thread.title or ('Thread ' ~ loop.index) }} · {{ thread.message_count }} msg{% if thread.message_count != 1 %}s{% endif %}</option>
+                        {% endfor %}
+                    </select>
+                    {% elif selected_memory_id %}
+                    <span class="inline-thread-chip" title="{{ selected_memory_id }}">Latest thread</span>
+                    {% endif %}
+                </div>
+                <div class="inline-chat-messages" id="messages-{{ agent_id_value }}" data-memory-id="{{ selected_memory_id }}">
+                    {% set recent = agent_recent_messages.get(agent_id_value, []) %}
+                    {% if recent %}
+                        {% for msg in recent %}
+                        <div class="inline-msg inline-msg--{{ msg.role }}">{{ msg.content or msg.get('text', '') }}</div>
+                        {% endfor %}
+                    {% else %}
+                    <div class="inline-chat-placeholder">Send a message to start chatting&hellip;</div>
+                    {% endif %}
+                </div>
+                <form class="inline-chat-form" onsubmit="return sendInlineChat(event, '{{ agent_id_value }}')">
+                    <input type="text" class="inline-chat-input" id="input-{{ agent_id_value }}" placeholder="Ask {{ agent_display_name }} something…" autocomplete="off" aria-label="Message {{ agent_display_name }}">
+                    <button type="submit" class="inline-chat-send" id="send-{{ agent_id_value }}" aria-label="Send">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </form>
             </div>
-            <form class="inline-chat-form" onsubmit="return sendInlineChat(event, '{{ agent_id_value }}')">
-                <input type="text" class="inline-chat-input" id="input-{{ agent_id_value }}"
-                       placeholder="Ask {{ agent_display_name }} something…"
-                       autocomplete="off">
-                <button type="submit" class="inline-chat-send" id="send-{{ agent_id_value }}">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                </button>
-            </form>
-        </div>
-    {% endcall %}
-    {% endfor %}
+        </section>
+        {% endfor %}
+    </aside>
 </div>
 {% else %}
-<div class="empty-state">
-    <div class="empty-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="4" y="7" width="16" height="12" rx="3"/>
-            <path d="M12 3v4"/>
-            <path d="M9 12h.01"/>
-            <path d="M15 12h.01"/>
-            <path d="M8 16h8"/>
-        </svg>
-    </div>
-    <h3>No Agents Found</h3>
-    <p>There are no agents stored in this memory provider.</p>
-</div>
+{{ empty_state('No agents yet', 'Agents you create here, or save from Python with agent.save(), appear in this list.', '/agents/new', 'Create agent') }}
 {% endif %}
 
 <script>
 const _activeStreams = {};
+
+// The mini-chat is a preview: show stored markdown as readable plain text.
+function plainPreview(text) {
+    return String(text || '')
+        .replace(/```[\s\S]*?```/g, ' [code] ')
+        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
+        .replace(/(\*\*|__|\*|_|`|~~)(.+?)\1/g, '$2')
+        .replace(/\|/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
 
 function getSelectedInlineMemoryId(agentId) {
     const selector = document.getElementById('thread-' + agentId);
@@ -151,7 +314,7 @@ function renderInlineMessages(agentId, messages) {
         if (!content) return;
         const bubble = document.createElement('div');
         bubble.className = 'inline-msg inline-msg--' + role;
-        bubble.textContent = content;
+        bubble.textContent = plainPreview(content);
         messagesEl.appendChild(bubble);
     });
 
@@ -267,6 +430,10 @@ async function sendInlineChat(e, agentId) {
                 if (typeof data === 'string') {
                     // Error message
                     fullText += data;
+                } else if (data.type === 'answer.delta' && data.delta) {
+                    fullText += data.delta;
+                } else if (data.type === 'run.done' && data.status && data.status !== 'completed') {
+                    throw new Error(data.error_code || data.status);
                 } else if (data.type === 'content' && data.content) {
                     fullText += data.content;
                 } else if (data.type === 'done' && data.content) {
@@ -274,15 +441,18 @@ async function sendInlineChat(e, agentId) {
                 } else if (data.type === 'tool_call') {
                     // skip tool calls in mini-chat
                 }
-            } catch (_) {}
-            asstBubble.textContent = fullText || '…';
+            } catch (parseOrRunError) {
+                if (parseOrRunError instanceof SyntaxError) return;
+                throw parseOrRunError;
+            }
+            asstBubble.textContent = plainPreview(fullText) || '…';
             messagesEl.scrollTop = messagesEl.scrollHeight;
         });
 
         if (!fullText.trim()) {
             asstBubble.textContent = '(no response)';
         } else {
-            asstBubble.textContent = fullText;
+            asstBubble.textContent = plainPreview(fullText);
         }
     } catch (err) {
         asstBubble.textContent = 'Error: ' + err.message;
@@ -297,10 +467,22 @@ async function sendInlineChat(e, agentId) {
     return false;
 }
 
-// Scroll pre-loaded message containers to the bottom on page load
 document.addEventListener('DOMContentLoaded', function() {
-    document.querySelectorAll('.inline-chat-messages').forEach(function(el) {
-        el.scrollTop = el.scrollHeight;
+    document.querySelectorAll('.inline-msg').forEach(function(el) {
+        el.textContent = plainPreview(el.textContent);
+    });
+    MemorizzMonitor.init({
+        table: 'fleet-table',
+        storageKey: 'memorizz.fleet.selected',
+        onSelect: function(row) {
+            const messages = document.getElementById('messages-' + row.dataset.key);
+            if (messages) messages.scrollTop = messages.scrollHeight;
+        },
+        keys: {
+            Enter: function(row) { window.location.href = '/agents/' + row.dataset.key + '/playground'; },
+            e: function(row) { window.location.href = '/agents/' + row.dataset.key + '/edit'; },
+            t: function(row) { window.location.href = '/traces?agent_id=' + encodeURIComponent(row.dataset.key); },
+        },
     });
 });
 </script>

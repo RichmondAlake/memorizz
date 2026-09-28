@@ -28,7 +28,8 @@ const {chromium} = require(process.env.MEMORIZZ_PLAYWRIGHT_MODULE || 'playwright
         await page.locator('#incident-finder-panel summary').click();
         await page.locator('#trace-health-link').click();
         assert(new URL(page.url()).searchParams.get('root_trace_id') === 'legacy-root');
-        await page.locator('.page-header a').click();
+        // The header's Traces tab returns to the trace view with the selection kept.
+        await page.locator('#trace-traces-link').click();
         assert(new URL(page.url()).searchParams.get('root_trace_id') === 'legacy-root');
         await page.setViewportSize({width: 390, height: 844});
         await page.goto(url.toString());

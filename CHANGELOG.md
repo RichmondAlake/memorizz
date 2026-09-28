@@ -2,6 +2,61 @@
 
 ## Unreleased
 
+## 0.12.0 — 2026-09-28
+
+### Added
+
+- Rebuilt the local UI as a monitoring console. The overview shows runs, success
+  rate, run time, tokens, prompt-cache reuse and spend over 24 hours, 7 or 30
+  days, with a runs-over-time chart, recent runs and agent, tool and model
+  breakdowns. "Needs attention" names causes in plain language (failed runs,
+  failing tools, provider stream errors, unpriced models, duplicate agent
+  records) from content-free codes, so it also works in metadata-only mode.
+- Added a fleet monitor for agents (health, runs, success, p95, tokens, cache
+  share, spend, trend, detail pane, quick chat) and monitor pages for memory,
+  workflow trajectories, learned skills, the learning control plane, persona
+  evolution, harnesses, automations, MCP connections, Vercel skills, settings,
+  observability, usage and Evalground: shared filters, sortable grids,
+  keyboard navigation (`/`, `j`/`k`), full-width layouts and phone layouts.
+- Added a chat-style agent playground with an inspector for the context window,
+  prompt cache, memory and settings.
+- Added Evalground comparisons of answer models and rerankers on shared
+  evidence, with quality, latency and API cost, and the optional `rerank` extra.
+- Added prompt-cache reuse across agents and providers: Anthropic cache
+  breakpoints for stable prefixes (optionally for single-shot prompts),
+  explicit GPT-5.6/GPT-6 cache boundaries and a default routing key for
+  OpenAI, per-run usage via `MemAgent.get_last_run_usage()` and in `run.done`,
+  and prompt-cache hit rates in the UI and Evalground.
+- Tools discovered for an agent and user stay disclosed in later turns
+  (`ContextPolicy.sticky_tool_limit`), keeping the cached prompt prefix stable.
+- A provider stream that drops before any public answer text or tool call is
+  re-sent up to twice; each attempt is traced as its own model call.
+- Added `MongoDBProvider.estimate_count()`, `list_recent()` and
+  `observability_row_cursor()`; UI counts and memory pages read bounded pages.
+
+### Changed
+
+- Rejected tool calls report `tool_not_disclosed`, `invalid_arguments` or
+  `tool_not_callable` instead of `invalid_tool_invocation`; argument errors
+  name the expected parameters.
+- Anthropic stream error events record the provider's error type.
+- `tool.completed` stream events carry a safe `reason_code` for failures.
+
+### Fixed
+
+- MongoDB observability pages stopped at the boundary between ObjectId and
+  string ids, so usage and event queries skipped immutable trace bundles.
+  Event reads are now batched with exact per-record resume positions.
+- Concurrent `MemAgent.save()` calls (for example one per web worker) could
+  insert duplicate agent records. Saves are an atomic upsert and MongoDB gets a
+  unique `agent_id` index (a warning names duplicates that block it).
+- Tools discovered mid-turn were forgotten before the next turn.
+- Streamed playground turns started a new thread each turn, losing history.
+- Added prices for current Claude models and dated model snapshots; unpriced
+  calls report why they could not be priced.
+- The settings sandbox readiness check did not appear, and blank learning
+  control plane scope filters matched nothing.
+
 ## 0.11.0 — 2026-09-18
 
 ### Added

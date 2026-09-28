@@ -1,0 +1,93 @@
+/* Playground launcher: one dense row per agent; a click opens its playground.
+   Loaded before console.css, so overrides carry one extra class. */
+
+.pg .fleet-table tbody tr {
+    cursor: pointer;
+}
+
+.pg .pg-name {
+    max-width: 320px;
+}
+
+.pg .fleet-table td.pg-col-model {
+    max-width: 220px;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-overflow: ellipsis;
+}
+
+.pg .fleet-table td.pg-col-mode {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.pg .fleet-table td.pg-col-about {
+    width: 100%;
+    max-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+}
+
+.pg-role {
+    margin-right: 4px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.pg .fleet-table tbody td.num {
+    font-size: 12px;
+}
+
+.pg .pg-col-open {
+    width: 1%;
+    text-align: right;
+}
+
+.pg-open {
+    color: var(--text-muted);
+    font-size: 12px;
+    text-decoration: none;
+    opacity: 0;
+}
+
+.pg .fleet-table tbody tr:hover .pg-open,
+.pg .fleet-table tbody tr.is-selected .pg-open {
+    color: var(--accent-primary);
+    opacity: 1;
+}
+
+@container (max-width: 760px) {
+    .pg-col-about { display: none; }
+    /* Without the instructions column, the name absorbs spare width. */
+    .pg .fleet-table .pg-name {
+        width: 100%;
+        max-width: 0;
+        min-width: 110px;
+    }
+}
+
+@container (max-width: 620px) {
+    .pg-col-mode,
+    .pg-col-open { display: none; }
+}
+
+@container (max-width: 500px) {
+    .pg-col-threads { display: none; }
+    .pg .fleet-id { display: none; }
+}
+
+@container (max-width: 400px) {
+    .pg .fleet-table td.pg-col-model { max-width: 110px; }
+    .pg .fleet-table tbody td,
+    .pg .fleet-table tbody th { padding: 0 6px; }
+}
+
+@media (max-width: 640px) {
+    /* Tape labels stay on one line; the tape scrolls sideways instead. */
+    .fleet-tape > div > span {
+        white-space: nowrap;
+    }
+}

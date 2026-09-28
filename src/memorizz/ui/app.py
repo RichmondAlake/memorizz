@@ -38,12 +38,16 @@ from .helpers import (
     _extract_agent_persona_name,
     _get_default_llm_model,
     _get_default_llm_provider,
+    _list_agents,
     _parse_bool,
     _to_text,
     _validate_sandbox_provider_choice,
 )
+from .integrations_view import settings_summary
 from .routers.agents_api import router as agents_api_router
 from .routers.agents_crud import router as agents_crud_router
+from .routers.comparisons import router as comparisons_router
+from .routers.comparisons import stop_comparison_workers
 from .routers.continual_learning import router as continual_learning_router
 from .routers.evalground import router as evalground_router
 from .routers.evalground import stop_active_eval_run_processes
@@ -76,12 +80,12 @@ DEFAULT_GRAALPY_INTERNET_ACCESS = "0"
 
 SETTINGS_SECTIONS = [
     {
-        "title": "Memory Provider & Notion",
+        "title": "Memory provider & Notion",
         "description": "Saved defaults do not reconnect the current UI or migrate memory. Use Connect to switch this UI's provider. For guided Notion setup, run memorizz notion connect in a terminal.",
         "fields": [
             {
                 "env": "MEMORIZZ_BACKEND",
-                "label": "Default Memory Provider",
+                "label": "Default memory provider",
                 "field_type": "select",
                 "options": [{"value": "", "label": "Keep unchanged"}]
                 + [
@@ -92,20 +96,20 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "NOTION_TOKEN",
-                "label": "Notion Connection Token",
+                "label": "Notion connection token",
                 "placeholder": "Leave blank to keep the configured token",
                 "hint": "Share the exact parent page or library with this Notion connection. The token is never prefilled.",
             },
             {
                 "env": "MEMORIZZ_NOTION_DATA_SOURCE_ID",
-                "label": "Notion Memory Data Source ID",
+                "label": "Notion memory data source ID",
                 "field_type": "text",
                 "placeholder": "Data-source UUID (not the enclosing database ID)",
                 "hint": "memorizz notion connect resolves database URLs and checks the managed memory columns.",
             },
             {
                 "env": "MEMORIZZ_NOTION_SEMANTIC_BACKEND",
-                "label": "Notion Semantic / Vector Backend",
+                "label": "Notion semantic / vector backend",
                 "field_type": "select",
                 "options": [
                     {"value": "", "label": "Keep unchanged (default: filesystem)"}
@@ -118,7 +122,7 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "MEMORIZZ_NOTION_VECTOR_PATH",
-                "label": "Notion Filesystem Vector Directory",
+                "label": "Notion filesystem vector directory",
                 "field_type": "text",
                 "placeholder": "Automatic separate directory per library when unset",
                 "hint": "Requires the filesystem extra and a configured embedding provider/model.",
@@ -126,48 +130,48 @@ SETTINGS_SECTIONS = [
         ],
     },
     {
-        "title": "LLM & Embeddings",
+        "title": "LLM & embeddings",
         "description": "Keys used by OpenAI, Anthropic, Azure OpenAI, Ollama, Voyage AI, and Hugging Face integrations.",
         "fields": [
             {
                 "env": "OPENAI_API_KEY",
-                "label": "OpenAI API Key",
+                "label": "OpenAI API key",
                 "placeholder": "sk-...",
                 "hint": "Required for OpenAI LLM and embedding providers.",
             },
             {
                 "env": "ANTHROPIC_API_KEY",
-                "label": "Anthropic API Key",
+                "label": "Anthropic API key",
                 "placeholder": "sk-ant-...",
                 "hint": "Required for Anthropic Claude LLM provider.",
             },
             {
                 "env": "AZURE_OPENAI_API_KEY",
-                "label": "Azure OpenAI API Key",
+                "label": "Azure OpenAI API key",
                 "placeholder": "azure-...",
                 "hint": "Used by Azure OpenAI LLM and embedding providers.",
             },
             {
                 "env": "OLLAMA_HOST",
-                "label": "Ollama Host URL",
+                "label": "Ollama host URL",
                 "placeholder": "http://localhost:11434",
                 "hint": "Ollama server URL. Defaults to http://localhost:11434.",
             },
             {
                 "env": "VOYAGE_API_KEY",
-                "label": "Voyage AI API Key",
+                "label": "Voyage AI API key",
                 "placeholder": "pa-...",
                 "hint": "Used by the Voyage AI embedding provider.",
             },
             {
                 "env": "HF_TOKEN",
-                "label": "Hugging Face Token",
+                "label": "Hugging Face token",
                 "placeholder": "hf_...",
                 "hint": "Optional token for private Hugging Face models.",
             },
             {
                 "env": "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER",
-                "label": "Default Embedding Provider",
+                "label": "Default embedding provider",
                 "hint": "Default for filesystem, MongoDB, Oracle external embeddings, and Notion's separate vector store when not explicitly overridden.",
                 "field_type": "select",
                 "options": [
@@ -181,21 +185,21 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "MEMORIZZ_DEFAULT_EMBEDDING_MODEL",
-                "label": "Default Embedding Model",
+                "label": "Default embedding model",
                 "field_type": "text",
                 "placeholder": "text-embedding-3-small",
                 "hint": "Optional model id used with the default embedding provider.",
             },
             {
                 "env": "MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS",
-                "label": "Default Embedding Dimensions",
+                "label": "Default embedding dimensions",
                 "field_type": "text",
                 "placeholder": "1536",
                 "hint": "Optional output dimensions; must match the selected model and vector index/schema. Changing dimensions may require a new index and sync.",
             },
             {
                 "env": "MEMORIZZ_ORACLE_IN_DATABASE_EMBEDDING",
-                "label": "Oracle Embedding Mode",
+                "label": "Oracle embedding mode",
                 "hint": "Use Oracle's ONNX model, or use the external embedding provider configured above.",
                 "field_type": "select",
                 "default_value": "true",
@@ -207,12 +211,12 @@ SETTINGS_SECTIONS = [
         ],
     },
     {
-        "title": "Default Agent Model",
+        "title": "Default agent model",
         "description": "Default provider/model used in Agent creation and Playground config when not explicitly set on an agent.",
         "fields": [
             {
                 "env": "MEMORIZZ_DEFAULT_LLM_PROVIDER",
-                "label": "Default LLM Provider",
+                "label": "Default LLM provider",
                 "hint": "Applies to newly-created agents unless overridden.",
                 "field_type": "select",
                 "default_value": DEFAULT_LLM_PROVIDER,
@@ -231,7 +235,7 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "MEMORIZZ_DEFAULT_LLM_MODEL",
-                "label": "Default Model / Deployment",
+                "label": "Default model / deployment",
                 "hint": "Provider-aware dropdown populated from the latest supported model catalog.",
                 "field_type": "select",
                 "default_value": DEFAULT_LLM_MODEL_BY_PROVIDER[DEFAULT_LLM_PROVIDER],
@@ -240,42 +244,42 @@ SETTINGS_SECTIONS = [
         ],
     },
     {
-        "title": "Internet Access",
+        "title": "Internet access",
         "description": "Keys for Tavily, Firecrawl, and other web browsing providers.",
         "fields": [
             {
                 "env": "TAVILY_API_KEY",
-                "label": "Tavily API Key",
+                "label": "Tavily API key",
                 "placeholder": "tvly-...",
                 "hint": "Preferred default for Memorizz internet access.",
             },
             {
                 "env": "FIRECRAWL_API_KEY",
-                "label": "Firecrawl API Key",
+                "label": "Firecrawl API key",
                 "placeholder": "fc-...",
                 "hint": "Fallback provider for web browsing workflows.",
             },
             {
                 "env": "MEMORIZZ_DEFAULT_INTERNET_PROVIDER_API_KEY",
-                "label": "Default Internet Provider API Key",
+                "label": "Default internet provider API key",
                 "placeholder": "provider-key",
                 "hint": "Used when MEMORIZZ_DEFAULT_INTERNET_PROVIDER is set.",
             },
         ],
     },
     {
-        "title": "Skills Marketplace",
+        "title": "Skills marketplace",
         "description": "API keys for skillsmp.com and Vercel Agent Skills (skills.sh) marketplace integrations.",
         "fields": [
             {
                 "env": "SKILLSMP_API_KEY",
-                "label": "SkillsMP API Key",
+                "label": "SkillsMP API key",
                 "placeholder": "sk_live_skillsmp_...",
                 "hint": "Used for https://skillsmp.com/ API access in agent marketplace tools.",
             },
             {
                 "env": "GITHUB_TOKEN",
-                "label": "GitHub Personal Access Token",
+                "label": "GitHub personal access token",
                 "placeholder": "ghp_...",
                 "hint": (
                     "Required for Vercel Agent Skills search (uses GitHub's code search API, which "
@@ -295,7 +299,7 @@ SETTINGS_SECTIONS = [
         ],
     },
     {
-        "title": "Browser Control",
+        "title": "Browser control",
         "description": (
             "Configure the isolated Browser Use provider. Browser tasks are "
             "always side-effecting and require durable operator approval."
@@ -303,7 +307,7 @@ SETTINGS_SECTIONS = [
         "fields": [
             {
                 "env": "MEMORIZZ_BROWSER_CONTROL_PROVIDER",
-                "label": "Default Browser Control Provider",
+                "label": "Default browser control provider",
                 "hint": "Browser automation is opt-in; choose Browser Use or leave disabled.",
                 "field_type": "select",
                 "options": [
@@ -313,27 +317,27 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "BROWSER_USE_API_KEY",
-                "label": "Browser Use API Key",
+                "label": "Browser Use API key",
                 "placeholder": "bu_...",
                 "hint": "Only required when the Browser Use model provider is selected.",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_COMMAND",
-                "label": "Browser Use Entry Point",
+                "label": "Browser Use entry point",
                 "placeholder": "browser-use",
                 "hint": "Entry point from an isolated Python 3.11+ Browser Use installation.",
                 "field_type": "text",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_PYTHON_COMMAND",
-                "label": "Browser Use Python Path",
+                "label": "Browser Use Python path",
                 "placeholder": "/absolute/path/to/browser-use/bin/python",
                 "hint": "Optional override when the entry point does not expose an absolute interpreter shebang.",
                 "field_type": "text",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_LLM_PROVIDER",
-                "label": "Browser Use LLM Provider",
+                "label": "Browser Use LLM provider",
                 "field_type": "select",
                 "options": [
                     {"value": "openai", "label": "OpenAI"},
@@ -345,49 +349,49 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_MODEL",
-                "label": "Browser Use Model",
+                "label": "Browser Use model",
                 "placeholder": "gpt-4.1-mini",
                 "hint": "Optional model override for the selected provider.",
                 "field_type": "text",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_ALLOWED_DOMAINS",
-                "label": "Allowed Domains",
+                "label": "Allowed domains",
                 "placeholder": "calendar.google.com, *.notion.so",
                 "hint": "Comma-separated navigation allowlist. Empty permits any public domain.",
                 "field_type": "text",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_PROHIBITED_DOMAINS",
-                "label": "Prohibited Domains",
+                "label": "Prohibited domains",
                 "placeholder": "bank.example, admin.example",
                 "hint": "Comma-separated denylist applied in addition to the allowlist.",
                 "field_type": "text",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_HEADLESS",
-                "label": "Headless Browser",
+                "label": "Headless browser",
                 "field_type": "checkbox",
                 "default_value": "1",
                 "checkbox_label": "Run Chromium without a visible window",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_BLOCK_IP_ADDRESSES",
-                "label": "Block Direct IP Navigation",
+                "label": "Block direct IP navigation",
                 "field_type": "checkbox",
                 "default_value": "1",
                 "checkbox_label": "Reject direct IP-address navigation (recommended)",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_MAX_STEPS",
-                "label": "Maximum Browser Steps",
+                "label": "Maximum browser steps",
                 "placeholder": "25",
                 "hint": "Hard upper bound per task (1-100).",
                 "field_type": "text",
             },
             {
                 "env": "MEMORIZZ_BROWSER_USE_TASK_TIMEOUT",
-                "label": "Browser Task Timeout (seconds)",
+                "label": "Browser task timeout (seconds)",
                 "placeholder": "600",
                 "hint": "Hard wall-clock limit per task (10-3600 seconds).",
                 "field_type": "text",
@@ -395,12 +399,12 @@ SETTINGS_SECTIONS = [
         ],
     },
     {
-        "title": "Sandbox Providers",
+        "title": "Sandbox providers",
         "description": "Configure sandbox code execution providers. The default provider applies globally to all agents unless overridden per-agent in the Playground.",
         "fields": [
             {
                 "env": "MEMORIZZ_DEFAULT_SANDBOX_PROVIDER",
-                "label": "Default Sandbox Provider",
+                "label": "Default sandbox provider",
                 "placeholder": "e2b",
                 "hint": "Global default sandbox provider: e2b, daytona, or graalpy.",
                 "field_type": "select",
@@ -419,26 +423,26 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "E2B_API_KEY",
-                "label": "E2B API Key",
+                "label": "E2B API key",
                 "placeholder": "e2b_...",
                 "hint": "Required for the E2B sandbox provider. Manage it at e2b.dev.",
             },
             {
                 "env": "DAYTONA_API_KEY",
-                "label": "Daytona API Key",
+                "label": "Daytona API key",
                 "placeholder": "daytona_...",
                 "hint": "Required for the Daytona sandbox provider. Manage it at daytona.io.",
             },
             {
                 "env": "GRAALPY_PATH",
-                "label": "GraalPy Executable Path",
+                "label": "GraalPy executable path",
                 "placeholder": "/path/to/graalpy",
                 "hint": "Optional absolute path to the graalpy executable (used when not on PATH).",
                 "field_type": "text",
             },
             {
                 "env": "MEMORIZZ_GRAALPY_MODE",
-                "label": "GraalPy Execution Mode",
+                "label": "GraalPy execution mode",
                 "hint": (
                     "Subprocess is bounded trusted-code execution, not a security "
                     "sandbox. Java wrapper is the validated UNTRUSTED boundary."
@@ -459,7 +463,7 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "MEMORIZZ_GRAALPY_INTERNET_ACCESS",
-                "label": "GraalPy Internet Access",
+                "label": "GraalPy internet access",
                 "hint": (
                     "Explicit egress opt-in for trusted subprocess mode. Network is "
                     "denied by default and Java UNTRUSTED mode always blocks guest IO."
@@ -471,7 +475,7 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "GRAALPY_JAVA_WRAPPER_JAR",
-                "label": "GraalPy Java Wrapper JAR",
+                "label": "GraalPy Java wrapper JAR",
                 "placeholder": "/path/to/graalpy-sandbox.jar",
                 "hint": "Required only when GraalPy Execution Mode is Java UNTRUSTED wrapper.",
                 "field_type": "text",
@@ -485,14 +489,14 @@ SETTINGS_SECTIONS = [
         "fields": [
             {
                 "env": "MEMORIZZ_DEFAULT_TIMEZONE",
-                "label": "Default Timezone",
+                "label": "Default timezone",
                 "placeholder": "America/New_York",
                 "hint": "Default IANA timezone used by automation tools/UI when timezone is omitted.",
                 "field_type": "timezone",
             },
             {
                 "env": "MEMORIZZ_AUTOMATIONS_UI_WORKER",
-                "label": "UI Automations Worker",
+                "label": "UI automations worker",
                 "hint": "When enabled, the UI process also runs an automations worker loop.",
                 "field_type": "checkbox",
                 "default_value": "0",
@@ -500,37 +504,37 @@ SETTINGS_SECTIONS = [
             },
             {
                 "env": "MEMORIZZ_AUTOMATIONS_POLL_INTERVAL_S",
-                "label": "Automations Poll Interval (s)",
+                "label": "Automations poll interval (s)",
                 "placeholder": "5",
                 "hint": "Worker poll interval in seconds.",
             },
             {
                 "env": "MEMORIZZ_AUTOMATIONS_LEASE_SECONDS",
-                "label": "Automations Lease Seconds",
+                "label": "Automations lease seconds",
                 "placeholder": "120",
                 "hint": "Job lease duration in seconds to prevent duplicate runs across workers.",
             },
             {
                 "env": "MEMORIZZ_AUTOMATIONS_CONCURRENCY",
-                "label": "Automations Concurrency",
+                "label": "Automations concurrency",
                 "placeholder": "2",
                 "hint": "Max concurrent job executions per worker.",
             },
             {
                 "env": "TWILIO_ACCOUNT_SID",
-                "label": "Twilio Account SID",
+                "label": "Twilio account SID",
                 "placeholder": "AC...",
                 "hint": "Required for WhatsApp delivery via Twilio.",
             },
             {
                 "env": "TWILIO_AUTH_TOKEN",
-                "label": "Twilio Auth Token",
+                "label": "Twilio auth token",
                 "placeholder": "••••••••",
                 "hint": "Required for WhatsApp delivery via Twilio.",
             },
             {
                 "env": "TWILIO_WHATSAPP_FROM",
-                "label": "Twilio WhatsApp From",
+                "label": "Twilio WhatsApp sender",
                 "placeholder": "whatsapp:+1415...",
                 "hint": "WhatsApp-enabled Twilio sender. Format: whatsapp:+E164.",
             },
@@ -659,6 +663,7 @@ async def lifespan(app: FastAPI):
 
     # Cleanup: stop any active Evalground benchmark subprocesses
     stop_active_eval_run_processes()
+    stop_comparison_workers()
     close_meta_harness()
     # Cleanup: close provider connection
     if _state["provider"]:
@@ -857,6 +862,7 @@ def create_app(
     app.include_router(knowledge_base_router)
     app.include_router(whatsapp_router)
     app.include_router(evalground_router)
+    app.include_router(comparisons_router)
     app.include_router(agents_crud_router)
     app.include_router(playground_router)
 
@@ -1145,16 +1151,23 @@ def create_app(
         return RedirectResponse(url="/connect", status_code=302)
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    async def dashboard(request: Request):
-        """Show the main dashboard."""
+    async def dashboard(request: Request, window: str = "7d", load: bool = False):
+        """Show live run health for the platform, then its inventory."""
         if not _state["provider"]:
             return RedirectResponse(url="/connect", status_code=302)
 
-        # Get counts for each memory type
         from starlette.concurrency import run_in_threadpool
 
-        stats = await run_in_threadpool(_get_memory_stats)
+        from . import dashboard as dash
 
+        stats = await run_in_threadpool(_get_memory_stats)
+        context = await run_in_threadpool(
+            dash.build_dashboard_context,
+            request,
+            window,
+            automation_store=_get_automation_store_for_ui(),
+            load=load,
+        )
         return templates.TemplateResponse(
             "dashboard.html",
             {
@@ -1163,6 +1176,8 @@ def create_app(
                 "connection_info": _state["connection_info"],
                 "stats": stats,
                 "active_page": "dashboard",
+                **context,
+                **dash.template_helpers(),
             },
         )
 
@@ -1178,7 +1193,8 @@ def create_app(
                 "request": request,
                 "provider_type": _state["provider_type"],
                 "connection_info": _state["connection_info"],
-                "settings_sections": _build_settings_sections(),
+                "settings_sections": (sections := _build_settings_sections()),
+                "settings_summary": settings_summary(sections),
                 "env_file_path": str(_resolve_env_file().expanduser().absolute()),
                 "config_warnings": [],
                 "message": None,
@@ -1261,7 +1277,8 @@ def create_app(
                 "request": request,
                 "provider_type": _state["provider_type"],
                 "connection_info": _state["connection_info"],
-                "settings_sections": _build_settings_sections(),
+                "settings_sections": (sections := _build_settings_sections()),
+                "settings_summary": settings_summary(sections),
                 "env_file_path": str(_resolve_env_file().expanduser().absolute()),
                 "config_warnings": config_warnings,
                 "message": message,
@@ -1307,6 +1324,11 @@ def create_app(
         if not _state["provider"]:
             return RedirectResponse(url="/connect", status_code=302)
 
+        from datetime import datetime, timezone
+
+        from . import dashboard as dash
+        from .execution_view import AUTOMATION_RECENT_RUNS, build_automation_monitor
+
         selected_agent_id = _to_text(agent_id).strip() or None
         store = _get_automation_store_for_ui()
         jobs: List[Dict[str, Any]] = []
@@ -1332,7 +1354,12 @@ def create_app(
                 # Attach latest run to each job for inline preview
                 for job_dict in jobs:
                     try:
-                        runs = store.list_runs(job_dict["job_id"], limit=1)
+                        runs = store.list_runs(
+                            job_dict["job_id"], limit=AUTOMATION_RECENT_RUNS
+                        )
+                        job_dict["recent_runs"] = [
+                            run.model_dump(mode="json") for run in runs
+                        ]
                         if runs:
                             run_dict = runs[0].model_dump(mode="json")
                             # Convert run timestamps to the job's timezone
@@ -1369,7 +1396,7 @@ def create_app(
 
         agents: List[Any] = []
         try:
-            agents = _state["provider"].list_memagents()
+            agents = _list_agents()
         except Exception:
             agents = []
 
@@ -1382,6 +1409,7 @@ def create_app(
                 {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
             )
 
+        now = datetime.now(timezone.utc)
         return templates.TemplateResponse(
             "automations.html",
             {
@@ -1395,6 +1423,14 @@ def create_app(
                 "jobs": jobs,
                 "selected_agent_id": selected_agent_id or "",
                 "agent_options": agent_options,
+                "monitor": build_automation_monitor(
+                    jobs,
+                    agent_names={o["agent_id"]: o["label"] for o in agent_options},
+                    now=now,
+                    runs_per_job=AUTOMATION_RECENT_RUNS,
+                ),
+                "generated_at": now,
+                **dash.template_helpers(),
             },
         )
 
@@ -1410,7 +1446,7 @@ def create_app(
 
         agents: List[Any] = []
         try:
-            agents = _state["provider"].list_memagents()
+            agents = _list_agents()
         except Exception:
             agents = []
 
@@ -1545,7 +1581,7 @@ def create_app(
             # Re-render form with error.
             agents: List[Any] = []
             try:
-                agents = _state["provider"].list_memagents()
+                agents = _list_agents()
             except Exception:
                 agents = []
             agent_options = []
@@ -1633,7 +1669,7 @@ def create_app(
 
         agents: List[Any] = []
         try:
-            agents = _state["provider"].list_memagents()
+            agents = _list_agents()
         except Exception:
             agents = []
 
@@ -1771,7 +1807,7 @@ def create_app(
         if error:
             agents: List[Any] = []
             try:
-                agents = _state["provider"].list_memagents()
+                agents = _list_agents()
             except Exception:
                 agents = []
 
@@ -2325,7 +2361,7 @@ def _build_settings_sections() -> List[Dict[str, Any]]:
                 enriched["checkbox_checked"] = current_value == "1"
             fields.append(enriched)
         enriched_section = {**section, "fields": fields}
-        if section.get("title") == "Sandbox Providers":
+        if str(section.get("title") or "").lower() == "sandbox providers":
             enriched_section["provider_checks"] = _build_sandbox_provider_checks()
         sections.append(enriched_section)
     return sections
@@ -2388,8 +2424,14 @@ def _get_memory_stats() -> Dict[str, int]:
         # journal counts, not thirteen full remote scans on every page load.
         return _state["provider"].index_status()["tracked_by_memory_type"]
 
+    # Database providers count from collection metadata; loading every record
+    # of every memory type on each page view is not safe on production stores.
+    estimate = getattr(_state["provider"], "estimate_count", None)
     for mem_type in MemoryType:
         try:
+            if callable(estimate):
+                stats[mem_type.value] = int(estimate(mem_type) or 0)
+                continue
             items = _state["provider"].list_all(mem_type)
             stats[mem_type.value] = len(items) if items else 0
         except Exception:

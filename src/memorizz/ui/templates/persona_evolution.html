@@ -1,63 +1,224 @@
 {% extends "base.html" %}
-{% block title %}Persona Evolution - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/persona-evolution.css">{% endblock %}
+{% from '_ui.html' import page_header, empty_state, id_chip %}
+{% from '_learning_tabs.html' import learning_tabs %}
+{% block title %}Persona evolution - Memorizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="learning" data-sidebar-default="collapsed"{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/persona-evolution.css?v=3">{% endblock %}
 {% block content %}
-<div class="page-header pe-heading"><span class="pe-eyebrow">MEMORY → ADAPTATION</span><h1>A learning partner, shaped by evidence.</h1>
-<p>See what changed, why it changed, and the conversations behind it. Each account has its own approach.</p></div>
-<form method="get" action="/persona-evolution" class="pe-scope">
-<label for="account-id">Account ID<input id="account-id" name="user_id" maxlength="128" value="{{ user_id }}" required placeholder="Inspect one account, never a shared persona"></label>
-<button class="btn btn-secondary" type="submit">Inspect account</button></form>
-<p class="pe-muted">Use the account lookup in Observability to resolve an email to its verified account ID.</p>
+{% set pe_description = "Review how one account's approach adapts from its conversations: what changed, why, and the evidence behind it. Suggestions wait for approval, apply from the next turn and can be undone." %}
+{% set tabs = learning_tabs('persona-evolution') %}
+{% set history = (profile.persona.evolution_history or []) if profile else [] %}
+{% if profile %}
+{#- Account-wide commands. Approve and dismiss live with the suggestion itself. -#}
+{% call page_header('Persona evolution', pe_description, 'Continual learning', nav=tabs) %}
+    <button class="btn btn-primary" data-action="reflect" {% if not writable or profile.paused or profile.pending %}disabled{% endif %}>Reflect now</button>
+    <button class="btn" data-action="pause" data-paused="{{ 'false' if profile.paused else 'true' }}" {% if not writable %}disabled{% endif %}>{{ 'Resume reflection' if profile.paused else 'Pause reflection' }}</button>
+    {% if history and history[-1].action != 'undo' %}<button class="btn" data-action="undo" {% if not writable %}disabled{% endif %}>Undo last change</button>{% endif %}
+{% endcall %}
+{% else %}
+{{ page_header('Persona evolution', pe_description, 'Continual learning', nav=tabs) }}
+{% endif %}
+
+<form method="get" action="/persona-evolution" class="filter-bar pe-scope">
+    <label for="account-id" class="is-wide">Account ID<input id="account-id" name="user_id" maxlength="128" value="{{ user_id }}" required placeholder="One account at a time, never a shared persona" autocomplete="off"></label>
+    <button class="btn" type="submit">Inspect account</button>
+    <p class="pe-scope-note">To resolve an email address to its verified account ID, use the account lookup in <a href="/traces">Observability</a>.</p>
+</form>
 {% if error %}<p role="alert" class="pe-error">{{ error }}</p>{% endif %}<p role="alert" id="pe-error" class="pe-error" hidden></p>
 <p role="status" id="pe-notice" class="pe-guard" hidden></p>
 {% if not connected %}
-<div class="empty-state"><h2>Connect your application's persona adapter</h2><p>Memorizz must ask the host for the account's canonical profile. A shared agent's persona is not a per-user profile.</p></div>
+{{ empty_state("Connect your application's persona adapter"|safe, "Memorizz reads each account's canonical profile from your application. Pass a persona adapter to create_app(persona_evolution=...) to enable this page; docs/persona-evolution-hosts.md describes the adapter contract. A shared agent's persona is not a per-user profile.") }}
 {% elif not profile %}
-<div class="empty-state"><h2>Start with an account</h2><p>Inspect a user's approved approach, pending reflection, and change history.</p></div>
+{{ empty_state('Start with an account', "Enter an account ID above to review its approved approach, any pending reflection and its change history.") }}
 {% else %}
+{% set agent_q = profile.agent_id|default('', true)|urlencode %}
+{% set user_q = user_id|urlencode %}
 <div id="pe-state" data-user-id="{{ user_id }}" data-revision="{{ profile.revision }}" data-proposal-id="{{ profile.pending.id if profile.pending else '' }}"></div>
-<div class="pe-flow" aria-label="Evolution process"><span>01 · User conversations</span><span>02 · Reflect &amp; review</span><span>03 · Next-turn adaptation</span></div>
-<div class="pe-grid">
-<section class="pe-card pe-current">
-<div class="pe-card-top"><span class="pe-eyebrow">CURRENT APPROACH</span><span class="pe-pill">Version {{ profile.persona.version }}</span></div>
-<h2>{{ profile.persona.name }} · {{ profile.persona.role }}</h2><p class="pe-goals">{{ profile.persona.goals }}</p>
-<div class="pe-guard">Stable foundation<br><span>Source grounding · Application rules · Explicit user preferences</span></div>
-<div class="pe-card-top pe-controls"><button class="btn btn-primary" data-action="reflect" {% if not writable or profile.paused or profile.pending %}disabled{% endif %}>Reflect now</button>
-<button class="btn btn-secondary" data-action="pause" data-paused="{{ 'false' if profile.paused else 'true' }}" {% if not writable %}disabled{% endif %}>{{ 'Resume reflection' if profile.paused else 'Pause reflection' }}</button></div>
-<p class="pe-muted">{{ 'Daily + manual review' if profile.daily_enabled else 'Manual review' }} · Approval required · {{ 'Paused' if profile.paused else 'Awaiting your decision' if profile.pending else 'Ready to reflect' }}<br>Last review: {{ profile.last_review_at or 'Not yet reviewed' }}</p>
-<p class="pe-muted">Reflect now reviews recent user-authored memory. It does not force a change.</p>
-{% if profile.daily_enabled is defined %}<div class="pe-guard"><strong>Daily reflection</strong><p>Check every 24 hours, only after new conversations. Suggestions always wait for approval. This is not a midnight job; busy workers may check later.</p>
-<button class="btn btn-secondary" data-action="schedule" data-daily-enabled="{{ 'false' if profile.daily_enabled else 'true' }}" {% if not writable %}disabled{% endif %}>{{ 'Turn off daily review' if profile.daily_enabled else 'Enable daily review' }}</button>
-{% if profile.daily_enabled %}<p class="pe-muted">{{ 'Checks paused' if profile.paused else 'Awaiting your decision' if profile.pending else 'Next check no earlier than ' ~ (profile.next_daily_check_at or 'the next worker check') }}</p>{% endif %}
-{% if profile.last_daily_check_at %}<p class="pe-muted">Last daily check: {{ profile.last_daily_check_at }} · {{ profile.last_daily_outcome|replace('_', ' ') }}</p>{% endif %}</div>{% endif %}
-{% if not writable %}<p class="pe-muted">Inspection only. Persona actions must be explicitly enabled by the host.</p>{% elif trace_read_only %}<p class="pe-muted">Trace editing stays disabled. Host persona actions may append their own audit traces.</p>{% endif %}
+
+<div class="fleet-tape pe-tape" role="list" aria-label="Persona summary for this account">
+    <div role="listitem"><span>Approach</span><strong>v{{ profile.persona.version }}</strong></div>
+    <div role="listitem" class="pe-tape-wide"><span>Status</span><strong class="pe-tape-text {{ ('is-' ~ view.status_signal) if view.status_signal else '' }}">{{ view.status }}</strong></div>
+    <div role="listitem"><span>Pending</span><strong class="{{ 'is-warn' if view.pending else '' }}">{{ 1 if view.pending else 0 }}</strong></div>
+    <div role="listitem"><span title="Supporting memories behind the pending suggestion">Evidence</span><strong>{{ view.evidence }}</strong></div>
+    <div role="listitem"><span>Changes</span><strong>{{ view.changes }}</strong></div>
+    <div role="listitem"><span>Undone</span><strong>{{ view.undos }}</strong></div>
+    <div role="listitem"><span>Reflections</span><strong>{{ view.reviews }}</strong></div>
+    <div role="listitem"><span>Failed</span><strong class="{{ 'is-bad' if view.failed_reviews else '' }}">{{ view.failed_reviews }}</strong></div>
+    <div role="listitem"><span>Last review</span><strong class="pe-tape-text" {% if view.last_review %}title="{{ view.last_review }} UTC"{% endif %}>{{ relative_time(view.last_review_at, now) if view.last_review_at else (view.last_review or 'Never') }}</strong></div>
+    {% if profile.daily_enabled is defined %}<div role="listitem"><span>Daily review</span><strong class="pe-tape-text {{ 'is-good' if profile.daily_enabled and not profile.paused else '' }}">{{ ('Paused' if profile.paused else 'On') if profile.daily_enabled else 'Off' }}</strong></div>{% endif %}
+</div>
+
+{#- The account's current state: rendered once, placed beside or under the activity grid. -#}
+{% set state_panels %}
+<div class="ov-grid ov-grid--two pe-panels">
+<section class="panel pe-card pe-current" aria-labelledby="pe-current-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="pe-current-title">Current approach</h2>
+        <span class="pill pill--info pe-pill">Version {{ profile.persona.version }}</span>
+    </div>
+    <p class="pe-identity"><strong>{{ profile.persona.name }}</strong> · {{ profile.persona.role }}</p>
+    <p class="pe-goals">{{ profile.persona.goals }}</p>
+    <p class="pe-guard"><strong>Stable foundation</strong><br><span>Source grounding · Application rules · Explicit user preferences</span></p>
+    <dl class="detail-list pe-facts">
+        <div><dt>Review</dt><dd>{{ 'Daily and manual' if profile.daily_enabled else 'Manual' }}; approval required</dd></div>
+        <div><dt>Status</dt><dd>{{ 'Paused' if profile.paused else 'Awaiting your decision' if profile.pending else 'Ready to reflect' }}</dd></div>
+        <div><dt>Last review</dt><dd>{{ profile.last_review_at or 'Not yet reviewed' }}</dd></div>
+    </dl>
+    <p class="pe-muted">Reflect now reviews recent user-authored memory. It does not force a change.</p>
+    {% if not writable %}<p class="pe-muted">Inspection only. Persona actions must be explicitly enabled by the host.</p>{% elif trace_read_only %}<p class="pe-muted">Trace editing stays disabled. Host persona actions may append their own audit traces.</p>{% endif %}
 </section>
-<section class="pe-card">
-{% if profile.pending %}
-<span class="pe-eyebrow">SUGGESTED ADAPTATION · NOT APPLIED</span><h2>A better way to learn together</h2><p>{{ profile.pending.reason }}</p>
-<div class="pe-diff"><div><span>Before</span><p>{{ profile.pending.changes.goals.old }}</p></div><div><span>Proposed</span><p>{{ profile.pending.changes.goals.new }}</p></div></div>
-<details class="pe-evidence" open><summary>Why this suggestion? {{ profile.pending.evidence|length }} supporting memories</summary>
-{% for item in profile.pending.evidence %}<blockquote><p>{{ item.text }}</p><a href="/traces?agent_id={{ profile.agent_id|default('', true)|urlencode }}&user_id={{ user_id|urlencode }}&thread_id={{ item.thread_id|urlencode }}#trace-timeline">Inspect conversation traces ↗</a><small>Memory {{ item.id }} · {{ item.timestamp }}</small></blockquote>{% endfor %}</details>
-<div class="pe-card-top pe-controls"><button class="btn btn-primary" data-action="approve" {% if not writable or profile.paused %}disabled{% endif %}>Approve for next turn</button><button class="btn btn-secondary" data-action="dismiss" {% if not writable %}disabled{% endif %}>Dismiss</button></div>
+<section class="panel pe-card" aria-labelledby="pe-review-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="pe-review-title">Latest reflection</h2>
+        {% if profile.pending %}<span class="pill pill--warning">Awaiting your decision</span>{% elif profile.review_state == 'no_change' %}<span class="pill">No change needed</span>{% elif profile.review_state == 'failed' %}<span class="pill pill--danger">Failed</span>{% elif profile.review_state == 'reviewing' %}<span class="pill pill--info">Reviewing</span>{% endif %}
+    </div>
+    {% if profile.pending %}
+    <p>A suggestion is waiting for your decision. Nothing changes until you approve it; select it in the activity grid to compare the change and read its evidence.</p>
+    {% else %}
+    <p>{{ 'The reviewed conversations did not support a durable change. Your current approach stays in place.' if profile.review_state == 'no_change' else 'No suggestion is pending. When conversations support a better approach, the suggestion and its evidence appear here before anything changes.' }}</p>
+    {% if profile.review_state == 'failed' %}<p role="alert" class="pe-error">The last reflection failed. Your approved approach is unchanged. Wait two minutes and retry.</p>{% endif %}
+    {% if profile.review_state == 'reviewing' %}<p role="status">Reflection is running. Refresh this page to check its result.</p>{% endif %}
+    {% endif %}
+    {% if profile.daily_enabled is defined %}
+    <div class="pe-subsection">
+        <h3>Daily reflection</h3>
+        <p class="pe-muted">Check every 24 hours, only after new conversations. Suggestions always wait for approval. This is not a midnight job; busy workers may check later.</p>
+        <button class="btn" data-action="schedule" data-daily-enabled="{{ 'false' if profile.daily_enabled else 'true' }}" {% if not writable %}disabled{% endif %}>{{ 'Turn off daily review' if profile.daily_enabled else 'Enable daily review' }}</button>
+        {% if profile.daily_enabled %}<p class="pe-muted">{{ 'Checks paused' if profile.paused else 'Awaiting your decision' if profile.pending else 'Next check no earlier than ' ~ (profile.next_daily_check_at or 'the next worker check') }}</p>{% endif %}
+        {% if profile.last_daily_check_at %}<p class="pe-muted">Last daily check: {{ profile.last_daily_check_at }} · {{ profile.last_daily_outcome|replace('_', ' ') }}</p>{% endif %}
+    </div>
+    {% endif %}
+</section>
+</div>
+{% endset %}
+
+{% if view.rows %}
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="pe-filter" data-monitor-filter-for="pe-table" placeholder="Filter by reason, operator or review" aria-label="Filter persona activity" autocomplete="off">
+    </label>
+    <div class="segmented" role="group" aria-label="Show activity">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ view.rows|length }}</span></button>
+        {% for tag, label, count in view.chips %}<button type="button" class="segmented-item" data-monitor-tag="{{ tag }}" aria-pressed="false">{{ label }} <span>{{ count }}</span></button>{% endfor %}
+    </div>
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>t</kbd> trace</span><span><kbd>/</kbd> filter</span></p>
+</div>
+
+<div class="fleet pe-monitor" id="pe-monitor">
+    <div class="fleet-main">
+        <div class="fleet-table-wrap">
+            <table class="fleet-table pe-table" id="pe-table">
+                <caption class="visually-hidden">Suggestions, approved changes and reflection attempts for this account, pending first, then newest first. Select a row to see the change and its evidence.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" class="pe-col-time" aria-sort="none"><button type="button" data-sort="when">When</button></th>
+                        <th scope="col" class="pe-col-kind" aria-sort="none"><button type="button" data-sort="kind" data-sort-type="text">Activity</button></th>
+                        <th scope="col" class="num pe-col-version">Version</th>
+                        <th scope="col" class="pe-col-summary">Reason</th>
+                        <th scope="col" class="num pe-col-evidence" aria-sort="none"><button type="button" data-sort="evidence">Evidence</button></th>
+                        <th scope="col" class="pe-col-actor">By</th>
+                        <th scope="col" class="pe-col-status">Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in view.rows %}
+                    {% set entry = row.entry %}
+                    {% set trace = entry.trace if entry.trace is mapping else none %}
+                    <tr data-key="{{ row.key }}"
+                        data-tags="{{ row.tags }}"
+                        data-when="{{ row.sort }}"
+                        data-kind="{{ row.kind_label|lower }}"
+                        data-evidence="{{ row.evidence_count or 0 }}"
+                        data-trace-url="{% if trace %}/traces?agent_id={{ agent_q }}&user_id={{ user_q }}&thread_id={{ trace.thread_id|urlencode }}&root_trace_id={{ trace.root_trace_id|urlencode }}#trace-timeline{% endif %}"
+                        data-search="{{ row.search }}"
+                        tabindex="-1">
+                        <td class="pe-col-time mono" title="{{ row.timestamp }}">{% if row.recorded %}<span class="pe-time-full">{{ row.recorded }}</span><span class="pe-time-short">{{ row.recorded[5:] if row.recorded_at else row.recorded }}</span>{% else %}—{% endif %}</td>
+                        <td class="pe-col-kind"><span class="pe-kind pe-kind--{{ row.kind }}{{ " pe-kind--bad" if row.signal == "bad" else "" }}">{{ row.kind_label }}</span><span class="pe-kind-summary" aria-hidden="true">{{ row.summary }}</span></td>
+                        <td class="num pe-col-version">{{ ('v' ~ row.version) if row.version is not none else '—' }}</td>
+                        <td class="pe-col-summary" title="{{ row.summary }}">{{ row.summary or '—' }}</td>
+                        <td class="num pe-col-evidence">{{ row.evidence_count if row.evidence_count is not none else '—' }}</td>
+                        <td class="pe-col-actor mono" title="{{ row.actor }}">{{ row.actor or '—' }}</td>
+                        <td class="pe-col-status"><span class="pill{{ (' pill--' ~ row.status_class) if row.status_class else '' }}">{{ row.status_label }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="fleet-none" id="pe-none" hidden>No activity matches this filter.</p>
+        </div>
+        <p class="form-note pe-note">Approved changes and reflection attempts, newest first. The latest {{ profile.history_limit }} changes and reflection attempts are retained. This is an adaptation history, not model training.</p>
+        {{ state_panels }}
+    </div>
+
+    <aside class="fleet-pane" aria-label="Selected activity">
+        {% for row in view.rows %}
+        {% set entry = row.entry %}
+        {% set goals = ((entry.changes if entry.changes is mapping else {}).goals) or {} %}
+        <section class="fleet-detail pe-detail" id="pe-detail-{{ loop.index0 }}" data-key="{{ row.key }}" hidden>
+        {% if row.kind == 'proposal' %}
+            <header class="fleet-detail-head">
+                <div>
+                    <h2>Suggested change</h2>
+                    <p class="fleet-detail-sub"><span class="pill pill--warning">Suggested adaptation · not applied</span></p>
+                </div>
+            </header>
+            <div class="fleet-detail-actions pe-controls"><button class="btn btn-primary" data-action="approve" {% if not writable or profile.paused %}disabled{% endif %}>Approve for next turn</button><button class="btn" data-action="dismiss" {% if not writable %}disabled{% endif %}>Dismiss</button></div>
+            {% if profile.paused %}<p class="pe-muted">Reflection is paused. Resume it to approve this suggestion.</p>{% endif %}
+            <p class="pe-reason">{{ entry.reason }}</p>
+            <div class="pe-diff"><div><span>Before</span><p>{{ goals.old }}</p></div><div><span>Proposed</span><p>{{ goals.new }}</p></div></div>
+            <details class="pe-evidence" open><summary>Why this suggestion? {{ entry.evidence|length }} supporting memories</summary>
+            {% for item in entry.evidence %}<blockquote><p>{{ item.text }}</p><a href="/traces?agent_id={{ agent_q }}&user_id={{ user_q }}&thread_id={{ item.thread_id|urlencode }}#trace-timeline">Open conversation traces</a><small>Memory <span class="mono">{{ item.id }}</span> · {{ item.timestamp }}</small></blockquote>{% endfor %}</details>
+            {% if entry.id %}<p class="pe-muted">Suggestion <span class="mono">{{ entry.id }}</span>{% if profile.last_review_at %} · reviewed {{ profile.last_review_at }}{% endif %}</p>{% endif %}
+        {% elif row.kind in ['change', 'undo'] %}
+            <header class="fleet-detail-head">
+                <div>
+                    <h2>{{ 'Change undone' if row.kind == 'undo' else 'Learning approach updated' }}</h2>
+                    <p class="fleet-detail-sub"><span class="mono">v{{ entry.version }}</span><span class="mono">{{ entry.timestamp }}</span></p>
+                </div>
+                <span class="pill pill--{{ row.status_class }}">{{ row.status_label }}</span>
+            </header>
+            {% if entry.trace %}<div class="fleet-detail-actions"><a class="btn btn-sm" href="/traces?agent_id={{ profile.agent_id|urlencode }}&user_id={{ user_q }}&thread_id={{ entry.trace.thread_id|urlencode }}&root_trace_id={{ entry.trace.root_trace_id|urlencode }}#trace-timeline">Open the decision trace for this version</a></div>{% endif %}
+            <p class="pe-reason">{{ entry.change_trigger.reason if entry.change_trigger else '' }}</p>
+            <div class="pe-diff"><div><span>Before</span><p>{{ goals.old }}</p></div><div><span>After</span><p>{{ goals.new }}</p></div></div>
+            <dl class="fleet-config">
+                <div><dt>{{ 'Undone by' if row.kind == 'undo' else 'Approved by' }}</dt><dd class="mono">{{ entry.actor_id or '—' }}</dd></div>
+                <div><dt>Review</dt><dd>{% if entry.review_id %}{{ id_chip(entry.review_id|string, 16) }}{% else %}—{% endif %}</dd></div>
+            </dl>
+            <details class="pe-event" open><summary><strong>Supporting memories</strong><span>{{ (entry.evidence or [])|length }}</span></summary>
+            {% for item in entry.evidence or [] %}<blockquote><p>{{ item.text }}</p><a href="/traces?agent_id={{ agent_q }}&user_id={{ user_q }}&thread_id={{ item.thread_id|urlencode }}#trace-timeline">Open conversation traces</a><small>Memory <span class="mono">{{ item.id }}</span></small></blockquote>{% else %}<p class="pe-muted">No supporting memories are recorded for this version.</p>{% endfor %}</details>
+        {% else %}
+            <header class="fleet-detail-head">
+                <div>
+                    <h2>Reflection</h2>
+                    <p class="fleet-detail-sub"><span class="mono">{{ entry.timestamp }}</span></p>
+                </div>
+                <span class="pill{{ (' pill--' ~ row.status_class) if row.status_class else '' }}">{{ row.status_label }}</span>
+            </header>
+            {% if entry.trace %}<div class="fleet-detail-actions"><a class="btn btn-sm" href="/traces?agent_id={{ profile.agent_id|urlencode }}&user_id={{ user_q }}&thread_id={{ entry.trace.thread_id|urlencode }}&root_trace_id={{ entry.trace.root_trace_id|urlencode }}#trace-timeline">Open trace, usage and outcome</a></div>{% endif %}
+            <dl class="fleet-stats">
+                <div><dt title="Memories reviewed">Reviewed</dt><dd>{{ entry.evidence_count if entry.evidence_count is not none else '—' }}</dd></div>
+                <div><dt>Selected</dt><dd>{{ entry.selected_count if entry.selected_count is not none else '—' }}</dd></div>
+                <div><dt>Trigger</dt><dd>{{ entry.trigger or '—' }}</dd></div>
+            </dl>
+            <p class="pe-reason">{{ entry.reason or 'No reason recorded.' }}</p>
+            {% if not entry.trace %}<p class="pe-muted">Trace not captured. Enable host observability to capture traces for future reviews.</p>{% endif %}
+        {% endif %}
+        </section>
+        {% endfor %}
+    </aside>
+</div>
 {% else %}
-<span class="pe-eyebrow">REFLECTION</span><h2>{{ 'No change needed' if profile.review_state == 'no_change' else 'Changes you can understand.' }}</h2>
-<p>{{ 'The reviewed conversations did not support a durable change. Your current approach stays in place.' if profile.review_state == 'no_change' else 'When a conversation supports a better teaching approach, a reflection will explain the suggestion here before anything changes.' }}</p>
-{% if profile.review_state == 'failed' %}<p role="alert" class="pe-error">The last reflection failed. Your approved approach is unchanged. Wait two minutes and retry.</p>{% endif %}
-{% if profile.review_state == 'reviewing' %}<p role="status">Reflection is running. Refresh this page to check its result.</p>{% endif %}
-{% endif %}</section></div>
-<section class="pe-history"><div class="pe-card-top"><div><span class="pe-eyebrow">EVOLUTION TRAIL</span><h2>What changed over time</h2></div>
-{% set history = profile.persona.evolution_history or [] %}
-{% if history and history[-1].action != 'undo' %}<button class="btn btn-secondary" data-action="undo" {% if not writable %}disabled{% endif %}>Undo last change</button>{% endif %}</div>
-{% for entry in history|reverse %}
-<details class="pe-event"><summary><span class="pe-dot"></span><strong>v{{ entry.version }} · {{ 'Change undone' if entry.action == 'undo' else 'Learning approach updated' }}</strong><span>{{ entry.timestamp }}</span></summary>
-<p>{{ entry.change_trigger.reason }}</p><div class="pe-diff"><div><span>Before</span><p>{{ entry.changes.goals.old }}</p></div><div><span>After</span><p>{{ entry.changes.goals.new }}</p></div></div><p class="pe-muted">{{ entry.actor_id }} · Review {{ entry.review_id }}</p>
-{% if entry.trace %}<a href="/traces?agent_id={{ profile.agent_id|urlencode }}&user_id={{ user_id|urlencode }}&thread_id={{ entry.trace.thread_id|urlencode }}&root_trace_id={{ entry.trace.root_trace_id|urlencode }}#trace-timeline">Inspect version decision trace ↗</a>{% endif %}
-{% for item in entry.evidence or [] %}<blockquote><p>{{ item.text }}</p><a href="/traces?agent_id={{ profile.agent_id|default('', true)|urlencode }}&user_id={{ user_id|urlencode }}&thread_id={{ item.thread_id|urlencode }}#trace-timeline">Conversation traces ↗</a><small>Memory {{ item.id }}</small></blockquote>{% endfor %}</details>
-{% else %}<p class="pe-muted">No approved changes yet. Reflection suggestions do not count as an evolved persona until approved.</p>{% endfor %}
-<details class="pe-event"><summary>Reflection attempts — including no change and dismissed suggestions</summary>
-{% for review in profile.reviews|reverse %}<p><strong>{{ review.status|replace('_', ' ') }}</strong> · {{ review.timestamp }}<br>{{ review.reason }}<small>{{ review.evidence_count }} memories reviewed · {{ review.selected_count }} selected · {{ review.trigger }}</small>
-{% if review.trace %}<a href="/traces?agent_id={{ profile.agent_id|urlencode }}&user_id={{ user_id|urlencode }}&thread_id={{ review.trace.thread_id|urlencode }}&root_trace_id={{ review.trace.root_trace_id|urlencode }}#trace-timeline">Inspect reflection trace, usage &amp; outcome ↗</a>{% else %}<small>Reflection trace not captured · Enable host observability for future reviews.</small>{% endif %}</p>{% else %}<p>No reflections yet.</p>{% endfor %}</details>
-<p class="pe-muted">The latest {{ profile.history_limit }} changes and reflection attempts are retained. This is an adaptation history, not model training.</p></section>
+{{ empty_state('No approved changes yet', 'Reflection suggestions change the persona only after approval.' ~ (' Select Reflect now to review recent conversations.' if writable else '')) }}
+{{ state_panels }}
 {% endif %}
+{% endif %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    if (!window.MemorizzMonitor) return;
+    function trace(row) { if (row.dataset.traceUrl) window.location.href = row.dataset.traceUrl; }
+    // Navigation only: approving, dismissing and undoing stay deliberate clicks.
+    MemorizzMonitor.init({ table: 'pe-table', keys: { t: trace } });
+});
+</script>
 {% endblock %}
 {% block scripts %}{{ super() }}<script src="/static/js/persona-evolution.js" defer></script>{% endblock %}

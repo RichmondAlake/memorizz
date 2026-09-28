@@ -102,7 +102,7 @@ def test_progressive_router_discloses_top_k_and_allowlists_dispatch():
         "calendar_create_event",
         {"title": "Review", "starts_at": "2026-08-13T10:00:00Z"},
     )
-    assert hidden["error_code"] == "invalid_tool_invocation"
+    assert hidden["error_code"] == "tool_not_disclosed"
     assert "not disclosed" in hidden["error"]
 
     discovered = router.discover_tools("weather", user_id="alice", limit=1)
@@ -181,7 +181,7 @@ def test_hidden_direct_tool_name_is_rejected_even_if_registered():
         user_id="alice",
     )
     payload = json.loads(messages[-1]["content"])
-    assert payload["error_code"] == "invalid_tool_invocation"
+    assert payload["error_code"] == "tool_not_disclosed"
     assert calls == []
 
 
@@ -380,3 +380,58 @@ def test_persist_all_results_keeps_small_outputs_inline_and_skips_expansion():
         )
         == 1
     )
+
+
+@pytest.mark.unit
+def test_tools_discovered_mid_turn_stay_disclosed_in_later_turns():
+    from memorizz.tooling import _STICKY_TOOLS
+
+    manager = ToolManager()
+
+    def weather_read(city: str) -> str:
+        """Read the current weather for a city."""
+        return city
+
+    def inventory_lookup(sku: str) -> str:
+        """Read inventory stock."""
+        return sku
+
+    for function in (weather_read, inventory_lookup):
+        assert manager.add_tool(function)
+    router = SemanticToolRouter(manager, top_k=1, sticky_limit=5)
+    _STICKY_TOOLS.pop("agent-x|alice", None)
+
+    router.begin_turn(user_id="alice")
+    router.schemas_for_turn("weather in London", user_id="alice", cache_scope="agent-x")
+    router.discover_tools("inventory stock", user_id="alice", limit=1)
+
+    router.begin_turn(user_id="alice")
+    names = {
+        schema["function"]["name"]
+        for schema in router.schemas_for_turn(
+            "weather tomorrow", user_id="alice", cache_scope="agent-x"
+        )
+    }
+    assert "inventory_lookup" in names, "discovered last turn, still callable"
+    assert router.invoke_tool("inventory_lookup", {"sku": "A1"})["ok"]
+
+    router.begin_turn(user_id="bob")
+    bob = router.schemas_for_turn("weather", user_id="bob", cache_scope="agent-x")
+    assert "inventory_lookup" not in {s["function"]["name"] for s in bob}
+
+
+@pytest.mark.unit
+def test_rejected_calls_carry_specific_codes():
+    manager = ToolManager()
+
+    def weather_read(city: str) -> str:
+        """Read the current weather for a city."""
+        return city
+
+    assert manager.add_tool(weather_read)
+    router = SemanticToolRouter(manager, top_k=1)
+    router.begin_turn(user_id="alice")
+    router.schemas_for_turn("weather", user_id="alice")
+    bad = router.invoke_tool("weather_read", {"town": "London"})
+    assert bad["error_code"] == "invalid_arguments"
+    assert "expected weather_read(city)" in bad["error"]

@@ -38,7 +38,7 @@ from ...benchmarks.memory_suite import BENCHMARK_CATALOG, get_benchmark_spec
 from ...observability import ObservabilityStore
 from ...observability.analytics import finite_number
 from ..analytics import eval_charts
-from ..helpers import _extract_agent_persona_name
+from ..helpers import _extract_agent_persona_name, _list_agents
 from ..state import _state, templates
 
 logger = logging.getLogger(__name__)
@@ -263,8 +263,15 @@ def _build_eval_run_history_rows(
                 "benchmark": run.get("benchmark"),
                 "dataset_variant": run.get("dataset_variant"),
                 "num_samples": run.get("num_samples"),
+                "evaluated_samples": (eval_results_payload or {})
+                .get("metadata", {})
+                .get("num_samples")
+                if isinstance(eval_results_payload, dict)
+                else None,
                 "agent_id": agent_id,
                 "agent_name": agent_name,
+                "model": run.get("model"),
+                "evaluation_mode": run.get("evaluation_mode"),
                 "overall_accuracy": overall_accuracy,
                 "cost_usd": finite_number(
                     (eval_results_payload or {})
@@ -384,7 +391,7 @@ async def evalground(request: Request):
 
     agents = []
     try:
-        agents = _state["provider"].list_memagents()
+        agents = _list_agents()
     except Exception as e:
         logger.error(f"Failed to list agents for Evalground: {e}")
 
@@ -973,10 +980,12 @@ async def evalground_start_run(
                 content={"error": "Local memory-suite runner is missing."},
             )
         model_provider = str(model_provider or "ollama").strip().lower()
-        if model_provider not in {"ollama", "openai"}:
+        if model_provider not in {"ollama", "openai", "anthropic"}:
             return JSONResponse(
                 status_code=400,
-                content={"error": "Model provider must be Ollama or OpenAI."},
+                content={
+                    "error": "Model provider must be Ollama, OpenAI or Anthropic."
+                },
             )
         memory_provider = str(memory_provider or "filesystem").strip().lower()
         if memory_provider not in {"filesystem", "oracle"}:
@@ -994,10 +1003,15 @@ async def evalground_start_run(
                     "error": "Reader model, Ollama embedding model, and host are required."
                 },
             )
-        if model_provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
+        key_name = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(
+            model_provider
+        )
+        if key_name and not os.environ.get(key_name):
             return JSONResponse(
                 status_code=400,
-                content={"error": "OPENAI_API_KEY is required for an OpenAI reader."},
+                content={
+                    "error": f"{key_name} is required for a {model_provider} reader."
+                },
             )
         if evaluation_mode == "memagent" and not agent_id.strip():
             return JSONResponse(
@@ -1224,7 +1238,7 @@ async def evalground_download(request: Request):
 
     agents = []
     try:
-        agents = _state["provider"].list_memagents()
+        agents = _list_agents()
     except Exception as e:
         logger.error(f"Failed to list agents for Evalground: {e}")
 

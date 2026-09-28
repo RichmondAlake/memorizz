@@ -1,169 +1,225 @@
 {% extends "base.html" %}
+{% from '_ui.html' import page_header, empty_state %}
+{% from '_run_health.html' import runs_chart, attention_panel, recent_runs with context %}
 
-{% block title %}Dashboard - Memorizz{% endblock %}
+{% block title %}Overview - Memorizz{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <span class="page-eyebrow">Memory control plane</span>
-    <h1>System overview</h1>
-    <p>Inspect the active provider and every memory surface from one place.</p>
-    {% if provider_type == 'notion' %}
-    <p role="status">Notion counts cover this local repair journal, not a verified workspace total. Run <code>memorizz notion sync</code> to discover external changes; memory reads still check Notion.</p>
-    {% endif %}
-</div>
+{% set window_labels = {'24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days'} %}
+{% call page_header('Overview', 'Runs, failures, run time, tokens and spend across every agent on this platform.', 'Home') %}
+    <nav class="segmented" aria-label="Time range">
+        {% for key in windows %}<a class="segmented-item" href="/dashboard?window={{ key }}{% if loaded %}&load=1{% endif %}"{% if key == window %} aria-current="page"{% endif %}>{{ key }}</a>{% endfor %}
+    </nav>
+    <a class="btn" href="/traces">Observability</a>
+    <a class="btn btn-primary" href="/agents/new">Create agent</a>
+{% endcall %}
 
-<div class="connection-info-card">
-    <div class="connection-card-heading">
-        <span class="connection-live-dot" aria-hidden="true"></span>
-        <div>
-            <span class="connection-card-kicker">Active provider</span>
-            <h3>{{ provider_type|title }}</h3>
-        </div>
+<p class="ov-status" role="status">
+    <span class="connection-live-dot" aria-hidden="true"></span>
+    <span>{{ provider_type|title }} provider connected</span>
+    <span>{{ window_labels[window] }}</span>
+    <span>Updated {{ generated_at.strftime('%H:%M') }} UTC</span>
+    {% if coverage.truncated %}<span title="The overview reads the newest trace records only.">Newest {{ coverage.records }} trace records</span>{% endif %}
+    <a href="/dashboard?window={{ window }}{% if loaded %}&load=1{% endif %}">Refresh</a>
+</p>
+
+{% if provider_type == 'notion' %}
+<p class="form-note" role="status">Notion counts cover this local repair journal, not a verified workspace total. Run <code>memorizz notion sync</code> to discover external changes; memory reads still check Notion.</p>
+{% endif %}
+
+{% if deferred %}
+{% call empty_state('Run health is loaded on request', 'This provider reads traces through a remote API, so the overview does not scan it on every visit.') %}
+    <a class="btn" href="/dashboard?window={{ window }}&load=1">Load run health</a>
+{% endcall %}
+{% elif trace_error %}
+{{ empty_state('Run health is unavailable', trace_error) }}
+{% elif overview %}
+{% set t = overview.totals %}
+{% set series = overview.series %}
+<section aria-label="Run health">
+    <div class="kpi-strip ov-kpis">
+        <a class="kpi" href="/traces">
+            <span class="kpi-label">Runs</span>
+            <strong class="kpi-value">{{ '{:,}'.format(t.runs) }}</strong>
+            <span class="kpi-note">{{ t.succeeded }} succeeded · {{ t.failed }} failed{% if t.in_progress %} · {{ t.in_progress }} running{% endif %}</span>
+            <svg class="kpi-spark" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{ sparkline(series|map(attribute='runs')|list) }}"/></svg>
+        </a>
+        <a class="kpi" href="/traces/health">
+            <span class="kpi-label">Success rate</span>
+            {% if t.success_rate is none %}
+            <strong class="kpi-value">—</strong>
+            <span class="kpi-note">No finished runs</span>
+            {% else %}
+            <strong class="kpi-value {{ 'is-good' if t.success_rate >= 99 else ('is-warn' if t.success_rate >= 90 else 'is-bad') }}">{{ '%.1f'|format(t.success_rate) }}%</strong>
+            <span class="kpi-note">{{ t.runs_with_tool_failures }} run{{ '' if t.runs_with_tool_failures == 1 else 's' }} with tool failures</span>
+            {% endif %}
+        </a>
+        <a class="kpi" href="/traces/health">
+            <span class="kpi-label">Run time p95</span>
+            <strong class="kpi-value">{{ fmt_duration(t.p95_ms) }}</strong>
+            <span class="kpi-note">Median {{ fmt_duration(t.p50_ms) }}</span>
+        </a>
+        <a class="kpi" href="/traces/usage">
+            <span class="kpi-label">Model calls</span>
+            <strong class="kpi-value">{{ '{:,}'.format(t.model_calls) }}</strong>
+            <span class="kpi-note">{% if t.runs %}{{ '%.1f'|format(t.model_calls / t.runs) }} per run{% else %}No runs{% endif %}{% if t.model_errors %} · {{ t.model_errors }} errors{% endif %}</span>
+        </a>
+        <a class="kpi" href="/traces/usage#provider-prompt-cache">
+            <span class="kpi-label">Tokens</span>
+            <strong class="kpi-value">{{ fmt_compact(t.input_tokens + t.output_tokens) }}</strong>
+            <span class="kpi-note">{% if t.cache_read_percent is not none %}{{ '%.0f'|format(t.cache_read_percent) }}% of input read from prompt cache{% else %}No token usage recorded{% endif %}</span>
+            <svg class="kpi-spark" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{ sparkline(series|map(attribute='tokens')|list) }}"/></svg>
+        </a>
+        <a class="kpi" href="/traces/usage">
+            <span class="kpi-label">Spend</span>
+            <strong class="kpi-value">{{ fmt_usd(t.cost_usd) }}</strong>
+            <span class="kpi-note">{% if t.cost_per_run is not none %}{{ fmt_usd(t.cost_per_run) }} per run{% else %}No priced calls{% endif %}{% if t.unpriced_calls %} · {{ t.unpriced_calls }} unpriced{% endif %}</span>
+            <svg class="kpi-spark" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{ sparkline(series|map(attribute='cost_usd')|map('float')|list) }}"/></svg>
+        </a>
     </div>
-    <div class="connection-details">
-        {% for key, value in connection_info.items() %}
-        <div class="detail-item">
-            <span class="detail-label">{{ key|title }}:</span>
-            <span class="detail-value">{{ value }}</span>
-        </div>
-        {% endfor %}
+
+    <div class="ov-grid ov-grid--activity">
+        {{ runs_chart(overview, window, window_labels[window]|lower) }}
+        {{ attention_panel(overview.attention) }}
     </div>
-</div>
 
-<div class="stats-grid">
-    <a href="/agents" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="4" y="7" width="16" height="12" rx="3"/>
-                <path d="M12 3v4"/>
-                <path d="M9 12h.01"/>
-                <path d="M15 12h.01"/>
-                <path d="M8 16h8"/>
-            </svg>
-        </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('agents', 0) }}</span>
-            <span class="stat-label">Agents</span>
-        </div>
-    </a>
+    {{ recent_runs(overview.recent, agent_names) }}
 
-    <a href="/memory/personas" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="8" r="4"/>
-                <path d="M4 20a8 8 0 0 1 16 0"/>
-            </svg>
-        </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('personas', 0) }}</span>
-            <span class="stat-label">Personas</span>
-        </div>
-    </a>
+    <div class="ov-grid ov-grid--three">
+        <section class="panel" aria-labelledby="ov-agents-title">
+            <div class="panel-header">
+                <h2 class="panel-title" id="ov-agents-title">Agents</h2>
+                <a class="panel-meta" href="/agents">All agents</a>
+            </div>
+            {% if overview.agents %}
+            <table class="data-table ov-compact">
+                <thead><tr><th scope="col">Agent</th><th scope="col" class="num">Runs</th><th scope="col" class="num">Failed</th><th scope="col" class="num">p95</th><th scope="col" class="num">Spend</th></tr></thead>
+                <tbody>
+                    {% for row in overview.agents[:6] %}
+                    <tr>
+                        <td class="ov-name"><a href="/traces?agent_id={{ row.agent_id|urlencode }}" title="{{ agent_names.get(row.agent_id, row.agent_id) }}">{{ agent_names.get(row.agent_id, row.agent_id[:12] or 'Unknown') }}</a></td>
+                        <td class="num">{{ row.runs }}</td>
+                        <td class="num">{% if row.failed %}<span class="ov-failed">{{ row.failed }}</span>{% else %}0{% endif %}</td>
+                        <td class="num">{{ fmt_duration(row.p95_ms) }}</td>
+                        <td class="num">{{ fmt_usd(row.cost_usd) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="panel-empty">No agent activity in this window.</p>
+            {% endif %}
+        </section>
 
-    <a href="/memory/toolbox" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.2 2.2-1.8-1.8z"/>
-            </svg>
-        </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('toolbox', 0) }}</span>
-            <span class="stat-label">Tools</span>
-        </div>
-    </a>
+        <section class="panel" aria-labelledby="ov-tools-title">
+            <div class="panel-header">
+                <h2 class="panel-title" id="ov-tools-title">Tools</h2>
+                <span class="panel-meta">{{ t.tool_calls }} calls</span>
+            </div>
+            {% if overview.tools %}
+            <table class="data-table ov-compact">
+                <thead><tr><th scope="col">Tool</th><th scope="col" class="num">Calls</th><th scope="col" class="num">Failed</th></tr></thead>
+                <tbody>
+                    {% for row in overview.tools[:6] %}
+                    <tr>
+                        <td class="ov-name mono" title="{{ row.name }}{% if row.top_reason %} · {{ row.top_reason }}{% endif %}">{{ row.name }}</td>
+                        <td class="num">{{ row.calls }}</td>
+                        <td class="num">{% if row.failures %}<span class="ov-failed">{{ '%.0f'|format(row.failure_rate) }}%</span>{% else %}0%{% endif %}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="panel-empty">No tool calls in this window.</p>
+            {% endif %}
+        </section>
 
-    <a href="/memory/conversations" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-7a8 8 0 1 1 18-4z"/>
-            </svg>
-        </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('conversation_memory', 0) }}</span>
-            <span class="stat-label">Conversations</span>
-        </div>
-    </a>
+        <section class="panel" aria-labelledby="ov-models-title">
+            <div class="panel-header">
+                <h2 class="panel-title" id="ov-models-title">Models</h2>
+                <a class="panel-meta" href="/traces/usage">Usage</a>
+            </div>
+            {% set models = usage.models if usage else [] %}
+            {% if models %}
+            <table class="data-table ov-compact">
+                <thead><tr><th scope="col">Model</th><th scope="col" class="num">Calls</th><th scope="col" class="num">From cache</th><th scope="col" class="num">Spend</th></tr></thead>
+                <tbody>
+                    {% for row in models[:6] %}
+                    <tr>
+                        <td class="ov-name" title="{{ row.label }} · p95 latency {{ fmt_duration(row.p95_latency_ms) }}">{{ row.label.split(' / ')[-1] }}</td>
+                        <td class="num">{{ row.calls }}</td>
+                        <td class="num">{% if row.input_tokens %}{{ '%.0f'|format(100 * row.cached_tokens / row.input_tokens) }}%{% else %}—{% endif %}</td>
+                        <td class="num">{{ fmt_usd(row.cost_usd) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="panel-empty">No model calls in this window.</p>
+            {% endif %}
+        </section>
+    </div>
+</section>
+{% endif %}
 
-    <a href="/memory/workflows" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 3h7v7"/>
-                <path d="M10 14 21 3"/>
-                <path d="M21 14v7h-7"/>
-                <path d="m3 10 11 11"/>
-            </svg>
+<div class="ov-grid ov-grid--two">
+    <section class="panel" aria-labelledby="ov-automations-title">
+        <div class="panel-header">
+            <h2 class="panel-title" id="ov-automations-title">Automations</h2>
+            <a class="panel-meta" href="/automations">{% if automations.deferred %}All automations{% else %}{{ automations.enabled }} active · {{ automations.paused }} paused{% endif %}</a>
         </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('workflow_memory', 0) }}</span>
-            <span class="stat-label">Workflows</span>
-        </div>
-    </a>
+        {% if automations.deferred %}
+        <p class="panel-empty">Loaded with run health. <a href="/automations">Open automations</a></p>
+        {% elif not automations.available %}
+        <p class="panel-empty">Automations are unavailable for this provider.</p>
+        {% elif automations.upcoming %}
+        <table class="data-table">
+            <thead><tr><th scope="col">Automation</th><th scope="col">Next run</th><th scope="col">Last result</th></tr></thead>
+            <tbody>
+                {% for job in automations.upcoming %}
+                <tr>
+                    <td><a href="/automations/{{ job.job_id }}">{{ job.name }}</a></td>
+                    <td title="{{ job.next_run_at.strftime('%Y-%m-%d %H:%M') if job.next_run_at else '' }} UTC">{{ relative_time(job.next_run_at, generated_at) }}</td>
+                    <td>{% if not job.last_status %}<span class="pill">Not run yet</span>{% elif job.last_status|lower in ['succeeded', 'success', 'completed'] %}<span class="pill pill--success">{{ job.last_status|capitalize }}</span>{% elif job.last_status|lower in ['failed', 'error', 'timed_out', 'timeout'] %}<span class="pill pill--danger">{{ job.last_status|replace('_', ' ')|capitalize }}</span>{% else %}<span class="pill pill--info">{{ job.last_status|replace('_', ' ')|capitalize }}</span>{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="panel-empty">No active automations. <a href="/automations/new">Schedule one</a> to run an agent on a timer.</p>
+        {% endif %}
+    </section>
 
-    <a href="/memory/skills" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="m12 3 9 5-9 5-9-5z"/>
-                <path d="m3 13 9 5 9-5"/>
-                <path d="m3 17.5 9 5 9-5"/>
-            </svg>
+    <section class="panel" aria-labelledby="ov-platform-title">
+        <div class="panel-header">
+            <h2 class="panel-title" id="ov-platform-title">Platform</h2>
+            <span class="panel-meta">{{ provider_type|title }} provider</span>
         </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('skillbox', 0) }}</span>
-            <span class="stat-label">Learned Skills</span>
-        </div>
-    </a>
-
-    <a href="/memory/entity" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 1 0-7.07-7.07L11 4"/>
-                <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 1 0 7.07 7.07L13 20"/>
-            </svg>
-        </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('entity_memory', 0) }}</span>
-            <span class="stat-label">Entities</span>
-        </div>
-    </a>
-
-    <a href="/memory/summaries" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M4 19a2 2 0 0 1 2-2h14"/>
-                <path d="M6 17V5a2 2 0 0 1 2-2h12v16H8a2 2 0 0 1-2-2z"/>
-            </svg>
-        </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('summaries', 0) }}</span>
-            <span class="stat-label">Summaries</span>
-        </div>
-    </a>
-
-    <a href="/automations" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"/>
-                <path d="M12 6v6l4 2"/>
-            </svg>
-        </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('automations', 0) }}</span>
-            <span class="stat-label">Automations</span>
-        </div>
-    </a>
-
-    <a href="/memory/cache" class="stat-card">
-        <div class="stat-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M4 4h16v16H4z"/>
-                <path d="M8 4v6h8V4"/>
-                <path d="M9 16h6"/>
-            </svg>
-        </div>
-        <div class="stat-info">
-            <span class="stat-value">{{ stats.get('semantic_cache', 0) }}</span>
-            <span class="stat-label">Cache Entries</span>
-        </div>
-    </a>
+        <dl class="detail-list ov-connection">
+            {% for key, value in connection_info.items() %}
+            <div>
+                <dt>{{ key|replace('_', ' ')|capitalize }}</dt>
+                <dd class="mono">{{ value }}</dd>
+            </div>
+            {% endfor %}
+        </dl>
+        {% set inventory = [
+            ('/agents', stats.get('agents', 0), 'Agents'),
+            ('/memory/toolbox', stats.get('toolbox', 0), 'Tools'),
+            ('/memory/personas', stats.get('personas', 0), 'Personas'),
+            ('/automations', stats.get('automations', 0), 'Automations'),
+            ('/memory/conversations', stats.get('conversation_memory', 0), 'Conversation messages'),
+            ('/memory/workflows', stats.get('workflow_memory', 0), 'Workflow trajectories'),
+            ('/memory/entity', stats.get('entity_memory', 0), 'Entities'),
+            ('/memory/summaries', stats.get('summaries', 0), 'Summaries'),
+            ('/memory/skills', stats.get('skillbox', 0), 'Learned skills'),
+            ('/memory/cache', stats.get('semantic_cache', 0), 'Semantic cache entries'),
+        ] %}
+        <ul class="ov-inventory" aria-label="Stored records">
+            {% for href, value, label in inventory %}
+            <li><a href="{{ href }}"><strong>{{ '{:,}'.format(value) }}</strong> <span>{{ label }}</span></a></li>
+            {% endfor %}
+        </ul>
+    </section>
 </div>
 {% endblock %}

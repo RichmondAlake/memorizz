@@ -94,7 +94,7 @@ def test_harness_ui_launch_approval_resume_and_evidence(tmp_path: Path):
             client = TestClient(create_app(), follow_redirects=False)
             page = client.get("/harnesses")
             assert page.status_code == 200
-            assert "Agent Harnesses" in page.text
+            assert "Agent harnesses" in page.text
             assert "ui-fake" in page.text
 
             started = client.post(

@@ -15,7 +15,8 @@ from typing import Any, Dict
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from ..helpers import _to_text
+from ..helpers import _list_agents, _to_text
+from ..integrations_view import skills_marketplace_agents
 from ..state import _state, templates
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,11 @@ async def vercel_skills_page(request: Request):
         return RedirectResponse(url="/connect", status_code=302)
 
     github_token_present = bool(_to_text(os.environ.get("GITHUB_TOKEN", "")).strip())
+    try:
+        agents = list(_list_agents() or [])
+    except Exception as exc:
+        logger.warning("Could not list agents for the skills page: %s", exc)
+        agents = []
 
     return templates.TemplateResponse(
         "vercel_skills.html",
@@ -38,6 +44,8 @@ async def vercel_skills_page(request: Request):
             "provider_type": _state["provider_type"],
             "active_page": "vercel-skills",
             "github_token_present": github_token_present,
+            "skill_agents": skills_marketplace_agents(agents),
+            "agent_total": len(agents),
         },
     )
 

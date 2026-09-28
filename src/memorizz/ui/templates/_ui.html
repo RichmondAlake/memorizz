@@ -1,0 +1,63 @@
+{#- Shared page chrome. Import with {% from '_ui.html' import page_header, page_tabs, empty_state, id_chip %}.
+
+    page_header: `section` is the breadcrumb (plain text, sentence case), `back`
+    an optional (href, label) pair, `nav` rendered tabs (page_tabs or an area
+    macro below). Wrap it in {% call %} to add actions on the right:
+        {% call page_header('Agents', 'Create and run agents.', 'Build') %}
+            <a class="btn btn-primary" href="/agents/new">Create agent</a>
+        {% endcall %}
+    page_tabs: sibling views of one area, as (href, label, key[, element_id]). -#}
+
+{% macro page_header(title, description=None, section=None, back=None, nav=None, title_id=None, description_id=None, actions_class=None) -%}
+<header class="page-header">
+    <div class="page-header-text">
+        {#- A back link replaces the breadcrumb: one wayfinding line per page. -#}
+        {% if back %}<a class="page-back" href="{{ back[0] }}">{{ back[1] }}</a>{% elif section %}<span class="page-eyebrow">{{ section }}</span>{% endif %}
+        <h1{% if title_id %} id="{{ title_id }}"{% endif %}>{{ title }}</h1>
+        {% if description %}<p{% if description_id %} id="{{ description_id }}"{% endif %}>{{ description }}</p>{% endif %}
+    </div>
+    {% if caller is defined %}<div class="page-actions{% if actions_class %} {{ actions_class }}{% endif %}">{{ caller() }}</div>{% endif %}
+    {% if nav %}{{ nav }}{% endif %}
+</header>
+{%- endmacro %}
+
+{% macro page_tabs(tabs, active=None, label='Section views') -%}
+<nav class="page-tabs" aria-label="{{ label }}">
+    {% for tab in tabs %}<a class="page-tab"{% if tab|length > 3 and tab[3] %} id="{{ tab[3] }}"{% endif %} href="{{ tab[0] }}"{% if tab[2] == active %} aria-current="page"{% endif %}>{{ tab[1] }}</a>{% endfor %}
+</nav>
+{%- endmacro %}
+
+{#- empty_state: wrap in {% call %} for custom actions (script buttons, several links). -#}
+{% macro empty_state(title, text=None, action_href=None, action_label=None) -%}
+<div class="empty-state">
+    <strong>{{ title }}</strong>
+    {% if text %}<p>{{ text }}</p>{% endif %}
+    {% if action_href or caller is defined %}<div class="empty-state-actions">
+        {% if action_href %}<a class="btn" href="{{ action_href }}">{{ action_label }}</a>{% endif %}
+        {% if caller is defined %}{{ caller() }}{% endif %}
+    </div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro id_chip(value, length=12) -%}
+<button type="button" class="id-chip" data-copy="{{ value }}" title="Copy {{ value }}">{{ value[:length] }}{% if value|length > length %}…{% endif %}</button>
+{%- endmacro %}
+
+{#- Views of the Observability area. `urls` carries selection-preserving links. -#}
+{% macro observability_tabs(active, urls=None) -%}
+{% set urls = urls or {} %}
+{{ page_tabs([
+    (urls.get('traces') or '/traces', 'Traces', 'traces', 'trace-traces-link'),
+    (urls.get('health') or '/traces/health', 'Health', 'health', 'trace-health-link'),
+    (urls.get('compare') or '/traces/compare', 'Compare traces', 'compare', 'trace-compare-link'),
+    (urls.get('usage') or '/traces/usage', 'Usage & cost', 'usage', 'trace-usage-link'),
+], active, 'Observability views') }}
+{%- endmacro %}
+
+{#- Views of the Evalground area. -#}
+{% macro evalground_tabs(active) -%}
+{{ page_tabs([
+    ('/evalground', 'Evaluations', 'evaluations', 'evalground-evaluations-tab'),
+    ('/evalground/compare', 'Compare models & rerankers', 'compare', 'evalground-compare-tab'),
+], active, 'Evalground views') }}
+{%- endmacro %}

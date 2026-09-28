@@ -30,14 +30,17 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ...enums.memory_type import MemoryType
 from ...llms.llm_factory import create_llm_provider
-from ...long_term.procedural.skillbox import (
-    PromotionConfig,
-    SkillStatus,
-    calculate_shadow_readiness,
-)
+from ...long_term.procedural.skillbox import PromotionConfig
 from ...long_term.procedural.workflow.canonicalization import (
     TrajectoryStats,
     aggregate_trajectory_stats,
+)
+from ..learning_view import (
+    LEARNING_TABS,
+    build_skill_monitor,
+    build_workflow_monitor,
+    shape_class,
+    shape_skill,
 )
 from ..state import _state, templates
 
@@ -93,46 +96,6 @@ def _build_manager(agent_id: Optional[str]):
     )
 
 
-def _gate_breakdown(
-    stat: TrajectoryStats, config: PromotionConfig
-) -> List[Dict[str, Any]]:
-    """Per-gate pass/fail for display. The authoritative decision (which
-    also handles re-promotion windows and live-skill coverage) comes from
-    the engine; this is the explainer next to it."""
-    age_days = (datetime.now() - stat.last_seen).days if stat.last_seen else None
-    return [
-        {
-            "name": "executions",
-            "passed": stat.executions >= config.min_executions,
-            "detail": f"{stat.executions} / {config.min_executions} runs",
-        },
-        {
-            "name": "success rate",
-            "passed": stat.success_rate >= config.min_success_rate,
-            "detail": f"{stat.success_rate:.0%} (need {config.min_success_rate:.0%})",
-        },
-        {
-            "name": "query diversity",
-            "passed": stat.distinct_query_count >= config.min_distinct_queries,
-            "detail": (
-                f"{stat.distinct_query_count} distinct "
-                f"(need {config.min_distinct_queries})"
-            ),
-        },
-        {
-            "name": "recency",
-            "passed": (
-                age_days is not None and age_days <= config.max_days_since_last_seen
-            ),
-            "detail": (
-                f"last seen {age_days}d ago"
-                if age_days is not None
-                else "no timestamps"
-            ),
-        },
-    ]
-
-
 def _tool_sequence(provider, stat: TrajectoryStats) -> str:
     """Human-readable tool chain for a class, from one sample run."""
     for run in stat.runs:
@@ -159,18 +122,6 @@ def _tool_sequence(provider, stat: TrajectoryStats) -> str:
                 str(unit.get("tool")) for unit in canonical_signature(steps)
             )
     return "(no steps recorded)"
-
-
-def _serialize_run(run) -> Dict[str, Any]:
-    return {
-        "workflow_id": run.workflow_id,
-        "outcome": run.outcome,
-        "created_at": run.created_at.strftime("%Y-%m-%d %H:%M")
-        if run.created_at
-        else "",
-        "user_query": run.user_query or "",
-        "promoted": bool(run.promoted_skill_id),
-    }
 
 
 def _report_panel(report) -> Dict[str, Any]:
@@ -217,12 +168,14 @@ async def workflow_classes_page(request: Request):
         pass
 
     config = PromotionConfig()
+    now = datetime.now()
     agent_sections = []
     for agent_id, docs in sorted(
         docs_by_agent.items(), key=lambda kv: (kv[0] is None, str(kv[0]))
     ):
         stats = aggregate_trajectory_stats(_DocsProvider(docs), agent_id=agent_id)
         agent_config = config
+        agent_name = ""
         if agent_id:
             try:
                 agent_model = provider.retrieve_memagent(agent_id)
@@ -231,43 +184,29 @@ async def workflow_classes_page(request: Request):
                     if agent_model
                     else None
                 )
+                agent_name = str(getattr(agent_model, "name", "") or "")
             except Exception:
                 agent_config = config
 
-        classes = []
-        for stat in stats:
-            gates = _gate_breakdown(stat, agent_config)
-            eligible = all(gate["passed"] for gate in gates)
-            covering_skill = (
-                skill_names.get(str(stat.promoted_skill_id))
-                if stat.promoted_skill_id
-                else None
+        classes = [
+            shape_class(
+                stat,
+                agent_id=agent_id,
+                tools=_tool_sequence(provider, stat),
+                config=agent_config,
+                now=now,
+                skill_name=(
+                    skill_names.get(str(stat.promoted_skill_id))
+                    if stat.promoted_skill_id
+                    else None
+                ),
             )
-            classes.append(
-                {
-                    "hash": stat.canonical_hash,
-                    "hash_short": stat.canonical_hash[:12],
-                    "tools": _tool_sequence(provider, stat),
-                    "executions": stat.executions,
-                    "success_rate": f"{stat.success_rate:.0%}",
-                    "distinct_queries": stat.distinct_query_count,
-                    "last_seen": stat.last_seen.strftime("%Y-%m-%d %H:%M")
-                    if stat.last_seen
-                    else "—",
-                    "gates": gates,
-                    "eligible": eligible and not stat.already_promoted,
-                    "promoted": stat.already_promoted,
-                    "covering_skill_id": stat.promoted_skill_id,
-                    "covering_skill_name": covering_skill,
-                    "runs": [_serialize_run(run) for run in stat.runs[:10]],
-                    "run_count": len(stat.runs),
-                }
-            )
-
+            for stat in stats
+        ]
         agent_sections.append(
             {
                 "agent_id": agent_id,
-                "label": agent_id or "(no agent id)",
+                "name": agent_name,
                 "classes": classes,
                 "total_runs": len(docs),
                 "report": _last_reports.get(agent_id or ""),
@@ -281,8 +220,11 @@ async def workflow_classes_page(request: Request):
             "request": request,
             "provider_type": _state["provider_type"],
             "connection_info": _state["connection_info"],
-            "agent_sections": agent_sections,
+            "view": build_workflow_monitor(
+                agent_sections, total_runs=len(documents), now=now
+            ),
             "total_workflows": len(documents),
+            "learning_tabs": LEARNING_TABS,
             "active_page": "workflows",
         },
     )
@@ -301,83 +243,32 @@ async def skills_page(request: Request):
     except Exception as exc:
         logger.error("Failed to list skillbox: %s", exc)
 
-    configs_by_agent: Dict[Optional[str], PromotionConfig] = {}
+    agents: Dict[Optional[str], tuple] = {}
 
-    def _config_for(agent_id: Optional[str]) -> PromotionConfig:
-        if agent_id in configs_by_agent:
-            return configs_by_agent[agent_id]
-        config = PromotionConfig()
+    def _agent_info(agent_id: Optional[str]) -> tuple:
+        """(promotion config, display name) per agent, read once."""
+        if agent_id in agents:
+            return agents[agent_id]
+        config, name = PromotionConfig(), ""
         if agent_id:
             try:
                 model = provider.retrieve_memagent(agent_id)
                 config = PromotionConfig.from_dict(
                     getattr(model, "continual_learning_config", None) if model else None
                 )
+                name = str(getattr(model, "name", "") or "") if model else ""
             except Exception:
                 pass
-        configs_by_agent[agent_id] = config
-        return config
+        agents[agent_id] = (config, name)
+        return agents[agent_id]
 
+    now = datetime.now()
     skills = []
     for doc in documents:
         if not isinstance(doc, dict):
             continue
-        stats = doc.get("stats") or {}
-        status = str(doc.get("status") or "candidate")
-        agent_id = doc.get("agent_id")
-        config = _config_for(agent_id)
-        shadow_stats = stats.get("shadow") or {}
-        readiness = calculate_shadow_readiness(
-            shadow_stats,
-            min_observations=config.shadow_readiness_min_observations,
-            min_trajectory_match_rate=(
-                config.shadow_readiness_min_trajectory_match_rate
-            ),
-            min_matched_success_rate=(config.shadow_readiness_min_matched_success_rate),
-        )
-        injection_role = str(doc.get("injection_role") or "user").strip().lower()
-        if injection_role not in {"user", "developer"}:
-            injection_role = "user"
-        skills.append(
-            {
-                "skill_id": doc.get("skill_id"),
-                "agent_id": agent_id,
-                "name": doc.get("name") or "(unnamed skill)",
-                "description": doc.get("description") or "",
-                "content": doc.get("content") or "",
-                "status": status,
-                "injection_role": injection_role,
-                "version": doc.get("version", 1),
-                "preconditions": doc.get("preconditions") or [],
-                "tools_used": doc.get("tools_used") or [],
-                "source_hash_short": str(doc.get("source_canonical_hash") or "")[:12],
-                "activations": stats.get("activations", 0),
-                "successes": stats.get("successes", 0),
-                "failures": stats.get("failures", 0),
-                "deviations": stats.get("deviations", 0),
-                "baseline": doc.get("baseline") or {},
-                "promoted_at": doc.get("promoted_at") or "",
-                "demoted_at": doc.get("demoted_at") or "",
-                "demotion_reason": doc.get("demotion_reason") or "",
-                "shadow_observations": readiness["observations"],
-                "shadow_trajectory_match_rate": readiness["trajectory_match_rate"],
-                "shadow_matched_success_rate": readiness["matched_success_rate"],
-                "shadow_last_evaluated_at": (
-                    shadow_stats.get("last_evaluated_at") or ""
-                ),
-                "shadow_ready": readiness["ready"],
-                "shadow_readiness_reasons": readiness["reasons"],
-                "shadow_evaluation_enabled": (config.shadow_evaluation_enabled),
-                "can_activate": status
-                in (
-                    SkillStatus.SHADOW.value,
-                    SkillStatus.CANDIDATE.value,
-                ),
-                "can_demote": status == SkillStatus.ACTIVE.value,
-            }
-        )
-    order = {"active": 0, "shadow": 1, "candidate": 2, "deprecated": 3, "demoted": 4}
-    skills.sort(key=lambda s: (order.get(s["status"], 9), s["name"]))
+        config, name = _agent_info(doc.get("agent_id"))
+        skills.append(shape_skill(doc, config, now, agent_name=name))
 
     return templates.TemplateResponse(
         "skills_list.html",
@@ -385,7 +276,9 @@ async def skills_page(request: Request):
             "request": request,
             "provider_type": _state["provider_type"],
             "connection_info": _state["connection_info"],
+            "view": build_skill_monitor(skills),
             "skills": skills,
+            "learning_tabs": LEARNING_TABS,
             "active_page": "skills",
         },
     )

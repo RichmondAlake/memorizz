@@ -70,6 +70,7 @@ nav:
       - Troubleshooting: troubleshooting.md
   - Evaluate & Research:
       - Evaluation Suite: evaluation-suite.md
+      - Evalground Comparisons: guides/evalground-comparisons.md
       - Terminal-Bench Evaluation: terminal-bench.md
       - Research Papers: research-paper.md
   - Reference:

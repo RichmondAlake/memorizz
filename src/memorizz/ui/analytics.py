@@ -60,6 +60,7 @@ def eval_charts(results, history):
             ("Generation", "average_generation_seconds"),
             ("Semantic search", "average_semantic_search_seconds"),
             ("Lexical search", "average_lexical_search_seconds"),
+            ("Fusion", "average_fusion_seconds"),
             ("Reranking", "average_reranking_seconds"),
         )
     ]

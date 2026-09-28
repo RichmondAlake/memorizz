@@ -44,7 +44,9 @@ from ..helpers import (
     _coerce_timestamp,
     _extract_agent_tools,
     _get_default_llm_model,
+    _list_agents,
     _load_agent_knowledge_base,
+    _load_agent_last_run_map,
     _load_thread_messages,
     _normalize_browser_control_provider_name,
     _normalize_internet_provider_name,
@@ -1091,12 +1093,30 @@ async def playground_index(request: Request):
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
 
+    from datetime import timezone
+
+    from .. import dashboard as dash
+    from ..execution_view import build_playground_launcher
+
     agents = []
+    last_run_by_agent: Dict[str, float] = {}
     try:
-        agents = _state["provider"].list_memagents()
+        agents = _list_agents()
+        # The sidebar already reads this map; compute it once for both. It
+        # comes from conversation memory, never from a trace scan.
+        last_run_by_agent = _load_agent_last_run_map(agents)
     except Exception as e:
         logger.error(f"Failed to list agents for playground: {e}")
 
+    now = datetime.now(timezone.utc)
+    launcher = build_playground_launcher(
+        agents,
+        last_run_by_agent=last_run_by_agent,
+        now=now,
+        default_model=lambda provider: _get_default_llm_model(
+            _normalize_llm_provider(provider or "openai")
+        ),
+    )
     return templates.TemplateResponse(
         "playground_select.html",
         {
@@ -1104,8 +1124,13 @@ async def playground_index(request: Request):
             "provider_type": _state["provider_type"],
             "connection_info": _state["connection_info"],
             "agents": agents,
+            "launcher": launcher,
+            "generated_at": now,
+            **dash.template_helpers(),
             "active_page": "playground",
-            "agents_nav": _build_agent_nav_items(),
+            "agents_nav": _build_agent_nav_items(
+                agents=agents, last_run_by_agent=last_run_by_agent
+            ),
         },
     )
 
@@ -1645,6 +1670,26 @@ async def agent_playground_stream(request: Request, agent_id: str):
         else:
             session.persistence["adapter_state"] = "not_configured"
 
+    # Continue the memory's most recent thread, as the CLI does. History loads
+    # per thread, and a streamed turn without one starts a new thread — the
+    # agent would lose the conversation (and its cached prefix) every turn.
+    thread_kwargs: Dict[str, Any] = {}
+    if memory_id:
+        from ...cli.conversations import latest_thread_id
+
+        try:
+            thread_id = await asyncio.to_thread(
+                latest_thread_id,
+                _state["provider"],
+                memory_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+        except Exception:
+            thread_id = None
+        if thread_id:
+            thread_kwargs["thread_id"] = thread_id
+
     async def event_stream():
         stream = agent_event_stream(
             None,
@@ -1653,6 +1698,7 @@ async def agent_playground_stream(request: Request, agent_id: str):
             _finalize=finalize,
             _agent_id=agent_id,
             memory_id=memory_id,
+            **thread_kwargs,
         )
         last_frame = time.monotonic()
         sentinel = object()
@@ -1734,6 +1780,27 @@ async def agent_playground_compact(request: Request, agent_id: str):
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
+def _thread_order_key(row: Dict[str, Any]) -> float:
+    """Order messages and trace bundles on one clock.
+
+    Conversation rows store naive UTC timestamps while trace bundles store
+    UTC-aware ones. Reading naive values as local time pushed every trace
+    bundle after the whole conversation, so naive ISO strings count as UTC.
+    """
+    value = row.get("timestamp")
+    if isinstance(value, str):
+        text = value.strip()
+        if (
+            text
+            and "T" in text
+            and not text.endswith("Z")
+            and "+" not in text[10:]
+            and text.count("-") <= 2
+        ):
+            value = text + "+00:00"
+    return _coerce_timestamp(value) or 0.0
+
+
 @router.get("/agents/{agent_id}/playground/thread")
 async def agent_playground_thread(agent_id: str, memory_id: str = ""):
     """Return conversation history for a specific thread memory_id."""
@@ -1755,7 +1822,7 @@ async def agent_playground_thread(agent_id: str, memory_id: str = ""):
                 limit=100,
             )
         )
-        messages.sort(key=lambda row: _coerce_timestamp(row.get("timestamp")) or 0.0)
+        messages.sort(key=_thread_order_key)
         logger.debug(
             "Thread %s: loaded %d raw messages for agent %s",
             requested_memory_id,

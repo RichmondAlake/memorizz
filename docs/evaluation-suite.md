@@ -481,3 +481,7 @@ failures. Until then, keep these records as engineering evidence only.
 - Use a fresh output directory for every run.
 - Rotate any credential that has appeared in a terminal transcript before
   sharing raw logs publicly.
+
+## Side-by-side model and reranker comparisons
+
+Use **Evalground → Compare models & rerankers** to run controlled reader, reranker, and memory QA comparisons with per-call cost and latency data. See [the comparison guide](guides/evalground-comparisons.md) for setup, metrics, exports, and measurement limits.

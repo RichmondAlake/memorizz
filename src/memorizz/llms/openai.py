@@ -247,27 +247,61 @@ class OpenAI(LLMProvider):
         if getattr(self, "base_url", None):
             self._last_prompt_cache_metadata = {}
             return
-        if self._prompt_cache_key:
-            kwargs["prompt_cache_key"] = self._prompt_cache_key
+        key = self._prompt_cache_key or self._instruction_cache_key(kwargs)
+        if key:
+            kwargs["prompt_cache_key"] = key
         if self._prompt_cache_retention:
             kwargs["prompt_cache_retention"] = self._prompt_cache_retention
-        self._apply_responses_cache_boundary(kwargs)
+        self._apply_explicit_cache_boundaries(kwargs)
         from .prompt_cache import cache_request_metadata
 
         self._last_prompt_cache_metadata = cache_request_metadata(kwargs, "openai")
 
-    def _apply_responses_cache_boundary(self, kwargs: Dict[str, Any]) -> None:
-        """Keep a reusable instruction boundary on GPT-5.6/6 Responses calls.
+    def _instruction_cache_key(self, kwargs: Dict[str, Any]) -> Optional[str]:
+        """Default routing key for callers that did not set one.
 
-        Their implicit write ends at the latest eligible message, which may
-        include a changing user question. An explicit instruction breakpoint
-        also writes the stable prefix. Keep implicit conversation caching and
-        respect caller-supplied breakpoints; never mutate caller message blocks.
+        Responses requests without a key were not observed to reuse a shared
+        prefix, so single-shot callers (Evalground readers and judges, tool
+        metadata helpers) route by model and reusable instructions instead.
         """
-        if "input" not in kwargs or not self.model.startswith(("gpt-5.6", "gpt-6")):
+        parts = [kwargs.get("instructions")]
+        items = kwargs.get("input", kwargs.get("messages"))
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict) or item.get("role") not in {
+                "system",
+                "developer",
+            }:
+                break
+            parts.append(item.get("content"))
+        if not any(parts):
+            return None
+        digest = hashlib.sha256(
+            json.dumps([self.model, parts], sort_keys=True, default=str).encode()
+        ).hexdigest()
+        return "memorizz:" + digest[:40]
+
+    def _apply_explicit_cache_boundaries(self, kwargs: Dict[str, Any]) -> None:
+        """Keep reusable prefix boundaries on GPT-5.6/6 requests.
+
+        These models write implicitly only at the latest message, which
+        carries MemAgent's per-turn volatile context, and read only from
+        explicit breakpoints on input content (assistant output breakpoints
+        are not honored for reads). Two input boundaries keep reuse alive
+        across both Chat Completions and Responses:
+
+        1. the end of the leading system/developer instructions;
+        2. the last user message before the final one — stable history that
+           the next turn's boundary finds by lookback, so each turn re-bills
+           only its newest exchange instead of the whole conversation.
+
+        Tool-loop continuations already reuse the implicit write. Caller
+        breakpoints are respected as-is; caller messages are never mutated.
+        """
+        if not self.model.startswith(("gpt-5.6", "gpt-6")):
             return
-        items = kwargs["input"]
-        if isinstance(items, str) and kwargs.get("instructions"):
+        field = "input" if "input" in kwargs else "messages"
+        items = kwargs.get(field)
+        if field == "input" and isinstance(items, str) and kwargs.get("instructions"):
             items = [
                 {"role": "developer", "content": kwargs.pop("instructions")},
                 {"role": "user", "content": items},
@@ -278,31 +312,44 @@ class OpenAI(LLMProvider):
             isinstance(block, dict) and block.get("prompt_cache_breakpoint")
             for item in items
             if isinstance(item, dict)
-            for field in ("content", "output")
-            for block in (item.get(field) if isinstance(item.get(field), list) else [])
+            for key in ("content", "output")
+            for block in (item.get(key) if isinstance(item.get(key), list) else [])
         ):
             return
         items = deepcopy(items)
-        target = None
-        for item in items:
-            if not isinstance(item, dict) or item.get("role") not in {
-                "system",
-                "developer",
-            }:
-                break
+        text_type = "input_text" if field == "input" else "text"
+
+        def mark(item: Any) -> bool:
             content = item.get("content")
             if isinstance(content, str) and content:
-                item["content"] = [{"type": "input_text", "text": content}]
-            for block in item.get("content") or []:
+                item["content"] = [{"type": text_type, "text": content}]
+            for block in reversed(item.get("content") or []):
                 if (
                     isinstance(block, dict)
-                    and block.get("type") == "input_text"
+                    and block.get("type") == text_type
                     and block.get("text")
                 ):
-                    target = block
-        if target is not None:
-            target["prompt_cache_breakpoint"] = {"mode": "explicit"}
-            kwargs["input"] = items
+                    block["prompt_cache_breakpoint"] = {"mode": "explicit"}
+                    return True
+            return False
+
+        leading = 0
+        while (
+            leading < len(items)
+            and isinstance(items[leading], dict)
+            and items[leading].get("role") in {"system", "developer"}
+        ):
+            leading += 1
+        marked = any(mark(items[index]) for index in reversed(range(leading)))
+        user_turns = [
+            index
+            for index in range(leading, len(items))
+            if isinstance(items[index], dict) and items[index].get("role") == "user"
+        ]
+        if len(user_turns) >= 2:
+            marked = mark(items[user_turns[-2]]) or marked
+        if marked:
+            kwargs[field] = items
 
     def _create_chat_completion(self, kwargs: Dict[str, Any]) -> Any:
         """Call chat.completions.create, dropping cache params on old SDKs.

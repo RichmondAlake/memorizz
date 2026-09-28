@@ -114,6 +114,7 @@ def test_ui_notion_connect_renders_no_token_and_accepts_separate_vectors(
         dashboard = client.get("/dashboard")
         assert dashboard.status_code == 200
         assert "local repair journal" in dashboard.text
+        assert "Load run health" in dashboard.text
         assert len(stack[2].calls) == calls, "Dashboard counts must not scan Notion"
         assert client.get("/memory/knowledge-base").status_code == 200
         usage = client.get("/traces/usage.json")

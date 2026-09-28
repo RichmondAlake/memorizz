@@ -158,7 +158,7 @@ def test_responses_text_instructions_cached_and_explicit_caller_boundaries_prese
     provider = OpenAI.__new__(OpenAI)
     provider.model = "gpt-6-astra"
     kwargs = {"input": "question", "instructions": "stable"}
-    provider._apply_responses_cache_boundary(kwargs)
+    provider._apply_explicit_cache_boundaries(kwargs)
     assert "instructions" not in kwargs
     assert kwargs["input"][0] == {
         "role": "developer",
@@ -186,7 +186,7 @@ def test_responses_text_instructions_cached_and_explicit_caller_boundaries_prese
         ]
     }
     before = deepcopy(caller)
-    provider._apply_responses_cache_boundary(caller)
+    provider._apply_explicit_cache_boundaries(caller)
     assert caller == before
 
 

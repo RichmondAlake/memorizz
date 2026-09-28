@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from bson import ObjectId
-from pymongo import InsertOne, MongoClient, ReplaceOne
-from pymongo.errors import CollectionInvalid, OperationFailure
+from pymongo import InsertOne, MongoClient, ReplaceOne, ReturnDocument
+from pymongo.errors import CollectionInvalid, DuplicateKeyError, OperationFailure
 from pymongo.operations import SearchIndexModel
 
 from ...embeddings import get_embedding
@@ -354,6 +354,7 @@ class MongoDBProvider(MemoryProvider):
         # create collections or indexes as a hidden side effect.
         if not config.read_only:
             self._create_memory_stores()
+            self._ensure_unique_agent_ids()
 
         # Create vector indexes immediately only if not using lazy initialization
         if not config.read_only and not config.lazy_vector_indexes:
@@ -967,6 +968,29 @@ class MongoDBProvider(MemoryProvider):
             ),
         ],
     }
+
+    def _ensure_unique_agent_ids(self) -> None:
+        """One record per agent_id, so concurrent saves cannot duplicate an agent.
+
+        Several processes saving the same agent at start-up (e.g. one per web
+        worker) raced a find-then-insert and left duplicate records that could
+        disagree on configuration. With this index, atomic upserts in
+        ``store_memagent`` stay unique. It cannot be built while duplicates
+        exist; saves still upsert, and the warning names the fix.
+        """
+        try:
+            self.memagent_collection.create_index(
+                "agent_id",
+                name="agent_id_unique",
+                unique=True,
+                partialFilterExpression={"agent_id": {"$type": "string"}},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Agent records are not unique by agent_id (%s). Remove duplicate "
+                "agent records so concurrent saves cannot create more.",
+                type(exc).__name__,
+            )
 
     def _ensure_btree_indexes(self) -> None:
         """Create missing btree indexes for hot-path queries.
@@ -2250,22 +2274,94 @@ class MongoDBProvider(MemoryProvider):
             return []
         return list(collection.find(mongo_filter, projection))
 
+    def estimate_count(self, memory_store_type: MemoryType) -> Optional[int]:
+        """Approximate document count from collection metadata, without a scan.
+
+        Each memory type has its own collection, so this is the store's size.
+        Returns None for an unknown memory type.
+        """
+        collection = self._collection(memory_store_type)
+        if collection is None:
+            return None
+        return int(collection.estimated_document_count())
+
+    def list_recent(
+        self,
+        memory_store_type: MemoryType,
+        limit: int = 100,
+        include_embedding: bool = False,
+        user_id: Any = _MONGO_UNSET,
+    ) -> List[Dict[str, Any]]:
+        """Newest documents first, at most ``limit`` of them.
+
+        Ordered by the record ``timestamp`` and then ``_id``: stores mix
+        ObjectId and string ids (immutable trace bundles use string ids), so
+        ``_id`` alone does not follow time. MongoDB applies the limit during
+        the sort, so a page never loads the whole collection.
+        """
+        projection = {} if include_embedding else {"embedding": 0}
+        mongo_filter: Dict[str, Any] = {}
+        if user_id is not _MONGO_UNSET and _mongo_memory_type_supports_user_id(
+            memory_store_type
+        ):
+            mongo_filter.update(_mongo_user_id_predicate(user_id))
+        collection = self._collection(memory_store_type)
+        if collection is None:
+            return []
+        cursor = collection.find(mongo_filter, projection).sort(
+            [("timestamp", -1), ("_id", -1)]
+        )
+        return list(cursor.limit(max(1, int(limit))))
+
+    # BSON types that sort below ObjectId / string. Pages walk ``_id`` in
+    # descending order, and MongoDB range operators only match values of the
+    # same type, so a cursor must explicitly include the lower types.
+    _NUMERIC_ID_TYPES = ["double", "int", "long", "decimal"]
+
     @staticmethod
     def _encode_observability_cursor(value: Any) -> str:
+        # Tag the id type: a string id can look like ObjectId hex.
+        tagged = f"o:{value}" if isinstance(value, ObjectId) else f"s:{value}"
         return (
-            base64.urlsafe_b64encode(str(value).encode("ascii"))
-            .decode("ascii")
-            .rstrip("=")
+            base64.urlsafe_b64encode(tagged.encode("utf-8")).decode("ascii").rstrip("=")
         )
 
     @staticmethod
     def _decode_observability_cursor(value: str) -> Any:
         try:
             padded = value + "=" * (-len(value) % 4)
-            decoded = base64.urlsafe_b64decode(padded).decode("ascii")
+            decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
         except Exception as exc:
             raise ValueError("Invalid observability cursor") from exc
+        if decoded.startswith("o:") and ObjectId.is_valid(decoded[2:]):
+            return ObjectId(decoded[2:])
+        if decoded.startswith("s:"):
+            return decoded[2:]
+        # Untagged cursors from earlier versions.
         return ObjectId(decoded) if ObjectId.is_valid(decoded) else decoded
+
+    def observability_row_cursor(self, row: Dict[str, Any]) -> str:
+        """Cursor that continues ``query_observability_records`` after ``row``."""
+        return self._encode_observability_cursor(row["_id"])
+
+    @classmethod
+    def _observability_cursor_clause(cls, cursor_value: Any) -> Dict[str, Any]:
+        """Everything after ``cursor_value`` in descending ``_id`` order.
+
+        Stores mix ObjectId ids (older rows) and string ids (immutable trace
+        bundles). Descending BSON order is ObjectId, then string, then numbers;
+        a bare ``$lt`` would stop at the first type boundary and silently skip
+        every row of the lower types.
+        """
+        lower_types = list(cls._NUMERIC_ID_TYPES)
+        if isinstance(cursor_value, ObjectId):
+            lower_types.insert(0, "string")
+        return {
+            "$or": [
+                {"_id": {"$lt": cursor_value}},
+                *({"_id": {"$type": name}} for name in lower_types),
+            ]
+        }
 
     def get_observability_index(self):
         from ...observability.mongo_index import MongoSpanIndex
@@ -2350,7 +2446,11 @@ class MongoDBProvider(MemoryProvider):
                 timestamp_filter["$lte"] = end_time
             clauses.append({"timestamp": timestamp_filter})
         if cursor:
-            clauses.append({"_id": {"$lt": self._decode_observability_cursor(cursor)}})
+            clauses.append(
+                self._observability_cursor_clause(
+                    self._decode_observability_cursor(cursor)
+                )
+            )
 
         mongo_filter: Dict[str, Any]
         if not clauses:
@@ -2713,18 +2813,29 @@ class MongoDBProvider(MemoryProvider):
         # update the agent instead of inserting duplicates (matches the
         # filesystem provider's semantics).
         if agent_id is not None:
-            existing = self.memagent_collection.find_one(
-                {"agent_id": str(agent_id)}, {"_id": 1}
-            )
-            if existing:
-                self.memagent_collection.replace_one(
-                    {"_id": existing["_id"]}, memagent_dict
-                )
-                memagent_dict["_id"] = existing["_id"]
-                self._sync_agent_tools_to_toolbox(
-                    str(agent_id), memagent_dict.get("tools")
-                )
-                return memagent_dict
+            # One atomic replace-or-insert. The previous find-then-insert let
+            # processes saving the same agent concurrently each insert a copy.
+            payload = {
+                key: value for key, value in memagent_dict.items() if key != "_id"
+            }
+            payload["agent_id"] = str(agent_id)
+            for attempt in range(2):
+                try:
+                    stored = self.memagent_collection.find_one_and_replace(
+                        {"agent_id": str(agent_id)},
+                        payload,
+                        projection={"_id": 1},
+                        upsert=True,
+                        return_document=ReturnDocument.AFTER,
+                    )
+                    break
+                except DuplicateKeyError:
+                    # A concurrent save inserted it first; retrying replaces it.
+                    if attempt:
+                        raise
+            memagent_dict["_id"] = stored["_id"]
+            self._sync_agent_tools_to_toolbox(str(agent_id), memagent_dict.get("tools"))
+            return memagent_dict
 
         result = self.memagent_collection.insert_one(memagent_dict)
         memagent_dict["_id"] = result.inserted_id

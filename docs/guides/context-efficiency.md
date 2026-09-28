@@ -13,7 +13,7 @@ MemoRizz therefore orders every request stable-prefix → volatile-tail:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ tools           deterministic order (sorted by name)        │  stable
+│ tools           sorted; disclosed tools stay visible        │  stable
 │ system prompt   frozen for the session                      │  prefix
 │ history         append-only, chunk-evicted                  │  (cached)
 ├─────────────────────────────────────────────────────────────┤
@@ -42,6 +42,23 @@ in chunks of 20 messages: the window start stays byte-stable for many turns,
 then jumps a whole chunk at once — one cache miss per chunk instead of one
 per turn.
 
+### A stable tool surface
+
+Tool schemas are the first bytes of the cached prefix, so any change to the
+exposed tool list rewrites everything after it. Progressive disclosure picks
+the most relevant tools for each query, which would change the list almost
+every turn. Tools already disclosed to an agent's user therefore stay
+visible (and callable), up to `ContextPolicy.sticky_tool_limit` (default 15);
+past the bound the least recently selected tool is evicted. The list changes
+only when a genuinely new tool is needed, and the converged surface is shared
+by every conversation with the agent. Set `sticky_tool_limit=0` to re-select
+every turn.
+
+History is loaded per thread. Streaming callers that continue a conversation
+should pass its `thread_id`; a run without one starts a new thread and sees
+no earlier turns. The UI playground continues the selected memory's most
+recent thread, as the CLI does.
+
 ## Provider support
 
 ### Anthropic
@@ -50,7 +67,9 @@ The `Anthropic` LLM provider attaches `cache_control` breakpoints
 automatically (`enable_prompt_caching=True` by default):
 
 - on the **system prompt** — caches tool schemas + system text for every
-  tool-loop iteration and follow-up turn;
+  tool-loop iteration and follow-up turn. Reviewed developer-authority skills
+  ride in a separate block after this breakpoint, so a skill change does not
+  invalidate the cached tools and system prompt;
 - on the **final message** — the read point for the next iteration of the
   same turn's tool loop;
 - on the **second-to-last message** — the cross-turn read point that lets
@@ -65,8 +84,13 @@ breakpoints are preserved and consume the budget before MemoRizz adds its
 own; an already-invalid request containing more than four fails locally
 before an API call.
 
-In live testing this serves ~99% of the prompt from cache from turn 2
-onward. Reads bill at ~0.1× input price; disable with
+Single-shot `generate_text` calls (summaries, extraction, Evalground readers
+and judges) cache only the instructions: nothing extends their unique prompt,
+so a message breakpoint would only add the 1.25× write premium. Exact-repeat
+workloads (for example repeated evaluation runs) therefore do not reuse the
+prompt body on Claude.
+
+Reads bill at ~0.1× input price; disable with
 `Anthropic(..., enable_prompt_caching=False)`.
 
 ### OpenAI
@@ -75,28 +99,55 @@ onward. Reads bill at ~0.1× input price; disable with
 for prompts ≥ 1024 tokens, keyed on the exact prefix. MemoRizz maximizes hits
 by:
 
-- pinning a **`prompt_cache_key`** per conversation thread
-  (`memorizz:{agent_id}:{memory_id}:{thread_id}`), so requests route to the
-  same cache shard;
+- pinning a **`prompt_cache_key`** per conversation
+  (`memorizz:{agent_id}:{memory_id}`), so requests route to the same cache
+  shard. Callers that set no key (single-shot helpers, Evalground readers and
+  judges) get one derived from the model and their instructions: in live
+  tests, Responses requests without a key did not reuse a shared prefix;
 - optional **`prompt_cache_retention="24h"`**
   (`OpenAI(..., prompt_cache_retention="24h")`) for long-lived agents on
   models that support extended retention.
 
-Unlike the Anthropic integration, MemoRizz does not add cache annotations to
-OpenAI message blocks. It relies on OpenAI's default implicit server-side
-breakpoint, so there is no reusable-message mutation or client-side
-breakpoint accumulation. GPT-5.6 and later also support explicit
-`prompt_cache_breakpoint` blocks with a four-write limit, but MemoRizz does
-not currently emit those blocks. `prompt_cache_retention` is the legacy
-control for models before GPT-5.6; newer model families use
-`prompt_cache_options.ttl`.
+Models before GPT-5.6 cache any previously seen prefix, so MemoRizz adds no
+annotations for them. GPT-5.6 and GPT-6 write implicitly only at the latest
+message (which carries the per-turn volatile block) and read only from
+explicit `prompt_cache_breakpoint` blocks on input content; breakpoints on
+assistant output are not used for reads. On both Chat Completions and
+Responses, MemoRizz marks provider-owned copies at two input boundaries:
+
+- the end of the leading system/developer instructions;
+- the last user message before the final one — stable history that the next
+  turn's breakpoint finds by lookback.
+
+Without the history boundary each turn re-writes the whole conversation; in a
+live probe with ~5k tokens of history it raised the next turn's cache read
+from 2.6k to 7.7k tokens. Caller-supplied breakpoints are left as they are.
+`prompt_cache_retention` is the legacy control for models before GPT-5.6;
+newer model families use `prompt_cache_options.ttl`.
 
 Cache parameters are only sent to the official endpoint — local
 OpenAI-compatible servers (llama.cpp, LM Studio, vLLM) are left untouched.
 
 ### Verifying cache hits
 
-`agent.model.get_last_usage()` now surfaces cache metrics on both providers:
+Where to look:
+
+- **Agent playground** — the *Prompt Cache* card shows the agent's cache read
+  rate (cached share of input tokens) and hit rate (calls that read from the
+  cache), plus the last turn's calls, reads and writes. *Details* opens the
+  usage page filtered to the agent.
+- **Observability → Usage** — the same rates, cached and written tokens,
+  a per-model breakdown and cache-drop warnings for any filter.
+- **Evalground** — memory-suite results show a provider prompt-cache panel
+  and per-lane cache writes and hit rates; *Compare models & rerankers* adds a
+  cache hit-rate column per call lane.
+- **Code** — `agent.get_last_run_usage()` sums every model call of the last
+  run (tool-loop iterations included), and the streaming `run.done` event
+  carries the same summary as `usage`. The native MetaHarness adapter reports
+  these whole-run totals, so its input and output token budgets apply.
+
+`agent.model.get_last_usage()` surfaces the last call's cache metrics on both
+providers:
 
 ```python
 agent.run("first turn")

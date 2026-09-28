@@ -1,0 +1,348 @@
+/* Evalground home and comparison setup: monitor-style run library.
+   Loaded before console.css, so selectors refine the shared rules by scope. */
+
+/* See pages/observability.css: main-content must be able to shrink below its
+   content while the sidebar animates away on resize. */
+.main-content {
+    min-width: 0;
+}
+
+/* ---------- Summary tape ---------- */
+
+.fleet-tape.eval-tape > div {
+    min-width: 0;
+}
+
+.fleet-tape.eval-tape strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fleet-tape.eval-tape .eval-tape-text strong {
+    font-family: inherit;
+    font-size: 14px;
+    letter-spacing: 0;
+    line-height: 23px;
+}
+
+.fleet-tape.compare-tape {
+    margin: 0 0 16px;
+}
+
+/* ---------- Start cards: one compact row ---------- */
+
+.evaluation-starts {
+    gap: 12px;
+    margin: 0 0 12px;
+}
+
+.evaluation-starts > a {
+    padding: 10px 14px;
+    border-radius: var(--console-radius);
+}
+
+.evaluation-starts strong {
+    margin: 0 0 2px;
+    font-size: 13.5px;
+}
+
+.evaluation-starts p {
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+/* ---------- Run library ---------- */
+
+#run-library.eval-library {
+    margin-top: 0;
+    padding: 12px 16px 10px;
+}
+
+.eval-library .run-library-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+    margin: 0 0 10px;
+}
+
+.eval-library .run-library-heading h2 {
+    margin: 0;
+    font-size: 14px;
+}
+
+.eval-library .run-library-heading .form-hint {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.eval-bar {
+    gap: 8px 12px;
+    margin-bottom: 10px;
+}
+
+.eval-bar .fleet-search {
+    flex: 1 1 240px;
+    max-width: 380px;
+}
+
+.eval-bar .fleet-order {
+    white-space: nowrap;
+}
+
+.eval-bar .fleet-order select {
+    max-width: 210px;
+}
+
+.eval-bar .btn-sm {
+    min-height: 30px;
+}
+
+.eval-runs-table tbody td {
+    max-width: 0;
+}
+
+.eval-runs-table .eval-col-name {
+    width: 30%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.eval-runs-table .run-name {
+    color: var(--text-primary);
+    font-weight: 500;
+    text-decoration: none;
+}
+
+.eval-runs-table .run-name:hover {
+    color: var(--accent-primary);
+}
+
+.eval-runs-table .dataset-tag {
+    margin: 0 0 0 8px;
+    padding: 0 5px;
+    font-size: 10.5px;
+    vertical-align: 1px;
+}
+
+.eval-runs-table .eval-col-models {
+    width: 22%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.eval-runs-table .run-subtitle {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+/* Fixed-content columns size to their text; name and models truncate. */
+.eval-runs-table tbody td.eval-col-type,
+.eval-runs-table tbody td:nth-child(4),
+.eval-runs-table tbody td.num,
+.eval-runs-table tbody td.eval-col-result {
+    width: 1%;
+    max-width: none;
+}
+
+.eval-runs-table td.eval-col-type {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.eval-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.eval-status::before {
+    content: "";
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.eval-status--good { color: var(--accent-secondary); }
+.eval-status--warn { color: var(--accent-warning); }
+.eval-status--bad { color: var(--accent-danger); }
+.eval-status--active { color: var(--accent-primary); }
+
+.eval-status--active::before {
+    animation: eval-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes eval-pulse {
+    50% { opacity: 0.35; }
+}
+
+.eval-col-progress progress {
+    width: 44px;
+    height: 4px;
+    margin: 0 8px 2px 0;
+    overflow: hidden;
+    vertical-align: middle;
+    background: var(--bg-tertiary);
+    border: 0;
+    border-radius: 2px;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.eval-col-progress progress::-webkit-progress-bar {
+    background: var(--bg-tertiary);
+}
+
+.eval-col-progress progress::-webkit-progress-value {
+    background: var(--accent-secondary);
+}
+
+.eval-col-progress progress::-moz-progress-bar {
+    background: var(--accent-secondary);
+}
+
+.eval-muted,
+.eval-runs-table td.eval-muted {
+    color: var(--text-muted);
+}
+
+.eval-runs-table .eval-col-result .btn {
+    min-height: 26px;
+    padding: 2px 10px;
+    font-size: 12px;
+}
+
+.eval-runs-table td.eval-empty {
+    max-width: none;
+    padding: 16px 8px;
+    color: var(--text-muted);
+    white-space: normal;
+}
+
+.run-library-pagination {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px 12px;
+    margin: 10px 0 0;
+    font-size: 12px;
+}
+
+#run-library-message {
+    margin: 0 auto 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+#run-page {
+    color: var(--text-secondary);
+    font-family: var(--console-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+.eval-library .history-scope > summary {
+    padding-top: 6px;
+}
+
+/* ---------- Collapsed resources under the grid ---------- */
+
+details.detail-section.evaluation-resource {
+    padding: 10px 16px;
+}
+
+details.detail-section.evaluation-resource > summary {
+    font-size: 14px;
+}
+
+details[open].detail-section.evaluation-resource > summary {
+    margin-bottom: 12px;
+}
+
+/* Long server paths wrap instead of widening the page on phones. */
+.evaluation-resource code,
+.evaluation-resource .dataset-file {
+    overflow-wrap: anywhere;
+}
+
+/* Columns drop by the grid's own width, least important first. */
+@container (max-width: 1080px) {
+    .eval-col-type { display: none; }
+}
+
+@container (max-width: 900px) {
+    .eval-col-models { display: none; }
+    .eval-runs-table .eval-col-name { width: auto; }
+}
+
+@container (max-width: 700px) {
+    .eval-col-quality,
+    .eval-col-started { display: none; }
+    .eval-col-progress progress { display: none; }
+}
+
+@container (max-width: 480px) {
+    .eval-col-progress,
+    .eval-col-result { display: none; }
+    .eval-runs-table .dataset-tag { display: none; }
+    /* Status keeps its signal dot; the words stay available to screen readers. */
+    .eval-status-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+}
+
+@media (max-width: 700px) {
+    .evaluation-starts {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 8px;
+    }
+
+    .evaluation-starts > a {
+        padding: 10px 12px;
+    }
+
+    .eval-bar .fleet-order {
+        flex: 1 1 calc(50% - 6px);
+        min-width: 0;
+    }
+
+    .eval-bar .fleet-order select {
+        flex: 1;
+        min-width: 0;
+        max-width: none;
+    }
+}
+
+@media (max-width: 640px) {
+    #run-library-message {
+        flex-basis: 100%;
+    }
+
+    .fleet-tape.eval-tape {
+        grid-auto-columns: max-content;
+    }
+
+    .fleet-tape.eval-tape > div {
+        min-width: 96px;
+    }
+
+    .fleet-tape.eval-tape span {
+        white-space: nowrap;
+    }
+
+    .fleet-tape.eval-tape strong {
+        overflow: visible;
+    }
+}

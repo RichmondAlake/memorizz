@@ -30,6 +30,54 @@ class ProviderStreamError(RuntimeError):
         super().__init__(f"{code}: {detail}" if detail else code)
 
 
+# Connection-level failures a provider stream can hit mid-flight (the server
+# or a proxy closes the connection). Re-sending the same request is safe as
+# long as nothing from the failed attempt reached the caller.
+_TRANSIENT_STREAM_ERROR_NAMES = frozenset(
+    {
+        "RemoteProtocolError",
+        "StreamClosed",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "ConnectError",
+        "ConnectTimeout",
+        "PoolTimeout",
+        "APIConnectionError",
+        "APITimeoutError",
+        "IncompleteRead",
+        "ChunkedEncodingError",
+    }
+)
+# Stream error events that will fail the same way on a retry.
+_PERMANENT_PROVIDER_ERROR_TYPES = frozenset(
+    {
+        "invalid_request_error",
+        "authentication_error",
+        "permission_error",
+        "not_found_error",
+        "request_too_large",
+    }
+)
+
+
+def is_transient_stream_error(exc):
+    """True for dropped connections and provider overload, not request errors."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ProviderStreamError):
+            return (
+                exc.code == "provider_stream_error"
+                and exc.response_metadata.get("provider_error_type")
+                not in _PERMANENT_PROVIDER_ERROR_TYPES
+            )
+        if type(exc).__name__ in _TRANSIENT_STREAM_ERROR_NAMES:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 def streaming_capabilities(provider):
     method = getattr(provider, "generate_stream", None)
     supported = (

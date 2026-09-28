@@ -133,8 +133,9 @@ class PricingRegistry:
         tier = str(usage.get("service_tier") or "default")
         # Only OpenAI's dated snapshots inherit a base model's list rate.
         card = self.cards.get((provider, model, tier))
-        if card is None and provider == "openai":
-            base = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", model)
+        if card is None and provider in {"openai", "anthropic"}:
+            # Dated snapshots inherit their base model's list rate.
+            base = re.sub(r"-\d{4}-\d{2}-\d{2}$|-\d{8}$", "", model)
             card = self.cards.get((provider, base, tier))
         if card is None:
             return unknown("No rate card for this provider, model and service tier")
@@ -227,4 +228,38 @@ def _openai_cards():
         )
 
 
-DEFAULT_PRICING = PricingRegistry(_openai_cards())
+def _anthropic_cards():
+    # (input, cache read, output) USD per million tokens. 5-minute cache writes
+    # bill at 1.25x input; MemoRizz does not request 1-hour writes.
+    rates = {
+        "claude-fable-5-1": (10, 0.25, 50),
+        "claude-fable-5": (10, 1, 50),
+        "claude-opus-5-5": (4, 0.2, 20),
+        "claude-opus-5": (5, 0.5, 25),
+        "claude-opus-4-8": (5, 0.5, 25),
+        "claude-opus-4-7": (5, 0.5, 25),
+        "claude-opus-4-6": (5, 0.5, 25),
+        "claude-opus-4-5": (5, 0.5, 25),
+        "claude-sonnet-5": (2, 0.2, 10),
+        "claude-sonnet-4-6": (3, 0.3, 15),
+        "claude-sonnet-4-5": (3, 0.3, 15),
+        "claude-haiku-4-5": (1, 0.1, 5),
+    }
+    # These have a separate over-200K schedule; leave it unpriced, not guessed.
+    short_context = {"claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"}
+    for model, (inputs, cached, outputs) in rates.items():
+        yield RateCard(
+            provider="anthropic",
+            model=model,
+            input_per_million=inputs,
+            cached_input_per_million=cached,
+            output_per_million=outputs,
+            cache_write_per_million=Decimal(str(inputs)) * Decimal("1.25"),
+            source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+            as_of="2026-09-28",
+            version="anthropic-standard-2026-09-28",
+            max_input_tokens=200_000 if model in short_context else None,
+        )
+
+
+DEFAULT_PRICING = PricingRegistry((*_openai_cards(), *_anthropic_cards()))

@@ -1,0 +1,453 @@
+/* Persona evolution monitor. Builds on the shared fleet monitor
+   (console.css "Fleet monitor"); only the account bar, activity cells, the
+   suggestion diff and evidence, and column drops live here. Colours come
+   only from the theme tokens so light and dark stay in step. */
+
+/* ---------- Account bar ---------- */
+
+.filter-bar.pe-scope {
+    align-items: center;
+    gap: 8px 12px;
+    margin: 0 0 12px;
+    padding: 8px 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--console-radius);
+}
+
+.filter-bar.pe-scope label.is-wide {
+    flex: 0 1 520px;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.filter-bar.pe-scope input {
+    min-width: 0;
+    min-height: 30px;
+    padding: 4px 8px;
+    font-family: var(--console-mono);
+    font-size: 12px;
+}
+
+.filter-bar.pe-scope .btn {
+    min-height: 30px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    font-size: 12px;
+}
+
+.pe-scope-note {
+    flex: 1 1 260px;
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: right;
+}
+
+/* ---------- Tape ---------- */
+
+.pe-tape .pe-tape-text {
+    font-family: inherit;
+    font-size: 13px;
+    letter-spacing: 0;
+    line-height: 23px;
+    white-space: nowrap;
+}
+
+/* ---------- Activity grid ---------- */
+
+.pe-monitor .fleet-table tbody td {
+    max-width: 0;
+}
+
+.pe-monitor td.pe-col-summary {
+    width: 100%;
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+}
+
+.pe-monitor .pe-col-time,
+.pe-monitor .pe-col-kind,
+.pe-monitor .pe-col-version,
+.pe-monitor .pe-col-evidence,
+.pe-monitor .pe-col-status {
+    width: 1%;
+}
+
+.pe-monitor .fleet-table tbody td.pe-col-time,
+.pe-monitor .fleet-table tbody td.pe-col-kind,
+.pe-monitor .fleet-table tbody td.pe-col-version,
+.pe-monitor .fleet-table tbody td.pe-col-evidence,
+.pe-monitor .fleet-table tbody td.pe-col-status {
+    max-width: none;
+}
+
+.pe-monitor .pe-col-time {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.pe-monitor .fleet-table tbody td.pe-col-actor {
+    width: 1%;
+    max-width: 150px;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    text-overflow: ellipsis;
+}
+
+.pe-monitor .pe-col-status .pill {
+    padding: 0 8px;
+    font-size: 11.5px;
+}
+
+/* Activity kind with a signal dot: amber waits for you, green applied. */
+.pe-kind {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text-primary);
+    white-space: nowrap;
+}
+
+.pe-kind::before {
+    content: "";
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--border-color);
+}
+
+.pe-kind--proposal::before { background: var(--accent-warning); }
+.pe-kind--change::before { background: var(--accent-secondary); }
+.pe-kind--undo::before { background: var(--accent-primary); }
+.pe-kind--bad::before { background: var(--accent-danger); }
+
+.pe-kind-summary,
+.pe-time-short {
+    display: none;
+}
+
+.pe-detail .fleet-config dd {
+    min-width: 0;
+    overflow: hidden;
+}
+
+.form-note.pe-note {
+    margin: 0;
+}
+
+/* ---------- Detail pane: suggestion, diff and evidence ---------- */
+
+.pe-detail .fleet-detail-sub {
+    gap: 6px 10px;
+}
+
+.pe-reason {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 13px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.pe-card p {
+    line-height: 1.6;
+}
+
+.pe-identity {
+    margin: 0 0 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.pe-identity strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.pe-goals {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 15px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.pe-muted {
+    margin: 8px 0 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.fleet-detail .pe-muted {
+    margin: 0;
+}
+
+.pe-guard {
+    margin: 16px 0;
+    padding-left: 12px;
+    border-left: 2px solid var(--border-color);
+    font-size: 13px;
+}
+
+.pe-guard span {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.pe-facts {
+    margin: 16px 0;
+}
+
+.pe-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.pe-subsection {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.pe-subsection h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.pe-subsection .btn {
+    margin-top: 12px;
+}
+
+.pe-diff {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    margin: 0;
+}
+
+.pe-diff > div {
+    min-width: 0;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.pe-diff > div:last-child {
+    border-color: var(--accent-primary);
+}
+
+.pe-diff span {
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.pe-diff p {
+    margin: 4px 0 0;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.pe-evidence > summary,
+.pe-event > summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+    padding: 4px 0;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    list-style: none;
+}
+
+.pe-evidence > summary::-webkit-details-marker,
+.pe-event > summary::-webkit-details-marker {
+    display: none;
+}
+
+.pe-evidence > summary::before,
+.pe-event > summary::before {
+    content: "";
+    flex: none;
+    align-self: center;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--text-muted);
+    border-bottom: 1.5px solid var(--text-muted);
+    transform: rotate(-45deg);
+    transition: transform 120ms ease;
+}
+
+.pe-evidence[open] > summary::before,
+.pe-event[open] > summary::before {
+    transform: rotate(45deg);
+}
+
+.pe-event > summary strong {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.pe-event > summary > span {
+    color: var(--text-muted);
+    font-family: var(--console-mono);
+    font-weight: 400;
+}
+
+.pe-evidence blockquote,
+.pe-event blockquote {
+    margin: 10px 0;
+    padding: 4px 0 4px 12px;
+    border-left: 2px solid var(--border-color);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.pe-evidence blockquote p,
+.pe-event blockquote p {
+    margin: 0 0 6px;
+}
+
+.pe-evidence small,
+.pe-event small {
+    display: block;
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.pe-error {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    color: var(--accent-danger);
+    background: var(--bg-card);
+    border: 1px solid var(--accent-danger);
+    border-radius: 8px;
+}
+
+.pe-card .pe-error {
+    margin: 12px 0 0;
+}
+
+.pe-error[hidden],
+.pe-guard[hidden] {
+    display: none;
+}
+
+/* ---------- State panels under the grid ---------- */
+
+.ov-grid.pe-panels {
+    gap: 12px;
+    margin: 0;
+}
+
+.pe-panels > .panel {
+    padding: 16px 18px;
+}
+
+.pe-panels .panel-header {
+    margin-bottom: 12px;
+}
+
+.pe-panels .panel-title {
+    font-size: 14px;
+}
+
+/* Without activity yet, the panels follow the empty state. */
+.empty-state + .pe-panels {
+    margin-top: 0;
+}
+
+/* ---------- Column drops, measured on the grid's own width ---------- */
+
+@container (max-width: 900px) {
+    .pe-col-actor { display: none; }
+}
+
+@container (max-width: 760px) {
+    .pe-col-version,
+    .pe-col-evidence { display: none; }
+}
+
+/* Phones: activity and reason share one two-line cell. */
+@container (max-width: 560px) {
+    .pe-col-summary { display: none; }
+    .pe-monitor .fleet-table tbody td.pe-col-kind {
+        width: 100%;
+        max-width: 0;
+        padding-top: 5px;
+        padding-bottom: 5px;
+    }
+    .pe-monitor .pe-col-time { font-size: 11px; }
+    .pe-time-full { display: none; }
+    .pe-time-short { display: inline; }
+    .pe-kind-summary {
+        display: block;
+        overflow: hidden;
+        padding-left: 14px;
+        color: var(--text-secondary);
+        font-size: 12px;
+        text-overflow: ellipsis;
+    }
+}
+
+@media (max-width: 1100px) {
+    /* Stacked: grid, the selected activity, then the account state. */
+    .pe-monitor .fleet-main > .pe-note { order: 1; }
+    .pe-monitor .fleet-main > .ov-grid { order: 3; }
+}
+
+@media (max-width: 768px) {
+    .layout:has(.pe-scope) .main-content {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        margin-left: 0;
+        padding: 20px;
+    }
+
+    .filter-bar.pe-scope label.is-wide {
+        flex: 1 1 100%;
+    }
+
+    .pe-scope-note {
+        text-align: left;
+    }
+
+    .layout:has(.pe-scope) .page-header h1 {
+        overflow-wrap: break-word;
+    }
+}
+
+@media (max-width: 640px) {
+    /* The tape scrolls as one row; the status word gets a double cell. */
+    .pe-tape > .pe-tape-wide {
+        grid-column: span 2;
+    }
+
+    .filter-bar.pe-scope label.is-wide {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr);
+    }
+
+    .filter-bar.pe-scope .btn {
+        flex: 1 1 auto;
+    }
+}

@@ -11,7 +11,7 @@ const {chromium} = require(process.env.MEMORIZZ_PLAYWRIGHT_MODULE || 'playwright
         await page.goto(`${base}/traces/usage`);
         assert.equal(await page.locator('h1').textContent(), 'Usage & memory analytics');
         assert.equal(await page.locator('.usage-kpis strong').first().textContent(), '6');
-        assert.equal(await page.locator('.usage-kpis strong').nth(1).textContent(), '6600');
+        assert.equal(await page.locator('.usage-kpis strong').nth(1).textContent(), '6,600');
         assert.equal(await page.locator('.usage-kpis strong').nth(2).textContent(), '$0.001170');
         assert.equal(await page.locator('.usage-slice').count(), 3);
         assert.equal(await page.locator('.usage-line').count(), 2);

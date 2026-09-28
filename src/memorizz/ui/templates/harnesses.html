@@ -1,39 +1,72 @@
 {% extends "base.html" %}
 
-{% block title %}Agent Harnesses - MemoRizz{% endblock %}
+{% block title %}Agent harnesses - Memorizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="harnesses" data-sidebar-default="collapsed"{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=3">{% endblock %}
 
 {% block content %}
-<div class="page-header harness-page-header">
-    <div>
-        <span class="harness-eyebrow">Execution control plane</span>
-        <h1>Agent Harnesses</h1>
-        <p>Route memory-grounded tasks to Codex, Claude Code, OpenHands, or a native MemAgent with durable approval and host verification.</p>
-    </div>
-    <button class="btn btn-secondary" type="button" onclick="location.reload()">Refresh</button>
+{% from '_ui.html' import page_header, empty_state, id_chip %}
+{% set m = monitor %}
+{% set dot = {'good': 'healthy', 'warn': 'degraded', 'bad': 'failing', 'idle': 'idle', 'active': 'active'} %}
+{% set agent_names = {} %}
+{% for agent in agents %}{% set _ = agent_names.update({agent.agent_id|string: agent.name or agent.agent_id|string}) %}{% endfor %}
+{% call page_header('Agent harnesses', 'Route memory-grounded tasks to Codex, Claude Code, OpenHands or a native MemAgent, with durable approval and host verification.', 'Execution') %}
+    <button class="btn" type="button" onclick="location.reload()">Refresh</button>
+    {% if not ui_read_only %}<button class="btn btn-primary" type="button" data-open-launch>New run</button>{% endif %}
+{% endcall %}
+
+{% if error %}<div class="error-message" role="alert">{{ error }}</div>{% endif %}
+
+{% set c = m.counts %}
+<div class="fleet-tape" role="list" aria-label="Harness summary">
+    <div role="listitem"><span>Harnesses ready</span><strong class="{{ 'is-good' if m.total_harnesses and m.ready == m.total_harnesses else ('is-warn' if m.ready else 'is-bad') }}">{{ m.ready }}<small>of {{ m.total_harnesses }}</small></strong></div>
+    <div role="listitem"><span>Runs</span><strong>{{ m.run_count }}{% if m.has_more %}+{% endif %}</strong></div>
+    <div role="listitem"><span>Active</span><strong>{{ c.active }}</strong></div>
+    <div role="listitem"><span>Awaiting approval</span><strong class="{{ 'is-warn' if m.awaiting_approval else '' }}">{{ m.awaiting_approval }}</strong></div>
+    <div role="listitem"><span>Succeeded</span><strong class="{{ 'is-good' if c.succeeded else '' }}">{{ c.succeeded }}</strong></div>
+    <div role="listitem"><span>Failed</span><strong class="{{ 'is-bad' if c.failed else '' }}">{{ c.failed }}</strong></div>
+    <div role="listitem"><span>Verified</span>{% if m.verification_checked %}<strong class="{{ 'is-good' if m.verified == m.verification_checked else 'is-warn' }}">{{ m.verified }}<small>of {{ m.verification_checked }}</small></strong>{% else %}<strong>—</strong>{% endif %}</div>
+    {% if m.spend is not none %}<div role="listitem"><span>Spend</span><strong>{{ fmt_usd(m.spend) }}</strong></div>{% endif %}
+    <div role="listitem" class="fleet-tape-meta"><span>Last activity</span><strong>{{ relative_time(m.last_activity, generated_at) if m.last_activity else '—' }}</strong></div>
 </div>
 
-{% if error %}<div class="harness-notice harness-notice--bad">{{ error }}</div>{% endif %}
-
-<section class="harness-provider-strip" aria-label="Harness availability">
-    {% for item in harnesses %}
-    <article class="harness-provider-card">
-        <div class="harness-provider-topline">
-            <span class="harness-status-dot {{ 'is-online' if item.ready else 'is-offline' }}"></span>
-            <strong>{{ item.name }}</strong>
-        </div>
-        <div class="harness-provider-version">{{ item.version or ('Ready' if item.ready else ('Setup required' if item.error_code == 'authentication_required' else 'Unavailable')) }}</div>
-        {% if item.error %}<div class="harness-provider-error">{{ item.error }}</div>{% endif %}
-        {% if item.remediation %}<div class="harness-provider-remediation">{{ item.remediation }}</div>{% endif %}
-    </article>
+{# Availability: one compact chip per adapter; selecting one shows its setup details. #}
+<section class="hx-avail" aria-labelledby="harness-availability-title">
+    <h2 class="hx-avail-title" id="harness-availability-title">Availability <span>{{ m.ready }} of {{ m.total_harnesses }} ready</span></h2>
+    {% if m.availability %}
+    <div class="hx-avail-list" role="group" aria-label="Harnesses">
+        {% for item in m.availability %}
+        <button type="button" class="hx-avail-item hx-avail-item--{{ item.state }}" data-avail="{{ item.name }}" aria-expanded="false" aria-controls="hx-avail-{{ item.name }}">
+            <span class="fleet-health fleet-health--{{ dot[item.signal] }}"><span class="visually-hidden">{{ item.label }}</span></span>
+            <span class="hx-avail-name">{{ item.name }}</span>
+            <span class="hx-avail-state">{{ item.label }}</span>
+            {% if item.version %}<span class="hx-avail-version" title="{{ item.version }}">{{ item.version }}</span>{% endif %}
+        </button>
+        {% endfor %}
+    </div>
+    {% if m.needs_setup %}<p class="hx-avail-hint" id="hx-avail-hint">{{ m.needs_setup|length }} harness{{ '' if m.needs_setup|length == 1 else 'es' }} not ready. Select one to see how to fix it.</p>{% endif %}
+    {% for item in m.availability %}
+    <div class="hx-avail-detail" id="hx-avail-{{ item.name }}" data-avail-detail="{{ item.name }}" hidden>
+        <dl class="fleet-config">
+            <div><dt>Status</dt><dd><span class="fleet-health fleet-health--{{ dot[item.signal] }}">{{ item.label }}</span></dd></div>
+            <div><dt>Version</dt><dd class="mono">{{ item.version or '—' }}</dd></div>
+            {% if item.command %}<div><dt>Command</dt><dd class="mono">{{ item.command }}</dd></div>{% endif %}
+            {% if item.features %}<div><dt>Supports</dt><dd>{{ item.features|join(', ') }}</dd></div>{% endif %}
+            {% if item.models %}<div><dt>Models</dt><dd class="mono">{{ item.models|join(', ') }}</dd></div>{% endif %}
+        </dl>
+        {% if item.error %}<p class="harness-provider-error">{{ item.error }}</p>{% endif %}
+        {% if item.remediation %}<p class="harness-provider-remediation">{{ item.remediation }}</p>{% endif %}
+        {% if not item.error and not item.remediation %}<p class="hx-muted">Ready to take runs.</p>{% endif %}
+    </div>
     {% endfor %}
+    {% else %}
+    {{ empty_state('No harness adapters registered', 'Install Codex, Claude Code or OpenHands, or register an adapter with the MetaHarness, then refresh this page.') }}
+    {% endif %}
 </section>
 
 {% if not ui_read_only %}
-<section class="harness-panel harness-launch-panel">
-    <div class="harness-panel-heading">
-        <div><span class="harness-section-index">01</span><h2>Launch a bounded run</h2></div>
-        <span class="harness-panel-note">Direct edits, network, secrets, and governed writes require approval.</span>
-    </div>
+<details class="panel harness-launch-panel hx-launch" id="harness-launch"{% if not runs %} open{% endif %}>
+    <summary><span id="harness-launch-title">Launch a bounded run</span><span class="hx-launch-meta">Direct edits, network access, secrets and governed writes need approval before the run starts.</span></summary>
     <form id="harness-run-form" class="harness-run-form">
         <div class="form-group harness-task-field">
             <label for="harness-task">Task</label>
@@ -101,68 +134,240 @@
         </div>
         <div class="harness-policy-row">
             <label class="harness-check"><input type="checkbox" name="write"> Allow direct workspace edits</label>
-            <label class="harness-check"><input type="checkbox" name="allow_dirty_workspace"> Permit an already-dirty Git worktree</label>
+            <label class="harness-check"><input type="checkbox" name="allow_dirty_workspace"> Allow a Git worktree with uncommitted changes</label>
             <label class="harness-inline-select">Network <select name="network"><option value="none">None</option><option value="restricted">Restricted</option><option value="full">Full</option></select></label>
             <label class="harness-inline-select">MemoRizz MCP <select name="mcp_access"><option value="read_only">Read only</option><option value="none">Disabled</option><option value="governed_write">Governed write</option></select></label>
         </div>
         <div class="harness-form-actions">
             <button id="harness-submit" class="btn btn-primary" type="submit">Start run</button>
-            <span id="harness-submit-status" class="harness-panel-note" aria-live="polite"></span>
+            <span id="harness-submit-status" class="form-hint" aria-live="polite"></span>
         </div>
     </form>
-</section>
+</details>
 {% endif %}
 
-{% if approvals %}
-<section class="harness-panel harness-approval-panel">
-    <div class="harness-panel-heading"><div><span class="harness-section-index">02</span><h2>Approval queue</h2></div><span class="harness-count-pill">{{ approvals|length }} pending</span></div>
+{#- pane=True: inside the run's detail pane (task shown above it). Queue rows whose run is
+    in the ledger link to it (show_run) and leave the policy text to the pane (reason). -#}
+{% macro approval_card(proposal, pane=False, reason=True, show_run=False) %}
+{% set args = proposal.arguments or {} %}
+{% set perms = args.permissions or {} %}
+<article class="harness-approval{% if pane %} hx-approval--pane{% endif %}" data-proposal-id="{{ proposal.proposal_id }}">
+    <div>
+        <div class="harness-approval-title">{% if args.harness and args.harness != 'auto' %}<span class="mono">{{ args.harness }}</span>{% else %}Auto route{% endif %} · {{ args.mode or 'runtime' }} mode{% if perms.workspace_mode == 'direct' %} · <span class="is-warn">direct edits</span>{% endif %}{% if perms.network and perms.network != 'none' %} · network {{ perms.network }}{% endif %}</div>
+        {% if not pane %}<div class="harness-approval-task" title="{{ args.task }}">{{ args.task }}</div>{% endif %}
+        <div class="harness-approval-meta"><span class="mono">{{ args.workspace }}</span><span{% if proposal.expires %} title="{{ proposal.expires.strftime('%Y-%m-%d %H:%M:%S') }} UTC"{% endif %}>Expires {{ relative_time(proposal.expires, generated_at) if proposal.expires else proposal.expires_at }}</span>{% if show_run and args.run_id %}<button type="button" class="hx-link" data-select-run="{{ args.run_id }}">Show run</button>{% endif %}</div>
+        {% if reason %}<div class="harness-approval-reason">{{ proposal.policy_reason }}</div>{% endif %}
+    </div>
+    {% if not ui_read_only %}
+    <div class="harness-approval-actions">
+        <input class="harness-approver" aria-label="Approver identity" placeholder="Approver identity" required>
+        <button class="btn btn-primary harness-decision" data-decision="approve" type="button">Approve &amp; run</button>
+        <button class="btn btn-danger harness-decision" data-decision="reject" type="button">Reject</button>
+    </div>
+    {% endif %}
+</article>
+{% endmacro %}
+
+{% if m.approvals %}
+<section class="panel harness-approval-panel hx-approvals" aria-labelledby="harness-approvals-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="harness-approvals-title">Approval queue</h2>
+        <span class="panel-meta">{{ m.approvals|length }} pending · approve the exact run envelope, or reject it</span>
+    </div>
     <div class="harness-approval-list">
-        {% for proposal in approvals %}
-        <article class="harness-approval" data-proposal-id="{{ proposal.proposal_id }}">
-            <div>
-                <div class="harness-approval-title">{{ proposal.arguments.harness }} · {{ proposal.arguments.mode }}</div>
-                <div class="harness-approval-task">{{ proposal.arguments.task }}</div>
-                <div class="harness-approval-meta"><code>{{ proposal.arguments.workspace }}</code><span>{{ proposal.expires_at }}</span></div>
-                <div class="harness-approval-reason">{{ proposal.policy_reason }}</div>
-            </div>
-            {% if not ui_read_only %}
-            <div class="harness-approval-actions">
-                <input class="harness-approver" aria-label="Approver identity" placeholder="Approver identity" required>
-                <button class="btn btn-primary harness-decision" data-decision="approve" type="button">Approve &amp; run</button>
-                <button class="btn btn-danger harness-decision" data-decision="reject" type="button">Reject</button>
-            </div>
-            {% endif %}
-        </article>
-        {% endfor %}
+        {% for proposal in m.approvals %}{% set unlisted = proposal in m.unlisted_approvals %}{{ approval_card(proposal, reason=unlisted, show_run=not unlisted) }}{% endfor %}
     </div>
 </section>
 {% endif %}
 
-<section class="harness-panel">
-    <div class="harness-panel-heading"><div><span class="harness-section-index">03</span><h2>Run ledger</h2></div><span class="harness-count-pill">{{ runs|length }} recent</span></div>
-    {% if runs %}
-    <div class="harness-table-wrap">
-        <table class="harness-runs-table">
-            <thead><tr><th>Status</th><th>Harness</th><th>Task</th><th>Updated</th><th>Evidence</th><th></th></tr></thead>
-            <tbody>
-            {% for run in runs %}
-                <tr data-run-id="{{ run.run_id }}">
-                    <td><span class="harness-run-status status-{{ run.status }}">{{ run.status|replace('_', ' ') }}</span></td>
-                    <td>{{ run.harness or 'routing' }}</td>
-                    <td><div class="harness-run-task">{{ run.task.task }}</div><code>{{ run.run_id[:8] }}</code></td>
-                    <td>{{ run.updated_at }}</td>
-                    <td>{% if run.result %}{{ 'verified' if run.result.verified else (run.result.error_code or 'complete') }}{% else %}—{% endif %}</td>
-                    <td class="harness-row-actions"><button class="harness-link-button harness-inspect" type="button">Inspect</button>{% if run.status in ['queued', 'running', 'pending_approval'] and not ui_read_only %}<button class="harness-link-button harness-cancel" type="button">Cancel</button>{% endif %}</td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
+{% if m.runs %}
+<h2 class="visually-hidden" id="harness-runs-title">Run ledger</h2>
+<div class="fleet-bar hx-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="hx-filter" data-monitor-filter-for="hx-table" placeholder="Filter by task, harness or ID" aria-label="Filter runs by task, harness, workspace or ID" autocomplete="off">
+    </label>
+    <div class="segmented" role="group" aria-label="Show runs">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ m.run_count }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="active" aria-pressed="false">Active <span>{{ c.active }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="approval" aria-pressed="false">Awaiting approval <span>{{ c.approval }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="succeeded" aria-pressed="false">Succeeded <span>{{ c.succeeded }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="failed" aria-pressed="false">Failed <span>{{ c.failed }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="canceled" aria-pressed="false">Canceled <span>{{ c.canceled }}</span></button>
     </div>
-    {% else %}<div class="empty-state"><h3>No harness runs yet</h3><p>Launch a bounded task to create the first durable run record.</p></div>{% endif %}
-</section>
+    {% if m.harness_names|length > 1 %}
+    <div class="fleet-order">
+        <label for="hx-harness">Harness</label>
+        <select id="hx-harness" data-monitor-field="harness">
+            <option value="">All harnesses</option>
+            {% for name in m.harness_names %}<option value="{{ name }}">{{ name }}</option>{% endfor %}
+        </select>
+    </div>
+    {% endif %}
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>↵</kbd> evidence</span>{% if not ui_read_only %}<span><kbd>n</kbd> new run</span>{% endif %}</p>
+</div>
 
-<dialog id="harness-run-dialog" class="harness-dialog">
-    <div class="harness-dialog-header"><div><span class="harness-eyebrow">Run evidence</span><h2 id="harness-dialog-title">Harness run</h2></div><button id="harness-dialog-close" class="harness-dialog-close" type="button" aria-label="Close">×</button></div>
+<div class="fleet hx" id="hx">
+    <div class="fleet-main">
+        <div class="fleet-table-wrap">
+            <table class="fleet-table" id="hx-table">
+                <caption class="visually-hidden">Run ledger, most recently updated first. Select a run to see its limits, verification, approval and outcome.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" aria-sort="none"><button type="button" data-sort="rank">Status</button></th>
+                        <th scope="col" class="hx-col-harness" aria-sort="none"><button type="button" data-sort="harness" data-sort-type="text">Harness</button></th>
+                        <th scope="col">Task</th>
+                        <th scope="col" class="hx-col-mode">Mode</th>
+                        <th scope="col" class="hx-col-verify" aria-sort="none"><button type="button" data-sort="verify" data-sort-type="text">Verification</button></th>
+                        <th scope="col" class="num hx-col-cost" aria-sort="none"><button type="button" data-sort="cost">Cost</button></th>
+                        <th scope="col" class="num hx-col-duration" aria-sort="none"><button type="button" data-sort="duration">Duration</button></th>
+                        <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="updated">Updated</button></th>
+                        <th scope="col" class="hx-col-id">Run</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for run in m.runs %}
+                    <tr data-key="{{ run.key }}"
+                        data-run-id="{{ run.run_id }}"
+                        data-tags="{{ run.group }}"
+                        data-harness="{{ run.harness }}"
+                        data-rank="{{ {'bad': 5, 'warn': 4, 'active': 3, 'good': 2, 'idle': 1}.get(run.signal, 0) }}"
+                        data-verify="{{ run.verify_label|lower }}"
+                        data-cost="{{ run.cost_usd if run.cost_usd is not none else -1 }}"
+                        data-duration="{{ run.duration_ms if run.duration_ms is not none else -1 }}"
+                        data-updated="{{ run.updated_at.timestamp() if run.updated_at else 0 }}"
+                        data-search="{{ (run.task_line ~ ' ' ~ run.harness_label ~ ' ' ~ run.workspace ~ ' ' ~ run.run_id ~ ' ' ~ run.status_label ~ ' ' ~ run.model)|lower }}"
+                        tabindex="-1">
+                        <td><span class="fleet-health fleet-health--{{ dot[run.signal] }}">{{ run.status_label }}</span></td>
+                        <td class="hx-col-harness mono">{{ run.harness_label }}</td>
+                        <td class="hx-task" title="{{ run.task_line }}">{{ run.task_line }}</td>
+                        <td class="hx-col-mode">{% if run.writes %}<span class="is-warn">Edits</span>{% else %}Read only{% endif %}</td>
+                        <td class="hx-col-verify">{% if run.verify_state == 'verified' %}<span class="is-good">Verified</span>{% elif run.verify_state == 'failed' %}<span class="is-bad">Failed</span>{% elif run.verify_state == 'pending' %}Pending{% else %}<span class="hx-muted">—</span>{% endif %}</td>
+                        <td class="num hx-col-cost">{{ fmt_usd(run.cost_usd) if run.cost_usd is not none else '—' }}</td>
+                        <td class="num hx-col-duration">{{ fmt_duration(run.duration_ms) if run.duration_ms is not none else '—' }}</td>
+                        <td class="num" {% if run.updated_at %}title="{{ run.updated_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC"{% endif %}>{{ relative_time(run.updated_at, generated_at) if run.updated_at else '—' }}</td>
+                        <td class="hx-col-id mono">{{ run.run_id[:8] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="fleet-none" id="hx-none" hidden>No runs match this filter.</p>
+        </div>
+        {% if m.has_more %}<p class="form-note">Showing the newest {{ m.run_count }} runs. Older runs are available from <span class="mono">memorizz harness runs</span> or <span class="mono">GET /api/harness-runs?limit=1000</span>.</p>{% endif %}
+    </div>
+
+    <aside class="fleet-pane" aria-label="Selected run">
+        {% for run in m.runs %}
+        <section class="fleet-detail" id="hx-detail-{{ run.key }}" data-key="{{ run.key }}" data-run-id="{{ run.run_id }}" hidden>
+            <header class="fleet-detail-head">
+                <div>
+                    <h2>{{ run.harness_label }}</h2>
+                    <p class="fleet-detail-sub">{{ id_chip(run.run_id) }}{% if run.created_at %} <span class="mono" title="{{ run.created_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC">created {{ relative_time(run.created_at, generated_at) }}</span>{% endif %}</p>
+                </div>
+                <span class="fleet-health fleet-health--{{ dot[run.signal] }}">{{ run.status_label }}</span>
+            </header>
+            <div class="fleet-detail-actions">
+                <button class="btn btn-primary harness-inspect" type="button" data-run-id="{{ run.run_id }}">Evidence</button>
+                <a class="btn" href="/api/harness-runs/{{ run.run_id }}?include_events=true" target="_blank" rel="noopener">JSON</a>
+                {% if run.agent_id %}<a class="btn" href="/agents/{{ run.agent_id }}/playground">Agent</a>{% endif %}
+                {% if run.cancellable and not ui_read_only %}<button class="btn harness-cancel" type="button" data-run-id="{{ run.run_id }}">Cancel run</button>{% endif %}
+            </div>
+
+            {% if run.approval %}
+            <h3 class="fleet-detail-title">Approval</h3>
+            {{ approval_card(run.approval, pane=True) }}
+            {% endif %}
+
+            <dl class="fleet-stats">
+                <div><dt>Duration</dt><dd>{{ fmt_duration(run.duration_ms) if run.duration_ms is not none else '—' }}</dd></div>
+                <div><dt>Cost</dt><dd>{{ fmt_usd(run.cost_usd) if run.cost_usd is not none else '—' }}</dd></div>
+                <div><dt>Tokens</dt><dd>{{ fmt_compact(run.tokens) if run.tokens is not none else '—' }}</dd></div>
+            </dl>
+
+            <div class="mem-body-head">
+                <h3 class="fleet-detail-title">Task</h3>
+                <button type="button" class="btn btn-sm" data-copy-target="hx-task-{{ run.key }}">Copy</button>
+            </div>
+            <pre class="mem-body hx-task-body" id="hx-task-{{ run.key }}">{{ run.task }}</pre>
+
+            <h3 class="fleet-detail-title">Outcome</h3>
+            {% if run.error or run.error_code %}
+            <div class="hx-outcome hx-outcome--bad">
+                <strong>{{ run.outcome or run.status_label }}</strong>
+                {% if run.error %}<p>{{ run.error }}</p>{% endif %}
+                {% if run.remediation %}<p class="hx-fix">{{ run.remediation }}</p>{% endif %}
+            </div>
+            {% elif run.final_response %}
+            <pre class="mem-body hx-response">{{ run.final_response }}</pre>
+            {% elif run.group == 'failed' %}
+            <div class="hx-outcome hx-outcome--bad">
+                <strong>{{ run.status_label }}</strong>
+                <p class="hx-fix">No error message was recorded. Open Evidence for the event stream{% if run.verify_state == 'failed' %} and check the verification output below{% endif %}.</p>
+            </div>
+            {% elif run.status == 'pending_approval' %}
+            <p class="hx-muted">Waiting for an approver. Nothing runs until the envelope is approved.</p>
+            {% elif run.group == 'active' %}
+            <p class="hx-muted">{{ run.status_label }}. Refresh to see new evidence, or open Evidence for the event stream.</p>
+            {% else %}
+            <p class="hx-muted">{{ run.outcome or run.status_label }}. No response text recorded.</p>
+            {% endif %}
+
+            <h3 class="fleet-detail-title">Verification</h3>
+            <dl class="fleet-config">
+                <div><dt>Result</dt><dd>{% if run.verify_state == 'verified' %}<span class="is-good">Verified</span>{% elif run.verify_state == 'failed' %}<span class="is-bad">Failed</span>{% else %}{{ run.verify_label }}{% endif %}</dd></div>
+                <div><dt>Exit code</dt><dd class="mono">{{ run.verify_return_code if run.verify_return_code is not none else '—' }}</dd></div>
+                <div class="hx-wide"><dt>Command</dt>{% if run.verify_command %}<dd class="mono">{{ run.verify_command }}</dd>{% else %}<dd class="hx-muted">None. Add a host verification command to check the result.</dd>{% endif %}</div>
+            </dl>
+            {% if run.verify_output %}<pre class="mem-body hx-verify-output">{{ run.verify_output }}</pre>{% endif %}
+
+            <h3 class="fleet-detail-title">Workspace and permissions</h3>
+            <dl class="fleet-config">
+                <div class="hx-wide"><dt>Workspace</dt><dd class="mono hx-path">{{ run.workspace or '—' }}</dd></div>
+                <div><dt>Mode</dt><dd>{% if run.writes %}<span class="is-warn">{{ run.mode_label }}</span>{% else %}{{ run.mode_label }}{% endif %}</dd></div>
+                <div><dt>Network</dt><dd>{{ run.network }}</dd></div>
+                <div><dt>MemoRizz MCP</dt><dd>{{ run.mcp_access }}</dd></div>
+                <div><dt>Isolation</dt><dd>{{ run.backend }}</dd></div>
+                <div><dt>Uncommitted changes</dt><dd>{{ 'Allowed' if run.allow_dirty else 'Not allowed' }}</dd></div>
+                <div><dt>Model</dt><dd class="mono">{{ run.model or 'Adapter default' }}</dd></div>
+                {% if run.agent_id %}<div><dt>MemAgent</dt><dd><a href="/agents/{{ run.agent_id }}/playground">{{ agent_names.get(run.agent_id, run.agent_id[:12]) }}</a></dd></div>{% endif %}
+                {% if run.memory_id %}<div><dt>Memory ID</dt><dd>{{ id_chip(run.memory_id, 18) }}</dd></div>{% endif %}
+                {% if run.user_id %}<div><dt>User ID</dt><dd class="mono">{{ run.user_id }}</dd></div>{% endif %}
+            </dl>
+
+            <h3 class="fleet-detail-title">Limits</h3>
+            {% set lim = run.limits %}
+            <dl class="fleet-config">
+                <div><dt>Wall time</dt><dd class="mono">{{ fmt_duration(lim.wall_seconds * 1000) if lim.wall_seconds else '—' }}</dd></div>
+                <div><dt>Actions</dt><dd class="mono">{{ lim.steps|int if lim.steps else '—' }}</dd></div>
+                <div><dt>Cost</dt><dd class="mono">{{ fmt_usd(lim.cost_usd) if lim.cost_usd is not none else 'No limit' }}</dd></div>
+                <div><dt>Input tokens</dt><dd class="mono">{{ fmt_compact(lim.input_tokens) if lim.input_tokens else 'No limit' }}</dd></div>
+                <div><dt>Output tokens</dt><dd class="mono">{{ fmt_compact(lim.output_tokens) if lim.output_tokens else 'No limit' }}</dd></div>
+            </dl>
+
+            <h3 class="fleet-detail-title">Timeline</h3>
+            <dl class="fleet-config hx-times">
+                {% for label, value in [('Created', run.created_at), ('Started', run.started_at), ('Finished', run.finished_at), ('Updated', run.updated_at)] %}
+                <div><dt>{{ label }}</dt><dd class="mono">{{ value.strftime('%Y-%m-%d %H:%M:%S') if value else '—' }}</dd></div>
+                {% endfor %}
+                {% if run.approval_id %}<div><dt>Approval</dt><dd>{{ id_chip(run.approval_id, 12) }}</dd></div>{% endif %}
+                {% if run.source %}<div><dt>Started from</dt><dd>{{ run.source|upper if run.source|length <= 3 else run.source|capitalize }}</dd></div>{% endif %}
+            </dl>
+        </section>
+        {% endfor %}
+    </aside>
+</div>
+{% else %}
+<section class="panel" aria-labelledby="harness-runs-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="harness-runs-title">Run ledger</h2>
+        <span class="panel-meta">0 recent</span>
+    </div>
+    {{ empty_state('No harness runs yet', 'Runs started from the CLI or API appear here.' if ui_read_only else 'Launch a bounded run above to create the first durable run record.') }}
+</section>
+{% endif %}
+
+<dialog id="harness-run-dialog" class="harness-dialog" aria-labelledby="harness-dialog-title">
+    <div class="harness-dialog-header"><div><span class="harness-eyebrow">Run evidence</span><h2 id="harness-dialog-title" class="mono">Harness run</h2></div><button id="harness-dialog-close" class="harness-dialog-close" type="button" aria-label="Close">×</button></div>
     <pre id="harness-dialog-content"></pre>
 </dialog>
 {% endblock %}
@@ -172,6 +377,7 @@
 (() => {
     const form = document.getElementById('harness-run-form');
     const status = document.getElementById('harness-submit-status');
+    const launch = document.getElementById('harness-launch');
     const request = async (url, options = {}) => {
         const response = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
         const body = await response.json().catch(() => ({detail: 'Invalid server response'}));
@@ -183,6 +389,7 @@
         }
         return body;
     };
+    const runIdOf = (button) => button.dataset.runId || button.closest('[data-run-id]').dataset.runId;
     if (form) form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const data = new FormData(form);
@@ -212,18 +419,72 @@
     }));
     const dialog = document.getElementById('harness-run-dialog');
     const content = document.getElementById('harness-dialog-content');
-    document.querySelectorAll('.harness-inspect').forEach(button => button.addEventListener('click', async () => {
-        const runId = button.closest('tr').dataset.runId;
+    const inspect = async (runId) => {
         try { const body = await request(`/api/harness-runs/${runId}?include_events=true`); document.getElementById('harness-dialog-title').textContent = runId; content.textContent = JSON.stringify(body.run, null, 2); dialog.showModal(); }
         catch (error) { alert(error.message); }
-    }));
+    };
+    document.querySelectorAll('.harness-inspect').forEach(button => button.addEventListener('click', () => inspect(runIdOf(button))));
     document.querySelectorAll('.harness-cancel').forEach(button => button.addEventListener('click', async () => {
-        const runId = button.closest('tr').dataset.runId;
+        const runId = runIdOf(button);
         if (!confirm(`Cancel harness run ${runId}?`)) return;
         try { await request(`/api/harness-runs/${runId}/cancel`, {method: 'POST', body: '{}'}); location.reload(); }
         catch (error) { alert(error.message); }
     }));
     document.getElementById('harness-dialog-close')?.addEventListener('click', () => dialog.close());
+
+    // New run: open the launch panel and put the cursor in the task field.
+    const openLaunch = () => {
+        if (!launch) return;
+        launch.open = true;
+        launch.scrollIntoView({block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+        document.getElementById('harness-task')?.focus({preventScroll: true});
+    };
+    document.querySelectorAll('[data-open-launch]').forEach(button => button.addEventListener('click', openLaunch));
+
+    // Availability chips toggle one setup panel at a time.
+    const chips = document.querySelectorAll('[data-avail]');
+    chips.forEach(chip => chip.addEventListener('click', () => {
+        const open = chip.getAttribute('aria-expanded') !== 'true';
+        chips.forEach(other => other.setAttribute('aria-expanded', other === chip && open ? 'true' : 'false'));
+        document.querySelectorAll('[data-avail-detail]').forEach(panel => { panel.hidden = !(open && panel.dataset.availDetail === chip.dataset.avail); });
+        const hint = document.getElementById('hx-avail-hint');
+        if (hint) hint.hidden = open;
+    }));
+
+    document.addEventListener('DOMContentLoaded', () => {
+        if (!document.getElementById('hx-table')) {
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'n' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.target.closest('input, textarea, select, [contenteditable="true"]')) { event.preventDefault(); openLaunch(); }
+            });
+            return;
+        }
+        const monitor = MemorizzMonitor.init({
+            table: 'hx-table',
+            storageKey: 'memorizz.harnesses.selected',
+            keys: {
+                Enter: (row) => inspect(row.dataset.runId),
+                n: (row, event) => { event.preventDefault(); openLaunch(); },
+                a: (row, event) => {
+                    const input = document.querySelector('#hx-detail-' + CSS.escape(row.dataset.key) + ' .harness-approver');
+                    if (input) { event.preventDefault(); input.focus(); }
+                },
+            },
+        });
+        // "Show run" in the approval queue selects that run in the ledger.
+        document.querySelectorAll('[data-select-run]').forEach(button => button.addEventListener('click', () => {
+            const row = document.querySelector('#hx-table tr[data-key="' + CSS.escape(button.dataset.selectRun) + '"]');
+            if (!row || !monitor) return;
+            if (row.hidden) {
+                const filter = document.getElementById('hx-filter');
+                if (filter) filter.value = '';
+                document.querySelector('[data-monitor-tag=""]')?.click();
+                const harness = document.getElementById('hx-harness');
+                if (harness && harness.value) { harness.value = ''; harness.dispatchEvent(new Event('change')); }
+            }
+            monitor.select(row, true);
+            row.scrollIntoView({block: 'center'});
+        }));
+    });
 })();
 </script>
 {% endblock %}

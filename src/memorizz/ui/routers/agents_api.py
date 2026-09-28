@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
+from ..helpers import _list_agents
 from ..state import _state
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ async def api_list_agents():
 
     agents = []
     try:
-        raw_agents = _state["provider"].list_memagents()
+        raw_agents = _list_agents()
         for agent in raw_agents:
             agents.append(_serialize_agent(agent))
     except Exception as e:

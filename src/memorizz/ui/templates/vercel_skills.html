@@ -1,391 +1,128 @@
 {% extends "base.html" %}
 
-{% block title %}Vercel Skills - Memorizz{% endblock %}
+{% block title %}Vercel skills - Memorizz{% endblock %}
 
-{% block head %}
-<style>
-    .vercel-hero {
-        background: linear-gradient(135deg, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0.3) 100%);
-        border: 1px solid var(--border-color, #1a1a2e);
-        border-radius: 12px;
-        padding: 2rem;
-        margin-bottom: 2rem;
-    }
-    .vercel-hero h1 {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        font-size: 1.5rem;
-        margin-bottom: 0.5rem;
-    }
-    .vercel-hero .vercel-logo {
-        display: inline-block;
-        width: 24px;
-        height: 24px;
-    }
-    .vercel-hero p {
-        color: var(--text-secondary, #8b8b9e);
-        margin: 0;
-        font-size: 0.95rem;
-    }
-
-    .skills-search-bar {
-        display: flex;
-        gap: 0.75rem;
-        margin-bottom: 1.5rem;
-    }
-    .skills-search-bar input[type="text"] {
-        flex: 1;
-        background: var(--bg-secondary, #0a0a1a);
-        border: 1px solid var(--border-color, #1a1a2e);
-        border-radius: 8px;
-        padding: 0.7rem 1rem;
-        color: var(--text-primary, #e0e0e0);
-        font-size: 0.95rem;
-    }
-    .skills-search-bar input[type="text"]::placeholder {
-        color: var(--text-muted, #555);
-    }
-    .skills-search-bar input[type="text"]:focus {
-        outline: none;
-        border-color: var(--accent-primary, #00d9ff);
-    }
-    .skills-search-bar button {
-        background: var(--accent-primary, #00d9ff);
-        color: #000;
-        border: none;
-        border-radius: 8px;
-        padding: 0.7rem 1.5rem;
-        font-weight: 600;
-        cursor: pointer;
-        white-space: nowrap;
-    }
-    .skills-search-bar button:hover {
-        opacity: 0.9;
-    }
-
-    .repo-fetch-bar {
-        display: flex;
-        gap: 0.75rem;
-        margin-bottom: 2rem;
-        padding: 1.25rem;
-        background: var(--bg-secondary, #0a0a1a);
-        border: 1px solid var(--border-color, #1a1a2e);
-        border-radius: 10px;
-    }
-    .repo-fetch-bar input[type="text"] {
-        flex: 1;
-        background: var(--bg-primary, #000);
-        border: 1px solid var(--border-color, #1a1a2e);
-        border-radius: 8px;
-        padding: 0.7rem 1rem;
-        color: var(--text-primary, #e0e0e0);
-        font-size: 0.95rem;
-    }
-    .repo-fetch-bar input[type="text"]::placeholder {
-        color: var(--text-muted, #555);
-    }
-    .repo-fetch-bar input[type="text"]:focus {
-        outline: none;
-        border-color: var(--accent-primary, #00d9ff);
-    }
-    .repo-fetch-bar button {
-        background: transparent;
-        color: var(--accent-primary, #00d9ff);
-        border: 1px solid var(--accent-primary, #00d9ff);
-        border-radius: 8px;
-        padding: 0.7rem 1.5rem;
-        font-weight: 600;
-        cursor: pointer;
-        white-space: nowrap;
-    }
-    .repo-fetch-bar button:hover {
-        background: rgba(0, 217, 255, 0.1);
-    }
-    .repo-fetch-label {
-        font-size: 0.85rem;
-        color: var(--text-secondary, #8b8b9e);
-        margin-bottom: 0.5rem;
-    }
-
-    .skills-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-        gap: 1rem;
-    }
-    .skill-card {
-        background: var(--bg-secondary, #0a0a1a);
-        border: 1px solid var(--border-color, #1a1a2e);
-        border-radius: 10px;
-        padding: 1.25rem;
-        transition: border-color 0.2s;
-    }
-    .skill-card:hover {
-        border-color: var(--accent-primary, #00d9ff);
-    }
-    .skill-card-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        margin-bottom: 0.5rem;
-    }
-    .skill-card-name {
-        font-weight: 600;
-        font-size: 1rem;
-        color: var(--text-primary, #e0e0e0);
-        word-break: break-word;
-    }
-    .skill-card-repo {
-        font-size: 0.8rem;
-        color: var(--text-muted, #555);
-        margin-bottom: 0.5rem;
-    }
-    .skill-card-repo a {
-        color: var(--accent-primary, #00d9ff);
-        text-decoration: none;
-    }
-    .skill-card-repo a:hover {
-        text-decoration: underline;
-    }
-    .skill-card-desc {
-        font-size: 0.88rem;
-        color: var(--text-secondary, #8b8b9e);
-        line-height: 1.5;
-        margin-bottom: 0.75rem;
-    }
-    .skill-card-actions {
-        display: flex;
-        gap: 0.5rem;
-    }
-    .skill-card-actions button {
-        background: transparent;
-        color: var(--accent-primary, #00d9ff);
-        border: 1px solid var(--border-color, #1a1a2e);
-        border-radius: 6px;
-        padding: 0.4rem 0.8rem;
-        font-size: 0.8rem;
-        cursor: pointer;
-    }
-    .skill-card-actions button:hover {
-        border-color: var(--accent-primary, #00d9ff);
-        background: rgba(0, 217, 255, 0.08);
-    }
-    .skill-stars {
-        color: var(--text-muted, #555);
-        font-size: 0.8rem;
-        white-space: nowrap;
-    }
-
-    .skill-detail-panel {
-        display: none;
-        background: var(--bg-secondary, #0a0a1a);
-        border: 1px solid var(--accent-primary, #00d9ff);
-        border-radius: 10px;
-        padding: 1.5rem;
-        margin-bottom: 2rem;
-    }
-    .skill-detail-panel.active {
-        display: block;
-    }
-    .skill-detail-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-    }
-    .skill-detail-header h2 {
-        font-size: 1.2rem;
-        margin: 0;
-    }
-    .skill-detail-close {
-        background: transparent;
-        border: 1px solid var(--border-color, #1a1a2e);
-        color: var(--text-secondary, #8b8b9e);
-        border-radius: 6px;
-        padding: 0.3rem 0.7rem;
-        cursor: pointer;
-        font-size: 0.85rem;
-    }
-    .skill-detail-close:hover {
-        border-color: var(--text-secondary);
-    }
-    .skill-instructions {
-        background: var(--bg-primary, #000);
-        border: 1px solid var(--border-color, #1a1a2e);
-        border-radius: 8px;
-        padding: 1rem;
-        font-family: monospace;
-        font-size: 0.85rem;
-        line-height: 1.6;
-        color: var(--text-primary, #e0e0e0);
-        white-space: pre-wrap;
-        max-height: 500px;
-        overflow-y: auto;
-    }
-    .skill-meta-row {
-        display: flex;
-        gap: 1.5rem;
-        margin-bottom: 0.75rem;
-        font-size: 0.85rem;
-        color: var(--text-secondary, #8b8b9e);
-    }
-    .skill-meta-row strong {
-        color: var(--text-primary, #e0e0e0);
-    }
-
-    .search-status {
-        color: var(--text-secondary, #8b8b9e);
-        font-size: 0.9rem;
-        margin-bottom: 1rem;
-    }
-    .search-status.error {
-        color: #ff6b6b;
-    }
-
-    .token-alert {
-        background: rgba(255, 170, 0, 0.08);
-        border: 1px solid rgba(255, 170, 0, 0.5);
-        border-radius: 10px;
-        padding: 1rem 1.25rem;
-        margin-bottom: 1.5rem;
-        display: flex;
-        gap: 0.85rem;
-        align-items: flex-start;
-    }
-    .token-alert .token-alert-icon {
-        flex-shrink: 0;
-        width: 22px;
-        height: 22px;
-        border-radius: 50%;
-        background: rgba(255, 170, 0, 0.25);
-        color: #ffaa00;
-        font-weight: 700;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 0.85rem;
-        margin-top: 0.15rem;
-    }
-    .token-alert-body {
-        flex: 1;
-        font-size: 0.9rem;
-        line-height: 1.55;
-        color: var(--text-primary, #e0e0e0);
-    }
-    .token-alert-body strong {
-        color: #ffc966;
-    }
-    .token-alert-body a {
-        color: var(--accent-primary, #00d9ff);
-        text-decoration: none;
-    }
-    .token-alert-body a:hover {
-        text-decoration: underline;
-    }
-    .token-alert-body p {
-        margin: 0 0 0.4rem 0;
-    }
-    .token-alert-body p:last-child {
-        margin-bottom: 0;
-    }
-
-    .empty-state {
-        text-align: center;
-        padding: 3rem;
-        color: var(--text-secondary, #8b8b9e);
-    }
-    .empty-state p {
-        margin: 0.5rem 0;
-    }
-
-    .loading-spinner {
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        border: 2px solid var(--border-color, #1a1a2e);
-        border-top-color: var(--accent-primary, #00d9ff);
-        border-radius: 50%;
-        animation: spin 0.6s linear infinite;
-        margin-right: 0.5rem;
-        vertical-align: middle;
-    }
-    @keyframes spin {
-        to { transform: rotate(360deg); }
-    }
-</style>
-{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/vercel_skills.css?v=5">{% endblock %}
 
 {% block content %}
-<div class="vercel-hero">
-    <h1>
-        <svg class="vercel-logo" viewBox="0 0 76 65" fill="currentColor">
-            <path d="M37.5274 0L75.0548 65H0L37.5274 0Z"/>
-        </svg>
-        Vercel Agent Skills
-    </h1>
-    <p>Search and browse reusable agent skills from the open Vercel skills ecosystem. Skills provide structured instructions your agents can follow to complete tasks.</p>
-</div>
+{% from '_ui.html' import page_header, empty_state %}
+{{ page_header('Vercel agent skills', 'Search the open Vercel skills ecosystem, or fetch a skill from a GitHub repository, and read the instructions it gives an agent.', 'Integrations') }}
 
 {% if not github_token_present %}
-<div class="token-alert" role="alert">
-    <div class="token-alert-icon">!</div>
-    <div class="token-alert-body">
-        <p><strong>GitHub token required for Vercel Skills search.</strong></p>
-        <p>Skill search uses GitHub's code search API, which rejects unauthenticated requests (HTTP 401). Fetching a skill directly by <code>owner/repo</code> still works, but search will fail until you set a token.</p>
-        <p>
-            Add a <code>GITHUB_TOKEN</code> in the <a href="/settings#GITHUB_TOKEN">Settings page</a>, or create one at
-            <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>.
-            Memorizz only reads public skills data, so <strong>no scopes are required</strong> — leave every checkbox unchecked. See the
-            <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noopener noreferrer">GitHub docs</a>
-            for step-by-step instructions.
-        </p>
-    </div>
+<div class="warning-message skills-token-alert" role="status">
+    <p><strong>Skill search needs a GitHub token.</strong> Search uses GitHub's code search API, which rejects unauthenticated requests (HTTP 401). Fetching a skill by <code>owner/repo</code> works without one.</p>
+    <p>Add <code>GITHUB_TOKEN</code> on the <a href="/settings#GITHUB_TOKEN">Settings page</a>, or create a token at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>. MemoRizz reads only public skills data, so the token needs no scopes: leave every checkbox unchecked. See the <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noopener noreferrer">GitHub docs</a> for step-by-step instructions.</p>
 </div>
 {% endif %}
 
-<!-- Fetch from repo -->
-<div class="repo-fetch-bar">
-    <div style="flex: 1;">
-        <div class="repo-fetch-label">Fetch skill from a GitHub repository</div>
-        <div style="display: flex; gap: 0.75rem;">
-            <input type="text" id="repo-input" placeholder="owner/repo or GitHub URL (e.g. vercel-labs/skills)" />
-            <input type="text" id="skill-name-input" placeholder="Skill name (optional)" style="max-width: 200px;" />
-            <button type="button" id="fetch-repo-btn" onclick="fetchSkillFromRepo()">Fetch Skill</button>
+<div class="fleet-tape skills-tape" role="list" aria-label="Vercel skills summary">
+    <div role="listitem"><span>GitHub token</span><strong class="{{ 'is-good' if github_token_present else 'is-warn' }}">{{ 'Set' if github_token_present else 'Not set' }}</strong></div>
+    <div role="listitem"><span>Search</span><strong class="{{ '' if github_token_present else 'is-warn' }}">{{ 'Ready' if github_token_present else 'Needs token' }}</strong></div>
+    <div role="listitem"><span>Agents using skills</span><strong>{{ skill_agents|length }}<small>of {{ agent_total }}</small></strong></div>
+    <div role="listitem"><span>Results</span><strong id="skills-tape-results">—</strong></div>
+    <div role="listitem"><span>Repositories</span><strong id="skills-tape-repos">—</strong></div>
+    <div role="listitem"><span>Most stars</span><strong id="skills-tape-stars">—</strong></div>
+    <div role="listitem" class="fleet-tape-meta"><span>Last query</span><strong id="skills-tape-query">—</strong></div>
+</div>
+
+<section class="panel skills-find" aria-labelledby="skills-find-title">
+    <h2 class="visually-hidden" id="skills-find-title">Find a skill</h2>
+    <div class="skills-find-grid">
+        <div class="filter-bar">
+            <label class="is-wide">Search skills
+                <input type="text" id="search-input" placeholder="React, Next.js, deployment, AI SDK…" />
+            </label>
+            <button type="button" class="btn btn-primary" id="search-btn" onclick="searchSkills()">Search</button>
+        </div>
+        <div class="filter-bar">
+            <label class="is-wide">GitHub repository
+                <input type="text" id="repo-input" placeholder="owner/repo or GitHub URL, e.g. vercel-labs/skills" />
+            </label>
+            <label>Skill name (optional)
+                <input type="text" id="skill-name-input" placeholder="All skills in the repository" />
+            </label>
+            <button type="button" class="btn" id="fetch-repo-btn" onclick="fetchSkillFromRepo()">Fetch skill</button>
         </div>
     </div>
+    <p class="skills-suggest">Try
+        {% for term in ['react', 'next.js', 'deployment', 'ai sdk', 'design', 'testing'] %}<button type="button" class="skills-suggest-item" data-skill-query="{{ term }}">{{ term }}</button>{% endfor %}
+    </p>
+</section>
+
+<p class="search-status" id="search-status" role="status"></p>
+
+<div class="fleet-bar" id="skills-bar" hidden>
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="skills-filter" data-monitor-filter-for="skills-table" placeholder="Filter results by name, repository or text" aria-label="Filter results" autocomplete="off">
+    </label>
+    <div class="segmented" role="group" aria-label="Show skills">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span data-skill-count="">0</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="vercel" aria-pressed="false">From Vercel <span data-skill-count="vercel">0</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="popular" aria-pressed="false">100+ stars <span data-skill-count="popular">0</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="described" aria-pressed="false">Described <span data-skill-count="described">0</span></button>
+    </div>
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>↵</kbd> instructions</span><span><kbd>o</kbd> open on GitHub</span></p>
 </div>
 
-<!-- Skill detail panel -->
-<div class="skill-detail-panel" id="skill-detail-panel">
-    <div class="skill-detail-header">
-        <h2 id="detail-skill-name">Skill Name</h2>
-        <button type="button" class="skill-detail-close" onclick="closeDetailPanel()">Close</button>
+<div class="fleet skills" id="skills">
+    <div class="fleet-main">
+        <div class="skills-grid" id="skills-grid">
+            {{ empty_state('Find a skill to get started', 'Search by keyword, such as react, deployment, AI SDK or design, or fetch a skill directly from a GitHub repository.') }}
+        </div>
+        <div class="fleet-table-wrap" id="skills-table-wrap" hidden>
+            <table class="fleet-table" id="skills-table">
+                <caption class="visually-hidden">Skills found on GitHub. Select a row to see its source and read its instructions.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" aria-sort="none"><button type="button" data-sort="name" data-sort-type="text">Skill</button></th>
+                        <th scope="col" class="skills-col-repo" aria-sort="none"><button type="button" data-sort="repo" data-sort-type="text">Repository</button></th>
+                        <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="stars">Stars</button></th>
+                        <th scope="col" class="skills-col-desc">Description</th>
+                        <th scope="col" class="skills-col-path">Path</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <p class="fleet-none" id="skills-none" hidden>No skills match this filter.</p>
+        </div>
     </div>
-    <div class="skill-meta-row">
-        <span>Repo: <strong id="detail-skill-repo">-</strong></span>
-        <span>Path: <strong id="detail-skill-path">-</strong></span>
-    </div>
-    <div class="skill-meta-row" id="detail-skill-desc-row" style="display:none;">
-        <span id="detail-skill-desc"></span>
-    </div>
-    <h3 style="font-size:0.95rem; margin: 1rem 0 0.5rem;">Instructions</h3>
-    <div class="skill-instructions" id="detail-skill-instructions">-</div>
-</div>
 
-<!-- Search -->
-<div class="skills-search-bar">
-    <input type="text" id="search-input" placeholder="Search skills (e.g. React, Next.js, deployment, AI SDK...)" />
-    <button type="button" id="search-btn" onclick="searchSkills()">Search</button>
-</div>
+    <aside class="fleet-pane" aria-label="Selected skill" id="skills-pane">
+        <section class="skills-intro" id="skills-intro">
+            <h2>How agents use these skills</h2>
+            <p>An agent with the Vercel skills marketplace enabled gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code>, and loads a skill's instructions when a task needs them. Nothing is installed here: this page reads the same public skills the agent can fetch.</p>
+            <h3 class="fleet-detail-title">Agents with the marketplace enabled</h3>
+            {% if skill_agents %}
+            <ul class="skills-agents">
+                {% for agent in skill_agents %}<li><a href="/agents/{{ agent.agent_id }}/edit">{{ agent.name }}</a><span class="mono">{{ agent.agent_id[:8] }}</span></li>{% endfor %}
+            </ul>
+            {% else %}
+            <p class="panel-empty">None yet. Enable it under Skills marketplace when you <a href="/agents">edit an agent</a>.</p>
+            {% endif %}
+        </section>
 
-<div class="search-status" id="search-status"></div>
-
-<!-- Results grid -->
-<div class="skills-grid" id="skills-grid">
-    <div class="empty-state">
-        <p>Search for skills or fetch one directly from a GitHub repository.</p>
-        <p style="font-size: 0.85rem;">Try: "react", "deployment", "AI SDK", "design"</p>
-    </div>
+        <!-- Skill instructions: filled by View instructions or Fetch skill -->
+        <section class="skill-detail-panel" id="skill-detail-panel" aria-labelledby="detail-skill-name">
+            <header class="fleet-detail-head skill-detail-header">
+                <div>
+                    <h2 id="detail-skill-name">Skill</h2>
+                    <p class="fleet-detail-sub">Instructions an agent receives</p>
+                </div>
+                <button type="button" class="btn btn-sm skill-detail-close" onclick="closeDetailPanel()">Close</button>
+            </header>
+            <dl class="fleet-config skill-meta-row">
+                <div><dt>Repository</dt><dd class="mono" id="detail-skill-repo">-</dd></div>
+                <div><dt>Path</dt><dd class="mono" id="detail-skill-path">-</dd></div>
+            </dl>
+            <p class="skill-meta-desc" id="detail-skill-desc-row" style="display:none;"><span id="detail-skill-desc"></span></p>
+            <div class="mem-body-head">
+                <h3 class="fleet-detail-title skill-instructions-title">Instructions</h3>
+                <button type="button" class="btn btn-sm" data-copy-target="detail-skill-instructions">Copy</button>
+            </div>
+            <div class="skill-instructions" id="detail-skill-instructions">-</div>
+        </section>
+    </aside>
 </div>
 
 <script>
@@ -397,17 +134,48 @@
     repoInput.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') fetchSkillFromRepo();
     });
+    var skillsMonitor = null;
+    var currentSkills = [];
+
+    document.querySelectorAll('[data-skill-query]').forEach(function(button) {
+        button.addEventListener('click', function() {
+            searchInput.value = button.dataset.skillQuery;
+            searchSkills();
+        });
+    });
+
+    function setTape(id, value) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = value;
+    }
+
+    function clearResults() {
+        currentSkills = [];
+        document.querySelector('#skills-table tbody').textContent = '';
+        document.querySelectorAll('#skills-pane .fleet-detail').forEach(function(el) { el.remove(); });
+        document.getElementById('skills-table-wrap').hidden = true;
+        document.getElementById('skills-bar').hidden = true;
+    }
+
+    function showEmpty(title, text) {
+        var grid = document.getElementById('skills-grid');
+        grid.hidden = false;
+        grid.textContent = '';
+        var box = document.createElement('div'); box.className = 'empty-state';
+        var strong = document.createElement('strong'); strong.textContent = title;
+        var p = document.createElement('p'); p.textContent = text;
+        box.append(strong, p); grid.appendChild(box);
+    }
 
     function searchSkills() {
         var query = document.getElementById('search-input').value.trim();
         if (!query) return;
 
         var status = document.getElementById('search-status');
-        var grid = document.getElementById('skills-grid');
 
         status.className = 'search-status';
         status.innerHTML = '<span class="loading-spinner"></span> Searching for "' + escapeHtml(query) + '"...';
-        grid.innerHTML = '';
+        setTape('skills-tape-query', query);
 
         fetch('/vercel-skills/api/search?q=' + encodeURIComponent(query))
             .then(function(r) { return r.json(); })
@@ -421,40 +189,150 @@
                     return;
                 }
                 var skills = data.skills || [];
-                status.textContent = 'Found ' + data.count + ' skill' + (data.count !== 1 ? 's' : '') + ' for "' + query + '"';
+                status.textContent = 'Found ' + data.count + ' skill' + (data.count !== 1 ? 's' : '') + ' for "' + query + '"' + (data.total_count > data.count ? ', ' + data.total_count + ' matches on GitHub' : '');
+                clearResults();
                 if (skills.length === 0) {
-                    grid.innerHTML = '<div class="empty-state"><p>No skills found for "' + escapeHtml(query) + '". Try different keywords.</p></div>';
+                    showEmpty('No skills found', 'Nothing matched "' + query + '". Try different keywords, or fetch the skill by repository.');
+                    ['skills-tape-results', 'skills-tape-repos', 'skills-tape-stars'].forEach(function(id) { setTape(id, '0'); });
                     return;
                 }
-                var html = '';
-                for (var i = 0; i < skills.length; i++) {
-                    var s = skills[i];
-                    html += renderSkillCard(s);
-                }
-                grid.innerHTML = html;
+                renderSkills(skills);
             })
             .catch(function(err) {
                 status.className = 'search-status error';
-                status.textContent = 'Request failed: ' + err.message;
+                status.textContent = 'Request failed: ' + err.message + '. Check that the UI server is running, then search again.';
             });
     }
 
-    function renderSkillCard(skill) {
-        var starsHtml = '';
-        if (skill.stars) {
-            starsHtml = '<span class="skill-stars">' + skill.stars + ' stars</span>';
+    // A skill's own name is its folder; SKILL.md at the repository root takes the repo name.
+    function skillLabel(skill) {
+        var parts = String(skill.path || '').split('/').filter(Boolean);
+        if (parts.length > 1) return parts[parts.length - 2];
+        var repo = String(skill.repo || '');
+        return repo.split('/').pop() || skill.name || '-';
+    }
+
+    // Pass a skill name only where fetch looks for it (skills/<name>/SKILL.md and friends).
+    function skillNameFor(skill) {
+        var match = /^(?:skills\/(?:\.curated\/|\.experimental\/)?)?([^/]+)\/SKILL\.md$/.exec(String(skill.path || ''));
+        return match ? match[1] : '';
+    }
+
+    function tagsFor(skill) {
+        var tags = [];
+        var owner = String(skill.repo || '').split('/')[0].toLowerCase();
+        if (owner === 'vercel' || owner === 'vercel-labs') tags.push('vercel');
+        if ((skill.stars || 0) >= 100) tags.push('popular');
+        if (skill.description) tags.push('described');
+        return tags;
+    }
+
+    function cell(tag, className, text, title) {
+        var el = document.createElement(tag);
+        if (className) el.className = className;
+        el.textContent = text;
+        if (title) el.title = title;
+        return el;
+    }
+
+    function renderSkills(skills) {
+        currentSkills = skills;
+        var tbody = document.querySelector('#skills-table tbody');
+        var pane = document.getElementById('skills-pane');
+        var counts = { '': skills.length, vercel: 0, popular: 0, described: 0 };
+        var repos = {};
+        var topStars = 0;
+        skills.forEach(function(skill, index) {
+            var key = 's' + index;
+            var label = skillLabel(skill);
+            var tags = tagsFor(skill);
+            tags.forEach(function(tag) { counts[tag] += 1; });
+            repos[skill.repo] = true;
+            topStars = Math.max(topStars, skill.stars || 0);
+
+            var row = document.createElement('tr');
+            row.dataset.key = key;
+            row.dataset.tags = tags.join(' ');
+            row.dataset.name = label.toLowerCase();
+            row.dataset.repo = String(skill.repo || '').toLowerCase();
+            row.dataset.stars = String(skill.stars || 0);
+            row.dataset.search = [label, skill.repo, skill.path, skill.description].join(' ').toLowerCase();
+            row.tabIndex = -1;
+            var name = cell('th', 'fleet-name skills-name', label);
+            name.scope = 'row';
+            row.append(
+                name,
+                cell('td', 'skills-col-repo mono', skill.repo || '-', skill.repo),
+                cell('td', 'num', (skill.stars || 0).toLocaleString()),
+                cell('td', 'skills-col-desc', skill.description || '—', skill.description),
+                cell('td', 'skills-col-path mono', skill.path || '-', skill.path)
+            );
+            tbody.appendChild(row);
+            pane.insertBefore(renderDetail(skill, key, label), document.getElementById('skill-detail-panel'));
+        });
+        Object.keys(counts).forEach(function(tag) {
+            var el = document.querySelector('[data-skill-count="' + tag + '"]');
+            if (el) el.textContent = counts[tag];
+        });
+        setTape('skills-tape-results', String(skills.length));
+        setTape('skills-tape-repos', String(Object.keys(repos).length));
+        setTape('skills-tape-stars', topStars.toLocaleString());
+        document.getElementById('skills-grid').hidden = true;
+        document.getElementById('skills-table-wrap').hidden = false;
+        document.getElementById('skills-bar').hidden = false;
+        document.getElementById('skills-intro').hidden = true;
+        document.getElementById('skills-filter').value = '';
+        var all = document.querySelector('[data-monitor-tag=""]');
+        if (all) all.click();
+        if (skillsMonitor) {
+            skillsMonitor.applyFilter();
+            skillsMonitor.select(tbody.rows[0]);
         }
-        return '<div class="skill-card">' +
-            '<div class="skill-card-header">' +
-                '<span class="skill-card-name">' + escapeHtml(skill.name || skill.repo || '-') + '</span>' +
-                starsHtml +
-            '</div>' +
-            '<div class="skill-card-repo"><a href="' + escapeHtml(skill.repo_url || ('https://github.com/' + skill.repo)) + '" target="_blank" rel="noopener">' + escapeHtml(skill.repo || '-') + '</a></div>' +
-            '<div class="skill-card-desc">' + escapeHtml(skill.description || 'No description available.') + '</div>' +
-            '<div class="skill-card-actions">' +
-                '<button onclick="fetchAndShowSkill(\'' + escapeHtml(skill.repo || '') + '\')">View Instructions</button>' +
-            '</div>' +
-        '</div>';
+    }
+
+    function renderDetail(skill, key, label) {
+        var section = document.createElement('section');
+        section.className = 'fleet-detail';
+        section.dataset.key = key;
+        section.hidden = true;
+
+        var head = document.createElement('header'); head.className = 'fleet-detail-head';
+        var title = document.createElement('div');
+        var h2 = cell('h2', '', label);
+        var sub = document.createElement('p'); sub.className = 'fleet-detail-sub';
+        sub.append(cell('span', 'mono', skill.repo || '-'));
+        title.append(h2, sub);
+        head.append(title, cell('span', 'pill' + ((skill.stars || 0) >= 100 ? ' pill--info' : ''), (skill.stars || 0).toLocaleString() + ' stars'));
+
+        var actions = document.createElement('div'); actions.className = 'fleet-detail-actions';
+        var view = cell('button', 'btn btn-primary btn-sm', 'View instructions');
+        view.type = 'button';
+        view.addEventListener('click', function() { fetchAndShowSkill(skill.repo || '', skillNameFor(skill)); });
+        actions.appendChild(view);
+        if (skill.html_url) {
+            var file = cell('a', 'btn btn-sm', 'Open SKILL.md');
+            file.href = skill.html_url; file.target = '_blank'; file.rel = 'noopener';
+            actions.appendChild(file);
+        }
+        var repoLink = cell('a', 'btn btn-sm', 'Repository');
+        repoLink.href = skill.repo_url || ('https://github.com/' + skill.repo); repoLink.target = '_blank'; repoLink.rel = 'noopener';
+        actions.appendChild(repoLink);
+
+        var desc = cell('p', 'skills-desc', skill.description || 'The repository has no description.');
+
+        var config = document.createElement('dl'); config.className = 'fleet-config';
+        [['Source', 'GitHub code search'], ['Stars', (skill.stars || 0).toLocaleString()], ['Repository', skill.repo || '-'], ['Path', skill.path || '-']].forEach(function(pair) {
+            var item = document.createElement('div');
+            item.append(cell('dt', '', pair[0]), cell('dd', pair[0] === 'Repository' || pair[0] === 'Path' ? 'mono' : '', pair[1]));
+            config.appendChild(item);
+        });
+
+        var access = cell('p', 'skills-access', {{ skill_agents|length|tojson }}
+            ? 'Available to {{ skill_agents|length }} agent{{ "" if skill_agents|length == 1 else "s" }} through vercel_skill_fetch. Nothing to install.'
+            : 'Not installed anywhere: agents load skills on demand. Enable the Vercel marketplace on an agent to let it fetch this one.');
+
+        section.append(head, actions, desc, config, access);
+        return section;
     }
 
     function fetchSkillFromRepo() {
@@ -462,6 +340,14 @@
         if (!repo) return;
         var skillName = document.getElementById('skill-name-input').value.trim();
         fetchAndShowSkill(repo, skillName);
+    }
+
+    function showPanel(panel) {
+        document.getElementById('skills-intro').hidden = true;
+        panel.classList.toggle('is-alone', !currentSkills.length);
+        panel.classList.add('active');
+        var motion = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+        panel.scrollIntoView({ behavior: motion, block: 'nearest' });
     }
 
     function fetchAndShowSkill(repo, skillName) {
@@ -491,19 +377,22 @@
                 // Multi-skill repo
                 if (data.multi_skill_repo) {
                     var skills = data.available_skills || [];
-                    var html = '<div style="margin-bottom: 0.5rem; font-size: 0.95rem;">This repository contains <strong>' + skills.length + '</strong> skills. Click one to view:</div>';
-                    for (var i = 0; i < skills.length; i++) {
-                        html += '<button onclick="fetchAndShowSkill(\'' + escapeHtml(data.repo) + '\', \'' + escapeHtml(skills[i].name) + '\')" ' +
-                            'style="background:transparent; border:1px solid var(--border-color); color:var(--accent-primary); border-radius:6px; padding:0.4rem 0.8rem; margin:0.25rem; cursor:pointer; font-size:0.85rem;">' +
-                            escapeHtml(skills[i].name) + '</button>';
-                    }
+                    var box = document.getElementById('detail-skill-instructions');
+                    box.textContent = '';
+                    var intro = document.createElement('div');
+                    intro.append('This repository contains ', cell('strong', '', String(skills.length)), ' skills. Select one to view its instructions:');
+                    box.appendChild(intro);
+                    skills.forEach(function(item) {
+                        var button = cell('button', 'btn btn-sm', item.name);
+                        button.type = 'button';
+                        button.addEventListener('click', function() { fetchAndShowSkill(data.repo, item.name); });
+                        box.appendChild(button);
+                    });
                     document.getElementById('detail-skill-name').textContent = data.repo + ' (multi-skill)';
                     document.getElementById('detail-skill-repo').textContent = data.repo;
                     document.getElementById('detail-skill-path').textContent = 'skills/';
-                    document.getElementById('detail-skill-instructions').innerHTML = html;
                     document.getElementById('detail-skill-desc-row').style.display = 'none';
-                    panel.classList.add('active');
-                    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    showPanel(panel);
                     return;
                 }
 
@@ -519,23 +408,43 @@
                     document.getElementById('detail-skill-desc-row').style.display = 'none';
                 }
 
-                panel.classList.add('active');
-                panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                showPanel(panel);
             })
             .catch(function(err) {
                 status.className = 'search-status error';
-                status.textContent = 'Request failed: ' + err.message;
+                status.textContent = 'Request failed: ' + err.message + '. Check that the UI server is running, then try again.';
                 panel.classList.remove('active');
             });
     }
 
     function closeDetailPanel() {
         document.getElementById('skill-detail-panel').classList.remove('active');
+        if (!currentSkills.length) document.getElementById('skills-intro').hidden = false;
     }
 
     function escapeHtml(str) {
         if (!str) return '';
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
+
+    function selectedSkill(row) {
+        return currentSkills[Number(String(row.dataset.key).slice(1))] || null;
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        skillsMonitor = MemorizzMonitor.init({
+            table: 'skills-table',
+            keys: {
+                Enter: function(row) {
+                    var skill = selectedSkill(row);
+                    if (skill) fetchAndShowSkill(skill.repo || '', skillNameFor(skill));
+                },
+                o: function(row) {
+                    var skill = selectedSkill(row);
+                    if (skill) window.open(skill.html_url || skill.repo_url || ('https://github.com/' + skill.repo), '_blank', 'noopener');
+                },
+            },
+        });
+    });
 </script>
 {% endblock %}

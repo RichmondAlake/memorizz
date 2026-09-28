@@ -31,6 +31,36 @@ class OpenAITextPricing:
 
 
 OPENAI_TEXT_PRICING: Mapping[str, OpenAITextPricing] = {
+    "gpt-6-sol": OpenAITextPricing(
+        model="gpt-6-sol",
+        input_per_million=2.0,
+        cached_input_per_million=0.2,
+        output_per_million=10.0,
+        source_url="https://developers.openai.com/api/docs/models/gpt-6-sol",
+        as_of="2026-09-25",
+        long_context_threshold=272_000,
+        long_input_multiplier=2.0,
+        long_output_multiplier=1.5,
+    ),
+    "gpt-6-luna": OpenAITextPricing(
+        model="gpt-6-luna",
+        input_per_million=0.1,
+        cached_input_per_million=0.01,
+        output_per_million=0.5,
+        source_url="https://developers.openai.com/api/docs/models/gpt-6-luna",
+        as_of="2026-09-25",
+        long_context_threshold=272_000,
+        long_input_multiplier=2.0,
+        long_output_multiplier=1.5,
+    ),
+    "gpt-4.1-mini": OpenAITextPricing(
+        model="gpt-4.1-mini",
+        input_per_million=0.4,
+        cached_input_per_million=0.1,
+        output_per_million=1.6,
+        source_url="https://developers.openai.com/api/docs/pricing",
+        as_of="2026-09-24",
+    ),
     "gpt-5.6-terra": OpenAITextPricing(
         model="gpt-5.6-terra",
         input_per_million=2.0,

@@ -1,10 +1,14 @@
 """Host-owned account personas; never mutate a shared agent configuration."""
 import json
+from collections.abc import Mapping
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from ..dashboard import relative_time
+from ..persona_monitor import build_persona_view
 from ..security import audit_trace_view, ui_read_only
 from ..state import templates
 from ..trace_access import current_principal
@@ -50,6 +54,9 @@ async def page(request: Request, user_id: str = ""):
             "request": request,
             "active_page": "persona-evolution",
             "profile": state,
+            "view": build_persona_view(state) if isinstance(state, Mapping) else None,
+            "now": datetime.now(timezone.utc),
+            "relative_time": relative_time,
             "user_id": user_id,
             "connected": adapter is not None,
             "error": error,

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.11.0"
+version = "0.12.0"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -81,6 +81,7 @@ anthropic = ["anthropic>=0.26.0"]
 # Ollama ships in base now; this alias keeps `pip install memorizz[ollama]` valid.
 ollama = ["ollama>=0.6.0"]
 voyageai = ["voyageai"]
+rerank = ["sentence-transformers>=5.0.0"]
 huggingface = [
     "numpy>=1.21,<2",
     "sentence-transformers>=5.0.0",

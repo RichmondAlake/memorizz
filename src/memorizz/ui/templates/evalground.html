@@ -1,13 +1,57 @@
 {% extends "base.html" %}
 
 {% block title %}Evalground - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/evalground-runs.css?v=2"><link rel="stylesheet" href="/static/css/pages/evalground.css?v=1">{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Evalground</h1>
-    <p>Run paper-backed long-term-memory evaluations with local open models or a metered OpenAI reader.</p>
+{% from '_ui.html' import page_header, evalground_tabs %}
+{% call page_header('Evalground', 'Choose models and retrieval strategies with evidence from your workloads.', 'Evaluate', nav=evalground_tabs('evaluations'), actions_class='evaluation-actions') %}<a class="btn btn-primary" href="/evalground/compare">New comparison</a>
+    <a class="btn" href="#agent-evaluation" data-open-section="agent-evaluation">Evaluate an agent</a>{% endcall %}
+{#- Filled from the run library by evalground-runs.js; placeholders keep the layout steady while it loads. -#}
+<div id="run-library-stats" class="fleet-tape eval-tape" role="list" aria-label="Evaluation summary" aria-busy="true">
+    {% for label in ['Evaluations', 'In progress', 'Completed', 'Needs attention', 'Known API cost', 'Latest run'] %}<div role="listitem"><span>{{ label }}</span><strong>—</strong></div>{% endfor %}
 </div>
+<div class="evaluation-starts" aria-label="Start an evaluation">
+    <a href="/evalground/compare?type=reader"><strong>Compare answer models <span aria-hidden="true">↗</span></strong><p>Same evidence. Compare answer quality, latency and API cost.</p></a>
+    <a href="/evalground/compare?type=reranker"><strong>Compare rerankers <span aria-hidden="true">↗</span></strong><p>Same candidates. Measure which method finds the right evidence.</p></a>
+    <a href="#agent-evaluation" data-open-section="agent-evaluation"><strong>Evaluate an agent <span aria-hidden="true">↗</span></strong><p>Run a memory benchmark against an agent or retrieval pipeline.</p></a>
+</div>
+
+<section id="run-library" class="detail-section evalground-section eval-library">
+    <div class="run-library-heading"><h2>Recent evaluations</h2><p class="form-hint">Search, compare and revisit your evaluation results.</p></div>
+    <div class="fleet-bar eval-bar">
+        <label class="fleet-search">
+            <kbd aria-hidden="true">/</kbd>
+            <input id="run-search" type="search" placeholder="Name, model, agent or run ID" aria-label="Search evaluations" autocomplete="off" data-monitor-filter-for="run-library-table">
+        </label>
+        <label class="fleet-order">Run type<select id="run-kind"><option value="all">All run types</option><option value="reranker">Reranking experiments</option><option value="reader">Answer-model experiments</option><option value="pipeline">Pipeline experiments</option><option value="agent">Agent evaluations</option></select></label>
+        <label class="fleet-order">Status<select id="run-status"><option value="all">All statuses</option><option value="active">In progress</option><option value="completed">Completed</option><option value="attention">Needs attention</option></select></label>
+        <label class="fleet-order">Sort by<select id="run-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="cost">Highest API cost</option><option value="column" hidden disabled>Column order</option></select></label>
+        <button type="button" id="refresh-run-library" class="btn btn-sm">Refresh runs</button>
+        <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>↵</kbd> open result</span></p>
+    </div>
+    <div class="fleet-table-wrap eval-runs-wrap">
+        <table id="run-library-table" class="fleet-table eval-runs-table">
+            <caption class="visually-hidden">Saved model comparisons and agent evaluations. Select a row and press Enter to open its result.</caption>
+            <thead>
+                <tr>
+                    <th scope="col" aria-sort="none"><button type="button" data-run-sort="name" data-sort-type="text">Experiment / agent</button></th>
+                    <th scope="col" class="eval-col-models">Models</th>
+                    <th scope="col" class="eval-col-type" aria-sort="none"><button type="button" data-run-sort="kind" data-sort-type="text">Type</button></th>
+                    <th scope="col" aria-sort="none"><button type="button" data-run-sort="status" data-sort-type="text">Status</button></th>
+                    <th scope="col" class="num eval-col-progress" aria-sort="none"><button type="button" data-run-sort="progress">Progress</button></th>
+                    <th scope="col" class="num eval-col-quality" aria-sort="none"><button type="button" data-run-sort="quality">Quality</button></th>
+                    <th scope="col" class="num" aria-sort="none"><button type="button" data-run-sort="cost">API cost</button></th>
+                    <th scope="col" class="num eval-col-started" aria-sort="descending"><button type="button" data-run-sort="created">Started</button></th>
+                    <th scope="col" class="eval-col-result">Result</th>
+                </tr>
+            </thead>
+            <tbody id="run-library-rows"></tbody>
+        </table>
+    </div>
+    <div class="run-library-pagination"><p id="run-library-message" role="status">Loading saved runs…</p><button id="run-prev" type="button" class="btn btn-sm">Previous</button><span id="run-page"></span><button id="run-next" type="button" class="btn btn-sm">Next</button></div>
+    <details class="history-scope"><summary>About these measurements</summary><p id="run-library-scope" class="form-hint"></p></details>
+</section>
 
 {% if warnings %}
 <div class="warning-message">
@@ -26,8 +70,7 @@
 </div>
 {% endif %}
 
-<div class="detail-section evalground-section">
-    <h2>Trace-derived experiments</h2>
+<details id="suggested-experiments" class="detail-section evalground-section evaluation-resource"><summary>Suggested experiments</summary>
     <p class="form-hint">Accepted Trace Insights become versioned drafts here. A draft is evidence for an evaluation plan; it does not mutate the production agent.</p>
     {% if trace_experiments %}
     <div class="traces-table-wrap">
@@ -61,10 +104,9 @@
     {% else %}
     <p class="empty-hint">No accepted trace recommendations yet.</p>
     {% endif %}
-</div>
+</details>
 
-<div class="detail-section evalground-section">
-    <h2>Dataset Library</h2>
+<details id="dataset-library" class="detail-section evalground-section evaluation-resource"><summary>Benchmark datasets</summary>
     <p class="form-hint">Official datasets remain external. Configure each environment variable or enter a path for the run.</p>
     <div class="dataset-status">
         {% for item in benchmark_catalog %}
@@ -114,10 +156,9 @@
         </form>
         {% endif %}
     </details>
-</div>
+</details>
 
-<div class="detail-section evalground-section">
-    <h2>Benchmark Run</h2>
+<details id="agent-evaluation" class="detail-section evalground-section evaluation-resource"{% if selected_run_id %} open{% endif %}><summary>Configure an agent evaluation</summary>
     <form method="post" action="/evalground/runs" class="evalground-form">
         <div class="form-grid">
             <div class="form-group">
@@ -214,6 +255,7 @@
                 <select id="model_provider" name="model_provider">
                     <option value="ollama" {% if (model_provider or 'ollama') == 'ollama' %}selected{% endif %}>Ollama (local)</option>
                     <option value="openai" {% if model_provider == 'openai' %}selected{% endif %}>OpenAI (metered)</option>
+                    <option value="anthropic" {% if model_provider == 'anthropic' %}selected{% endif %}>Anthropic (metered)</option>
                 </select>
             </div>
             <div class="form-group">
@@ -249,15 +291,14 @@
         <p class="form-hint">Results saved to <code>{{ eval_results_dir }}</code>.</p>
         <p id="eval-run-status" class="form-hint eval-run-status"></p>
     </form>
-</div>
+</details>
 
 <div id="live-run-output-section" class="detail-section evalground-section" hidden>
     <h2>Live Output</h2>
     <pre id="live-run-output" class="eval-run-output"></pre>
 </div>
 
-<div class="detail-section evalground-section">
-    <h2>Run History</h2>
+<details id="agent-history" class="detail-section evalground-section evaluation-resource"{% if selected_run_id %} open{% endif %}><summary>Agent evaluation history</summary>
     {% if eval_charts %}{% from '_analytics_charts.html' import bars %}
     <div class="usage-dashboard"><div class="usage-grid">{{ bars(eval_charts.cost, 'Recent evaluation charges', 'USD · benchmark-reported estimates') }}</div><p class="usage-notice">Charges are benchmark estimates, not provider invoices. Runs may differ in samples, model and configuration; compare like for like. Local hardware cost is not measured.</p></div>{% endif %}
     {% if runs_history %}
@@ -318,9 +359,11 @@
         </table>
     </div>
     {% else %}
-    <p class="empty-hint">No benchmark runs yet.</p>
+    <p class="empty-hint">No agent evaluations in this server session. Saved model comparisons are listed in Recent evaluations above.</p>
     {% endif %}
-</div>
+</details>
+
+<p class="evaluation-help"><a href="/evalground/compare#experiment-library">Examples &amp; developer guides</a> · Explore sample datasets and runnable memory experiments.</p>
 
 {% if selected_agent %}
 <div class="agent-summary">
@@ -358,11 +401,11 @@
     <div class="usage-dashboard"><div class="usage-grid">{{ bars(eval_charts.categories, 'Quality by category', 'reported accuracy') }}{{ bars(eval_charts.latency, 'Evaluation latency', 'mean seconds; stages may overlap') }}</div></div>{% endif %}
     <div class="eval-summary-grid">
         <div class="eval-summary-card">
-            <div class="eval-summary-label">Overall Accuracy</div>
+            <div class="eval-summary-label">Overall accuracy</div>
             <div class="eval-summary-value">{{ (eval_results.overall_accuracy * 100)|round(2) }}%</div>
         </div>
         <div class="eval-summary-card">
-            <div class="eval-summary-label">Overall Score</div>
+            <div class="eval-summary-label">Overall score</div>
             <div class="eval-summary-value">{{ eval_results.overall_score|round(3) }}</div>
         </div>
         <div class="eval-summary-card">
@@ -370,24 +413,24 @@
             <div class="eval-summary-value">{{ eval_results.metadata.num_samples }}</div>
         </div>
         <div class="eval-summary-card">
-            <div class="eval-summary-label">Processing Time</div>
+            <div class="eval-summary-label">Processing time</div>
             <div class="eval-summary-value">{{ eval_results.metadata.total_processing_time|round(2) }}s</div>
         </div>
         {% if eval_results.retrieval %}
         <div class="eval-summary-card">
-            <div class="eval-summary-label">Retrieval Recall@k</div>
+            <div class="eval-summary-label">Retrieval recall@k</div>
             <div class="eval-summary-value">{% if eval_results.retrieval.recall_at_k is not none %}{{ eval_results.retrieval.recall_at_k|round(3) }}{% else %}—{% endif %}</div>
         </div>
         <div class="eval-summary-card">
-            <div class="eval-summary-label">Gold-evidence Ceiling</div>
+            <div class="eval-summary-label">Gold-evidence ceiling</div>
             <div class="eval-summary-value">{% if eval_results.answer_quality.gold_evidence_oracle_score is not none %}{{ eval_results.answer_quality.gold_evidence_oracle_score|round(3) }}{% else %}—{% endif %}</div>
         </div>
         <div class="eval-summary-card">
-            <div class="eval-summary-label">Grounded Answers</div>
+            <div class="eval-summary-label">Grounded answers</div>
             <div class="eval-summary-value">{{ (eval_results.answer_quality.grounded_rate * 100)|round(1) }}%</div>
         </div>
         <div class="eval-summary-card">
-            <div class="eval-summary-label">Corpus Cache</div>
+            <div class="eval-summary-label">Corpus cache</div>
             <div class="eval-summary-value">{{ eval_results.efficiency.embedding_cache_hits }} hit / {{ eval_results.efficiency.embedding_cache_misses }} miss</div>
         </div>
         {% endif %}
@@ -429,7 +472,7 @@
         </tr>
         <tr>
             <td class="info-label">External API cost estimate</td>
-            <td class="info-value"><span class="badge badge-success">${{ eval_results.metadata.external_api_cost_usd }}</span></td>
+            <td class="info-value"><span class="badge">{% if eval_results.metadata.external_api_cost_usd is not none %}${{ eval_results.metadata.external_api_cost_usd }}{% else %}Unknown{% endif %}</span></td>
         </tr>
         <tr>
             <td class="info-label">Comparison status</td>
@@ -444,6 +487,7 @@
         {% endif %}
     </table>
 
+    {% include "_eval_usage.html" %}
     <h3 class="eval-ability-heading">Ability breakdown</h3>
     <div class="eval-category-grid">
         {% for cat_key, metrics in eval_results.category_results.items() %}
@@ -521,6 +565,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/evalground-runs.js?v=2" defer></script>
 <script>
 document.addEventListener("DOMContentLoaded", () => {
     const evalMonitor = window.memorizzEvalMonitor || null;

@@ -2,56 +2,81 @@
 
 {% block title %}Settings - Memorizz{% endblock %}
 
-{% block content %}
-<style>
-    /* Local-model manager widget styles are shared in styles.css
-       (.local-model-status .model-manager etc). Below: page-specific rules. */
+{% block head %}<link rel="stylesheet" href="/static/css/pages/settings.css?v=3">{% endblock %}
 
-    /* When the manage-list is the active selector for a local provider,
-       hide the redundant dropdown + custom input + hint so users only have
-       one way to pick a model. The label-row (with the Set/Missing badge)
-       stays visible so the field's status is still legible. */
-    .form-group.is-local-provider #MEMORIZZ_DEFAULT_LLM_MODEL_select,
-    .form-group.is-local-provider #MEMORIZZ_DEFAULT_LLM_MODEL_custom,
-    .form-group.is-local-provider > .form-hint {
-        display: none !important;
-    }
-</style>
-<div class="page-header">
-    <h1>Settings</h1>
-    <p>Manage provider credentials and saved defaults.</p>
-</div>
+{% block content %}
+{% from '_ui.html' import page_header %}
+{% set summary = settings_summary %}
+{{ page_header('Settings', 'Manage provider credentials and the saved defaults that the UI, CLI and MCP server load.', 'System') }}
 
 {% if message %}
-<div class="success-message">
-    <span>OK</span> {{ message }}
-</div>
+<div class="success-message">{{ message }}</div>
 {% endif %}
 
 {% if error %}
-<div class="error-message">
-    <span>!</span> {{ error }}
-</div>
+<div class="error-message">{{ error }}</div>
 {% endif %}
 
 {% for warning in config_warnings %}
-<div class="error-message" role="status">Warning: {{ warning }}</div>
+<div class="warning-message" role="status">{{ warning }}</div>
 {% endfor %}
 
-<form method="post" action="/settings" class="agent-form">
-    <div class="detail-section">
-        <h2>Notes</h2>
-        <p>Save target: <code>{{ env_file_path }}</code>. Active UI memory provider: <strong>{{ provider_type }}</strong>.</p>
+<div class="fleet-tape settings-tape" role="list" aria-label="Configuration summary">
+    <div role="listitem"><span>Keys configured</span><strong class="{{ 'is-warn' if not summary.keys_set else '' }}">{{ summary.keys_set }}<small>of {{ summary.keys_total }}</small></strong></div>
+    <div role="listitem"><span>Active provider</span><strong class="settings-tape-text is-good">{{ provider_type or '—' }}</strong></div>
+    <div role="listitem"><span>Saved default provider</span><strong class="settings-tape-text">{{ summary.saved_backend or 'Not set' }}</strong></div>
+    <div role="listitem"><span>Default LLM</span><strong class="settings-tape-text" title="{{ summary.llm_provider }}{% if summary.llm_model %} · {{ summary.llm_model }}{% endif %}">{{ summary.llm_provider or 'Not set' }}{% if summary.llm_model %}<small>{{ summary.llm_model }}</small>{% endif %}</strong></div>
+    <div role="listitem"><span>Embeddings</span><strong class="settings-tape-text{{ ' is-warn' if not summary.embedding_provider else '' }}" title="{{ summary.embedding_provider }}{% if summary.embedding_model %} · {{ summary.embedding_model }}{% endif %}">{{ summary.embedding_provider or 'Not set' }}{% if summary.embedding_model %}<small>{{ summary.embedding_model }}</small>{% endif %}</strong></div>
+    <div role="listitem"><span>Sandbox</span><strong class="settings-tape-text">{{ summary.sandbox or 'Off' }}</strong></div>
+    <div role="listitem"><span>Browser control</span><strong class="settings-tape-text">{{ summary.browser or 'Off' }}</strong></div>
+</div>
+
+<div class="settings-console">
+    <nav class="settings-index" aria-label="Settings sections">
+        <label class="fleet-search settings-filter">
+            <kbd aria-hidden="true">/</kbd>
+            <input type="search" id="settings-filter" placeholder="Find a setting" aria-label="Find a setting by name or variable" autocomplete="off">
+        </label>
+        <ol>
+            <li><a href="#settings-saving" data-section-link="settings-saving">How saving works</a></li>
+            {% for item in summary.sections %}
+            <li><a href="#{{ item.id }}" data-section-link="{{ item.id }}">{{ item.title }}<span class="settings-count{% if item.set %} is-set{% endif %}" title="{{ item.set }} of {{ item.total }} fields set">{{ item.set }}/{{ item.total }}</span></a></li>
+            {% endfor %}
+        </ol>
+        <p class="settings-none" id="settings-none" hidden>No setting matches this search.</p>
+    </nav>
+
+<form method="post" action="/settings" class="settings-form">
+    <section class="panel settings-notes settings-section" id="settings-saving" aria-labelledby="settings-saving-title">
+        <div class="panel-header">
+            <h2 class="panel-title" id="settings-saving-title">How saving works</h2>
+        </div>
+        <dl class="detail-list">
+            <div>
+                <dt>Save target</dt>
+                <dd class="mono">{{ env_file_path }}</dd>
+            </div>
+            <div>
+                <dt>Active UI memory provider</dt>
+                <dd>{{ provider_type }}</dd>
+            </div>
+        </dl>
         <p class="form-hint">Leave a field blank to keep its value. Saving updates this process's environment, but does not reconnect existing agents or switch their memory provider. Reconnect through <a href="/connect">Connect</a>; restart CLI/MCP processes to load saved defaults. No memory is migrated.</p>
         <p class="form-hint">Precedence: process exports &gt; project <code>.env</code> &gt; Memorizz <code>.env</code>. A project setting may override this save after restart; use <code>memorizz config set KEY --project</code> to edit it explicitly. Keep credential files out of version control; on POSIX, saves use owner-only permissions (0600).</p>
-    </div>
+    </section>
 
     {% for section in settings_sections %}
-    <div class="detail-section">
-        <h2>{{ section.title }}</h2>
-        {% if section.description %}
-        <p class="form-hint">{{ section.description }}</p>
-        {% endif %}
+    {% set item = summary.sections[loop.index0] %}
+    <section class="panel settings-section" id="{{ item.id }}" aria-labelledby="{{ item.id }}-title">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title" id="{{ item.id }}-title">{{ section.title }}</h2>
+                {% if section.description %}
+                <p class="panel-description">{{ section.description }}</p>
+                {% endif %}
+            </div>
+            <span class="panel-meta settings-section-count">{{ item.set }} of {{ item.total }} set</span>
+        </div>
         {% if section.provider_checks %}
         <div class="sandbox-status-list">
             {% for check in section.provider_checks %}
@@ -59,9 +84,9 @@
                 <div class="label-row">
                     <strong>{{ check.label }}</strong>
                     {% if check.ready %}
-                    <span class="badge badge-success">Ready</span>
+                    <span class="pill pill--success">Ready</span>
                     {% else %}
-                    <span class="badge badge-warning">Needs Setup</span>
+                    <span class="pill pill--warning">Needs setup</span>
                     {% endif %}
                 </div>
                 <p class="form-hint">{{ check.message }}</p>
@@ -73,6 +98,7 @@
             {% for field in section.fields %}
             <div
                 class="form-group"
+                data-setting-search="{{ (field.label ~ ' ' ~ field.env ~ ' ' ~ section.title)|lower }}"
                 {% if field.visible_if_sandbox_provider %}
                 data-visible-if-sandbox-provider="{{ field.visible_if_sandbox_provider }}"
                 {% endif %}
@@ -80,9 +106,9 @@
                 <div class="label-row">
                     <label for="{% if field.env == 'MEMORIZZ_DEFAULT_LLM_MODEL' %}{{ field.env }}_select{% elif field.field_type == 'checkbox' %}{{ field.env }}_checkbox{% else %}{{ field.env }}{% endif %}">{{ field.label }}</label>
                     {% if field.is_set %}
-                    <span class="badge badge-success">Set</span>
+                    <span class="pill pill--success">Set</span>
                     {% else %}
-                    <span class="badge badge-warning">Missing</span>
+                    <span class="pill">Not set</span>
                     {% endif %}
                 </div>
                 {% if field.field_type == 'select' %}
@@ -153,16 +179,19 @@
                 {% if field.hint %}
                 <p class="form-hint">{{ field.hint|safe }}</p>
                 {% endif %}
+                <code class="settings-env">{{ field.env }}</code>
             </div>
             {% endfor %}
         </div>
-    </div>
+    </section>
     {% endfor %}
 
-    <div class="form-actions">
-        <button type="submit" class="btn btn-primary">Save Settings</button>
+    <div class="settings-actions">
+        <button type="submit" class="btn btn-primary">Save settings</button>
+        <span class="settings-actions-note">Blank fields keep their saved value.</span>
     </div>
 </form>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -666,6 +695,75 @@
     initializeLlmModelControls();
     initializeCheckboxFields();
     initializeSandboxConditionalFields();
+})();
+
+// Section index: jump links with the section in view highlighted, and a
+// finder (/ focuses it) that narrows the form to matching fields. Hidden
+// fields still submit, and blank ones keep their saved value.
+(function() {
+    const links = Array.from(document.querySelectorAll('[data-section-link]'));
+    const sections = links
+        .map(function(link) { return document.getElementById(link.dataset.sectionLink); })
+        .filter(Boolean);
+    const filter = document.getElementById('settings-filter');
+    const none = document.getElementById('settings-none');
+
+    function markCurrent() {
+        let current = sections[0];
+        sections.forEach(function(section) {
+            if (!section.hidden && section.getBoundingClientRect().top <= 140) current = section;
+        });
+        if ((window.innerHeight + window.scrollY) >= document.documentElement.scrollHeight - 4) {
+            const shown = sections.filter(function(section) { return !section.hidden; });
+            current = shown[shown.length - 1] || current;
+        }
+        links.forEach(function(link) {
+            if (current && link.dataset.sectionLink === current.id) link.setAttribute('aria-current', 'true');
+            else link.removeAttribute('aria-current');
+        });
+    }
+    let pending = false;
+    window.addEventListener('scroll', function() {
+        if (pending) return;
+        pending = true;
+        window.requestAnimationFrame(function() { pending = false; markCurrent(); });
+    }, { passive: true });
+    markCurrent();
+
+    function applyFilter() {
+        const query = (filter.value || '').trim().toLowerCase();
+        let matches = 0;
+        sections.forEach(function(section) {
+            const groups = section.querySelectorAll('[data-setting-search]');
+            let shown = 0;
+            groups.forEach(function(group) {
+                const hit = !query || group.dataset.settingSearch.includes(query);
+                group.classList.toggle('is-filtered-out', !hit);
+                if (hit) shown += 1;
+            });
+            const keep = !query || shown > 0;
+            section.hidden = !keep;
+            const link = links.find(function(item) { return item.dataset.sectionLink === section.id; });
+            if (link) link.parentElement.hidden = !keep;
+            matches += query ? shown : 1;
+        });
+        if (none) none.hidden = matches > 0;
+        markCurrent();
+    }
+    if (filter) {
+        filter.addEventListener('input', applyFilter);
+        filter.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') { filter.value = ''; applyFilter(); filter.blur(); }
+        });
+    }
+    document.addEventListener('keydown', function(event) {
+        if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
+        const target = event.target;
+        if (target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+        if (!filter) return;
+        event.preventDefault();
+        filter.focus();
+    });
 })();
 </script>
 {% endblock %}

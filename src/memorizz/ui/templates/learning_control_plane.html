@@ -1,69 +1,340 @@
 {% extends "base.html" %}
+{% from '_ui.html' import page_header, empty_state, id_chip %}
+{% from '_learning_tabs.html' import learning_tabs %}
 
-{% block title %}Learning Control Plane - Memorizz{% endblock %}
+{% block title %}Learning control plane - Memorizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="learning" data-sidebar-default="collapsed"{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/learning-control-plane.css?v=5">{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Learning Control Plane</h1>
-    <p>Bounded retrieval evidence, immutable learning events, incremental compilation, and reversible forgetting.</p>
-</div>
+{#- Links out of an event: its trace, and the exact scope its compile stream covers. -#}
+{% macro trace_url(row) -%}
+{%- if row.trace_id -%}/traces?agent_id={{ selected_agent_id|urlencode }}&root_trace_id={{ row.trace_id|urlencode }}#trace-timeline
+{%- elif row.run_id -%}/traces?agent_id={{ selected_agent_id|urlencode }}&run_id={{ row.run_id|urlencode }}#trace-timeline
+{%- endif -%}
+{%- endmacro %}
+{% macro scope_url(scope) -%}
+/learning-control-plane?{{ {'agent_id': selected_agent_id, 'memory_id': scope.memory_id, 'user_id': scope.user_id, 'thread_id': scope.thread_id}|urlencode }}
+{%- endmacro %}
 
-<form method="get" action="/learning-control-plane" class="settings-form">
-    <div class="form-grid">
-        <div class="form-group">
-            <label for="agent_id">Agent</label>
-            <select id="agent_id" name="agent_id" required>
-                {% for id in known_agent_ids %}<option value="{{ id }}" {% if id == selected_agent_id %}selected{% endif %}>{{ id }}</option>{% endfor %}
-            </select>
-        </div>
-        <div class="form-group"><label for="memory_id">Memory ID</label><input id="memory_id" name="memory_id" value="{{ memory_id }}"></div>
-        <div class="form-group"><label for="user_id">User ID</label><input id="user_id" name="user_id" value="{{ user_id }}"></div>
-        <div class="form-group"><label for="thread_id">Thread ID</label><input id="thread_id" name="thread_id" value="{{ thread_id }}"></div>
-    </div>
-    <button class="btn btn-secondary" type="submit">Inspect scope</button>
-</form>
-
-{% if error %}<div class="cl-report cl-report-bad">{{ error }}</div>{% endif %}
-{% if action %}<div class="cl-report"><strong>{{ action.message }}</strong>{% if action.at %}<span class="cl-report-time"> {{ action.at }}</span>{% endif %}</div>{% endif %}
-
-{% if selected_agent_id and report %}
-<div class="stats-grid">
-    <div class="stat-card"><div class="stat-value">{{ report.records.record_count }}</div><div class="stat-label">Control records</div></div>
-    <div class="stat-card"><div class="stat-value">{{ report.records.record_types.get('learning_event', 0) }}</div><div class="stat-label">Immutable events</div></div>
-    <div class="stat-card"><div class="stat-value">{{ report.records.record_types.get('learning_artifact', 0) }}</div><div class="stat-label">Compiled artifacts</div></div>
-    <div class="stat-card"><div class="stat-value">{{ report.config.evidence_token_budget }}</div><div class="stat-label">Evidence token budget</div></div>
-</div>
-
-{% if not ui_read_only %}
-<div class="cl-agent-header">
+{% set lcp_description = 'Inspect bounded retrieval evidence, immutable learning events, incremental compilation and reversible forgetting for one agent scope.' %}
+{% set tabs = learning_tabs('learning-control-plane', selected_agent_id) %}
+{% if selected_agent_id and view and not ui_read_only %}
+{% call page_header('Learning control plane', lcp_description, 'Continual learning', nav=tabs) %}
+    <form method="post" action="/learning-control-plane/forget-plan" class="cl-inline-form">
+        <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
+        <button class="btn" type="submit">Plan forgetting (dry run)</button>
+    </form>
     <form method="post" action="/learning-control-plane/compile" class="cl-inline-form">
         <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
         <button class="btn btn-primary" type="submit">Compile pending events</button>
     </form>
-    <form method="post" action="/learning-control-plane/forget-plan" class="cl-inline-form">
-        <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
-        <button class="btn btn-secondary" type="submit">Plan forgetting (dry run)</button>
-    </form>
+{% endcall %}
+{% else %}
+{{ page_header('Learning control plane', lcp_description, 'Continual learning', nav=tabs) }}
+{% endif %}
+
+{% set scoped = memory_id or user_id or thread_id %}
+<form method="get" action="/learning-control-plane" class="filter-bar lcp-filters lcp-scope" aria-label="Scope">
+    <label for="agent_id" class="is-wide">Agent
+        <select id="agent_id" name="agent_id" class="lcp-agent" required>
+            {% for id in known_agent_ids %}<option value="{{ id }}" {% if id == selected_agent_id %}selected{% endif %}>{{ agent_names.get(id) or id }} · {{ id[:8] }}</option>{% endfor %}
+        </select>
+    </label>
+    <label for="memory_id">Memory ID<input id="memory_id" name="memory_id" value="{{ memory_id }}" placeholder="All memories" autocomplete="off"></label>
+    <label for="user_id">User ID<input id="user_id" name="user_id" value="{{ user_id }}" placeholder="All users" autocomplete="off"></label>
+    <label for="thread_id">Thread ID<input id="thread_id" name="thread_id" value="{{ thread_id }}" placeholder="All threads" autocomplete="off"></label>
+    <button class="btn" type="submit">Inspect scope</button>
+    {% if scoped and selected_agent_id %}<a class="lcp-clear" href="/learning-control-plane?agent_id={{ selected_agent_id|urlencode }}">Clear scope</a>{% endif %}
+</form>
+
+{% if error %}<p class="error-message" role="alert">The learning stream for this scope could not be loaded: {{ error }}. Check the memory provider connection, then select Inspect scope to retry.</p>{% endif %}
+{% if action %}<p class="{{ 'error-message' if action.kind == 'error' else 'success-message' }}" role="status"><strong>{{ action.message }}</strong>{% if action.at %} <span class="cl-report-time">{{ action.at }}</span>{% endif %}</p>{% endif %}
+
+{% if selected_agent_id and view %}
+{% set plan = view.plan %}
+{% set to_forget = plan.candidate_count if plan and plan.state == 'awaiting' else 0 %}
+<div class="fleet-tape lcp-tape" role="list" aria-label="Learning records in this scope">
+    {% if capture_enabled is not none %}<div role="listitem"><span>Capture</span><strong class="{{ 'is-good' if capture_enabled else 'is-warn' }}">{{ 'On' if capture_enabled else 'Off' }}</strong></div>{% endif %}
+    <div role="listitem"><span title="All learning record types in this scope">Records</span><strong>{{ '{:,}'.format(view.record_count) }}</strong></div>
+    <div role="listitem"><span title="Append-only learning events, never edited">Events</span><strong>{{ '{:,}'.format(view.event_count) }}</strong></div>
+    <div role="listitem"><span title="Events not yet compiled into artifacts">Uncompiled</span><strong class="{{ 'is-warn' if view.pending_count else '' }}">{{ '{:,}'.format(view.pending_count) }}</strong></div>
+    <div role="listitem"><span title="Artifacts compiled from recorded events">Artifacts</span><strong>{{ '{:,}'.format(view.artifact_count) }}</strong></div>
+    <div role="listitem"><span title="Candidates in the latest dry run awaiting approval">To forget</span><strong class="{{ 'is-warn' if to_forget else '' }}">{{ to_forget }}</strong></div>
+    <div role="listitem"><span>Tombstoned</span><strong>{{ view.tombstone_count }}</strong></div>
+    <div role="listitem"><span>Run success</span>{% if view.run_success_rate is none %}<strong>—</strong>{% else %}<strong class="{{ 'is-good' if view.run_success_rate >= 99 else ('is-warn' if view.run_success_rate >= 90 else 'is-bad') }}">{{ '%.0f'|format(view.run_success_rate) }}%<small>of {{ view.runs }}</small></strong>{% endif %}</div>
+    <div role="listitem"><span title="Mean tokens used per evidence pack">Evidence used</span>{% if view.evidence_mean_tokens is none %}<strong>—</strong>{% else %}<strong class="{{ 'is-warn' if view.evidence_use_percent and view.evidence_use_percent >= 90 else '' }}">{{ fmt_compact(view.evidence_mean_tokens) }}<small>mean</small></strong>{% endif %}</div>
+    <div role="listitem"><span title="Maximum tokens per evidence pack">Token budget</span><strong>{{ '{:,}'.format(view.evidence_budget) if view.evidence_budget else '—' }}</strong></div>
+    <div role="listitem"><span>Last compile</span><strong class="lcp-tape-time" {% if view.last_compile %}title="{{ view.last_compile }} UTC"{% endif %}>{{ relative_time(view.last_compile_at, now) if view.last_compile_at else 'Never' }}</strong></div>
+    {% if view.series %}
+    {% set peak = [view.series|map(attribute='count')|max, 1]|max %}
+    <div role="listitem" class="lcp-tape-trend">
+        <span title="Events per day, 14 days up to the newest">14 days</span>
+        <svg class="fleet-trend" viewBox="0 0 {{ view.series|length * 4 }} 20" preserveAspectRatio="none" role="img" aria-label="Events per day for the 14 days up to the newest event">
+            {% for day in view.series %}{% if day.count %}{% set h = [20 * day.count / peak, 2]|max %}{% set fh = h * day.failed / day.count %}<rect class="ok" x="{{ loop.index0 * 4 }}" y="{{ 20 - h }}" width="3" height="{{ h - fh }}"><title>{{ day.day }}: {{ day.count }}</title></rect>{% if day.failed %}<rect class="bad" x="{{ loop.index0 * 4 }}" y="{{ 20 - fh }}" width="3" height="{{ fh }}"/>{% endif %}{% endif %}{% endfor %}
+        </svg>
+    </div>
+    {% endif %}
 </div>
-{% if action and action.kind == 'forget-plan' and action.report.candidate_count > 0 %}
-<div class="memory-item">
-    <h3>Approve reversible forgetting</h3>
-    <p>This writes tombstones only; immutable events are retained.</p>
-    <form method="post" action="/learning-control-plane/forget-apply" class="settings-form">
+
+{% if view.pending_count and view.pending_count != view.pending_in_scope %}
+<p class="form-note lcp-note" role="status">Compile works on one exact scope. {{ view.pending_in_scope }} of {{ view.pending_count }} uncompiled events are in this scope{% if not scoped %} (no memory, user or thread){% endif %}. Pick a stream under Compile streams, or select an event and use Inspect this scope, then compile.</p>
+{% endif %}
+
+{% if not ui_read_only and action and action.kind == 'forget-plan' and action.report.candidate_count > 0 %}
+<section class="panel lcp-approve" aria-labelledby="lcp-forget-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="lcp-forget-title">Approve reversible forgetting</h2>
+            <p class="panel-description">The dry run found {{ action.report.candidate_count }} candidate(s). Applying writes tombstones only; immutable events are kept.</p>
+        </div>
+        <span class="pill pill--warning">Awaiting approval</span>
+    </div>
+    <form method="post" action="/learning-control-plane/forget-apply" class="filter-bar">
         <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="plan_id" value="{{ action.report.plan_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
-        <div class="form-grid"><div class="form-group"><label for="approved_by">Approver identity</label><input id="approved_by" name="approved_by" required></div><div class="form-group"><label for="reason">Reason</label><input id="reason" name="reason"></div></div>
+        <label for="approved_by">Approver identity<input id="approved_by" name="approved_by" required autocomplete="off"></label>
+        <label for="reason" class="is-wide">Reason<input id="reason" name="reason" placeholder="Optional" autocomplete="off"></label>
         <button class="btn btn-danger" type="submit">Apply {{ action.report.candidate_count }} tombstone(s)</button>
     </form>
+</section>
+{% endif %}
+
+{% if view.record_count == 0 %}
+{% call empty_state('No learning events in this scope', ("Learning capture is off for this agent. Turn on the learning control plane in the agent's settings; while the agent runs it records retrievals, tool calls, workflows and outcomes here." if capture_enabled == false else "Events are recorded while an agent with the learning control plane enabled runs: retrievals, tool calls, workflows and outcomes. " ~ ("Clear the memory, user or thread filter to widen the scope, or turn on the control plane in the agent's settings." if scoped else "Run the agent in the playground to record some, or turn on the control plane in the agent's settings."))) %}
+    <a class="btn{{ ' btn-primary' if capture_enabled == false else '' }}" href="/agents/{{ selected_agent_id }}/edit">Edit agent settings</a>
+    {% if scoped %}<a class="btn" href="/learning-control-plane?agent_id={{ selected_agent_id|urlencode }}">Clear scope</a>{% elif capture_enabled %}<a class="btn" href="/agents/{{ selected_agent_id }}/playground">Open playground</a>{% endif %}
+{% endcall %}
+{% else %}
+{% if view.events %}
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="lcp-filter" data-monitor-filter-for="lcp-events" placeholder="Filter by type, tool, run or ID" aria-label="Filter events" autocomplete="off">
+    </label>
+    <div class="segmented" role="group" aria-label="Show events">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ view.events|length }}</span></button>
+        {% set shown_pending = view.events|rejectattr('compiled')|list|length %}
+        {% if shown_pending %}<button type="button" class="segmented-item" data-monitor-tag="pending" aria-pressed="false">Uncompiled <span>{{ shown_pending }}</span></button>{% endif %}
+        {% set shown_failed = view.events|selectattr('signal', 'equalto', 'bad')|list|length %}
+        {% if shown_failed %}<button type="button" class="segmented-item" data-monitor-tag="failed" aria-pressed="false">Failed <span>{{ shown_failed }}</span></button>{% endif %}
+        {% for key, label, count in view.families %}{% set shown = view.events|selectattr('family', 'equalto', key)|list|length %}{% if shown %}<button type="button" class="segmented-item" data-monitor-tag="{{ key }}" aria-pressed="false">{{ label }} <span>{{ shown }}</span></button>{% endif %}{% endfor %}
+    </div>
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>t</kbd> trace</span><span><kbd>s</kbd> scope</span><span><kbd>c</kbd> copy</span><span><kbd>/</kbd> filter</span></p>
 </div>
 {% endif %}
+
+<div class="fleet lcp" id="lcp">
+    <div class="fleet-main">
+        {% if view.events %}
+        <div class="fleet-table-wrap">
+            <table class="fleet-table lcp-table" id="lcp-events">
+                <caption class="visually-hidden">Learning events in this scope, newest first. Select a row to read the full event.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" class="lcp-col-time" aria-sort="descending"><button type="button" data-sort="when">Recorded</button></th>
+                        <th scope="col" class="lcp-col-type" aria-sort="none"><button type="button" data-sort="type" data-sort-type="text">Type</button></th>
+                        <th scope="col" class="lcp-col-summary">Summary</th>
+                        <th scope="col" class="lcp-col-memory" aria-sort="none"><button type="button" data-sort="memory" data-sort-type="text">Memory</button></th>
+                        <th scope="col" class="lcp-col-user" aria-sort="none"><button type="button" data-sort="user" data-sort-type="text">User</button></th>
+                        <th scope="col" class="lcp-col-thread" aria-sort="none"><button type="button" data-sort="thread" data-sort-type="text">Thread</button></th>
+                        <th scope="col" class="lcp-col-run">Run</th>
+                        <th scope="col" class="lcp-col-status" aria-sort="none"><button type="button" data-sort="status" data-sort-type="text">Status</button></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in view.events %}
+                    <tr data-key="{{ row.key }}"
+                        data-index="{{ loop.index0 }}"
+                        data-tags="{{ row.tags }}"
+                        data-when="{{ row.sort }}"
+                        data-type="{{ row.label|lower }}"
+                        data-memory="{{ row.scope.memory_id }}"
+                        data-user="{{ row.scope.user_id }}"
+                        data-thread="{{ row.scope.thread_id }}"
+                        data-status="{{ 'compiled' if row.compiled else 'uncompiled' }}"
+                        data-trace-url="{{ trace_url(row) }}"
+                        data-scope-url="{{ scope_url(row.scope) }}"
+                        data-search="{{ row.search }}"
+                        tabindex="-1">
+                        <td class="lcp-col-time mono" title="{{ row.timestamp }}">{% if row.recorded %}<span class="lcp-time-full">{{ row.recorded[5:] }}</span><span class="lcp-time-short">{{ row.recorded[5:16] }}</span>{% else %}—{% endif %}</td>
+                        <td class="lcp-col-type"><span class="lcp-type lcp-type--{{ row.signal or 'none' }}"><span class="lcp-type-label">{{ row.label }}</span></span><span class="lcp-type-summary" aria-hidden="true">{{ row.summary }}</span></td>
+                        <td class="lcp-summary lcp-col-summary" title="{{ row.summary }}">{{ row.summary }}</td>
+                        <td class="lcp-col-memory mono" title="{{ row.scope.memory_id }}">{{ row.scope.memory_id or '—' }}</td>
+                        <td class="lcp-col-user mono" title="{{ row.scope.user_id }}">{{ row.scope.user_id or '—' }}</td>
+                        <td class="lcp-col-thread mono" title="{{ row.scope.thread_id }}">{{ row.scope.thread_id or '—' }}</td>
+                        <td class="lcp-col-run mono" title="{{ row.run_ref }}">{{ row.run_ref or '—' }}</td>
+                        <td class="lcp-col-status"><span class="lcp-status lcp-status--{{ 'compiled' if row.compiled else 'pending' }}">{{ 'Compiled' if row.compiled else 'Uncompiled' }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="fleet-none" id="lcp-none" hidden>No events match this filter.</p>
+        </div>
+        {% if view.has_more_events %}<p class="form-note lcp-note" role="status">Showing the newest {{ view.events|length }} of {{ '{:,}'.format(view.event_count) }} events. Narrow the memory, user or thread scope to see older ones.</p>{% endif %}
+        {% else %}
+        {{ empty_state('No learning events in this scope', 'This scope holds compiled artifacts or checkpoints but no events. Clear the memory, user or thread filter to see the events they were built from.', '/learning-control-plane?agent_id=' ~ selected_agent_id|urlencode, 'Clear scope') }}
+        {% endif %}
+
+        <div class="ov-grid ov-grid--two lcp-panels">
+            <section class="panel lcp-panel" aria-labelledby="lcp-streams-title">
+                <div class="panel-header">
+                    <h2 class="panel-title" id="lcp-streams-title">Compile streams</h2>
+                    <span class="panel-meta">One per exact memory, user and thread</span>
+                </div>
+                {% if view.streams %}
+                <div class="table-scroll">
+                    <table class="data-table lcp-compact">
+                        <thead><tr><th scope="col">Scope</th><th scope="col" class="num">Events</th><th scope="col" class="num">Uncompiled</th><th scope="col" class="num lcp-col-compiled">Last compile</th><th scope="col"><span class="visually-hidden">Inspect</span></th></tr></thead>
+                        <tbody>
+                            {% for stream in view.streams %}
+                            {% set s = stream.scope %}
+                            {% set current = s.memory_id == memory_id and s.user_id == user_id and s.thread_id == thread_id %}
+                            <tr{% if current %} class="is-current"{% endif %}>
+                                <td class="lcp-stream-scope mono" title="Memory {{ s.memory_id or 'none' }} · user {{ s.user_id or 'none' }} · thread {{ s.thread_id or 'none' }}">{{ s.memory_id or '—' }} · {{ s.user_id or '—' }} · {{ s.thread_id or '—' }}</td>
+                                <td class="num">{{ stream.events }}</td>
+                                <td class="num{{ ' is-warn' if stream.pending else '' }}">{{ stream.pending }}</td>
+                                <td class="num lcp-col-compiled mono" {% if stream.last_compile %}title="{{ stream.last_compile }} UTC"{% endif %}>{{ stream.last_compile[5:16] if stream.last_compile else 'Never' }}</td>
+                                <td class="lcp-stream-link">{% if current %}<span class="pill pill--info">In scope</span>{% else %}<a href="{{ scope_url(s) }}">Inspect</a>{% endif %}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="panel-empty">No event streams in this scope.</p>
+                {% endif %}
+            </section>
+
+            <section class="panel lcp-panel" aria-labelledby="lcp-plan-title">
+                <div class="panel-header">
+                    <h2 class="panel-title" id="lcp-plan-title">Forgetting plan</h2>
+                    {% if plan %}<span class="pill {{ 'pill--warning' if plan.state == 'awaiting' else 'pill--success' }}">{{ plan.state_label }}</span>{% endif %}
+                </div>
+                {% if plan %}
+                <dl class="fleet-stats lcp-plan-stats">
+                    <div><dt>Candidates</dt><dd>{{ plan.candidate_count }}</dd></div>
+                    <div><dt>Retained</dt><dd>{{ plan.retained }}</dd></div>
+                    <div><dt>{{ 'Tombstoned' if plan.state == 'applied' else 'Planned' }}</dt><dd>{% if plan.state == 'applied' %}{{ plan.tombstoned }}{% else %}<span title="{{ plan.planned }} UTC">{{ relative_time(plan.planned_at, now) if plan.planned_at else '—' }}</span>{% endif %}</dd></div>
+                </dl>
+                <p class="lcp-plan-meta">Plan {{ id_chip(plan.plan_id, 24) }}{% if plan.state == 'applied' %} · applied {{ plan.applied }}{% if plan.approved_by %} by {{ plan.approved_by }}{% endif %}{% endif %}</p>
+                {% if plan.candidates %}
+                <div class="table-scroll">
+                    <table class="data-table lcp-compact">
+                        <thead><tr><th scope="col">Artifact</th><th scope="col">Reason</th><th scope="col" class="num">Utility</th><th scope="col" class="num">Age</th></tr></thead>
+                        <tbody>
+                            {% for item in plan.candidates[:8] %}
+                            <tr>
+                                <td>{{ id_chip(item.target_id, 16) }}</td>
+                                <td class="lcp-reason" title="{{ item.reason }}">{{ item.reason }}</td>
+                                <td class="num mono">{{ '%.2f'|format(item.utility) if item.utility is not none else '—' }}</td>
+                                <td class="num mono">{{ '%.0f'|format(item.age_days) ~ 'd' if item.age_days is not none else '—' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% if plan.candidates|length > 8 %}<p class="panel-empty">{{ plan.candidates|length - 8 }} more in the plan.</p>{% endif %}
+                {% endif %}
+                {% if plan.state == 'awaiting' and not (action and action.kind == 'forget-plan') %}<p class="panel-empty">Nothing has been removed. {{ 'Select Plan forgetting (dry run) for this scope to review the latest candidates and approve them.' if not ui_read_only else 'This console is read-only; apply the plan from the SDK with agent.apply_forgetting().' }}</p>{% endif %}
+                {% else %}
+                <p class="panel-empty">No dry run yet. A plan lists compiled artifacts that are duplicates or whose utility has decayed, so they can be tombstoned. Nothing is removed until an operator approves, and immutable events are always kept.{% if ui_read_only %} This console is read-only; plan forgetting from the SDK with agent.plan_forgetting().{% else %} Select Plan forgetting (dry run) to create one.{% endif %}</p>
+                {% endif %}
+            </section>
+        </div>
+
+        <section class="panel lcp-panel" aria-labelledby="lcp-artifacts-title">
+            <div class="panel-header">
+                <h2 class="panel-title" id="lcp-artifacts-title">Compiled artifacts</h2>
+                {% if view.artifacts %}<span class="panel-meta">{{ view.artifacts|length }} shown · newest first</span>{% endif %}
+            </div>
+            {% if view.artifacts %}
+            <div class="table-scroll">
+                <table class="data-table lcp-compact lcp-artifacts">
+                    <thead><tr><th scope="col">Updated</th><th scope="col">Kind</th><th scope="col">Verification</th><th scope="col" class="num">Utility</th><th scope="col" class="num">Sources</th><th scope="col" class="lcp-col-content">Content</th><th scope="col">Artifact ID</th></tr></thead>
+                    <tbody>
+                    {% for artifact in view.artifacts %}
+                    <tr>
+                        <td class="mono" title="{{ artifact.updated_at }}">{{ artifact.updated[5:16] or '—' }}</td>
+                        <td>{{ artifact.kind_label }}</td>
+                        <td>{% if artifact.tombstoned %}<span class="pill pill--warning">Tombstoned</span>{% elif artifact.verified %}<span class="pill pill--success">Verified</span>{% else %}<span class="pill">Unverified</span>{% endif %}</td>
+                        <td class="num mono">{{ '%.2f'|format(artifact.utility) if artifact.utility is not none else '—' }}</td>
+                        <td class="num mono">{{ artifact.sources or '—' }}</td>
+                        <td class="lcp-col-content" title="{{ artifact.content }}">{{ artifact.content or '—' }}</td>
+                        <td>{% if artifact.artifact_id %}{{ id_chip(artifact.artifact_id|string, 20) }}{% else %}—{% endif %}</td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            {{ empty_state('No compiled artifacts yet', 'Compilation turns recorded learning events into reusable artifacts. Select Compile pending events to build them now; agents also compile automatically as events accumulate.' if not ui_read_only else 'Compilation turns recorded learning events into reusable artifacts. This console is read-only, so compile from the SDK or CLI.') }}
+            {% endif %}
+        </section>
+    </div>
+
+    {% if view.events %}
+    <aside class="fleet-pane" aria-label="Selected event">
+        {% for row in view.events %}
+        <section class="fleet-detail" id="lcp-detail-{{ loop.index0 }}" data-key="{{ row.key }}" hidden>
+            <header class="fleet-detail-head">
+                <div>
+                    <h2><span class="lcp-type lcp-type--{{ row.signal or 'none' }}">{{ row.label }}</span></h2>
+                    <p class="fleet-detail-sub">{{ id_chip(row.event_id, 22) }} <span class="mono">{{ row.recorded }}</span></p>
+                </div>
+                <span class="pill {{ 'pill--success' if row.compiled else 'pill--warning' }}">{{ 'Compiled' if row.compiled else 'Uncompiled' }}</span>
+            </header>
+            <p class="lcp-detail-summary">{{ row.summary }}</p>
+            <div class="fleet-detail-actions">
+                {% set trace = trace_url(row) %}
+                {% if trace %}<a class="btn btn-sm" href="{{ trace }}">Open trace</a>{% endif %}
+                <a class="btn btn-sm" href="{{ scope_url(row.scope) }}">Inspect this scope</a>
+            </div>
+            {% if row.metrics %}
+            <dl class="fleet-stats">
+                {% for label, value in row.metrics %}<div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>{% endfor %}
+            </dl>
+            {% endif %}
+            <h3 class="fleet-detail-title">Scope</h3>
+            <dl class="fleet-config lcp-refs">
+                <div><dt>Memory ID</dt><dd>{% if row.scope.memory_id %}{{ id_chip(row.scope.memory_id, 18) }}{% else %}—{% endif %}</dd></div>
+                <div><dt>User ID</dt><dd>{% if row.scope.user_id %}{{ id_chip(row.scope.user_id, 18) }}{% else %}—{% endif %}</dd></div>
+                <div><dt>Thread ID</dt><dd>{% if row.scope.thread_id %}{{ id_chip(row.scope.thread_id, 18) }}{% else %}—{% endif %}</dd></div>
+                {% for label, value in row.refs %}<div><dt>{{ label }}</dt><dd>{{ id_chip(value, 18) }}</dd></div>{% endfor %}
+            </dl>
+            <div class="mem-body-head">
+                <h3 class="fleet-detail-title">Event record</h3>
+                <button type="button" class="btn btn-sm" data-copy-target="lcp-record-{{ loop.index0 }}">Copy</button>
+            </div>
+            <pre class="mem-body" id="lcp-record-{{ loop.index0 }}">{{ row.record }}</pre>
+        </section>
+        {% endfor %}
+    </aside>
+    {% endif %}
+</div>
+{% endif %}
+{% elif not selected_agent_id %}
+{{ empty_state('No saved agent selected', 'The learning control plane inspects saved agents. Create an agent here, or save one from Python with agent.save(), then return to inspect its learning stream.', '/agents/new', 'Create agent') }}
 {% endif %}
 
-<h2>Recent events</h2>
-{% if events %}<table class="cl-runs-table"><thead><tr><th>When</th><th>Type</th><th>Run / workflow</th><th>Event</th></tr></thead><tbody>{% for event in events %}<tr><td>{{ event.timestamp }}</td><td>{{ event.event_type }}</td><td><code>{{ event.run_id or event.workflow_id or '—' }}</code></td><td><code>{{ event.event_id }}</code></td></tr>{% endfor %}</tbody></table>{% else %}<div class="empty-state"><h3>No learning events in this scope</h3></div>{% endif %}
-
-<h2>Compiled artifacts</h2>
-{% if artifacts %}<table class="cl-runs-table"><thead><tr><th>Updated</th><th>Kind</th><th>Verified</th><th>Utility</th><th>Artifact</th></tr></thead><tbody>{% for artifact in artifacts %}<tr><td>{{ artifact.updated_at }}</td><td>{{ artifact.kind }}</td><td>{{ 'yes' if artifact.verified else 'no' }}</td><td>{{ artifact.utility }}</td><td><code>{{ artifact.artifact_id }}</code></td></tr>{% endfor %}</tbody></table>{% else %}<div class="empty-state"><h3>No compiled artifacts yet</h3></div>{% endif %}
-{% else %}
-<div class="empty-state"><h3>No saved agent selected</h3><p>Create or save an agent before inspecting its learning stream.</p></div>
-{% endif %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    if (!window.MemorizzMonitor) return;
+    function go(row, field) {
+        const url = row.dataset[field];
+        if (url) window.location.href = url;
+    }
+    MemorizzMonitor.init({
+        table: 'lcp-events',
+        keys: {
+            Enter: function(row) { go(row, 'traceUrl'); },
+            t: function(row) { go(row, 'traceUrl'); },
+            s: function(row) { go(row, 'scopeUrl'); },
+            c: function(row) {
+                const body = document.getElementById('lcp-record-' + row.dataset.index);
+                if (body && navigator.clipboard) navigator.clipboard.writeText(body.textContent);
+            },
+        },
+    });
+});
+</script>
 {% endblock %}

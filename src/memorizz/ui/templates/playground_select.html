@@ -1,38 +1,88 @@
 {% extends "base.html" %}
-{% import "_macros.html" as macros %}
 
 {% block title %}Playground - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/playground-select.css?v=2">{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Playground</h1>
-    <p>Select an agent to start an interactive session</p>
+{% from '_ui.html' import page_header, empty_state %}
+{% set l = launcher %}
+{% call page_header('Playground', 'Choose an agent to open an interactive session with its memory, tools and trace timeline.', 'Agents') %}
+    <a class="btn" href="/agents/new">Create agent</a>
+{% endcall %}
+
+{% if l.agents %}
+<div class="fleet-tape pg-tape" role="list" aria-label="Agent activity">
+    <div role="listitem"><span>Agents</span><strong>{{ l.total }}</strong></div>
+    <div role="listitem"><span>Used in 24 hours</span><strong class="{{ 'is-good' if l.used_day else '' }}">{{ l.used_day }}</strong></div>
+    <div role="listitem"><span>Used in 7 days</span><strong>{{ l.used_week }}</strong></div>
+    <div role="listitem"><span>Threads</span><strong>{{ l.threads }}</strong></div>
+    <div role="listitem"><span>Models</span><strong>{{ l.models }}</strong></div>
+    <div role="listitem" class="fleet-tape-meta"><span>Last conversation</span><strong>{{ relative_time(l.last_activity, generated_at) if l.last_activity else '—' }}</strong></div>
 </div>
 
-{% if agents %}
-<div class="agents-grid">
-    {% for agent in agents %}
-    {% set meta_items = [] %}
-    {% if agent.persona and agent.persona.role %}
-        {% set _ = meta_items.append({'label': 'Role:', 'value': agent.persona.role}) %}
-    {% endif %}
-    {{ macros.agent_card(
-        agent,
-        agent.agent_id,
-        agent.persona.name if agent.persona and agent.persona.name else 'Agent',
-        meta_items=meta_items,
-        footer_links=[
-            {'href': '/agents/' ~ agent.agent_id ~ '/playground', 'class': 'btn btn-primary', 'label': 'Open Playground →'},
-        ]
-    ) }}
-    {% endfor %}
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="pg-filter" data-monitor-filter-for="pg-table" placeholder="Filter by name, model or ID" aria-label="Filter agents" autocomplete="off">
+    </label>
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>↵</kbd> open playground</span><span><kbd>/</kbd> filter</span></p>
+</div>
+
+<div class="fleet-table-wrap pg">
+    <table class="fleet-table" id="pg-table">
+        <caption class="visually-hidden">Agents, most recently used first. Select an agent to open its playground.</caption>
+        <thead>
+            <tr>
+                <th scope="col" aria-sort="none"><button type="button" data-sort="name" data-sort-type="text">Agent</button></th>
+                <th scope="col" class="pg-col-model" aria-sort="none"><button type="button" data-sort="model" data-sort-type="text">Model</button></th>
+                <th scope="col" class="pg-col-mode">Mode</th>
+                <th scope="col" class="pg-col-about">Instructions</th>
+                <th scope="col" class="num pg-col-threads" aria-sort="none"><button type="button" data-sort="threads">Threads</button></th>
+                <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="last">Last run</button></th>
+                <th scope="col" class="pg-col-open"><span class="visually-hidden">Open</span></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for agent in l.agents %}
+            <tr data-key="{{ agent.agent_id }}"
+                data-name="{{ agent.name|lower }}"
+                data-model="{{ agent.model|lower }}"
+                data-threads="{{ agent.threads }}"
+                data-last="{{ agent.last_run.timestamp() if agent.last_run else 0 }}"
+                data-search="{{ (agent.name ~ ' ' ~ agent.model ~ ' ' ~ agent.provider ~ ' ' ~ agent.mode ~ ' ' ~ agent.role ~ ' ' ~ agent.agent_id ~ ' ' ~ agent.instruction)|lower }}"
+                tabindex="-1">
+                <th scope="row" class="fleet-name pg-name">
+                    <a href="/agents/{{ agent.agent_id }}/playground">{{ agent.name }}</a>
+                    <span class="fleet-id">{{ agent.agent_id[:8] }}</span>
+                </th>
+                <td class="pg-col-model mono" title="{{ agent.provider }} / {{ agent.model }}">{{ agent.model or '—' }}</td>
+                <td class="pg-col-mode">{{ agent.mode }}</td>
+                <td class="pg-col-about" title="{{ agent.instruction }}">{% if agent.role %}<span class="pg-role">{{ agent.role }}</span> {% endif %}{{ agent.instruction or ('' if agent.role else '—') }}</td>
+                <td class="num pg-col-threads">{{ agent.threads }}</td>
+                <td class="num" {% if agent.last_run %}title="{{ agent.last_run.strftime('%Y-%m-%d %H:%M:%S') }} UTC"{% endif %}>{{ relative_time(agent.last_run, generated_at) if agent.last_run else '—' }}</td>
+                <td class="pg-col-open"><a class="pg-open" href="/agents/{{ agent.agent_id }}/playground" tabindex="-1" aria-hidden="true">Open</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="fleet-none" id="pg-none" hidden>No agents match this filter.</p>
 </div>
 {% else %}
-<div class="empty-state">
-    <div class="empty-icon">🎮</div>
-    <h3>No Agents Available</h3>
-    <p>Create an agent first to use the playground.</p>
-    <a href="/agents/new" class="btn btn-primary">Create Agent</a>
-</div>
+{{ empty_state('No agents yet', 'Create an agent, or save one from Python with agent.save(), to start a playground session.', '/agents/new', 'Create agent') }}
 {% endif %}
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const table = document.getElementById('pg-table');
+    if (!table) return;
+    const open = function(row) { window.location.href = '/agents/' + encodeURIComponent(row.dataset.key) + '/playground'; };
+    MemorizzMonitor.init({ table: 'pg-table', keys: { Enter: open } });
+    // A launcher: one click (or tap) on a row opens that agent's playground.
+    table.tBodies[0].addEventListener('click', function(event) {
+        if (event.target.closest('a, button')) return;
+        const row = event.target.closest('tr[data-key]');
+        if (row) open(row);
+    });
+});
+</script>
 {% endblock %}

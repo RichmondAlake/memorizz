@@ -1,0 +1,57 @@
+{#- Figures for monitor pages. Built-in Jinja only, so partials that import these
+    render in any environment (tests render some partials with a bare Environment).
+
+    count(v)  875799 -> 875,799
+    usd(v)    one rule for charges: 2 decimals from $1, 4 under $1, 6 under one cent
+              ($1.107414 -> $1.11, $0.0295196 -> $0.0295, $0.00117 -> $0.001170).
+              Put the exact value in a title where it matters (see exact_usd).
+    ms(v)     1601.79 -> 1,602 ms; 8.61 -> 8.6 ms
+    tape(items, label)  a .fleet-tape strip from observability_view tape items. -#}
+
+{% macro count(value, unknown='—') -%}
+{%- if value is none or value == '' -%}{{ unknown }}{%- else -%}{{ '{:,}'.format(value|int) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro usd(value, unknown='Unknown') -%}
+{%- if value is none or value == '' -%}{{ unknown }}{%- else -%}
+{%- set amount = value|float -%}
+{%- if amount == 0 -%}$0.00
+{%- elif amount|abs >= 1 -%}{{ '${:,.2f}'.format(amount) }}
+{%- elif amount|abs >= 0.01 -%}{{ '${:.4f}'.format(amount) }}
+{%- else -%}{{ '${:.6f}'.format(amount) }}
+{%- endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{#- The unrounded value for a title attribute, e.g. "$1.10741417". -#}
+{% macro usd_exact(value) -%}
+{%- if value is not none and value != '' -%}${{ value }}{%- endif -%}
+{%- endmacro %}
+
+{% macro ms(value, unknown='—') -%}
+{%- if value is none or value == '' -%}{{ unknown }}
+{%- elif value|float < 100 -%}{{ '{:,.1f} ms'.format(value|float) }}
+{%- else -%}{{ '{:,.0f} ms'.format(value|float) }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro percent(value, unknown='—') -%}
+{%- if value is none or value == '' -%}{{ unknown }}{%- else -%}{{ '%.1f%%'|format(value|float) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro tape_value(entry) -%}
+{%- if entry.kind == 'usd' -%}{{ usd(entry.value) }}
+{%- elif entry.kind == 'percent' -%}{{ percent(entry.value) }}
+{%- elif entry.kind == 'ms' -%}{{ ms(entry.value) }}
+{%- elif entry.kind == 'count' -%}{{ count(entry.value) }}
+{%- else -%}{{ entry.value }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro tape(items, label, extra_class='') -%}
+<div class="fleet-tape obs-tape{% if extra_class %} {{ extra_class }}{% endif %}" role="list" aria-label="{{ label }}">
+    {%- for entry in items %}
+    <div role="listitem" class="obs-tape-{{ entry.kind }}{% if entry.meta %} fleet-tape-meta{% endif %}"><span>{{ entry.label }}</span><strong{% if entry.tone %} class="{{ entry.tone }}"{% endif %}{% if entry.title %} title="{{ entry.title }}"{% endif %}>{{ tape_value(entry) }}</strong></div>
+    {%- endfor %}
+</div>
+{%- endmacro %}

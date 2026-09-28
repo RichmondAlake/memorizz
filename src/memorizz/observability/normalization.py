@@ -870,56 +870,79 @@ def query_trace_events(provider, memory_type, *, limit=250, cursor=None, **filte
     duplicate_count = 0
     scanned = 0
     next_position = None
+    source = (
+        "tool_rows"
+        if str(getattr(memory_type, "value", memory_type)) == "tool_log"
+        else "conversation_rows"
+    )
+    # Providers that can name the cursor after any row are read in batches;
+    # positions stay exact per row, so resuming never skips or repeats a
+    # record even when new records land between pages. Others: one per call.
+    row_cursor = getattr(provider, "observability_row_cursor", None)
+    batch = 50 if callable(row_cursor) else 1
     while len(events) < limit and scanned < 1000:
+        page_cursor = position.get("cursor")
         page = provider.query_observability_records(
-            memory_type, limit=1, cursor=position.get("cursor"), **filters
+            memory_type, limit=min(batch, 1000 - scanned), cursor=page_cursor, **filters
         )
         rows = page.get("items") or []
         if not rows:
             break
-        scanned += 1
-        source = (
-            "tool_rows"
-            if str(getattr(memory_type, "value", memory_type)) == "tool_log"
-            else "conversation_rows"
-        )
-        window = normalize_trace_snapshot(
-            TraceSnapshot(**{source: rows}),
-            agent_ids=filters.get("agent_ids"),
-            memory_ids=filters.get("memory_ids"),
-            thread_id=filters.get("thread_id"),
-            **{
-                key: filters[key]
-                for key in ("application_id", "user_id")
-                if key in filters
-            },
-        )
-        children = [event for event in window.events if selected(event)]
-        checksum = hashlib.sha256(
-            json.dumps([e["event_id"] for e in children]).encode()
-        ).hexdigest()
-        if position.get("checksum") and position["checksum"] != checksum:
-            raise ValueError("bundle changed while paginating; restart the event query")
-        offset = position["offset"]
-        if offset > len(children):
-            raise ValueError("invalid event cursor offset")
-        counts.update(window.source_counts)
-        errors.extend(window.normalization_errors)
-        duplicate_count += window.duplicate_count
-        take = min(limit - len(events), len(children) - offset)
-        events.extend(children[offset : offset + take])
-        if offset + take < len(children):
-            next_position = {
-                "cursor": position.get("cursor"),
-                "offset": offset + take,
-                "checksum": checksum,
-            }
+        stop = False
+        for index, row in enumerate(rows):
+            # The cursor that resumes at this row: the page start, or just
+            # after the previous row.
+            at_row = page_cursor if index == 0 else row_cursor(rows[index - 1])
+            scanned += 1
+            window = normalize_trace_snapshot(
+                TraceSnapshot(**{source: [row]}),
+                agent_ids=filters.get("agent_ids"),
+                memory_ids=filters.get("memory_ids"),
+                thread_id=filters.get("thread_id"),
+                **{
+                    key: filters[key]
+                    for key in ("application_id", "user_id")
+                    if key in filters
+                },
+            )
+            children = [event for event in window.events if selected(event)]
+            checksum = hashlib.sha256(
+                json.dumps([e["event_id"] for e in children]).encode()
+            ).hexdigest()
+            if position.get("checksum") and position["checksum"] != checksum:
+                raise ValueError(
+                    "bundle changed while paginating; restart the event query"
+                )
+            offset = position["offset"]
+            if offset > len(children):
+                raise ValueError("invalid event cursor offset")
+            counts.update(window.source_counts)
+            errors.extend(window.normalization_errors)
+            duplicate_count += window.duplicate_count
+            take = min(limit - len(events), len(children) - offset)
+            events.extend(children[offset : offset + take])
+            if offset + take < len(children):
+                next_position = {
+                    "cursor": at_row,
+                    "offset": offset + take,
+                    "checksum": checksum,
+                }
+                stop = True
+                break
+            after = (
+                row_cursor(row) if index + 1 < len(rows) else page.get("next_cursor")
+            )
+            if not after:
+                next_position = None
+                stop = True
+                break
+            position = {"cursor": after, "offset": 0}
+            next_position = position
+            if len(events) >= limit or scanned >= 1000:
+                stop = True
+                break
+        if stop:
             break
-        if not page.get("next_cursor"):
-            next_position = None
-            break
-        position = {"cursor": page["next_cursor"], "offset": 0}
-        next_position = position
     next_cursor = None
     if next_position:
         next_cursor = (

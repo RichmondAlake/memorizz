@@ -2,7 +2,10 @@
 
 {% block title %}Playground - {{ agent.persona.name if agent and agent.persona and agent.persona.name else 'Agent' }} - Memorizz{% endblock %}
 
+{% block body_attrs %} class="page-playground" data-sidebar-scope="playground" data-sidebar-default="collapsed"{% endblock %}
+
 {% block head %}
+<link rel="stylesheet" href="/static/css/playground.css?v=8">
 <!-- marked.js for markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
 <style>
@@ -29,8 +32,8 @@
         margin-bottom: 0;
     }
     .pg-message-text.md-rendered pre {
-        background: rgba(0, 0, 0, 0.3);
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
         border-radius: 6px;
         padding: 12px 14px;
         overflow-x: auto;
@@ -38,7 +41,7 @@
         font-size: 0.88em;
     }
     .pg-message-text.md-rendered code {
-        background: rgba(0, 0, 0, 0.25);
+        background: var(--bg-tertiary);
         border-radius: 3px;
         padding: 2px 5px;
         font-size: 0.9em;
@@ -59,10 +62,10 @@
         margin: 0.2em 0;
     }
     .pg-message-text.md-rendered blockquote {
-        border-left: 3px solid rgba(0, 217, 255, 0.4);
+        border-left: 3px solid var(--accent-primary);
         margin: 0.5em 0;
         padding: 0.3em 0.8em;
-        color: rgba(255, 255, 255, 0.75);
+        color: var(--text-secondary);
     }
     .pg-message-text.md-rendered h1,
     .pg-message-text.md-rendered h2,
@@ -75,28 +78,33 @@
     .pg-message-text.md-rendered h2 { font-size: 1.15em; }
     .pg-message-text.md-rendered h3 { font-size: 1.05em; }
     .pg-message-text.md-rendered table {
+        display: block;
+        max-width: 100%;
+        overflow-x: auto;
         border-collapse: collapse;
         margin: 0.5em 0;
-        width: 100%;
         font-size: 0.92em;
     }
     .pg-message-text.md-rendered th,
     .pg-message-text.md-rendered td {
-        border: 1px solid rgba(255, 255, 255, 0.12);
+        border: 1px solid var(--border-color);
         padding: 6px 10px;
         text-align: left;
+        overflow-wrap: normal;
+        word-break: normal;
+        min-width: 7ch;
     }
     .pg-message-text.md-rendered th {
-        background: rgba(255, 255, 255, 0.05);
+        background: var(--bg-tertiary);
         font-weight: 600;
     }
     .pg-message-text.md-rendered a {
-        color: #00d9ff;
+        color: var(--accent-primary);
         text-decoration: underline;
     }
     .pg-message-text.md-rendered hr {
         border: none;
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        border-top: 1px solid var(--border-color);
         margin: 0.8em 0;
     }
     .pg-message-text.md-rendered img {
@@ -112,7 +120,7 @@
         background: rgba(255, 184, 77, 0.08);
     }
     .pg-approval-card-title {
-        color: #ffc46b;
+        color: var(--accent-warning, #b7791f);
         font-weight: 650;
         margin-bottom: 6px;
     }
@@ -126,7 +134,7 @@
         white-space: pre-wrap;
         padding: 8px;
         border-radius: 5px;
-        background: rgba(0, 0, 0, 0.25);
+        background: var(--bg-tertiary);
     }
     .pg-approval-actions {
         display: flex;
@@ -135,7 +143,7 @@
     }
     .pg-approval-status {
         margin-top: 8px;
-        color: rgba(255, 255, 255, 0.8);
+        color: var(--text-secondary);
     }
 
     /* Compact button styles */
@@ -145,16 +153,16 @@
         gap: 5px;
         padding: 5px 12px;
         font-size: 0.78em;
-        border: 1px solid rgba(0, 217, 255, 0.3);
+        border: 1px solid var(--border-color);
         border-radius: 6px;
-        background: rgba(0, 217, 255, 0.08);
-        color: rgba(255, 255, 255, 0.85);
+        background: var(--bg-secondary);
+        color: var(--text-primary);
         cursor: pointer;
-        transition: all 0.2s ease;
+        transition: background 0.15s ease, border-color 0.15s ease;
     }
     .compact-btn:hover {
-        background: rgba(0, 217, 255, 0.18);
-        border-color: rgba(0, 217, 255, 0.5);
+        background: var(--bg-hover);
+        border-color: var(--accent-primary);
     }
     .compact-btn:disabled {
         opacity: 0.5;
@@ -168,9 +176,9 @@
         font-size: 0.7em;
         padding: 2px 6px;
         border-radius: 4px;
-        background: rgba(0, 255, 136, 0.12);
-        color: rgba(0, 255, 136, 0.85);
-        border: 1px solid rgba(0, 255, 136, 0.2);
+        background: color-mix(in srgb, var(--accent-secondary) 12%, transparent);
+        color: var(--accent-secondary);
+        border: 1px solid color-mix(in srgb, var(--accent-secondary) 30%, transparent);
         margin-left: 6px;
         vertical-align: middle;
     }
@@ -178,58 +186,609 @@
 {% endblock %}
 
 {% block content %}
-<div class="page-header page-header--agent">
-    {% set agent_is_favorite = agent.is_favorite if agent and agent.is_favorite is not none else false %}
-    <a href="/agents" class="back-link">← Back to Agents</a>
-    <h1>
-        Playground
-        <span class="playground-agent-name">
-            {% if agent and agent.persona and agent.persona.name %}
-                — {{ agent.persona.name }}
-            {% endif %}
-        </span>
-    </h1>
-    {% if agent %}
-    <form method="post" action="/agents/{{ agent.agent_id }}/favorite" class="playground-favorite-form">
-        <input type="hidden" name="redirect_to" value="/agents/{{ agent.agent_id }}/playground">
-        <input type="hidden" name="is_favorite" value="{% if agent_is_favorite %}0{% else %}1{% endif %}">
-        <button
-            type="submit"
-            class="favorite-toggle favorite-toggle--playground {% if agent_is_favorite %}is-active{% endif %}"
-            title="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
-            aria-label="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
-        >
-            <span aria-hidden="true">★</span>
-            <span>{% if agent_is_favorite %}Favorited{% else %}Favorite{% endif %}</span>
-        </button>
-    </form>
-    {% endif %}
-    {% if agent %}
-    <div class="page-actions" style="margin-top: 12px;">
-        <a href="/automations?agent_id={{ agent.agent_id }}" class="btn btn-sm">View Automations</a>
-        <a href="/automations/new?agent_id={{ agent.agent_id }}" class="btn btn-sm">Create Automation</a>
-    </div>
-    {% endif %}
-    {% if agent and agent.persona and agent.persona.role %}
-    <p>{{ agent.persona.role }}</p>
-    {% endif %}
-</div>
-
-{% if error %}
-<div class="error-message">
-    <span>!</span> {{ error }}
-</div>
-{% endif %}
-
+{% from '_ui.html' import id_chip %}
 {% if agent %}
-<!-- Collapsible Agent Config Panel -->
-<details class="playground-config">
-    <summary class="playground-config-toggle">
-        <span class="config-icon">⚙️</span>
-        <span>Agent Configuration</span>
-        <span class="config-caret">▾</span>
-    </summary>
-    <form method="post" action="/agents/{{ agent.agent_id }}/playground/config" class="playground-config-form">
+{% set agent_is_favorite = agent.is_favorite if agent and agent.is_favorite is not none else false %}
+{% set agent_title = agent.name or (agent.persona.name if agent.persona and agent.persona.name else 'Agent') %}
+<div class="pg-app" id="pg-app" data-agent-name="{{ agent_title }}">
+    <aside class="pg-rail playground-threads" id="pg-rail" aria-label="Conversations">
+        <div class="pg-rail-head playground-threads-header">
+            <button type="button" class="pg-new-chat" onclick="startNewThread()"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>New chat</span></button>
+        </div>
+        <div class="pg-rail-scroll">
+            <h2 class="pg-rail-title">Conversations</h2>
+            <div class="playground-thread-tabs" id="playground-thread-tabs">
+                {% for thread in threads %}
+                <button
+                    type="button"
+                    class="playground-thread-tab {% if thread.memory_id == default_memory_id %}is-active{% endif %}"
+                    data-memory-id="{{ thread.memory_id }}"
+                    title="{{ thread.memory_id }} • {{ thread.message_count }} messages • {{ thread.last_activity }}"
+                    onclick='useThreadMemoryId({{ thread.memory_id|tojson }})'
+                >
+                    <span class="thread-tab-title">{{ thread.title or ('Conversation ' ~ loop.index) }}</span>
+                    <span class="thread-tab-meta">{{ thread.message_count }} message{% if thread.message_count != 1 %}s{% endif %}{% if thread.last_activity and thread.last_activity != '—' %} · {{ thread.last_activity[:16] }}{% endif %}</span>
+                </button>
+                {% endfor %}
+            </div>
+            {% if not threads %}<p class="pg-rail-empty" id="pg-no-threads">No conversations yet. Send a message to start one.</p>{% endif %}
+
+            <div class="pg-rail-title-row">
+                <h2 class="pg-rail-title">Automations</h2>
+                <a class="pg-rail-link" href="/automations/new?agent_id={{ agent.agent_id }}">New</a>
+            </div>
+            <div class="playground-thread-tabs pg-automation-list" id="playground-automation-tabs">
+                <p class="form-hint" id="automation-tabs-empty">Loading automation runs…</p>
+            </div>
+            <a class="pg-rail-link pg-rail-footer-link" href="/automations?agent_id={{ agent.agent_id }}">All automations</a>
+        </div>
+    </aside>
+
+    <div class="pg-scrim" onclick="pgCloseDrawers()" aria-hidden="true"></div>
+    <section class="pg-main" id="playground-chat" aria-label="Chat">
+        <header class="pg-topbar">
+            <button type="button" class="pg-icon-btn" id="pg-rail-toggle" onclick="togglePlaygroundRail()" aria-controls="pg-rail" aria-expanded="true" title="Show or hide conversations"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9 4.5v15"/></svg></button>
+            <div class="pg-topbar-title">
+                <h1>{{ agent_title }}</h1>
+                <button type="button" class="pg-model-chip" onclick="openInspectorTab('settings')" title="{{ llm_provider }} / {{ llm_model }} · change the model in Settings">{{ llm_model }}</button>
+            </div>
+            <div class="pg-topbar-actions">
+                <form method="post" action="/agents/{{ agent.agent_id }}/favorite" class="playground-favorite-form">
+                    <input type="hidden" name="redirect_to" value="/agents/{{ agent.agent_id }}/playground">
+                    <input type="hidden" name="is_favorite" value="{% if agent_is_favorite %}0{% else %}1{% endif %}">
+                    <button type="submit" class="pg-icon-btn favorite-toggle favorite-toggle--playground {% if agent_is_favorite %}is-active{% endif %}"
+                        title="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
+                        aria-label="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"><span aria-hidden="true">★</span></button>
+                </form>
+                <a class="btn btn-sm" href="/traces?agent_id={{ agent.agent_id }}">Traces</a>
+                <a class="btn btn-sm" href="/agents/{{ agent.agent_id }}/edit">Edit</a>
+                <button type="button" class="pg-icon-btn" id="context-panel-toggle" onclick="toggleContextPanel()" aria-controls="playground-context-panel" aria-expanded="true" title="Show or hide the inspector"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M15 4.5v15"/></svg></button>
+            </div>
+        </header>
+
+        {% if error %}
+        <div class="error-message pg-error" role="alert">{{ error }}</div>
+        {% endif %}
+
+        <div class="pg-dropzone" id="pg-dropzone" aria-hidden="true">
+            <div class="pg-dropzone-inner">
+                <div class="pg-dropzone-title">Drop files to add them to the knowledge base</div>
+                <div class="pg-dropzone-hint">Each file is chunked, embedded and attached to this agent.</div>
+            </div>
+        </div>
+
+        <input id="pg-memory-id" type="hidden" value="{{ default_memory_id }}">
+        <div class="pg-thread" id="playground-messages" aria-live="polite">
+            <div class="pg-empty pg-loading">Loading conversation…</div>
+        </div>
+
+        <div class="pg-composer-wrap">
+            <div class="pg-composer" id="playground-composer">
+                <div id="pg-kb-chips" class="pg-kb-chips" style="display:none;"></div>
+                <label for="pg-query" class="sr-only">Message</label>
+                <textarea id="pg-query" rows="1" placeholder="Message {{ agent_title }}…" autofocus></textarea>
+                <div class="composer-row">
+                    <button type="button" id="pg-attach-btn" class="pg-icon-btn" onclick="document.getElementById('pg-kb-file-input').click()" title="Add files to the knowledge base">
+                        <span id="pg-attach-icon"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.4 8.4a1.7 1.7 0 0 1-2.4-2.4l7.6-7.6"/></svg></span>
+                        <span id="pg-attach-label" class="sr-only">Attach files</span>
+                    </button>
+                    <input id="pg-kb-file-input" type="file" multiple hidden onchange="uploadKbFiles(this.files)">
+                    <button type="button" class="pg-meter" id="pg-composer-meter" onclick="openInspectorTab('overview')" title="Context window used · open the inspector">
+                        <span class="pg-meter-ring" aria-hidden="true"></span>
+                        <span id="pg-composer-meter-label">{{ token_stats.percentage_used|default(0) if token_stats else 0 }}% context</span>
+                    </button>
+                    <span class="pg-meter pg-meter--cache" id="pg-composer-cache" hidden></span>
+                    <span class="composer-spacer"></span>
+                    <button type="button" id="pg-stop-btn" class="pg-send pg-stop" onclick="stopStreaming()" style="display:none;" aria-label="Stop generating" title="Stop generating (Esc)"><span aria-hidden="true">■</span></button>
+                    <button type="button" id="pg-send-btn" class="pg-send" onclick="sendMessage()" aria-label="Send message" title="Send (Enter)">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5.5 11.5L12 5l6.5 6.5"/></svg>
+                        <span id="pg-send-text" class="sr-only">Send</span>
+                        <span id="pg-send-spinner" class="spinner" style="display:none;"></span>
+                    </button>
+                </div>
+            </div>
+            <div id="pg-kb-upload-status" class="pg-kb-upload-status" style="display:none;"></div>
+            <p class="pg-composer-hint">Enter to send · Shift+Enter for a new line · Drop files to add them to the knowledge base</p>
+        </div>
+    </section>
+
+    <aside class="pg-inspector playground-context-panel" id="playground-context-panel" aria-label="Agent inspector">
+        <div class="pg-tabs" role="tablist" aria-label="Inspector views">
+            <button type="button" role="tab" id="pg-tab-overview" data-tab="overview" aria-controls="pg-panel-overview" aria-selected="true">Overview</button>
+            <button type="button" role="tab" id="pg-tab-context" data-tab="context" aria-controls="pg-panel-context" aria-selected="false" tabindex="-1">Context</button>
+            <button type="button" role="tab" id="pg-tab-memory" data-tab="memory" aria-controls="pg-panel-memory" aria-selected="false" tabindex="-1">Memory</button>
+            <button type="button" role="tab" id="pg-tab-settings" data-tab="settings" aria-controls="pg-panel-settings" aria-selected="false" tabindex="-1">Settings</button>
+        </div>
+        <div class="pg-tab-panel" role="tabpanel" id="pg-panel-overview" aria-labelledby="pg-tab-overview">
+            {% if token_stats %}
+            <div class="token-utilization" id="token-utilization-card">
+                <div class="token-header">
+                    <h3>Context window</h3>
+                    <span class="token-summary" id="token-summary">{{ "{:,}".format(token_stats.total_tokens|default(0)|int) }} / {{ "{:,}".format(token_stats.context_window_tokens|default(128000)|int) }} tokens</span>
+                </div>
+                <div class="token-bar-wrapper" id="token-bar-wrapper" tabindex="0" role="button" aria-expanded="false" aria-label="Show token composition">
+                    <div class="token-bar-container">
+                        <div class="token-bar" id="token-bar-fill" style="width: {{ [token_stats.percentage_used|default(0), 100]|min }}%"></div>
+                    </div>
+                </div>
+                <div class="token-composition-tooltip" id="token-composition-tooltip">
+                    <div class="composition-title">What fills it</div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot instruction"></span> System instruction</span>
+                        <span class="composition-value" id="token-comp-instruction">{{ "{:,}".format(token_stats.composition.instruction|default(0)|int) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot persona"></span> Persona</span>
+                        <span class="composition-value" id="token-comp-persona">{{ "{:,}".format(token_stats.composition.persona|default(0)|int) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot tools"></span> Tools</span>
+                        <span class="composition-value" id="token-comp-tools">{{ "{:,}".format(token_stats.composition.tools|default(0)|int) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot toolbox-memory"></span> Toolbox memory</span>
+                        <span class="composition-value" id="token-comp-toolbox-memory">{{ "{:,}".format(token_stats.composition.toolbox_memory|default(0)|int) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot workflow-memory"></span> Workflow memory</span>
+                        <span class="composition-value" id="token-comp-workflow-memory">{{ "{:,}".format(token_stats.composition.workflow_memory|default(0)|int) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot entity-memory"></span> Entity memory</span>
+                        <span class="composition-value" id="token-comp-entity-memory">{{ "{:,}".format(token_stats.composition.entity_memory|default(0)|int) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot summary-memory"></span> Summary memory</span>
+                        <span class="composition-value" id="token-comp-summary-memory">{{ "{:,}".format(token_stats.composition.summary_memory|default(0)|int) }} tokens</span>
+                    </div>
+                    <div class="composition-item">
+                        <span class="composition-label"><span class="composition-dot history"></span> Conversation history</span>
+                        <span class="composition-value" id="token-comp-history">{{ "{:,}".format(token_stats.composition.history|default(0)|int) }} tokens</span>
+                    </div>
+                </div>
+                <div class="token-details">
+                    <span class="token-percentage" id="token-percentage">{{ token_stats.percentage_used|default(0) }}% used</span>
+                    <span class="token-messages" id="token-messages">{{ token_stats.message_count|default(0) }} messages</span>
+                </div>
+                <div class="token-actions">
+                    <button type="button" class="compact-btn" id="compact-context-btn" onclick="compactContextWindow()" title="Summarize and compact the context window to free up tokens">
+                        <span>Compact context</span>
+                    </button>
+                    <span class="auto-compact-badge" title="The context window compacts automatically at 80% utilization">Auto-compacts at 80%</span>
+                </div>
+            </div>
+            {% endif %}
+            {% if agent %}
+            <div class="token-utilization pg-cache-card" id="pg-prompt-cache" aria-live="polite">
+                <div class="token-header">
+                    <h3>Prompt cache</h3>
+                    <a class="token-summary" href="/traces/usage?agent_id={{ agent.agent_id|urlencode }}#provider-prompt-cache">Details</a>
+                </div>
+                <div class="pg-cache-stats">
+                    <div><span>Read rate</span><strong id="pg-cache-read">—</strong></div>
+                    <div><span>Hit rate</span><strong id="pg-cache-hit">—</strong></div>
+                </div>
+                <p class="pg-cache-note" id="pg-cache-agent-note">Loading recorded model calls…</p>
+                <p class="pg-cache-note pg-cache-last" id="pg-cache-last" hidden></p>
+            </div>
+            {% endif %}
+            <section class="pg-section">
+                <h3 class="pg-section-title">Agent</h3>
+                <dl class="pg-facts">
+                    <div><dt>Model</dt><dd class="mono">{{ llm_provider }} / {{ llm_model }}</dd></div>
+                    <div><dt>Mode</dt><dd>{{ agent.application_mode or 'assistant' }}</dd></div>
+                    <div><dt>Max tool iterations</dt><dd>{{ max_steps }}</dd></div>
+                    <div><dt>Conversations</dt><dd>{{ threads|length }}</dd></div>
+                    <div class="pg-facts-wide"><dt>Agent ID</dt><dd>{{ id_chip(agent.agent_id|string, 36) }}</dd></div>
+                </dl>
+            </section>
+        </div>
+        <div class="pg-tab-panel" role="tabpanel" id="pg-panel-context" aria-labelledby="pg-tab-context" hidden>
+            <div class="pg-section-head">
+                <h3 class="pg-section-title">Sent to the model</h3>
+                <span class="pg-section-meta" id="context-window-count">{{ context_window|length }} messages</span>
+            </div>
+                    {% if agent.instruction %}
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">System instruction</summary>
+                        <div class="context-block-body">
+                            <pre class="instruction-text">{{ agent.instruction }}</pre>
+                        </div>
+                    </details>
+                    {% endif %}
+
+                    <details id="full-system-prompt-details" class="context-block context-block-collapsible" data-agent-id="{{ agent.agent_id }}">
+                        <summary class="context-block-title">Full system prompt</summary>
+                        <div class="context-block-body">
+                            <p class="form-hint">This is the full prompt assembled at inference time (base + memory + instruction + persona + tools + ...). Fetched on demand.</p>
+                            <div id="full-system-prompt-meta" class="form-hint" style="display: none;"></div>
+                            <pre id="full-system-prompt-text" class="instruction-text" style="white-space: pre-wrap; max-height: 480px; overflow:auto;">Loading…</pre>
+                            <div class="form-actions" style="margin-top: 8px;">
+                                <button type="button" id="full-system-prompt-refresh" class="btn">Refresh</button>
+                                <button type="button" id="full-system-prompt-copy" class="btn">Copy</button>
+                            </div>
+                        </div>
+                    </details>
+                    <script>
+                        (function() {
+                            var details = document.getElementById('full-system-prompt-details');
+                            if (!details) return;
+                            var agentId = details.dataset.agentId;
+                            if (!agentId) return;
+                            var textEl = document.getElementById('full-system-prompt-text');
+                            var metaEl = document.getElementById('full-system-prompt-meta');
+                            var refreshBtn = document.getElementById('full-system-prompt-refresh');
+                            var copyBtn = document.getElementById('full-system-prompt-copy');
+                            var loaded = false;
+                            var inflight = false;
+
+                            function formatMeta(data) {
+                                var parts = [];
+                                parts.push(data.length + ' chars');
+                                if (data.persona) {
+                                    var p = data.persona;
+                                    var name = p.name || '(unnamed)';
+                                    parts.push('persona: ' + name + ' v' + (p.version || 1) + ' (' + (p.history_count || 0) + ' history)');
+                                }
+                                if (Array.isArray(data.tools)) {
+                                    parts.push(data.tools.length + ' tools');
+                                    if (data.persona_tools_registered) {
+                                        parts.push('update_persona: registered');
+                                    } else {
+                                        parts.push('update_persona: NOT registered');
+                                    }
+                                }
+                                return parts.join(' · ');
+                            }
+
+                            function load() {
+                                if (inflight) return;
+                                inflight = true;
+                                textEl.textContent = 'Loading…';
+                                if (metaEl) { metaEl.style.display = 'none'; metaEl.textContent = ''; }
+                                fetch('/api/agents/' + encodeURIComponent(agentId) + '/system-prompt')
+                                    .then(function(r) {
+                                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                                        return r.json();
+                                    })
+                                    .then(function(data) {
+                                        textEl.textContent = data.system_prompt || '(empty)';
+                                        if (metaEl) {
+                                            metaEl.textContent = formatMeta(data);
+                                            metaEl.style.display = 'block';
+                                        }
+                                        loaded = true;
+                                    })
+                                    .catch(function(err) {
+                                        textEl.textContent = 'Failed to load system prompt: ' + err.message;
+                                    })
+                                    .finally(function() { inflight = false; });
+                            }
+
+                            details.addEventListener('toggle', function() {
+                                if (details.open && !loaded) load();
+                            });
+
+                            if (refreshBtn) {
+                                refreshBtn.addEventListener('click', function() {
+                                    loaded = false;
+                                    load();
+                                });
+                            }
+                            if (copyBtn) {
+                                copyBtn.addEventListener('click', function() {
+                                    var text = textEl.textContent || '';
+                                    if (!text) return;
+                                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                                        navigator.clipboard.writeText(text).then(function() {
+                                            copyBtn.textContent = 'Copied';
+                                            setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
+                                        });
+                                    }
+                                });
+                            }
+                        })();
+                    </script>
+
+                    {% if agent.persona %}
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Persona</summary>
+                        <div class="context-block-body">
+                            {% if agent.persona.name %}
+                            <div class="context-item">
+                                <span class="item-label">Name:</span>
+                                <span class="item-value">{{ agent.persona.name }}</span>
+                            </div>
+                            {% endif %}
+                            {% if agent.persona.role %}
+                            <div class="context-item">
+                                <span class="item-label">Role:</span>
+                                <span class="item-value">{{ agent.persona.role }}</span>
+                            </div>
+                            {% endif %}
+                            {% if agent.persona.background %}
+                            <div class="context-item">
+                                <span class="item-label">Background:</span>
+                                <span class="item-value">{{ agent.persona.background }}</span>
+                            </div>
+                            {% endif %}
+                            {% if agent.persona.goals %}
+                            <div class="context-item">
+                                <span class="item-label">Goals:</span>
+                                <ul class="goals-list">
+                                {% if agent.persona.goals is iterable and agent.persona.goals is not string %}
+                                    {% for goal in agent.persona.goals %}
+                                    <li>{{ goal }}</li>
+                                    {% endfor %}
+                                {% else %}
+                                    <li>{{ agent.persona.goals }}</li>
+                                {% endif %}
+                                </ul>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </details>
+                    {% endif %}
+
+                    {% if agent.tools %}
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Tools ({{ agent.tools|length }})</summary>
+                        <div class="context-block-body">
+                            <div class="tools-list">
+                                {% for tool in agent.tools %}
+                                <div class="tool-item">
+                                    <span class="tool-name">{{ tool.name if tool.name else tool.get('function', {}).get('name', 'Unknown') }}</span>
+                                    <span class="tool-desc">{{ tool.description if tool.description else tool.get('function', {}).get('description', '') }}</span>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </details>
+                    {% endif %}
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Conversation history</summary>
+                        <div id="context-conversation-container">
+                        {% if context_window %}
+                        <div class="context-log">
+                            {% for msg in context_window %}
+                            <div class="context-log-item">
+                                <div class="context-log-meta">
+                                    <span class="context-log-role">{{ msg.role|default('unknown')|capitalize }}</span>
+                                    {% if msg.timestamp %}
+                                    <span class="context-log-time">{{ msg.timestamp }}</span>
+                                    {% endif %}
+                                </div>
+                                <div class="context-log-text">{{ msg.content or msg.get('text', 'No content') }}</div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No conversation history.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+        </div>
+        <div class="pg-tab-panel" role="tabpanel" id="pg-panel-memory" aria-labelledby="pg-tab-memory" hidden>
+            <p class="pg-panel-intro">What this agent has stored for the current conversation.</p>
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Toolbox</summary>
+                        <div id="context-toolbox-container">
+                        {% if toolbox_memory %}
+                        <div class="context-toolbox-list">
+                            {% for item in toolbox_memory %}
+                            <div class="context-toolbox-item">
+                                <div class="context-toolbox-header">
+                                    <span class="context-toolbox-name">{{ item.name }}</span>
+                                    <span class="context-toolbox-type">{{ item.tool_type }}</span>
+                                </div>
+                                {% if item.timestamp %}
+                                <div class="context-toolbox-time">{{ item.timestamp }}</div>
+                                {% endif %}
+                                {% if item.description %}
+                                <div class="context-toolbox-description">{{ item.description }}</div>
+                                {% endif %}
+                                {% if item.signature %}
+                                <code class="context-toolbox-signature">{{ item.signature }}</code>
+                                {% endif %}
+                                {% if item.value_preview %}
+                                <pre class="context-toolbox-value">{{ item.value_preview }}</pre>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No toolbox memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Workflows</summary>
+                        <div id="context-workflow-container">
+                        {% if workflow_memory %}
+                        <div class="context-workflow-list">
+                            {% for item in workflow_memory %}
+                            <div class="context-workflow-item">
+                                <div class="context-workflow-header">
+                                    <span class="context-workflow-name">{{ item.name }}</span>
+                                    <span class="context-workflow-meta">{{ item.step_count }} steps</span>
+                                </div>
+                                {% if item.timestamp %}
+                                <div class="context-workflow-time">{{ item.timestamp }}</div>
+                                {% endif %}
+                                {% if item.status or item.outcome %}
+                                <div class="context-workflow-state">
+                                    {% if item.status %}<span>Status: {{ item.status }}</span>{% endif %}
+                                    {% if item.outcome %}<span>Outcome: {{ item.outcome }}</span>{% endif %}
+                                </div>
+                                {% endif %}
+                                {% if item.user_query %}
+                                <div class="context-workflow-query">{{ item.user_query }}</div>
+                                {% elif item.description %}
+                                <div class="context-workflow-query">{{ item.description }}</div>
+                                {% endif %}
+                                {% if item.step_names_preview %}
+                                <div class="context-workflow-steps">
+                                    {{ item.step_names_preview | join(', ') }}
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No workflow memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Learned skills</summary>
+                        <div id="context-skills-container">
+                        {% if skill_memory %}
+                        <div class="context-workflow-list">
+                            {% for item in skill_memory %}
+                            <div class="context-workflow-item">
+                                <div class="context-workflow-header">
+                                    <span class="context-workflow-name">{{ item.name }}</span>
+                                    <span class="context-workflow-meta">{{ item.status }} · {{ item.injection_role }} authority{% if item.version %} · v{{ item.version }}{% endif %}</span>
+                                </div>
+                                {% if item.description %}
+                                <div class="context-workflow-query">{{ item.description }}</div>
+                                {% endif %}
+                                <div class="context-workflow-state">
+                                    <span>Activations: {{ item.activations }}</span>
+                                    <span>Successes: {{ item.successes }}</span>
+                                    <span>Failures: {{ item.failures }}</span>
+                                    <span>Deviations: {{ item.deviations }}</span>
+                                </div>
+                                {% if item.demotion_reason %}
+                                <div class="context-workflow-steps">Demoted: {{ item.demotion_reason }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No learned skills yet for this agent.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Entities</summary>
+                        <div id="context-entity-container">
+                        {% if entity_memory %}
+                        <div class="context-entity-list">
+                            {% for item in entity_memory %}
+                            <div class="context-entity-item">
+                                <div class="context-entity-header">
+                                    <span class="context-entity-name">{{ item.name }}</span>
+                                    {% if item.entity_type %}
+                                    <span class="context-entity-type">{{ item.entity_type }}</span>
+                                    {% endif %}
+                                </div>
+                                {% if item.timestamp %}
+                                <div class="context-entity-time">{{ item.timestamp }}</div>
+                                {% endif %}
+                                {% if item.attributes_preview %}
+                                <div class="context-entity-attributes">{{ item.attributes_preview }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No entity memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Summaries</summary>
+                        <div id="context-summary-container">
+                        {% if summary_memory %}
+                        <div class="context-summary-list">
+                            {% for item in summary_memory %}
+                            <div class="context-summary-item">
+                                <div class="context-summary-header">
+                                    <span class="context-summary-type">{{ item.summary_type }}</span>
+                                    {% if item.timestamp %}
+                                    <span class="context-summary-time">{{ item.timestamp }}</span>
+                                    {% endif %}
+                                </div>
+                                {% if item.content %}
+                                <div class="context-summary-content">{{ item.content }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No summary memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Knowledge base</summary>
+                        <div id="context-knowledge-base-container">
+                        {% if knowledge_base_memory %}
+                        <div class="context-summary-list">
+                            {% for item in knowledge_base_memory %}
+                            <div class="context-summary-item">
+                                <div class="context-summary-header">
+                                    <span class="context-summary-type">{{ item.namespace or 'knowledge' }}</span>
+                                    {% if item.timestamp %}
+                                    <span class="context-summary-time">{{ item.timestamp }}</span>
+                                    {% endif %}
+                                </div>
+                                {% if item.content_preview %}
+                                <div class="context-summary-content">{{ item.content_preview }}</div>
+                                {% endif %}
+                                {% if item.content_length %}
+                                <div class="context-toolbox-time">{{ item.content_length }} chars · id {{ item.knowledge_base_id[:8] }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No knowledge base entries attached to this agent.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible">
+                        <summary class="context-block-title">Tool logs</summary>
+                        <div id="context-tool-log-container">
+                        {% if tool_log_memory %}
+                        <div class="context-toolbox-list">
+                            {% for item in tool_log_memory %}
+                            <div class="context-toolbox-item">
+                                <div class="context-toolbox-header">
+                                    <span class="context-toolbox-name">{{ item.tool_name }}</span>
+                                    <span class="context-toolbox-type">{% if item.success %}✓{% else %}✗{% endif %}</span>
+                                </div>
+                                {% if item.timestamp %}
+                                <div class="context-toolbox-time">{{ item.timestamp }}</div>
+                                {% endif %}
+                                {% if item.arguments %}
+                                <div class="context-toolbox-description" style="font-size:0.82em;opacity:0.7;">Args: {{ item.arguments[:120] }}{% if item.arguments|length > 120 %}...{% endif %}</div>
+                                {% endif %}
+                                {% if item.result_preview %}
+                                <pre class="context-toolbox-value">{{ item.result_preview }}</pre>
+                                {% endif %}
+                                {% if item.error %}
+                                <div style="color: #ff6b6b; font-size: 0.82em;">Error: {{ item.error }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No tool logs for this thread. Tool outputs are offloaded here to save context window space.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+        </div>
+        <div class="pg-tab-panel" role="tabpanel" id="pg-panel-settings" aria-labelledby="pg-tab-settings" hidden>
+            <p class="pg-panel-intro">Changes apply to this agent and are saved to its configuration.</p>
+<form method="post" action="/agents/{{ agent.agent_id }}/playground/config" class="playground-config-form">
         <div class="config-grid">
             <div class="config-field">
                 <label for="cfg-llm-provider">LLM Provider</label>
@@ -451,48 +1010,9 @@
             <button type="submit" class="btn btn-primary btn-sm">Save Config</button>
         </div>
     </form>
-</details>
-
-<section class="playground-threads">
-    <div class="playground-threads-header">
-        <h2>Threads</h2>
-        <div class="playground-threads-actions">
-            <button type="button" class="btn btn-sm" onclick="startNewThread()">Start New Thread</button>
         </div>
-    </div>
-    {% if threads %}
-    <div class="playground-thread-tabs" id="playground-thread-tabs">
-        {% for thread in threads %}
-        <button
-            type="button"
-            class="playground-thread-tab {% if thread.memory_id == default_memory_id %}is-active{% endif %}"
-            data-memory-id="{{ thread.memory_id }}"
-            title="{{ thread.memory_id }} • {{ thread.message_count }} messages • {{ thread.last_activity }}"
-            onclick='useThreadMemoryId({{ thread.memory_id|tojson }})'
-        >
-            <span class="thread-tab-title">Thread {{ loop.index }}</span>
-            <span class="thread-tab-meta">{{ thread.message_count }} msg{% if thread.message_count != 1 %}s{% endif %}</span>
-            <code>{{ thread.memory_id }}</code>
-        </button>
-        {% endfor %}
-    </div>
-    {% else %}
-    <p class="form-hint">No thread memory IDs yet. Use "Start New Thread" or send your first message.</p>
-    {% endif %}
-
-    <div class="playground-threads-header" style="margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06);">
-        <h2>Automations</h2>
-        <div class="playground-threads-actions">
-            {% if agent %}
-            <a href="/automations/new?agent_id={{ agent.agent_id }}" class="btn btn-sm">Create</a>
-            <a href="/automations?agent_id={{ agent.agent_id }}" class="btn btn-sm">View All</a>
-            {% endif %}
-        </div>
-    </div>
-    <div class="playground-thread-tabs" id="playground-automation-tabs">
-        <p class="form-hint" id="automation-tabs-empty">Loading automation runs...</p>
-    </div>
-</section>
+    </aside>
+</div>
 
 <script>
 (function() {
@@ -621,549 +1141,9 @@
 })();
 </script>
 
-<!-- Playground Workbench: Chat + Context Panel -->
-<div class="playground-workbench">
-    <!-- Chat Area (left) -->
-    <div class="playground-chat" id="playground-chat">
-        <!-- Drag-and-drop overlay: revealed when files are dragged over the chat area -->
-        <div class="pg-dropzone" id="pg-dropzone" aria-hidden="true">
-            <div class="pg-dropzone-inner">
-                <div class="pg-dropzone-icon" aria-hidden="true">📥</div>
-                <div class="pg-dropzone-title">Drop file(s) to ingest</div>
-                <div class="pg-dropzone-hint">Each file is chunked, embedded, and attached to this agent's knowledge base.</div>
-            </div>
-        </div>
-
-        <input id="pg-memory-id" type="hidden" value="{{ default_memory_id }}">
-        <div class="playground-messages" id="playground-messages">
-            {% if context_window %}
-                {% for msg in context_window %}
-                <div class="pg-message pg-message--{{ msg.role or 'system' }}">
-                    <div class="pg-message-avatar">
-                        {% if msg.role == 'user' %}👤{% elif msg.role == 'assistant' %}🤖{% elif msg.role == 'tool' %}🔧{% else %}📝{% endif %}
-                    </div>
-                    <div class="pg-message-body">
-                        <div class="pg-message-role">{{ msg.role|default('Unknown')|title }}</div>
-                        <div class="pg-message-text{% if msg.role == 'assistant' %} md-rendered{% endif %}" {% if msg.role == 'assistant' %}data-md-raw="{{ (msg.content or msg.get('text', '')) | e }}"{% endif %}>{{ msg.content or msg.get('text', '') }}</div>
-                    </div>
-                </div>
-                {% endfor %}
-            {% else %}
-            <div class="pg-empty">
-                <div class="pg-empty-icon">💬</div>
-                <p>Start a conversation with this agent</p>
-                <p class="pg-empty-hint">Messages will stream in real-time</p>
-            </div>
-            {% endif %}
-        </div>
-
-        <!-- Composer -->
-        <div class="playground-composer" id="playground-composer">
-            <div class="composer-input">
-                <label for="pg-query" class="sr-only">Message</label>
-                <textarea id="pg-query" rows="2" placeholder="Type your message... (Enter to send, Shift+Enter for newline)" autofocus></textarea>
-            </div>
-            <div class="composer-row">
-                <button type="button" id="pg-attach-btn" class="btn" onclick="document.getElementById('pg-kb-file-input').click()" title="Upload file(s) to knowledge base">
-                    <span id="pg-attach-icon">📎</span>
-                    <span id="pg-attach-label">Attach</span>
-                </button>
-                <input id="pg-kb-file-input" type="file" multiple style="display:none;" onchange="uploadKbFiles(this.files)">
-                <button type="button" id="pg-send-btn" class="btn btn-primary" onclick="sendMessage()">
-                    <span id="pg-send-text">Send</span>
-                    <span id="pg-send-spinner" class="spinner" style="display:none;"></span>
-                </button>
-                <button type="button" id="pg-stop-btn" class="btn" onclick="stopStreaming()" style="display:none;">
-                    <span>⏹ Stop</span>
-                </button>
-            </div>
-            <div id="pg-kb-chips" class="pg-kb-chips" style="display:none;"></div>
-            <div id="pg-kb-upload-status" class="pg-kb-upload-status" style="display:none;"></div>
-        </div>
-    </div>
-
-    <!-- Context Panel (right) -->
-    <aside class="playground-context-panel" id="playground-context-panel">
-        <button class="context-panel-toggle" id="context-panel-toggle" onclick="toggleContextPanel()" title="Toggle context panel">◀</button>
-
-        <div class="context-panel-inner">
-            {% if token_stats %}
-            <div class="token-utilization" id="token-utilization-card">
-                <div class="token-header">
-                    <h3>Context Utilization</h3>
-                    <span class="token-summary" id="token-summary">{{ token_stats.total_tokens|default(0) }} / {{ token_stats.context_window_tokens|default(128000) }} tokens</span>
-                </div>
-                <div class="token-bar-wrapper" id="token-bar-wrapper" tabindex="0" role="button" aria-expanded="false" aria-label="Show token composition">
-                    <div class="token-bar-container">
-                        <div class="token-bar" id="token-bar-fill" style="width: {{ [token_stats.percentage_used|default(0), 100]|min }}%"></div>
-                    </div>
-                </div>
-                <div class="token-composition-tooltip" id="token-composition-tooltip">
-                    <div class="composition-title">Token Composition</div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot instruction"></span> System Instruction</span>
-                        <span class="composition-value" id="token-comp-instruction">{{ token_stats.composition.instruction|default(0) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot persona"></span> Persona</span>
-                        <span class="composition-value" id="token-comp-persona">{{ token_stats.composition.persona|default(0) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot tools"></span> Tools</span>
-                        <span class="composition-value" id="token-comp-tools">{{ token_stats.composition.tools|default(0) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot toolbox-memory"></span> Toolbox Memory</span>
-                        <span class="composition-value" id="token-comp-toolbox-memory">{{ token_stats.composition.toolbox_memory|default(0) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot workflow-memory"></span> Workflow Memory</span>
-                        <span class="composition-value" id="token-comp-workflow-memory">{{ token_stats.composition.workflow_memory|default(0) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot entity-memory"></span> Entity Memory</span>
-                        <span class="composition-value" id="token-comp-entity-memory">{{ token_stats.composition.entity_memory|default(0) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot summary-memory"></span> Summary Memory</span>
-                        <span class="composition-value" id="token-comp-summary-memory">{{ token_stats.composition.summary_memory|default(0) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot history"></span> Conversation History</span>
-                        <span class="composition-value" id="token-comp-history">{{ token_stats.composition.history|default(0) }} tokens</span>
-                    </div>
-                </div>
-                <div class="token-details">
-                    <span class="token-percentage" id="token-percentage">{{ token_stats.percentage_used|default(0) }}% used</span>
-                    <span class="token-messages" id="token-messages">{{ token_stats.message_count|default(0) }} messages</span>
-                </div>
-                <div style="margin-top: 8px; display: flex; align-items: center; gap: 6px;">
-                    <button type="button" class="compact-btn" id="compact-context-btn" onclick="compactContextWindow()" title="Summarize and compact the context window to free up tokens">
-                        <span class="compact-icon">🗜️</span>
-                        <span>Compact</span>
-                    </button>
-                    <span class="auto-compact-badge" title="Context window auto-compacts at 80% utilization">Auto @ 80%</span>
-                </div>
-            </div>
-            {% endif %}
-
-            <div class="context-card">
-                <div class="context-card-header">
-                    <div class="context-card-title">
-                        <h3>Context Window</h3>
-                        <span class="context-card-subtitle" id="context-window-count">{{ context_window|length }} messages</span>
-                    </div>
-                </div>
-                <div class="context-card-body">
-                    {% if agent.instruction %}
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">System Instruction</summary>
-                        <div class="context-block-body">
-                            <pre class="instruction-text">{{ agent.instruction }}</pre>
-                        </div>
-                    </details>
-                    {% endif %}
-
-                    <details id="full-system-prompt-details" class="context-block context-block-collapsible" data-agent-id="{{ agent.agent_id }}">
-                        <summary class="context-block-title">Full System Prompt (preview)</summary>
-                        <div class="context-block-body">
-                            <p class="form-hint">This is the full prompt assembled at inference time (base + memory + instruction + persona + tools + ...). Fetched on demand.</p>
-                            <div id="full-system-prompt-meta" class="form-hint" style="display: none;"></div>
-                            <pre id="full-system-prompt-text" class="instruction-text" style="white-space: pre-wrap; max-height: 480px; overflow:auto;">Loading…</pre>
-                            <div class="form-actions" style="margin-top: 8px;">
-                                <button type="button" id="full-system-prompt-refresh" class="btn">Refresh</button>
-                                <button type="button" id="full-system-prompt-copy" class="btn">Copy</button>
-                            </div>
-                        </div>
-                    </details>
-                    <script>
-                        (function() {
-                            var details = document.getElementById('full-system-prompt-details');
-                            if (!details) return;
-                            var agentId = details.dataset.agentId;
-                            if (!agentId) return;
-                            var textEl = document.getElementById('full-system-prompt-text');
-                            var metaEl = document.getElementById('full-system-prompt-meta');
-                            var refreshBtn = document.getElementById('full-system-prompt-refresh');
-                            var copyBtn = document.getElementById('full-system-prompt-copy');
-                            var loaded = false;
-                            var inflight = false;
-
-                            function formatMeta(data) {
-                                var parts = [];
-                                parts.push(data.length + ' chars');
-                                if (data.persona) {
-                                    var p = data.persona;
-                                    var name = p.name || '(unnamed)';
-                                    parts.push('persona: ' + name + ' v' + (p.version || 1) + ' (' + (p.history_count || 0) + ' history)');
-                                }
-                                if (Array.isArray(data.tools)) {
-                                    parts.push(data.tools.length + ' tools');
-                                    if (data.persona_tools_registered) {
-                                        parts.push('update_persona: registered');
-                                    } else {
-                                        parts.push('update_persona: NOT registered');
-                                    }
-                                }
-                                return parts.join(' · ');
-                            }
-
-                            function load() {
-                                if (inflight) return;
-                                inflight = true;
-                                textEl.textContent = 'Loading…';
-                                if (metaEl) { metaEl.style.display = 'none'; metaEl.textContent = ''; }
-                                fetch('/api/agents/' + encodeURIComponent(agentId) + '/system-prompt')
-                                    .then(function(r) {
-                                        if (!r.ok) throw new Error('HTTP ' + r.status);
-                                        return r.json();
-                                    })
-                                    .then(function(data) {
-                                        textEl.textContent = data.system_prompt || '(empty)';
-                                        if (metaEl) {
-                                            metaEl.textContent = formatMeta(data);
-                                            metaEl.style.display = 'block';
-                                        }
-                                        loaded = true;
-                                    })
-                                    .catch(function(err) {
-                                        textEl.textContent = 'Failed to load system prompt: ' + err.message;
-                                    })
-                                    .finally(function() { inflight = false; });
-                            }
-
-                            details.addEventListener('toggle', function() {
-                                if (details.open && !loaded) load();
-                            });
-
-                            if (refreshBtn) {
-                                refreshBtn.addEventListener('click', function() {
-                                    loaded = false;
-                                    load();
-                                });
-                            }
-                            if (copyBtn) {
-                                copyBtn.addEventListener('click', function() {
-                                    var text = textEl.textContent || '';
-                                    if (!text) return;
-                                    if (navigator.clipboard && navigator.clipboard.writeText) {
-                                        navigator.clipboard.writeText(text).then(function() {
-                                            copyBtn.textContent = 'Copied';
-                                            setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1500);
-                                        });
-                                    }
-                                });
-                            }
-                        })();
-                    </script>
-
-                    {% if agent.persona %}
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Persona</summary>
-                        <div class="context-block-body">
-                            {% if agent.persona.name %}
-                            <div class="context-item">
-                                <span class="item-label">Name:</span>
-                                <span class="item-value">{{ agent.persona.name }}</span>
-                            </div>
-                            {% endif %}
-                            {% if agent.persona.role %}
-                            <div class="context-item">
-                                <span class="item-label">Role:</span>
-                                <span class="item-value">{{ agent.persona.role }}</span>
-                            </div>
-                            {% endif %}
-                            {% if agent.persona.background %}
-                            <div class="context-item">
-                                <span class="item-label">Background:</span>
-                                <span class="item-value">{{ agent.persona.background }}</span>
-                            </div>
-                            {% endif %}
-                            {% if agent.persona.goals %}
-                            <div class="context-item">
-                                <span class="item-label">Goals:</span>
-                                <ul class="goals-list">
-                                {% if agent.persona.goals is iterable and agent.persona.goals is not string %}
-                                    {% for goal in agent.persona.goals %}
-                                    <li>{{ goal }}</li>
-                                    {% endfor %}
-                                {% else %}
-                                    <li>{{ agent.persona.goals }}</li>
-                                {% endif %}
-                                </ul>
-                            </div>
-                            {% endif %}
-                        </div>
-                    </details>
-                    {% endif %}
-
-                    {% if agent.tools %}
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Tools ({{ agent.tools|length }})</summary>
-                        <div class="context-block-body">
-                            <div class="tools-list">
-                                {% for tool in agent.tools %}
-                                <div class="tool-item">
-                                    <span class="tool-name">{{ tool.name if tool.name else tool.get('function', {}).get('name', 'Unknown') }}</span>
-                                    <span class="tool-desc">{{ tool.description if tool.description else tool.get('function', {}).get('description', '') }}</span>
-                                </div>
-                                {% endfor %}
-                            </div>
-                        </div>
-                    </details>
-                    {% endif %}
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Toolbox Memory</summary>
-                        <div id="context-toolbox-container">
-                        {% if toolbox_memory %}
-                        <div class="context-toolbox-list">
-                            {% for item in toolbox_memory %}
-                            <div class="context-toolbox-item">
-                                <div class="context-toolbox-header">
-                                    <span class="context-toolbox-name">{{ item.name }}</span>
-                                    <span class="context-toolbox-type">{{ item.tool_type }}</span>
-                                </div>
-                                {% if item.timestamp %}
-                                <div class="context-toolbox-time">{{ item.timestamp }}</div>
-                                {% endif %}
-                                {% if item.description %}
-                                <div class="context-toolbox-description">{{ item.description }}</div>
-                                {% endif %}
-                                {% if item.signature %}
-                                <code class="context-toolbox-signature">{{ item.signature }}</code>
-                                {% endif %}
-                                {% if item.value_preview %}
-                                <pre class="context-toolbox-value">{{ item.value_preview }}</pre>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No toolbox memory found for this thread.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Workflow Memory</summary>
-                        <div id="context-workflow-container">
-                        {% if workflow_memory %}
-                        <div class="context-workflow-list">
-                            {% for item in workflow_memory %}
-                            <div class="context-workflow-item">
-                                <div class="context-workflow-header">
-                                    <span class="context-workflow-name">{{ item.name }}</span>
-                                    <span class="context-workflow-meta">{{ item.step_count }} steps</span>
-                                </div>
-                                {% if item.timestamp %}
-                                <div class="context-workflow-time">{{ item.timestamp }}</div>
-                                {% endif %}
-                                {% if item.status or item.outcome %}
-                                <div class="context-workflow-state">
-                                    {% if item.status %}<span>Status: {{ item.status }}</span>{% endif %}
-                                    {% if item.outcome %}<span>Outcome: {{ item.outcome }}</span>{% endif %}
-                                </div>
-                                {% endif %}
-                                {% if item.user_query %}
-                                <div class="context-workflow-query">{{ item.user_query }}</div>
-                                {% elif item.description %}
-                                <div class="context-workflow-query">{{ item.description }}</div>
-                                {% endif %}
-                                {% if item.step_names_preview %}
-                                <div class="context-workflow-steps">
-                                    {{ item.step_names_preview | join(', ') }}
-                                </div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No workflow memory found for this thread.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Learned Skills</summary>
-                        <div id="context-skills-container">
-                        {% if skill_memory %}
-                        <div class="context-workflow-list">
-                            {% for item in skill_memory %}
-                            <div class="context-workflow-item">
-                                <div class="context-workflow-header">
-                                    <span class="context-workflow-name">{{ item.name }}</span>
-                                    <span class="context-workflow-meta">{{ item.status }} · {{ item.injection_role }} authority{% if item.version %} · v{{ item.version }}{% endif %}</span>
-                                </div>
-                                {% if item.description %}
-                                <div class="context-workflow-query">{{ item.description }}</div>
-                                {% endif %}
-                                <div class="context-workflow-state">
-                                    <span>Activations: {{ item.activations }}</span>
-                                    <span>Successes: {{ item.successes }}</span>
-                                    <span>Failures: {{ item.failures }}</span>
-                                    <span>Deviations: {{ item.deviations }}</span>
-                                </div>
-                                {% if item.demotion_reason %}
-                                <div class="context-workflow-steps">Demoted: {{ item.demotion_reason }}</div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No learned skills yet for this agent.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Entity Memory</summary>
-                        <div id="context-entity-container">
-                        {% if entity_memory %}
-                        <div class="context-entity-list">
-                            {% for item in entity_memory %}
-                            <div class="context-entity-item">
-                                <div class="context-entity-header">
-                                    <span class="context-entity-name">{{ item.name }}</span>
-                                    {% if item.entity_type %}
-                                    <span class="context-entity-type">{{ item.entity_type }}</span>
-                                    {% endif %}
-                                </div>
-                                {% if item.timestamp %}
-                                <div class="context-entity-time">{{ item.timestamp }}</div>
-                                {% endif %}
-                                {% if item.attributes_preview %}
-                                <div class="context-entity-attributes">{{ item.attributes_preview }}</div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No entity memory found for this thread.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Summary Memory</summary>
-                        <div id="context-summary-container">
-                        {% if summary_memory %}
-                        <div class="context-summary-list">
-                            {% for item in summary_memory %}
-                            <div class="context-summary-item">
-                                <div class="context-summary-header">
-                                    <span class="context-summary-type">{{ item.summary_type }}</span>
-                                    {% if item.timestamp %}
-                                    <span class="context-summary-time">{{ item.timestamp }}</span>
-                                    {% endif %}
-                                </div>
-                                {% if item.content %}
-                                <div class="context-summary-content">{{ item.content }}</div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No summary memory found for this thread.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Knowledge Base</summary>
-                        <div id="context-knowledge-base-container">
-                        {% if knowledge_base_memory %}
-                        <div class="context-summary-list">
-                            {% for item in knowledge_base_memory %}
-                            <div class="context-summary-item">
-                                <div class="context-summary-header">
-                                    <span class="context-summary-type">{{ item.namespace or 'knowledge' }}</span>
-                                    {% if item.timestamp %}
-                                    <span class="context-summary-time">{{ item.timestamp }}</span>
-                                    {% endif %}
-                                </div>
-                                {% if item.content_preview %}
-                                <div class="context-summary-content">{{ item.content_preview }}</div>
-                                {% endif %}
-                                {% if item.content_length %}
-                                <div class="context-toolbox-time">{{ item.content_length }} chars · id {{ item.knowledge_base_id[:8] }}</div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No knowledge base entries attached to this agent.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible">
-                        <summary class="context-block-title">Tool Logs</summary>
-                        <div id="context-tool-log-container">
-                        {% if tool_log_memory %}
-                        <div class="context-toolbox-list">
-                            {% for item in tool_log_memory %}
-                            <div class="context-toolbox-item">
-                                <div class="context-toolbox-header">
-                                    <span class="context-toolbox-name">{{ item.tool_name }}</span>
-                                    <span class="context-toolbox-type">{% if item.success %}✓{% else %}✗{% endif %}</span>
-                                </div>
-                                {% if item.timestamp %}
-                                <div class="context-toolbox-time">{{ item.timestamp }}</div>
-                                {% endif %}
-                                {% if item.arguments %}
-                                <div class="context-toolbox-description" style="font-size:0.82em;opacity:0.7;">Args: {{ item.arguments[:120] }}{% if item.arguments|length > 120 %}...{% endif %}</div>
-                                {% endif %}
-                                {% if item.result_preview %}
-                                <pre class="context-toolbox-value">{{ item.result_preview }}</pre>
-                                {% endif %}
-                                {% if item.error %}
-                                <div style="color: #ff6b6b; font-size: 0.82em;">Error: {{ item.error }}</div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No tool logs for this thread. Tool outputs are offloaded here to save context window space.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Conversation</summary>
-                        <div id="context-conversation-container">
-                        {% if context_window %}
-                        <div class="context-log">
-                            {% for msg in context_window %}
-                            <div class="context-log-item">
-                                <div class="context-log-meta">
-                                    <span class="context-log-role">{{ msg.role|default('unknown')|upper }}</span>
-                                    {% if msg.timestamp %}
-                                    <span class="context-log-time">{{ msg.timestamp }}</span>
-                                    {% endif %}
-                                </div>
-                                <div class="context-log-text">{{ msg.content or msg.get('text', 'No content') }}</div>
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No conversation history.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-                </div>
-            </div>
-        </div>
-    </aside>
-</div>
-
 {% else %}
-<div class="empty-state">
-    <div class="empty-icon">❓</div>
-    <h3>Agent Not Found</h3>
-    <p>The requested agent could not be found.</p>
-    <a href="/agents" class="btn btn-primary">Back to Agents</a>
-</div>
+{% from '_ui.html' import empty_state %}
+{{ empty_state('Agent not found', 'No agent with this ID exists in the connected memory provider. It may have been deleted, or it belongs to a different provider.', '/agents', 'All agents') }}
 {% endif %}
 {% endblock %}
 
@@ -1833,11 +1813,119 @@ if (playgroundModelCustom) {
 }
 initConfigCollections();
 
+// --- Workspace layout: conversations rail, inspector and its tabs ---------
+const PG_LAYOUT_KEY = 'memorizz.playground.layout';
+
+function pgLayoutState() {
+    try {
+        return JSON.parse(window.localStorage.getItem(PG_LAYOUT_KEY) || '{}') || {};
+    } catch (err) {
+        return {};
+    }
+}
+
+function pgSaveLayout(patch) {
+    try {
+        window.localStorage.setItem(PG_LAYOUT_KEY, JSON.stringify(Object.assign(pgLayoutState(), patch)));
+    } catch (err) {
+        // Storage can be unavailable (private mode); layout still works.
+    }
+}
+
+// Side panels dock beside the chat on wide screens and slide over it on narrow ones.
+const PG_DOCK_QUERY = { rail: '(min-width: 1200px)', inspector: '(min-width: 1024px)' };
+
+function pgPanelDocks(name) {
+    return window.matchMedia(PG_DOCK_QUERY[name]).matches;
+}
+
+function pgSetPanel(name, open, persist = true) {
+    const app = document.getElementById('pg-app');
+    const toggle = document.getElementById(name === 'rail' ? 'pg-rail-toggle' : 'context-panel-toggle');
+    if (!app) return;
+    app.classList.toggle(name === 'rail' ? 'rail-collapsed' : 'inspector-collapsed', !open);
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    // A drawer opened over the chat is transient; only docked choices are remembered.
+    if (persist && pgPanelDocks(name)) pgSaveLayout({ [name]: open });
+}
+
+function pgCloseDrawers() {
+    ['rail', 'inspector'].forEach(function(name) {
+        if (!pgPanelDocks(name)) pgSetPanel(name, false, false);
+    });
+}
+
+function togglePlaygroundRail() {
+    const app = document.getElementById('pg-app');
+    if (app) pgSetPanel('rail', app.classList.contains('rail-collapsed'));
+}
+
 function toggleContextPanel() {
-    const panel = document.getElementById('playground-context-panel');
-    const btn = document.getElementById('context-panel-toggle');
-    panel.classList.toggle('collapsed');
-    btn.textContent = panel.classList.contains('collapsed') ? '▶' : '◀';
+    const app = document.getElementById('pg-app');
+    if (app) pgSetPanel('inspector', app.classList.contains('inspector-collapsed'));
+}
+
+function openInspectorTab(name, focusTab = false, reveal = true) {
+    const tabs = document.querySelectorAll('.pg-tabs [role="tab"]');
+    let selected = null;
+    tabs.forEach(function(tab) {
+        const active = tab.dataset.tab === name;
+        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        tab.tabIndex = active ? 0 : -1;
+        const panel = document.getElementById(tab.getAttribute('aria-controls'));
+        if (panel) panel.hidden = !active;
+        if (active) selected = tab;
+    });
+    if (!selected) return;
+    const app = document.getElementById('pg-app');
+    if (reveal && app && app.classList.contains('inspector-collapsed')) pgSetPanel('inspector', true);
+    if (focusTab) selected.focus();
+    pgSaveLayout({ tab: name });
+}
+
+function initPlaygroundLayout() {
+    const state = pgLayoutState();
+    // Docked panels restore the saved choice; drawers on narrow screens start closed.
+    ['rail', 'inspector'].forEach(function(name) {
+        const docks = pgPanelDocks(name);
+        pgSetPanel(name, docks && state[name] !== false, false);
+    });
+    openInspectorTab(state.tab || 'overview', false, false);
+    document.addEventListener('keydown', function(event) {
+        // While a reply streams, Esc stops it instead (see the composer handler).
+        if (event.key === 'Escape' && !isStreaming) pgCloseDrawers();
+    });
+    const tablist = document.querySelector('.pg-tabs');
+    if (tablist) {
+        tablist.addEventListener('click', function(event) {
+            const tab = event.target.closest('[role="tab"]');
+            if (tab) openInspectorTab(tab.dataset.tab);
+        });
+        tablist.addEventListener('keydown', function(event) {
+            if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+            const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
+            const index = tabs.findIndex(function(tab) { return tab.getAttribute('aria-selected') === 'true'; });
+            const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+            openInspectorTab(next.dataset.tab, true);
+            event.preventDefault();
+        });
+    }
+}
+
+// Composer grows with its content up to a comfortable maximum.
+function pgAutosize() {
+    const textarea = document.getElementById('pg-query');
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 240) + 'px';
+}
+
+function pgUseSuggestion(text) {
+    const textarea = document.getElementById('pg-query');
+    if (!textarea) return;
+    textarea.value = text;
+    pgAutosize();
+    textarea.focus();
 }
 
 function generateThreadId() {
@@ -1895,18 +1983,16 @@ function createThreadTab(memoryId, messageCount = 0) {
 
     const titleEl = document.createElement('span');
     titleEl.className = 'thread-tab-title';
-    titleEl.textContent = 'New Thread';
+    titleEl.textContent = 'New chat';
 
     const metaEl = document.createElement('span');
     metaEl.className = 'thread-tab-meta';
-    metaEl.textContent = `${messageCount} msgs`;
-
-    const codeEl = document.createElement('code');
-    codeEl.textContent = memoryId;
+    metaEl.textContent = `${messageCount} message${messageCount === 1 ? '' : 's'}`;
 
     btn.appendChild(titleEl);
     btn.appendChild(metaEl);
-    btn.appendChild(codeEl);
+    const emptyHint = document.getElementById('pg-no-threads');
+    if (emptyHint) emptyHint.remove();
     btn.addEventListener('click', function() {
         useThreadMemoryId(memoryId);
     });
@@ -1915,17 +2001,67 @@ function createThreadTab(memoryId, messageCount = 0) {
     return btn;
 }
 
+function pgAgentName() {
+    const app = document.getElementById('pg-app');
+    return (app && app.dataset.agentName) || 'the agent';
+}
+
 function renderThreadEmptyState(memoryId) {
     const container = document.getElementById('playground-messages');
     if (!container) return;
-    const safeThread = escapeHtml(memoryId || 'new');
+    const starters = [
+        'What do you remember about me?',
+        'Which tools can you use?',
+        'Summarize our previous conversations.',
+    ];
     container.innerHTML = `
         <div class="pg-empty">
-            <div class="pg-empty-icon">💬</div>
-            <p>Start a conversation in this thread</p>
-            <p class="pg-empty-hint">Thread: ${safeThread}</p>
+            <h2 class="pg-empty-title">How can ${escapeHtml(pgAgentName())} help?</h2>
+            <p class="pg-empty-hint">Messages stream live. The inspector shows what reaches the model: context use, memory and prompt-cache reuse.</p>
+            <div class="pg-starters">
+                ${starters.map(function(text) {
+                    return `<button type="button" class="pg-starter" data-starter="${escapeHtml(text)}">${escapeHtml(text)}</button>`;
+                }).join('')}
+            </div>
         </div>
     `;
+    container.querySelectorAll('[data-starter]').forEach(function(button) {
+        button.addEventListener('click', function() { pgUseSuggestion(button.dataset.starter); });
+    });
+}
+
+// One message shape for history, new messages and streams.
+function pgMessageElement(role, bodyHtml, rawText) {
+    const div = document.createElement('div');
+    div.className = `pg-message pg-message--${role}`;
+    if (role === 'user') {
+        div.innerHTML = `<div class="pg-message-body">${bodyHtml}</div>`;
+    } else {
+        const label = role === 'assistant' ? pgAgentName() : role.charAt(0).toUpperCase() + role.slice(1);
+        const initial = escapeHtml((label.trim()[0] || 'A').toUpperCase());
+        div.innerHTML = `
+            <div class="pg-message-head"><span class="pg-agent-mark" aria-hidden="true">${initial}</span><span class="pg-message-role">${escapeHtml(label)}</span></div>
+            <div class="pg-message-body">${bodyHtml}</div>
+            <div class="pg-message-actions"><button type="button" class="pg-copy" title="Copy message">Copy</button></div>
+        `;
+        pgBindCopy(div, rawText);
+    }
+    return div;
+}
+
+function pgBindCopy(messageEl, rawText) {
+    const button = messageEl.querySelector('.pg-copy');
+    if (!button) return;
+    messageEl.dataset.raw = rawText || '';
+    button.addEventListener('click', async function() {
+        try {
+            await navigator.clipboard.writeText(messageEl.dataset.raw || '');
+            button.textContent = 'Copied';
+            setTimeout(function() { button.textContent = 'Copy'; }, 1200);
+        } catch (err) {
+            button.textContent = 'Copy failed';
+        }
+    });
 }
 
 function renderThreadMessages(messages, memoryId) {
@@ -1938,7 +2074,19 @@ function renderThreadMessages(messages, memoryId) {
         return;
     }
 
-    const avatars = { user: '👤', assistant: '🤖', tool: '🔧', system: '📝' };
+    // A turn's activity is recorded just before its question; show it
+    // between the question and the answer.
+    messages = messages.slice();
+    for (let i = 0; i < messages.length - 1; i++) {
+        const current = messages[i];
+        const next = messages[i + 1];
+        if (current && current.message_type === 'trace_bundle' && next && String(next.role || '').toLowerCase() === 'user') {
+            messages[i] = next;
+            messages[i + 1] = current;
+            i++;
+        }
+    }
+
     messages.forEach(function(msg) {
         if (
             msg
@@ -1960,38 +2108,27 @@ function renderThreadMessages(messages, memoryId) {
                 return `
                     <div class="pg-trace-item pg-trace-item--${traceKindClass}${outcomeMeta ? ` pg-trace-item--outcome-${outcomeMeta.status}` : ''}">
                         <div class="pg-trace-title">${escapeHtml(title)}${outcomeBadge}</div>
-                        <div class="pg-trace-content">${escapeHtml(content)}</div>
+                        <div class="pg-trace-content">${escapeHtml(formatTraceContent(content))}</div>
                     </div>
                 `;
             }).join('');
 
             traceMessage.innerHTML = `
-                <div class="pg-message-avatar">${avatars.tool}</div>
-                <div class="pg-message-body">
-                    <div class="pg-message-role">Agent Trace</div>
+                <details class="pg-activity">
+                    <summary>${pgActivitySummary(msg.trace_events)}</summary>
                     <div class="pg-trace-timeline">${traceRows}</div>
-                </div>
+                </details>
             `;
             container.appendChild(traceMessage);
             return;
         }
 
         const role = ((msg && msg.role) ? String(msg.role) : 'system').toLowerCase();
-        const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
         const content = msg && (msg.content ?? msg.text) ? String(msg.content ?? msg.text) : '';
         const useMarkdown = (role === 'assistant' || role === 'system');
         const renderedContent = useMarkdown ? renderMarkdown(content) : escapeHtml(content);
         const mdClass = useMarkdown ? ' md-rendered' : '';
-        const div = document.createElement('div');
-        div.className = `pg-message pg-message--${role}`;
-        div.innerHTML = `
-            <div class="pg-message-avatar">${avatars[role] || '📝'}</div>
-            <div class="pg-message-body">
-                <div class="pg-message-role">${escapeHtml(roleLabel)}</div>
-                <div class="pg-message-text${mdClass}">${renderedContent}</div>
-            </div>
-        `;
-        container.appendChild(div);
+        container.appendChild(pgMessageElement(role, `<div class="pg-message-text${mdClass}">${renderedContent}</div>`, content));
     });
     scrollToBottom();
 }
@@ -2232,6 +2369,111 @@ function renderContextToolLogs(entries) {
     container.innerHTML = `<div class="context-toolbox-list">${rows}</div>`;
 }
 
+function formatCacheCount(value) {
+    return Number(value || 0).toLocaleString();
+}
+
+// Provider prompt-cache reuse for this agent, from recorded model-result traces.
+async function loadAgentPromptCache() {
+    const note = document.getElementById('pg-cache-agent-note');
+    if (!note) return;
+    const readEl = document.getElementById('pg-cache-read');
+    const hitEl = document.getElementById('pg-cache-hit');
+    try {
+        const res = await fetch(
+            `/traces/usage.json?agent_id=${encodeURIComponent(AGENT_ID)}&max_events=5000`,
+            { cache: 'no-store' },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const cache = (await res.json()).prompt_cache || {};
+        const measured = (cache.hit || 0) + (cache.write || 0) + (cache.no_reuse || 0);
+        readEl.textContent = cache.read_percent == null ? 'Unknown' : `${cache.read_percent.toFixed(1)}%`;
+        hitEl.textContent = measured ? `${((100 * cache.hit) / measured).toFixed(1)}%` : 'Unknown';
+        note.textContent = measured
+            ? `${cache.hit} of ${measured} recorded calls read from cache · `
+                + `${formatCacheCount(cache.cached_tokens)} cached input tokens · `
+                + `${formatCacheCount(cache.cache_write_tokens)} written`
+                + (cache.attention && cache.warnings && cache.warnings.length
+                    ? ` · ${cache.warnings[0].message}${cache.warnings[0].count > 1 ? ` (${cache.warnings[0].count}×)` : ''}`
+                    : (cache.attention ? ' · needs attention, see details' : ''))
+            : 'No model calls with reported cache usage yet.';
+    } catch (err) {
+        readEl.textContent = hitEl.textContent = '—';
+        note.textContent = 'Usage analytics are unavailable.';
+    }
+}
+
+// Plain-language reasons for the safe failure codes the stream reports.
+const PG_TOOL_REASONS = {
+    invalid_tool_invocation: 'not callable here: undisclosed, unregistered in this process, or bad arguments',
+    tool_budget_exhausted: 'per-turn tool budget used up',
+    duplicate_tool_call: 'same call already succeeded this turn',
+    tool_retry_limit: 'retry limit reached',
+    approval_required: 'waiting for approval',
+    provider_unavailable: 'tool provider unavailable',
+};
+
+// Tool calls stream as short steps inside the reply, like chat assistants show.
+function pgLiveActivity(messageEl, event) {
+    const list = messageEl && messageEl.querySelector('.pg-live-activity');
+    if (!list || !event.tool_name) return;
+    const key = event.span_id || event.tool_name;
+    let item = Array.from(list.children).find(function(li) { return li.dataset.key === key; });
+    if (!item) {
+        item = document.createElement('li');
+        item.dataset.key = key;
+        list.appendChild(item);
+    }
+    const done = event.type === 'tool.completed';
+    const failed = done && event.status && !['success', 'completed', 'ok'].includes(String(event.status));
+    item.className = done ? (failed ? 'is-failed' : 'is-done') : 'is-running';
+    item.textContent = (done ? (failed ? 'Failed ' : 'Used ') : 'Using ') + event.tool_name;
+    if (failed && event.reason_code) {
+        const reason = document.createElement('span');
+        reason.className = 'pg-live-reason';
+        reason.textContent = PG_TOOL_REASONS[event.reason_code] || String(event.reason_code).replace(/_/g, ' ');
+        item.appendChild(reason);
+    }
+    list.hidden = false;
+}
+
+// Tokens and prompt-cache reuse for the turn, shown under the reply.
+function pgTurnFootnote(messageEl, usage) {
+    if (!messageEl || !usage || !usage.calls) return;
+    const parts = [
+        `${usage.calls} model call${usage.calls === 1 ? '' : 's'}`,
+        `${formatCacheCount(usage.input_tokens)} input · ${formatCacheCount(usage.output_tokens)} output tokens`,
+    ];
+    if (usage.read_percent != null) parts.push(`${usage.read_percent.toFixed(1)}% from prompt cache`);
+    if (usage.cache_write_tokens) parts.push(`${formatCacheCount(usage.cache_write_tokens)} cached for next time`);
+    let note = messageEl.querySelector('.pg-turn-meta');
+    if (!note) {
+        note = document.createElement('div');
+        note.className = 'pg-turn-meta';
+        const actions = messageEl.querySelector('.pg-message-actions');
+        (actions || messageEl).prepend(note);
+    }
+    note.textContent = parts.join(' · ');
+}
+
+// Per-turn summary from the stream's terminal run.done event.
+function renderLastTurnCache(usage) {
+    const el = document.getElementById('pg-cache-last');
+    if (!el || !usage || !usage.calls) return;
+    const read = usage.read_percent == null ? 'unknown' : `${usage.read_percent.toFixed(1)}%`;
+    const chip = document.getElementById('pg-composer-cache');
+    if (chip && usage.read_percent != null) {
+        chip.textContent = `${usage.read_percent.toFixed(0)}% cached`;
+        chip.title = 'Share of last turn input read from the provider prompt cache';
+        chip.hidden = false;
+    }
+    el.textContent = `Last turn: ${usage.calls} model call${usage.calls === 1 ? '' : 's'} · `
+        + `${read} of ${formatCacheCount(usage.measured_input_tokens)} input tokens read from cache · `
+        + `${usage.cache_hit_calls}/${usage.cache_reported_calls} calls hit · `
+        + `${formatCacheCount(usage.cache_write_tokens)} written`;
+    el.hidden = false;
+}
+
 function updateContextWindowCount(messageCount) {
     const countEl = document.getElementById('context-window-count');
     if (!countEl) return;
@@ -2241,6 +2483,14 @@ function updateContextWindowCount(messageCount) {
 
 function applyTokenStats(stats) {
     if (!stats) return;
+    const meter = document.getElementById('pg-composer-meter');
+    const meterLabel = document.getElementById('pg-composer-meter-label');
+    if (meter && meterLabel) {
+        const used = Math.max(0, Math.min(100, Number(stats.percentage_used) || 0));
+        meter.style.setProperty('--pg-used', used + '%');
+        meter.classList.toggle('is-high', used >= 70);
+        meterLabel.textContent = `${Math.round(used)}% context`;
+    }
 
     const totalTokens = Number(stats.total_tokens) || 0;
     const contextWindowTokens = Number(stats.context_window_tokens) || 128000;
@@ -2261,18 +2511,18 @@ function applyTokenStats(stats) {
     const compSummaryMemory = document.getElementById('token-comp-summary-memory');
     const compHistory = document.getElementById('token-comp-history');
 
-    if (tokenSummary) tokenSummary.textContent = `${totalTokens} / ${contextWindowTokens} tokens`;
+    if (tokenSummary) tokenSummary.textContent = `${formatCacheCount(totalTokens)} / ${formatCacheCount(contextWindowTokens)} tokens`;
     if (tokenBarFill) tokenBarFill.style.width = `${percentageUsed}%`;
     if (tokenPercentage) tokenPercentage.textContent = `${percentageUsed.toFixed(2)}% used`;
     if (tokenMessages) tokenMessages.textContent = `${messageCount} message${messageCount === 1 ? '' : 's'}`;
-    if (compInstruction) compInstruction.textContent = `${Number(composition.instruction) || 0} tokens`;
-    if (compPersona) compPersona.textContent = `${Number(composition.persona) || 0} tokens`;
-    if (compTools) compTools.textContent = `${Number(composition.tools) || 0} tokens`;
-    if (compToolboxMemory) compToolboxMemory.textContent = `${Number(composition.toolbox_memory) || 0} tokens`;
-    if (compWorkflowMemory) compWorkflowMemory.textContent = `${Number(composition.workflow_memory) || 0} tokens`;
-    if (compEntityMemory) compEntityMemory.textContent = `${Number(composition.entity_memory) || 0} tokens`;
-    if (compSummaryMemory) compSummaryMemory.textContent = `${Number(composition.summary_memory) || 0} tokens`;
-    if (compHistory) compHistory.textContent = `${Number(composition.history) || 0} tokens`;
+    if (compInstruction) compInstruction.textContent = `${formatCacheCount(composition.instruction)} tokens`;
+    if (compPersona) compPersona.textContent = `${formatCacheCount(composition.persona)} tokens`;
+    if (compTools) compTools.textContent = `${formatCacheCount(composition.tools)} tokens`;
+    if (compToolboxMemory) compToolboxMemory.textContent = `${formatCacheCount(composition.toolbox_memory)} tokens`;
+    if (compWorkflowMemory) compWorkflowMemory.textContent = `${formatCacheCount(composition.workflow_memory)} tokens`;
+    if (compEntityMemory) compEntityMemory.textContent = `${formatCacheCount(composition.entity_memory)} tokens`;
+    if (compSummaryMemory) compSummaryMemory.textContent = `${formatCacheCount(composition.summary_memory)} tokens`;
+    if (compHistory) compHistory.textContent = `${formatCacheCount(composition.history)} tokens`;
 }
 
 function updateThreadTabMeta(memoryId, messageCount, lastActivity) {
@@ -2283,11 +2533,14 @@ function updateThreadTabMeta(memoryId, messageCount, lastActivity) {
         if ((tab.dataset.memoryId || '') !== normalized) return;
         const count = Number(messageCount) || 0;
         const metaEl = tab.querySelector('.thread-tab-meta');
+        const activityText = (lastActivity || '').trim();
         if (metaEl) {
-            metaEl.textContent = `${count} msg${count === 1 ? '' : 's'}`;
+            // Same "N messages · time" shape the server renders for every row.
+            const previous = (metaEl.textContent.split(' · ')[1] || '').trim();
+            const when = activityText && activityText !== '—' ? activityText.slice(0, 16) : previous;
+            metaEl.textContent = `${count} message${count === 1 ? '' : 's'}${when ? ` · ${when}` : ''}`;
         }
         const titleParts = [normalized, `${count} messages`];
-        const activityText = (lastActivity || '').trim();
         if (activityText && activityText !== '—') titleParts.push(activityText);
         tab.title = titleParts.join(' • ');
     });
@@ -2405,19 +2658,10 @@ function appendMessage(role, content) {
     const emptyState = container.querySelector('.pg-empty');
     if (emptyState) emptyState.remove();
 
-    const avatars = { user: '👤', assistant: '🤖', tool: '🔧', system: '📝' };
     const useMarkdown = (role === 'assistant' || role === 'system');
     const renderedContent = useMarkdown ? renderMarkdown(content) : escapeHtml(content);
     const mdClass = useMarkdown ? ' md-rendered' : '';
-    const div = document.createElement('div');
-    div.className = `pg-message pg-message--${role}`;
-    div.innerHTML = `
-        <div class="pg-message-avatar">${avatars[role] || '📝'}</div>
-        <div class="pg-message-body">
-            <div class="pg-message-role">${role.charAt(0).toUpperCase() + role.slice(1)}</div>
-            <div class="pg-message-text${mdClass}">${renderedContent}</div>
-        </div>
-    `;
+    const div = pgMessageElement(role, `<div class="pg-message-text${mdClass}">${renderedContent}</div>`, content);
     container.appendChild(div);
     scrollToBottom();
     return div;
@@ -2429,16 +2673,12 @@ function createStreamingMessage() {
     const emptyState = container.querySelector('.pg-empty');
     if (emptyState) emptyState.remove();
 
-    const div = document.createElement('div');
-    div.className = 'pg-message pg-message--assistant';
-    div.innerHTML = `
-        <div class="pg-message-avatar">🤖</div>
-        <div class="pg-message-body">
-            <div class="pg-message-role">Assistant</div>
-            <div class="pg-trace-timeline"></div>
-            <div class="pg-message-text"><span class="streaming-cursor"></span></div>
-        </div>
-    `;
+    const div = pgMessageElement(
+        'assistant',
+        `<ol class="pg-live-activity" hidden></ol><div class="pg-trace-timeline"></div><div class="pg-message-text"><span class="streaming-cursor"></span></div>`,
+        ''
+    );
+    div.classList.add('is-streaming');
     container.appendChild(div);
     scrollToBottom();
     return {
@@ -2664,8 +2904,46 @@ async function compactContextWindow() {
     }
 }
 
+// A stored tool result failed when its payload says ok: false or names an error code.
+function pgToolResultFailed(traceEvent) {
+    try {
+        const payload = JSON.parse(String(traceEvent.content || ''));
+        return Boolean(payload && typeof payload === 'object' && (payload.ok === false || payload.error_code));
+    } catch (_) {
+        return false;
+    }
+}
+
+// Summarise a turn by what a person cares about: tools used, failures, model calls.
+function pgActivitySummary(events) {
+    const tools = [];
+    let failed = 0;
+    let modelCalls = 0;
+    events.forEach(function(event) {
+        const kind = String((event && event.trace_kind) || '');
+        if (kind === 'model_call') modelCalls += 1;
+        if (kind !== 'tool_result') return;
+        const name = String(event.title || '').replace(/^Tool Result:\s*/, '') || 'tool';
+        if (!tools.includes(name)) tools.push(name);
+        if (pgToolResultFailed(event)) failed += 1;
+    });
+    const parts = [];
+    if (tools.length) {
+        const shown = tools.slice(0, 3).map(escapeHtml).join(', ');
+        parts.push(`Used ${shown}${tools.length > 3 ? ` and ${tools.length - 3} more` : ''}`);
+    } else {
+        parts.push('Agent activity');
+    }
+    if (failed) parts.push(`<span class="pg-activity-failed">${failed} failed</span>`);
+    if (modelCalls) parts.push(`${modelCalls} model call${modelCalls === 1 ? '' : 's'}`);
+    return parts.join(' · ');
+}
+
 function traceOutcomeMeta(traceEvent) {
     if (!traceEvent || typeof traceEvent !== 'object') return null;
+    if (!traceEvent.outcome && traceEvent.trace_kind === 'tool_result' && pgToolResultFailed(traceEvent)) {
+        return { status: 'error', label: 'Failed' };
+    }
     const status = String(traceEvent.outcome || '').toLowerCase();
     const labels = {
         success: 'Completed',
@@ -2676,6 +2954,23 @@ function traceOutcomeMeta(traceEvent) {
         error: 'Failed',
     };
     return labels[status] ? { status, label: labels[status] } : null;
+}
+
+// Trace payloads are often JSON objects; show them as readable key: value lines.
+function formatTraceContent(content) {
+    const text = String(content || '').trim();
+    if (!text.startsWith('{')) return text;
+    try {
+        const value = JSON.parse(text);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return text;
+        return Object.entries(value).map(function(entry) {
+            const item = entry[1];
+            const rendered = item !== null && typeof item === 'object' ? JSON.stringify(item) : String(item);
+            return entry[0].replace(/_/g, ' ') + ': ' + rendered;
+        }).join('\n');
+    } catch (err) {
+        return text;
+    }
 }
 
 function appendTraceBox(traceTimeline, traceEvent) {
@@ -2717,7 +3012,7 @@ function appendTraceBox(traceTimeline, traceEvent) {
         : '';
     item.innerHTML = `
         <div class="pg-trace-title">${escapeHtml(title)}${outcomeBadge}</div>
-        <div class="pg-trace-content">${escapeHtml(content)}</div>
+        <div class="pg-trace-content">${escapeHtml(formatTraceContent(content))}</div>
     `;
     traceTimeline.appendChild(item);
     scrollToBottom();
@@ -2733,12 +3028,14 @@ function setLoading(loading) {
 
     if (loading) {
         btn.disabled = true;
-        text.textContent = 'Streaming...';
-        spinner.style.display = 'inline-block';
-        stopBtn.style.display = 'inline-block';
+        btn.style.display = 'none';
+        text.textContent = 'Sending';
+        spinner.style.display = 'none';
+        stopBtn.style.display = 'inline-flex';
         textarea.disabled = true;
     } else {
         btn.disabled = false;
+        btn.style.display = '';
         text.textContent = 'Send';
         spinner.style.display = 'none';
         stopBtn.style.display = 'none';
@@ -2820,8 +3117,10 @@ function initKbDragAndDrop() {
 // Initialize once the DOM is ready (the script is at end-of-body so elements exist)
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initKbDragAndDrop);
+    document.addEventListener('DOMContentLoaded', loadAgentPromptCache);
 } else {
     initKbDragAndDrop();
+    loadAgentPromptCache();
 }
 
 // --- Knowledge base file upload (per-file chips with cancel/undo) ---
@@ -2895,11 +3194,11 @@ function kbBubbleAppend(bubbleId, text, variant) {
         node = document.createElement('div');
         node.id = bubbleId;
         node.className = 'pg-message pg-message--system pg-kb-event';
+        node.setAttribute('role', 'status');
         node.innerHTML = `
-            <div class="pg-message-avatar">📎</div>
             <div class="pg-message-body">
-                <div class="pg-message-role">Knowledge base</div>
-                <div class="pg-message-text pg-kb-event-text"></div>
+                <span class="pg-kb-event-label">Knowledge base</span>
+                <span class="pg-message-text pg-kb-event-text"></span>
             </div>
         `;
         container.appendChild(node);
@@ -3129,6 +3428,7 @@ async function sendMessage() {
 
     appendMessage('user', query);
     queryEl.value = '';
+    pgAutosize();
     setLoading(true);
 
     const streamMessage = createStreamingMessage();
@@ -3218,6 +3518,8 @@ async function sendMessage() {
                 showStatus('Answer ready — saving conversation…');
             } else if (event.type === 'run.done') {
                 paint(true);
+                renderLastTurnCache(event.usage);
+                pgTurnFootnote(streamMessage.container, event.usage);
                 const failedWrites = Object.values(event.persistence || {}).includes('failed');
                 showStatus(event.status === 'completed'
                     ? (failedWrites ? 'Answer complete; a state write failed.' : '')
@@ -3229,6 +3531,7 @@ async function sendMessage() {
                 showStatus(event.message || String(event.stage || '').replaceAll('_', ' '));
             } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
                 showStatus((event.type === 'tool.started' ? 'Running ' : 'Finished ') + event.tool_name);
+                pgLiveActivity(streamMessage.container, event);
             } else if (event.type === 'completion.check' && !event.accepted) {
                 showStatus('Checking the answer; retrying.');
             }
@@ -3240,6 +3543,7 @@ async function sendMessage() {
             streamTarget.innerHTML = renderMarkdown(fullText);
             streamTarget.classList.add('md-rendered');
         }
+        streamMessage.container.dataset.raw = fullText;
 
     } catch (err) {
         if (err.name === 'AbortError') {
@@ -3252,11 +3556,14 @@ async function sendMessage() {
     } finally {
         if (pendingPaint !== null) cancelAnimationFrame(pendingPaint);
         currentAbortController = null;
+        streamMessage.container.classList.remove('is-streaming');
+        if (!streamMessage.container.dataset.raw) streamMessage.container.dataset.raw = fullText;
         setLoading(false);
         const activeMemoryId = (memoryEl.value || '').trim();
         if (activeMemoryId) {
             await loadThreadMessages(activeMemoryId, { renderChat: false });
         }
+        loadAgentPromptCache();
     }
 }
 
@@ -3268,8 +3575,19 @@ document.getElementById('pg-query').addEventListener('keydown', function(e) {
     }
 });
 
+initPlaygroundLayout();
 initThreadTabs();
 initTokenTooltip();
+(function() {
+    const textarea = document.getElementById('pg-query');
+    if (textarea) textarea.addEventListener('input', pgAutosize);
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape' && isStreaming) stopStreaming();
+    });
+    const meter = document.getElementById('pg-composer-meter');
+    const initial = {{ (token_stats.percentage_used|default(0) if token_stats else 0)|tojson }};
+    if (meter) meter.style.setProperty('--pg-used', Math.min(100, Number(initial) || 0) + '%');
+})();
 
 // Render markdown for server-rendered assistant messages
 document.querySelectorAll('.pg-message-text[data-md-raw]').forEach(function(el) {

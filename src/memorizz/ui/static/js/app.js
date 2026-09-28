@@ -42,7 +42,7 @@ function initializeMemorizzUI() {
         },
     };
 
-    function setSidebarCollapsed(isCollapsed) {
+    function setSidebarCollapsed(isCollapsed, persist = true) {
         body.classList.toggle("sidebar-collapsed", isCollapsed);
         if (sidebarToggleBtn) {
             sidebarToggleBtn.innerHTML = `<span class="sidebar-toggle-icon" id="sidebar-toggle-icon" aria-hidden="true">${isCollapsed ? iconMarkup.sidebarExpand : iconMarkup.sidebarCollapse}</span>`;
@@ -55,7 +55,9 @@ function initializeMemorizzUI() {
                 isCollapsed ? "Expand navigation" : "Collapse navigation"
             );
         }
-        storage.set(storageKeys.sidebarCollapsed, isCollapsed ? "1" : "0");
+        if (persist) {
+            storage.set(storageKeys.sidebarCollapsed, isCollapsed ? "1" : "0");
+        }
     }
 
     function setLightMode(enabled) {
@@ -73,12 +75,48 @@ function initializeMemorizzUI() {
         setLightMode(!body.classList.contains("theme-light"));
     }
 
+    // Full-screen workspaces (the agent playground) keep their own navigation
+    // state and start collapsed, so the global preference is left untouched.
+    const sidebarScope = body.dataset.sidebarScope;
+    if (sidebarScope) {
+        storageKeys.sidebarCollapsed = storageKeys.sidebarCollapsed + "." + sidebarScope;
+    }
+    // Phones open the full navigation as a drawer, so the icon-only preference
+    // is neither applied nor overwritten there.
+    const phoneQuery = window.matchMedia("(max-width: 768px)");
     const savedSidebarState = storage.get(storageKeys.sidebarCollapsed);
-    if (savedSidebarState === "1") {
+    if (phoneQuery.matches) {
+        setSidebarCollapsed(false, false);
+    } else if (savedSidebarState === "1" || (savedSidebarState === null && body.dataset.sidebarDefault === "collapsed")) {
         setSidebarCollapsed(true);
     } else {
         setSidebarCollapsed(false);
     }
+
+    const mobileNavToggle = document.getElementById("mobile-nav-toggle");
+    function setMobileNavOpen(open) {
+        body.classList.toggle("mobile-nav-open", open);
+        if (mobileNavToggle) {
+            mobileNavToggle.setAttribute("aria-expanded", open ? "true" : "false");
+            mobileNavToggle.setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
+        }
+    }
+    if (mobileNavToggle) {
+        mobileNavToggle.addEventListener("click", function() {
+            setMobileNavOpen(!body.classList.contains("mobile-nav-open"));
+        });
+    }
+    document.querySelectorAll("[data-mobile-nav-close], .sidebar a").forEach(function(el) {
+        el.addEventListener("click", function() {
+            setMobileNavOpen(false);
+        });
+    });
+    document.addEventListener("keydown", function(event) {
+        if (event.key === "Escape" && body.classList.contains("mobile-nav-open")) {
+            setMobileNavOpen(false);
+            if (mobileNavToggle) mobileNavToggle.focus();
+        }
+    });
 
     const savedLightMode = storage.get(storageKeys.lightMode);
     if (savedLightMode === "1") {
@@ -680,3 +718,22 @@ if (document.readyState === "loading") {
 } else {
     initializeMemorizzUI();
 }
+
+// Click-to-copy for identifiers rendered with the id_chip macro ([data-copy]).
+document.addEventListener("click", async (event) => {
+    const chip = event.target.closest("[data-copy]");
+    if (!chip) return;
+    event.preventDefault();
+    try {
+        await navigator.clipboard.writeText(chip.dataset.copy);
+    } catch (err) {
+        return;
+    }
+    const label = chip.getAttribute("title") || "";
+    chip.classList.add("is-copied");
+    chip.setAttribute("title", "Copied");
+    setTimeout(() => {
+        chip.classList.remove("is-copied");
+        chip.setAttribute("title", label);
+    }, 1200);
+});

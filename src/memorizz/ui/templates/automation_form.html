@@ -1,13 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}{{ form_title }} - Memorizz{% endblock %}
+{% block title %}{{ form_title|capitalize }} - Memorizz{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <a href="/automations{% if agent_id %}?agent_id={{ agent_id }}{% endif %}" class="back-link">← Back to Automations</a>
-    <h1>{{ form_title }}</h1>
-    <p>Create durable scheduled jobs that run via the automations worker.</p>
-</div>
+{% from '_ui.html' import page_header, id_chip %}
+{% set back_url = '/automations' ~ ('?agent_id=' ~ agent_id if agent_id else '') %}
+{{ page_header(form_title|capitalize, 'Choose an agent, a schedule and the query to run. A worker runs the job at each scheduled time and records the result.', 'Execution', back=(back_url, 'All automations')) }}
 
 {% if error %}
 <div class="error-message">
@@ -15,18 +13,12 @@
 </div>
 {% endif %}
 
-<form method="post" action="{{ form_action }}" class="agent-form">
-    {% if is_edit %}
-    <div class="detail-section">
-        <h2>Job ID</h2>
-        <div class="form-group">
-            <code class="agent-id-display">{{ job_id }}</code>
+<form method="post" action="{{ form_action }}" class="automation-form">
+    <section class="panel" aria-labelledby="automation-basics-title">
+        <div class="panel-header">
+            <h2 class="panel-title" id="automation-basics-title">Basics</h2>
+            {% if is_edit %}<span class="panel-meta">Job ID {{ id_chip(job_id, 40) }}</span>{% endif %}
         </div>
-    </div>
-    {% endif %}
-
-    <div class="detail-section">
-        <h2>Basics</h2>
         <div class="form-grid">
             <div class="form-group">
                 <label for="automation-agent-id">Agent</label>
@@ -37,7 +29,7 @@
                     {% endfor %}
                 </select>
                 {% if is_edit %}
-                <p class="form-hint">Agent cannot be changed after creation.</p>
+                <p class="form-hint">You can't change the agent after creating the job.</p>
                 {% endif %}
             </div>
             <div class="form-group">
@@ -51,38 +43,35 @@
                 </label>
             </div>
         </div>
-    </div>
+    </section>
 
-    <details class="detail-section collapsible-section" open>
-        <summary class="section-toggle">
-            <h2>Schedule</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel" open>
+        <summary>Schedule</summary>
         <div class="section-body">
             <div class="form-grid">
                 <div class="form-group">
-                    <label for="automation-schedule-preset">Quick Schedule</label>
+                    <label for="automation-schedule-preset">Quick schedule</label>
                     <select id="automation-schedule-preset" onchange="applySchedulePreset(this.value)">
-                        <option value="">Custom...</option>
+                        <option value="">Custom…</option>
                         <option value="every_30_min">Every 30 minutes</option>
                         <option value="every_hour">Every hour</option>
-                        <option value="every_day">Every day at...</option>
-                        <option value="every_weekday">Every weekday (Mon-Fri) at...</option>
-                        <option value="every_monday">Every Monday at...</option>
+                        <option value="every_day">Every day at…</option>
+                        <option value="every_weekday">Every weekday (Mon–Fri) at…</option>
+                        <option value="every_monday">Every Monday at…</option>
                         <option value="once_now">Run once (now)</option>
                     </select>
-                    <p class="form-hint">Pick a common schedule or choose "Custom..." to configure manually below.</p>
+                    <p class="form-hint">Pick a common schedule, or choose Custom to set the fields below yourself.</p>
                 </div>
                 <div id="schedule-time-picker" class="form-group" style="display: none;">
-                    <label>Time</label>
-                    <div style="display: flex; gap: 6px; align-items: center;">
-                        <select id="schedule-hour" onchange="updateCronFromPicker()" style="width: auto;">
+                    <label for="schedule-hour">Time</label>
+                    <div class="automation-time-picker">
+                        <select id="schedule-hour" aria-label="Hour" onchange="updateCronFromPicker()">
                             {% for h in range(24) %}
                             <option value="{{ h }}" {% if h == 9 %}selected{% endif %}>{{ '%02d'|format(h) }}</option>
                             {% endfor %}
                         </select>
                         <span>:</span>
-                        <select id="schedule-minute" onchange="updateCronFromPicker()" style="width: auto;">
+                        <select id="schedule-minute" aria-label="Minute" onchange="updateCronFromPicker()">
                             <option value="0" selected>00</option>
                             <option value="15">15</option>
                             <option value="30">30</option>
@@ -95,25 +84,25 @@
                 <div class="form-group">
                     <label for="automation-schedule-type">Type</label>
                     <select id="automation-schedule-type" name="schedule_type">
-                        <option value="cron" {% if schedule_type == 'cron' %}selected{% endif %}>cron</option>
-                        <option value="interval" {% if schedule_type == 'interval' %}selected{% endif %}>interval</option>
-                        <option value="one_shot" {% if schedule_type == 'one_shot' %}selected{% endif %}>one_shot</option>
+                        <option value="cron" {% if schedule_type == 'cron' %}selected{% endif %}>Cron</option>
+                        <option value="interval" {% if schedule_type == 'interval' %}selected{% endif %}>Interval</option>
+                        <option value="one_shot" {% if schedule_type == 'one_shot' %}selected{% endif %}>One-shot</option>
                     </select>
                 </div>
                 <div class="form-group">
-                    <label for="automation-cron-expr">Cron Expr (5-field)</label>
+                    <label for="automation-cron-expr">Cron expression</label>
                     <input id="automation-cron-expr" name="cron_expr" type="text" value="{{ cron_expr }}" placeholder="0 9 * * *">
-                    <p class="form-hint">Format: minute hour day month dow (e.g. 0 9 * * *).</p>
+                    <p class="form-hint">Five fields: minute, hour, day of month, month, day of week. For example, <code>0 9 * * *</code> runs daily at 09:00.</p>
                 </div>
                 <div class="form-group">
-                    <label for="automation-interval-seconds">Interval Seconds</label>
+                    <label for="automation-interval-seconds">Interval (seconds)</label>
                     <input id="automation-interval-seconds" name="interval_seconds" type="number" min="1" value="{{ interval_seconds }}" placeholder="3600">
-                    <p class="form-hint">Used when schedule type is interval.</p>
+                    <p class="form-hint">Used when the type is Interval.</p>
                 </div>
                 <div class="form-group">
                     <label for="automation-timezone">Timezone</label>
                     <input id="automation-timezone" name="timezone" type="text" value="{{ timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
-                    <p class="form-hint">IANA timezone name. Used for cron evaluation and template variables.</p>
+                    <p class="form-hint">IANA timezone name, used to evaluate cron schedules and fill template variables.</p>
                 </div>
             </div>
         </div>
@@ -225,34 +214,28 @@
     });
     </script>
 
-    <details class="detail-section collapsible-section" open>
-        <summary class="section-toggle">
-            <h2>Action</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel" open>
+        <summary>Action</summary>
         <div class="section-body">
             <div class="form-group">
-                <label for="automation-query-template">Agent Query Template</label>
+                <label for="automation-query-template">Query template</label>
                 <textarea id="automation-query-template" name="query_template" rows="5" placeholder="Send me today's top 10 stocks...">{{ query_template }}</textarea>
-                <p class="form-hint">Variables: {today_iso}, {scheduled_for_iso}, {now_utc_iso}, {timezone}.</p>
+                <p class="form-hint">The message sent to the agent on each run. Available variables: <code>{today_iso}</code>, <code>{scheduled_for_iso}</code>, <code>{now_utc_iso}</code>, <code>{timezone}</code>.</p>
             </div>
             <div class="form-group">
-                <label for="automation-memory-id">Memory ID (optional)</label>
-                <input id="automation-memory-id" name="memory_id" type="text" value="{{ memory_id }}" placeholder="Leave blank to auto-generate">
+                <label for="automation-memory-id">Memory ID <span class="optional">optional</span></label>
+                <input id="automation-memory-id" name="memory_id" type="text" value="{{ memory_id }}" placeholder="Leave blank to generate one">
             </div>
         </div>
     </details>
 
-    <details class="detail-section collapsible-section">
-        <summary class="section-toggle">
-            <h2>Delivery</h2>
-            <span class="toggle-caret">▾</span>
-        </summary>
+    <details class="panel">
+        <summary>Delivery</summary>
         <div class="section-body">
             <div class="form-group">
                 <label for="automation-delivery-channel">Channel</label>
                 <select id="automation-delivery-channel" name="delivery_channel" onchange="toggleDeliveryFields(this.value)">
-                    <option value="in_chat" {% if not delivery_channel or delivery_channel == 'in_chat' %}selected{% endif %}>In Chat (default)</option>
+                    <option value="in_chat" {% if not delivery_channel or delivery_channel == 'in_chat' %}selected{% endif %}>In chat (default)</option>
                     <option value="whatsapp_twilio" {% if delivery_channel == 'whatsapp_twilio' %}selected{% endif %}>WhatsApp (Twilio)</option>
                 </select>
                 <p id="delivery-hint-in-chat" class="form-hint" {% if delivery_channel == 'whatsapp_twilio' %}style="display:none;"{% endif %}>
@@ -261,9 +244,9 @@
             </div>
             <div id="delivery-whatsapp-fields" {% if not delivery_channel or delivery_channel != 'whatsapp_twilio' %}style="display:none;"{% endif %}>
                 <div class="form-group">
-                    <label for="automation-whatsapp-to">WhatsApp Recipients (Twilio)</label>
+                    <label for="automation-whatsapp-to">WhatsApp recipients</label>
                     <textarea id="automation-whatsapp-to" name="whatsapp_to" rows="4" placeholder="whatsapp:+15551234567&#10;whatsapp:+15557654321">{{ whatsapp_to }}</textarea>
-                    <p class="form-hint">One per line or comma-separated. The worker uses TWILIO_* env vars for delivery.</p>
+                    <p class="form-hint">One per line or comma-separated. The worker sends through Twilio using the <code>TWILIO_*</code> environment variables.</p>
                 </div>
             </div>
         </div>
@@ -283,8 +266,23 @@
     }
     </script>
 
-    <div class="config-actions">
-        <button type="submit" class="btn btn-primary">{% if is_edit %}Save Changes{% else %}Create Automation{% endif %}</button>
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary">{% if is_edit %}Save changes{% else %}Create automation{% endif %}</button>
+        <a class="btn" href="{{ back_url }}">Cancel</a>
     </div>
 </form>
+
+<style>
+.automation-form .section-body > * + * {
+    margin-top: var(--console-gap);
+}
+.automation-time-picker {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.automation-time-picker select {
+    width: auto;
+}
+</style>
 {% endblock %}

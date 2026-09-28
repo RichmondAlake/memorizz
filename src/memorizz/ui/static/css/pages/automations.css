@@ -1,0 +1,285 @@
+/* Automations: job monitor grid, detail pane with controls, latest results.
+   Loaded before console.css, so overrides carry one extra class. */
+
+.fleet-health.fleet-health--active { color: var(--accent-primary); }
+.ax-muted { color: var(--text-muted); }
+
+/* ---------- Grid ---------- */
+
+/* The name absorbs spare width and truncates first, so the grid never scrolls. */
+.ax .fleet-table .ax-name {
+    width: 100%;
+    max-width: 0;
+    min-width: 120px;
+}
+
+.ax .fleet-table td.ax-col-agent {
+    max-width: 180px;
+    overflow: hidden;
+    color: var(--text-secondary);
+    text-overflow: ellipsis;
+}
+
+.ax .fleet-table td.ax-col-schedule {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.ax .fleet-table tbody td.num {
+    font-size: 12px;
+}
+
+.ax-when {
+    margin-left: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.ax-strip {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 16px;
+    vertical-align: middle;
+}
+
+.ax-tick {
+    display: block;
+    width: 4px;
+    height: 14px;
+    border-radius: 1px;
+    background: var(--text-muted);
+    opacity: 0.6;
+}
+
+.ax-tick--good { background: var(--accent-secondary); opacity: 1; }
+.ax-tick--bad { background: var(--accent-danger); opacity: 1; }
+.ax-tick--active { background: var(--accent-primary); opacity: 1; }
+
+.ax .ax-flat {
+    width: 58px;
+}
+
+@container (max-width: 820px) {
+    .ax .fleet-id { display: none; }
+}
+
+@container (max-width: 860px) {
+    .ax-col-recent { display: none; }
+}
+
+@container (max-width: 770px) {
+    .ax-col-status { display: none; }
+}
+
+@container (max-width: 700px) {
+    .ax-col-schedule { display: none; }
+}
+
+@container (max-width: 560px) {
+    .ax-col-agent { display: none; }
+}
+
+@container (max-width: 420px) {
+    .ax .ax-when { display: none; }
+    .ax .fleet-table tbody td,
+    .ax .fleet-table tbody th { padding: 0 6px; }
+}
+
+/* ---------- Latest results under the grid ---------- */
+
+.panel.ax-results {
+    margin: 0;
+    padding: 14px 16px;
+}
+
+.panel.ax-results .panel-header {
+    margin-bottom: 8px;
+}
+
+.panel.ax-results .panel-title {
+    font-size: 14px;
+}
+
+.ax-results-list {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.ax-results-list li {
+    display: grid;
+    grid-template-columns: 10px 64px minmax(80px, max-content) minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-height: 32px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 12.5px;
+}
+
+.ax-results-list li:last-child {
+    border-bottom: 0;
+}
+
+.ax-results-list .fleet-health {
+    gap: 0;
+}
+
+.ax-results-list .ax-when {
+    margin: 0;
+}
+
+.ax-result-name {
+    max-width: 240px;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-weight: 500;
+    text-decoration: none;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ax-result-name:hover {
+    color: var(--accent-primary);
+}
+
+.ax-result-text {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---------- Detail pane ---------- */
+
+.ax .fleet-detail-actions form {
+    margin: 0;
+}
+
+.fleet-stats small.ax-of {
+    display: inline;
+    color: var(--text-muted);
+}
+
+.ax-latest-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.ax .ax-output,
+.ax .ax-query {
+    max-height: 220px;
+    font-family: inherit;
+    font-size: 12.5px;
+}
+
+.ax .ax-output--error {
+    color: var(--accent-danger);
+}
+
+.ax .ax-note {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.ax-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: -4px 0 0;
+}
+
+.ax-runs {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.ax-runs li {
+    display: grid;
+    grid-template-columns: 10px 64px 56px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.ax-runs .fleet-health {
+    gap: 0;
+}
+
+.ax-runs .mono,
+.ax-runs .num {
+    font-family: var(--console-mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.ax-run-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ax .fleet-config dd {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.ax .fleet-config dd.mono {
+    font-size: 12px;
+}
+
+.automation-delete {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.automation-delete label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+@media (max-width: 640px) {
+    .ax-results-list li {
+        grid-template-columns: 10px 56px minmax(0, 1fr);
+        padding: 6px 0;
+    }
+
+    .ax-result-text {
+        grid-column: 2 / -1;
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+    }
+
+    .ax-result-name {
+        max-width: none;
+    }
+}
+
+@media (max-width: 640px) {
+    /* Tape labels stay on one line; the tape scrolls sideways instead. */
+    .fleet-tape > div > span {
+        white-space: nowrap;
+    }
+}

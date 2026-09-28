@@ -390,3 +390,19 @@ class TestEvalground:
         assert snapshot["tools"] == []
         assert snapshot["mcp_servers"] == []
         assert snapshot["continual_learning"] is False
+
+
+@pytest.mark.unit
+def test_duplicate_agent_records_collapse_to_one_with_the_most_memories():
+    from memorizz.ui.helpers import _unique_agents
+
+    records = [
+        {"agent_id": "assistant", "name": "A", "memory_ids": []},
+        {"agent_id": "assistant", "name": "A", "memory_ids": ["m1", "m2"]},
+        {"agent_id": "other", "name": "B", "memory_ids": []},
+        {"agent_id": "assistant", "name": "A", "memory_ids": ["m1"]},
+    ]
+    agents, copies = _unique_agents(records)
+    assert [a["agent_id"] for a in agents] == ["assistant", "other"]
+    assert agents[0]["memory_ids"] == ["m1", "m2"]
+    assert copies == {"assistant": 3, "other": 1}

@@ -204,11 +204,11 @@ class TestWorkflowClassesPage:
     def test_sidebar_exposes_continual_learning_navigation(self, client, connected):
         page = client.get("/memory/workflows").text
 
-        assert "<span>Continual Learning</span>" in page
+        assert "<span>Continual learning</span>" in page
         assert '<a href="/memory/workflows"' in page
-        assert "<span>Workflow Trajectories</span>" in page
+        assert "<span>Workflow trajectories</span>" in page
         assert '<a href="/memory/skills"' in page
-        assert "<span>Learned Skills</span>" in page
+        assert "<span>Learned skills</span>" in page
 
     @pytest.mark.unit
     def test_groups_runs_into_classes_with_gate_status(self, client, connected):
@@ -237,7 +237,7 @@ class TestWorkflowClassesPage:
         _seed_workflows(connected, 5, promoted_skill_id="skill-1")
         _seed_skill(connected, "active", skill_id="skill-1")
         page = client.get("/memory/workflows").text
-        assert "PROMOTED" in page
+        assert "Promoted" in page
         assert "suppressed" in page
         assert "Distill now" not in page
 
@@ -261,7 +261,7 @@ class TestPromotionActions:
         # Report panel shows the promotion; source runs are now suppressed.
         page = client.get("/memory/workflows").text
         assert "Promoted skill" in page
-        assert "PROMOTED" in page
+        assert "Promoted" in page
 
     @pytest.mark.unit
     def test_distill_now_still_enforces_gates(self, client, connected):
@@ -299,7 +299,7 @@ class TestSkillLifecycleActions:
             injection_role="developer",
         )
         page = client.get("/memory/skills").text
-        assert "SHADOW" in page
+        assert "Shadow" in page
         assert "authority: developer" in page
         assert "Activate as developer" in page
         assert "Demote" not in page  # only ACTIVE skills can be demoted
@@ -307,7 +307,7 @@ class TestSkillLifecycleActions:
         assert "12 passive observations" in page
         assert "trajectory match 83%" in page
         assert "matched success 90%" in page
-        assert "READY TO REVIEW" in page
+        assert "Ready to review" in page
         assert "last evaluated 2026-07-19T12:00" in page
 
     @pytest.mark.unit

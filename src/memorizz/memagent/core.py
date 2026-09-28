@@ -63,6 +63,7 @@ from ..long_term.semantic.entity_memory import EntityAttributeInput, EntityRelat
 from ..observability.analytics import MEMORY_FIELDS
 from ..observability.analytics import memory_type as usage_memory_type
 from ..observability.pricing import DEFAULT_PRICING, PRICING_FIELDS
+from ..observability.prompt_cache import add_call_usage
 from ..streaming import (
     StreamCancelled,
     check_cancelled,
@@ -78,6 +79,7 @@ from ..tooling import (
     ToolResult,
     ToolResultPolicy,
     governed_tool,
+    invocation_error_code,
     normalize_tool_result,
     serialize_tool_result,
     tool_metadata_to_openai,
@@ -261,6 +263,7 @@ class MemAgent:
     _last_selection_ledger = _ContextLocal(list)
     _last_memory_context_evidence = _ContextLocal(dict)
     _memory_usage_chars = _ContextLocal(dict)
+    _run_usage = _ContextLocal(dict)
     _rendered_persona_chars = _ContextLocal(lambda: 0)
     _last_memory_attribution_context = _ContextLocal()
     _thread_ids_by_memory = _ContextLocal(dict)
@@ -532,6 +535,12 @@ class MemAgent:
         self._current_memory_id = None
         self._current_user_id: Optional[str] = None
         self._thread_ids_by_memory: Dict[str, str] = {}
+        # Instance-wide memory -> thread fallback. The context-local map above
+        # isolates concurrent runs, but a streamed run executes in a worker
+        # context whose updates never reach the caller, so without this each
+        # streamed turn started a new thread and loaded no history.
+        self._last_thread_by_memory: Dict[str, str] = {}
+        self._thread_map_lock = threading.Lock()
 
         # Initialize LLM. We stash any construction error on the instance
         # so the chat endpoints can surface the real cause (e.g. "model not
@@ -666,6 +675,7 @@ class MemAgent:
             },
             max_invocations_per_turn=self.context_policy.max_tool_invocations_per_turn,
             max_attempts_per_call=self.context_policy.max_tool_attempts_per_call,
+            sticky_limit=self.context_policy.sticky_tool_limit,
         )
         self._register_context_monitor_tools()
         self._register_knowledge_base_tools()
@@ -4022,10 +4032,11 @@ class MemAgent:
         if requested_thread_id:
             resolved_thread_id = requested_thread_id
         else:
-            resolved_thread_id = self._thread_ids_by_memory.get(resolved_memory_id)
+            resolved_thread_id = self._known_thread_id(resolved_memory_id)
             if not resolved_thread_id:
                 resolved_thread_id = str(uuid.uuid4())
                 logger.debug("Started new thread: %s", resolved_thread_id)
+        self._remember_thread(resolved_memory_id, resolved_thread_id)
 
         # ContextVars copy values when an asyncio task is spawned. Copy before
         # mutation so sibling tasks never share the same inherited dict.
@@ -4120,6 +4131,7 @@ class MemAgent:
         self._last_tool_outcomes = []
         self._last_memory_context_evidence = {}
         self._memory_usage_chars = {}
+        self._run_usage = {}
         self._last_selection_ledger = []
         self._last_memory_attribution_context = None
         self._last_trace_context = self._trace_identity_payload()
@@ -4946,6 +4958,8 @@ class MemAgent:
             model_metadata.update(pricing.quote(model_metadata))
         except Exception:
             logger.debug("Usage pricing unavailable", exc_info=True)
+        if error is None:
+            add_call_usage(self._run_usage, model_metadata)
         self._emit_stream_event(
             "trace",
             {
@@ -5005,6 +5019,56 @@ class MemAgent:
                 error=error,
                 response_metadata=response_metadata,
             )
+
+    # Extra attempts after a dropped provider connection (see below).
+    TRANSIENT_STREAM_RETRIES = 2
+
+    def _stream_with_transient_retry(
+        self, make_stream, *, public: bool
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Re-send a model request whose stream dropped, never duplicating output.
+
+        Events pass through as they arrive, so streaming latency and progress
+        are unchanged. A retry happens only before any public answer text and
+        before a terminal event (so no tool runs twice). A ``stream_reset``
+        event tells the caller to discard what it buffered from the failed
+        attempt. Each attempt is traced as its own model call.
+        """
+        from ..llms.streaming import is_transient_stream_error
+
+        for attempt in range(self.TRANSIENT_STREAM_RETRIES + 1):
+            delivered = terminal = False
+            stream = make_stream()
+            try:
+                for event in stream:
+                    kind = event.get("type")
+                    delivered = delivered or (public and kind == "content")
+                    terminal = terminal or kind in {"done", "tool_calls"}
+                    yield event
+            except Exception as exc:
+                if (
+                    delivered
+                    or terminal
+                    or attempt == self.TRANSIENT_STREAM_RETRIES
+                    or not is_transient_stream_error(exc)
+                ):
+                    raise
+                session = session_for(self)
+                if session is not None:
+                    session.emit(
+                        "status",
+                        stage="provider_retry",
+                        attempt=attempt + 1,
+                        error_code=type(exc).__name__[:80],
+                    )
+                time.sleep(min(4.0, 0.5 * 2**attempt))
+                yield {"type": "stream_reset"}
+                continue
+            finally:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
+            return
 
     def _generate_stream_with_trace(
         self,
@@ -6829,7 +6893,11 @@ class MemAgent:
             return None
         router = getattr(self, "semantic_tool_router", None)
         if router is not None:
-            tools = router.schemas_for_turn(query, user_id=user_id)
+            # Tools render before the system prompt in the cached prefix, and
+            # that prefix is shared by every conversation with this agent.
+            tools = router.schemas_for_turn(
+                query, user_id=user_id, cache_scope=self.agent_id or "anon"
+            )
             return tools or None
         tools = [
             schema
@@ -6840,26 +6908,32 @@ class MemAgent:
         return tools or None
 
     def _set_provider_cache_scope(self) -> None:
-        """Give the LLM provider a stable per-thread prompt-cache key.
+        """Give the LLM provider a stable per-conversation prompt-cache key.
 
         OpenAI routes requests to cache shards by prefix-hash + this key;
-        pinning it to the conversation thread keeps every turn of a thread on
-        the same shard. Providers without ``set_prompt_cache_key`` (Anthropic,
+        pinning it to the conversation keeps every turn on the same shard.
+        Providers without ``set_prompt_cache_key`` (Anthropic,
         Ollama, local servers) are silently skipped.
         """
         setter = getattr(self.model, "set_prompt_cache_key", None)
         if not callable(setter):
             return
         try:
-            setter(
-                "memorizz:{agent}:{memory}:{thread}".format(
-                    agent=self.agent_id or "anon",
-                    memory=self._current_memory_id or "default",
-                    thread=self._current_thread_id or "main",
-                )
-            )
+            setter(self._prompt_cache_scope())
         except Exception as exc:
             logger.debug("Failed to set prompt cache key: %s", exc)
+
+    def _prompt_cache_scope(self) -> str:
+        """Identify the conversation whose prompt prefix should stay reusable.
+
+        Keyed by memory, not thread: a streamed run that omits ``thread_id``
+        starts a new thread every turn, which would rotate the key on each
+        request of the same conversation.
+        """
+        return "memorizz:{agent}:{memory}".format(
+            agent=self.agent_id or "anon",
+            memory=self._current_memory_id or "default",
+        )
 
     def _persist_workflow_run(self, workflow) -> bool:
         """Store a captured workflow and feed the continual-learning loop.
@@ -7213,7 +7287,7 @@ class MemAgent:
                 except (LookupError, PermissionError, TypeError, ValueError) as exc:
                     result = {
                         "ok": False,
-                        "error_code": "invalid_tool_invocation",
+                        "error_code": invocation_error_code(exc),
                         "error": str(exc),
                     }
                     error_message = str(exc)
@@ -7230,7 +7304,7 @@ class MemAgent:
                 except (LookupError, PermissionError, TypeError, ValueError) as exc:
                     result = {
                         "ok": False,
-                        "error_code": "invalid_tool_invocation",
+                        "error_code": invocation_error_code(exc),
                         "error": str(exc),
                     }
                     error_message = str(exc)
@@ -7602,16 +7676,25 @@ class MemAgent:
                     stage="answer_generation" if final_phase else "tool_phase",
                     attempt=iteration + 1,
                 )
-                provider = self._generate_stream_with_trace(
-                    _to_jsonable(messages),
-                    tools=None if final_phase else tools,
-                    iteration=iteration + 1,
-                    stage="agent_stream",
+                request_messages = _to_jsonable(messages)
+                phase_tools = None if final_phase else tools
+                provider = self._stream_with_transient_retry(
+                    lambda: self._generate_stream_with_trace(
+                        request_messages,
+                        tools=phase_tools,
+                        iteration=iteration + 1,
+                        stage="agent_stream",
+                    ),
+                    public=session.mode == "final_stream" and final_phase,
                 )
                 try:
                     for event in provider:
                         check_cancelled()
                         kind = event.get("type")
+                        if kind == "stream_reset":
+                            # The provider stream dropped and is being re-sent.
+                            pending.clear()
+                            continue
                         if kind == "content":
                             delta = event.get("content", "")
                             pending.append(delta)
@@ -7818,13 +7901,22 @@ class MemAgent:
                 messages = _to_jsonable(messages)
                 pending_content: List[str] = []
                 iteration_had_tool_calls = False
-                for event in self._generate_stream_with_trace(
-                    messages,
-                    tools=tools,
-                    iteration=iteration + 1,
-                    stage="agent_stream",
+                request_messages = messages
+                for event in self._stream_with_transient_retry(
+                    lambda: self._generate_stream_with_trace(
+                        request_messages,
+                        tools=tools,
+                        iteration=iteration + 1,
+                        stage="agent_stream",
+                    ),
+                    # Without a completion gate, text goes straight to the caller.
+                    public=not gate_enabled,
                 ):
                     event_type = event.get("type")
+                    if event_type == "stream_reset":
+                        # The provider stream dropped and is being re-sent.
+                        pending_content.clear()
+                        continue
                     if event_type == "content":
                         content_chunk = event.get("content", "")
                         if gate_enabled:
@@ -9893,6 +9985,31 @@ class MemAgent:
         self._current_thread_id = None
         self._current_memory_id = None
         self._thread_ids_by_memory = {}
+        with self._thread_map_lock:
+            self._last_thread_by_memory.clear()
+
+    def _known_thread_id(self, memory_id: str) -> Optional[str]:
+        """Return the thread this agent last used for a memory, if any."""
+        thread = self._thread_ids_by_memory.get(memory_id)
+        if thread:
+            return thread
+        lock = getattr(self, "_thread_map_lock", None)
+        shared = getattr(self, "_last_thread_by_memory", None)
+        if lock is None or shared is None:
+            return None
+        with lock:
+            return shared.get(memory_id)
+
+    def _remember_thread(self, memory_id: str, thread_id: str) -> None:
+        lock = getattr(self, "_thread_map_lock", None)
+        shared = getattr(self, "_last_thread_by_memory", None)
+        if lock is None or shared is None:
+            return
+        with lock:
+            shared.pop(memory_id, None)
+            shared[memory_id] = thread_id
+            while len(shared) > 4096:
+                shared.pop(next(iter(shared)))
         logger.info("Reset thread state")
 
     @staticmethod
@@ -9996,6 +10113,16 @@ class MemAgent:
             "domains": sorted(domains),
             "tags": sorted(set(tags)),
         }
+
+    def get_last_run_usage(self) -> Dict[str, Any]:
+        """Return provider-reported usage summed over the last run's model calls.
+
+        Covers every tool-loop iteration in the current context, not just the
+        final call: token totals, provider prompt-cache reads and writes, the
+        calls that read from the cache, and the cached share of input tokens.
+        Empty when no model call has completed.
+        """
+        return dict(self._run_usage)
 
     def semantic_cache_stats(self) -> Dict[str, Any]:
         """Return real hit/miss/bypass/write/eviction counters and provenance."""
@@ -10428,6 +10555,8 @@ class MemAgent:
             self._current_memory_id = None
             self._current_thread_id = None
             self._thread_ids_by_memory.clear()
+            with self._thread_map_lock:
+                self._last_thread_by_memory.clear()
 
             logger.info(f"Deleted all memory for agent {self.agent_id}")
             return True

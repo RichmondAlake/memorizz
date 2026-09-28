@@ -1,106 +1,283 @@
 {% extends "base.html" %}
 
-{% block title %}Workflows - Memorizz{% endblock %}
+{% block title %}Workflow trajectories - Memorizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="learning" data-sidebar-default="collapsed"{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/learning.css?v=11">{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Workflow Memory</h1>
-    <p>{{ total_workflows }} run{% if total_workflows != 1 %}s{% endif %} grouped into trajectory classes — repeated, successful classes can be distilled into learned skills</p>
+{% from '_ui.html' import page_header, page_tabs, empty_state, id_chip %}
+{% set s = view.summary %}
+{% set short_status = {'ready': 'Ready', 'failing': 'Failing', 'evidence': 'Needs evidence', 'promoted': 'Promoted'} %}
+{% set status_pill = {'ready': 'pill--success', 'failing': 'pill--danger', 'evidence': '', 'promoted': 'pill--info'} %}
+{% call page_header('Workflow trajectories', 'Tool runs grouped into trajectory classes, one tool path per agent. A class that meets all four promotion criteria can be distilled into a learned skill.', 'Continual learning', nav=page_tabs(learning_tabs, 'workflows', 'Continual learning views')) %}
+    <a class="btn" href="/memory/skills">View learned skills</a>
+{% endcall %}
+
+{% if view.agents %}
+{% for agent in view.reports %}
+{% set report = agent.report %}
+<section class="panel lw-report" role="status" aria-labelledby="lw-report-{{ loop.index }}">
+    <div class="lw-report-head">
+        <h2 class="panel-title" id="lw-report-{{ loop.index }}">Last promotion report</h2>
+        <span class="panel-meta">{{ agent.label }}{% if agent.short and agent.label != agent.short %} <span class="mono">{{ agent.short }}</span>{% endif %} · <span class="mono">{{ report.at }}</span></span>
+    </div>
+    <ul class="lw-report-list">
+        {% if report.promoted %}
+        <li class="is-good">Promoted skill{{ 's' if report.promoted|length != 1 }}: {{ report.promoted|join(', ') }}. <a href="/memory/skills">Review on the learned skills page</a></li>
+        {% endif %}
+        {% for item in report.rejected %}
+        <li class="is-bad">Rejected <span class="mono">{{ item.hash }}…</span>: {{ item.reasons|join('; ') }}</li>
+        {% endfor %}
+        {% for item in report.skipped %}
+        <li>Skipped <span class="mono">{{ item.hash }}…</span>: {{ item.reason }}</li>
+        {% endfor %}
+        {% for flag in report.review_flags %}
+        <li class="is-warn">Needs review: {{ flag }}</li>
+        {% endfor %}
+        {% if not report.promoted and not report.rejected and not report.skipped and not report.review_flags %}
+        <li>No trajectory classes were eligible this cycle.</li>
+        {% endif %}
+    </ul>
+</section>
+{% endfor %}
+
+<div class="fleet-tape" role="list" aria-label="Trajectory summary">
+    <div role="listitem"><span>Recorded runs</span><strong>{{ '{:,}'.format(s.runs) }}</strong></div>
+    <div role="listitem"><span>Trajectory classes</span><strong>{{ s.classes }}</strong></div>
+    <div role="listitem"><span>Agents</span><strong>{{ s.agents }}</strong></div>
+    <div role="listitem"><span>Ready to distill</span><strong class="{{ 'is-good' if s.ready else '' }}">{{ s.ready }}</strong></div>
+    <div role="listitem"><span>Promoted</span><strong>{{ s.promoted }}</strong></div>
+    <div role="listitem"><span>Failing</span><strong class="{{ 'is-bad' if s.failing else '' }}">{{ s.failing }}</strong></div>
+    <div role="listitem"><span>Success</span><strong class="{{ s.success_tone }}">{{ s.success_rate }}</strong></div>
+    <div role="listitem"><span>Newest run</span><strong{% if s.newest %} title="{{ s.newest }}"{% endif %}>{{ s.newest_ago }}</strong></div>
 </div>
 
-{% if agent_sections %}
-{% for section in agent_sections %}
-<div class="cl-agent-section">
-    <div class="cl-agent-header">
-        <h2>Agent: <code>{{ section.label }}</code></h2>
-        {% if section.can_act %}
-        <form method="post" action="/continual-learning/{{ section.agent_id }}/cycle" class="cl-inline-form">
-            <button type="submit" class="btn btn-primary" title="Staleness sweep + gated promotion of the top eligible classes">Run promotion cycle</button>
-        </form>
-        {% endif %}
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="lw-filter" data-monitor-filter-for="lw-table" placeholder="Filter by tool, agent or query" aria-label="Filter trajectory classes" autocomplete="off">
+    </label>
+    <div class="segmented" role="group" aria-label="Show classes">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ s.classes }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="ready" aria-pressed="false">Ready to distill <span>{{ view.counts.ready }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="evidence" aria-pressed="false">Needs more evidence <span>{{ view.counts.evidence }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="failing" aria-pressed="false">Failing <span>{{ view.counts.failing }}</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="promoted" aria-pressed="false">Promoted <span>{{ view.counts.promoted }}</span></button>
     </div>
-
-    {% if section.report %}
-    <div class="cl-report">
-        <div class="cl-report-title">Last promotion report <span class="cl-report-time">{{ section.report.at }}</span></div>
-        {% if section.report.promoted %}
-        <div class="cl-report-row cl-report-ok">✓ Promoted skill{{ 's' if section.report.promoted|length != 1 }}: {{ section.report.promoted|join(', ') }} — <a href="/memory/skills">review on the Skills page</a></div>
-        {% endif %}
-        {% for item in section.report.rejected %}
-        <div class="cl-report-row cl-report-bad">✗ Rejected {{ item.hash }}…: {{ item.reasons|join('; ') }}</div>
-        {% endfor %}
-        {% for item in section.report.skipped %}
-        <div class="cl-report-row">– Skipped {{ item.hash }}…: {{ item.reason }}</div>
-        {% endfor %}
-        {% for flag in section.report.review_flags %}
-        <div class="cl-report-row cl-report-warn">⚠ {{ flag }}</div>
-        {% endfor %}
-        {% if not section.report.promoted and not section.report.rejected and not section.report.skipped and not section.report.review_flags %}
-        <div class="cl-report-row">No eligible trajectory classes this cycle.</div>
-        {% endif %}
+    {% if view.agents|length > 1 %}
+    <div class="fleet-order">
+        <label for="lw-agent">Agent</label>
+        <select id="lw-agent" data-monitor-field="agent">
+            <option value="">All agents</option>
+            {% for agent in view.agents %}<option value="{{ agent.key }}">{{ agent.label }}{% if agent.short and agent.label != agent.short %} ({{ agent.short }}){% endif %}</option>{% endfor %}
+        </select>
     </div>
     {% endif %}
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>c</kbd> copy hash</span><span><kbd>/</kbd> filter</span></p>
+</div>
 
-    {% for cls in section.classes %}
-    <div class="memory-item cl-class{% if cls.promoted %} cl-class--promoted{% endif %}">
-        <div class="memory-item-header">
-            <h3>{{ cls.tools }}</h3>
-            <code class="item-id" title="canonical trajectory hash">{{ cls.hash_short }}…</code>
-        </div>
-        <div class="memory-item-body">
-            <div class="item-meta">
-                <span class="meta-tag">{{ cls.executions }} run{{ 's' if cls.executions != 1 }}</span>
-                <span class="meta-tag">{{ cls.success_rate }} success</span>
-                <span class="meta-tag">{{ cls.distinct_queries }} distinct quer{{ 'y' if cls.distinct_queries == 1 else 'ies' }}</span>
-                <span class="meta-tag">last seen {{ cls.last_seen }}</span>
-            </div>
-
-            <div class="cl-gates">
-                {% if cls.promoted %}
-                <span class="cl-badge cl-badge--promoted">PROMOTED{% if cls.covering_skill_name %} → {{ cls.covering_skill_name }}{% endif %}</span>
-                <a class="cl-gate-link" href="/memory/skills">view skill</a>
-                {% else %}
-                {% for gate in cls.gates %}
-                <span class="cl-gate {% if gate.passed %}cl-gate--pass{% else %}cl-gate--fail{% endif %}" title="{{ gate.detail }}">
-                    {{ '✓' if gate.passed else '✗' }} {{ gate.name }}
-                </span>
-                {% endfor %}
-                {% if cls.eligible and section.can_act %}
-                <form method="post" action="/continual-learning/{{ section.agent_id }}/distill/{{ cls.hash }}" class="cl-inline-form">
-                    <button type="submit" class="btn btn-primary btn-sm" title="Distill this class into a skill (eligibility + validation gates still apply)">Distill now</button>
-                </form>
-                {% elif cls.eligible %}
-                <span class="cl-badge cl-badge--eligible">ELIGIBLE</span>
-                {% endif %}
-                {% endif %}
-            </div>
-
-            <details class="cl-runs">
-                <summary>{{ cls.run_count }} run{{ 's' if cls.run_count != 1 }} (showing {{ cls.runs|length }})</summary>
-                <table class="cl-runs-table">
-                    <thead><tr><th>When</th><th>Outcome</th><th>User query</th><th></th></tr></thead>
-                    <tbody>
-                    {% for run in cls.runs %}
+<div class="fleet lw" id="lw">
+    <div class="fleet-main">
+        <div class="fleet-table-wrap">
+            <table class="fleet-table lw-table" id="lw-table">
+                <caption class="visually-hidden">Trajectory classes, ready to distill first. Select a row to see its promotion criteria and runs.</caption>
+                <thead>
                     <tr>
-                        <td>{{ run.created_at or '—' }}</td>
-                        <td><span class="cl-badge {% if run.outcome == 'success' %}cl-badge--ok{% else %}cl-badge--bad{% endif %}">{{ run.outcome }}</span></td>
-                        <td class="cl-run-query">{{ run.user_query|truncate(90) }}</td>
-                        <td>{% if run.promoted %}<span class="cl-badge cl-badge--promoted" title="covered by an active skill; hidden from workflow retrieval">suppressed</span>{% endif %}</td>
+                        <th scope="col" class="lw-col-agent" aria-sort="none"><button type="button" data-sort="agentname" data-sort-type="text">Agent</button></th>
+                        <th scope="col" class="lw-col-path" aria-sort="none"><button type="button" data-sort="path" data-sort-type="text">Tool path</button></th>
+                        <th scope="col" class="lw-col-status" aria-sort="none"><button type="button" data-sort="status" data-sort-type="text">Status</button></th>
+                        <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="runs">Runs</button></th>
+                        <th scope="col" class="num lw-col-success" aria-sort="none"><button type="button" data-sort="success">Success</button></th>
+                        <th scope="col" class="num lw-col-queries" aria-sort="none"><button type="button" data-sort="queries">Queries</button></th>
+                        <th scope="col" class="lw-col-criteria" aria-sort="none"><button type="button" data-sort="criteria">Criteria</button></th>
+                        <th scope="col" class="num lw-col-last" aria-sort="none"><button type="button" data-sort="last">Last seen</button></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for cls in view.rows %}
+                    <tr data-key="{{ cls.key }}"
+                        data-hash="{{ cls.hash }}"
+                        data-agent="{{ cls.agent_key }}"
+                        data-tags="{{ cls.tags|join(' ') }}"
+                        data-agentname="{{ cls.agent_label|lower }}"
+                        data-path="{{ cls.tools|lower }}"
+                        data-status="{{ {'ready': 'a', 'failing': 'b', 'evidence': 'c', 'promoted': 'd'}[cls.status] }}"
+                        data-runs="{{ cls.executions }}"
+                        data-success="{{ (cls.success_ratio * 100)|round(1) if cls.success_ratio is not none else -1 }}"
+                        data-queries="{{ cls.distinct_queries }}"
+                        data-criteria="{{ cls.criteria_met }}"
+                        data-last="{{ cls.last_seen_ts }}"
+                        data-search="{{ cls.search }}"
+                        tabindex="-1">
+                        <td class="lw-col-agent{{ '' if cls.agent_named else ' mono' }}" title="{{ cls.agent_label }}{% if cls.agent_id %} · {{ cls.agent_id }}{% endif %}">{{ cls.agent_label }}</td>
+                        <th scope="row" class="lw-col-path lw-path" title="{{ cls.tools }}">{% for tool in cls.tools.split(' → ') %}{% if not loop.first %}<span class="lw-arrow" aria-hidden="true"> → </span>{% endif %}{{ tool }}{% endfor %}</th>
+                        <td class="lw-col-status"><span class="fleet-health fleet-health--{{ cls.status_health }}">{{ short_status[cls.status] }}</span></td>
+                        <td class="num">{{ cls.executions }}</td>
+                        <td class="num lw-col-success"><span class="{{ cls.success_tone }}">{{ cls.success_rate }}</span></td>
+                        <td class="num lw-col-queries">{{ cls.distinct_queries }}</td>
+                        <td class="lw-col-criteria">
+                            <span class="lw-crit-count {{ 'is-good' if cls.criteria_met == cls.criteria_total else '' }}">{{ cls.criteria_met }}/{{ cls.criteria_total }}</span>
+                            <span class="lw-dots" role="img" aria-label="{% for gate in cls.gates %}{{ gate.name|capitalize }} {{ 'met' if gate.passed else 'not met' }}{{ ', ' if not loop.last }}{% endfor %}">{% for gate in cls.gates %}<i class="{{ 'is-met' if gate.passed else 'is-unmet' }}" title="{{ gate.name|capitalize }}: {{ gate.detail }}"></i>{% endfor %}</span>
+                        </td>
+                        <td class="num lw-col-last"{% if cls.last_seen_at %} title="{{ cls.last_seen }}"{% endif %}>{{ cls.last_seen_ago }}</td>
                     </tr>
                     {% endfor %}
+                </tbody>
+            </table>
+            <p class="fleet-none" id="lw-none"{% if view.rows %} hidden{% endif %}>{% if view.rows %}No trajectory classes match this filter.{% else %}No trajectory classes yet. Runs without recorded tool steps are not grouped.{% endif %}</p>
+        </div>
+
+        <section class="panel lw-agents" aria-labelledby="lw-agents-title">
+            <div class="panel-header">
+                <h2 class="panel-title" id="lw-agents-title">Agents</h2>
+                <span class="panel-meta">A promotion cycle sweeps stale skills, then distills the agent's top eligible classes through the same gates.</span>
+            </div>
+            <div class="lw-agents-wrap">
+                <table class="fleet-table lw-agent-table">
+                    <caption class="visually-hidden">Trajectory classes and promotion readiness per agent.</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Agent</th>
+                            <th scope="col" class="num lw-acol-classes">Classes</th>
+                            <th scope="col" class="num lw-acol-runs">Runs</th>
+                            <th scope="col" class="num">Ready</th>
+                            <th scope="col" class="num lw-acol-promoted">Promoted</th>
+                            <th scope="col" class="num lw-acol-success">Success</th>
+                            <th scope="col" class="num lw-acol-newest">Newest run</th>
+                            <th scope="col"><span class="visually-hidden">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for agent in view.agents %}
+                        <tr>
+                            <th scope="row" class="lw-agent-name" title="{{ agent.agent_id or 'No agent id' }}">
+                                {% if view.agents|length > 1 %}<button type="button" class="lw-agent-filter" data-lw-agent="{{ agent.key }}" title="Show only this agent's classes">{{ agent.label }}</button>{% else %}{{ agent.label }}{% endif %}
+                                {% if agent.short and agent.label != agent.short %}<span class="fleet-id">{{ agent.short }}</span>{% endif %}
+                            </th>
+                            <td class="num lw-acol-classes">{{ agent.classes }}</td>
+                            <td class="num lw-acol-runs">{{ agent.runs }}</td>
+                            <td class="num"><span class="{{ 'is-good' if agent.ready else '' }}">{{ agent.ready }}</span></td>
+                            <td class="num lw-acol-promoted">{{ agent.promoted }}</td>
+                            <td class="num lw-acol-success"><span class="{{ agent.success_tone }}">{{ agent.success_rate }}</span></td>
+                            <td class="num lw-acol-newest" title="{{ agent.newest }}">{{ agent.newest_ago }}</td>
+                            <td class="lw-agent-action">
+                                {% if agent.can_act %}
+                                <form method="post" action="/continual-learning/{{ agent.agent_id }}/cycle" class="cl-inline-form">
+                                    <button type="submit" class="btn btn-sm" aria-label="Run promotion cycle for {{ agent.label }}" title="Runs a staleness sweep, then promotes the top eligible classes through the promotion gates"><span class="lw-cycle-long">Run promotion cycle</span><span class="lw-cycle-short" aria-hidden="true">Run cycle</span></button>
+                                </form>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
                     </tbody>
                 </table>
-            </details>
-        </div>
+            </div>
+        </section>
     </div>
-    {% endfor %}
+
+    <aside class="fleet-pane" aria-label="Selected trajectory class">
+        {% for cls in view.rows %}
+        <section class="fleet-detail lw-detail" id="lw-detail-{{ cls.key }}" data-key="{{ cls.key }}" hidden>
+            <header class="fleet-detail-head">
+                <div>
+                    <h2 class="lw-detail-path">{{ cls.tools }}</h2>
+                    <p class="fleet-detail-sub"><span class="pill {{ status_pill[cls.status] }}">{{ cls.status_label }}</span> {{ id_chip(cls.hash|string, 12) }} <span>{{ cls.agent_label }}</span>{% if cls.agent_named %} <span class="mono">{{ cls.agent_short }}</span>{% endif %}</p>
+                </div>
+            </header>
+
+            {% if cls.promoted or cls.eligible or cls.can_act %}
+            <div class="fleet-detail-actions">
+                {% if cls.promoted %}
+                <a class="btn" href="/memory/skills#{{ cls.covering_skill_key }}">View skill</a>
+                {% elif cls.eligible and cls.can_act %}
+                <form method="post" action="/continual-learning/{{ cls.agent_id }}/distill/{{ cls.hash }}" class="cl-inline-form">
+                    <button type="submit" class="btn btn-primary" title="Distill this class into a skill. Eligibility and validation gates still apply.">Distill now</button>
+                </form>
+                {% elif cls.eligible %}
+                <span class="pill pill--success">Eligible</span>
+                {% endif %}
+                {% if cls.can_act %}
+                <form method="post" action="/continual-learning/{{ cls.agent_id }}/cycle" class="cl-inline-form">
+                    <button type="submit" class="btn" title="Runs a staleness sweep, then promotes the top eligible classes through the promotion gates">Run promotion cycle</button>
+                </form>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% if cls.promoted %}
+            <p class="lw-note">Promoted{% if cls.covering_skill_name %} → {{ cls.covering_skill_name }}{% endif %}. While that skill is active, these runs are suppressed from workflow retrieval.</p>
+            {% endif %}
+
+            <dl class="fleet-stats">
+                <div><dt>Runs</dt><dd>{{ cls.executions }}{% if cls.failed %} <small class="is-bad">{{ cls.failed }} failed</small>{% endif %}</dd></div>
+                <div><dt>Success</dt><dd class="{{ cls.success_tone }}">{{ cls.success_rate }}</dd></div>
+                <div><dt>Distinct queries</dt><dd>{{ cls.distinct_queries }}</dd></div>
+                <div><dt>Criteria met</dt><dd class="{{ 'is-good' if cls.criteria_met == cls.criteria_total else '' }}">{{ cls.criteria_met }}/{{ cls.criteria_total }}</dd></div>
+                <div><dt>First seen</dt><dd title="{{ cls.first_seen }}">{{ cls.first_seen_ago }}</dd></div>
+                <div><dt>Last seen</dt><dd title="{{ cls.last_seen }}">{{ cls.last_seen_ago }}</dd></div>
+            </dl>
+
+            <h3 class="fleet-detail-title">Promotion criteria</h3>
+            <ul class="lw-criteria">
+                {% for gate in cls.gates %}
+                <li class="{{ 'is-met' if gate.passed else 'is-unmet' }}">
+                    <span class="lw-crit-name">{{ '✓' if gate.passed else '✗' }} {{ gate.name }}</span>
+                    <span class="lw-crit-detail">{{ gate.detail }}</span>
+                    <span class="lw-crit-measures">{{ gate.measures }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+
+            <div class="mem-body-head">
+                <h3 class="fleet-detail-title">Runs</h3>
+                <span class="lw-meta">{{ cls.run_count }} run{{ 's' if cls.run_count != 1 }}{% if cls.run_count > cls.runs|length %}, newest {{ cls.runs|length }} shown{% endif %}</span>
+            </div>
+            <ol class="lw-runs">
+                {% for run in cls.runs %}
+                <li>
+                    <span class="fleet-run-dot fleet-run-dot--{{ 'success' if run.outcome == 'success' else 'failed' }}" title="{{ run.outcome|capitalize }}"></span>
+                    <span class="lw-run-time" title="{{ run.created_at }}">{{ run.created_at[5:] or '—' }}</span>
+                    <span class="lw-run-query" title="{{ run.user_query }}">{{ run.user_query or '(no user query)' }}</span>
+                    {% if run.promoted %}<span class="lw-run-flag" title="Covered by an active skill, so this run is suppressed from workflow retrieval">Suppressed</span>{% elif run.outcome != 'success' %}<span class="lw-run-outcome is-bad">{{ run.outcome|capitalize }}</span>{% endif %}
+                </li>
+                {% endfor %}
+            </ol>
+        </section>
+        {% endfor %}
+    </aside>
 </div>
-{% endfor %}
 {% else %}
-<div class="empty-state">
-    <div class="empty-icon">🛠️</div>
-    <h3>No Workflow Memory Found</h3>
-    <p>Workflow trajectories are captured automatically when agents call tools. Once the same procedure repeats successfully, it becomes eligible for promotion to a learned skill.</p>
-</div>
+{{ empty_state('No workflow trajectories yet', 'Trajectories are captured automatically when an agent with workflow memory turned on calls tools. Once the same procedure repeats successfully, it becomes eligible for promotion to a learned skill.', '/agents', 'Open agents') }}
 {% endif %}
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const monitor = MemorizzMonitor.init({
+        table: 'lw-table',
+        storageKey: 'memorizz.workflows.selected',
+        keys: {
+            // c copies the selected class hash.
+            c: function(row) {
+                if (navigator.clipboard) navigator.clipboard.writeText(row.dataset.hash);
+            },
+        },
+    });
+    // Links such as /memory/workflows#<class key> open on that class.
+    const wanted = decodeURIComponent(window.location.hash.slice(1));
+    if (monitor && wanted && window.CSS && CSS.escape) {
+        const row = document.querySelector('#lw-table tbody tr[data-key="' + CSS.escape(wanted) + '"]');
+        if (row) monitor.select(row, true);
+    }
+    // Agent names in the roll-up narrow the grid to that agent.
+    const agentSelect = document.getElementById('lw-agent');
+    document.querySelectorAll('[data-lw-agent]').forEach(function(button) {
+        button.addEventListener('click', function() {
+            if (!agentSelect) return;
+            agentSelect.value = button.dataset.lwAgent;
+            agentSelect.dispatchEvent(new Event('change'));
+            const motion = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+            document.querySelector('.fleet-bar').scrollIntoView({ behavior: motion, block: 'start' });
+        });
+    });
+});
+</script>
 {% endblock %}

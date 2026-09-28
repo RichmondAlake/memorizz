@@ -10,6 +10,8 @@ import hashlib
 import inspect
 import json
 import re
+import threading
+from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -344,12 +346,19 @@ class ContextPolicy:
 
     progressive_tool_disclosure: bool = True
     tool_top_k: int = 5
+    # Tools already disclosed to this agent's user stay visible, up to this
+    # many, so the tool schemas (the first bytes of the provider prompt-cache
+    # prefix) change only when a new tool is needed. 0 re-selects every turn.
+    sticky_tool_limit: int = 15
     approval_ttl_seconds: int = 900
     max_tool_invocations_per_turn: int = 20
     max_tool_attempts_per_call: int = 2
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_top_k", max(1, min(int(self.tool_top_k), 50)))
+        object.__setattr__(
+            self, "sticky_tool_limit", max(0, min(int(self.sticky_tool_limit), 50))
+        )
         object.__setattr__(
             self,
             "approval_ttl_seconds",
@@ -380,6 +389,7 @@ class ContextPolicy:
         return {
             "progressive_tool_disclosure": self.progressive_tool_disclosure,
             "tool_top_k": self.tool_top_k,
+            "sticky_tool_limit": self.sticky_tool_limit,
             "approval_ttl_seconds": self.approval_ttl_seconds,
             "max_tool_invocations_per_turn": self.max_tool_invocations_per_turn,
             "max_tool_attempts_per_call": self.max_tool_attempts_per_call,
@@ -438,6 +448,36 @@ def tool_metadata_to_openai(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]
     }
 
 
+# Tool names already disclosed per scope (agent + user), most recently selected
+# last. Shared by every router in the process because hosts such as the UI
+# rebuild the agent, and its router, for each request.
+_STICKY_TOOLS: "OrderedDict[str, OrderedDict[str, None]]" = OrderedDict()
+_STICKY_LOCK = threading.Lock()
+
+
+class ToolNotDisclosedError(PermissionError):
+    """A registered tool was called before discovery disclosed it this turn."""
+
+    code = "tool_not_disclosed"
+
+
+class ToolNotCallableError(LookupError):
+    """The tool name has no trusted callable registered in this process."""
+
+    code = "tool_not_callable"
+
+
+class ToolArgumentsError(TypeError):
+    """The arguments do not match the tool's signature."""
+
+    code = "invalid_arguments"
+
+
+def invocation_error_code(exc: BaseException) -> str:
+    """Safe, content-free code for a rejected tool call (shown in metadata mode)."""
+    return getattr(exc, "code", None) or "invalid_tool_invocation"
+
+
 class SemanticToolRouter:
     """Progressively disclose and strictly dispatch a bounded set of tools."""
 
@@ -451,6 +491,7 @@ class SemanticToolRouter:
         successful_calls: set[str] = field(default_factory=set)
         invocation_count: int = 0
         active_user_id: Optional[str] = None
+        sticky_key: Optional[str] = None
 
     def _state(self) -> "SemanticToolRouter._TurnState":
         state = self._turn_state_var.get()
@@ -512,6 +553,7 @@ class SemanticToolRouter:
         deprecated_arguments: Optional[Mapping[str, Mapping[str, str]]] = None,
         max_invocations_per_turn: int = 20,
         max_attempts_per_call: int = 2,
+        sticky_limit: int = 0,
     ) -> None:
         self._turn_state_var: ContextVar[
             Optional[SemanticToolRouter._TurnState]
@@ -529,6 +571,7 @@ class SemanticToolRouter:
         }
         self.max_invocations_per_turn = max(1, int(max_invocations_per_turn))
         self.max_attempts_per_call = max(1, int(max_attempts_per_call))
+        self.sticky_limit = max(0, int(sticky_limit))
         self._selected: set[str] = set()
         self._call_attempts: Dict[str, int] = {}
         self._successful_calls: set[str] = set()
@@ -627,7 +670,26 @@ class SemanticToolRouter:
         bounded = max(1, min(int(limit or self.top_k), self.top_k))
         candidates = self.preview(query, user_id=user_id, limit=bounded)
         self._selected.update(candidates)
+        # Tools discovered mid-turn stay disclosed for this scope's later turns;
+        # recording only at the next turn's start lost them to begin_turn().
+        self._remember_sticky(candidates)
         return candidates
+
+    def _remember_sticky(self, names: Iterable[str]) -> None:
+        """Mark tools as recently disclosed in this turn's sticky scope."""
+        key = self._state().sticky_key
+        if not key or not self.sticky_limit:
+            return
+        with _STICKY_LOCK:
+            sticky = _STICKY_TOOLS.pop(key, None) or OrderedDict()
+            for name in sorted(names):
+                sticky.pop(name, None)
+                sticky[name] = None
+            while len(sticky) > self.sticky_limit:
+                sticky.popitem(last=False)
+            _STICKY_TOOLS[key] = sticky
+            while len(_STICKY_TOOLS) > 512:
+                _STICKY_TOOLS.popitem(last=False)
 
     def preview(
         self, query: str, *, user_id: Optional[str] = None, limit: Optional[int] = None
@@ -681,7 +743,11 @@ class SemanticToolRouter:
         ]
 
     def schemas_for_turn(
-        self, query: str, *, user_id: Optional[str] = None
+        self,
+        query: str,
+        *,
+        user_id: Optional[str] = None,
+        cache_scope: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not self.enabled:
             return [
@@ -690,6 +756,17 @@ class SemanticToolRouter:
                 if (schema := tool_metadata_to_openai(metadata)) is not None
             ]
         self.select(query, user_id=user_id)
+        if cache_scope and self.sticky_limit:
+            # Relevance ranking moves every turn; re-exposing a different
+            # subset rewrites the whole cached prefix (tools render first).
+            # Keep tools already disclosed in this scope visible and callable;
+            # past the bound, evict the least recently selected one, so each
+            # genuinely new tool costs one cache write.
+            key = f"{cache_scope}|{user_id or ''}"
+            self._state().sticky_key = key
+            self._remember_sticky(self._selected)
+            with _STICKY_LOCK:
+                self._selected.update(_STICKY_TOOLS.get(key) or ())
         visible = self.always_visible | self._selected
         schemas = self._meta_schemas()
         for metadata in self._metadata():
@@ -732,7 +809,7 @@ class SemanticToolRouter:
             and name not in self._selected
             and name not in self.always_visible
         ):
-            raise PermissionError(
+            raise ToolNotDisclosedError(
                 f"Tool '{name}' was not disclosed for this turn; call discover_tools first"
             )
         if name in {self.DISCOVERY_TOOL, self.INVOCATION_TOOL}:
@@ -744,7 +821,7 @@ class SemanticToolRouter:
             if old not in values:
                 continue
             if new in values:
-                raise TypeError(
+                raise ToolArgumentsError(
                     f"Arguments '{old}' and '{new}' cannot both be supplied"
                 )
             values[new] = values.pop(old)
@@ -752,9 +829,18 @@ class SemanticToolRouter:
 
         function = self.tool_manager.get_tool_callable(name)
         if function is None:
-            raise LookupError(f"Tool '{name}' has no trusted callable binding")
+            raise ToolNotCallableError(f"Tool '{name}' has no trusted callable binding")
         signature = inspect.signature(function)
-        signature.bind(**values)
+        try:
+            signature.bind(**values)
+        except TypeError as exc:
+            # The tool was disclosed, so naming its signature leaks nothing and
+            # lets the model correct the call without another discovery.
+            params = ", ".join(
+                param.name if param.default is param.empty else f"{param.name}=…"
+                for param in signature.parameters.values()
+            )
+            raise ToolArgumentsError(f"{exc}; expected {name}({params})") from exc
         return name, values, warnings
 
     def invoke_tool(
@@ -765,7 +851,7 @@ class SemanticToolRouter:
         except (LookupError, PermissionError, TypeError, ValueError) as exc:
             return {
                 "ok": False,
-                "error_code": "invalid_tool_invocation",
+                "error_code": invocation_error_code(exc),
                 "error": str(exc),
             }
 

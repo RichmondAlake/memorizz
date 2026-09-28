@@ -1,0 +1,114 @@
+{#- Run-health panels shared by the overview and the fleet monitor.
+    Import "with context" so the formatting helpers are visible. -#}
+{% from '_ui.html' import empty_state %}
+
+{% macro runs_chart(overview, window, window_label, title='Runs over time', prefix='ov') -%}
+{% set t = overview.totals %}
+{% set series = overview.series %}
+<section class="panel ov-activity" aria-labelledby="{{ prefix }}-activity-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="{{ prefix }}-activity-title">{{ title }}</h2>
+        <span class="ov-legend"><span class="ov-key ov-key--ok"></span>Succeeded <span class="ov-key ov-key--failed"></span>Failed</span>
+    </div>
+    {% if t.runs %}
+    {% set peak = [series|map(attribute='runs')|max, 1]|max %}
+    {% set time_format = '%H:%M' if window == '24h' else ('%b %d %H:%M' if window == '7d' else '%b %d') %}
+    <div class="ov-chart" role="img" aria-label="{{ t.runs }} runs in the {{ window_label }}, {{ t.failed }} failed">
+        <div class="ov-chart-axis" aria-hidden="true"><span>{{ peak }}</span><span>0</span></div>
+        <div class="ov-bars">
+            {% for bucket in series %}
+            <div class="ov-bar" title="{{ bucket.start.strftime(time_format) }} UTC · {{ bucket.runs }} run{{ '' if bucket.runs == 1 else 's' }}{% if bucket.failed %} · {{ bucket.failed }} failed{% endif %}">
+                <span class="ov-bar-fill" style="height: {{ (100 * bucket.runs / peak)|round(1) }}%">
+                    {% if bucket.failed %}<span class="ov-bar-failed" style="height: {{ (100 * bucket.failed / bucket.runs)|round(1) }}%"></span>{% endif %}
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="ov-chart-labels" aria-hidden="true">
+            <span>{{ series[0].start.strftime(time_format) }}</span>
+            <span>{{ series[series|length // 2].start.strftime(time_format) }}</span>
+            <span>Now</span>
+        </div>
+    </div>
+    {% else %}
+    {{ empty_state('No runs in this window', 'Send a message in the playground or run an automation to see activity here.', '/playground', 'Open the playground') }}
+    {% endif %}
+</section>
+{%- endmacro %}
+
+{% macro attention_panel(items, prefix='ov', limit=8) -%}
+<section class="panel" aria-labelledby="{{ prefix }}-attention-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="{{ prefix }}-attention-title">Needs attention</h2>
+        <span class="panel-meta">{{ items|length }}</span>
+    </div>
+    {% if items %}
+    <ul class="ov-attention">
+        {% for item in items[:limit] %}
+        <li class="ov-attention-item ov-attention-item--{{ item.severity }}">
+            <span class="ov-attention-title">{% if item.href %}<a href="{{ item.href }}">{{ item.title }}</a>{% else %}{{ item.title }}{% endif %}</span>
+            <span class="ov-attention-detail">{{ item.detail }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="ov-all-clear"><span class="pill pill--success">All clear</span> No failed runs, failing tools or cache regressions in this window.</p>
+    {% endif %}
+</section>
+{%- endmacro %}
+
+{% macro recent_runs(runs, agent_names, title='Recent runs', prefix='ov') -%}
+<section class="panel" aria-labelledby="{{ prefix }}-recent-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="{{ prefix }}-recent-title">{{ title }}</h2>
+        <a class="panel-meta" href="/traces">View all in Observability</a>
+    </div>
+    {% if runs %}
+    <div class="table-scroll">
+        <table class="data-table ov-runs">
+            <thead>
+                <tr>
+                    <th scope="col">Started</th>
+                    <th scope="col">Agent</th>
+                    <th scope="col">Status</th>
+                    <th scope="col" class="num">Duration</th>
+                    <th scope="col" class="num ov-col-calls">Model calls</th>
+                    <th scope="col" class="ov-col-tools">Tools</th>
+                    <th scope="col" class="num">Tokens</th>
+                    <th scope="col" class="num ov-col-cache">From cache</th>
+                    <th scope="col" class="num">Cost</th>
+                    <th scope="col"><span class="visually-hidden">Trace</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in runs %}
+                <tr>
+                    <td title="{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC">{{ relative_time(run.started_at, generated_at) }}</td>
+                    <td>{% if run.agent_id %}<a href="/agents/{{ run.agent_id }}/playground">{{ agent_names.get(run.agent_id, run.agent_id[:12]) }}</a>{% else %}—{% endif %}</td>
+                    <td>
+                        {% if run.status == 'success' %}<span class="pill pill--success">Succeeded</span>
+                        {% elif run.status == 'failed' %}<span class="pill pill--danger" title="{{ run.error_code }}">Failed</span>
+                        {% elif run.status == 'running' %}<span class="pill pill--info">Running</span>
+                        {% else %}<span class="pill" title="No result was recorded for this run.">Incomplete</span>{% endif %}
+                    </td>
+                    <td class="num">{{ fmt_duration(run.duration_ms) }}</td>
+                    <td class="num ov-col-calls">{{ run.model_calls }}</td>
+                    <td class="ov-tools ov-col-tools">
+                        {% if run.tool_calls %}{{ run.tool_calls }}{% if run.tool_failures %} <span class="ov-failed">· {{ run.tool_failures }} failed</span>{% endif %}
+                        <span class="ov-tool-names">{{ run.tools|map(attribute='name')|unique|join(', ') }}</span>
+                        {% else %}—{% endif %}
+                    </td>
+                    <td class="num">{{ fmt_compact(run.input_tokens + run.output_tokens) }}</td>
+                    <td class="num ov-col-cache">{% if run.input_tokens %}{{ '%.0f'|format(100 * run.cached_tokens / run.input_tokens) }}%{% else %}—{% endif %}</td>
+                    <td class="num">{% if run.unpriced_calls and not run.cost_usd %}<span title="No price for this model">—</span>{% else %}{{ fmt_usd(run.cost_usd) }}{% endif %}</td>
+                    <td><a href="{{ run.trace_url }}">Trace</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    {{ empty_state('No recorded runs yet', 'Runs appear here as soon as an agent answers a message.') }}
+    {% endif %}
+</section>
+{%- endmacro %}

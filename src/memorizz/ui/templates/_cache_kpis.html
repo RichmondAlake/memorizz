@@ -1,0 +1,12 @@
+{# Provider prompt-cache tiles shared by the usage, observability and Evalground views.
+   read_percent: cached share of measured input tokens; hit_calls/measured_calls: calls
+   that reported cache usage and read from the cache. None means not reported. #}
+{% macro cache_kpis(read_percent, hit_calls, measured_calls, cached_tokens, write_tokens) %}
+{% set read_percent, cached_tokens, write_tokens = read_percent|default(none), cached_tokens|default(none), write_tokens|default(none) %}
+<div class="kpi-strip cache-kpis">
+    <div class="kpi"><span class="kpi-label">Cache read rate</span><strong class="kpi-value">{{ '%.1f%%'|format(read_percent) if read_percent is not none else 'Unknown' }}</strong><small class="kpi-note">of measured input tokens</small></div>
+    <div class="kpi"><span class="kpi-label">Cache hit rate</span><strong class="kpi-value">{{ '%.1f%%'|format(100 * hit_calls / measured_calls) if measured_calls else 'Unknown' }}</strong><small class="kpi-note">{{ '{:,}'.format(hit_calls|int) if measured_calls else 0 }} of {{ '{:,}'.format((measured_calls or 0)|int) }} calls read from cache</small></div>
+    <div class="kpi"><span class="kpi-label">Cached input tokens</span><strong class="kpi-value">{{ '{:,}'.format(cached_tokens|int) if cached_tokens is not none else 'Unknown' }}</strong><small class="kpi-note">billed at the cached-input rate</small></div>
+    <div class="kpi"><span class="kpi-label">Cache write tokens</span><strong class="kpi-value">{{ '{:,}'.format(write_tokens|int) if write_tokens is not none else 'Unknown' }}</strong><small class="kpi-note">new cache entries, where reported</small></div>
+</div>
+{% endmacro %}

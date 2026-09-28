@@ -1,100 +1,222 @@
 {% extends "base.html" %}
 
-{% block title %}Skills - Memorizz{% endblock %}
+{% block title %}Learned skills - Memorizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="learning" data-sidebar-default="collapsed"{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/learning.css?v=11">{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Learned Skills</h1>
-    <p>{{ skills|length }} skill{% if skills|length != 1 %}s{% endif %} distilled from repeated successful workflow trajectories — <a href="/memory/workflows">see trajectory classes</a></p>
-</div>
+{% from '_ui.html' import page_header, page_tabs, empty_state, id_chip %}
+{% set s = view.summary %}
+{% set c = view.counts %}
+{% call page_header('Learned skills', 'Skills distilled from repeated, successful workflow trajectories. Shadow skills are observed passively; activation is always an explicit reviewer decision.', 'Continual learning', nav=page_tabs(learning_tabs, 'skills', 'Continual learning views')) %}
+    <a class="btn" href="/memory/workflows">View trajectory classes</a>
+{% endcall %}
 
 {% if skills %}
-<div class="memory-items">
-    {% for skill in skills %}
-    <div class="memory-item cl-skill cl-skill--{{ skill.status }}">
-        <div class="memory-item-header">
-            <h3>{{ skill.name }} <span class="cl-skill-version">v{{ skill.version }}</span></h3>
-            <span class="cl-badge cl-badge--{{ skill.status }}">{{ skill.status|upper }}</span>
+<div class="fleet-tape" role="list" aria-label="Learned skill summary">
+    <div role="listitem"><span>Skills</span><strong>{{ s.skills }}</strong></div>
+    <div role="listitem"><span>Active</span><strong class="{{ 'is-good' if c.active else '' }}">{{ c.active }}</strong></div>
+    <div role="listitem"><span>Shadow</span><strong>{{ c.shadow }}</strong></div>
+    <div role="listitem"><span>Ready to review</span><strong class="{{ 'is-good' if view.ready else '' }}">{{ view.ready }}</strong></div>
+    {% if c.candidate %}<div role="listitem"><span>Candidates</span><strong>{{ c.candidate }}</strong></div>{% endif %}
+    {% if c.demoted %}<div role="listitem"><span>Demoted</span><strong class="is-bad">{{ c.demoted }}</strong></div>{% endif %}
+    {% if c.deprecated %}<div role="listitem"><span>Deprecated</span><strong>{{ c.deprecated }}</strong></div>{% endif %}
+    <div role="listitem"><span>Activations</span><strong>{{ '{:,}'.format(s.activations) }}</strong></div>
+    <div role="listitem"><span>Success</span><strong class="{{ s.success_tone }}">{{ s.success_rate }}</strong></div>
+    <div role="listitem"><span>Deviations</span><strong class="{{ 'is-warn' if s.deviations else '' }}">{{ s.deviations }}</strong></div>
+    <div role="listitem"><span>Newest skill</span><strong{% if s.newest %} title="{{ s.newest }}"{% endif %}>{{ s.newest_ago }}</strong></div>
+</div>
+
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="lw-skill-filter" data-monitor-filter-for="lw-skill-table" placeholder="Filter by name, tool or agent" aria-label="Filter learned skills" autocomplete="off">
+    </label>
+    <div class="segmented" role="group" aria-label="Show skills">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ s.skills }}</span></button>
+        {% for status, count in view.statuses %}
+        <button type="button" class="segmented-item" data-monitor-tag="{{ status }}" aria-pressed="false">{{ status|capitalize }} <span>{{ count }}</span></button>
+        {% endfor %}
+        {% if c.shadow %}
+        <button type="button" class="segmented-item" data-monitor-tag="ready" aria-pressed="false">Ready to review <span>{{ view.ready }}</span></button>
+        {% endif %}
+    </div>
+    {% if view.agents|length > 1 %}
+    <div class="fleet-order">
+        <label for="lw-skill-agent">Agent</label>
+        <select id="lw-skill-agent" data-monitor-field="agent">
+            <option value="">All agents</option>
+            {% for agent in view.agents %}<option value="{{ agent.key }}">{{ agent.label }}</option>{% endfor %}
+        </select>
+    </div>
+    {% endif %}
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>c</kbd> copy SKILL.md</span><span><kbd>/</kbd> filter</span></p>
+</div>
+
+<div class="fleet lw" id="lw">
+    <div class="fleet-main">
+        <div class="fleet-table-wrap">
+            <table class="fleet-table lw-table" id="lw-skill-table">
+                <caption class="visually-hidden">Learned skills by lifecycle status. Select a row to read the skill and act on it.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" class="lw-skill-name" aria-sort="none"><button type="button" data-sort="name" data-sort-type="text">Skill</button></th>
+                        <th scope="col" aria-sort="none"><button type="button" data-sort="status">Status</button></th>
+                        <th scope="col" class="lw-col-skill-agent" aria-sort="none"><button type="button" data-sort="agentname" data-sort-type="text">Agent</button></th>
+                        <th scope="col" class="lw-col-role" aria-sort="none"><button type="button" data-sort="role" data-sort-type="text">Authority</button></th>
+                        <th scope="col" class="lw-col-tools">Tools</th>
+                        <th scope="col" class="num lw-col-activations" aria-sort="none"><button type="button" data-sort="activations">Activations</button></th>
+                        <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="success">Success</button></th>
+                        <th scope="col" class="num lw-col-deviations" aria-sort="none"><button type="button" data-sort="deviations">Deviations</button></th>
+                        <th scope="col" class="lw-col-shadow" aria-sort="none"><button type="button" data-sort="shadow">Shadow</button></th>
+                        <th scope="col" class="num lw-col-listed" aria-sort="none"><button type="button" data-sort="listed">Promoted</button></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for skill in view.rows %}
+                    <tr data-key="{{ skill.key }}"
+                        data-agent="{{ skill.agent_key }}"
+                        data-tags="{{ skill.tags|join(' ') }}"
+                        data-name="{{ skill.name|lower }}"
+                        data-status="{{ 10 - skill.status_rank }}"
+                        data-agentname="{{ skill.agent_label|lower }}"
+                        data-role="{{ skill.injection_role }}"
+                        data-activations="{{ skill.activations }}"
+                        data-success="{{ (skill.success_ratio * 100)|round(1) if skill.success_ratio is not none else -1 }}"
+                        data-deviations="{{ skill.deviations }}"
+                        data-shadow="{{ skill.shadow_observations if skill.status == 'shadow' else -1 }}"
+                        data-listed="{{ skill.listed_ts }}"
+                        data-search="{{ skill.search }}"
+                        tabindex="-1">
+                        <th scope="row" class="lw-skill-name" title="{{ skill.name }}">{{ skill.name }}<span class="lw-version">v{{ skill.version }}</span></th>
+                        <td><span class="fleet-health fleet-health--{{ skill.status_health }}">{{ skill.status_label }}</span></td>
+                        <td class="lw-col-skill-agent" title="{{ skill.agent_id or 'No agent id' }}">{{ skill.agent_label }}</td>
+                        <td class="lw-col-role">{{ skill.injection_role }}</td>
+                        <td class="lw-col-tools" title="{{ skill.tools_used|join(', ') }}">{{ skill.tools_used|join(', ') or '—' }}</td>
+                        <td class="num lw-col-activations">{{ skill.activations }}</td>
+                        <td class="num"><span class="{{ skill.success_tone }}">{{ skill.success_rate }}</span></td>
+                        <td class="num lw-col-deviations"><span class="{{ 'is-warn' if skill.deviations else '' }}">{{ skill.deviations }}</span></td>
+                        <td class="lw-col-shadow lw-shadow">{% if skill.status == 'shadow' %}<span class="{{ 'is-good' if skill.shadow_ready else 'is-warn' }}">{{ 'Ready' if skill.shadow_ready else 'Not ready' }}</span><small>{{ skill.shadow_observations }} obs</small>{% else %}—{% endif %}</td>
+                        <td class="num lw-col-listed" title="{{ skill.listed_at }}">{{ skill.listed_ago }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="fleet-none" id="lw-skill-none" hidden>No skills match this filter.</p>
         </div>
-        <div class="memory-item-body">
-            <p class="item-content">{{ skill.description }}</p>
+    </div>
 
-            <div class="item-meta">
-                {% if skill.agent_id %}<span class="meta-tag">agent: {{ skill.agent_id|truncate(24) }}</span>{% endif %}
-                <span class="meta-tag" title="instruction authority used when this active skill is injected">authority: {{ skill.injection_role }}</span>
-                {% if skill.source_hash_short %}<span class="meta-tag" title="source trajectory class">class: {{ skill.source_hash_short }}…</span>{% endif %}
-                {% if skill.tools_used %}<span class="meta-tag">tools: {{ skill.tools_used|join(', ') }}</span>{% endif %}
-            </div>
+    <aside class="fleet-pane" aria-label="Selected skill">
+        {% for skill in view.rows %}
+        <section class="fleet-detail lw-detail" id="lw-skill-detail-{{ skill.key }}" data-key="{{ skill.key }}" hidden>
+            <header class="fleet-detail-head">
+                <div>
+                    <h2>{{ skill.name }}<span class="lw-version">v{{ skill.version }}</span></h2>
+                    <p class="fleet-detail-sub">{% if skill.skill_id %}{{ id_chip(skill.skill_id|string) }}{% endif %} <span>{{ skill.agent_label }}</span>{% if skill.agent_named %} <span class="mono">{{ skill.agent_short }}</span>{% endif %}</p>
+                </div>
+                <span class="pill{% if skill.status_pill %} pill--{{ skill.status_pill }}{% endif %}">{{ skill.status_label }}</span>
+            </header>
+            {% if skill.description %}<p class="lw-desc">{{ skill.description }}</p>{% endif %}
 
-            <div class="item-meta">
-                <span class="meta-tag">{{ skill.activations }} activation{{ 's' if skill.activations != 1 }}</span>
-                <span class="meta-tag">{{ skill.successes }} ✓ / {{ skill.failures }} ✗</span>
-                {% if skill.deviations %}<span class="meta-tag" title="skill was in context but the run took a different path">{{ skill.deviations }} deviation{{ 's' if skill.deviations != 1 }}</span>{% endif %}
-                {% if skill.baseline.success_rate is defined %}<span class="meta-tag" title="success rate frozen at promotion time">baseline {{ '%.0f'|format(skill.baseline.success_rate * 100) }}%</span>{% endif %}
-            </div>
-
-            {% if skill.status == 'shadow' %}
-            <div class="item-meta">
-                <span class="meta-tag">{{ skill.shadow_observations }} passive observation{{ 's' if skill.shadow_observations != 1 }}</span>
-                <span class="meta-tag">trajectory match {{ '%.0f'|format(skill.shadow_trajectory_match_rate * 100) }}%</span>
-                <span class="meta-tag">matched success {{ '%.0f'|format(skill.shadow_matched_success_rate * 100) }}%</span>
-                {% if skill.shadow_last_evaluated_at %}<span class="meta-tag">last evaluated {{ skill.shadow_last_evaluated_at|truncate(19, true, '') }}</span>{% endif %}
-                <span class="cl-badge cl-badge--{{ 'active' if skill.shadow_ready else 'candidate' }}">
-                    {{ 'READY TO REVIEW' if skill.shadow_ready else 'NOT READY' }}
-                </span>
-            </div>
-            {% if skill.shadow_readiness_reasons %}
-            <div class="cl-report-row cl-report-warn">
-                Advisory readiness: {{ skill.shadow_readiness_reasons|join('; ') }}.
-                Activation remains an explicit reviewer decision.
-            </div>
-            {% endif %}
-            {% if not skill.shadow_evaluation_enabled %}
-            <div class="cl-report-row">
-                Passive shadow evaluation is disabled for this agent.
-            </div>
-            {% endif %}
-            {% endif %}
-
-            {% if skill.demotion_reason %}
-            <div class="cl-report-row cl-report-warn">Demoted{% if skill.demoted_at %} {{ skill.demoted_at|truncate(16, true, '') }}{% endif %}: {{ skill.demotion_reason }}</div>
-            {% endif %}
-
-            <div class="cl-skill-actions">
+            <div class="fleet-detail-actions">
                 {% if skill.can_activate %}
                 <form method="post" action="/continual-learning/skills/{{ skill.skill_id }}/activate" class="cl-inline-form">
-                    <button type="submit" class="btn btn-primary btn-sm" title="Activate at {{ skill.injection_role }} authority: the skill starts injecting into matching runs and its source workflows are suppressed from retrieval">Activate as {{ skill.injection_role }}</button>
+                    <button type="submit" class="btn btn-primary" title="Activate at {{ skill.injection_role }} authority: the skill starts injecting into matching runs and its source workflows are suppressed from retrieval">Activate as {{ skill.injection_role }}</button>
                 </form>
                 {% endif %}
                 {% if skill.can_demote %}
                 <form method="post" action="/continual-learning/skills/{{ skill.skill_id }}/demote" class="cl-inline-form">
-                    <button type="submit" class="btn btn-sm" title="Demote: stops injection and releases the suppressed workflows back to retrieval">Demote</button>
+                    <button type="submit" class="btn" title="Stops injection and releases the suppressed workflows back to retrieval">Demote</button>
                 </form>
                 {% endif %}
+                {% if skill.source_key %}<a class="btn" href="/memory/workflows#{{ skill.source_key }}">Source trajectory class</a>{% endif %}
             </div>
 
-            {% if skill.preconditions %}
-            <details class="cl-runs">
-                <summary>Preconditions ({{ skill.preconditions|length }})</summary>
-                <ul class="cl-precondition-list">
-                    {% for p in skill.preconditions %}<li>{{ p }}</li>{% endfor %}
-                </ul>
-            </details>
+            <p class="lw-tags">
+                <span title="Instruction authority used when this active skill is injected">authority: {{ skill.injection_role }}</span>
+                {% if skill.source_hash_short %}<span title="Source trajectory class">class: {{ skill.source_hash_short }}…</span>{% endif %}
+                {% if skill.tools_used %}<span>tools: {{ skill.tools_used|join(', ') }}</span>{% endif %}
+            </p>
+
+            <dl class="fleet-stats">
+                <div><dt>Activations</dt><dd>{{ skill.activations }}</dd></div>
+                <div><dt>Succeeded</dt><dd>{{ skill.successes }}</dd></div>
+                <div><dt>Failed</dt><dd class="{{ 'is-bad' if skill.failures else '' }}">{{ skill.failures }}</dd></div>
+                <div><dt>Success</dt><dd class="{{ skill.success_tone }}">{{ skill.success_rate }}</dd></div>
+                <div><dt title="The skill was in context but the run took a different path">Deviations</dt><dd class="{{ 'is-warn' if skill.deviations else '' }}">{{ skill.deviations }}</dd></div>
+                <div><dt title="Success rate frozen at promotion time">Baseline</dt><dd>{% if skill.baseline.success_rate is defined %}{{ '%.0f'|format(skill.baseline.success_rate * 100) }}%{% else %}—{% endif %}</dd></div>
+            </dl>
+
+            {% if skill.status == 'shadow' %}
+            <h3 class="fleet-detail-title">Shadow evaluation</h3>
+            <p class="lw-tags">
+                <span>{{ skill.shadow_observations }} passive observation{{ 's' if skill.shadow_observations != 1 }}</span>
+                <span>trajectory match {{ '%.0f'|format(skill.shadow_trajectory_match_rate * 100) }}%</span>
+                <span>matched success {{ '%.0f'|format(skill.shadow_matched_success_rate * 100) }}%</span>
+                {% if skill.shadow_last_evaluated_at %}<span>last evaluated {{ skill.shadow_last_evaluated_at|truncate(19, true, '') }}</span>{% endif %}
+                <span class="pill{% if skill.shadow_ready %} pill--success{% endif %}">{{ 'Ready to review' if skill.shadow_ready else 'Not ready' }}</span>
+            </p>
+            {% if skill.shadow_readiness_reasons %}
+            <p class="lw-note lw-note--warn">Advisory readiness: {{ skill.shadow_readiness_reasons|join('; ') }}. Activation remains an explicit reviewer decision.</p>
+            {% endif %}
+            {% if not skill.shadow_evaluation_enabled %}
+            <p class="lw-note">Passive shadow evaluation is turned off for this agent. Turn it on in the agent's continual learning settings to collect readiness evidence.</p>
+            {% endif %}
             {% endif %}
 
-            <details class="cl-runs">
-                <summary>SKILL.md</summary>
-                <pre class="cl-skill-content">{{ skill.content }}</pre>
-            </details>
-        </div>
-    </div>
-    {% endfor %}
+            {% if skill.demotion_reason %}
+            <p class="lw-note lw-note--bad">Demoted{% if skill.demoted_at %} {{ skill.demoted_at|truncate(16, true, '')|replace('T', ' ') }}{% endif %}: {{ skill.demotion_reason }}</p>
+            {% endif %}
+
+            <h3 class="fleet-detail-title">Lifecycle</h3>
+            <dl class="fleet-config">
+                <div><dt>Version</dt><dd class="mono">v{{ skill.version }}</dd></div>
+                <div><dt>Authority</dt><dd>{{ skill.injection_role|capitalize }}</dd></div>
+                <div><dt>Created</dt><dd class="mono">{{ skill.created_at or '—' }}</dd></div>
+                <div><dt>Promoted</dt><dd class="mono">{{ skill.promoted_at|truncate(16, true, '')|replace('T', ' ') if skill.promoted_at else '—' }}</dd></div>
+                {% if skill.agent_id %}<div><dt>Agent</dt><dd><a href="/agents/{{ skill.agent_id }}/playground">{{ skill.agent_label }}</a></dd></div>{% endif %}
+                {% if skill.source_hash %}<div><dt>Source class</dt><dd>{{ id_chip(skill.source_hash|string, 12) }}</dd></div>{% endif %}
+            </dl>
+
+            {% if skill.preconditions %}
+            <h3 class="fleet-detail-title">Preconditions ({{ skill.preconditions|length }})</h3>
+            <ul class="lw-preconditions">
+                {% for p in skill.preconditions %}<li>{{ p }}</li>{% endfor %}
+            </ul>
+            {% endif %}
+
+            <div class="mem-body-head">
+                <h3 class="fleet-detail-title">SKILL.md</h3>
+                <button type="button" class="btn btn-sm" data-copy-target="lw-skill-md-{{ skill.key }}">Copy</button>
+            </div>
+            <pre class="mem-body" id="lw-skill-md-{{ skill.key }}">{{ skill.content }}</pre>
+        </section>
+        {% endfor %}
+    </aside>
 </div>
 {% else %}
-<div class="empty-state">
-    <div class="empty-icon">🎓</div>
-    <h3>No Learned Skills Yet</h3>
-    <p>Enable continual learning on an agent, let it repeat successful tool workflows, then promote eligible trajectory classes from the <a href="/memory/workflows">Workflows page</a>.</p>
-</div>
+{{ empty_state('No learned skills yet', 'Turn on continual learning for an agent and let it repeat successful tool workflows. Eligible trajectory classes can then be promoted into skills from the workflow trajectories page.', '/memory/workflows', 'View workflow trajectories') }}
 {% endif %}
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const monitor = MemorizzMonitor.init({
+        table: 'lw-skill-table',
+        storageKey: 'memorizz.skills.selected',
+        keys: {
+            // c copies the selected skill's SKILL.md.
+            c: function(row) {
+                const body = document.getElementById('lw-skill-md-' + row.dataset.key);
+                if (body && navigator.clipboard) navigator.clipboard.writeText(body.textContent);
+            },
+        },
+    });
+    // Links such as /memory/skills#<skill id> open on that skill.
+    const wanted = decodeURIComponent(window.location.hash.slice(1));
+    if (monitor && wanted && window.CSS && CSS.escape) {
+        const row = document.querySelector('#lw-skill-table tbody tr[data-key="' + CSS.escape(wanted) + '"]');
+        if (row) monitor.select(row, true);
+    }
+});
+</script>
 {% endblock %}

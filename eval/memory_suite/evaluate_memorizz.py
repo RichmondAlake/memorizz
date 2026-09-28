@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--workspace", type=Path)
     parser.add_argument(
-        "--model-provider", choices=("ollama", "openai"), default="ollama"
+        "--model-provider", choices=("ollama", "openai", "anthropic"), default="ollama"
     )
     parser.add_argument("--model", default="qwen2.5:3b")
     parser.add_argument("--judge-model")
@@ -140,10 +140,13 @@ def main() -> int:
             )
         except Exception as exc:
             raise SystemExit(f"Unable to load MemAgent template: {exc}") from exc
-    if args.model_provider == "openai":
+    if args.model_provider in {"openai", "anthropic"}:
         load_layered_env()
-        if not os.getenv("OPENAI_API_KEY"):
-            raise SystemExit("OPENAI_API_KEY is required when --model-provider=openai")
+        key = f"{args.model_provider.upper()}_API_KEY"
+        if not os.getenv(key):
+            raise SystemExit(
+                f"{key} is required when --model-provider={args.model_provider}"
+            )
     spec = get_benchmark_spec(args.benchmark)
     configured_data = args.data_path or os.getenv(spec.dataset_env)
     if not configured_data:

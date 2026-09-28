@@ -3,11 +3,23 @@
 {% block title %}Automation - {{ job.name }} - Memorizz{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <a href="/automations{% if job.agent_id %}?agent_id={{ job.agent_id }}{% endif %}" class="back-link">← Back to Automations</a>
-    <h1>{{ job.name }}</h1>
-    <p><code>{{ job.job_id }}</code></p>
-</div>
+{% from '_ui.html' import page_header, empty_state, id_chip %}
+{% set status_pill = {'succeeded': 'pill--success', 'failed': 'pill--danger', 'running': 'pill--info'} %}
+{% call page_header(job.name, 'Schedule, status and run history for this job. Select a run to open its trace.', 'Execution', back=('/automations' ~ ('?agent_id=' ~ job.agent_id if job.agent_id else ''), 'All automations')) %}
+    <a class="btn" href="/automations/{{ job.job_id }}/edit">Edit</a>
+    {% if job.enabled %}
+    <form method="post" action="/automations/{{ job.job_id }}/pause">
+        <button type="submit" class="btn">Pause</button>
+    </form>
+    {% else %}
+    <form method="post" action="/automations/{{ job.job_id }}/resume">
+        <button type="submit" class="btn">Resume</button>
+    </form>
+    {% endif %}
+    <form method="post" action="/automations/{{ job.job_id }}/run-now">
+        <button type="submit" class="btn btn-primary">Run now</button>
+    </form>
+{% endcall %}
 
 {% if error %}
 <div class="error-message">
@@ -15,86 +27,74 @@
 </div>
 {% endif %}
 
-<div class="detail-section">
-    <h2>Job</h2>
-    <div class="form-grid">
-        <div class="form-group">
-            <label>Status</label>
-            <div id="job-status-badge">
+<section class="panel" aria-labelledby="automation-job-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="automation-job-title">Job</h2>
+    </div>
+    <dl class="detail-list">
+        <div>
+            <dt>Status</dt>
+            <dd id="job-status-badge">
                 {% if job.enabled %}
-                <span class="badge">enabled</span>
+                <span class="pill pill--success">Enabled</span>
                 {% else %}
-                <span class="badge">paused</span>
+                <span class="pill">Paused</span>
                 {% endif %}
-            </div>
+            </dd>
         </div>
-        <div class="form-group">
-            <label>Agent</label>
-            <div><code>{{ job.agent_id }}</code></div>
+        <div>
+            <dt>Job ID</dt>
+            <dd>{{ id_chip(job.job_id, 40) }}</dd>
         </div>
-        <div class="form-group">
-            <label>Schedule</label>
-            <div>
-                <span class="badge">{{ job.schedule_type }}</span>
+        <div>
+            <dt>Agent</dt>
+            <dd>{{ id_chip(job.agent_id, 40) }}</dd>
+        </div>
+        <div>
+            <dt>Schedule</dt>
+            <dd>
+                {{ job.schedule_type|replace('_', '-')|capitalize }}
                 {% if job.schedule_type == 'cron' and job.cron_expr %}
                 <code>{{ job.cron_expr }}</code>
                 {% elif job.schedule_type == 'interval' and job.interval_seconds %}
                 <code>{{ job.interval_seconds }}s</code>
                 {% endif %}
-            </div>
+            </dd>
         </div>
-        <div class="form-group">
-            <label>Timezone</label>
-            <div><code>{{ job.timezone }}</code></div>
-        </div>
-        <div class="form-group">
-            <label>Next Run</label>
-            <div><code id="job-next-run">{{ job.next_run_at }}</code></div>
-        </div>
-        <div class="form-group">
-            <label>Last Run</label>
-            <div><code id="job-last-run">{{ job.last_run_at or '-' }}</code></div>
-        </div>
-    </div>
-
-    <div class="page-actions page-actions--split" style="margin-top: 14px;">
         <div>
-            <a class="btn" href="/automations/{{ job.job_id }}/edit">Edit</a>
-            <form method="post" action="/automations/{{ job.job_id }}/run-now" style="display:inline;">
-                <button type="submit" class="btn">Run now</button>
-            </form>
-            {% if job.enabled %}
-            <form method="post" action="/automations/{{ job.job_id }}/pause" style="display:inline;">
-                <button type="submit" class="btn">Pause</button>
-            </form>
-            {% else %}
-            <form method="post" action="/automations/{{ job.job_id }}/resume" style="display:inline;">
-                <button type="submit" class="btn">Resume</button>
-            </form>
-            {% endif %}
+            <dt>Timezone</dt>
+            <dd>{{ job.timezone }}</dd>
         </div>
-        <form method="post" action="/automations/{{ job.job_id }}/delete" style="display:flex; gap: 8px; align-items: center;">
-            <label class="config-toggle-option" style="margin:0;">
-                <input type="checkbox" name="confirm" value="1">
-                <span>Confirm delete</span>
-            </label>
-            <button type="submit" class="btn">Delete</button>
-        </form>
-    </div>
-</div>
+        <div>
+            <dt>Next run</dt>
+            <dd><code id="job-next-run">{{ job.next_run_at }}</code></dd>
+        </div>
+        <div>
+            <dt>Last run</dt>
+            <dd><code id="job-last-run">{{ job.last_run_at or '-' }}</code></dd>
+        </div>
+    </dl>
+    <form class="automation-delete" method="post" action="/automations/{{ job.job_id }}/delete">
+        <label>
+            <input type="checkbox" name="confirm" value="1">
+            I understand this deletes the job
+        </label>
+        <button type="submit" class="btn btn-danger">Delete automation</button>
+    </form>
+</section>
 
-<div class="detail-section observability-section">
-    <div class="traces-toolbar">
-        <h2>Run History</h2>
-        <p class="form-hint">Most recent runs (max 50)</p>
+<section class="panel observability-section automation-runs" aria-labelledby="automation-runs-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="automation-runs-title">Run history</h2>
+        <span class="panel-meta">Latest 50 runs</span>
     </div>
 
     {% if runs %}
-    <div class="traces-table-wrap">
-        <table class="traces-agents-table">
+    <div class="traces-table-wrap table-scroll">
+        <table class="traces-agents-table data-table">
             <thead>
                 <tr>
-                    <th>Scheduled For</th>
+                    <th>Scheduled for</th>
                     <th>Status</th>
                     <th>Started</th>
                     <th>Finished</th>
@@ -113,19 +113,15 @@
                 {% set trace_url = '/traces?agent_id=' + job.agent_id + ('&thread_memory_id=' + run_memory_id if run_memory_id else '') + '&scroll=timeline' %}
                 <tr class="automation-run-row" data-trace-url="{{ trace_url }}" style="cursor: pointer;">
                     <td><code>{{ run.scheduled_for }}</code></td>
-                    <td><span class="badge">{{ run.status }}</span></td>
+                    <td><span class="pill {{ status_pill.get(run.status, '') }}">{{ run.status|capitalize }}</span></td>
                     <td><code>{{ run.started_at or '-' }}</code></td>
                     <td><code>{{ run.finished_at or '-' }}</code></td>
                     <td>
-                        {% if deliveries %}
-                        <span class="badge">{{ deliveries|length }}</span>
+                        {{ deliveries|length }}
                         {% if delivery_failed %}
-                        <span class="badge badge-warning">{{ delivery_failed }} failed</span>
+                        <span class="pill pill--warning">{{ delivery_failed }} failed</span>
                         {% elif delivery_sent %}
-                        <span class="badge badge-success">{{ delivery_sent }} sent</span>
-                        {% endif %}
-                        {% else %}
-                        <span class="badge">0</span>
+                        <span class="pill pill--success">{{ delivery_sent }} sent</span>
                         {% endif %}
                     </td>
                     <td>
@@ -142,12 +138,35 @@
     </div>
     {% else %}
     <div class="empty-pane">
-        <div class="empty-icon">RUN</div>
-        <p>No runs yet.</p>
-        <p class="empty-hint">Start a worker (CLI or UI embedded) and wait for the next run time, or click Run now.</p>
+        {{ empty_state('No runs yet', 'A run is recorded when a worker picks up this job at its next run time. Start a worker with memorizz automations run, or select Run now.') }}
     </div>
     {% endif %}
-</div>
+</section>
+
+<style>
+.automation-delete {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+.automation-delete label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+.automation-runs > .empty-pane {
+    display: block;
+    min-height: 0;
+    padding: 0;
+}
+</style>
 
 <script>
 var AUTOMATION_JOB_ID = {{ job.job_id|tojson }};
@@ -168,20 +187,24 @@ function _escHtml(s) {
     return d.innerHTML;
 }
 
+var _STATUS_PILLS = {succeeded: ' pill--success', failed: ' pill--danger', running: ' pill--info'};
+
 function _buildStatusBadge(status) {
-    return '<span class="badge">' + _escHtml(status) + '</span>';
+    var label = String(status || '');
+    label = label.charAt(0).toUpperCase() + label.slice(1);
+    return '<span class="pill' + (_STATUS_PILLS[status] || '') + '">' + _escHtml(label) + '</span>';
 }
 
 function _buildDeliveriesCell(payload) {
-    if (!payload) return '<span class="badge">0</span>';
+    if (!payload) return '0';
     var deliveries = payload.deliveries || [];
     var summary = payload.delivery_summary || {};
-    if (!deliveries.length) return '<span class="badge">0</span>';
-    var html = '<span class="badge">' + deliveries.length + '</span> ';
+    if (!deliveries.length) return '0';
+    var html = deliveries.length + ' ';
     if (summary.failed) {
-        html += '<span class="badge badge-warning">' + summary.failed + ' failed</span>';
+        html += '<span class="pill pill--warning">' + summary.failed + ' failed</span>';
     } else if (summary.sent) {
-        html += '<span class="badge badge-success">' + summary.sent + ' sent</span>';
+        html += '<span class="pill pill--success">' + summary.sent + ' sent</span>';
     }
     return html;
 }
@@ -211,7 +234,7 @@ function _bindRowClicks() {
         row.onclick = function() {
             if (row.dataset.traceUrl) window.location.href = row.dataset.traceUrl;
         };
-        row.onmouseenter = function() { row.style.backgroundColor = 'rgba(255, 255, 255, 0.05)'; };
+        row.onmouseenter = function() { row.style.backgroundColor = 'var(--bg-hover)'; };
         row.onmouseleave = function() { row.style.backgroundColor = ''; };
     });
 }
@@ -221,8 +244,8 @@ function _updateJobMeta(job) {
     var statusEl = document.getElementById('job-status-badge');
     if (statusEl) {
         statusEl.innerHTML = job.enabled
-            ? '<span class="badge">enabled</span>'
-            : '<span class="badge">paused</span>';
+            ? '<span class="pill pill--success">Enabled</span>'
+            : '<span class="pill">Paused</span>';
     }
     // Update next/last run
     var nextEl = document.getElementById('job-next-run');
@@ -250,8 +273,8 @@ function pollRuns() {
                 var section = document.querySelector('.observability-section');
                 emptyPane.remove();
                 section.insertAdjacentHTML('beforeend',
-                    '<div class="traces-table-wrap"><table class="traces-agents-table">'
-                    + '<thead><tr><th>Scheduled For</th><th>Status</th><th>Started</th>'
+                    '<div class="traces-table-wrap table-scroll"><table class="traces-agents-table data-table">'
+                    + '<thead><tr><th>Scheduled for</th><th>Status</th><th>Started</th>'
                     + '<th>Finished</th><th>Deliveries</th><th>Error</th></tr></thead>'
                     + '<tbody></tbody></table></div>');
                 tbody = section.querySelector('tbody');

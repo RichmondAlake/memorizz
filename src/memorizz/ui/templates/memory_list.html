@@ -1,65 +1,170 @@
 {% extends "base.html" %}
+{% from '_ui.html' import page_header, page_tabs, empty_state, id_chip %}
 
-{% block title %}{{ memory_type_display }} - Memorizz{% endblock %}
+{#- Sentence-case titles and one-line explanations per memory type; unknown types fall back to the route's display name. -#}
+{% set memory_pages = {
+    'personas': ('Personas', 'Saved personas that shape how agents describe themselves and respond.'),
+    'toolbox': ('Toolbox', 'Tools registered in the memory provider and available to agents.'),
+    'conversations': ('Conversation memory', 'Stored conversation turns across agents, memories and threads.'),
+    'knowledge-base': ('Knowledge base', 'Long-term knowledge entries that agents retrieve as evidence.'),
+    'short-term': ('Short-term memory', 'Working memory kept for active sessions.'),
+    'entity': ('Entity memory', 'Facts recorded about people, organizations and other entities.'),
+    'summaries': ('Summaries', 'Condensed summaries of earlier conversations.'),
+    'shared': ('Shared memory', 'Memory that several agents read and write together.'),
+    'cache': ('Semantic cache', 'Cached answers that agents reuse for semantically similar queries.'),
+} %}
+{% set page_info = memory_pages.get(memory_type, (memory_type_display|capitalize, None)) %}
+
+{% block title %}{{ page_info[0] }} - Memorizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="memory" data-sidebar-default="collapsed"{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>{{ memory_type_display }}</h1>
-    {% if not load_error %}<p>{{ items|length }} item{% if items|length != 1 %}s{% endif %} shown{% if has_more %}; more records exist. Narrow the query through the SDK or open the provider's database view.{% endif %}</p>{% endif %}
-</div>
+{#- Tabs switch memory types without the sidebar, which starts collapsed here. -#}
+{% set memory_tabs = [] %}
+{% for key, info in memory_pages.items() %}{% set _ = memory_tabs.append(('/memory/' ~ key, info[0]|replace(' memory', ''), key)) %}{% endfor %}
+{{ page_header(page_info[0], page_info[1], 'Memory', nav=page_tabs(memory_tabs, memory_type, 'Memory types')) }}
 
 {% if load_error %}
-<p role="alert">{{ load_error }}</p>
-{% elif items %}
-<div class="memory-items">
-    {% for item in items %}
-    <div class="memory-item">
-        <div class="memory-item-header">
-            {% if item.name %}
-            <h3>{{ item.name }}</h3>
-            {% elif item.title %}
-            <h3>{{ item.title }}</h3>
-            {% elif item._id %}
-            <h3>Item {{ item._id|string|truncate(12) }}</h3>
-            {% else %}
-            <h3>Item {{ loop.index }}</h3>
-            {% endif %}
+<p class="error-message" role="alert">{{ load_error }}</p>
+{% elif view.records %}
+{% set records = view.records %}
+<div class="fleet-tape" role="list" aria-label="{{ page_info[0] }} summary">
+    <div role="listitem"><span>Records</span><strong>{% if view.has_more and not total_known %}{{ records|length }}+{% else %}{{ '{:,}'.format(view.total) }}{% endif %}</strong></div>
+    <div role="listitem"><span>Shown</span><strong>{{ records|length }}{% if view.has_more %}<small> newest</small>{% endif %}</strong></div>
+    {% if view.memory_ids %}<div role="listitem"><span>Memory IDs</span><strong>{{ view.memory_ids|length }}</strong></div>{% endif %}
+    {% if view.agent_count %}<div role="listitem"><span>Agents</span><strong>{{ view.agent_count }}</strong></div>{% endif %}
+    {% for role, count in view.roles[:3] %}<div role="listitem"><span>{{ role|capitalize }}</span><strong>{{ '{:,}'.format(count) }}</strong></div>{% endfor %}
+    <div role="listitem"><span>Mean size</span><strong>{{ '{:,}'.format(view.mean_chars) }}<small> chars</small></strong></div>
+    <div role="listitem"><span>Newest</span><strong class="mem-time">{{ view.newest or '—' }}</strong></div>
+    {% if view.series %}
+    {% set peak = [view.series|max, 1]|max %}
+    <div role="listitem" class="mem-tape-trend">
+        <span>Last 14 days</span>
+        <svg class="fleet-trend" viewBox="0 0 {{ view.series|length * 4 }} 20" preserveAspectRatio="none" role="img" aria-label="Records per day for the 14 days up to the newest record">
+            {% for count in view.series %}{% if count %}{% set h = [20 * count / peak, 2]|max %}<rect class="ok" x="{{ loop.index0 * 4 }}" y="{{ 20 - h }}" width="3" height="{{ h }}"><title>{{ count }}</title></rect>{% endif %}{% endfor %}
+        </svg>
+    </div>
+    {% endif %}
+</div>
 
-            {% if item._id %}
-            <code class="item-id">{{ item._id|string|truncate(20) }}</code>
-            {% endif %}
-        </div>
+{% if view.has_more %}
+<p class="form-note" role="status">{{ records|length }} items shown, newest first{% if total_known %}, of {{ '{:,}'.format(view.total) }}{% endif %}; more records exist.{% if view.sampled %} Role, memory ID and date figures cover these newest records.{% endif %} Narrow the query through the SDK or open the provider's database view for the rest.</p>
+{% endif %}
 
-        <div class="memory-item-body">
-            {% if item.content %}
-            <p class="item-content">{{ item.content|truncate(200) }}</p>
-            {% elif item.description %}
-            <p class="item-content">{{ item.description|truncate(200) }}</p>
-            {% endif %}
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="mem-filter" data-monitor-filter-for="mem-table" placeholder="Filter by content, name or ID" aria-label="Filter records" autocomplete="off">
+    </label>
+    {% if view.roles|length > 1 %}
+    <div class="segmented" role="group" aria-label="Show role">
+        <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ view.total }}</span></button>
+        {% for role, count in view.roles %}
+        <button type="button" class="segmented-item" data-monitor-tag="{{ role }}" aria-pressed="false">{{ role|capitalize }} <span>{{ count }}</span></button>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if view.memory_ids|length > 1 %}
+    <div class="fleet-order">
+        <label for="mem-memory">Memory</label>
+        <select id="mem-memory" data-monitor-field="memory">
+            <option value="">All memory IDs</option>
+            {% for memory_id in view.memory_ids %}<option value="{{ memory_id }}">{{ memory_id }}</option>{% endfor %}
+        </select>
+    </div>
+    {% endif %}
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>c</kbd> copy content</span><span><kbd>/</kbd> filter</span></p>
+</div>
 
-            <div class="item-meta">
-                {% if item.role %}
-                <span class="meta-tag">{{ item.role }}</span>
-                {% endif %}
-                {% if item.memory_id %}
-                <span class="meta-tag">Memory: {{ item.memory_id|truncate(12) }}</span>
-                {% endif %}
-                {% if item.timestamp %}
-                <span class="meta-tag">{{ item.timestamp }}</span>
-                {% endif %}
-                {% if item.created_at %}
-                <span class="meta-tag">Created: {{ item.created_at }}</span>
-                {% endif %}
-            </div>
+<div class="fleet mem" id="mem">
+    <div class="fleet-main">
+        <div class="fleet-table-wrap">
+            <table class="fleet-table memory-table" id="mem-table">
+                <caption class="visually-hidden">{{ page_info[0] }}, newest first. Select a row to read the full record.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" class="mem-col-time">Recorded</th>
+                        {% if view.show_name %}<th scope="col" class="mem-col-name">Name</th>{% endif %}
+                        <th scope="col">Content</th>
+                        {% if view.show_role %}<th scope="col" class="mem-col-role">Role</th>{% endif %}
+                        {% if view.show_memory %}<th scope="col" class="mem-col-memory">Memory ID</th>{% endif %}
+                        <th scope="col" class="num mem-col-size">Size</th>
+                        <th scope="col" class="mem-col-id">ID</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in records %}
+                    <tr data-key="{{ loop.index0 }}"
+                        data-tags="{{ row.role }}"
+                        data-memory="{{ row.memory_id }}"
+                        data-search="{{ (row.name ~ ' ' ~ row.preview ~ ' ' ~ row.id ~ ' ' ~ row.memory_id ~ ' ' ~ row.agent_id)|lower }}"
+                        tabindex="-1">
+                        <td class="mem-col-time mono" {% if row.recorded %}title="{{ row.recorded }}"{% endif %}>{% if row.recorded %}<span class="mem-time-full">{{ row.recorded }}</span><span class="mem-time-short">{{ row.recorded[5:16] }}</span>{% else %}—{% endif %}</td>
+                        {% if view.show_name %}<td class="mem-col-name">{{ row.name or '—' }}</td>{% endif %}
+                        <td class="mem-preview">{{ row.preview or '—' }}</td>
+                        {% if view.show_role %}<td class="mem-col-role">{% if row.role %}<span class="mem-role mem-role--{{ row.role }}">{{ row.role }}</span>{% else %}—{% endif %}</td>{% endif %}
+                        {% if view.show_memory %}<td class="mem-col-memory mono" title="{{ row.memory_id }}">{{ row.memory_id[:14] or '—' }}</td>{% endif %}
+                        <td class="num mem-col-size">{{ '{:,}'.format(row.size) if row.size else '—' }}</td>
+                        <td class="mem-col-id mono" title="{{ row.id }}">{{ row.id[:10] or '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="fleet-none" id="mem-none" hidden>No records match this filter.</p>
         </div>
     </div>
-    {% endfor %}
+
+    <aside class="fleet-pane" aria-label="Selected record">
+        {% for row in records %}
+        <section class="fleet-detail" id="mem-detail-{{ loop.index0 }}" data-key="{{ loop.index0 }}" hidden>
+            <header class="fleet-detail-head">
+                <div>
+                    <h2>{{ row.name or (row.role|capitalize if row.role else 'Record') }}</h2>
+                    <p class="fleet-detail-sub">{% if row.id %}{{ id_chip(row.id) }}{% endif %}{% if row.recorded %} <span class="mono">{{ row.recorded }}</span>{% endif %}</p>
+                </div>
+                {% if row.role %}<span class="mem-role mem-role--{{ row.role }}">{{ row.role }}</span>{% endif %}
+            </header>
+            {% if row.memory_id or row.agent_id %}
+            <dl class="fleet-config">
+                {% if row.memory_id %}<div><dt>Memory ID</dt><dd>{{ id_chip(row.memory_id, 24) }}</dd></div>{% endif %}
+                {% if row.agent_id %}<div><dt>Agent</dt><dd><a href="/agents/{{ row.agent_id }}/playground">{{ row.agent_id[:12] }}</a></dd></div>{% endif %}
+            </dl>
+            {% endif %}
+            {% if row.body %}
+            <div class="mem-body-head">
+                <h3 class="fleet-detail-title">{{ row.body_key|replace('_', ' ')|capitalize }}</h3>
+                <button type="button" class="btn btn-sm" data-copy-target="mem-body-{{ loop.index0 }}">Copy</button>
+            </div>
+            <pre class="mem-body" id="mem-body-{{ loop.index0 }}">{{ row.body }}</pre>
+            {% endif %}
+            {% if row.fields %}
+            <h3 class="fleet-detail-title">Fields</h3>
+            <dl class="mem-fields">
+                {% for field in row.fields %}
+                <div><dt>{{ field.key }}</dt><dd>{{ field.value }}</dd></div>
+                {% endfor %}
+            </dl>
+            {% endif %}
+        </section>
+        {% endfor %}
+    </aside>
 </div>
 {% else %}
-<div class="empty-state">
-    <div class="empty-icon">📭</div>
-    <h3>No {{ memory_type_display }} Found</h3>
-    <p>There are no items of this type stored in the memory provider.</p>
-</div>
+{{ empty_state('Nothing stored yet', 'The connected memory provider has no ' ~ page_info[0]|lower ~ ' entries. They appear here once agents write them during runs, or after you save them with the Python SDK.') }}
 {% endif %}
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    MemorizzMonitor.init({
+        table: 'mem-table',
+        keys: {
+            // c copies the selected record's content.
+            c: function(row) {
+                const body = document.getElementById('mem-body-' + row.dataset.key);
+                if (body && navigator.clipboard) navigator.clipboard.writeText(body.textContent);
+            },
+        },
+    });
+});
+</script>
 {% endblock %}

@@ -49,18 +49,28 @@ async def memory_list(request: Request, memory_type: str):
         raise HTTPException(status_code=404, detail="Unknown memory type")
 
     items = []
+    total = None
     load_error = None
+    provider = _state["provider"]
     try:
         if _state.get("provider_type") == "notion":
             items = await run_in_threadpool(
-                _state["provider"].retrieve_by_query, {}, mem_type, limit=101
+                provider.retrieve_by_query, {}, mem_type, limit=101
             )
+        elif callable(getattr(provider, "list_recent", None)):
+            # Database providers: read only the newest page, count from metadata.
+            items = await run_in_threadpool(provider.list_recent, mem_type, 101)
+            total = await run_in_threadpool(provider.estimate_count, mem_type)
         else:
-            items = await run_in_threadpool(_state["provider"].list_all, mem_type)
+            items = await run_in_threadpool(provider.list_all, mem_type)
     except Exception as e:
         logger.error("Failed to list %s (%s)", memory_type, type(e).__name__)
         load_error = "Memory could not be loaded. Check provider access and query limits; this is not an empty-result confirmation."
 
+    from ..memory_view import build_memory_view
+
+    # Newest 100 records, shaped for the explorer (no embedding vectors).
+    view = await run_in_threadpool(lambda: build_memory_view(items or [], total=total))
     return templates.TemplateResponse(
         "memory_list.html",
         {
@@ -69,8 +79,11 @@ async def memory_list(request: Request, memory_type: str):
             "connection_info": _state["connection_info"],
             "memory_type": memory_type,
             "memory_type_display": memory_type.replace("-", " ").title(),
-            "items": items[:100],  # Limit to 100 items
-            "has_more": len(items) > 100,
+            "view": view,
+            "items": view["records"],
+            "has_more": view["has_more"],
+            # Notion reads a bounded page, so its count is a floor, not a total.
+            "total_known": _state.get("provider_type") != "notion",
             "load_error": load_error,
             "active_page": memory_type,
         },

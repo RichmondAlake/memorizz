@@ -65,6 +65,11 @@ class Anthropic(LLMProvider):
         so repeated prefixes — every tool-loop iteration and every follow-up
         turn — are billed at Anthropic's cached-input rate instead of full
         price. Enabled by default; requires no server-side setup.
+    cache_single_shot_prompts : bool
+        Also cache the prompt body of single-shot ``generate_text`` calls.
+        Off by default: a unique prompt would only pay the 1.25x write
+        premium. Enable for workloads that resend identical prompts, such as
+        repeated evaluation runs.
     additional_config : dict, optional
         Extra keyword arguments forwarded to ``messages.create``.
     """
@@ -79,6 +84,8 @@ class Anthropic(LLMProvider):
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
         enable_prompt_caching: bool = True,
+        cache_single_shot_prompts: bool = False,
+        effort: Optional[str] = None,
         additional_config: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ):
@@ -101,9 +108,14 @@ class Anthropic(LLMProvider):
         self._last_usage: Optional[Dict[str, int]] = None
         self._max_tokens = max_tokens
         self._enable_prompt_caching = enable_prompt_caching
+        self._cache_single_shot_prompts = bool(cache_single_shot_prompts)
 
         # Build optional request parameters
         self._request_options: Dict[str, Any] = {}
+        if effort is not None:
+            if effort not in {"low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("Unsupported Anthropic effort")
+            self._request_options["output_config"] = {"effort": effort}
         opts = {"temperature": temperature, "top_p": top_p, "top_k": top_k}
         for key, value in opts.items():
             if value is not None:
@@ -117,6 +129,10 @@ class Anthropic(LLMProvider):
             if "enable_prompt_caching" in additional_config:
                 self._enable_prompt_caching = bool(
                     additional_config["enable_prompt_caching"]
+                )
+            if "cache_single_shot_prompts" in additional_config:
+                self._cache_single_shot_prompts = bool(
+                    additional_config["cache_single_shot_prompts"]
                 )
 
     # ------------------------------------------------------------------
@@ -157,6 +173,7 @@ class Anthropic(LLMProvider):
             "context_window_tokens": self.context_window_tokens,
             "max_tokens": self._max_tokens,
             "enable_prompt_caching": self._enable_prompt_caching,
+            "cache_single_shot_prompts": self._cache_single_shot_prompts,
             "additional_config": copy.deepcopy(self._request_options),
         }
 
@@ -206,7 +223,13 @@ class Anthropic(LLMProvider):
         if instructions:
             messages.append({"role": "system", "content": instructions})
         messages.append({"role": "user", "content": prompt})
-        kwargs = self._build_request_kwargs(messages)
+        # Single-shot: no follow-up request extends this prompt, so a message
+        # breakpoint would only pay the 1.25x write premium unless the caller
+        # resends identical prompts. By default cache the instructions alone.
+        kwargs = self._build_request_kwargs(
+            messages,
+            message_breakpoints=int(getattr(self, "_cache_single_shot_prompts", False)),
+        )
 
         self._last_usage = None
         self._last_response_metadata = {}
@@ -303,8 +326,19 @@ class Anthropic(LLMProvider):
                 if event_type == "message_stop":
                     stopped = True
                 elif event_type == "error":
+                    # Keep the provider's error type (e.g. overloaded_error) so
+                    # callers can tell a transient failure from a bad request.
+                    error_type = getattr(getattr(event, "error", None), "type", None)
                     raise ProviderStreamError(
-                        "provider_stream_error", self.get_last_response_metadata()
+                        "provider_stream_error",
+                        {
+                            **self.get_last_response_metadata(),
+                            **(
+                                {"provider_error_type": str(error_type)[:80]}
+                                if error_type
+                                else {}
+                            ),
+                        },
                     )
                 elif event_type == "message_start":
                     # message_start carries the authoritative input-side usage
@@ -436,6 +470,8 @@ class Anthropic(LLMProvider):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: str = "auto",
+        *,
+        message_breakpoints: int = 2,
     ) -> Dict[str, Any]:
         """Build one provider-owned Anthropic request.
 
@@ -445,6 +481,30 @@ class Anthropic(LLMProvider):
         cache-breakpoint policy.
         """
         system_content, api_messages = self._split_system(messages)
+        leading = next(
+            (
+                index
+                for index, message in enumerate(messages)
+                if message.get("role") not in ("system", "developer")
+            ),
+            len(messages),
+        )
+        stable, _ = self._split_system(messages[:leading])
+        trailing, _ = self._split_system(messages[leading:])
+        system_boundary = None
+        if (
+            self._enable_prompt_caching
+            and isinstance(stable, str)
+            and isinstance(trailing, str)
+        ):
+            # Later developer instructions (reviewed skills) vary by turn.
+            # A separate block after the stable-prompt breakpoint keeps a
+            # skill change from invalidating the cached tools + system.
+            system_content = [
+                {"type": "text", "text": stable},
+                {"type": "text", "text": trailing},
+            ]
+            system_boundary = 0
         api_messages = self._convert_messages(api_messages)
 
         kwargs: Dict[str, Any] = {
@@ -458,14 +518,24 @@ class Anthropic(LLMProvider):
             kwargs["tools"] = self._convert_tools(tools)
             kwargs["tool_choice"] = self._convert_tool_choice(tool_choice)
         kwargs.update(copy.deepcopy(self._request_options))
-        self._apply_cache_control(kwargs)
+        self._apply_cache_control(
+            kwargs,
+            message_breakpoints=message_breakpoints,
+            system_boundary=system_boundary,
+        )
         self._validate_cache_control_budget(kwargs)
         from .prompt_cache import cache_request_metadata
 
         self._last_prompt_cache_metadata = cache_request_metadata(kwargs, "anthropic")
         return kwargs
 
-    def _apply_cache_control(self, kwargs: Dict[str, Any]) -> None:
+    def _apply_cache_control(
+        self,
+        kwargs: Dict[str, Any],
+        *,
+        message_breakpoints: int = 2,
+        system_boundary: Optional[int] = None,
+    ) -> None:
         """Attach ephemeral ``cache_control`` breakpoints to the request.
 
         Anthropic prompt caching is opt-in and prefix-based (rendered order:
@@ -489,7 +559,11 @@ class Anthropic(LLMProvider):
 
         Reads bill at ~0.1x input price, writes at 1.25x — with the tool loop
         re-sending the whole prefix every iteration this pays for itself on
-        the very next request. No-ops when ``enable_prompt_caching`` is off.
+        the very next request. Single-shot callers pass
+        ``message_breakpoints=0`` because nothing will read a message write.
+        ``system_boundary`` selects the stable system block when later,
+        per-turn instructions follow it; a caller's system breakpoint is
+        respected instead. No-ops when ``enable_prompt_caching`` is off.
         """
         if not self._enable_prompt_caching:
             return
@@ -516,15 +590,22 @@ class Anthropic(LLMProvider):
                 }
             ]
             remaining -= 1
-        elif isinstance(system_content, list):
-            system_block = self._last_cacheable_content_block(system_content)
+        elif isinstance(system_content, list) and not any(
+            isinstance(block, dict) and block.get("cache_control") is not None
+            for block in system_content
+        ):
+            system_block = (
+                system_content[system_boundary]
+                if system_boundary is not None
+                else self._last_cacheable_content_block(system_content)
+            )
             if system_block is not None:
                 mark_block(system_block)
 
         messages = kwargs.get("messages") or []
         selected = 0
         for msg in reversed(messages):
-            if selected >= 2:
+            if selected >= message_breakpoints:
                 break
             if not isinstance(msg, dict):
                 continue
@@ -664,6 +745,19 @@ class Anthropic(LLMProvider):
         if getattr(usage, "cache_creation_input_tokens", None) is not None:
             extracted["cache_creation_input_tokens"] = cache_creation
             extracted["cache_write_tokens"] = cache_creation
+            breakdown = getattr(usage, "cache_creation", None)
+            if breakdown is not None:
+                get = (
+                    breakdown.get
+                    if isinstance(breakdown, dict)
+                    else lambda key, default=0: getattr(breakdown, key, default)
+                )
+                extracted["cache_write_1h_tokens"] = (
+                    get("ephemeral_1h_input_tokens", 0) or 0
+                )
+                extracted["cache_write_5m_tokens"] = (
+                    get("ephemeral_5m_input_tokens", 0) or 0
+                )
         return extracted
 
     def get_last_response_metadata(self) -> Dict[str, Any]:

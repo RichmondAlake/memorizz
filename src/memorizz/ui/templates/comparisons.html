@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block title %}Model comparison · Evalground{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/comparisons.css"><link rel="stylesheet" href="/static/css/pages/evalground.css?v=1">{% endblock %}
+{% block content %}
+<div class="compare-page">
+{% from '_ui.html' import page_header, evalground_tabs %}
+{% call page_header('New comparison', 'Evaluate quality, latency and cost on a shared set of questions.', 'Evaluate', nav=evalground_tabs('compare'), title_id='comparison-page-title', description_id='comparison-page-description') %}<button id="toggle-setup" class="btn btn-secondary" type="button" hidden>View configuration</button>{% endcall %}
+{#- Live summary: the planned workload while setting up, the saved run's figures on a result. Filled by the script below. -#}
+<div id="compare-tape" class="fleet-tape eval-tape compare-tape" role="list" aria-label="Comparison summary" aria-live="polite">
+    {% for label in ['Dataset', 'Questions', 'Answer models', 'Rerankers', 'Planned answers', 'Spend threshold'] %}<div role="listitem"><span>{{ label }}</span><strong>—</strong></div>{% endfor %}
+</div>
+<section id="saved-configuration" class="compare-panel" hidden><h2>Run configuration</h2><p class="muted">These are the settings used for this run. Duplicate the configuration to make changes and run again.</p><div id="saved-configuration-summary" class="review-summary"></div><details><summary>Full configuration</summary><pre id="saved-configuration-json"></pre></details></section>
+<form id="comparison-form" novalidate>
+<nav class="setup-steps" aria-label="Comparison setup"><button type="button" data-step="0" aria-current="step"><span>1</span>Dataset</button><button type="button" data-step="1"><span>2</span>Models</button><button type="button" data-step="2"><span>3</span>Review &amp; run</button></nav>
+<section class="compare-panel setup-panel" data-panel="0">
+<div class="setup-heading"><span class="step-number">01</span><div><h2>Define the comparison</h2><p class="muted">Choose what changes and the questions you will use to measure it.</p></div></div>
+<div class="compare-grid">
+<label>Experiment name<input id="experiment-name" required maxlength="120" value="Model comparison" placeholder="For example: support assistant model selection"></label>
+<label>Compare<select id="experiment-type"><option value="reader">Answer models</option><option value="reranker">Rerankers</option><option value="pipeline">Complete memory pipelines</option></select></label>
+</div><p id="experiment-purpose" class="setup-context"></p>
+<div class="compare-grid">
+<label>Evaluation dataset<select id="dataset"><option value="memory_checks">Sample · 6 memory questions</option><option value="custom">Your labeled dataset · JSON / JSONL</option>{% for spec in benchmark_catalog %}<option value="{{ spec.benchmark_id }}">{{ spec.name }}</option>{% endfor %}<option value="demo">Sample · 6 simple questions</option></select></label>
+<label>Questions per configuration<input id="limit" type="number" min="1" max="2000" value="6" required></label>
+<label id="path-field" hidden>Dataset path on the server<input id="data-path" placeholder="/datasets/support-evaluation.jsonl"></label>
+<label id="variant-field" hidden>Dataset variant<select id="variant"></select></label>
+</div>
+<p id="dataset-help" class="notice"></p>
+<details id="dataset-schema"><summary>Dataset format &amp; example</summary><p>Provide expected answers and relevant memory IDs for each question. Use conversations that were not used to tune your prompts. Paths refer to files accessible by the Evalground server.</p><pre class="sample">[{"case_id":"q1","corpus_id":"customer-1","category":"preference",
+  "question":"Which drink does Asha prefer?","answers":["tea"],
+  "scorer":"exact_match","relevant_source_ids":["m1"],
+  "documents":[{"source_id":"m1","content":"Asha prefers tea."}]}]</pre></details>
+<details id="snapshot-settings"><summary>Use a saved candidate pool</summary><p class="muted">Optional: reuse previously retrieved evidence to isolate model and reranker performance. Retrieval and embedding costs are excluded from this replay.</p><label>Candidate snapshot path<input id="candidate-snapshot" placeholder="/datasets/oracle-candidates.json"></label><p id="snapshot-note" class="muted"></p></details>
+<details id="sample-presets"><summary>Start from a sample configuration</summary><p class="muted">These examples use six synthetic questions and saved Oracle/Voyage candidates. New runs make live provider calls.</p><div class="compare-actions"><button type="button" id="load-system-one" class="btn btn-secondary">7 reranking methods</button><button type="button" id="load-system-one-readers" class="btn btn-secondary">3 answer models</button></div><p id="preset-note" class="muted"></p></details>
+</section>
+<section class="compare-panel setup-panel" data-panel="1" hidden>
+<div class="setup-heading"><span class="step-number">02</span><div><h2>Choose the models</h2><p class="muted">The first model or method is your baseline. Compare alternatives against it.</p></div></div>
+<p class="setup-context">Providers use credentials configured on this server. Model menus show discovered models; access and quota are checked by the provider when a run starts.</p>
+<h3 id="reader-section-title">Answer models to compare</h3><div id="readers"></div><button type="button" id="add-reader" class="btn btn-secondary">+ Add answer model</button>
+<div id="reranker-section" hidden><h3>Reranking methods</h3><p class="muted">Every method receives the same candidates. Keep original candidate order as a baseline.</p><div id="rerankers"></div><button type="button" id="add-reranker" class="btn btn-secondary">+ Add reranker</button></div>
+<details><summary>Scoring &amp; judge model</summary><p>Exact match and F1 are deterministic. Rubric and faithfulness checks use the fixed judge below. Judge and gold-evidence calls are reported separately from serving costs.</p><div id="judge"></div><label class="check"><input id="oracle" type="checkbox"> Also test answers with gold evidence (additional calls)</label></details>
+</section>
+<section class="compare-panel setup-panel" data-panel="2" hidden>
+<div class="setup-heading"><span class="step-number">03</span><div><h2>Review &amp; run</h2><p class="muted">Confirm the workload and operating limits before starting live inference.</p></div></div>
+<div id="review-summary" class="review-summary"></div>
+<div class="compare-grid">
+<label>Repeat each configuration<input id="repeats" type="number" min="1" max="5" value="1" required></label>
+<label>Evidence records per answer (top k)<input id="top-k" type="number" min="1" max="50" value="4" required></label>
+<label>Initial candidate pool<input id="pool" type="number" min="2" max="100" value="20" required></label>
+<label>Time limit (minutes)<input id="minutes" type="number" min="1" max="1440" value="30" required></label>
+<label>API spend threshold (USD)<input id="max-cost" type="number" min="0.000001" step="any" placeholder="No spend threshold"></label>
+</div>
+<p class="muted">Limits are checked between calls. An in-flight request can exceed a time or spend threshold. All hosted models need known prices to apply a spend threshold.</p>
+<details id="retrieval-settings"><summary>Retrieval &amp; reproducibility settings</summary><div class="compare-grid"><label>Dataset seed<input id="seed" type="number" min="0" max="2147483647" value="0"></label><label>Embedding model (Ollama)<input id="embedding" value="nomic-embed-text" required></label><label>Ollama endpoint<input id="ollama-host" value="http://localhost:11434" required></label><label>Local hardware estimate (USD / hour)<input id="local-cost" type="number" min="0" step="any" value="0"></label></div><p class="muted" id="retrieval-settings-note">Initial retrieval is shared across configurations. Local compute estimates cover measured model calls, excluding ingestion and idle time.</p></details>
+<p id="run-plan" class="notice"></p><button id="start-comparison" class="btn btn-primary" type="submit">Run comparison</button>
+</section>
+<p id="form-error" role="alert"></p>
+<div class="setup-footer"><a href="/evalground">Cancel</a><span id="setup-position">Step 1 of 3</span><button id="setup-back" type="button" class="btn btn-secondary" hidden>Back</button><button id="setup-next" type="button" class="btn btn-primary">Continue to models →</button></div>
+</form>
+<section id="experiment-results" class="compare-panel" hidden>
+<div class="compare-actions result-heading"><h2 id="result-name">Results</h2><span id="result-status" class="badge"></span><button id="stop-comparison" class="btn btn-secondary" type="button">Stop run</button><button id="reuse-config" class="btn btn-secondary" type="button">Duplicate configuration</button><a id="export-json">Export JSON</a><a id="export-csv">Export CSV</a></div>
+<p id="result-progress" role="status"></p><p id="result-error" role="alert"></p>
+<nav class="result-tabs" aria-label="Result views"><button type="button" data-result-tab="overview" aria-current="page">Overview</button><button type="button" data-result-tab="evidence">Evidence</button><button type="button" data-result-tab="measurements">Calls &amp; measurements</button></nav>
+<div id="result-overview" data-result-panel="overview">
+<div id="comparison-visuals"></div>
+<h3>Configuration results</h3><div id="results-table" class="compare-table-wrap"></div>
+<div id="paired-results"></div>
+<details id="metric-guide" class="metric-guide"><summary>Metric definitions</summary><div id="metric-explanations"></div></details>
+</div>
+<div id="configuration-inspector" hidden><label>Configuration<select id="inspect-run"></select></label></div>
+<div id="result-evidence" data-result-panel="evidence" hidden><section id="ranking-explorer" hidden></section></div>
+<div id="result-measurements" data-result-panel="measurements" hidden><div id="run-details"></div></div>
+<details class="result-provenance"><summary>Dataset, methodology &amp; limitations</summary><p id="result-context" class="muted"></p><p class="muted" id="measurement-scope"></p><ul id="result-warnings"></ul></details>
+</section>
+<details id="experiment-library" class="compare-panel">
+<summary>Examples &amp; developer guides</summary><p>Run sample comparisons here or explore the educational appbook. The appbook provides standalone Python lessons and Oracle-backed decision experiments.</p>
+<div class="lesson-links">
+<a href="#sample-presets" data-show-setup>Reranking comparison<span>Original order, dedicated, LLM, open-source and Jev methods</span></a>
+<a href="{{ appbook_url }}?lab=summary&amp;tab=experiment" target="_blank" rel="noopener">Summary quality gates<span>Check extracted summaries · Appbook ↗</span></a>
+<a href="{{ appbook_url }}?lab=routing&amp;tab=experiment" target="_blank" rel="noopener">Memory-use routing<span>Decide whether memory helps · Appbook ↗</span></a>
+<a href="{{ appbook_url }}?lab=selection&amp;tab=experiment" target="_blank" rel="noopener">Tool &amp; skill selection<span>Retrieval versus typed decisions · Appbook ↗</span></a>
+<a href="{{ appbook_url }}?lab=chunking&amp;tab=experiment" target="_blank" rel="noopener">Semantic chunking<span>Boundaries and retrieval quality · Appbook ↗</span></a>
+<a href="#sample-presets" data-show-setup>Answer-model comparison<span>Opus, GPT Sol and GPT Luna on fixed evidence</span></a>
+</div></details>
+<details class="compare-panel"><summary>Other comparisons</summary><div id="comparison-history">Loading…</div><a href="/evalground">View all evaluations →</a></details>
+</div>
+<script id="benchmark-catalog" type="application/json">{{ benchmark_catalog|tojson }}</script>
+{% endblock %}
+{% block scripts %}<script>
+/* Summary tape for the comparison page. Reads the setup form, or the saved run's
+   row from the read-only run library when a result is open. Never starts work. */
+document.addEventListener("DOMContentLoaded", () => {
+  const tape = document.getElementById("compare-tape");
+  const results = document.getElementById("experiment-results");
+  if (!tape || !results) return;
+  const $ = (id) => document.getElementById(id);
+  const usd = (value) => {
+    if (value == null) return "Unknown";
+    if (value === 0) return "$0.00";
+    const size = Math.abs(value);
+    if (size >= 1) return "$" + value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return "$" + value.toFixed(size >= 0.01 ? 4 : 6);
+  };
+  const group = (status) => ["queued", "running", "cancelling", "canceling"].includes(status) ? "active" : status === "completed" ? "good" : ["failed", "interrupted"].includes(status) ? "bad" : "warn";
+  function paint(items) {
+    tape.replaceChildren(...items.map(([label, value, tone, title, text]) => {
+      const cell = document.createElement("div");
+      cell.setAttribute("role", "listitem");
+      if (text) cell.className = "eval-tape-text";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const figure = document.createElement("strong");
+      figure.textContent = value;
+      if (tone) figure.className = tone;
+      if (title) figure.title = title;
+      cell.append(name, figure);
+      return cell;
+    }));
+  }
+  function setupItems() {
+    const dataset = $("dataset");
+    const option = dataset && dataset.selectedOptions[0];
+    const limit = Number($("limit")?.value) || 0;
+    const readers = document.querySelectorAll("#readers .model-row").length;
+    const rerankerMode = !$("reranker-section")?.hidden;
+    const rerankers = rerankerMode ? document.querySelectorAll("#rerankers .model-row").length : 0;
+    const repeats = Number($("repeats")?.value) || 1;
+    const cap = $("max-cost")?.value;
+    const planned = limit * Math.max(readers, 1) * Math.max(rerankers, 1) * repeats;
+    return [
+      ["Dataset", option ? option.textContent.replace(/^Sample · /, "Sample: ") : "—", "", option ? option.textContent : "", true],
+      ["Questions", limit ? limit.toLocaleString("en-US") : "—"],
+      ["Answer models", String(readers)],
+      ["Rerankers", rerankerMode ? String(rerankers) : "Original order", "", "", !rerankerMode],
+      ["Planned answers", planned ? planned.toLocaleString("en-US") : "—", "", `${limit} questions × ${Math.max(readers, 1)} answer model(s) × ${Math.max(rerankers, 1)} reranker(s) × ${repeats} repeat(s)`],
+      ["Spend threshold", cap ? usd(Number(cap)) : "None", cap ? "" : "is-warn", cap ? "" : "No spend threshold: hosted calls run to completion", true],
+    ];
+  }
+  let library = null;
+  async function resultItems(id) {
+    if (!library) {
+      const response = await fetch("/evalground/run-library");
+      library = response.ok ? (await response.json()).runs : [];
+    }
+    const run = library.find((row) => row.id === id);
+    if (!run) return null;
+    const nDCG = (run.quality_label || "").startsWith("nDCG");
+    const fmt = (v) => nDCG ? v.toFixed(3) : (v * 100).toFixed(1) + "%";
+    const tone = group(run.status);
+    return [
+      ["Status", (run.status || "").replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase()), tone === "active" ? "" : "is-" + tone, "", true],
+      ["Configurations", String(run.models.length), "", run.models.join(" · ")],
+      ["Progress", `${run.completed ?? "—"}/${run.planned ?? "—"}`, "", run.progress_unit],
+      ["Best quality", run.quality_max == null ? "—" : fmt(run.quality_max), "", run.quality_label],
+      ["Lowest quality", run.quality_min == null ? "—" : fmt(run.quality_min), "", run.quality_label],
+      ["API cost", usd(run.cost_usd), "", run.cost_usd == null ? "" : "Exact $" + run.cost_usd],
+      ["Started", run.created_at ? new Date(run.created_at * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—", "", "", true],
+    ];
+  }
+  let pending = 0;
+  async function update() {
+    const ticket = ++pending;
+    const id = new URLSearchParams(location.search).get("experiment");
+    if (!results.hidden && id) {
+      try {
+        const items = await resultItems(id);
+        if (ticket === pending && items) paint(items);
+      } catch (_) {}
+      return;
+    }
+    paint(setupItems());
+  }
+  const form = $("comparison-form");
+  if (form) {
+    form.addEventListener("input", update);
+    form.addEventListener("change", update);
+    form.addEventListener("click", () => setTimeout(update, 0));
+  }
+  const watch = new MutationObserver(() => update());
+  ["readers", "rerankers", "reranker-section"].forEach((id) => {
+    const node = $(id);
+    if (node) watch.observe(node, { childList: true, attributes: true, attributeFilter: ["hidden"] });
+  });
+  watch.observe(results, { attributes: true, attributeFilter: ["hidden"] });
+  update();
+});
+</script><script src="/static/js/comparison-analysis.js?v=2" defer></script><script src="/static/js/comparison-charts.js?v=2" defer></script><script src="/static/js/comparison-evidence.js?v=2" defer></script><script src="/static/js/comparisons.js?v=2" defer></script>{% endblock %}

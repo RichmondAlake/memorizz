@@ -1,0 +1,12 @@
+{#- Views of the Continual learning area. Pages that start with the sidebar
+    collapsed use these tabs to move between the sibling pages. -#}
+{% from '_ui.html' import page_tabs %}
+
+{% macro learning_tabs(active, agent_id=None) -%}
+{{ page_tabs([
+    ('/memory/workflows', 'Workflow trajectories', 'workflows'),
+    ('/memory/skills', 'Learned skills', 'skills'),
+    ('/learning-control-plane' ~ (('?agent_id=' ~ agent_id|urlencode) if agent_id else ''), 'Control plane', 'learning-control-plane'),
+    ('/persona-evolution', 'Persona evolution', 'persona-evolution'),
+], active, 'Continual learning views') }}
+{%- endmacro %}

@@ -20,6 +20,14 @@ from ...enums import MemoryType
 from ...llms.ollama import OllamaLLM
 from ..common import create_benchmark_memory_provider
 from ..longmemeval_v2 import rank_lexical_documents
+from ..measurement import (
+    LOCAL_PROVIDERS,
+    READER_PROVIDERS,
+    accepts_reasoning_effort,
+    accepts_temperature,
+    token_price,
+    usage_cost,
+)
 from .catalog import get_benchmark_spec
 from .corpus_cache import CorpusEmbeddingCache
 from .datasets import verify_dataset
@@ -57,11 +65,6 @@ class _AgentTemplateProvider:
         return (
             self.template if not template_id or template_id == str(agent_id) else None
         )
-
-
-_OPENAI_TOKEN_PRICING_USD_PER_MILLION: Dict[str, Dict[str, float]] = {
-    "gpt-5.5": {"input": 5.0, "cached_input": 0.5, "output": 30.0},
-}
 
 
 def _mean(values: Sequence[float | None]) -> float | None:
@@ -104,8 +107,10 @@ def _percentile(values: Sequence[float], percentile: float) -> float | None:
     present = sorted(float(value) for value in values)
     if not present:
         return None
-    index = max(0, min(len(present) - 1, round((len(present) - 1) * percentile)))
-    return present[index]
+    position = max(0.0, min(len(present) - 1, (len(present) - 1) * percentile))
+    lower = int(position)
+    upper = min(lower + 1, len(present) - 1)
+    return present[lower] + (present[upper] - present[lower]) * (position - lower)
 
 
 def _directory_size(path: Path) -> int:
@@ -171,6 +176,7 @@ class MemorySuiteRunner:
         model_provider: str = "ollama",
         model_name: str = "qwen2.5:3b",
         judge_model_name: str | None = None,
+        judge_provider: str | None = None,
         embedding_model: str = "nomic-embed-text",
         ollama_host: str = "http://localhost:11434",
         top_k: int = 8,
@@ -207,8 +213,11 @@ class MemorySuiteRunner:
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.model_provider = str(model_provider or "ollama").strip().lower()
-        if self.model_provider not in {"ollama", "openai"}:
-            raise ValueError("model_provider must be 'ollama' or 'openai'")
+        if self.model_provider not in READER_PROVIDERS:
+            raise ValueError("Unsupported reader provider")
+        self.judge_provider = judge_provider or self.model_provider
+        if self.judge_provider not in READER_PROVIDERS:
+            raise ValueError("Unsupported judge provider")
         self.model_name = str(model_name)
         self.judge_model_name = str(judge_model_name or model_name)
         self.embedding_model = str(embedding_model)
@@ -265,7 +274,9 @@ class MemorySuiteRunner:
         self.model = model or self._create_model(self.model_name, judge=False)
         if judge_model is not None:
             self.judge_model = judge_model
-        elif judge_model_name and judge_model_name != model_name:
+        elif self.judge_provider != self.model_provider or (
+            judge_model_name and judge_model_name != model_name
+        ):
             self.judge_model = self._create_model(self.judge_model_name, judge=True)
         else:
             self.judge_model = self.model
@@ -291,6 +302,7 @@ class MemorySuiteRunner:
             )
         self._corpora: Dict[str, Dict[str, Any]] = {}
         self._judge_seconds: List[float] = []
+        self._cost_lanes = {lane: [] for lane in ("generation", "judge", "oracle")}
         self._usage = {
             "generation_prompt_tokens": 0,
             "generation_completion_tokens": 0,
@@ -305,6 +317,16 @@ class MemorySuiteRunner:
             "oracle_cached_tokens": 0,
             "oracle_reasoning_tokens": 0,
         }
+        # Provider prompt-cache evidence per lane: writes, and how many calls
+        # reported cache usage and read from the cache.
+        for lane in ("generation", "judge", "oracle"):
+            for key in (
+                "cache_write_tokens",
+                "calls",
+                "cache_reported_calls",
+                "cache_hit_calls",
+            ):
+                self._usage[f"{lane}_{key}"] = 0
 
     def _create_evaluation_agent(self, template: Any) -> Any:
         """Hydrate one agent template onto the isolated benchmark provider."""
@@ -411,7 +433,20 @@ class MemorySuiteRunner:
         return agent
 
     def _create_model(self, model_name: str, *, judge: bool) -> Any:
-        if self.model_provider == "ollama":
+        provider = self.judge_provider if judge else self.model_provider
+        if provider not in {"ollama", "openai"}:
+            from ...llms.llm_factory import create_llm_provider
+
+            key = "deployment_name" if provider == "azure" else "model"
+            config = {
+                "provider": provider,
+                key: model_name,
+                "max_tokens": self.max_output_tokens,
+            }
+            if accepts_temperature(provider, model_name):
+                config["temperature"] = 0
+            return create_llm_provider(config)
+        if provider == "ollama":
             return OllamaLLM(
                 model=model_name,
                 host=self.ollama_host,
@@ -427,7 +462,9 @@ class MemorySuiteRunner:
         return OpenAI(
             model=model_name,
             api_mode="responses",
-            reasoning_effort=self.reasoning_effort,
+            reasoning_effort=self.reasoning_effort
+            if accepts_reasoning_effort("openai", model_name)
+            else None,
             max_completion_tokens=(
                 min(self.max_output_tokens, 256) if judge else self.max_output_tokens
             ),
@@ -436,6 +473,11 @@ class MemorySuiteRunner:
     def _capture_usage(self, model: Any, *, lane: str) -> None:
         getter = getattr(model, "get_last_usage", None)
         usage = getter() if callable(getter) else None
+        provider = self.judge_provider if lane == "judge" else self.model_provider
+        name = self.judge_model_name if lane == "judge" else self.model_name
+        self._cost_lanes[lane].append(
+            usage_cost(provider, usage or {}, token_price(provider, name))
+        )
         if not isinstance(usage, Mapping):
             return
         self._usage[f"{lane}_prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
@@ -446,30 +488,37 @@ class MemorySuiteRunner:
         self._usage[f"{lane}_reasoning_tokens"] += int(
             usage.get("reasoning_tokens") or 0
         )
+        self._usage[f"{lane}_cache_write_tokens"] += int(
+            usage.get("cache_write_tokens") or 0
+        )
+        self._usage[f"{lane}_calls"] += 1
+        if usage.get("cached_tokens") is not None:
+            self._usage[f"{lane}_cache_reported_calls"] += 1
+            self._usage[f"{lane}_cache_hit_calls"] += int(
+                int(usage.get("cached_tokens") or 0) > 0
+            )
 
     @staticmethod
     def _pricing_for_model(model_name: str) -> Dict[str, float] | None:
-        normalized = str(model_name or "").lower()
-        for prefix, pricing in _OPENAI_TOKEN_PRICING_USD_PER_MILLION.items():
-            if normalized == prefix or normalized.startswith(f"{prefix}-"):
-                return pricing
-        return None
+        return token_price("openai", model_name)
 
     def _lane_cost(self, lane: str, model_name: str) -> float | None:
-        if self.model_provider != "openai":
+        costs = self._cost_lanes[lane]
+        if costs:
+            return None if any(c is None for c in costs) else sum(costs)
+        provider = self.judge_provider if lane == "judge" else self.model_provider
+        usage = {
+            k: self._usage.get(f"{lane}_{k}")
+            for k in (
+                "prompt_tokens",
+                "completion_tokens",
+                "cached_tokens",
+                "reasoning_tokens",
+            )
+        }
+        if not any(usage.values()):
             return 0.0
-        pricing = self._pricing_for_model(model_name)
-        if pricing is None:
-            return None
-        prompt_tokens = int(self._usage[f"{lane}_prompt_tokens"])
-        cached_tokens = min(prompt_tokens, int(self._usage[f"{lane}_cached_tokens"]))
-        uncached_tokens = max(0, prompt_tokens - cached_tokens)
-        completion_tokens = int(self._usage[f"{lane}_completion_tokens"])
-        return (
-            uncached_tokens * pricing["input"]
-            + cached_tokens * pricing["cached_input"]
-            + completion_tokens * pricing["output"]
-        ) / 1_000_000
+        return usage_cost(provider, usage, token_price(provider, model_name))
 
     def _estimated_cost(self) -> float | None:
         generation = self._lane_cost("generation", self.model_name)
@@ -681,9 +730,9 @@ class MemorySuiteRunner:
                 "evaluation. Never invent facts and return the requested JSON only."
             ),
         ).strip()
-        elapsed = time.perf_counter() - started
         self._capture_usage(self.model, lane=lane)
         parsed = self._parse_reader_with_repair(case, raw, lane=lane)
+        elapsed = time.perf_counter() - started
         parsed["evidence_text"] = evidence_text
         parsed["seconds"] = elapsed
         return parsed
@@ -1000,9 +1049,9 @@ class MemorySuiteRunner:
         started_at = datetime.now(timezone.utc)
         started = time.perf_counter()
         provider_note = (
-            "external API cost is fixed at $0"
-            if self.model_provider == "ollama"
-            else "OpenAI token usage and estimated cost will be recorded"
+            "reader external API cost is fixed at $0"
+            if self.model_provider in LOCAL_PROVIDERS
+            else "provider token usage and available estimated costs will be recorded"
         )
         self.progress(
             f"Starting {spec.name} {variant} with "
@@ -1076,10 +1125,15 @@ class MemorySuiteRunner:
             "reader_model": self.model_name,
             "embedding_model": self.embedding_model,
             "judge_model": self.judge_model_name,
+            "judge_provider": self.judge_provider,
             "top_k": self.top_k,
             "decoding": {
-                "strategy": "greedy",
-                "temperature": 0,
+                "strategy": "greedy"
+                if accepts_temperature(self.model_provider, self.model_name)
+                else "provider_default",
+                "temperature": 0
+                if accepts_temperature(self.model_provider, self.model_name)
+                else None,
                 "seed": self.seed,
                 "quantization": None,
             },
@@ -1274,8 +1328,12 @@ class MemorySuiteRunner:
                 "average_lexical_search_seconds": statistics.fmean(
                     float(row["retrieval_timing"]["lexical_seconds"]) for row in results
                 ),
-                "average_reranking_seconds": statistics.fmean(
+                "average_fusion_seconds": statistics.fmean(
                     float(row["retrieval_timing"]["fusion_seconds"]) for row in results
+                ),
+                "average_reranking_seconds": statistics.fmean(
+                    float(row["retrieval_timing"].get("reranker_seconds", 0))
+                    for row in results
                 ),
                 "average_generation_seconds": statistics.fmean(
                     float(row["generation_seconds"]) for row in results
@@ -1316,7 +1374,11 @@ class MemorySuiteRunner:
                 **self._usage,
                 "total_tokens": primary_token_total,
                 "cost_usd": estimated_cost,
-                "cost_is_estimate": self.model_provider == "openai",
+                "cost_is_estimate": estimated_cost is not None
+                and (
+                    self.model_provider not in LOCAL_PROVIDERS
+                    or self.judge_provider not in LOCAL_PROVIDERS
+                ),
                 "pricing_usd_per_million_tokens": (
                     self._pricing_for_model(self.model_name)
                     if self.model_provider == "openai"
@@ -1355,8 +1417,11 @@ class MemorySuiteRunner:
                 "model_provider": self.model_provider,
                 "reader_model": self.model_name,
                 "judge_model": self.judge_model_name,
+                "judge_provider": self.judge_provider,
                 "reasoning_effort": (
-                    self.reasoning_effort if self.model_provider == "openai" else None
+                    self.reasoning_effort
+                    if accepts_reasoning_effort(self.model_provider, self.model_name)
+                    else None
                 ),
                 "embedding_provider": "ollama",
                 "embedding_model": self.embedding_model,

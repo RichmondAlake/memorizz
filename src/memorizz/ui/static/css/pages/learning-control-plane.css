@@ -1,0 +1,415 @@
+/* Learning control plane monitor. Builds on the shared fleet monitor
+   (console.css "Fleet monitor"): only the scope bar, event cells, signal
+   colours, compact panels and column drops live here. */
+
+/* ---------- Scope bar: one dense row of labelled fields ---------- */
+
+.lcp-filters.lcp-scope {
+    align-items: center;
+    gap: 8px 12px;
+    margin: 0 0 12px;
+    padding: 8px 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--console-radius);
+}
+
+.lcp-filters.lcp-scope label {
+    flex: 1 1 150px;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.lcp-filters.lcp-scope label.is-wide {
+    flex: 1.6 1 260px;
+}
+
+.lcp-filters.lcp-scope input,
+.lcp-filters.lcp-scope select {
+    min-width: 0;
+    min-height: 30px;
+    padding: 4px 8px;
+    font-family: var(--console-mono);
+    font-size: 12px;
+}
+
+.lcp-filters.lcp-scope select.lcp-agent {
+    font-family: inherit;
+    text-overflow: ellipsis;
+}
+
+.lcp-filters.lcp-scope .btn {
+    min-height: 30px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    font-size: 12px;
+}
+
+.lcp-clear {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.form-note.lcp-note {
+    margin: -4px 0 12px;
+}
+
+/* ---------- Tape ---------- */
+
+.lcp-tape .lcp-tape-time {
+    font-size: 13px;
+    line-height: 23px;
+    white-space: nowrap;
+}
+
+.lcp-tape-trend .fleet-trend {
+    width: 100%;
+    min-width: 72px;
+    height: 22px;
+    margin-top: 1px;
+}
+
+.panel.lcp-approve {
+    margin: 0 0 12px;
+    padding: 14px 16px;
+}
+
+.lcp-approve .panel-header {
+    margin-bottom: 10px;
+}
+
+.lcp-approve .filter-bar {
+    margin: 0;
+}
+
+/* ---------- Event grid ---------- */
+
+.lcp .fleet-table tbody td {
+    max-width: 0;
+}
+
+.lcp .lcp-summary {
+    width: 100%;
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+}
+
+.lcp .lcp-col-time,
+.lcp .lcp-col-type,
+.lcp .lcp-col-status {
+    width: 1%;
+}
+
+.lcp .fleet-table tbody td.lcp-col-time,
+.lcp .fleet-table tbody td.lcp-col-type,
+.lcp .fleet-table tbody td.lcp-col-status {
+    max-width: none;
+}
+
+.lcp .lcp-col-time {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.lcp .lcp-col-memory,
+.lcp .lcp-col-user,
+.lcp .lcp-col-thread,
+.lcp .lcp-col-run {
+    width: 1%;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    text-overflow: ellipsis;
+}
+
+.lcp .fleet-table tbody td.lcp-col-memory,
+.lcp .fleet-table tbody td.lcp-col-run {
+    max-width: 110px;
+}
+
+.lcp .fleet-table tbody td.lcp-col-user,
+.lcp .fleet-table tbody td.lcp-col-thread {
+    max-width: 96px;
+}
+
+.lcp-time-short,
+.lcp-type-summary {
+    display: none;
+}
+
+/* Event type with a signal dot: green good, amber degraded, red failed. */
+.lcp-type {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text-primary);
+    white-space: nowrap;
+}
+
+.lcp-type::before {
+    content: "";
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--border-color);
+}
+
+.lcp-type--good::before { background: var(--accent-secondary); }
+.lcp-type--warn::before { background: var(--accent-warning); }
+.lcp-type--bad::before { background: var(--accent-danger); }
+
+.lcp-status {
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.lcp-status--compiled {
+    color: var(--text-muted);
+}
+
+.lcp-status--pending {
+    color: var(--accent-warning);
+}
+
+/* ---------- Detail pane ---------- */
+
+.fleet-detail-head .lcp-type {
+    gap: 9px;
+}
+
+.fleet-detail-head .lcp-type::before {
+    width: 9px;
+    height: 9px;
+}
+
+.lcp-detail-summary {
+    margin: -4px 0 0;
+    color: var(--text-primary);
+    font-size: 13px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.lcp-refs dd {
+    min-width: 0;
+}
+
+.lcp-refs .id-chip {
+    max-width: 100%;
+}
+
+/* ---------- Panels under the grid ---------- */
+
+.lcp .lcp-panels {
+    gap: 12px;
+}
+
+.lcp .lcp-panel {
+    min-width: 0;
+    margin: 0;
+    padding: 14px 16px;
+}
+
+.lcp-panel .panel-header {
+    margin-bottom: 10px;
+}
+
+.lcp-panel .panel-title {
+    font-size: 14px;
+}
+
+.lcp-panel .panel-meta {
+    font-size: 12px;
+}
+
+.lcp-panel .panel-empty {
+    margin-top: 10px;
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+
+.lcp-panel .empty-state {
+    margin: 0;
+}
+
+.data-table.lcp-compact {
+    font-size: 12.5px;
+}
+
+.data-table.lcp-compact th,
+.data-table.lcp-compact td {
+    padding: 7px 8px;
+    white-space: nowrap;
+}
+
+.data-table.lcp-compact th:first-child,
+.data-table.lcp-compact td:first-child {
+    padding-left: 0;
+}
+
+.lcp-compact td.num {
+    font-family: var(--console-mono);
+}
+
+.lcp-compact tr.is-current td {
+    background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
+}
+
+.lcp-stream-scope,
+.lcp-reason,
+.lcp-col-content {
+    max-width: 0;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lcp-stream-scope {
+    color: var(--text-secondary);
+    font-size: 11.5px;
+}
+
+.lcp-stream-link {
+    text-align: right;
+}
+
+.fleet-stats.lcp-plan-stats {
+    margin: 0 0 10px;
+}
+
+.lcp-plan-meta {
+    margin: 0 0 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.lcp-artifacts td {
+    vertical-align: middle;
+}
+
+/* ---------- Column drops, measured on the grid's own width ---------- */
+
+@container (max-width: 1060px) {
+    .lcp-col-run { display: none; }
+}
+
+@container (max-width: 930px) {
+    .lcp-col-memory { display: none; }
+}
+
+@container (max-width: 780px) {
+    .lcp-col-thread { display: none; }
+}
+
+@container (max-width: 640px) {
+    .lcp-col-user { display: none; }
+}
+
+@container (max-width: 520px) {
+    .lcp-time-full { display: none; }
+    .lcp-time-short { display: inline; }
+    .lcp .lcp-col-time { font-size: 11px; }
+    .lcp-status--compiled { font-size: 0; }
+    .lcp-status--compiled::before {
+        content: "✓";
+        font-size: 12px;
+    }
+    .lcp-status--pending { font-size: 0; }
+    .lcp-status--pending::before {
+        content: "•";
+        font-size: 16px;
+        line-height: 1;
+    }
+}
+
+/* Phones: type and summary share one two-line cell so neither clips. */
+@container (max-width: 520px) {
+    .lcp-col-summary { display: none; }
+    .lcp .fleet-table tbody td.lcp-col-type {
+        width: 100%;
+        max-width: 0;
+        padding-top: 5px;
+        padding-bottom: 5px;
+    }
+    .lcp .lcp-col-type .lcp-type {
+        display: flex;
+        min-width: 0;
+    }
+    .lcp-type-label,
+    .lcp-type-summary {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .lcp-type-summary {
+        display: block;
+        padding-left: 14px;
+        color: var(--text-secondary);
+        font-size: 12px;
+    }
+}
+
+@media (max-width: 1100px) {
+    /* Stacked: grid, then the selected event, then the scope-wide panels. */
+    .lcp .fleet-main > .ov-grid { order: 3; }
+    .lcp .fleet-main > .panel { order: 4; }
+    .lcp .fleet-main > .form-note { order: 1; }
+}
+
+@media (max-width: 900px) {
+    .lcp-filters.lcp-scope label,
+    .lcp-filters.lcp-scope label.is-wide {
+        flex: 1 1 calc(50% - 12px);
+    }
+}
+
+@media (max-width: 640px) {
+    .lcp-filters.lcp-scope {
+        padding: 8px;
+    }
+
+    .lcp-filters.lcp-scope label,
+    .lcp-filters.lcp-scope label.is-wide {
+        flex: 1 1 100%;
+    }
+
+    .lcp-filters.lcp-scope label {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr);
+    }
+
+    .lcp-filters.lcp-scope .btn {
+        flex: 1 1 auto;
+    }
+
+    .lcp-compact .lcp-col-compiled {
+        display: none;
+    }
+
+    .data-table.lcp-compact th,
+    .data-table.lcp-compact td {
+        padding: 7px 6px;
+        font-size: 12px;
+    }
+
+    /* Scope and reason wrap instead of truncating to a few characters. */
+    .lcp-stream-scope,
+    .lcp-reason {
+        white-space: normal !important;
+        overflow-wrap: anywhere;
+    }
+
+    .lcp-artifacts th:nth-child(5),
+    .lcp-artifacts td:nth-child(5),
+    .lcp-artifacts th:nth-child(6),
+    .lcp-artifacts td:nth-child(6),
+    .lcp-artifacts th:nth-child(7),
+    .lcp-artifacts td:nth-child(7) {
+        display: none;
+    }
+}

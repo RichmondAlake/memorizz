@@ -17,6 +17,7 @@
    Extra trailing card content (e.g. the inline mini-chat on agents.html)
    can be supplied with {% call %} ... {% endcall %}.
 #}
+{% from '_ui.html' import id_chip %}
 {% macro agent_card(agent, agent_id, display_name, icon='emoji', favorite=none, favorite_redirect='', meta_items=[], footer_links=[]) %}
     <div class="agent-card">
         <div class="agent-header">
@@ -35,7 +36,7 @@
             {% endif %}
             <div class="agent-title">
                 <h3>{{ display_name }}</h3>
-                <span class="agent-id" title="{{ agent_id }}">{{ agent_id[:12] }}...</span>
+                <span class="agent-id">{{ id_chip(agent_id) }}</span>
             </div>
             {% if favorite is not none %}
             <form method="post" action="/agents/{{ agent_id }}/favorite" class="agent-favorite-form">
@@ -56,7 +57,7 @@
         <div class="agent-body">
             <div class="agent-meta">
                 <div class="meta-item">
-                    <span class="meta-label">Mode:</span>
+                    <span class="meta-label">Mode</span>
                     <span class="meta-value badge">{{ agent.application_mode or 'assistant' }}</span>
                 </div>
 
@@ -70,7 +71,7 @@
 
             {% if agent.instruction %}
             <div class="agent-instruction">
-                <p>{{ agent.instruction[:150] }}{% if agent.instruction|length > 150 %}...{% endif %}</p>
+                <p>{{ agent.instruction[:150] }}{% if agent.instruction|length > 150 %}…{% endif %}</p>
             </div>
             {% endif %}
         </div>

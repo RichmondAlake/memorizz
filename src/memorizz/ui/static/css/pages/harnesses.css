@@ -1,0 +1,380 @@
+/* Agent harnesses: run ledger monitor, compact availability, collapsible launch.
+   Loaded before console.css, so overrides carry one extra class. */
+
+.fleet-health.fleet-health--active { color: var(--accent-primary); }
+.hx-muted { color: var(--text-muted); }
+
+/* ---------- Availability strip ---------- */
+
+.hx-avail {
+    margin: 0 0 12px;
+}
+
+.hx-avail-title {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 12px 6px 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.hx-avail-title span {
+    color: var(--text-muted);
+    font-family: var(--console-mono);
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.hx-avail-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.hx-avail-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+    height: 32px;
+    padding: 0 10px;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.hx-avail-item:hover {
+    border-color: var(--text-muted);
+}
+
+.hx-avail-item[aria-expanded="true"] {
+    border-color: var(--accent-primary);
+    box-shadow: inset 0 0 0 1px var(--accent-primary);
+}
+
+.hx-avail-item .fleet-health {
+    gap: 0;
+}
+
+.hx-avail-name {
+    color: var(--text-primary);
+    font-family: var(--console-mono);
+    font-weight: 500;
+}
+
+.hx-avail-item--setup .hx-avail-state { color: var(--accent-warning); }
+.hx-avail-item--ready .hx-avail-state { color: var(--accent-secondary); }
+.hx-avail-item--unavailable .hx-avail-state { color: var(--text-muted); }
+
+.hx-avail-version {
+    max-width: 150px;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-family: var(--console-mono);
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hx-avail-hint {
+    margin: 6px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.hx-avail-detail {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 12px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.hx-avail-detail[hidden] {
+    display: none;
+}
+
+.hx-avail-detail .fleet-config {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.hx-avail-detail dd {
+    overflow-wrap: anywhere;
+}
+
+.hx-avail-detail p {
+    margin: 0;
+}
+
+/* ---------- Launch panel (collapsed unless the ledger is empty) ---------- */
+
+details.panel.hx-launch {
+    margin: 0 0 12px;
+    padding: 10px 16px;
+}
+
+details.panel.hx-launch[open] {
+    padding: 14px 18px 18px;
+}
+
+details.panel.hx-launch > summary {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    font-size: 14px;
+}
+
+details[open].panel.hx-launch > summary {
+    margin-bottom: 14px;
+}
+
+.hx-launch .harness-form-grid {
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+}
+
+.hx-launch .harness-task-field textarea {
+    min-height: 76px;
+}
+
+.hx-launch .harness-policy-row {
+    margin-top: 14px;
+    padding: 10px 0;
+}
+
+.hx-launch-meta {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 400;
+}
+
+/* ---------- Approval queue ---------- */
+
+.panel.hx-approvals {
+    margin: 0 0 12px;
+    padding: 12px 16px;
+    border-color: color-mix(in srgb, var(--accent-warning) 45%, var(--border-color));
+}
+
+.panel.hx-approvals .panel-header {
+    margin-bottom: 10px;
+}
+
+.panel.hx-approvals .panel-title {
+    font-size: 14px;
+}
+
+.hx-approvals .harness-approval {
+    gap: 16px;
+    padding: 12px 14px;
+}
+
+.hx-approvals .harness-approval-task {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: 13px;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.hx-approvals .harness-approval-reason {
+    margin-top: 4px;
+}
+
+.harness-approval.hx-approval--pane {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 12px;
+    border-color: color-mix(in srgb, var(--accent-warning) 45%, var(--border-subtle));
+}
+
+.hx-approval--pane .harness-approval-actions {
+    flex-wrap: wrap;
+}
+
+.hx-approval--pane .harness-approver {
+    flex: 1 1 100%;
+    min-width: 0;
+}
+
+.harness-approval-meta .mono {
+    overflow-wrap: anywhere;
+}
+
+/* ---------- Run ledger grid ---------- */
+
+@media (min-width: 641px) {
+    .hx-bar .fleet-search {
+        max-width: 300px;
+    }
+}
+
+.hx-link {
+    padding: 0;
+    color: var(--accent-primary);
+    background: none;
+    border: 0;
+    font: inherit;
+    cursor: pointer;
+}
+
+.hx-link:hover {
+    text-decoration: underline;
+}
+
+.harness-approval .harness-approval-title {
+    text-transform: none;
+}
+
+.hx .fleet-table td.hx-task {
+    width: 100%;
+    max-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+}
+
+.hx .fleet-table td.hx-col-harness,
+.hx .fleet-table td.hx-col-id,
+.hx .fleet-table td.hx-col-mode,
+.hx .fleet-table td.hx-col-verify {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.hx .fleet-table tbody td.num {
+    font-size: 12px;
+}
+
+.hx + .form-note,
+.hx .form-note {
+    margin: 0;
+}
+
+/* Columns drop by the grid's own width, least important first. */
+@container (max-width: 1000px) {
+    .hx-col-id { display: none; }
+}
+
+@container (max-width: 880px) {
+    .hx-col-cost { display: none; }
+}
+
+@container (max-width: 780px) {
+    .hx-col-mode { display: none; }
+}
+
+@container (max-width: 660px) {
+    .hx-col-duration { display: none; }
+}
+
+@container (max-width: 560px) {
+    .hx-col-verify { display: none; }
+}
+
+@container (max-width: 440px) {
+    .hx-col-harness { display: none; }
+    .hx .fleet-table tbody td,
+    .hx .fleet-table tbody th { padding: 0 6px; }
+}
+
+/* ---------- Detail pane ---------- */
+
+.hx .fleet-config .hx-wide {
+    grid-column: 1 / -1;
+}
+
+.hx .fleet-config dd {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.hx .fleet-config dd.mono {
+    font-size: 12px;
+}
+
+.hx .hx-task-body,
+.hx .hx-response {
+    max-height: 180px;
+    font-family: inherit;
+    font-size: 12.5px;
+}
+
+.hx .hx-verify-output {
+    max-height: 140px;
+    font-size: 11.5px;
+}
+
+.hx-outcome {
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-left: 2px solid var(--accent-danger);
+    border-radius: 6px;
+    font-size: 12.5px;
+}
+
+.hx-outcome strong {
+    color: var(--accent-danger);
+    font-weight: 600;
+}
+
+.hx-outcome p {
+    margin: 0;
+    color: var(--text-primary);
+    line-height: 1.45;
+}
+
+.hx-outcome .hx-fix {
+    color: var(--text-secondary);
+}
+
+.hx .fleet-detail p.hx-muted {
+    margin: 0;
+    font-size: 12.5px;
+}
+
+@media (max-width: 640px) {
+    .hx-avail-version {
+        display: none;
+    }
+
+    .hx-launch-meta {
+        flex-basis: 100%;
+    }
+
+    .hx-approvals .harness-approval {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .hx-approvals .harness-approval-actions {
+        flex-wrap: wrap;
+    }
+
+    .hx-approvals .harness-approver {
+        flex: 1 1 100%;
+        min-width: 0;
+    }
+}
+
+@media (max-width: 640px) {
+    /* Tape labels stay on one line; the tape scrolls sideways instead. */
+    .fleet-tape > div > span {
+        white-space: nowrap;
+    }
+}
+
+.hx .fleet-detail-head > .fleet-health {
+    flex: none;
+    white-space: nowrap;
+}

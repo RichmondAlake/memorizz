@@ -344,7 +344,7 @@ def _load_agent_last_run_map(agents: Optional[List[Any]] = None) -> Dict[str, fl
 
     if agents is None:
         try:
-            agents = provider.list_memagents()
+            agents = _list_agents()
         except Exception as exc:
             logger.debug("Failed to list agents while loading last-run map: %s", exc)
             return {}
@@ -803,6 +803,55 @@ def _sort_agents_by_last_run_desc(
     return [item[3] for item in indexed]
 
 
+def _unique_agents(agents: Optional[List[Any]]):
+    """One entry per agent ID, and how many stored records each ID has.
+
+    Several processes saving the same agent (e.g. one per server worker) can
+    leave duplicate records that share an agent ID. The console shows one,
+    keeping the record with the most memory IDs, and reports the copies.
+    """
+    kept: Dict[str, Any] = {}
+    copies: Dict[str, int] = {}
+    order: List[str] = []
+    unnamed: List[Any] = []
+    for agent in agents or []:
+        agent_id = _extract_agent_identifier(agent)
+        if not agent_id:
+            unnamed.append(agent)
+            continue
+        copies[agent_id] = copies.get(agent_id, 0) + 1
+        current = kept.get(agent_id)
+        if current is None:
+            kept[agent_id] = agent
+            order.append(agent_id)
+        elif len(_extract_agent_memory_ids(agent)) > len(
+            _extract_agent_memory_ids(current)
+        ):
+            kept[agent_id] = agent
+    return [kept[agent_id] for agent_id in order] + unnamed, copies
+
+
+def _duplicate_agent_notes(copies: Dict[str, int]) -> List[Dict[str, str]]:
+    """Needs-attention items for agent IDs stored as several records."""
+    return [
+        {
+            "severity": "warning",
+            "title": f"{agent_id} is stored {count} times",
+            "detail": "Duplicate agent records share this ID and may disagree on "
+            "configuration; loading by ID returns whichever the store finds first. "
+            "The console shows the one with the most memories. Remove the extras.",
+        }
+        for agent_id, count in sorted(copies.items())
+        if count > 1
+    ]
+
+
+def _list_agents():
+    """Provider agents for display, one per agent ID. Errors propagate."""
+    agents = _state["provider"].list_memagents()
+    return _unique_agents(agents)[0] if agents else agents
+
+
 def _build_agent_nav_items(
     active_agent_id: Optional[str] = None,
     agents: Optional[List[Any]] = None,
@@ -815,7 +864,7 @@ def _build_agent_nav_items(
 
     if agents is None:
         try:
-            agents = _state["provider"].list_memagents()
+            agents = _list_agents()
         except Exception as exc:
             logger.error(f"Failed to list agents for navigation: {exc}")
             return []
@@ -1728,6 +1777,26 @@ def _build_agent_threads(agent: Any) -> List[Dict[str, Any]]:
         history = _load_thread_messages(memory_id, limit=200)
 
         message_count = len(history)
+        # Conversation lists are titled by their opening question, as chat UIs do.
+        first_user = next(
+            (
+                message
+                for message in history
+                if _to_text(message.get("role")).strip().lower() == "user"
+            ),
+            None,
+        )
+        title = (
+            " ".join(
+                _to_text(
+                    first_user.get("content") or first_user.get("text", "")
+                ).split()
+            )
+            if first_user
+            else ""
+        )
+        if len(title) > 60:
+            title = f"{title[:57].rstrip()}…"
         last_msg = history[-1] if history else {}
         last_role = _to_text(last_msg.get("role")).strip().lower() if last_msg else ""
         last_content = _to_text(last_msg.get("content") or last_msg.get("text", ""))
@@ -1746,6 +1815,7 @@ def _build_agent_threads(agent: Any) -> List[Dict[str, Any]]:
         thread_rows.append(
             {
                 "memory_id": memory_id,
+                "title": title,
                 "message_count": message_count,
                 "last_role": last_role or "—",
                 "last_content": last_content or "—",

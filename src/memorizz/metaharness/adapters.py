@@ -120,11 +120,15 @@ class NativeMemAgentHarness(AgentHarness):
                 {"role": "assistant", "text": str(response)},
             )
         )
-        usage: Dict[str, Any] = {}
+        # Whole-run totals (every tool-loop call, in the normalized
+        # input/output keys the budget checks read); the provider's last-call
+        # usage is only a fallback for agents without run accounting.
+        run_usage = getattr(self.agent, "get_last_run_usage", None)
+        usage: Dict[str, Any] = dict(run_usage() or {}) if callable(run_usage) else {}
         usage_getter = getattr(
             getattr(self.agent, "model", None), "get_last_usage", None
         )
-        if callable(usage_getter):
+        if not usage and callable(usage_getter):
             try:
                 candidate = usage_getter() or {}
             except Exception:

@@ -5,14 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="dark light">
     <title>{% block title %}Memorizz{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=30">
+    <link rel="stylesheet" href="/static/css/styles.css?v=32">
     {% block head %}{% endblock %}
+    <link rel="stylesheet" href="/static/css/console.css?v=27">
 </head>
-<body>
+<body{% block body_attrs %}{% endblock %}>
     {% block body %}
+    <header class="mobile-topbar">
+        <button type="button" class="mobile-nav-toggle" id="mobile-nav-toggle" aria-controls="app-sidebar" aria-expanded="false" aria-label="Open navigation">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
+        </button>
+        <a href="/dashboard" class="mobile-topbar-logo">Memorizz</a>
+    </header>
+    <div class="mobile-nav-scrim" data-mobile-nav-close aria-hidden="true"></div>
     <div class="layout">
         <!-- Sidebar -->
-        <aside class="sidebar">
+        <aside class="sidebar" id="app-sidebar">
             <div class="sidebar-header">
                 <a href="/dashboard" class="logo">
                     <span class="logo-icon" aria-hidden="true">
@@ -105,7 +113,7 @@
                                 <path d="M12 3v18"/>
                             </svg>
                         </span>
-                        <span>Memory Types</span>
+                        <span>Memory types</span>
                         <span class="nav-caret">▾</span>
                     </summary>
                     <div class="nav-dropdown-content">
@@ -142,7 +150,7 @@
                                     <path d="M8 14h5"/>
                                 </svg>
                             </span>
-                            <span>Knowledge Base</span>
+                            <span>Knowledge base</span>
                         </a>
                         <a href="/memory/short-term" class="nav-item nav-item--sub {% if active_page == 'short-term' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">
@@ -203,7 +211,7 @@
                                 <path d="M18.9 15A8 8 0 0 1 5.3 18.7L4 17"/>
                             </svg>
                         </span>
-                        <span>Continual Learning</span>
+                        <span>Continual learning</span>
                         <span class="nav-caret">▾</span>
                     </summary>
                     <div class="nav-dropdown-content">
@@ -216,7 +224,7 @@
                                     <path d="m3 10 11 11"/>
                                 </svg>
                             </span>
-                            <span>Workflow Trajectories</span>
+                            <span>Workflow trajectories</span>
                         </a>
                         <a href="/memory/skills" class="nav-item nav-item--sub {% if active_page == 'skills' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">
@@ -226,15 +234,15 @@
                                     <path d="m3 17.5 9 5 9-5"/>
                                 </svg>
                             </span>
-                            <span>Learned Skills</span>
+                            <span>Learned skills</span>
                         </a>
                         <a href="/learning-control-plane{% if active_agent_id %}?agent_id={{ active_agent_id }}{% endif %}" class="nav-item nav-item--sub {% if active_page == 'learning-control-plane' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">◎</span>
-                            <span>Control Plane</span>
+                            <span>Control plane</span>
                         </a>
                         <a href="/persona-evolution" class="nav-item nav-item--sub {% if active_page == 'persona-evolution' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">↗</span>
-                            <span>Persona Evolution</span>
+                            <span>Persona evolution</span>
                         </a>
                     </div>
                 </details>
@@ -260,7 +268,7 @@
                             <path d="M13 15h4"/>
                         </svg>
                     </span>
-                    <span>Agent Harnesses</span>
+                    <span>Agent harnesses</span>
                 </a>
 
                 <a href="/mcp{% if active_agent_id %}?agent_id={{ active_agent_id }}{% endif %}" class="nav-item {% if active_page == 'mcp' %}active{% endif %}">
@@ -273,7 +281,7 @@
                             <path d="m8.7 13.3 6.6 3.4"/>
                         </svg>
                     </span>
-                    <span>MCP Connections</span>
+                    <span>MCP connections</span>
                 </a>
 
                 <a href="/vercel-skills" class="nav-item {% if active_page == 'vercel-skills' %}active{% endif %}">
@@ -282,7 +290,7 @@
                             <path d="M12 2L2 19.5h20L12 2z"/>
                         </svg>
                     </span>
-                    <span>Vercel Skills</span>
+                    <span>Vercel skills</span>
                 </a>
 
                 <a href="/automations" class="nav-item {% if active_page == 'automations' %}active{% endif %}">
@@ -416,7 +424,8 @@
     {% endif %}
     {% endblock %}
 
-    <script src="/static/js/app.js?v=18" defer></script>
+    <script src="/static/js/app.js?v=20" defer></script>
+    <script src="/static/js/monitor.js?v=1" defer></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

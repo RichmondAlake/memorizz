@@ -9,12 +9,14 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from ..helpers import _build_agent_nav_items
+from ..helpers import _build_agent_nav_items, _list_agents
 from ..security import ui_read_only
 from ..state import _state, get_meta_harness, templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["meta-harness"])
+# The page's run ledger shows the newest runs; the JSON API pages through more.
+RUN_LIMIT = 100
 
 
 def _service():
@@ -61,12 +63,12 @@ async def harnesses_page(request: Request):
         return RedirectResponse(url="/connect", status_code=302)
     service = _service()
     try:
-        agents = list(_state["provider"].list_memagents() or [])
+        agents = list(_list_agents() or [])
     except Exception:
         agents = []
     try:
         harnesses = await asyncio.to_thread(service.list_harnesses)
-        runs = await asyncio.to_thread(service.list_runs, limit=100)
+        runs = await asyncio.to_thread(service.list_runs, limit=RUN_LIMIT)
         approvals = await asyncio.to_thread(
             service.list_approvals, status="pending", limit=100
         )
@@ -74,6 +76,12 @@ async def harnesses_page(request: Request):
     except Exception as exc:
         harnesses, runs, approvals = [], [], []
         error = str(exc)
+    from datetime import datetime, timezone
+
+    from .. import dashboard as dash
+    from ..execution_view import build_harness_monitor
+
+    now = datetime.now(timezone.utc)
     return templates.TemplateResponse(
         "harnesses.html",
         {
@@ -87,6 +95,11 @@ async def harnesses_page(request: Request):
             "agents": agents,
             "runs": runs,
             "approvals": approvals,
+            "monitor": build_harness_monitor(
+                harnesses, runs, approvals, now=now, run_limit=RUN_LIMIT
+            ),
+            "generated_at": now,
+            **dash.template_helpers(),
             "ui_read_only": ui_read_only(),
             "error": error,
         },

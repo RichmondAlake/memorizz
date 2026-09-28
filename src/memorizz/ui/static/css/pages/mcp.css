@@ -1,0 +1,378 @@
+/* MCP connections: server grid, detail pane and the add/edit panel.
+   Loaded before console.css, so rules that refine shared ones are scoped
+   under .mcp or the page's own classes. */
+
+/* The sticky detail pane needs a page that is not a scroll container. */
+.main-content:has(.fleet.mcp) {
+    overflow-x: clip;
+    overflow-y: visible;
+}
+
+
+/* The agent picker shrinks to the row on phones instead of overflowing. */
+.mcp-header-actions .agents-sort-controls {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.mcp-header-actions .agents-sort-controls select {
+    min-width: 0;
+}
+
+/* ---------- Grid ---------- */
+
+.mcp .fleet-table .mcp-name {
+    max-width: 200px;
+    font-family: var(--console-mono);
+    font-size: 12.5px;
+}
+
+.mcp .fleet-table td.mcp-col-transport,
+.mcp .fleet-table td.mcp-col-auth {
+    width: 1%;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.mcp .fleet-table td.mcp-col-last {
+    color: var(--text-secondary);
+}
+
+/* The endpoint takes the remaining width and truncates. */
+.mcp .fleet-table td.mcp-col-endpoint {
+    width: 100%;
+    max-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    text-overflow: ellipsis;
+}
+
+.mcp-live {
+    margin: -4px 0 12px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.mcp-live:empty {
+    display: none;
+}
+
+/* Columns drop by the grid's own width, least important first. */
+@container (max-width: 700px) {
+    .mcp-col-endpoint { display: none; }
+}
+
+@container (max-width: 600px) {
+    .mcp-col-auth { display: none; }
+}
+
+@container (max-width: 520px) {
+    .mcp-col-transport,
+    .mcp-col-calls { display: none; }
+}
+
+@container (max-width: 400px) {
+    .mcp-col-errors { display: none; }
+    .mcp .fleet-table .mcp-name { max-width: 120px; }
+}
+
+/* ---------- Detail pane ---------- */
+
+.mcp-endpoint {
+    margin: -6px 0 0;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.mcp .fleet-detail-actions .btn {
+    min-height: 28px;
+}
+
+.mcp-alert {
+    padding: 9px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-left: 3px solid currentColor;
+    border-radius: 6px;
+    font-size: 12px;
+}
+
+.mcp-alert[hidden] {
+    display: none;
+}
+
+.mcp-alert strong {
+    font-weight: 600;
+}
+
+.mcp-alert p {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.mcp .fleet-stats dd.mcp-stat-text {
+    font-family: inherit;
+    font-size: 13px;
+}
+
+.mcp .mcp-output {
+    max-height: 280px;
+    margin: 0;
+}
+
+.mcp-title-meta {
+    margin-left: 4px;
+    color: var(--text-muted);
+    font-weight: 400;
+}
+
+.mcp-tools,
+.mcp-usage,
+.mcp-errors {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.mcp-tools {
+    max-height: 360px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.mcp-tools li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.mcp-tools code {
+    color: var(--text-primary);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.mcp-tools p {
+    display: -webkit-box;
+    margin: 2px 0 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+}
+
+.mcp-tools .btn {
+    padding: 2px 10px;
+}
+
+.mcp-tools li.mcp-tools-empty {
+    display: block;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.mcp-usage li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto 64px;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.mcp-usage code {
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mcp-usage .num,
+.mcp-errors .num {
+    font-family: var(--console-mono);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.mcp-errors li {
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 12px;
+}
+
+.mcp-error-head {
+    display: grid;
+    grid-template-columns: 10px auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+}
+
+.mcp-error-head code {
+    color: var(--accent-danger);
+}
+
+.mcp-error-op {
+    overflow: hidden;
+    color: var(--text-muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mcp-errors p {
+    margin: 4px 0 0 18px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.mcp .mcp-config dt {
+    font-family: inherit;
+    font-size: 12px;
+}
+
+.mcp .mem-body-head[hidden] {
+    display: none;
+}
+
+.mcp-shared {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+/* ---------- Add / edit panel ---------- */
+
+details.mcp-editor > summary {
+    flex-wrap: wrap;
+    font-size: 15px;
+}
+
+.mcp-editor-meta {
+    margin-left: auto;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 400;
+}
+
+.mcp-editor .mcp-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 16px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.mcp-form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px 14px;
+}
+
+.mcp-field.wide {
+    grid-column: 1 / -1;
+}
+
+.mcp-field small {
+    color: var(--text-muted);
+    font-weight: 400;
+}
+
+.mcp-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.mcp-editor .error-message {
+    margin: 14px 0 0;
+    white-space: pre-wrap;
+}
+
+.mcp-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+/* ---------- Expose MemoRizz ---------- */
+
+.mcp-server-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 12px;
+}
+
+.mcp-server-option {
+    min-width: 0;
+    padding: 14px 16px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+}
+
+.mcp-server-option h3 {
+    margin: 0 0 4px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.mcp-meta {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.mcp-server-code {
+    margin: 10px 0 12px;
+    padding: 10px 12px;
+    overflow: auto;
+    font-family: var(--console-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    white-space: pre;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+}
+
+.mcp-actions,
+.mcp-empty-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+@media (max-width: 640px) {
+    .mcp-editor-meta {
+        display: none;
+    }
+
+    .mcp-form-grid,
+    .mcp-server-options {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .mcp-form-actions .btn {
+        flex: 1;
+    }
+}

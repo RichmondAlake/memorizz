@@ -248,6 +248,8 @@ class _Session:
             "workflow": "not_requested",
             "trace": "unknown",
         }
+        # Content-free provider usage summed over this run's model calls.
+        self.usage = {}
 
     def envelope(self, kind, **payload):
         self.seq += 1
@@ -343,6 +345,13 @@ class _Session:
                 )[:240],
                 status=event.get("status"),
                 span_id=event.get("span_id"),
+                **(
+                    {"reason_code": str(event["outcome_reason_code"])[:80]}
+                    if event["trace_kind"] == "tool_result"
+                    and event.get("status") != "success"
+                    and event.get("outcome_reason_code")
+                    else {}
+                ),
             )
         elif kind == "stream_start":
             self.emit(
@@ -354,6 +363,14 @@ class _Session:
                     if k in event
                 },
             )
+        elif (
+            kind == "trace"
+            and event.get("trace_kind") == "model_result"
+            and event.get("status") == "success"
+        ):
+            from .observability.prompt_cache import add_call_usage
+
+            add_call_usage(self.usage, event)
         elif kind == "trace" and event.get("trace_kind") == "model_call":
             self.emit(
                 "status",
@@ -402,7 +419,7 @@ def agent_event_stream(
     }
     identity["thread_id"] = (
         kwargs.get("thread_id")
-        or (agent._thread_ids_by_memory.get(identity["memory_id"]) if agent else None)
+        or (agent._known_thread_id(identity["memory_id"]) if agent else None)
         or str(uuid.uuid4())
     )
     if any(
@@ -527,6 +544,7 @@ def agent_event_stream(
                         if session.error_code
                         else None,
                         persistence=session.persistence,
+                        usage=session.usage or None,
                         **{k: v for k, v in identity.items() if k != "run_id"},
                     )
                 current_stream.reset(current)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
@@ -11,7 +11,15 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ...learning import LearningControlPlane
-from ..helpers import _build_agent_nav_items, _extract_agent_identifier
+from ...learning.compiler import MemoryCompiler
+from ..control_plane_monitor import build_control_plane_view
+from ..dashboard import template_helpers
+from ..helpers import (
+    _build_agent_nav_items,
+    _extract_agent_identifier,
+    _extract_agent_persona_name,
+    _list_agents,
+)
 from ..security import ui_read_only
 from ..state import _state, templates
 
@@ -38,6 +46,23 @@ def _redirect(agent_id: str, **scope: Any) -> RedirectResponse:
     )
 
 
+def _agent_setting(agent: Any, key: str) -> Any:
+    if isinstance(agent, dict):
+        return agent.get(key)
+    return getattr(agent, key, None)
+
+
+def _capture_enabled(agent: Any) -> Optional[bool]:
+    """Whether the saved agent records learning events (None: not a saved agent).
+
+    Agents persist the effective setting, including the control plane that
+    continual learning turns on implicitly.
+    """
+    if agent is None:
+        return None
+    return bool(_agent_setting(agent, "learning_control_plane"))
+
+
 @router.get("/learning-control-plane", response_class=HTMLResponse)
 async def learning_control_plane_page(
     request: Request,
@@ -49,64 +74,55 @@ async def learning_control_plane_page(
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
     try:
-        agents = _state["provider"].list_memagents() or []
+        agents = _list_agents() or []
     except Exception:
         agents = []
-    known_ids = [
-        value
-        for value in (_extract_agent_identifier(agent) for agent in agents)
-        if value
-    ]
+    by_id = {
+        identifier: agent
+        for agent in agents
+        for identifier in [_extract_agent_identifier(agent)]
+        if identifier
+    }
+    known_ids = list(by_id)
     selected = (
         agent_id if agent_id in known_ids else (known_ids[0] if known_ids else agent_id)
     )
-    report = None
-    events = []
-    artifacts = []
+    selected_agent = by_id.get(selected or "")
+    # The scope form always submits every field; a blank field means "all".
+    memory_id, user_id, thread_id = (
+        (value or "").strip() for value in (memory_id, user_id, thread_id)
+    )
+    view = None
     error = None
     if selected:
         plane = _plane(selected)
         try:
-            report = plane.report(
-                memory_id=memory_id, user_id=user_id, thread_id=thread_id
+            records = plane.store.list_records(
+                memory_id=memory_id or None,
+                user_id=user_id or ...,
+                thread_id=thread_id or None,
+                limit=50_000,
             )
-            events = plane.store.list_events(
-                memory_id=memory_id,
-                user_id=user_id,
-                thread_id=thread_id,
-                limit=100,
+            saved = _agent_setting(selected_agent, "learning_control_plane_config")
+            budget = (
+                saved.get("evidence_token_budget") if isinstance(saved, dict) else None
             )
-            artifacts = plane.store.list_artifacts(
-                memory_id=memory_id,
-                user_id=user_id,
-                thread_id=thread_id,
-                limit=100,
+            view = build_control_plane_view(
+                records,
+                # The stream the compile and dry-run actions work on.
+                scope_stream_id=MemoryCompiler.stream_id(
+                    selected,
+                    memory_id=memory_id or None,
+                    user_id=user_id or None,
+                    thread_id=thread_id or None,
+                ),
+                evidence_budget=budget or plane.config.evidence_token_budget,
             )
         except Exception as exc:
             logger.error("Learning control-plane page failed: %s", exc)
             error = str(exc)
         finally:
             plane.close()
-    event_rows = [
-        {
-            "event_id": item.event_id,
-            "event_type": item.event_type.value,
-            "timestamp": item.timestamp,
-            "run_id": item.run_id,
-            "workflow_id": item.workflow_id,
-        }
-        for item in reversed(events)
-    ]
-    artifact_rows = [
-        {
-            "artifact_id": item.get("artifact_id") or item.get("record_id"),
-            "kind": item.get("artifact_kind"),
-            "verified": bool(item.get("verified")),
-            "updated_at": item.get("updated_at") or item.get("timestamp"),
-            "utility": item.get("utility"),
-        }
-        for item in reversed(artifacts)
-    ]
     return templates.TemplateResponse(
         "learning_control_plane.html",
         {
@@ -118,18 +134,23 @@ async def learning_control_plane_page(
             ),
             "agents": agents,
             "known_agent_ids": known_ids,
+            "agent_names": {
+                identifier: _extract_agent_persona_name(agent)
+                for identifier, agent in by_id.items()
+            },
             "active_agent_id": selected,
             "selected_agent_id": selected,
-            "memory_id": memory_id or "",
-            "user_id": user_id or "",
-            "thread_id": thread_id or "",
-            "report": report,
-            "events": event_rows,
-            "artifacts": artifact_rows,
+            "capture_enabled": _capture_enabled(selected_agent),
+            "memory_id": memory_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "view": view,
             "action": _last_actions.get(selected or ""),
             "active_page": "learning-control-plane",
             "ui_read_only": ui_read_only(),
             "error": error,
+            "now": datetime.now(timezone.utc),
+            **template_helpers(),
         },
     )
 

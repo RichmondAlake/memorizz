@@ -1,0 +1,31 @@
+{% if eval_results.usage %}
+{% from '_cache_kpis.html' import cache_kpis %}
+{% set usage = eval_results.usage %}
+{% set lanes = [('Answer generation', 'generation', 'retrieved_reader'), ('Gold-evidence diagnostic', 'oracle', 'oracle_reader'), ('Judge', 'judge', 'judge')] %}
+{% set cache = namespace(prompt=0, cached=0, writes=0, reported=0, hits=0, tracked=false) %}
+{% for label, prefix, lane in lanes %}
+{% set cache.prompt = cache.prompt + (usage.get(prefix ~ '_prompt_tokens') or 0) %}
+{% set cache.cached = cache.cached + (usage.get(prefix ~ '_cached_tokens') or 0) %}
+{% set cache.writes = cache.writes + (usage.get(prefix ~ '_cache_write_tokens') or 0) %}
+{% set cache.reported = cache.reported + (usage.get(prefix ~ '_cache_reported_calls') or 0) %}
+{% set cache.hits = cache.hits + (usage.get(prefix ~ '_cache_hit_calls') or 0) %}
+{% if (prefix ~ '_cache_reported_calls') in usage %}{% set cache.tracked = true %}{% endif %}
+{% endfor %}
+{% if cache.prompt %}
+<section class="card eval-prompt-cache" id="eval-prompt-cache" aria-label="Provider prompt cache" style="padding:20px;margin:20px 0">
+<h3 style="margin-top:0">Provider prompt cache</h3>
+{{ cache_kpis((100 * cache.cached / cache.prompt)|round(1) if cache.tracked or cache.cached else none, cache.hits, cache.reported, cache.cached, cache.writes if cache.tracked else none) }}
+<p class="usage-notice">Counts are provider-reported across answer, diagnostic and judge calls. Each case sends different evidence, so reuse comes mainly from shared instructions, and providers cache only prefixes above a model-specific minimum length. {% if not cache.tracked %}This run predates per-call cache tracking; the hit rate and writes were not recorded.{% endif %}</p>
+</section>
+{% endif %}
+<details class="card" style="padding:20px;margin:20px 0"><summary>Token usage &amp; cost details</summary>
+<p>Usage is reported by the provider. Missing prices or usage mean the cost is unknown. <a href="/evalground/compare">Compare models &amp; rerankers</a> for per-call measurements.</p>
+<div style="overflow-x:auto"><table class="info-table"><thead><tr><th>Purpose</th><th>Input tokens</th><th>Cached input</th><th>Cache writes</th><th>Cache hit rate</th><th>Output tokens</th><th>API cost</th></tr></thead><tbody>
+{% for label, prefix, lane in lanes %}
+{% set reported = usage.get(prefix ~ '_cache_reported_calls') %}
+<tr><td>{{ label }}</td><td>{{ usage.get(prefix ~ '_prompt_tokens', '—') }}</td><td>{{ usage.get(prefix ~ '_cached_tokens', '—') }}</td><td>{{ usage.get(prefix ~ '_cache_write_tokens', '—') }}</td><td>{% if reported %}{{ '%.1f%%'|format(100 * usage.get(prefix ~ '_cache_hit_calls', 0) / reported) }} <small>({{ usage.get(prefix ~ '_cache_hit_calls', 0) }}/{{ reported }})</small>{% else %}—{% endif %}</td><td>{{ usage.get(prefix ~ '_completion_tokens', '—') }}</td><td>{% set cost = usage.get('lane_cost_usd', {}).get(lane) %}{% if cost is not none %}${{ '%.6f'|format(cost) }}{% else %}Unknown{% endif %}</td></tr>
+{% endfor %}
+</tbody></table></div>
+<details><summary>Raw usage &amp; pricing metadata</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ usage|tojson(indent=2) }}</pre></details>
+</details>
+{% endif %}

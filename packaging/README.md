@@ -47,7 +47,8 @@ resource dependencies or build new bottles.
 
 Compare the base dependency list with the separate tap before every release.
 The 0.10.0 formula already includes `packaging` and Typer 0.27.2 (the new minimum);
-0.11.0 adds no base dependencies.
+0.11.0 and 0.12.0 add no base dependencies (0.12.0 adds the optional `rerank`
+extra only).
 The Windows-only `tzdata` dependency is not needed on Homebrew's macOS/Linux
 targets. Publish new bottles only after building and testing the new version.
 
