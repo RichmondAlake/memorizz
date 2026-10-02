@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from memorizz.cli.app import app
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+from tests.cli_text import plain
 
 runner = CliRunner()
 
@@ -213,7 +214,7 @@ def test_cli_agents_get_delegates_harness_models_updates_and_deletes(tmp_path):
         ["agents", "create", "--name", "X", "--no-llm", "--default-harness", "codex"],
         env=env,
     )
-    assert lonely.exit_code != 0 and "needs --harness-mode" in lonely.output
+    assert lonely.exit_code != 0 and "needs --harness-mode" in plain(lonely.output)
 
     def update(agent_id, *extra):
         return runner.invoke(

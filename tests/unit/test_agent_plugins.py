@@ -17,6 +17,7 @@ from memorizz.cli import plugin_commands
 from memorizz.cli.app import app
 from memorizz.enums import MemoryType
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+from tests.cli_text import plain
 
 pytestmark = pytest.mark.unit
 
@@ -583,7 +584,7 @@ def test_install_saves_the_options_as_settings(tmp_path: Path, monkeypatch):
     root = tmp_path / "work"
     root.mkdir()
     refused = CliRunner().invoke(app, ["plugin", "install", "codex", "--allow-harness"])
-    assert refused.exit_code != 0 and "--harness-root" in refused.output
+    assert refused.exit_code != 0 and "--harness-root" in plain(refused.output)
     done = CliRunner().invoke(
         app,
         [

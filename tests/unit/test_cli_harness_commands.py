@@ -10,6 +10,7 @@ import pytest
 
 from memorizz.cli.app import app
 from memorizz.memagent.models import MemAgentModel
+from tests.cli_text import plain
 from tests.unit.test_harness_parity import _cli, _meta, _provider, _workspace
 
 pytestmark = pytest.mark.unit
@@ -66,7 +67,7 @@ def test_compare_and_plan_take_a_model_per_harness_and_stage(
             "gamma=m",
         ],
     )
-    assert wrong.exit_code != 0 and "not a compared --harness" in wrong.output
+    assert wrong.exit_code != 0 and "not a compared --harness" in plain(wrong.output)
 
     planned = runner.invoke(
         app,
@@ -342,5 +343,5 @@ def test_harness_delegates_can_be_created_and_attached(tmp_path: Path, monkeypat
     lonely = runner.invoke(
         app, ["harness", "delegate", "create", "--harness", "codex", "--attach"]
     )
-    assert lonely.exit_code != 0 and "--coordinator" in lonely.output
+    assert lonely.exit_code != 0 and "--coordinator" in plain(lonely.output)
     provider.close()

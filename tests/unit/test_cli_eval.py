@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from memorizz.cli.app import app
+from tests.cli_text import plain
 
 
 @pytest.mark.unit
@@ -343,7 +344,6 @@ def test_eval_run_takes_a_saved_agent_and_an_ollama_host(tmp_path, monkeypatch):
     )
     assert missing.exit_code != 0 and "Agent not found" in missing.output
     wrong_mode = CliRunner().invoke(app, [*base, "--agent-id", agent_id], env=env)
-    assert (
-        wrong_mode.exit_code != 0
-        and "needs --evaluation-mode memagent" in wrong_mode.output
+    assert wrong_mode.exit_code != 0 and "needs --evaluation-mode memagent" in plain(
+        wrong_mode.output
     )
