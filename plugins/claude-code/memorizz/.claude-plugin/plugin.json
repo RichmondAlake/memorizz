@@ -1,7 +1,7 @@
 {
   "name": "memorizz",
   "displayName": "MemoRizz",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Durable, searchable project memory for Claude Code, shared with Codex and your MemoRizz agents, through MemoRizz's MCP server.",
   "author": {
     "name": "Richmond Alake",

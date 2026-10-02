@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 {% block title %}Usage &amp; memory analytics - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=1">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=2">{% endblock %}
 {% block content %}
 {% from '_ui.html' import page_header, observability_tabs %}
 {% from '_fmt.html' import tape %}
@@ -18,4 +18,16 @@
 </form>
 {% if preserved_filters %}<p class="usage-notice">Trace selection retained: {% for key, value in preserved_filters.items() %}{{ key }}={{ value }} {% endfor %}. <a href="/traces/usage">Clear trace selection</a></p>{% endif %}
 {% with usage_tape_shown = true %}{% include '_usage_panel.html' %}{% endwith %}
+{% if coding_agents %}
+<details class="usage-table usage-coding-agents" open id="coding-agent-sessions">
+    <summary>Coding-agent sessions</summary>
+    <p class="usage-notice">Codex and Claude Code sessions the MemoRizz plugin recorded, read from each agent's own session log and counted apart from the traced usage above. Cost is Claude Code's own total, or OpenAI list rates for Codex when its model has one; a ChatGPT plan isn't billed per token. <a href="/harnesses">Open them on Agent harnesses</a>.</p>
+    <div class="usage-table-scroll"><table>
+        <thead><tr><th>Agent</th><th>Model</th><th class="num">Sessions</th><th class="num">Turns</th><th class="num">Tokens in</th><th class="num">Cached</th><th class="num">Tokens out</th><th class="num">Spend</th></tr></thead>
+        <tbody>
+        {% for row in coding_agents %}<tr><th>{{ row.label }}</th><td class="mono">{{ row.model or '—' }}</td><td class="num">{{ '{:,}'.format(row.sessions) }}</td><td class="num">{{ '{:,}'.format(row.turns) }}</td><td class="num">{{ '{:,}'.format(row.input_tokens) }}</td><td class="num">{{ '{:,}'.format(row.cached_tokens) }}</td><td class="num">{{ '{:,}'.format(row.output_tokens) }}</td><td class="num">{% if row.priced %}${{ '{:,.4f}'.format(row.cost_usd) }}{% if row.priced < row.sessions %} <small>+ {{ row.sessions - row.priced }} unpriced</small>{% endif %}{% else %}Unpriced{% endif %}</td></tr>{% endfor %}
+        </tbody>
+    </table></div>
+</details>
+{% endif %}
 {% endblock %}

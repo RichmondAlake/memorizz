@@ -1856,8 +1856,12 @@
                 },
             },
         });
+        // ?run=<id> (from Observability, say) selects that run, or opens its
+        // evidence when it is older than the runs loaded here.
+        const wanted = new URLSearchParams(location.search).get('run');
+        if (wanted && !selectRun(wanted, 'trajectory')) openEvidence(wanted, 'trajectory');
         const selected = monitor && monitor.selected();
-        if (selected) openTrajectory(selected.dataset.runId);
+        if (selected && !wanted) openTrajectory(selected.dataset.runId);
     });
 })();
 </script>

@@ -896,3 +896,31 @@ details.detail-section.obs-nav:not([open]) {
         border-top: 1px solid var(--border-subtle);
     }
 }
+
+/* ---------- Coding-agent sessions ---------- */
+
+/* A Codex or Claude Code session saved by the MemoRizz plugin: its turns are
+   here; its full trajectory is a run on Agent harnesses. */
+.obs-plugin-session {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 16px;
+    margin: 0 0 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-subtle);
+    border-left: 3px solid var(--accent-primary);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.obs-plugin-session p {
+    flex: 1 1 320px;
+    min-width: 0;
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+.obs-plugin-session strong {
+    color: var(--text-primary);
+}

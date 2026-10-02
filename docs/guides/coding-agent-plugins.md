@@ -154,6 +154,19 @@ local UI reads. `MEMORIZZ_PLUGIN_RUNS=false` turns this off and keeps turn
 capture. It also turns off with turn capture (`--no-capture`), and with a
 hosted server, which can't read this machine's session logs.
 
+Elsewhere in the UI:
+
+| Page | What it shows for these sessions |
+|---|---|
+| **Agent harnesses** | One run per session, with its full trajectory |
+| **Observability** | **Codex sessions** and **Claude Code sessions**, one thread per session, with its saved turns and an **Open its run** link to the trajectory |
+| **Dashboard** | A **Coding-agent sessions** panel: sessions, turns, tokens and spend per agent in the window |
+| **Usage & cost** | The same per agent and model, honouring the page's time and model filters |
+| **Memory → Conversation / Summaries** | The saved turns and each session's summary |
+
+Their tokens and cost come from the agents' own logs and are reported apart
+from MemoRizz's own agent runs, so neither changes the other's figures.
+
 ## Memory types
 
 | Type | Holds | Written by |

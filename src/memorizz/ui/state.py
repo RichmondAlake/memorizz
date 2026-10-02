@@ -13,8 +13,9 @@ never rebound), so everyone importing it observes the same object.
 """
 
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from fastapi.templating import Jinja2Templates
 
@@ -54,6 +55,23 @@ def get_meta_harness():
         _state["meta_harness"] = current
         _state["meta_harness_provider"] = provider
         return current
+
+
+@contextmanager
+def harness_run_store() -> Iterator[Any]:
+    """The run store the Agent harnesses page reads, without starting the
+    harness service (which probes every adapter) just to read it."""
+    current = _state.get("meta_harness")
+    if current is not None and getattr(current, "run_store", None) is not None:
+        yield current.run_store
+        return
+    from ..metaharness.store import SQLiteHarnessRunStore
+
+    store = SQLiteHarnessRunStore()
+    try:
+        yield store
+    finally:
+        store.close()
 
 
 def close_meta_harness() -> None:

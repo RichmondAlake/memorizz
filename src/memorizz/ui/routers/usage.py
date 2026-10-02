@@ -1,5 +1,6 @@
 """Authorized, content-free usage pages. Sync routes run reads off the event loop."""
 
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,6 +17,15 @@ from ..state import _state, templates
 from ..trace_access import require_trace_permission, scoped_trace_filters
 
 router = APIRouter(tags=["usage"])
+
+
+def preserved_filters_of(selection, scope):
+    """The trace selection the usage page keeps across its own filters."""
+    return {
+        key: value
+        for key, value in {**selection, **scope}.items()
+        if key not in {"agent_id", "start_time", "end_time"}
+    }
 
 
 @router.get("/traces/usage", response_class=HTMLResponse)
@@ -137,9 +147,35 @@ def usage_page(
         "timezone_name": timezone_name,
         "max_events": max_events,
     }
+    # Codex and Claude Code sessions are counted from their own session logs,
+    # apart from traced agent runs; a trace selection or agent filter
+    # narrows to traces, so they are shown only without one.
+    coding_agents = []
+    if not preserved_filters_of(selection, scope) and not agent_id:
+        from ..dashboard import coding_agent_sessions
+
+        def moment(value: str):
+            try:
+                parsed = datetime.fromisoformat(value) if value else None
+            except ValueError:
+                return None
+            return (
+                parsed.replace(tzinfo=timezone.utc)
+                if parsed and not parsed.tzinfo
+                else parsed
+            )
+
+        coding_agents = [
+            row
+            for row in coding_agent_sessions(
+                moment(start_time), moment(end_time), by_model=True
+            )
+            if not model or model.lower() in row["model"].lower()
+        ]
     return templates.TemplateResponse(
         "usage.html",
         {
+            "coding_agents": coding_agents,
             "request": request,
             "active_page": "traces",
             "agents_nav": [],
@@ -149,11 +185,7 @@ def usage_page(
             "usage_charts": usage_charts(usage),
             "usage_tape": usage_tape(usage),
             "filters": params,
-            "preserved_filters": {
-                key: value
-                for key, value in {**selection, **scope}.items()
-                if key not in {"agent_id", "start_time", "end_time"}
-            },
+            "preserved_filters": preserved_filters_of(selection, scope),
             "max_events": max_events,
             "export_url": "/traces/usage.json?" + urlencode(params),
             "trace_url": "/traces?" + urlencode({**selection, **scope}),

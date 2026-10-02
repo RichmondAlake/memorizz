@@ -192,6 +192,75 @@ def load_run_health(
     return result
 
 
+def coding_agent_sessions(
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    *,
+    by_model: bool = False,
+) -> List[Dict[str, Any]]:
+    """Codex and Claude Code sessions the MemoRizz plugin recorded as runs,
+    active between ``start`` and ``end``, per agent (and model). Their usage
+    comes from the agents' own session logs, so it is reported apart from
+    MemoRizz's own agent runs."""
+    from .state import harness_run_store
+
+    try:
+        with harness_run_store() as store:
+            runs = store.list(limit=2000)
+    except Exception:
+        logger.warning("Coding-agent sessions could not be read", exc_info=True)
+        return []
+    labels = {"codex": "Codex", "claude-code": "Claude Code"}
+    rows: Dict[tuple, Dict[str, Any]] = {}
+    for run in runs:
+        task = run.task or {}
+        metadata = task.get("metadata") or {}
+        moment = timestamp(run.updated_at)
+        if metadata.get("source") != "plugin" or not moment:
+            continue
+        updated = datetime.fromisoformat(moment)
+        if (start and updated < start) or (end and updated > end):
+            continue
+        result = run.result or {}
+        usage = result.get("usage") or {}
+        model = str(usage.get("model") or task.get("model") or "")
+        key = (str(run.harness), model if by_model else "")
+        row = rows.setdefault(
+            key,
+            {
+                "agent": key[0],
+                "label": labels.get(key[0], key[0]),
+                "model": key[1],
+                "sessions": 0,
+                "turns": 0,
+                "input_tokens": 0,
+                "cached_tokens": 0,
+                "output_tokens": 0,
+                "cost_usd": Decimal(0),
+                "priced": 0,
+                "last_at": None,
+            },
+        )
+        cached = int(usage.get("cached_input_tokens") or 0) + int(
+            usage.get("cache_read_input_tokens") or 0
+        )
+        # Codex counts cached tokens inside input_tokens; Claude Code apart.
+        uncounted = int(usage.get("cache_read_input_tokens") or 0) + int(
+            usage.get("cache_creation_input_tokens") or 0
+        )
+        row["sessions"] += 1
+        row["turns"] += int(metadata.get("turns") or 0)
+        row["input_tokens"] += int(usage.get("input_tokens") or 0) + uncounted
+        row["cached_tokens"] += cached
+        row["output_tokens"] += int(usage.get("output_tokens") or 0)
+        if result.get("cost_usd") is not None:
+            row["cost_usd"] += Decimal(str(result["cost_usd"]))
+            row["priced"] += 1
+        if row["last_at"] is None or updated > row["last_at"]:
+            row["last_at"] = updated
+    return sorted(rows.values(), key=lambda row: (row["label"], row["model"]))
+
+
 def build_dashboard_context(
     request: Request, window: str, *, automation_store=None, load: bool = False
 ) -> Dict[str, Any]:
@@ -213,6 +282,7 @@ def build_dashboard_context(
         "coverage": health["coverage"],
         "agent_names": {},
         "automations": {"available": False, "deferred": True},
+        "coding_agents": coding_agent_sessions(now - WINDOWS[window][0], now),
     }
     if health["deferred"]:
         return context

@@ -128,6 +128,13 @@ unavailable primary provider.
 Accepted recommendations create draft experiments. They do not edit a live
 prompt, policy, tool, or learned skill automatically.
 
+Codex and Claude Code sessions saved by the MemoRizz plugin appear as
+**Codex sessions** and **Claude Code sessions**, one thread per session. Their
+timeline holds the saved turns, and **Open its run** goes to the session's full
+trajectory on Agent harnesses. Insights, usage and lineage panels, which assume
+a MemoRizz agent's own instrumentation, are left out for them. See
+[MemoRizz in Codex and Claude Code](guides/coding-agent-plugins.md#see-each-sessions-trajectory).
+
 The bounded JSON endpoint
 `/traces/events.json?store=trace&limit=250` returns trace pages;
 `store=conversation` and `store=tool_log` select the other indexed sources.

@@ -237,6 +237,7 @@ def analyze_trace_events(
     scope: str = "agent",
     source_is_virtual: bool = False,
     source_registration_known: bool = True,
+    source_kind: str = "",
     window_truncated: bool = False,
     signals: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     max_insights: int = 14,
@@ -460,7 +461,10 @@ def analyze_trace_events(
             signature_counts[signature] += 1
 
     insights: List[Dict[str, Any]] = []
-    if source_is_virtual and source_registration_known:
+    # Codex and Claude Code sessions saved by the MemoRizz plugin are not
+    # MemAgents: there is no agent to register.
+    coding_agent = source_kind == "coding_agent_plugin"
+    if source_is_virtual and source_registration_known and not coding_agent:
         insights.append(
             _insight(
                 "missing_trace_identity",
@@ -476,7 +480,7 @@ def analyze_trace_events(
             )
         )
 
-    if source_is_virtual and not source_registration_known:
+    if source_is_virtual and not source_registration_known and not coding_agent:
         insights.append(
             _insight(
                 "trace_registration_not_inspected",
@@ -844,21 +848,26 @@ def analyze_trace_events(
                 )
             )
 
-    if any(
-        e.get("kind") in {"model_call", "model_result", "conversation"}
-        for e in normalized
-    ) and not any(
-        any(
-            event.get(field) is not None
-            for field in (
-                "model",
-                "provider",
-                "input_tokens",
-                "output_tokens",
-                "cost_usd",
-            )
+    # A coding agent's tokens and cost are on its harness run, not in turns.
+    if (
+        not coding_agent
+        and any(
+            e.get("kind") in {"model_call", "model_result", "conversation"}
+            for e in normalized
         )
-        for event in normalized
+        and not any(
+            any(
+                event.get(field) is not None
+                for field in (
+                    "model",
+                    "provider",
+                    "input_tokens",
+                    "output_tokens",
+                    "cost_usd",
+                )
+            )
+            for event in normalized
+        )
     ):
         insights.append(
             _insight(
@@ -945,7 +954,12 @@ def analyze_trace_events(
         )
 
     insights.extend(diagnose_trace(normalized, metadata=coverage))
-    if coverage["coverage"] != "complete":
+    # The plugin saves a coding agent's turns only; its steps are on its
+    # harness run, so missing stages here are expected. Unreadable events
+    # still count.
+    if coverage["coverage"] != "complete" and (
+        not coding_agent or coverage.get("normalization_errors")
+    ):
         if coverage.get("normalization_errors"):
             coverage_finding = "Some stored events could not be normalized; repair invalid evidence before drawing conclusions."
         elif (

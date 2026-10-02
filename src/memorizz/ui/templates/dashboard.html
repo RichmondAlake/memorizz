@@ -162,6 +162,33 @@
 </section>
 {% endif %}
 
+{% if coding_agents %}
+<section class="panel" aria-labelledby="ov-coding-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="ov-coding-title">Coding-agent sessions</h2>
+        <a class="panel-meta" href="/harnesses">Agent harnesses</a>
+    </div>
+    <table class="data-table ov-compact">
+        <caption class="visually-hidden">Codex and Claude Code sessions the MemoRizz plugin recorded in this window, counted apart from agent runs above</caption>
+        <thead><tr><th scope="col">Agent</th><th scope="col" class="num">Sessions</th><th scope="col" class="num">Turns</th><th scope="col" class="num">Tokens in</th><th scope="col" class="num">Tokens out</th><th scope="col" class="num">Spend</th><th scope="col" class="num">Last session</th></tr></thead>
+        <tbody>
+            {% for row in coding_agents %}
+            <tr>
+                <td class="ov-name"><a href="/harnesses">{{ row.label }}</a></td>
+                <td class="num">{{ row.sessions }}</td>
+                <td class="num">{{ row.turns }}</td>
+                <td class="num">{{ fmt_compact(row.input_tokens) }}</td>
+                <td class="num">{{ fmt_compact(row.output_tokens) }}</td>
+                <td class="num" {% if row.priced < row.sessions %}title="{{ row.sessions - row.priced }} session{{ '' if row.sessions - row.priced == 1 else 's' }} not priced: a ChatGPT plan isn't billed per token, or the model has no list price"{% endif %}>{% if row.priced %}{{ fmt_usd(row.cost_usd) }}{% if row.priced < row.sessions %}<small class="hx-muted"> + unpriced</small>{% endif %}{% else %}—{% endif %}</td>
+                <td class="num" title="{{ row.last_at.strftime('%Y-%m-%d %H:%M') if row.last_at else '' }} UTC">{{ relative_time(row.last_at, generated_at) if row.last_at else '—' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="panel-empty">Recorded by the MemoRizz plugin from each agent's own session log, and counted apart from the agent runs above. Open a session on Agent harnesses for its steps.</p>
+</section>
+{% endif %}
+
 <div class="ov-grid ov-grid--two">
     <section class="panel" aria-labelledby="ov-automations-title">
         <div class="panel-header">

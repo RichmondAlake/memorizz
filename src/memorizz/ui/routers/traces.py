@@ -68,6 +68,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["traces"])
 
 _RUNTIME_TRACE_AGENT_ID = "__memorizz_runtime_traces__"
+# Codex and Claude Code sessions saved by the MemoRizz plugin: the record's
+# agent_id names the coding agent and its thread is "<agent>-<session id>".
+_CODING_AGENTS = {"codex": "Codex", "claude-code": "Claude Code"}
+_CODING_AGENT_SOURCE = "__memorizz_plugin_{}__"
 _TRACE_BUNDLE_RECORD_TYPE = "observability_trace_bundle"
 
 
@@ -175,7 +179,78 @@ def _selection_urls(request, **selection):
     }
 
 
+def _coding_agent(doc: Dict[str, Any]) -> Optional[str]:
+    """The coding agent whose plugin saved this record, if any."""
+    agent = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
+    thread = _to_text(doc.get("thread_id") or doc.get("conversation_id")).strip()
+    return agent if agent in _CODING_AGENTS and thread.startswith(f"{agent}-") else None
+
+
+def _coding_agent_source(agent: str) -> Dict[str, Any]:
+    """One trace source per coding agent. It matches by agent only: Codex and
+    Claude Code share each project's memory ID."""
+    return {
+        "agent_id": _CODING_AGENT_SOURCE.format(agent),
+        "name": f"{_CODING_AGENTS[agent]} sessions",
+        "application_mode": "plugin",
+        "memory_ids": [],
+        "_runtime_agent_ids": [agent],
+        "_is_virtual_trace_source": True,
+        "_coding_agent": agent,
+    }
+
+
+def _coding_agent_for_source(agent_id: Any) -> Optional[str]:
+    for agent in _CODING_AGENTS:
+        if agent_id == _CODING_AGENT_SOURCE.format(agent):
+            return agent
+    return None
+
+
+def _is_virtual_source_id(agent_id: Any) -> bool:
+    return agent_id == _RUNTIME_TRACE_AGENT_ID or bool(
+        _coding_agent_for_source(agent_id)
+    )
+
+
+def _coding_agent_of_source(agent: Any) -> str:
+    return str(agent.get("_coding_agent") or "") if isinstance(agent, dict) else ""
+
+
+def _source_kind(agent: Any) -> str:
+    if isinstance(agent, dict) and agent.get("_coding_agent"):
+        return "coding_agent_plugin"
+    return ""
+
+
+def _plugin_session_run(agent: str, thread_id: Optional[str]) -> Dict[str, Any]:
+    """Where a coding-agent session's full trajectory is: its run on the
+    Agent harnesses page, recorded by the plugin from the agent's own log."""
+    thread = _to_text(thread_id).strip()
+    if not thread.startswith(f"{agent}-"):
+        return {}
+    from ...metaharness.agent_sessions import session_run_id
+
+    run_id = session_run_id(agent, thread[len(agent) + 1 :])
+    from ..state import harness_run_store
+
+    try:
+        with harness_run_store() as store:
+            recorded = store.get(run_id) is not None
+    except Exception:
+        recorded = False
+    return {
+        "agent": agent,
+        "agent_label": _CODING_AGENTS[agent],
+        "run_id": run_id,
+        "recorded": recorded,
+    }
+
+
 def _targeted_runtime_agent(agent_id, thread_id=None):
+    coding = _coding_agent_for_source(agent_id)
+    if coding:
+        return _coding_agent_source(coding)
     snapshot = _load_trace_snapshot(agent_ids=[agent_id], thread_id=thread_id, limit=1)
     window = normalize_trace_snapshot(
         snapshot, agent_ids=[agent_id], **scoped_trace_filters()
@@ -465,6 +540,7 @@ async def traces_page(
                 scope=analysis_scope,
                 source_is_virtual=source_is_virtual,
                 source_registration_known=not current_principal.get().restricted,
+                source_kind=_source_kind(selected_agent),
                 window_truncated=window_truncated,
                 signals=trace_signals,
             )
@@ -565,6 +641,16 @@ async def traces_page(
                 query_metadata=trace_query_metadata,
             ),
             "selected_agent": selected_agent,
+            "coding_agent_label": _CODING_AGENTS.get(
+                _coding_agent_of_source(selected_agent), ""
+            ),
+            "plugin_session": (
+                _plugin_session_run(
+                    _coding_agent_of_source(selected_agent), selected_thread_id
+                )
+                if _coding_agent_of_source(selected_agent) and selected_thread_id
+                else {}
+            ),
             "selected_agent_name": (
                 _extract_agent_persona_name(selected_agent)
                 if selected_agent is not None
@@ -898,7 +984,7 @@ async def trace_analysis_export(
         ),
         None,
     )
-    if selected_agent is None and agent_id != _RUNTIME_TRACE_AGENT_ID:
+    if selected_agent is None and not _is_virtual_source_id(agent_id):
         try:
             selected_agent = (
                 None
@@ -955,6 +1041,7 @@ async def trace_analysis_export(
         scope=scope,
         source_is_virtual=source_is_virtual,
         source_registration_known=not current_principal.get().restricted,
+        source_kind=_source_kind(selected_agent),
         window_truncated=bool(events.coverage.get("truncated")),
         signals=signals,
     )
@@ -1210,8 +1297,10 @@ def _analysis_for_selection(
         ),
         None,
     )
-    if selected_agent is None and agent_id != _RUNTIME_TRACE_AGENT_ID:
+    if selected_agent is None and not _is_virtual_source_id(agent_id):
         selected_agent = provider.retrieve_memagent(agent_id)
+    if selected_agent is None and _coding_agent_for_source(agent_id):
+        selected_agent = _coding_agent_source(_coding_agent_for_source(agent_id))
     if not selected_agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -1253,6 +1342,7 @@ def _analysis_for_selection(
         scope="thread" if thread_id or thread_memory_id else "agent",
         source_is_virtual=source_is_virtual,
         source_registration_known=not current_principal.get().restricted,
+        source_kind=_source_kind(selected_agent),
         window_truncated=bool(events.coverage.get("truncated")),
         signals=signals,
     )
@@ -1582,6 +1672,12 @@ def _discover_runtime_trace_agents(
             ):
                 continue
             key = identity["agent_id"]
+            coding = _coding_agent(row)
+            if coding:
+                scoped_agents.setdefault(
+                    _CODING_AGENT_SOURCE.format(coding), _coding_agent_source(coding)
+                )
+                continue
             agent = scoped_agents.setdefault(
                 key,
                 {
@@ -1611,11 +1707,16 @@ def _discover_runtime_trace_agents(
     runtime_agent_ids = set()
     runtime_memory_ids = set()
     runtime_tool_names = set()
+    coding_agents = set()
     for doc in [*conversation_docs, *tool_log_docs]:
         doc_agent_id = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
         memory_id = _extract_trace_memory_id(doc, fallback="")
         if memory_id == "—":
             memory_id = ""
+        coding = _coding_agent(doc) if doc_agent_id not in saved_agent_ids else None
+        if coding:
+            coding_agents.add(coding)
+            continue
 
         is_unregistered_agent = bool(
             doc_agent_id and doc_agent_id not in saved_agent_ids
@@ -1642,6 +1743,7 @@ def _discover_runtime_trace_agents(
                 "_is_virtual_trace_source": True,
             }
         )
+    result.extend(_coding_agent_source(agent) for agent in sorted(coding_agents))
     return result
 
 

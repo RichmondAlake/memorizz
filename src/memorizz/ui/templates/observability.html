@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Observability &amp; Monitoring - Memorizz{% endblock %}
-{% block head %}<script src="/static/js/observability.js?v=3" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=1">{% endblock %}
+{% block head %}<script src="/static/js/observability.js?v=3" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=2">{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, observability_tabs, empty_state %}
@@ -120,7 +120,7 @@
                     <th scope="row" class="obs-nav-name">
                         <span class="traces-parent-caret" aria-hidden="true"></span>
                         <span class="obs-nav-label" title="{{ row.name }}">{{ row.name }}</span>
-                        <span class="fleet-id" title="{{ row.agent_id }}">{{ row.agent_id[:8] }}</span>
+                        {% if not row.agent_id.startswith('__memorizz_') %}<span class="fleet-id" title="{{ row.agent_id }}">{{ row.agent_id[:8] }}</span>{% endif %}
                     </th>
                     <td class="obs-col-mode">{{ row.mode }}</td>
                     <td class="num obs-col-threads">{{ count(row.thread_count) }}</td>
@@ -170,7 +170,7 @@
 {% if selected_agent %}
 <nav class="trace-section-nav" aria-label="Selected incident sections">
     <span>Root <code>{{ selected_root_trace_id or 'all loaded roots' }}</code>{% if selected_turn_id %} · Turn <code>{{ selected_turn_id }}</code>{% endif %}</span>
-    <a href="#trace-insights">Insights</a><a href="#trace-waterfall">Waterfall</a><a href="#trace-lineage-inspectors">Lineage</a><a href="#trace-output-contracts">Delivery</a>
+    {% if not coding_agent_label %}<a href="#trace-insights">Insights</a><a href="#trace-waterfall">Waterfall</a><a href="#trace-lineage-inspectors">Lineage</a><a href="#trace-output-contracts">Delivery</a>{% endif %}
     <form method="get" action="/traces">
         {% for key, value in selection_urls.params.items() %}{% if key not in ['root_trace_id', 'event_id', 'turn_id', 'task_id'] %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
         <label>Root <input name="root_trace_id" value="{{ selected_root_trace_id or '' }}" maxlength="240"></label><button class="btn btn-sm" type="submit">Select root</button>
@@ -183,7 +183,7 @@
     </div>
     <div class="summary-item">
         <span class="summary-label">Agent ID</span>
-        <code class="summary-value">{{ selected_agent.agent_id }}</code>
+        <code class="summary-value">{{ selected_agent._coding_agent if coding_agent_label else selected_agent.agent_id }}</code>
     </div>
     {% if selected_thread_row %}
     <div class="summary-item">
@@ -207,7 +207,9 @@
     {% endif %}
 </div>
 
-{% if trace_analysis %}
+{#- A coding agent's steps aren't in its saved turns, so counts here would
+    read as zero; its notice links to the run that has them. -#}
+{% if trace_analysis and not coding_agent_label %}
 <div class="detail-section observability-section trace-analysis" id="trace-insights">
     <div class="trace-analysis-header">
         <div>
@@ -396,13 +398,15 @@
     </div>
 </div>
 {#- Cache routing is supporting evidence: it follows the diagnosis. -#}
-{% include '_prompt_cache.html' %}
+{% if not coding_agent_label %}{% include '_prompt_cache.html' %}{% endif %}
 {% endif %}
 
-<details class="detail-section" id="trace-usage"><summary>Tokens, charges &amp; memory · selected trace window</summary>{% include '_usage_panel.html' %}</details>
-{% include "trace_waterfall.html" %}
-{% include "trace_inspectors.html" %}
-{% if selected_agent_id and trace_waterfall and trace_permissions and trace_permissions['replay.create'] %}
+{#- A Codex or Claude Code session's tokens, steps and memory use are on its
+    harness run, not in the turns the plugin saves, so these sections would
+    only report instrumentation it can't have. -#}
+{% if not coding_agent_label %}<details class="detail-section" id="trace-usage"><summary>Tokens, charges &amp; memory · selected trace window</summary>{% include '_usage_panel.html' %}</details>{% endif %}
+{% if not coding_agent_label %}{% include "trace_waterfall.html" %}{% include "trace_inspectors.html" %}{% endif %}
+{% if selected_agent_id and trace_waterfall and trace_permissions and trace_permissions['replay.create'] and not coding_agent_label %}
 <div class="detail-section">
     <h2>Safe Evalground replay draft</h2>
     <p>Freeze content-free references after current access checks. This does not run models, tools, or production side effects.</p>
@@ -414,6 +418,17 @@
 {% endif %}
 <div class="detail-section observability-section" id="trace-timeline">
     <h2>Trace Timeline</h2>
+    {% if coding_agent_label %}
+    <div class="obs-plugin-session" role="note">
+        {% if plugin_session %}
+        <p><strong>A {{ plugin_session.agent_label }} session, saved by the MemoRizz plugin.</strong> This timeline has its turns: each request and final answer. {% if plugin_session.recorded %}Its full trajectory, with every command, tool call and file change and its tokens and cost, is on Agent harnesses.{% else %}No run was recorded for it, so its steps aren't in MemoRizz; add them with <code>memorizz plugin import-session</code> and the session's log.{% endif %}</p>
+        {% if plugin_session.recorded %}<a class="btn btn-sm" href="/harnesses?run={{ plugin_session.run_id }}">Open its run</a>{% endif %}
+        {% else %}
+        <p><strong>{{ coding_agent_label }} sessions, saved by the MemoRizz plugin.</strong> Each thread is one session. Open one for its turns and a link to its full trajectory on Agent harnesses.</p>
+        <a class="btn btn-sm" href="/harnesses">Agent harnesses</a>
+        {% endif %}
+    </div>
+    {% endif %}
     {% if trace_events %}
     <div class="trace-timeline">
         <div class="conversation-messages">

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.14.1 — 2026-10-02
+
+### Changed
+
+- Observability shows Codex and Claude Code plugin sessions as **Codex
+  sessions** and **Claude Code sessions** instead of "Unregistered runtime
+  traces". Each thread links to the session's run on Agent harnesses
+  (`/harnesses?run=<id>` now opens a run). MemAgent-specific findings, such
+  as "Trace ownership is not durable" and the advice to save the agent, and
+  the usage, lineage and replay panels, no longer appear for them.
+- The Dashboard has a **Coding-agent sessions** panel, and Usage & cost a
+  matching section by agent and model: sessions, turns, tokens and spend from
+  the agents' own logs, reported apart from MemoRizz's agent runs.
+
 ## 0.14.0 — 2026-10-02
 
 ### Added
