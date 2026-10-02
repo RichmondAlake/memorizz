@@ -6,6 +6,9 @@ the coding agent long-term memory through MemoRizz's MCP server:
 - it starts each session with the project's memories and the last session's
   summary;
 - it saves each turn, and a summary of each session, as episodic memory;
+- it records each session as a run on the MemoRizz UI's Harnesses page, with
+  every command, tool call and file change, so you can follow its trajectory
+  and compare sessions;
 - it searches facts, past sessions and entities, saves new facts, corrects
   stale ones, and loads project documents into memory.
 
@@ -19,8 +22,8 @@ other recalls, and the MemoRizz UI, CLI and your MemoRizz agents see it too.
 | **MCP server** | `memorizz mcp serve --transport stdio --allow-writes`, started by the agent (or a hosted server, see [Use a hosted server](#use-a-hosted-server)). Tools to search, save, correct and forget memories, load documents, record and look up entities, and check status. Running saved agents, other harnesses and trace queries are opt-in. |
 | **SessionStart hook** | Gives the agent the project's memory ID, the last session's summary and the newest facts. |
 | **UserPromptSubmit hook** | Keeps the prompt for turn capture; with `MEMORIZZ_PROMPT_RECALL=true` it also adds memories related to the prompt. |
-| **Stop hook** | Saves the turn (your request and the final answer, secrets removed) to conversation memory, in a detached process, so the agent never waits and `claude -p` / `codex exec` exiting doesn't cancel it. |
-| **PreCompact and SessionEnd hooks** | Summarize the session with MemoRizz's default model, in a detached process that first waits for the last turn to be saved. |
+| **Stop hook** | Saves the turn (your request and the final answer, secrets removed) to conversation memory, and updates the session's run on the Harnesses page. It works in a detached process, so the agent never waits and `claude -p` / `codex exec` exiting doesn't cancel it. |
+| **PreCompact and SessionEnd hooks** | Summarize the session with MemoRizz's default model, in a detached process that first waits for the last turn to be saved, then bring the session's run up to date. |
 | **Skills** | `memorizz-memory` (recall, save, correct, forget, load documents), `memory-curator` (tidy memory) and `memorizz-agents` (saved MemoRizz agents and other harnesses). |
 | **Claude Code extras** | Slash commands `/memorizz:remember`, `/memorizz:recall`, `/memorizz:forget`, `/memorizz:memory-status`, and a `memory-curator` subagent. |
 
@@ -101,6 +104,56 @@ Talk to the agent as usual:
 In Claude Code, `/memorizz:remember <fact>`, `/memorizz:recall [topic]`,
 `/memorizz:forget <what>` and `/memorizz:memory-status` do the same directly.
 
+### Codex and Claude Code on one project
+
+Both plugins give a project the same memory ID, so what one agent learns the
+other can use. In
+[`examples/coding_agent_plugins`](https://github.com/RichmondAlake/memorizz/tree/main/examples/coding_agent_plugins),
+Codex fixes a failing test and saves why it made the change. Then Claude Code,
+in a new session on the same project, explains the change and what the last
+session did. The script uses a throwaway Codex home and its own store. The
+README there shows how to run the same thing live in two terminals.
+
+## See each session's trajectory
+
+After every turn the plugin reads the agent's own session log (Codex's rollout
+under `~/.codex/sessions`, Claude Code's transcript under `~/.claude/projects`)
+and records the session as one run on the **Harnesses** page of `memorizz ui`,
+marked *plugin session*.
+
+![Codex and Claude Code sessions on the Harnesses page, each marked plugin session; the Codex session's trajectory starts with the memory the plugin loaded.](../assets/screenshots/plugin-sessions-dark.png)
+
+The run holds:
+
+- each prompt and answer;
+- every command with its output and exit code;
+- every tool call with its result, MemoRizz's own `memorizz_*` tools
+  included;
+- each file change with its diff;
+- the memory the plugin added at session start;
+- tokens, the model, and cost (Claude Code's own total; Codex runs on a
+  ChatGPT plan are priced at OpenAI list rates when the model has one).
+
+Tick a Codex session and a Claude Code session and press **Compare** to see
+their steps side by side.
+
+![Compare: the Codex session that fixed the bug and the Claude Code session that explained it from MemoRizz memory, with their models, time, cost, tokens, actions and timelines.](../assets/screenshots/plugin-compare-dark.png)
+ A session is one run, rebuilt as it grows, so a long
+interactive session keeps a single row. Secrets are removed and long output is
+cut, as for turns.
+
+Sessions from before you installed the plugin can be added by hand:
+
+```bash
+memorizz plugin import-session ~/.codex/sessions/2026/10/02/rollout-*.jsonl
+memorizz plugin import-session ~/.claude/projects/<project>/<session>.jsonl
+```
+
+Runs are recorded in `$MEMORIZZ_HOME/harness-runs.sqlite3`, the store the
+local UI reads. `MEMORIZZ_PLUGIN_RUNS=false` turns this off and keeps turn
+capture. It also turns off with turn capture (`--no-capture`), and with a
+hosted server, which can't read this machine's session logs.
+
 ## Memory types
 
 | Type | Holds | Written by |
@@ -142,8 +195,8 @@ use.
 Codex / Claude Code
  ├─ SessionStart ──────> memorizz plugin hook session-start   (memory ID, last summary, newest facts)
  ├─ UserPromptSubmit ──> keep the prompt; optional recall
- ├─ Stop (background) ─> memorizz plugin hook stop            (save the turn)
- ├─ PreCompact/SessionEnd ─> detached: memorizz plugin hook summarize
+ ├─ Stop (background) ─> memorizz plugin hook stop            (save the turn, update the session's run)
+ ├─ PreCompact/SessionEnd ─> detached: memorizz plugin hook summarize (summary, final run update)
  ├─ skills/ ───────────> when to recall, save, correct, curate
  └─ MCP ───────────────> memorizz mcp serve (stdio) or a hosted server (HTTPS)
                            └─ MemoRizz store (shared with the UI, CLI and agents)

@@ -288,7 +288,7 @@
                 <div id="filesystem-fields" class="provider-fields" style="display: none;">
                     <div class="form-group">
                         <label for="filesystem_path">Storage Path</label>
-                        <input type="text" name="filesystem_path" id="filesystem_path" placeholder="~/.memorizz/data">
+                        <input type="text" name="filesystem_path" id="filesystem_path" placeholder="~/.memorizz/data" value="{{ env_filesystem_path or '' }}">
                     </div>
                 </div>
 

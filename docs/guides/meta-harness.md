@@ -907,6 +907,11 @@ runtime or delegate mode, the default harness, and a workspace allowlist.
   file changes, usage and the outcome), updating live while it runs. **Full
   view** and **Evidence** open it larger, next to the raw run record. The
   **Steps** column counts messages, commands, tool calls and file edits per run.
+- **Plugin sessions.** Codex and Claude Code sessions run with the MemoRizz
+  plugin are recorded as runs too, marked *plugin session*, from the agent's own
+  session log. Compare them with each other or with MetaHarness runs; there is
+  nothing to retry or continue, since the session ran in the agent itself. See
+  [See each session's trajectory](coding-agent-plugins.md#see-each-sessions-trajectory).
 - **Execution graph.** Each plan or comparison is drawn as nodes: comparisons
   fan out from the task to one lane per harness, plans run left to right, and
   the edge into a running node is animated.

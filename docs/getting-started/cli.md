@@ -603,6 +603,7 @@ memorizz plugin install codex|claude-code [--user NAME] [--no-capture] [--no-sum
   [--remote URL [--token-env NAME] | --local]
 memorizz plugin uninstall codex|claude-code
 memorizz plugin memory-id [PATH]
+memorizz plugin import-session LOG...   # past Codex/Claude Code sessions onto the Harnesses page
 memorizz plugin hook session-start|prompt|stop|summarize   # run by the plugins' hooks
 # Uses MEMORIZZ_BACKEND=filesystem|mongodb|oracle (filesystem by default)
 ```

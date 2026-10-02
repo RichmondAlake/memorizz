@@ -168,7 +168,10 @@ Running items spin and update in place; select a run to see its trajectory, and
 **Continue** keeps talking to the same harness with the run's setup. Filter the
 runs by task, harness, MemAgent name or ID, and tick two to four runs for
 **Compare selected**: their facts, timelines and steps side by side, including
-two MemAgents (for example the same agent with and without a tool cache). See
+two MemAgents (for example the same agent with and without a tool cache).
+Codex and Claude Code sessions run with the MemoRizz plugin appear here too,
+marked *plugin session*, with their full trajectories (see
+[See each session's trajectory](../guides/coding-agent-plugins.md#see-each-sessions-trajectory)). See
 [Local UI in the meta-harness guide](../guides/meta-harness.md#local-ui).
 
 Agent create/edit forms can persist `runtime` mode, where an external harness

@@ -54,6 +54,11 @@
                     // A harness restating that it started only adds what it runs on.
                     if (started) { if (facts) started.summary = facts; break; }
                     add({kind: 'status', title: data.status === 'running' ? 'Started' : humanize(data.status), summary: facts});
+                } else if (data.memory_context && data.memory_context.source === 'memorizz_plugin') {
+                    // What the MemoRizz plugin's hook added to the session.
+                    const ctx = data.memory_context;
+                    const when = ctx.hook === 'SessionStart' ? 'at session start' : 'with the prompt';
+                    add({kind: 'memory', title: 'MemoRizz memory', summary: 'The plugin added project memory ' + when + ' · ~' + fmtCount(ctx.token_estimate) + ' tokens', detail: ctx.text || ''});
                 } else if (data.memory_context) {
                     const ctx = data.memory_context;
                     add({kind: 'memory', title: 'Memory context', summary: (ctx.source_ids || []).length + ' memories · ~' + fmtCount(ctx.token_estimate) + ' tokens' + (ctx.truncated ? ' · truncated' : '')});

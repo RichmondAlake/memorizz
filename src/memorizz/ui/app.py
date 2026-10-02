@@ -954,6 +954,7 @@ def create_app(
                 "env_notion_data_source_id": os.environ.get(
                     "MEMORIZZ_NOTION_DATA_SOURCE_ID", ""
                 ),
+                "env_filesystem_path": os.environ.get("MEMORIZZ_MEMORY_ROOT", ""),
                 "has_env_notion_token": bool(os.environ.get("NOTION_TOKEN")),
                 "env_notion_semantic_backend": os.environ.get(
                     "MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"

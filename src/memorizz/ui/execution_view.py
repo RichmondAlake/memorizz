@@ -225,6 +225,10 @@ def shape_harness_run(
         "allow_dirty": bool(permissions.get("allow_dirty_workspace")),
         "backend": humanize(metadata.get("execution_backend") or "local"),
         "source": str(metadata.get("source") or ""),
+        # A Codex or Claude Code session the MemoRizz plugin recorded.
+        "plugin_session": metadata.get("source") == "plugin",
+        "turns": int(metadata.get("turns") or 0),
+        "session_log": str(metadata.get("session_log") or ""),
         "mode": str(task.get("mode") or "runtime"),
         # The model the harness actually used: the override, else the one the
         # adapter reported (e.g. Codex's default from its catalog).

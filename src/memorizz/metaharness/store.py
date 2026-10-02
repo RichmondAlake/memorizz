@@ -36,6 +36,9 @@ class HarnessRunStore(Protocol):
     def append_event(self, event: HarnessEvent) -> HarnessEvent:
         ...
 
+    def replace(self, run: HarnessRun, events: List[HarnessEvent]) -> HarnessRun:
+        ...
+
     def events(
         self, run_id: str, *, after: int = 0, limit: int = 1000
     ) -> List[HarnessEvent]:
@@ -256,6 +259,57 @@ class SQLiteHarnessRunStore:
                 self._connection.execute("ROLLBACK")
                 raise
         return event
+
+    def replace(self, run: HarnessRun, events: List[HarnessEvent]) -> HarnessRun:
+        """Write a run and all its events, replacing any earlier copy of both.
+
+        For runs recorded from elsewhere, such as a coding agent's own session
+        log, which are rebuilt whole each time they grow. One transaction, so
+        a reader never sees the run with half its events.
+        """
+        value = json.dumps(
+            run.to_dict(), ensure_ascii=False, sort_keys=True, default=str
+        )
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "INSERT INTO harness_runs(run_id,status,harness,created_at,updated_at,payload) "
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET "
+                    "status=excluded.status,harness=excluded.harness,"
+                    "updated_at=excluded.updated_at,payload=excluded.payload",
+                    (
+                        run.run_id,
+                        run.status.value,
+                        run.harness,
+                        run.created_at,
+                        run.updated_at,
+                        value,
+                    ),
+                )
+                self._connection.execute(
+                    "DELETE FROM harness_events WHERE run_id=?", (run.run_id,)
+                )
+                for sequence, event in enumerate(events, start=1):
+                    event.sequence = sequence
+                    self._connection.execute(
+                        "INSERT INTO harness_events(run_id,sequence,timestamp,event_type,payload) "
+                        "VALUES(?,?,?,?,?)",
+                        (
+                            run.run_id,
+                            sequence,
+                            event.timestamp,
+                            event.type.value,
+                            json.dumps(
+                                event.to_dict(), ensure_ascii=False, default=str
+                            ),
+                        ),
+                    )
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        return run
 
     def events(
         self, run_id: str, *, after: int = 0, limit: int = 1000

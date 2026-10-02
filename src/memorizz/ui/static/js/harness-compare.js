@@ -124,7 +124,7 @@
         return {
             runId: String(run.run_id || task.run_id || ''),
             harness,
-            label: agentName ? harness + ' · ' + agentName : harness,
+            label: agentName ? harness + ' · ' + agentName : harness + ((task.metadata || {}).source === 'plugin' ? ' · plugin session' : ''),
             cache,
             model: String(usage.model || task.model || (modelEvent ? modelEvent.data.model : '') || ''),
             task: String(task.task || ''),

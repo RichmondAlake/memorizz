@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.0 — 2026-10-02
+
+### Added
+
+- Coding-agent sessions on the Harnesses page: the Codex and Claude Code
+  plugins record each session as a run, read from the agent's own session log
+  after every turn. The run has its prompts, commands, tool calls (MemoRizz's
+  included), file changes, the memory the plugin loaded, tokens and cost, so
+  the UI shows its trajectory and Compare puts a Codex and a Claude Code
+  session side by side. `memorizz plugin import-session` adds past sessions;
+  `MEMORIZZ_PLUGIN_RUNS=false` turns it off. Local stores only.
+- `examples/coding_agent_plugins`: Codex fixes a bug and saves why; Claude
+  Code, in a new session, explains it from MemoRizz memory. Both sessions
+  appear as runs (`--ui` adds them to your usual UI).
+- `HarnessRunStore.replace(run, events)` writes a run and all its events in
+  one transaction.
+
 ## 0.13.0 — 2026-10-02
 
 ### Added

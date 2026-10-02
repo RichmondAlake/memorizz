@@ -43,6 +43,8 @@ RECENT_MEMORIES = 8
 PROMPT_RECALL_ENV = "MEMORIZZ_PROMPT_RECALL"
 CAPTURE_ENV = "MEMORIZZ_SESSION_CAPTURE"  # turns (default) or off
 SUMMARY_ENV = "MEMORIZZ_SESSION_SUMMARY"  # true (default) or false
+# Record each session as a run on the UI's Harnesses page: true (default) or false.
+RUNS_ENV = "MEMORIZZ_PLUGIN_RUNS"
 PRINCIPAL_ENV = "MEMORIZZ_MCP_SERVER_LOCAL_PRINCIPAL"
 # A hosted MemoRizz MCP server the plugin uses instead of the local store.
 REMOTE_URL_ENV = "MEMORIZZ_PLUGIN_REMOTE_URL"
@@ -546,6 +548,33 @@ def summarize_session(payload: Dict[str, Any], provider: Any = None) -> List[str
             _close(provider)
 
 
+def record_session_run(payload: Dict[str, Any], store: Any = None) -> Optional[str]:
+    """Record the session as a run on the Harnesses page (its steps read from
+    the agent's own session log), or bring it up to date. Returns the run ID.
+
+    Local stores only: a hosted server can't read this machine's session log."""
+    if _setting(RUNS_ENV, "true").lower() in {"false", "0", "off", "no"}:
+        return None
+    if store is None and _remote_url():
+        return None
+    from ..metaharness.agent_sessions import find_session_log, record_session
+
+    agent = _agent_name()
+    path = payload.get("transcript_path") or payload.get("agent_transcript_path")
+    log = Path(str(path)).expanduser() if path else None
+    if log is None or not log.is_file():
+        log = find_session_log(agent, str(payload.get("session_id") or ""))
+    if log is None:
+        return None
+    run = record_session(
+        log,
+        agent=agent,
+        memory_id=project_memory_id(payload.get("cwd")),
+        store=store,
+    )
+    return run.run_id if run else None
+
+
 @hook_app.command("stop")
 def hook_stop(
     prompt_file: Optional[Path] = typer.Option(
@@ -556,6 +585,10 @@ def hook_stop(
     payload = _hook_payload()
     try:
         capture_turn(payload, prompt_file=prompt_file)
+    except Exception:
+        pass
+    try:
+        record_session_run(payload)
     except Exception:
         pass
 
@@ -598,6 +631,68 @@ def hook_summarize() -> None:
         summarize_session(payload)
     except Exception:
         pass
+    try:
+        record_session_run(payload)  # with the totals written at session end
+    except Exception:
+        pass
+
+
+@plugin_app.command("import-session")
+def import_session(
+    logs: List[Path] = typer.Argument(
+        ...,
+        help=(
+            "Session logs: a Codex rollout (~/.codex/sessions/…/rollout-*.jsonl) "
+            "or a Claude Code transcript (~/.claude/projects/<project>/<session>.jsonl)."
+        ),
+        exists=True,
+        dir_okay=False,
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON."),
+) -> None:
+    """Show past Codex or Claude Code sessions on the UI's Harnesses page,
+    with their steps. The plugin does this for new sessions as they run."""
+    from ..metaharness.agent_sessions import detect_agent, read_session
+    from ..metaharness.store import SQLiteHarnessRunStore
+
+    recorded = []
+    store = SQLiteHarnessRunStore()
+    try:
+        for log in logs:
+            agent = detect_agent(log)
+            built = read_session(log, agent=agent) if agent else None
+            if built is None:
+                recorded.append({"log": str(log), "run_id": None})
+                continue
+            run, events = built
+            # The project's memory ID, as the plugin names it.
+            run.task["memory_id"] = project_memory_id(run.task.get("workspace"))
+            store.replace(run, events)
+            recorded.append(
+                {
+                    "log": str(log),
+                    "run_id": run.run_id,
+                    "agent": agent,
+                    "task": run.task.get("task"),
+                }
+            )
+    finally:
+        store.close()
+    if as_json:
+        typer.echo(json.dumps({"runs": recorded}, indent=2))
+        return
+    for item in recorded:
+        if item["run_id"]:
+            typer.echo(
+                f"{AGENTS[item['agent']]} session → run {item['run_id'][:8]}: "
+                f"{str(item['task'])[:70]}"
+            )
+        else:
+            typer.echo(
+                f"Skipped {item['log']}: not a Codex or Claude Code session log."
+            )
+    if any(item["run_id"] for item in recorded):
+        typer.echo("Open `memorizz ui` → Harnesses to see their steps.")
 
 
 @plugin_app.command("memory-id")

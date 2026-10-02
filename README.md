@@ -94,7 +94,10 @@ session with the project's facts and the last session's summary; each turn and
 a summary of each session are saved as episodic memory; and the agent can
 search past sessions, save and correct facts, record entities and load project
 documents. Both agents share the memory, locally or on a hosted MemoRizz MCP
-server for a team ([deploy/mcp-server](deploy/mcp-server/README.md)).
+server for a team ([deploy/mcp-server](deploy/mcp-server/README.md)). Each
+session also appears on the UI's Harnesses page with its full trajectory, so
+you can follow a Codex session and a Claude Code session step by step and
+compare them.
 
 ```bash
 memorizz plugin install codex          # or: memorizz plugin install claude-code
@@ -102,7 +105,9 @@ memorizz plugin install codex          # or: memorizz plugin install claude-code
 
 Or `codex plugin marketplace add RichmondAlake/memorizz` /
 `claude plugin marketplace add RichmondAlake/memorizz`, then install
-`memorizz@memorizz`. See [MemoRizz in Codex and Claude Code](docs/guides/coding-agent-plugins.md).
+`memorizz@memorizz`. See [MemoRizz in Codex and Claude Code](docs/guides/coding-agent-plugins.md),
+and [examples/coding_agent_plugins](examples/coding_agent_plugins/README.md) for
+Codex and Claude Code sharing one project's memory.
 
 ## Continual learning and the intelligence plane
 

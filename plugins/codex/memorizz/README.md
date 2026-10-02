@@ -15,7 +15,8 @@ MemoRizz's MCP server, and access to your saved MemoRizz agents.
   - UserPromptSubmit: keeps the prompt for turn capture; with
     `MEMORIZZ_PROMPT_RECALL=true`, also adds memories related to it;
   - Stop: saves the turn (request and final answer, secrets removed) to
-    conversation memory, in a detached process;
+    conversation memory, and records the session as a run on the MemoRizz UI's
+    Harnesses page, with its trajectory, in a detached process;
   - PreCompact and SessionEnd: summarize the session with MemoRizz's default
     model, in a detached process.
 - **Skills:** `memorizz-memory` (recall, save, correct, forget, load

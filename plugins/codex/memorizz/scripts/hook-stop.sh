@@ -1,6 +1,7 @@
 #!/bin/sh
 # Stop (Codex or Claude Code): save the turn that just ended (the prompt and
-# the final answer, secrets removed) to the project's conversation memory.
+# the final answer, secrets removed) to the project's conversation memory, and
+# update the session's run on the UI's Harnesses page.
 # The save runs detached, so the agent never waits and `claude -p` or
 # `codex exec` exiting doesn't cancel it. Off with MEMORIZZ_SESSION_CAPTURE=off.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

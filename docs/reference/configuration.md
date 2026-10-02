@@ -80,6 +80,7 @@ VALUE`, or the options of `memorizz plugin install`); see
 |---|---|
 | `MEMORIZZ_SESSION_CAPTURE` | `turns` (default) saves each turn; `off` saves no turns and makes no summaries |
 | `MEMORIZZ_SESSION_SUMMARY` | `false` keeps turns but skips session summaries (default `true`) |
+| `MEMORIZZ_PLUGIN_RUNS` | `false` stops recording each session as a run on the UI's Harnesses page (default `true`; local store only) |
 | `MEMORIZZ_PROMPT_RECALL` | `true` adds related memories to every prompt (default `false`) |
 | `MEMORIZZ_MCP_SERVER_LOCAL_PRINCIPAL` | The user whose memories a local (stdio) server reads and writes, for a shared store |
 | `MEMORIZZ_MCP_SERVER_INGEST_ROOTS` | Comma-separated folders `memorizz_ingest` may read (default: home for stdio, none for HTTP) |

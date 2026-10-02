@@ -5,11 +5,11 @@
 {% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=24">
 <link rel="stylesheet" href="/static/css/components/dialogs.css?v=1">
 <script src="/static/js/page-dialogs.js?v=1"></script>
-<script src="/static/js/harness-trajectory.js?v=13"></script>
+<script src="/static/js/harness-trajectory.js?v=14"></script>
 <link rel="stylesheet" href="/static/css/pages/harness-compare.css?v=2">
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
 <script src="/static/js/safe-markdown.js?v=2"></script>
-<script src="/static/js/harness-compare.js?v=5"></script>{% endblock %}
+<script src="/static/js/harness-compare.js?v=6"></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state, id_chip %}
@@ -460,7 +460,7 @@
                         tabindex="-1">
                         <td class="hx-col-pick"><input type="checkbox" data-compare-pick="{{ run.run_id }}" aria-label="Select {{ run.harness_label }} run {{ run.run_id[:8] }}"></td>
                         <td><span class="fleet-health fleet-health--{{ dot[run.signal] }}">{{ run.status_label }}</span></td>
-                        <td class="hx-col-harness mono">{{ run.harness_label }}{% if run.agent_id and run.harness == 'memagent' and agent_names.get(run.agent_id|string) %}<small class="hx-cell-agent" title="MemAgent">{{ agent_names.get(run.agent_id|string) }}</small>{% endif %}{% if run.model %}<small class="hx-cell-model" title="Model">{{ run.model }}</small>{% endif %}</td>
+                        <td class="hx-col-harness mono">{{ run.harness_label }}{% if run.agent_id and run.harness == 'memagent' and agent_names.get(run.agent_id|string) %}<small class="hx-cell-agent" title="MemAgent">{{ agent_names.get(run.agent_id|string) }}</small>{% endif %}{% if run.plugin_session %}<small class="hx-cell-agent" title="A {{ run.harness_label }} session the MemoRizz plugin recorded">plugin session</small>{% endif %}{% if run.model %}<small class="hx-cell-model" title="Model">{{ run.model }}</small>{% endif %}</td>
                         <td class="hx-task" title="{{ run.task_line }}">{% if run.workflow %}<span class="hx-tag" title="{{ run.workflow.name }}">{{ run.workflow.label }}</span>{% endif %}{% if run.parent_run_id %}<span class="hx-tag" title="A delegate's share of run {{ run.parent_run_id[:8] }}">Delegate</span>{% endif %}{{ run.task_line }}</td>
                         <td class="num hx-col-steps"><button type="button" class="hx-steps-cell" data-show-trajectory="{{ run.run_id }}" title="Show this run's trajectory">{% if run.step_total %}{{ step_strip(run.steps) }}{% else %}<span class="hx-muted">—</span>{% endif %}</button></td>
                         <td class="hx-col-mode">{% if run.writes %}<span class="is-warn">Edits</span>{% else %}Read only{% endif %}</td>
@@ -493,8 +493,8 @@
                 <a class="btn" href="/api/harness-runs/{{ run.run_id }}?include_events=true" target="_blank" rel="noopener">JSON</a>
                 {% if run.agent_id %}<a class="btn" href="/agents/{{ run.agent_id }}/playground">Agent</a>{% endif %}
                 {% if run.cancellable and not ui_read_only %}<button class="btn harness-cancel" type="button" data-run-id="{{ run.run_id }}">Cancel run</button>{% endif %}
-                {% if not run.cancellable and not ui_read_only %}<button class="btn harness-retry" type="button" data-run-id="{{ run.run_id }}">Retry</button>{% endif %}
-                {% if not ui_read_only and run.status not in ('pending_approval',) %}<a class="btn" href="/harnesses/chat?from={{ run.run_id }}" title="Keep talking to this harness with the same setup">Continue</a>{% endif %}
+                {% if not run.cancellable and not ui_read_only and not run.plugin_session %}<button class="btn harness-retry" type="button" data-run-id="{{ run.run_id }}">Retry</button>{% endif %}
+                {% if not ui_read_only and run.status not in ('pending_approval',) and not run.plugin_session %}<a class="btn" href="/harnesses/chat?from={{ run.run_id }}" title="Keep talking to this harness with the same setup">Continue</a>{% endif %}
                 {% if not run.cancellable and not ui_read_only %}{% if run.workflow %}<button class="btn hx-btn-quiet hx-btn-delete" type="button" data-delete-workflow="{{ run.workflow.id }}" data-delete-kind="{{ run.workflow.kind }}" data-delete-count="{{ run.workflow.steps }}" title="This run is a step of a workflow, so it is deleted with the workflow">Delete workflow</button>{% else %}<button class="btn hx-btn-quiet hx-btn-delete harness-delete" type="button" data-run-id="{{ run.run_id }}" data-delegate-runs="{{ run.delegate_runs or 0 }}" data-scratch="{{ 'true' if run.scratch else 'false' }}" data-harness="{{ run.harness_label }}">Delete</button>{% endif %}{% endif %}
             </div>
 
@@ -520,7 +520,7 @@
             <div class="hx-traj" data-trajectory-for="{{ run.run_id }}" data-active="{{ 'true' if run.group == 'active' else 'false' }}"><p class="hx-muted">Select the run to load its steps.</p></div>
 
             <div class="mem-body-head">
-                <h3 class="fleet-detail-title">Task</h3>
+                <h3 class="fleet-detail-title">{% if run.plugin_session %}First prompt{% if run.turns > 1 %} <span class="hx-muted">· {{ run.turns }} turns in the session</span>{% endif %}{% else %}Task{% endif %}</h3>
                 <button type="button" class="btn btn-sm" data-copy-target="hx-task-{{ run.key }}">Copy</button>
             </div>
             <pre class="mem-body hx-task-body" id="hx-task-{{ run.key }}">{{ run.task }}</pre>
@@ -547,6 +547,17 @@
             <p class="hx-muted">{{ run.outcome or run.status_label }}. No response text recorded.</p>
             {% endif %}
 
+            {% if run.plugin_session %}
+            <h3 class="fleet-detail-title">Session</h3>
+            <dl class="fleet-config">
+                <div class="hx-wide"><dt>Workspace</dt><dd class="mono hx-path">{{ run.workspace or '—' }}</dd></div>
+                <div><dt>Files</dt><dd>{% if run.writes %}<span class="is-warn">Changed files</span>{% else %}No file changes{% endif %}</dd></div>
+                <div><dt>Model</dt><dd class="mono">{{ run.model or '—' }}</dd></div>
+                <div><dt>Turns</dt><dd class="mono">{{ run.turns }}</dd></div>
+                {% if run.memory_id %}<div><dt>Memory ID</dt><dd>{{ id_chip(run.memory_id, 18) }}</dd></div>{% endif %}
+                {% if run.session_log %}<div class="hx-wide"><dt>Session log</dt><dd class="mono hx-path">{{ run.session_log }}</dd></div>{% endif %}
+            </dl>
+            {% else %}
             <h3 class="fleet-detail-title">Verification</h3>
             <dl class="fleet-config">
                 <div><dt>Result</dt><dd>{% if run.verify_state == 'verified' %}<span class="is-good">Verified</span>{% elif run.verify_state == 'failed' %}<span class="is-bad">Failed</span>{% else %}{{ run.verify_label }}{% endif %}</dd></div>
@@ -580,13 +591,16 @@
                 <div><dt>Output tokens</dt><dd class="mono">{{ fmt_compact(lim.output_tokens) if lim.output_tokens else 'No limit' }}</dd></div>
             </dl>
 
+            {% endif %}
+
             <h3 class="fleet-detail-title">Timeline</h3>
             <dl class="fleet-config hx-times">
                 {% for label, value in [('Created', run.created_at), ('Started', run.started_at), ('Finished', run.finished_at), ('Updated', run.updated_at)] %}
                 <div><dt>{{ label }}</dt><dd class="mono">{{ value.strftime('%Y-%m-%d %H:%M:%S') if value else '—' }}</dd></div>
                 {% endfor %}
                 {% if run.approval_id %}<div><dt>Approval</dt><dd>{{ id_chip(run.approval_id, 12) }}</dd></div>{% endif %}
-                {% if run.source %}<div><dt>Started from</dt><dd>{{ run.source|upper if run.source|length <= 3 else run.source|capitalize }}</dd></div>{% endif %}
+                {% if run.plugin_session %}<div><dt>Recorded by</dt><dd>MemoRizz plugin</dd></div>{% endif %}
+                {% if run.source and not run.plugin_session %}<div><dt>Started from</dt><dd>{{ run.source|upper if run.source|length <= 3 else run.source|capitalize }}</dd></div>{% endif %}
             </dl>
         </section>
         {% endfor %}
