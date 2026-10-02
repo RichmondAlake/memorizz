@@ -2,7 +2,6 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-import importlib
 import inspect
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Union
@@ -206,35 +205,6 @@ class Toolbox:
             return None
         return f"{module}:{qualname}"
 
-    @staticmethod
-    def _load_import_reference(reference: str) -> Callable[..., Any]:
-        module_name, separator, qualname = str(reference).partition(":")
-        if not separator or not module_name or not qualname or "<locals>" in qualname:
-            raise ValueError("Trusted tool references must use module:qualified_name")
-        value: Any = importlib.import_module(module_name)
-        for component in qualname.split("."):
-            value = getattr(value, component)
-        if not callable(value):
-            raise TypeError(f"Trusted tool reference '{reference}' is not callable")
-        return value
-
-    def bind_callable(
-        self,
-        *,
-        function: Optional[Callable[..., Any]] = None,
-        import_reference: Optional[str] = None,
-        tool_id: Optional[str] = None,
-        tool_name: Optional[str] = None,
-    ) -> Callable[..., Any]:
-        """Rebind persisted metadata through an explicit trusted reference."""
-        bound = function or self._load_import_reference(str(import_reference or ""))
-        if not callable(bound):
-            raise TypeError("function must be callable")
-        if tool_id:
-            self._tools[str(tool_id)] = bound
-        self._tools_by_name[str(tool_name or bound.__name__)] = bound
-        return bound
-
     @classmethod
     def _normalize_tool_metadata(
         cls,
@@ -385,53 +355,6 @@ class Toolbox:
                 break
         return filtered
 
-    def delete_tool_by_name(self, name: str) -> bool:
-        """
-        Delete a tool from the toolbox by name.
-
-        Parameters:
-        -----------
-        name : str
-            The name of the tool to delete.
-
-        Returns:
-        --------
-        bool
-            True if deletion was successful, False otherwise.
-        """
-        tool_data = self.memory_provider.retrieve_by_name(
-            name, memory_store_type=MemoryType.TOOLBOX
-        )
-        if tool_data and "_id" in tool_data:
-            tool_id = str(tool_data["_id"])
-            if tool_id in self._tools:
-                del self._tools[tool_id]
-
-        return self.memory_provider.delete_by_name(
-            name, memory_store_type=MemoryType.TOOLBOX
-        )
-
-    def delete_tool_by_id(self, id: str) -> bool:
-        """
-        Delete a tool from the toolbox by id.
-
-        Parameters:
-        -----------
-        id : str
-            The id of the tool to delete.
-
-        Returns:
-        --------
-        bool
-            True if deletion was successful, False otherwise.
-        """
-        if id in self._tools:
-            del self._tools[id]
-
-        return self.memory_provider.delete_by_id(
-            id, memory_store_type=MemoryType.TOOLBOX
-        )
-
     def delete_all(self) -> bool:
         """
         Delete all tools in the toolbox.
@@ -490,26 +413,6 @@ class Toolbox:
     def get_function_by_name(self, tool_name: str) -> Optional[Callable]:
         """Return a callable explicitly bound under a persisted tool name."""
         return self._tools_by_name.get(str(tool_name))
-
-    def update_tool_by_id(self, id: str, data: Dict[str, Any]) -> bool:
-        """
-        Update a tool's metadata in the memory provider by id.
-
-        Parameters:
-        -----------
-        id : str
-            The id of the tool to update.
-        data : Dict[str, Any]
-            The data to update the tool with.
-
-        Returns:
-        --------
-        bool
-            True if the update was successful, False otherwise.
-        """
-        return self.memory_provider.update_by_id(
-            id, data, memory_store_type=MemoryType.TOOLBOX
-        )
 
     # --- Internal methods now use the configured self.llm_provider ---
 

@@ -13,6 +13,7 @@
   const active = new Set(["queued", "running", "cancelling", "canceling"]);
   const kinds = {
     agent: "Agent evaluation",
+    harness: "Harness benchmark",
     reranker: "Reranking",
     reader: "Answer models",
     pipeline: "Memory pipeline",
@@ -62,22 +63,7 @@
     if (status === "completed") return "good";
     return status === "failed" || status === "interrupted" ? "bad" : "warn";
   }
-  // One rule for charges across the console's monitor pages:
-  // 2 decimals from $1, 4 under $1, 6 under one cent.
-  function usd(value) {
-    if (value == null) return "Unknown";
-    if (value === 0) return "$0.00";
-    const size = Math.abs(value);
-    if (size >= 1)
-      return (
-        "$" +
-        value.toLocaleString("en-US", {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })
-      );
-    return "$" + value.toFixed(size >= 0.01 ? 4 : 6);
-  }
+  const usd = window.MemorizzFormat.usd; // app.js
   function age(seconds) {
     if (!seconds) return "Unknown";
     const delta = Date.now() / 1000 - seconds;

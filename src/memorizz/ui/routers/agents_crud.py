@@ -2,17 +2,18 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-"""Agent CRUD pages (list, create, edit, favorite, delete).
+"""Agent CRUD pages (list, create, edit, favorite).
 
 Extracted verbatim from ``ui/app.py``: GET /agents, POST
 /agents/{agent_id}/favorite, GET+POST /agents/new, GET+POST
-/agents/{agent_id}/edit, the GET /agents/{agent_id} playground redirect, and
-POST /agents/{agent_id}/delete, plus the form-parsing helpers used only by
+/agents/{agent_id}/edit and the GET /agents/{agent_id} playground redirect,
+plus the form-parsing helpers used only by
 these routes. Route paths, response classes, template context keys, and
 behavior are unchanged. ``/agents/new`` stays registered before
 ``/agents/{agent_id}`` so the literal path keeps winning the match.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -22,11 +23,20 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from ...memagent.delegation_settings import (
+    DELEGATION_CONSOLIDATIONS,
+    delegate_ids,
+    delegation_settings,
+)
+from ...metaharness import catalog
+from ...metaharness.config import DEFAULT_HARNESS_CHOICES
+from ...tool_cache import ToolCacheConfig
 from ..helpers import (
     DEFAULT_LLM_MODEL_BY_PROVIDER,
     DEFAULT_LLM_PROVIDER,
     _agent_created_timestamp,
     _agent_entity_memory_enabled,
+    _agent_field,
     _agent_workflow_memory_enabled,
     _build_agent_nav_items,
     _build_agent_threads,
@@ -39,9 +49,11 @@ from ..helpers import (
     _duplicate_agent_notes,
     _extract_agent_identifier,
     _extract_agent_memory_ids,
+    _extract_agent_persona_name,
     _extract_agent_tools,
     _get_default_llm_model,
     _get_default_llm_provider,
+    _json_object,
     _load_agent_last_run_map,
     _load_memagent_created_at_map,
     _normalize_browser_control_provider_name,
@@ -62,7 +74,7 @@ from ..helpers import (
     _validate_self_aware_config,
     _validate_skills_marketplace_provider_choice,
 )
-from ..state import _state, templates
+from ..state import _state, get_meta_harness, templates
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +392,137 @@ def _extract_agent_id(result: Any, fallback: Optional[str]) -> Optional[str]:
     return fallback
 
 
+# ---------------------------------------------------------------------------
+# Delegates: other saved agents this agent hands parts of a request to.
+# ---------------------------------------------------------------------------
+
+_saved_delegate_ids = delegate_ids
+
+
+HARNESS_LABELS = catalog.HARNESS_LABELS
+_harness_backing = catalog.harness_backing
+
+
+def _harness_form_options() -> Dict[str, Any]:
+    """Harnesses a delegate can run on, and each one's model choices."""
+    try:
+        service = get_meta_harness()
+    except RuntimeError:
+        return {"harnesses": [], "models": {}}
+    try:
+        harnesses = list(service.list_harnesses())
+    except Exception:
+        harnesses = []
+    try:
+        models = catalog.model_choices(service, harnesses)
+    except Exception:
+        models = {}
+    rows = [
+        {
+            "name": item.get("name"),
+            "label": HARNESS_LABELS.get(item.get("name"), item.get("name")),
+            "ready": bool(item.get("ready")),
+        }
+        for item in harnesses
+        if item.get("name") in HARNESS_LABELS
+    ]
+    return {"harnesses": rows, "models": models}
+
+
+def _delegation_form_context(
+    agent_id: str,
+    delegate_ids: List[str],
+    config: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The Delegates section's choices and current values."""
+    config = config if isinstance(config, dict) else {}
+    selected = set(delegate_ids)
+    choices = []
+    provider = _state.get("provider")
+    try:
+        agents = list(provider.list_memagents() or []) if provider else []
+    except Exception:
+        agents = []
+    for agent in _sort_agents_by_created_at_desc(agents):
+        choice_id = _extract_agent_identifier(agent)
+        if not choice_id or choice_id == agent_id:
+            continue
+        llm_config = _agent_field(agent, "llm_config") or {}
+        model = (
+            llm_config.get("model") or llm_config.get("deployment_name")
+            if isinstance(llm_config, dict)
+            else None
+        )
+        choices.append(
+            {
+                "id": choice_id,
+                "name": _extract_agent_persona_name(agent, fallback="Untitled agent"),
+                "model": _to_text(model).strip(),
+                "selected": choice_id in selected,
+                "has_delegates": bool(_saved_delegate_ids(agent)),
+                "runs_on": _harness_backing(agent),
+            }
+        )
+    mode = _to_text(config.get("mode") or "auto").strip().lower()
+    consolidation = _to_text(config.get("consolidation_strategy") or "model").lower()
+    return {
+        "delegate_choices": choices,
+        "delegate_ids": list(delegate_ids),
+        "delegation_enabled": bool(config.get("enabled", True)),
+        "delegation_max_workers": config.get("max_workers") or "",
+        "delegation_consolidation": consolidation
+        if consolidation in DELEGATION_CONSOLIDATIONS
+        else "model",
+        "delegation_root_fallback": bool(config.get("allow_root_fallback", True)),
+        # A plan written in code (SDK) is kept as it is; the form says so.
+        "delegation_has_plan": bool(config.get("plan")) or mode == "deterministic",
+        "delegation_consolidations": DELEGATION_CONSOLIDATIONS,
+    }
+
+
+def _parse_delegation_form(
+    agent_id: Optional[str],
+    delegate_ids: List[str],
+    *,
+    enabled: bool,
+    max_workers: str,
+    consolidation: str,
+    root_fallback: bool,
+    existing_config: Optional[Dict[str, Any]],
+) -> Tuple[List[str], Dict[str, Any], Optional[str]]:
+    """Validate the Delegates section: (delegate IDs, config, error)."""
+    ids = list(
+        dict.fromkeys(
+            _to_text(item).strip() for item in delegate_ids if _to_text(item).strip()
+        )
+    )
+    try:
+        ids, config = delegation_settings(
+            _state["provider"],
+            agent_id,
+            ids,
+            enabled=enabled,
+            max_workers=_to_text(max_workers),
+            consolidation=_to_text(consolidation),
+            root_fallback=root_fallback,
+            existing_config=existing_config,
+        )
+        return ids, config, None
+    except ValueError as exc:
+        # Keep what was entered, so the form shows it with the message.
+        config = dict(existing_config) if isinstance(existing_config, dict) else {}
+        config.update(
+            enabled=bool(enabled),
+            consolidation_strategy=_to_text(consolidation).strip().lower() or "model",
+            allow_root_fallback=bool(root_fallback),
+        )
+        try:
+            config["max_workers"] = int(_to_text(max_workers).strip())
+        except ValueError:
+            config.pop("max_workers", None)
+        return ids, config, str(exc)
+
+
 def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
     """Prepare agent data for edit form rendering."""
     from ...memagent.constants import DEFAULT_INSTRUCTION, DEFAULT_MAX_STEPS
@@ -473,6 +616,7 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         else DEFAULT_MAX_STEPS,
         "tool_access": getattr(agent, "tool_access", None) or "private",
         "semantic_cache": bool(getattr(agent, "semantic_cache", False)),
+        "tool_cache": bool(getattr(agent, "tool_cache_config", None)),
         "continual_learning": bool(getattr(agent, "continual_learning", False)),
         "learning_control_plane": bool(getattr(agent, "learning_control_plane", False)),
         "skill_injection_role": skill_injection_role,
@@ -498,6 +642,7 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "default_harness": _to_text(getattr(agent, "default_harness", "auto")).strip()
         or "auto",
         "harness_workspace": _to_text(harness_config.get("workspace")).strip(),
+        "harness_model": _to_text(harness_config.get("model")).strip(),
         "internet_provider": internet_val,
         "skills_marketplace_provider": skills_marketplace_val,
         "skill_paths": getattr(agent, "skill_paths", None) or [],
@@ -513,6 +658,11 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
             "welcome_message", ""
         ),
         "agent_tools": _extract_agent_tools(agent),
+        **_delegation_form_context(
+            _to_text(getattr(agent, "agent_id", "")).strip(),
+            _saved_delegate_ids(agent),
+            getattr(agent, "delegation_config", None),
+        ),
     }
 
 
@@ -653,8 +803,6 @@ async def agent_toggle_favorite(
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
 
-    from ...memagent.models import MemAgentModel
-
     existing = _state["provider"].retrieve_memagent(agent_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -664,54 +812,11 @@ async def agent_toggle_favorite(
     else:
         next_value = _parse_bool(is_favorite)
 
-    updated = MemAgentModel(
-        agent_id=agent_id,
-        name=getattr(existing, "name", None),
-        instruction=getattr(existing, "instruction", None),
-        application_mode=getattr(existing, "application_mode", "assistant"),
-        memory_types=getattr(existing, "memory_types", None),
-        max_steps=getattr(existing, "max_steps", 20),
-        tool_access=getattr(existing, "tool_access", "private"),
-        semantic_cache=bool(getattr(existing, "semantic_cache", False)),
-        memory_ids=getattr(existing, "memory_ids", None),
-        persona=getattr(existing, "persona", None),
-        llm_config=getattr(existing, "llm_config", None),
-        tools=getattr(existing, "tools", None),
-        delegates=getattr(existing, "delegates", None),
-        embedding_config=getattr(existing, "embedding_config", None),
-        semantic_cache_config=getattr(existing, "semantic_cache_config", None),
-        tool_result_policy=getattr(existing, "tool_result_policy", None),
-        context_policy=getattr(existing, "context_policy", None),
-        retrieval_policy=getattr(existing, "retrieval_policy", None),
-        delegation_config=getattr(existing, "delegation_config", None),
-        skill_retrieval=bool(getattr(existing, "skill_retrieval", False)),
-        skill_retrieval_config=getattr(existing, "skill_retrieval_config", None),
-        semantic_layer_config=getattr(existing, "semantic_layer_config", None),
-        context_window_tokens=getattr(existing, "context_window_tokens", None),
-        is_favorite=next_value,
-        internet_access_provider=getattr(existing, "internet_access_provider", None),
-        internet_access_config=getattr(existing, "internet_access_config", None),
-        skills_marketplace_provider=getattr(
-            existing, "skills_marketplace_provider", None
-        ),
-        skills_marketplace_config=getattr(existing, "skills_marketplace_config", None),
-        knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
-        sandbox_provider=getattr(existing, "sandbox_provider", None),
-        browser_control=getattr(existing, "browser_control", None),
-        skill_paths=getattr(existing, "skill_paths", None),
-        mcp_servers=getattr(existing, "mcp_servers", None),
-        self_aware=bool(getattr(existing, "self_aware", False)),
-        self_aware_config=getattr(existing, "self_aware_config", None),
-        continual_learning=bool(getattr(existing, "continual_learning", False)),
-        continual_learning_config=getattr(existing, "continual_learning_config", None),
-        learning_control_plane=bool(getattr(existing, "learning_control_plane", False)),
-        learning_control_plane_config=getattr(
-            existing, "learning_control_plane_config", None
-        ),
-        automations_enabled=bool(getattr(existing, "automations_enabled", True)),
-        default_timezone=getattr(existing, "default_timezone", None),
-        whatsapp_enabled=bool(getattr(existing, "whatsapp_enabled", False)),
-        whatsapp_config=getattr(existing, "whatsapp_config", None),
+    updated = existing.model_copy(
+        update={
+            "agent_id": agent_id,
+            "is_favorite": next_value,
+        }
     )
 
     try:
@@ -761,6 +866,7 @@ async def agent_create_page(request: Request):
             "max_steps": DEFAULT_MAX_STEPS,
             "tool_access": "private",
             "semantic_cache": False,
+            "tool_cache": False,
             "continual_learning": False,
             "learning_control_plane": False,
             "skill_injection_role": "user",
@@ -781,6 +887,7 @@ async def agent_create_page(request: Request):
             "meta_harness_mode": "",
             "default_harness": "auto",
             "harness_workspace": "",
+            "harness_model": "",
             "internet_provider": os.environ.get(
                 "MEMORIZZ_DEFAULT_INTERNET_PROVIDER", ""
             ),
@@ -796,7 +903,112 @@ async def agent_create_page(request: Request):
                 os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "")
             ).strip(),
             "agent_tools": [],
+            "agent_templates": _template_cards(),
+            **_delegation_form_context("", [], {}),
         },
+    )
+
+
+def _template_cards() -> List[Dict[str, Any]]:
+    from ...mcp import catalog
+    from ...memagent.templates import TEMPLATES
+
+    return [
+        {
+            "key": template.key,
+            "title": template.title,
+            "summary": template.summary,
+            "persona": template.persona,
+            "connections": [
+                catalog.PRESETS[catalog.preset_key(key)]["title"]
+                for key in template.mcp_presets
+            ],
+        }
+        for template in TEMPLATES.values()
+    ]
+
+
+@router.post("/agents/templates/{template_key}")
+async def agent_create_from_template(
+    request: Request,
+    template_key: str,
+    google_client_id: str = Form(""),
+    google_client_secret: str = Form(""),
+):
+    """Create an agent from a template, attach its MCP servers, then open
+    MCP connections so the user can sign in to each one."""
+    if not _state["provider"]:
+        return RedirectResponse(url="/connect", status_code=302)
+
+    from urllib.parse import quote
+
+    from ...mcp import MCPClientManager
+    from ...memagent.models import MemAgentModel
+    from ...memagent.templates import get_template, template_mcp_servers
+    from ..helpers import _load_agent
+    from .mcp import _callback_url, _save_servers
+
+    try:
+        template = get_template(template_key)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    llm_provider = _get_default_llm_provider()
+    llm_config, llm_error = _parse_llm_config(
+        llm_provider, _get_default_llm_model(llm_provider), ""
+    )
+    if llm_error:
+        raise HTTPException(status_code=400, detail=llm_error)
+    persona = template.persona
+    memagent = MemAgentModel(
+        instruction=template.instruction,
+        application_mode="assistant",
+        memory_types=_build_memory_types_for_agent(
+            application_mode="assistant",
+            enable_entity_memory=template.enable_entity_memory,
+            enable_workflow_memory=False,
+        ),
+        persona=_resolve_persona_for_agent(
+            _state["provider"],
+            _build_persona_payload(
+                persona["name"],
+                persona["role"],
+                persona["goals"],
+                persona["background"],
+            ),
+            "",
+            agent_id=None,
+        ),
+        llm_config=llm_config,
+        automations_enabled=template.automations_enabled,
+        default_timezone=_to_text(
+            os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "")
+        ).strip()
+        or None,
+    )
+    try:
+        agent_id = _extract_agent_id(
+            _state["provider"].store_memagent(memagent), memagent.agent_id
+        )
+    except Exception as exc:
+        logger.error("Failed to create agent from template %s: %s", template.key, exc)
+        raise HTTPException(
+            status_code=500, detail="Failed to create the agent"
+        ) from exc
+    if not agent_id:
+        raise HTTPException(status_code=500, detail="Failed to create the agent")
+
+    manager = MCPClientManager(owner_id=agent_id, servers=[])
+    for server in template_mcp_servers(
+        template,
+        redirect_uri=_callback_url(request),
+        google_client_id=_to_text(google_client_id).strip() or None,
+        google_client_secret=_to_text(google_client_secret).strip() or None,
+    ):
+        manager.upsert_server(server)
+    _save_servers(_load_agent(agent_id), manager.server_dicts())
+    return RedirectResponse(
+        url=f"/mcp?agent_id={quote(agent_id)}&created={quote(template.key)}",
+        status_code=303,
     )
 
 
@@ -810,6 +1022,7 @@ async def agent_create_submit(
     max_steps: int = Form(20),
     tool_access: str = Form("private"),
     semantic_cache: Optional[str] = Form(None),
+    tool_cache: Optional[str] = Form(None),
     continual_learning: Optional[str] = Form(None),
     learning_control_plane: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
@@ -830,6 +1043,7 @@ async def agent_create_submit(
     meta_harness_mode: str = Form(""),
     default_harness: str = Form("auto"),
     harness_workspace: str = Form(""),
+    harness_model: str = Form(""),
     internet_provider: str = Form(""),
     skills_marketplace_provider: str = Form(""),
     self_aware: Optional[str] = Form(None),
@@ -840,6 +1054,12 @@ async def agent_create_submit(
     default_timezone: str = Form(""),
     whatsapp_enabled: Optional[str] = Form(None),
     whatsapp_welcome_message: str = Form(""),
+    delegation_form: str = Form(""),
+    delegate_ids: List[str] = Form([]),
+    delegation_enabled: Optional[str] = Form(None),
+    delegation_max_workers: str = Form(""),
+    delegation_consolidation: str = Form("model"),
+    delegation_root_fallback: Optional[str] = Form(None),
 ):
     """Create a new agent using the configured memory provider."""
     if not _state["provider"]:
@@ -859,6 +1079,7 @@ async def agent_create_submit(
     agent_name_value = _to_text(agent_name).strip() or None
     memory_id_list = _parse_memory_ids(memory_ids)
     semantic_cache_enabled = _parse_bool(semantic_cache)
+    tool_cache_enabled = _parse_bool(tool_cache)
     continual_learning_enabled = _parse_bool(continual_learning)
     learning_control_plane_enabled = _parse_bool(learning_control_plane)
     learning_control_plane_config_value = {"enabled": learning_control_plane_enabled}
@@ -899,6 +1120,31 @@ async def agent_create_submit(
         except Exception as exc:
             error = str(exc)
 
+    # Delegates (only when the form's Delegates section was posted).
+    delegates_value: Optional[List[str]] = None
+    delegation_config_value: Optional[Dict[str, Any]] = None
+    delegation_form_ctx = _delegation_form_context("", [], {})
+    if delegation_form:
+        (
+            delegate_list,
+            delegation_config_value,
+            delegation_error,
+        ) = _parse_delegation_form(
+            None,
+            delegate_ids,
+            enabled=_parse_bool(delegation_enabled),
+            max_workers=delegation_max_workers,
+            consolidation=delegation_consolidation,
+            root_fallback=_parse_bool(delegation_root_fallback),
+            existing_config=None,
+        )
+        delegates_value = delegate_list or None
+        delegation_form_ctx = _delegation_form_context(
+            "", delegate_list, delegation_config_value
+        )
+        if not error and delegation_error:
+            error = delegation_error
+
     # WhatsApp configuration
     whatsapp_enabled_value = _parse_bool(whatsapp_enabled)
     whatsapp_config_value = None
@@ -926,12 +1172,8 @@ async def agent_create_submit(
     default_harness_value = (
         _to_text(default_harness).strip().lower().replace("_", "-") or "auto"
     )
-    if (
-        default_harness_value
-        not in {"auto", "codex", "claude-code", "openhands", "native"}
-        and not error
-    ):
-        error = "Default harness must be auto, codex, claude-code, openhands, or native"
+    if default_harness_value not in DEFAULT_HARNESS_CHOICES and not error:
+        error = "Default harness must be auto, codex, claude-code, openhands, deepseek, pi, hermes, or native"
     harness_workspace_value = _to_text(harness_workspace).strip()
     if harness_workspace_value and not error:
         try:
@@ -951,6 +1193,8 @@ async def agent_create_submit(
         if harness_workspace_value
         else {}
     )
+    if _to_text(harness_model).strip():
+        harness_config_value["model"] = _to_text(harness_model).strip()
 
     if error:
         return templates.TemplateResponse(
@@ -971,6 +1215,7 @@ async def agent_create_submit(
                 "max_steps": max_steps,
                 "tool_access": tool_access,
                 "semantic_cache": semantic_cache_enabled,
+                "tool_cache": tool_cache_enabled,
                 "continual_learning": continual_learning_enabled,
                 "learning_control_plane": learning_control_plane_enabled,
                 "skill_injection_role": skill_injection_role,
@@ -994,6 +1239,7 @@ async def agent_create_submit(
                 "meta_harness_mode": meta_harness_mode_value,
                 "default_harness": default_harness_value,
                 "harness_workspace": harness_workspace_value,
+                "harness_model": _to_text(harness_model).strip(),
                 "internet_provider": internet_provider,
                 "skills_marketplace_provider": skills_marketplace_provider_value,
                 "enable_entity_memory": enable_entity_memory_value,
@@ -1005,6 +1251,7 @@ async def agent_create_submit(
                 "automations_enabled": automations_enabled_value,
                 "default_timezone": default_timezone,
                 "agent_tools": [],
+                **delegation_form_ctx,
             },
         )
 
@@ -1061,6 +1308,7 @@ async def agent_create_submit(
                 "max_steps": max_steps,
                 "tool_access": tool_access,
                 "semantic_cache": semantic_cache_enabled,
+                "tool_cache": tool_cache_enabled,
                 "continual_learning": continual_learning_enabled,
                 "learning_control_plane": learning_control_plane_enabled,
                 "skill_injection_role": skill_injection_role,
@@ -1084,6 +1332,7 @@ async def agent_create_submit(
                 "meta_harness_mode": meta_harness_mode_value,
                 "default_harness": default_harness_value,
                 "harness_workspace": harness_workspace_value,
+                "harness_model": _to_text(harness_model).strip(),
                 "internet_provider": internet_provider,
                 "skills_marketplace_provider": skills_marketplace_provider_value,
                 "enable_entity_memory": enable_entity_memory_value,
@@ -1095,6 +1344,7 @@ async def agent_create_submit(
                 "automations_enabled": automations_enabled_value,
                 "default_timezone": default_timezone,
                 "agent_tools": [],
+                **delegation_form_ctx,
             },
         )
 
@@ -1115,6 +1365,7 @@ async def agent_create_submit(
         max_steps=max_steps if max_steps is not None else 20,
         tool_access=tool_access or "private",
         semantic_cache=semantic_cache_enabled,
+        tool_cache_config=ToolCacheConfig().to_dict() if tool_cache_enabled else None,
         is_favorite=False,
         memory_ids=memory_id_list or None,
         persona=persona_payload,
@@ -1139,6 +1390,8 @@ async def agent_create_submit(
         default_timezone=default_timezone_value,
         whatsapp_enabled=whatsapp_enabled_value,
         whatsapp_config=whatsapp_config_value,
+        delegates=delegates_value,
+        delegation_config=delegation_config_value,
     )
 
     try:
@@ -1168,6 +1421,7 @@ async def agent_create_submit(
                 "max_steps": max_steps,
                 "tool_access": tool_access,
                 "semantic_cache": semantic_cache_enabled,
+                "tool_cache": tool_cache_enabled,
                 "continual_learning": continual_learning_enabled,
                 "learning_control_plane": learning_control_plane_enabled,
                 "skill_injection_role": skill_injection_role,
@@ -1191,6 +1445,7 @@ async def agent_create_submit(
                 "meta_harness_mode": meta_harness_mode_value,
                 "default_harness": default_harness_value,
                 "harness_workspace": harness_workspace_value,
+                "harness_model": _to_text(harness_model).strip(),
                 "internet_provider": internet_provider,
                 "skills_marketplace_provider": skills_marketplace_provider_value,
                 "enable_entity_memory": enable_entity_memory_value,
@@ -1202,6 +1457,7 @@ async def agent_create_submit(
                 "automations_enabled": automations_enabled_value,
                 "default_timezone": default_timezone,
                 "agent_tools": [],
+                **delegation_form_ctx,
             },
         )
 
@@ -1249,6 +1505,7 @@ async def agent_edit_submit(
     max_steps: int = Form(20),
     tool_access: str = Form("private"),
     semantic_cache: Optional[str] = Form(None),
+    tool_cache: Optional[str] = Form(None),
     continual_learning: Optional[str] = Form(None),
     learning_control_plane: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
@@ -1269,6 +1526,7 @@ async def agent_edit_submit(
     meta_harness_mode: str = Form(""),
     default_harness: str = Form("auto"),
     harness_workspace: str = Form(""),
+    harness_model: str = Form(""),
     internet_provider: str = Form(""),
     skills_marketplace_provider: Optional[str] = Form(None),
     self_aware: Optional[str] = Form(None),
@@ -1279,13 +1537,18 @@ async def agent_edit_submit(
     default_timezone: str = Form(""),
     whatsapp_enabled: Optional[str] = Form(None),
     whatsapp_welcome_message: str = Form(""),
+    delegation_form: str = Form(""),
+    delegate_ids: List[str] = Form([]),
+    delegation_enabled: Optional[str] = Form(None),
+    delegation_max_workers: str = Form(""),
+    delegation_consolidation: str = Form("model"),
+    delegation_root_fallback: Optional[str] = Form(None),
 ):
     """Update an existing agent."""
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
 
     from ...memagent.constants import DEFAULT_INSTRUCTION
-    from ...memagent.models import MemAgentModel
 
     existing = _state["provider"].retrieve_memagent(agent_id)
     if not existing:
@@ -1302,6 +1565,7 @@ async def agent_edit_submit(
     agent_name_value = _to_text(agent_name).strip() or None
     memory_id_list = _parse_memory_ids(memory_ids)
     semantic_cache_enabled = _parse_bool(semantic_cache)
+    tool_cache_enabled = _parse_bool(tool_cache)
     continual_learning_enabled = _parse_bool(continual_learning)
     learning_control_plane_enabled = _parse_bool(learning_control_plane)
     existing_learning_control_plane_config = getattr(
@@ -1423,12 +1687,8 @@ async def agent_edit_submit(
     default_harness_value = (
         _to_text(default_harness).strip().lower().replace("_", "-") or "auto"
     )
-    if (
-        default_harness_value
-        not in {"auto", "codex", "claude-code", "openhands", "native"}
-        and not error
-    ):
-        error = "Default harness must be auto, codex, claude-code, openhands, or native"
+    if default_harness_value not in DEFAULT_HARNESS_CHOICES and not error:
+        error = "Default harness must be auto, codex, claude-code, openhands, deepseek, pi, hermes, or native"
     harness_workspace_value = _to_text(harness_workspace).strip()
     if harness_workspace_value and not error:
         try:
@@ -1454,12 +1714,17 @@ async def agent_edit_submit(
     else:
         harness_config_value.pop("workspace", None)
         harness_config_value.pop("permissions", None)
+    if _to_text(harness_model).strip():
+        harness_config_value["model"] = _to_text(harness_model).strip()
+    else:
+        harness_config_value.pop("model", None)
     form_override_data = {
         "instruction": instruction,
         "application_mode": application_mode,
         "max_steps": max_steps,
         "tool_access": tool_access,
         "semantic_cache": semantic_cache_enabled,
+        "tool_cache": tool_cache_enabled,
         "continual_learning": continual_learning_enabled,
         "learning_control_plane": learning_control_plane_enabled,
         "skill_injection_role": skill_injection_role,
@@ -1482,6 +1747,7 @@ async def agent_edit_submit(
         "meta_harness_mode": meta_harness_mode_value,
         "default_harness": default_harness_value,
         "harness_workspace": harness_workspace_value,
+        "harness_model": _to_text(harness_model).strip(),
         "internet_provider": internet_provider,
         "skills_marketplace_provider": skills_marketplace_provider_value,
         "enable_entity_memory": enable_entity_memory_value,
@@ -1493,6 +1759,32 @@ async def agent_edit_submit(
         "automations_enabled": automations_enabled_value,
         "default_timezone": default_timezone,
     }
+
+    # Delegates (only when the form's Delegates section was posted).
+    delegation_update: Dict[str, Any] = {}
+    if delegation_form:
+        (
+            delegate_list,
+            delegation_config_value,
+            delegation_error,
+        ) = _parse_delegation_form(
+            agent_id,
+            delegate_ids,
+            enabled=_parse_bool(delegation_enabled),
+            max_workers=delegation_max_workers,
+            consolidation=delegation_consolidation,
+            root_fallback=_parse_bool(delegation_root_fallback),
+            existing_config=getattr(existing, "delegation_config", None),
+        )
+        form_override_data.update(
+            _delegation_form_context(agent_id, delegate_list, delegation_config_value)
+        )
+        delegation_update = {
+            "delegates": delegate_list or None,
+            "delegation_config": delegation_config_value,
+        }
+        if not error and delegation_error:
+            error = delegation_error
 
     if error:
         form_data = _build_agent_form_data(existing)
@@ -1652,59 +1944,52 @@ async def agent_edit_submit(
         agent_id=agent_id,
     )
 
-    updated = MemAgentModel(
-        agent_id=agent_id,
-        name=agent_name_value or getattr(existing, "name", None),
-        instruction=instruction_value
-        or getattr(existing, "instruction", None)
-        or DEFAULT_INSTRUCTION,
-        application_mode=application_mode
-        or getattr(existing, "application_mode", "assistant"),
-        memory_types=memory_types_value,
-        max_steps=max_steps
-        if max_steps is not None
-        else getattr(existing, "max_steps", 20),
-        tool_access=tool_access or getattr(existing, "tool_access", "private"),
-        semantic_cache=semantic_cache_enabled,
-        is_favorite=bool(getattr(existing, "is_favorite", False)),
-        memory_ids=memory_id_list or getattr(existing, "memory_ids", None),
-        persona=persona_payload,
-        llm_config=llm_config or getattr(existing, "llm_config", None),
-        tools=getattr(existing, "tools", None),
-        delegates=getattr(existing, "delegates", None),
-        embedding_config=getattr(existing, "embedding_config", None),
-        semantic_cache_config=getattr(existing, "semantic_cache_config", None),
-        tool_result_policy=getattr(existing, "tool_result_policy", None),
-        context_policy=getattr(existing, "context_policy", None),
-        retrieval_policy=getattr(existing, "retrieval_policy", None),
-        delegation_config=getattr(existing, "delegation_config", None),
-        skill_retrieval=bool(getattr(existing, "skill_retrieval", False)),
-        skill_retrieval_config=getattr(existing, "skill_retrieval_config", None),
-        semantic_layer_config=getattr(existing, "semantic_layer_config", None),
-        context_window_tokens=getattr(existing, "context_window_tokens", None),
-        internet_access_provider=internet_value,
-        internet_access_config=internet_config,
-        skills_marketplace_provider=skills_marketplace_value,
-        skills_marketplace_config=skills_marketplace_config_value,
-        knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
-        sandbox_provider=sandbox_value,
-        browser_control=browser_control_config_value,
-        meta_harness=bool(meta_harness_mode_value),
-        meta_harness_mode=meta_harness_mode_value or None,
-        default_harness=default_harness_value,
-        harness_config=harness_config_value,
-        skill_paths=getattr(existing, "skill_paths", None),
-        mcp_servers=getattr(existing, "mcp_servers", None),
-        self_aware=self_aware_enabled_value,
-        self_aware_config=self_aware_config_value,
-        continual_learning=continual_learning_enabled,
-        continual_learning_config=continual_learning_config_value,
-        learning_control_plane=learning_control_plane_enabled,
-        learning_control_plane_config=learning_control_plane_config_value,
-        automations_enabled=automations_enabled_value,
-        default_timezone=default_timezone_value,
-        whatsapp_enabled=whatsapp_enabled_value,
-        whatsapp_config=whatsapp_config_value,
+    updated = existing.model_copy(
+        update={
+            "agent_id": agent_id,
+            "name": agent_name_value or getattr(existing, "name", None),
+            "instruction": instruction_value
+            or getattr(existing, "instruction", None)
+            or DEFAULT_INSTRUCTION,
+            "application_mode": application_mode
+            or getattr(existing, "application_mode", "assistant"),
+            "memory_types": memory_types_value,
+            "max_steps": max_steps
+            if max_steps is not None
+            else getattr(existing, "max_steps", 20),
+            "tool_access": tool_access or getattr(existing, "tool_access", "private"),
+            "semantic_cache": semantic_cache_enabled,
+            "tool_cache_config": (
+                getattr(existing, "tool_cache_config", None)
+                or ToolCacheConfig().to_dict()
+            )
+            if tool_cache_enabled
+            else None,
+            "memory_ids": memory_id_list or getattr(existing, "memory_ids", None),
+            "persona": persona_payload,
+            "llm_config": llm_config or getattr(existing, "llm_config", None),
+            "internet_access_provider": internet_value,
+            "internet_access_config": internet_config,
+            "skills_marketplace_provider": skills_marketplace_value,
+            "skills_marketplace_config": skills_marketplace_config_value,
+            "sandbox_provider": sandbox_value,
+            "browser_control": browser_control_config_value,
+            "meta_harness": bool(meta_harness_mode_value),
+            "meta_harness_mode": meta_harness_mode_value or None,
+            "default_harness": default_harness_value,
+            "harness_config": harness_config_value,
+            "self_aware": self_aware_enabled_value,
+            "self_aware_config": self_aware_config_value,
+            "continual_learning": continual_learning_enabled,
+            "continual_learning_config": continual_learning_config_value,
+            "learning_control_plane": learning_control_plane_enabled,
+            "learning_control_plane_config": learning_control_plane_config_value,
+            "automations_enabled": automations_enabled_value,
+            "default_timezone": default_timezone_value,
+            "whatsapp_enabled": whatsapp_enabled_value,
+            "whatsapp_config": whatsapp_config_value,
+            **delegation_update,
+        }
     )
 
     try:
@@ -1745,18 +2030,47 @@ async def agent_detail(agent_id: str):
     return RedirectResponse(url=f"/agents/{agent_id}/playground", status_code=302)
 
 
-@router.post("/agents/{agent_id}/delete")
-async def delete_agent(agent_id: str, cascade: bool = False):
-    """Delete an agent."""
-    if not _state["provider"]:
-        raise HTTPException(status_code=400, detail="Not connected")
+# ---------------------------------------------------------------------------
+# Harnesses as delegates: an agent that runs every task it is given on one
+# harness (meta-harness runtime mode), so a coordinator can hand it parts of
+# a request like any other delegate.
+# ---------------------------------------------------------------------------
 
+
+@router.get("/api/harness-delegates/options")
+async def api_harness_options():
+    """Harnesses a delegate can run on, and each one's model choices."""
+    if not _state.get("provider"):
+        raise HTTPException(status_code=400, detail="Connect a memory provider first")
+    options = await asyncio.to_thread(_harness_form_options)
+    return {"ok": True, **options}
+
+
+@router.post("/api/harness-delegates")
+async def api_create_harness_delegate(request: Request):
+    """Create and save an agent that runs each task it is given on a harness."""
+    if not _state.get("provider"):
+        raise HTTPException(status_code=400, detail="Connect a memory provider first")
+    body = await _json_object(request)
+    provider_name = _get_default_llm_provider()
     try:
-        success = _state["provider"].delete_memagent(agent_id, cascade=cascade)
-        if not success:
-            raise HTTPException(status_code=404, detail="Agent not found")
-    except Exception as e:
-        logger.error(f"Failed to delete agent {agent_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-    return RedirectResponse(url="/agents", status_code=302)
+        agent = await asyncio.to_thread(
+            catalog.create_harness_delegate,
+            _state["provider"],
+            harness=_to_text(body.get("harness")),
+            model=_to_text(body.get("model")),
+            name=_to_text(body.get("name")),
+            coordinator_id=_to_text(body.get("coordinator_id")).strip(),
+            default_llm_config={
+                "provider": provider_name,
+                "model": _get_default_llm_model(provider_name),
+            },
+        )
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc).strip("'")) from exc
+    except Exception as exc:
+        logger.exception("Could not save harness delegate")
+        raise HTTPException(
+            status_code=500, detail="Could not save the delegate"
+        ) from exc
+    return {"ok": True, "agent": agent}

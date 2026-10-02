@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from ...._time import parse_iso_datetime
 from ....enums.memory_type import MemoryType
 
 # Step keys are written by MemAgent as ``"Step {n}: {tool_name}"``. The tool
@@ -42,15 +43,6 @@ def _tool_name_from_step_key(step_key: str) -> str:
     if match:
         return match.group(1).strip()
     return str(step_key).strip()
-
-
-def _parse_timestamp(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
 
 
 def canonical_signature(steps: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -94,7 +86,7 @@ def canonical_signature(steps: Dict[str, Any]) -> List[Dict[str, Any]]:
         entries.append(
             {
                 "index": index,
-                "timestamp": _parse_timestamp(data.get("timestamp")),
+                "timestamp": parse_iso_datetime(data.get("timestamp")),
                 "tool": _tool_name_from_step_key(step_key),
                 "arg_keys": arg_keys,
                 "errored": errored,
@@ -259,7 +251,7 @@ def aggregate_trajectory_stats(
                 RunRef(
                     workflow_id=doc.get("workflow_id"),
                     outcome=str(doc.get("outcome") or "success"),
-                    created_at=_parse_timestamp(doc.get("created_at")),
+                    created_at=parse_iso_datetime(doc.get("created_at")),
                     user_query=doc.get("user_query"),
                     promoted_skill_id=doc.get("promoted_skill_id"),
                     record_id=str(record_id) if record_id is not None else None,

@@ -163,7 +163,12 @@ def test_mcp_default_and_progress_only_clients_keep_final_result(tmp_path, progr
                 await asyncio.sleep(0.02)
             assert not task.done()
             if progress:
-                assert updates
+                # The provider signals the barrier from its own thread while
+                # progress travels server -> stdio -> client callback, so the
+                # first update can land a little after the file appears.
+                while not updates:
+                    assert time.monotonic() < deadline, "no progress update"
+                    await asyncio.sleep(0.02)
                 assert "Hello" not in str(updates)
             (tmp_path / "release").touch()
             result = await asyncio.wait_for(task, 10)

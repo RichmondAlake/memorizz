@@ -48,8 +48,9 @@ def test_mcp_page_and_server_crud(monkeypatch, tmp_path):
 
         page = client.get("/mcp?agent_id=agent-1")
         assert page.status_code == 200
-        assert "Connect Notion" in page.text
+        assert "Find a server" in page.text
         assert "Google Calendar" in page.text
+        assert "Gmail" in page.text
         assert "Expose MemoRizz as an MCP server" in page.text
         assert '"args": ["mcp", "serve"]' in page.text
 

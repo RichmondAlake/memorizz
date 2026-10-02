@@ -149,7 +149,15 @@ def capabilities() -> Dict[str, Any]:
             },
             "meta_harness": {
                 "available": True,
-                "adapters": ["memagent", "codex", "claude-code", "openhands"],
+                "adapters": [
+                    "memagent",
+                    "codex",
+                    "claude-code",
+                    "openhands",
+                    "deepseek",
+                    "pi",
+                    "hermes",
+                ],
                 "routing": "deterministic_policy_and_outcome",
                 "durable_runs": True,
                 "durable_cancellation": True,
@@ -185,10 +193,10 @@ def capabilities() -> Dict[str, Any]:
                     "learning",
                     "compaction",
                     "harness_execution",
+                    "path_ingestion",
                 ],
                 "trusted_host_only": [
                     "credential_management",
-                    "local_path_ingestion",
                     "approval_decisions",
                     "outbound_mcp_configuration",
                 ],

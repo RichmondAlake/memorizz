@@ -5,6 +5,15 @@ through one memory-first control plane. It starts with deterministic local
 adapters, so you can inspect every contract without credentials or model cost,
 then progresses to Codex, Claude Code, and OpenHands.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../docs/assets/screenshots/harnesses-dark.png">
+  <img alt="The MemoRizz harness dashboard: launch a task on a harness, see which harnesses are ready on this machine, and follow plans and comparisons across Codex, Claude Code and MemAgents." src="../../docs/assets/screenshots/harnesses-light.png">
+</picture>
+
+*The harness dashboard in the local UI (`memorizz ui`, then **Agent
+harnesses**): which harnesses are ready, recent runs, and plans and comparisons
+with each harness's answer.*
+
 ## What is a meta-harness?
 
 A harness owns an agent's execution loop: it reads a task, uses tools, inspects a
@@ -38,6 +47,7 @@ flowchart TB
 | [04 — Multi-harness review team](04_multi_harness_review_team.ipynb) | A deterministic MemAgent multi-agent system with a Codex correctness analyst and an independent Claude Code adversarial reviewer | Only when explicitly enabled |
 | [05 — Adaptive provider comparison](05_single_vs_multi_harness_evaluation.ipynb) | Audit the historical `structured_adaptive_v1` protocol, its Filesystem/Oracle artifact, fairness controls, and the narrow early-stopping claim it supports | No by default; paid rerun is explicit |
 | [06 — Factorial and Opus 5 evaluation](06_fair_harness_comparison_results.ipynb) | Build direct MetaHarness, one-harness MemAgent, mandatory and adaptive panels; audit the Filesystem/Oracle factorial; then reconstruct a four-task GPT-5.6 Luna versus Claude Opus 5 comparison from task-native evidence | No by default; paid runs are explicit |
+| [Harnesses as delegates](multi_harness_delegates/README.md) | Two ready-to-run coordinators whose delegates are harnesses: a code review crew (Codex, Claude Code, pi) and a web research desk (Codex, Claude Code), set up with one script and run from Agent Harnesses | Yes, when you run them |
 
 Run them in order. The local adapters in notebooks 1 and 2 are educational test
 doubles: they implement the same public `AgentHarness` interface as the vendor

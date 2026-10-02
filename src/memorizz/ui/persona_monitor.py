@@ -9,10 +9,9 @@ themselves are passed through unchanged for the detail pane.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping
 
-from ..observability.normalization import timestamp
+from .control_plane_monitor import _parse
 
 # Reflection result -> (label, pill modifier, signal).
 REVIEW_STATUS = {
@@ -24,13 +23,6 @@ REVIEW_STATUS = {
     "failed": ("Failed", "danger", "bad"),
     "reviewing": ("Reviewing", "info", ""),
 }
-
-
-def _parse(value: Any) -> Optional[datetime]:
-    if value in (None, ""):
-        return None
-    normalized = timestamp(value)
-    return datetime.fromisoformat(normalized) if normalized else None
 
 
 def _shown(value: Any) -> str:

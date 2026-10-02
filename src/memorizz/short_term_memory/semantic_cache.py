@@ -20,6 +20,7 @@ from ..enums.memory_type import MemoryType
 from ..enums.semantic_cache_scope import SemanticCacheScope
 from ..memory_provider.base import MemoryProvider
 from ..memory_unit.semantic_cache_entry import SemanticCacheEntry
+from ..tool_cache import DEFAULT_FRESHNESS_BY_DOMAIN
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class SemanticCacheConfig:
     embedding_config: Optional[Dict[str, Any]] = None
     admission_policy: str = "read_only_deterministic"
     freshness_by_domain: Dict[str, float] = field(
-        default_factory=lambda: {"mcp": 300.0, "inventory": 60.0, "calendar": 60.0}
+        default_factory=lambda: dict(DEFAULT_FRESHNESS_BY_DOMAIN)
     )
     require_fingerprint_match: bool = True
 
@@ -1290,78 +1291,3 @@ class SemanticCache:
         if persistent_removed > len(keys):
             self._stats["evictions"] += persistent_removed - len(keys)
         return max(len(keys), persistent_removed)
-
-
-# Standalone semantic cache for external frameworks
-class StandaloneSemanticCache(SemanticCache):
-    """Standalone semantic cache that can be used with any agent framework."""
-
-    def __init__(
-        self,
-        similarity_threshold: float = 0.85,
-        max_cache_size: int = 1000,
-        ttl_hours: float = 24.0,
-        scope: SemanticCacheScope = SemanticCacheScope.LOCAL,
-        embedding_provider: str = "openai",
-        embedding_config: Optional[Dict[str, Any]] = None,
-        enable_persistence: bool = False,
-        persistence_config: Optional[Dict[str, Any]] = None,
-    ):
-        """
-        Initialize standalone semantic cache for external use.
-
-        Parameters:
-        -----------
-        similarity_threshold : float
-            Minimum similarity score for cache hits (0.0-1.0)
-        max_cache_size : int
-            Maximum number of entries to keep in memory
-        ttl_hours : float
-            Time-to-live in hours (0 = no expiration)
-        scope : SemanticCacheScope
-            Cache scope (LOCAL = agent-specific, GLOBAL = cross-agent)
-        embedding_provider : str
-            Embedding provider ('openai', 'voyageai', 'ollama')
-        embedding_config : Optional[Dict[str, Any]]
-            Configuration for embedding provider
-        enable_persistence : bool
-            Whether to enable MongoDB persistence
-        persistence_config : Optional[Dict[str, Any]]
-            MongoDB configuration for persistence
-        """
-        config = SemanticCacheConfig(
-            similarity_threshold=similarity_threshold,
-            max_cache_size=max_cache_size,
-            ttl_hours=ttl_hours,
-            scope=scope,
-            embedding_provider=embedding_provider,
-            embedding_config=embedding_config,
-            enable_memory_provider_sync=enable_persistence,
-        )
-
-        memory_provider = None
-        if enable_persistence and persistence_config:
-            try:
-                from ..memory_provider.mongodb.provider import (
-                    MongoDBConfig,
-                    MongoDBProvider,
-                )
-
-                mongodb_config = MongoDBConfig(**persistence_config)
-                memory_provider = MongoDBProvider(mongodb_config)
-            except Exception as e:
-                logger.warning(f"Failed to initialize persistence: {e}")
-
-        super().__init__(
-            config=config, memory_provider=memory_provider, agent_id="standalone_cache"
-        )
-
-    def query(self, text: str, session_id: Optional[str] = None) -> Optional[str]:
-        """Simple query interface for external frameworks."""
-        return self.get(text, session_id=session_id)
-
-    def cache_response(
-        self, query: str, response: str, session_id: Optional[str] = None
-    ) -> bool:
-        """Simple caching interface for external frameworks."""
-        return self.set(query, response, session_id=session_id)

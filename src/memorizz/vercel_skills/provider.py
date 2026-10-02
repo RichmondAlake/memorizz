@@ -3,8 +3,10 @@
 
 """Vercel Agent Skills provider.
 
-Searches skills.sh for available skills and fetches SKILL.md instruction files
-from GitHub repositories so the agent can use them to complete tasks.
+Searches the skills.sh directory for available skills and fetches SKILL.md
+instruction files from GitHub repositories so the agent can use them to
+complete tasks. Search needs no token; GitHub code search is the fallback when
+skills.sh is unreachable and a token is configured.
 """
 
 import json
@@ -14,6 +16,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
+
+from .skill_md import parse_skill_md
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +39,10 @@ _GITHUB_API_BASE = "https://api.github.com"
 _SKILLS_SH_BASE = "https://skills.sh"
 
 MISSING_GITHUB_TOKEN_MESSAGE = (
-    "Vercel Agent Skills is enabled but GITHUB_TOKEN is not set. "
-    "Skill search calls GitHub's code search API, which requires authentication "
-    "and will fail with HTTP 401 without a token. "
-    "Set GITHUB_TOKEN in your environment (or pass github_token in the provider "
-    "config). Create a token with the 'public_repo' scope at "
+    "skills.sh search is unavailable and GITHUB_TOKEN is not set, so the "
+    "GitHub code search fallback cannot run (it rejects unauthenticated "
+    "requests). Set GITHUB_TOKEN in your environment (or pass github_token in "
+    "the provider config); the token needs no scopes. Create one at "
     "https://github.com/settings/tokens — see "
     "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
 )
@@ -56,8 +59,6 @@ class VercelSkillsProvider:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self._config = dict(config) if config else {}
         self._github_token = self._config.get("github_token", "")
-        if not self._github_token:
-            logger.warning(MISSING_GITHUB_TOKEN_MESSAGE)
 
     def search(
         self,
@@ -78,11 +79,10 @@ class VercelSkillsProvider:
             return {"ok": False, "error": "Search query is required."}
 
         safe_limit = max(1, min(int(limit or 20), 100))
-
-        # skills.sh doesn't have a public API, so we use the npx skills find
-        # equivalent by scraping the directory. Fall back to GitHub search.
-        results = self._search_github_skills(query, safe_limit)
-        return results
+        results = self._search_skills_sh(query, safe_limit)
+        if results.get("ok") or not self._github_token:
+            return results
+        return self._search_github_skills(query, safe_limit)
 
     def fetch_skill(
         self,
@@ -128,6 +128,14 @@ class VercelSkillsProvider:
                 result = self._fetch_raw_file(owner_repo, path, branch)
                 if result:
                     parsed = self._parse_skill_md(result, owner_repo, path)
+                    return {"ok": True, **parsed}
+            # Plugins and collections keep skills elsewhere, such as
+            # plugins/<plugin>/skills/<name>/SKILL.md; find it in the tree.
+            tree_path = self._find_skill_path(owner_repo, skill_name, branch)
+            if tree_path:
+                result = self._fetch_raw_file(owner_repo, tree_path, branch)
+                if result:
+                    parsed = self._parse_skill_md(result, owner_repo, tree_path)
                     return {"ok": True, **parsed}
 
         # Try standard discovery paths
@@ -204,44 +212,132 @@ class VercelSkillsProvider:
             return None
 
     def _parse_skill_md(self, content: str, repo: str, path: str) -> Dict[str, Any]:
-        """Parse a SKILL.md file into structured data."""
-        result: Dict[str, Any] = {
+        """Parse a SKILL.md file into structured data.
+
+        ``content`` keeps the raw file for installing; the agent tool drops it
+        because ``instructions`` already carries the body.
+        """
+        parsed = parse_skill_md(content)
+        return {
             "repo": repo,
             "path": path,
-            "name": "",
-            "description": "",
-            "instructions": content,
-            "metadata": {},
+            "name": parsed["name"] or repo.split("/")[-1],
+            "description": parsed["description"],
+            "instructions": parsed["body"],
+            "metadata": parsed["metadata"],
+            "content": content,
         }
 
-        # Extract YAML frontmatter
-        frontmatter_match = re.match(
-            r"^---\s*\n(.*?)\n---\s*\n(.*)$", content, re.DOTALL
+    def _find_skill_path(
+        self, owner_repo: str, skill_name: str, branch: str
+    ) -> Optional[str]:
+        """Find a skill's SKILL.md in the repo tree.
+
+        Directory ids (skills.sh) come from the folder, the folder path joined
+        with dashes (``notion/knowledge-capture``), or the frontmatter name,
+        which is checked last and only in small repositories.
+        """
+        url = (
+            f"{_GITHUB_API_BASE}/repos/{owner_repo}/git/trees/"
+            f"{urllib.parse.quote(branch, safe='')}?recursive=1"
         )
-        if frontmatter_match:
-            frontmatter_text = frontmatter_match.group(1)
-            body = frontmatter_match.group(2).strip()
-            result["instructions"] = body
+        data = self._github_json(url)
+        if not isinstance(data, dict):
+            return None
+        paths = [
+            str(item.get("path") or "")
+            for item in data.get("tree") or []
+            if isinstance(item, dict)
+            and item.get("type") == "blob"
+            and str(item.get("path") or "").endswith("SKILL.md")
+        ]
+        wanted = skill_name.lower()
 
-            # Simple YAML parsing for name/description
-            for line in frontmatter_text.split("\n"):
-                line = line.strip()
-                if line.startswith("name:"):
-                    result["name"] = line[5:].strip().strip("\"'")
-                elif line.startswith("description:"):
-                    result["description"] = line[12:].strip().strip("\"'")
-                else:
-                    key_match = re.match(r"^([a-zA-Z_]+):\s*(.+)$", line)
-                    if key_match:
-                        result["metadata"][key_match.group(1)] = (
-                            key_match.group(2).strip().strip("\"'")
-                        )
+        def folder_ids(path: str) -> set:
+            parts = path.lower().split("/")[:-1]
+            if "skills" in parts:
+                parts = parts[len(parts) - parts[::-1].index("skills") :]
+            return {parts[-1] if parts else "", "-".join(parts)}
 
-        # Fall back to repo name if no name in frontmatter
-        if not result["name"]:
-            result["name"] = repo.split("/")[-1]
+        matches = [path for path in paths if wanted in folder_ids(path)]
+        if matches:
+            return min(matches, key=len)
+        if len(paths) > 40:
+            return None
+        for path in paths:
+            content = self._fetch_raw_file(owner_repo, path, branch)
+            if content and parse_skill_md(content)["name"].lower() == wanted:
+                return path
+        return None
 
-        return result
+    def _github_json(self, url: str) -> Any:
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Memorizz-VercelSkills/1.0",
+        }
+        if self._github_token:
+            headers["Authorization"] = f"token {self._github_token}"
+        request = urllib.request.Request(url=url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                return json.loads(response.read().decode("utf-8", errors="replace"))
+        except Exception as exc:
+            logger.debug("GitHub request failed for %s: %s", url, exc)
+            return None
+
+    def _search_skills_sh(self, query: str, limit: int) -> Dict[str, Any]:
+        """Search the skills.sh directory, ranked by installs."""
+        url = (
+            f"{_SKILLS_SH_BASE}/api/search?"
+            f"{urllib.parse.urlencode({'q': query, 'limit': limit})}"
+        )
+        request = urllib.request.Request(
+            url=url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Memorizz-VercelSkills/1.0",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8", errors="replace"))
+        except Exception as exc:
+            if not self._github_token:
+                logger.warning(MISSING_GITHUB_TOKEN_MESSAGE)
+            return {"ok": False, "error": f"skills.sh search failed: {exc}"}
+
+        skills: List[Dict[str, Any]] = []
+        for item in data.get("skills") or [] if isinstance(data, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            repo = str(item.get("source") or "")
+            skill_name = str(item.get("skillId") or item.get("name") or "")
+            # Only GitHub-hosted skills can be fetched. GitHub owners have no
+            # dots, which rules out sources such as open.feishu.cn.
+            if not skill_name or not re.match(r"^[A-Za-z0-9-]+/[\w.-]+$", repo):
+                continue
+            skills.append(
+                {
+                    "repo": repo,
+                    "name": skill_name,
+                    "skill_name": skill_name,
+                    "path": "",
+                    "description": "",
+                    "installs": int(item.get("installs") or 0),
+                    "html_url": f"{_SKILLS_SH_BASE}/{item.get('id') or repo + '/' + skill_name}",
+                    "repo_url": f"https://github.com/{repo}",
+                    "source": "skills.sh",
+                }
+            )
+        return {
+            "ok": True,
+            "query": query,
+            "skills": skills,
+            "count": len(skills),
+            "total_count": len(skills),
+            "source": "skills.sh",
+        }
 
     def _discover_multi_skills(
         self, owner_repo: str, branch: str
@@ -344,6 +440,7 @@ class VercelSkillsProvider:
                     "html_url": item.get("html_url", ""),
                     "repo_url": f"https://github.com/{full_name}",
                     "stars": repo_info.get("stargazers_count", 0),
+                    "source": "github",
                 }
             )
 
@@ -353,4 +450,5 @@ class VercelSkillsProvider:
             "skills": skills,
             "count": len(skills),
             "total_count": data.get("total_count", len(skills)),
+            "source": "github",
         }

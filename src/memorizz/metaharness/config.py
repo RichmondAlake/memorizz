@@ -8,6 +8,19 @@ from typing import Any, Dict
 
 from .._env_io import ensure_home, memorizz_home
 
+# Every first-party adapter, in default routing preference order.
+HARNESS_NAMES = [
+    "memagent",
+    "codex",
+    "claude-code",
+    "openhands",
+    "deepseek",
+    "pi",
+    "hermes",
+]
+# Names a saved agent may use as its default harness.
+DEFAULT_HARNESS_CHOICES = ("auto", *HARNESS_NAMES[1:], "native")
+
 
 def harness_config_path() -> Path:
     return memorizz_home() / "harnesses.json"
@@ -16,8 +29,8 @@ def harness_config_path() -> Path:
 def default_harness_config() -> Dict[str, Any]:
     return {
         "version": 1,
-        "allowlist": ["memagent", "codex", "claude-code", "openhands"],
-        "preference": ["memagent", "codex", "claude-code", "openhands"],
+        "allowlist": list(HARNESS_NAMES),
+        "preference": list(HARNESS_NAMES),
         "adapters": {
             "codex": {"command": "codex", "model": None, "enabled": True},
             "claude-code": {"command": "claude", "model": None, "enabled": True},
@@ -26,6 +39,24 @@ def default_harness_config() -> Dict[str, Any]:
                 "model": None,
                 "enabled": True,
                 "external_isolation": False,
+            },
+            # Claude Code's agent loop on DeepSeek's Anthropic-compatible API.
+            "deepseek": {"command": "claude", "model": None, "enabled": True},
+            "pi": {
+                "command": "pi",
+                "model": None,
+                "provider": None,
+                "enabled": True,
+                "external_isolation": False,
+            },
+            # Nous Research's Hermes Agent; base_url selects a local
+            # OpenAI-compatible server (provider "custom").
+            "hermes": {
+                "command": "hermes",
+                "model": None,
+                "provider": None,
+                "base_url": None,
+                "enabled": True,
             },
         },
         "allowed_workspace_roots": [],
@@ -64,6 +95,8 @@ def save_harness_config(value: Dict[str, Any], path: Path | None = None) -> Path
 
 
 __all__ = [
+    "DEFAULT_HARNESS_CHOICES",
+    "HARNESS_NAMES",
     "default_harness_config",
     "harness_config_path",
     "load_harness_config",

@@ -1,0 +1,16 @@
+# Only what the image needs (BuildKit reads <Dockerfile>.dockerignore).
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!NOTICE
+!src
+!plugins
+# The wheel ships these eval scripts; the datasets stay out.
+!eval/*/evaluate_memorizz.py
+!eval/*/download_dataset.py
+!eval/*/README.md
+**/__pycache__
+**/*.pyc
+**/node_modules
+src/memorizz/ui/frontend/node_modules

@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import logging
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -12,6 +13,8 @@ from ....enums.memory_type import MemoryType
 from ....memory_provider import MemoryProvider
 from .canonicalization import canonical_hash as _canonical_hash
 from .canonicalization import canonical_signature as _canonical_signature
+
+logger = logging.getLogger(__name__)
 
 
 # Workflow outcome enum
@@ -138,7 +141,13 @@ class Workflow:
         steps_str = str(self.steps)
 
         embedding_input = f"{self.name} {self.description} {steps_str} {self.outcome.value} {self.user_query or ''}"
-        return get_embedding(embedding_input)
+        try:
+            return get_embedding(embedding_input)
+        except Exception as exc:
+            # No embedding provider (e.g. no API key) must not fail the turn;
+            # the workflow is kept and simply is not found by similarity.
+            logger.warning("Workflow stored without an embedding: %s", exc)
+            return None
 
     def to_dict(self) -> Dict[str, Any]:
         """

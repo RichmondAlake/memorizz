@@ -571,33 +571,6 @@ class MemoryManager:
             self._conversation_memory_cache.clear()
             logger.debug("Cleared entire conversation cache")
 
-    def update_memory_ids(self, agent_id: str, memory_ids: List[str]) -> bool:
-        """
-        Update the memory IDs associated with an agent.
-
-        Args:
-            agent_id: The agent ID to update.
-            memory_ids: The new list of memory IDs.
-
-        Returns:
-            True if successful, False otherwise.
-        """
-        try:
-            success = self.memory_provider.update_memagent_memory_ids(
-                agent_id=agent_id, memory_ids=memory_ids
-            )
-
-            if success:
-                logger.info(f"Updated memory IDs for agent {agent_id}: {memory_ids}")
-            else:
-                logger.warning(f"Failed to update memory IDs for agent {agent_id}")
-
-            return success
-
-        except Exception as e:
-            logger.error(f"Error updating memory IDs: {e}")
-            return False
-
     def store_tool_log(
         self,
         tool_name: str,
@@ -978,6 +951,9 @@ class MemoryManager:
                     "source_message_ids": message_ids,
                     "memory_id": doc_memory_id,
                     "thread_id": doc_thread_id or None,
+                    "summary_type": doc.get("summary_type") or "automatic",
+                    # Compaction summaries go into the prompt as text.
+                    "content": content[:2000],
                 }
             )
 
@@ -1054,39 +1030,6 @@ class MemoryManager:
             )
         return marked
 
-    def get_unsummarized_messages(
-        self,
-        memory_id: str,
-        limit: int = 200,
-        user_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Get conversation messages that have NOT been summarized yet.
-
-        Returns messages without a summary_id field, ordered by timestamp.
-        """
-        try:
-            history = self.load_conversation_history(
-                memory_id,
-                limit=limit,
-                user_id=user_id,
-                thread_id=thread_id,
-            )
-            unsummarized = []
-            for item in history:
-                content = item.get("content") or item
-                if isinstance(content, dict):
-                    if content.get("summary_id"):
-                        continue
-                elif isinstance(item, dict) and item.get("summary_id"):
-                    continue
-                unsummarized.append(item)
-            return unsummarized
-        except Exception as exc:
-            logger.error("Failed to get unsummarized messages: %s", exc)
-            return []
-
     def delete_memory(self, memory_id: str) -> bool:
         """
         Delete all memories associated with a memory ID.
@@ -1127,9 +1070,14 @@ class MemoryManager:
         days_back: int = 7,
         max_memories_per_summary: int = 50,
         record_context_usage: Optional[Any] = None,
+        keep_recent: int = 0,
+        summary_type: str = "automatic",
     ) -> List[str]:
         """
         Generate summaries by compressing memory units from a specified time period.
+
+        ``keep_recent`` leaves each thread's newest messages unsummarized so
+        they stay in the prompt word for word (auto-compaction uses this).
 
         Implementation moved verbatim from ``MemAgent.generate_summaries`` —
         the agent's collaborators (LLM model, agent/memory ids, context-usage
@@ -1309,6 +1257,8 @@ class MemoryManager:
             chunks: List[List[Dict[str, Any]]] = []
             for group in grouped.values():
                 group.sort(key=get_timestamp)
+                if keep_recent > 0:
+                    del group[-keep_recent:]
                 for offset in range(0, len(group), max_memories_per_summary):
                     chunks.append(group[offset : offset + max_memories_per_summary])
             chunks.sort(key=lambda chunk: get_timestamp(chunk[0]))
@@ -1347,6 +1297,17 @@ class MemoryManager:
 
                     from ...memory_provider.base import provider_manages_embeddings
 
+                    embedding = None
+                    if not provider_manages_embeddings(self.memory_provider):
+                        try:
+                            embedding = get_embedding(summary_content)
+                        except Exception as exc:
+                            # Summaries are found by thread, so a missing
+                            # embedder (no key) must not lose the summary.
+                            logger.warning(
+                                "Storing summary without an embedding: %s", exc
+                            )
+
                     # Create summary document with source references
                     summary_doc = {
                         "memory_id": chunk_memory_id,
@@ -1358,11 +1319,9 @@ class MemoryManager:
                         "period_end": period_end,
                         "memory_units_count": len(memory_chunk),
                         "source_message_ids": source_message_ids,
-                        "summary_type": "automatic",
+                        "summary_type": summary_type,
                         "created_at": current_time,
-                        "embedding": None
-                        if provider_manages_embeddings(self.memory_provider)
-                        else get_embedding(summary_content),
+                        "embedding": embedding,
                     }
 
                     # Store summary
@@ -1415,8 +1374,6 @@ class MemoryManager:
     ) -> str:
         """
         Use LLM to compress memory units into an emotionally and situationally relevant summary.
-
-        Implementation moved verbatim from ``MemAgent._compress_memories_with_llm``.
 
         Parameters:
         -----------

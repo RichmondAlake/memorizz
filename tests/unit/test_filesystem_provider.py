@@ -242,6 +242,16 @@ def test_memagent_round_trip(tmp_path):
     assert provider.retrieve_memagent(agent_id) is None
 
 
+def test_memagent_stores_a_persona_given_as_a_dict(tmp_path):
+    """The UI passes personas as dicts when the PERSONAS store is unavailable."""
+    provider = _make_provider(tmp_path)
+    persona = {"name": "Helper", "role": "assistant", "goals": "g", "background": "b"}
+
+    agent_id = provider.store_memagent(MemAgentModel(instruction="x", persona=persona))
+
+    assert provider.retrieve_memagent(agent_id).persona.name == "Helper"
+
+
 def test_semantic_query_uses_embedding_provider(tmp_path):
     dummy = DummyEmbeddingProvider()
     provider = _make_provider(tmp_path, embedding_provider=dummy)
@@ -402,3 +412,55 @@ def test_delete_memagent_cascade_removes_memories(tmp_path):
 
     provider.delete_memagent(agent_id, cascade=True)
     assert provider.list_all(MemoryType.CONVERSATION_MEMORY) == []
+
+
+def test_tool_logs_resolve_by_tool_log_id(tmp_path):
+    """The recent-logs hint shows the model tool_log_id; it must resolve."""
+    from memorizz.memagent.managers.memory_manager import MemoryManager
+
+    provider = _make_provider(tmp_path)
+    manager = MemoryManager(provider)
+    stored = manager.store_tool_log(
+        "web_search", {"q": "x"}, "output", memory_id="mem-1", user_id="u1"
+    )
+    row = manager.list_tool_logs("mem-1", user_id="u1")[0]
+    assert row["tool_log_id"] == stored
+    assert manager.retrieve_tool_log(row["tool_log_id"], user_id="u1")["result"] == (
+        "output"
+    )
+
+    # Logs stored before the IDs matched are still found by tool_log_id.
+    legacy = provider.store(
+        {"tool_log_id": "legacy-uuid", "result": "old", "_id": "legacy-record"},
+        memory_store_type=MemoryType.TOOL_LOG,
+    )
+    assert legacy == "legacy-record"
+    assert (
+        provider.retrieve_by_id("legacy-uuid", MemoryType.TOOL_LOG)["result"] == "old"
+    )
+    assert provider.retrieve_by_id("missing", MemoryType.TOOL_LOG) is None
+
+
+def test_memagents_keep_their_creation_time_across_saves(tmp_path):
+    """The agents list sorts by created_at, so saves must not reset it."""
+    import json
+
+    provider = _make_provider(tmp_path)
+    first = provider.store_memagent(MemAgentModel(instruction="first"))
+    created = provider.list_all(MemoryType.MEMAGENT)[0]["created_at"]
+
+    agent = provider.retrieve_memagent(first)
+    agent.instruction = "edited"
+    provider.store_memagent(agent)
+    second = provider.store_memagent(MemAgentModel(instruction="second"))
+
+    docs = {doc["agent_id"]: doc for doc in provider.list_all(MemoryType.MEMAGENT)}
+    assert docs[first]["created_at"] == created
+    assert docs[second]["created_at"] >= created
+
+    # Agents written before created_at existed get their file's time.
+    path = next(tmp_path.rglob(f"{second}.json"))
+    legacy = json.loads(path.read_text())
+    legacy.pop("created_at")
+    path.write_text(json.dumps(legacy))
+    assert provider.retrieve_by_id(second, MemoryType.MEMAGENT)["created_at"]

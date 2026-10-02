@@ -32,21 +32,6 @@ class EntityMemoryManager:
     def is_enabled(self) -> bool:
         return self._entity_memory is not None
 
-    def build_context(
-        self,
-        query: str,
-        memory_id: Optional[str],
-        limit: int = 3,
-        user_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """Return simplified entity profiles relevant to the query."""
-        return self.build_context_with_diagnostics(
-            query=query,
-            memory_id=memory_id,
-            limit=limit,
-            user_id=user_id,
-        )["profiles"]
-
     def build_context_with_diagnostics(
         self,
         query: str,
@@ -87,26 +72,6 @@ class EntityMemoryManager:
         ]
         diagnostics["match_count"] = len(profiles)
         return {"profiles": profiles, "retrieval": diagnostics}
-
-    def lookup_entities(
-        self,
-        *,
-        entity_id: Optional[str] = None,
-        name: Optional[str] = None,
-        query: Optional[str] = None,
-        limit: int = 5,
-        memory_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """Lookup utility exposed via agent tools."""
-        return self.lookup_entities_with_diagnostics(
-            entity_id=entity_id,
-            name=name,
-            query=query,
-            limit=limit,
-            memory_id=memory_id,
-            user_id=user_id,
-        )["matches"]
 
     def lookup_entities_with_diagnostics(
         self,
@@ -203,8 +168,15 @@ class EntityMemoryManager:
         metadata: Optional[Dict[str, Any]],
         memory_id: str,
         user_id: Optional[str] = None,
+        identity_key: Optional[str] = None,
     ) -> str:
-        """Persist entity updates triggered via the built-in tool."""
+        """Persist entity updates triggered via the built-in tool.
+
+        ``identity_key`` is host authority (for example
+        ``"authenticated_user"``), added by the application around the tool
+        call; the model-visible tool never accepts it. With it, updates land on
+        the one canonical record for that identity.
+        """
         if not self.is_enabled():
             raise RuntimeError("Entity memory is not enabled for this provider.")
         if not memory_id:
@@ -215,8 +187,12 @@ class EntityMemoryManager:
             # An LLM may only update an ID that it could resolve inside the
             # server-bound tenant scope. This prevents an attacker-supplied or
             # hallucinated ID from overwriting a different tenant in providers
-            # that use entity_id as their physical upsert key.
-            raise ValueError("entity_id was not found in the active entity scope.")
+            # that use entity_id as their physical upsert key. With a canonical
+            # identity the host already names the record, so the unknown ID is
+            # dropped instead.
+            if not identity_key:
+                raise ValueError("entity_id was not found in the active entity scope.")
+            entity_id = None
 
         return self._entity_memory.upsert_entity(
             entity_id=entity_id,
@@ -225,6 +201,7 @@ class EntityMemoryManager:
             attributes=attributes,
             relations=relations,
             metadata=metadata,
+            identity_key=identity_key,
             memory_id=memory_id,
             user_id=user_id,
         )

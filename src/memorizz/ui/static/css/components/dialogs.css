@@ -1,0 +1,74 @@
+/* In-page confirmations and notices (static/js/page-dialogs.js). */
+.mz-dialog {
+    max-width: min(460px, calc(100vw - 32px));
+    padding: 20px;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.mz-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.mz-dialog-text {
+    margin: 0 0 8px;
+    font-weight: 600;
+    line-height: 1.45;
+}
+
+.mz-dialog-detail {
+    margin: 0 0 16px;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
+.mz-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.mz-notices {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: min(420px, calc(100vw - 32px));
+}
+
+.mz-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--accent-danger);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.mz-notice--info {
+    border-left-color: var(--accent-primary);
+}
+
+.mz-notice-close {
+    margin-left: auto;
+    padding: 0 2px;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--text-secondary);
+    background: none;
+    border: 0;
+    cursor: pointer;
+}

@@ -1,0 +1,500 @@
+{
+  "model": "ollama/qwen2.5:7b",
+  "rounds": 2,
+  "plain": [
+    {
+      "tool_cache": false,
+      "seconds": 38.95,
+      "backend_calls": {
+        "lookup_order": 5,
+        "shipping_quote": 2,
+        "create_return_label": 1
+      },
+      "cache": {
+        "hits": 0,
+        "misses": 0,
+        "stored": 0,
+        "saved_ms": 0.0,
+        "hit_rate": null
+      },
+      "correct": 8,
+      "tickets": [
+        {
+          "ticket": 1,
+          "question": "Where is my order 1042?",
+          "seconds": 7.59,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Your order 1042, which includes Ridgeline hiking boots, has been shipped by UPS and is expected to arrive on October 6."
+        },
+        {
+          "ticket": 2,
+          "question": "How much does standard shipping cost for a 2.5 kg parcel to ZIP 98101?",
+          "seconds": 4.74,
+          "tools": [
+            "shipping_quote"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "The standard shipping cost for a 2.5 kg parcel to ZIP 98101 is $9.50 USD."
+        },
+        {
+          "ticket": 3,
+          "question": "Has order 1042 shipped yet, and when will it arrive?",
+          "seconds": 5.03,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Order 1042 has been shipped via UPS. The estimated time of arrival is October 6. The item being shipped is a pair of Ridgeline hiking boots."
+        },
+        {
+          "ticket": 4,
+          "question": "Quote me shipping for 2.5 kg to 98101, please.",
+          "seconds": 4.37,
+          "tools": [
+            "shipping_quote"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "The shipping cost for 2.5 kg to 98101 is $9.50 USD."
+        },
+        {
+          "ticket": 5,
+          "question": "What's the status of order 2077?",
+          "seconds": 4.32,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Order 2077 was delivered by FedEx on October 1. The item was a two-person tent."
+        },
+        {
+          "ticket": 6,
+          "question": "Did my order 2077 arrive? When?",
+          "seconds": 4.74,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Your order 2077, which included a two-person tent, was delivered by FedEx on October 1st."
+        },
+        {
+          "ticket": 7,
+          "question": "Can you check order 1042 for me again?",
+          "seconds": 5.13,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Order 1042 has been shipped via UPS. The items are Ridgeline hiking boots and it's expected to arrive on October 6."
+        },
+        {
+          "ticket": 8,
+          "question": "Please create a return label for order 2077.",
+          "seconds": 3.03,
+          "tools": [
+            "create_return_label"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Your return label for order 2077 is RL-2077-314E42."
+        }
+      ]
+    },
+    {
+      "tool_cache": false,
+      "seconds": 34.32,
+      "backend_calls": {
+        "lookup_order": 5,
+        "shipping_quote": 2,
+        "create_return_label": 1
+      },
+      "cache": {
+        "hits": 0,
+        "misses": 0,
+        "stored": 0,
+        "saved_ms": 0.0,
+        "hit_rate": null
+      },
+      "correct": 8,
+      "tickets": [
+        {
+          "ticket": 1,
+          "question": "Where is my order 1042?",
+          "seconds": 4.57,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Your order 1042, which includes Ridgeline hiking boots, has been shipped by UPS and is expected to arrive on October 6."
+        },
+        {
+          "ticket": 2,
+          "question": "How much does standard shipping cost for a 2.5 kg parcel to ZIP 98101?",
+          "seconds": 4.38,
+          "tools": [
+            "shipping_quote"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "The standard shipping cost for a 2.5 kg parcel to ZIP 98101 is $9.50 USD."
+        },
+        {
+          "ticket": 3,
+          "question": "Has order 1042 shipped yet, and when will it arrive?",
+          "seconds": 4.98,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Order 1042 has been shipped via UPS. The estimated time of arrival is October 6. The item being shipped is a pair of Ridgeline hiking boots."
+        },
+        {
+          "ticket": 4,
+          "question": "Quote me shipping for 2.5 kg to 98101, please.",
+          "seconds": 4.5,
+          "tools": [
+            "shipping_quote"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "The shipping cost for 2.5 kg to 98101 is $9.50 USD."
+        },
+        {
+          "ticket": 5,
+          "question": "What's the status of order 2077?",
+          "seconds": 4.25,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Order 2077 was delivered by FedEx on October 1. The item was a two-person tent."
+        },
+        {
+          "ticket": 6,
+          "question": "Did my order 2077 arrive? When?",
+          "seconds": 4.24,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Your order 2077, which included a two-person tent, was delivered by FedEx on October 1st."
+        },
+        {
+          "ticket": 7,
+          "question": "Can you check order 1042 for me again?",
+          "seconds": 4.5,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Order 1042 has been shipped via UPS. The items are Ridgeline hiking boots and it's expected to arrive on October 6."
+        },
+        {
+          "ticket": 8,
+          "question": "Please create a return label for order 2077.",
+          "seconds": 2.9,
+          "tools": [
+            "create_return_label"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Your return label for order 2077 is RL-2077-6E5320."
+        }
+      ]
+    }
+  ],
+  "cached": [
+    {
+      "tool_cache": true,
+      "seconds": 29.73,
+      "backend_calls": {
+        "lookup_order": 2,
+        "shipping_quote": 1,
+        "create_return_label": 1
+      },
+      "cache": {
+        "hits": 4,
+        "misses": 3,
+        "stored": 3,
+        "saved_ms": 5511.939,
+        "hit_rate": 0.5714
+      },
+      "correct": 8,
+      "tickets": [
+        {
+          "ticket": 1,
+          "question": "Where is my order 1042?",
+          "seconds": 4.72,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "stored"
+          ],
+          "correct": true,
+          "answer": "Your order 1042, which includes Ridgeline hiking boots, has been shipped by UPS and is expected to arrive on October 6."
+        },
+        {
+          "ticket": 2,
+          "question": "How much does standard shipping cost for a 2.5 kg parcel to ZIP 98101?",
+          "seconds": 4.62,
+          "tools": [
+            "shipping_quote"
+          ],
+          "cache": [
+            "stored"
+          ],
+          "correct": true,
+          "answer": "The standard shipping cost for a 2.5 kg parcel to ZIP 98101 is $9.50 USD."
+        },
+        {
+          "ticket": 3,
+          "question": "Has order 1042 shipped yet, and when will it arrive?",
+          "seconds": 3.59,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "hit"
+          ],
+          "correct": true,
+          "answer": "Order 1042 has been shipped via UPS. The estimated time of arrival is October 6. The item being shipped is a pair of Ridgeline hiking boots."
+        },
+        {
+          "ticket": 4,
+          "question": "Quote me shipping for 2.5 kg to 98101, please.",
+          "seconds": 3.4,
+          "tools": [
+            "shipping_quote"
+          ],
+          "cache": [
+            "hit"
+          ],
+          "correct": true,
+          "answer": "The shipping cost for 2.5 kg to 98101 is $9.50 USD."
+        },
+        {
+          "ticket": 5,
+          "question": "What's the status of order 2077?",
+          "seconds": 4.29,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "stored"
+          ],
+          "correct": true,
+          "answer": "Order 2077 was delivered by FedEx on October 1. The item was a two-person tent."
+        },
+        {
+          "ticket": 6,
+          "question": "Did my order 2077 arrive? When?",
+          "seconds": 2.88,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "hit"
+          ],
+          "correct": true,
+          "answer": "Your order 2077, which included a two-person tent, was delivered by FedEx on October 1st."
+        },
+        {
+          "ticket": 7,
+          "question": "Can you check order 1042 for me again?",
+          "seconds": 3.15,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "hit"
+          ],
+          "correct": true,
+          "answer": "Order 1042 has been shipped via UPS. The items are Ridgeline hiking boots and it's expected to arrive on October 6."
+        },
+        {
+          "ticket": 8,
+          "question": "Please create a return label for order 2077.",
+          "seconds": 3.08,
+          "tools": [
+            "create_return_label"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "The return label for order 2077 has been created. The label ID is RL-2077-A47728."
+        }
+      ]
+    },
+    {
+      "tool_cache": true,
+      "seconds": 27.55,
+      "backend_calls": {
+        "lookup_order": 2,
+        "shipping_quote": 1,
+        "create_return_label": 1
+      },
+      "cache": {
+        "hits": 4,
+        "misses": 3,
+        "stored": 3,
+        "saved_ms": 5511.272,
+        "hit_rate": 0.5714
+      },
+      "correct": 8,
+      "tickets": [
+        {
+          "ticket": 1,
+          "question": "Where is my order 1042?",
+          "seconds": 4.48,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "stored"
+          ],
+          "correct": true,
+          "answer": "Your order 1042, which includes Ridgeline hiking boots, has been shipped by UPS and is expected to arrive on October 6."
+        },
+        {
+          "ticket": 2,
+          "question": "How much does standard shipping cost for a 2.5 kg parcel to ZIP 98101?",
+          "seconds": 4.44,
+          "tools": [
+            "shipping_quote"
+          ],
+          "cache": [
+            "stored"
+          ],
+          "correct": true,
+          "answer": "The standard shipping cost for a 2.5 kg parcel to ZIP 98101 is $9.50 USD."
+        },
+        {
+          "ticket": 3,
+          "question": "Has order 1042 shipped yet, and when will it arrive?",
+          "seconds": 3.19,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "hit"
+          ],
+          "correct": true,
+          "answer": "Order 1042 has been shipped via UPS. The estimated time of arrival is October 6. The item being shipped is a pair of Ridgeline hiking boots."
+        },
+        {
+          "ticket": 4,
+          "question": "Quote me shipping for 2.5 kg to 98101, please.",
+          "seconds": 3.09,
+          "tools": [
+            "shipping_quote"
+          ],
+          "cache": [
+            "hit"
+          ],
+          "correct": true,
+          "answer": "The shipping cost for 2.5 kg to 98101 is $9.50 USD."
+        },
+        {
+          "ticket": 5,
+          "question": "What's the status of order 2077?",
+          "seconds": 4.11,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "stored"
+          ],
+          "correct": true,
+          "answer": "Order 2077 was delivered by FedEx on October 1. The item was a two-person tent."
+        },
+        {
+          "ticket": 6,
+          "question": "Did my order 2077 arrive? When?",
+          "seconds": 2.6,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "hit"
+          ],
+          "correct": true,
+          "answer": "Your order 2077, which included a two-person tent, was delivered by FedEx on October 1st."
+        },
+        {
+          "ticket": 7,
+          "question": "Can you check order 1042 for me again?",
+          "seconds": 3.0,
+          "tools": [
+            "lookup_order"
+          ],
+          "cache": [
+            "hit"
+          ],
+          "correct": true,
+          "answer": "Order 1042 has been shipped via UPS. The items are Ridgeline hiking boots and it's expected to arrive on October 6."
+        },
+        {
+          "ticket": 8,
+          "question": "Please create a return label for order 2077.",
+          "seconds": 2.63,
+          "tools": [
+            "create_return_label"
+          ],
+          "cache": [
+            null
+          ],
+          "correct": true,
+          "answer": "Your return label for order 2077 is RL-2077-76761B."
+        }
+      ]
+    }
+  ]
+}

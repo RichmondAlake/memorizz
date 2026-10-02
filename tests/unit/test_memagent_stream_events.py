@@ -218,3 +218,28 @@ def test_per_call_callback_and_execution_ids_survive_worker_thread(
     assert worker_events[0]["type"] == "stream_start"
     assert worker_events[-1]["type"] == "stream_end"
     assert parent_events == []
+
+
+def test_direct_run_stream_is_deprecated_but_the_event_engine_is_not():
+    import warnings
+
+    from memorizz.memagent import MemAgent
+
+    agent = MemAgent(memory_provider=False, auto_register=False)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            list(agent.run_stream("hello"))
+        assert any(
+            issubclass(item.category, DeprecationWarning)
+            and "run_stream_events" in str(item.message)
+            for item in caught
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with agent.run_stream_events("hello") as events:
+                list(events)
+        assert not any("run_stream()" in str(item.message) for item in caught)
+    finally:
+        agent.close()

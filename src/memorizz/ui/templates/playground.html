@@ -5,9 +5,12 @@
 {% block body_attrs %} class="page-playground" data-sidebar-scope="playground" data-sidebar-default="collapsed"{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="/static/css/playground.css?v=8">
+<link rel="stylesheet" href="/static/css/playground.css?v=12">
+<link rel="stylesheet" href="/static/css/catalog.css?v=4">
+<script src="/static/js/catalog.js?v=2" defer></script>
 <!-- marked.js for markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
+<script src="/static/js/safe-markdown.js?v=2"></script>
 <style>
     /* Local-model manager widget styles are shared in styles.css
        (.local-model-status .model-manager etc). Below: page-specific rules.
@@ -171,16 +174,37 @@
     .compact-btn .compact-icon {
         font-size: 1.1em;
     }
-    .auto-compact-badge {
-        display: inline-block;
-        font-size: 0.7em;
-        padding: 2px 6px;
+    .auto-compact-control {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: 8px;
+        font-size: 0.78em;
+        color: var(--text-secondary);
+    }
+    .auto-compact-control select {
+        padding: 3px 6px;
+        font: inherit;
+        color: var(--text-primary);
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+    }
+    .auto-compact-hint,
+    .token-measured {
+        margin: 6px 0 0;
+        font-size: 0.74em;
+        line-height: 1.4;
+        color: var(--text-muted);
+    }
+    .pg-compact-note {
+        margin: 0 0 8px;
+        padding: 6px 10px;
+        font-size: 0.8em;
+        color: var(--text-secondary);
+        border-left: 3px solid var(--accent-primary);
+        background: var(--bg-secondary);
         border-radius: 4px;
-        background: color-mix(in srgb, var(--accent-secondary) 12%, transparent);
-        color: var(--accent-secondary);
-        border: 1px solid color-mix(in srgb, var(--accent-secondary) 30%, transparent);
-        margin-left: 6px;
-        vertical-align: middle;
     }
 </style>
 {% endblock %}
@@ -199,6 +223,7 @@
             <h2 class="pg-rail-title">Conversations</h2>
             <div class="playground-thread-tabs" id="playground-thread-tabs">
                 {% for thread in threads %}
+                <div class="pg-thread-row" data-memory-id="{{ thread.memory_id }}">
                 <button
                     type="button"
                     class="playground-thread-tab {% if thread.memory_id == default_memory_id %}is-active{% endif %}"
@@ -209,6 +234,11 @@
                     <span class="thread-tab-title">{{ thread.title or ('Conversation ' ~ loop.index) }}</span>
                     <span class="thread-tab-meta">{{ thread.message_count }} message{% if thread.message_count != 1 %}s{% endif %}{% if thread.last_activity and thread.last_activity != '—' %} · {{ thread.last_activity[:16] }}{% endif %}</span>
                 </button>
+                <span class="pg-thread-actions">
+                    <button type="button" class="pg-thread-action" data-thread-action="rename" aria-label="Rename conversation" title="Rename"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+                    <button type="button" class="pg-thread-action is-danger" data-thread-action="delete" aria-label="Delete conversation" title="Delete"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+                </span>
+                </div>
                 {% endfor %}
             </div>
             {% if not threads %}<p class="pg-rail-empty" id="pg-no-threads">No conversations yet. Send a message to start one.</p>{% endif %}
@@ -278,8 +308,9 @@
                         <span id="pg-composer-meter-label">{{ token_stats.percentage_used|default(0) if token_stats else 0 }}% context</span>
                     </button>
                     <span class="pg-meter pg-meter--cache" id="pg-composer-cache" hidden></span>
+                    {% if harness_delegates %}<button type="button" class="pg-meter pg-hx-chip" id="pg-hx-chip" onclick="openInspectorTab('overview'); document.getElementById('pg-hx')?.scrollIntoView({block: 'nearest'})" title="What this agent's harness delegates may use · change it in the inspector">Delegates · fresh folder · no web</button>{% endif %}
                     <span class="composer-spacer"></span>
-                    <button type="button" id="pg-stop-btn" class="pg-send pg-stop" onclick="stopStreaming()" style="display:none;" aria-label="Stop generating" title="Stop generating (Esc)"><span aria-hidden="true">■</span></button>
+                    <button type="button" id="pg-stop-btn" class="pg-send pg-stop" onclick="stopStreaming()" style="display:none;" aria-label="Stop generating" title="Stop generating (Esc)"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg></button>
                     <button type="button" id="pg-send-btn" class="pg-send" onclick="sendMessage()" aria-label="Send message" title="Send (Enter)">
                         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5.5 11.5L12 5l6.5 6.5"/></svg>
                         <span id="pg-send-text" class="sr-only">Send</span>
@@ -287,7 +318,6 @@
                     </button>
                 </div>
             </div>
-            <div id="pg-kb-upload-status" class="pg-kb-upload-status" style="display:none;"></div>
             <p class="pg-composer-hint">Enter to send · Shift+Enter for a new line · Drop files to add them to the knowledge base</p>
         </div>
     </section>
@@ -312,34 +342,18 @@
                     </div>
                 </div>
                 <div class="token-composition-tooltip" id="token-composition-tooltip">
-                    <div class="composition-title">What fills it</div>
+                    <div class="composition-title">What the next request sends</div>
                     <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot instruction"></span> System instruction</span>
-                        <span class="composition-value" id="token-comp-instruction">{{ "{:,}".format(token_stats.composition.instruction|default(0)|int) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot persona"></span> Persona</span>
-                        <span class="composition-value" id="token-comp-persona">{{ "{:,}".format(token_stats.composition.persona|default(0)|int) }} tokens</span>
+                        <span class="composition-label"><span class="composition-dot instruction"></span> System prompt</span>
+                        <span class="composition-value" id="token-comp-system">{{ "{:,}".format(token_stats.composition.system_prompt|default(0)|int) }} tokens</span>
                     </div>
                     <div class="composition-item">
                         <span class="composition-label"><span class="composition-dot tools"></span> Tools</span>
                         <span class="composition-value" id="token-comp-tools">{{ "{:,}".format(token_stats.composition.tools|default(0)|int) }} tokens</span>
                     </div>
                     <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot toolbox-memory"></span> Toolbox memory</span>
-                        <span class="composition-value" id="token-comp-toolbox-memory">{{ "{:,}".format(token_stats.composition.toolbox_memory|default(0)|int) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot workflow-memory"></span> Workflow memory</span>
-                        <span class="composition-value" id="token-comp-workflow-memory">{{ "{:,}".format(token_stats.composition.workflow_memory|default(0)|int) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot entity-memory"></span> Entity memory</span>
-                        <span class="composition-value" id="token-comp-entity-memory">{{ "{:,}".format(token_stats.composition.entity_memory|default(0)|int) }} tokens</span>
-                    </div>
-                    <div class="composition-item">
-                        <span class="composition-label"><span class="composition-dot summary-memory"></span> Summary memory</span>
-                        <span class="composition-value" id="token-comp-summary-memory">{{ "{:,}".format(token_stats.composition.summary_memory|default(0)|int) }} tokens</span>
+                        <span class="composition-label"><span class="composition-dot entity-memory"></span> Memory</span>
+                        <span class="composition-value" id="token-comp-memory">{{ "{:,}".format(token_stats.composition.memory|default(0)|int) }} tokens</span>
                     </div>
                     <div class="composition-item">
                         <span class="composition-label"><span class="composition-dot history"></span> Conversation history</span>
@@ -348,14 +362,22 @@
                 </div>
                 <div class="token-details">
                     <span class="token-percentage" id="token-percentage">{{ token_stats.percentage_used|default(0) }}% used</span>
-                    <span class="token-messages" id="token-messages">{{ token_stats.message_count|default(0) }} messages</span>
+                    <span class="token-messages" id="token-messages">{{ token_stats.message_count|default(0) }} of {{ token_stats.thread_message_count|default(0) }} messages sent</span>
                 </div>
+                <p class="token-measured" id="token-measured" hidden></p>
+                <p class="token-model-note" id="token-model-note"{% if not token_stats.model_context_tokens or token_stats.model_context_tokens <= token_stats.context_window_tokens %} hidden{% endif %}><code id="token-model-name">{{ token_stats.model_name or '' }}</code> supports up to <span id="token-model-max">{{ "{:,}".format(token_stats.model_context_tokens|default(0)|int) }}</span> tokens. <button type="button" onclick="pgEditContextWindow()">Change the window</button></p>
                 <div class="token-actions">
                     <button type="button" class="compact-btn" id="compact-context-btn" onclick="compactContextWindow()" title="Summarize and compact the context window to free up tokens">
                         <span>Compact context</span>
                     </button>
-                    <span class="auto-compact-badge" title="The context window compacts automatically at 80% utilization">Auto-compacts at 80%</span>
+                    <label class="auto-compact-control" for="auto-compact-at">Auto-compact at
+                        <select id="auto-compact-at" data-available="{{ 'true' if token_stats.compaction_available else 'false' }}">
+                            <option value="0" {% if not token_stats.compact_at %}selected{% endif %}>Off</option>
+                            {% for value in [30, 40, 50, 60, 70, 80] %}<option value="{{ value }}" {% if token_stats.compact_at == value %}selected{% endif %}>{{ value }}%</option>{% endfor %}
+                        </select>
+                    </label>
                 </div>
+                <p class="auto-compact-hint" id="auto-compact-hint" data-projected="{{ token_stats.projected_percentage|default(0) }}" data-fixed="{{ token_stats.fixed_percentage|default(0) }}"></p>
             </div>
             {% endif %}
             {% if agent %}
@@ -382,6 +404,50 @@
                     <div class="pg-facts-wide"><dt>Agent ID</dt><dd>{{ id_chip(agent.agent_id|string, 36) }}</dd></div>
                 </dl>
             </section>
+            {% if harness_delegates %}
+            <section class="pg-section pg-hx" id="pg-hx" aria-labelledby="pg-hx-title">
+                <div class="pg-section-head">
+                    <h3 class="pg-section-title" id="pg-hx-title">Harness delegates</h3>
+                    <span class="pg-section-meta" id="pg-hx-state">Fresh folder · no web</span>
+                </div>
+                <p class="pg-hx-note">This agent hands parts of a request to {{ harness_delegates|join(', ') }}. They work in a folder and use only the access allowed here; each starts its own harness run, listed on <a href="/harnesses">Agent Harnesses</a>.</p>
+                <div class="pg-hx-active" id="pg-hx-active" hidden>
+                    <dl class="pg-facts">
+                        <div class="pg-facts-wide"><dt>Folder</dt><dd class="mono" id="pg-hx-active-folder"></dd></div>
+                        <div><dt>Access</dt><dd id="pg-hx-active-access"></dd></div>
+                        <div><dt>Approved by</dt><dd id="pg-hx-active-approver"></dd></div>
+                        <div class="pg-facts-wide"><dt>Until</dt><dd id="pg-hx-active-until"></dd></div>
+                    </dl>
+                    <button type="button" class="btn btn-sm" id="pg-hx-clear">Stop using this access</button>
+                </div>
+                <form class="pg-hx-form" id="pg-hx-form" novalidate>
+                    <div class="config-field">
+                        <label for="pg-hx-workspace">Folder</label>
+                        <input id="pg-hx-workspace" type="text" placeholder="Blank: a fresh folder for this conversation" autocomplete="off" spellcheck="false">
+                        <p class="form-hint">{% if harness_roots %}An existing folder inside {{ harness_roots|join(', ') }}.{% else %}The absolute path of an existing folder.{% endif %}</p>
+                    </div>
+                    <div class="config-field">
+                        <label for="pg-hx-network">Network</label>
+                        <select id="pg-hx-network">
+                            <option value="none">No web access</option>
+                            <option value="full">Full · web access</option>
+                        </select>
+                    </div>
+                    <div class="config-field config-field--toggle">
+                        <label class="config-toggle-option">
+                            <input id="pg-hx-write" type="checkbox">
+                            <span>Allow edits in the folder</span>
+                        </label>
+                    </div>
+                    <div class="config-field">
+                        <label for="pg-hx-approver">Approved by</label>
+                        <input id="pg-hx-approver" type="text" placeholder="Your name, for web access or edits" autocomplete="name">
+                    </div>
+                    <button type="submit" class="btn btn-sm btn-primary" id="pg-hx-allow">Allow</button>
+                    <p class="form-hint pg-hx-message" id="pg-hx-message" aria-live="polite"></p>
+                </form>
+            </section>
+            {% endif %}
         </div>
         <div class="pg-tab-panel" role="tabpanel" id="pg-panel-context" aria-labelledby="pg-tab-context" hidden>
             <div class="pg-section-head">
@@ -814,6 +880,14 @@
                      offline, instead of finding out from a 404 mid-chat. -->
                 <div id="cfg-local-model-status" class="local-model-status" style="display:none; margin-top:10px;"></div>
             </div>
+            <div class="config-field" id="cfg-context-window-field" {% if llm_provider != 'ollama' %}hidden{% endif %}>
+                <label for="cfg-context-window">Context window</label>
+                <select id="cfg-context-window" name="context_window_tokens" data-current="{{ llm_context_window }}" {% if llm_provider != 'ollama' %}disabled{% endif %}>
+                    <option value="">Default (the model's full length when it fits in memory)</option>
+                    {% if llm_context_window %}<option value="{{ llm_context_window }}" selected>{{ "{:,}".format(llm_context_window) }} tokens</option>{% endif %}
+                </select>
+                <p class="form-hint" id="cfg-context-window-hint">Larger windows hold more of the conversation but use more memory and run slower.</p>
+            </div>
             <div class="config-field">
                 <label for="cfg-max-steps">Max Tool Iterations</label>
                 <input id="cfg-max-steps" name="max_steps" type="number" value="{{ max_steps }}" min="1" max="100">
@@ -919,39 +993,7 @@
                 {% if skills_marketplace_status_error %}
                 <p class="form-hint sandbox-error-hint">{{ skills_marketplace_status_error }}</p>
                 {% endif %}
-                <p class="form-hint sandbox-error-hint" id="cfg-skills-marketplace-token-warning" style="display:none;">
-                    Vercel Agent Skills is selected but <code>GITHUB_TOKEN</code> is not set. Skill search will fail (HTTP 401) until you add a token in
-                    <a href="/settings#GITHUB_TOKEN">Settings</a>, or create one at
-                    <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>
-                    (no scopes required) — see the
-                    <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noopener noreferrer">GitHub docs</a>.
-                </p>
-                <script>
-                    (function() {
-                        var select = document.getElementById('cfg-skills-marketplace-provider');
-                        var warning = document.getElementById('cfg-skills-marketplace-token-warning');
-                        if (!select || !warning) return;
-                        var githubTokenPresent = null;
-
-                        function renderWarning() {
-                            if (select.value === 'vercel' && githubTokenPresent === false) {
-                                warning.style.display = '';
-                            } else {
-                                warning.style.display = 'none';
-                            }
-                        }
-
-                        fetch('/vercel-skills/api/token-status')
-                            .then(function(r) { return r.json(); })
-                            .then(function(data) {
-                                githubTokenPresent = !!(data && data.github_token_present);
-                                renderWarning();
-                            })
-                            .catch(function() { /* ignore */ });
-
-                        select.addEventListener('change', renderWarning);
-                    })();
-                </script>
+                <p class="form-hint">Lets the agent search a marketplace itself. To pin a skill, attach it under Skills below.</p>
             </div>
             <div class="config-field">
                 <label for="cfg-persona-name">Persona Name</label>
@@ -981,13 +1023,34 @@
                     <button type="button" class="btn btn-sm" onclick="addSkillPathRow()">Add Skill File</button>
                 </div>
                 <p class="form-hint">Use absolute or repo-relative paths. Skill code is executed only in sandbox via skill tools.</p>
+                <div class="catalog" data-catalog="skills" id="cfg-skill-catalog" data-agent-id="{{ active_agent_id }}">
+                    <div class="catalog-search" data-catalog-form role="search">
+                        <input type="search" placeholder="Find skills on skills.sh, e.g. notion, gmail, calendar" aria-label="Search skills">
+                        <button class="btn btn-sm" type="button">Search</button>
+                    </div>
+                    <p class="catalog-status" data-catalog-status role="status" aria-live="polite"></p>
+                    <ul class="catalog-results" data-catalog-results></ul>
+                </div>
             </div>
             <div class="config-field config-field--wide">
                 <label>MCP Servers</label>
-                <p class="form-hint">MCP connections, encrypted credentials, OAuth, and tool permissions are managed on the dedicated connections page.</p>
-                <div class="config-dynamic-actions">
-                    <a class="btn btn-sm" href="/mcp?agent_id={{ active_agent_id }}">Manage MCP Connections</a>
+                <ul class="catalog-attached" id="cfg-mcp-servers">
+                    {% for server in mcp_servers %}
+                    <li><span><strong>{{ server.name }}</strong> <span class="catalog-meta mono">{{ server.url or server.command or server.transport }}</span></span><span class="catalog-meta">{{ {'oauth': 'Sign-in', 'bearer': 'Token'}.get((server.auth or {}).type, 'No auth') }}</span></li>
+                    {% else %}
+                    <li class="catalog-empty"><span class="catalog-meta">No MCP servers attached.</span></li>
+                    {% endfor %}
+                </ul>
+                <div class="catalog" data-catalog="mcp" id="cfg-mcp-catalog" data-agent-id="{{ active_agent_id }}">
+                    <div class="catalog-search" data-catalog-form role="search">
+                        <input type="search" placeholder="Search the MCP Registry, e.g. linear, github, slack" aria-label="Search MCP servers">
+                        <button class="btn btn-sm" type="button">Search</button>
+                    </div>
+                    <p class="catalog-status" data-catalog-status role="status" aria-live="polite"></p>
+                    <ul class="catalog-results" data-catalog-results></ul>
+                    <button class="btn btn-sm" type="button" data-catalog-more hidden>More results</button>
                 </div>
+                <p class="form-hint">Attached servers are saved immediately. Test them, sign in again or change tool permissions on <a href="/mcp?agent_id={{ active_agent_id }}">MCP connections</a>.</p>
             </div>
 
             {% if agent_tools %}
@@ -1007,6 +1070,7 @@
             {% endif %}
         </div>
         <div class="config-actions">
+            <span class="config-dirty" id="cfg-dirty" hidden>Unsaved changes</span>
             <button type="submit" class="btn btn-primary btn-sm">Save Config</button>
         </div>
     </form>
@@ -1152,7 +1216,6 @@
 const AGENT_ID = "{{ agent.agent_id }}";
 const CURRENT_MODEL = "{{ llm_model }}";
 const INITIAL_SKILL_PATHS = {{ skill_paths|default([], true)|tojson }};
-const INITIAL_MCP_SERVERS = {{ mcp_servers|default([], true)|tojson }};
 let isStreaming = false;
 let currentAbortController = null;
 let threadLoadSequence = 0;
@@ -1270,12 +1333,6 @@ function onProviderChange() {
 // chosen model isn't actually present locally.
 // =====================================================================
 
-function pgEscapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function(c) {
-        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
-    });
-}
-
 function pgCurrentModel() {
     const customInput = document.getElementById('cfg-llm-model-custom');
     const select = document.getElementById('cfg-llm-model');
@@ -1301,6 +1358,8 @@ function pgSelectModel(value) {
     }
     syncPlaygroundModelInputMode();
     playgroundCheckLocalModel();
+    const dirty = document.getElementById('cfg-dirty');
+    if (dirty) dirty.hidden = false;
 }
 
 let _pgLocalCheckSeq = 0;
@@ -1311,6 +1370,56 @@ function pgScheduleLocalCheck() {
     _pgLocalCheckDebounce = setTimeout(playgroundCheckLocalModel, 350);
 }
 
+const PG_WINDOW_SIZES = [8192, 16384, 32768, 65536, 131072, 262144];
+let _pgWindowSeq = 0;
+
+// Ollama only: the window this agent requests, up to what the model supports.
+async function pgRefreshContextWindow(provider, model) {
+    const field = document.getElementById('cfg-context-window-field');
+    const select = document.getElementById('cfg-context-window');
+    const hint = document.getElementById('cfg-context-window-hint');
+    if (!field || !select) return;
+    const isOllama = provider === 'ollama';
+    field.hidden = !isOllama;
+    select.disabled = !isOllama;  // a disabled field is not submitted
+    if (!isOllama || !model) return;
+    const seq = ++_pgWindowSeq;
+    const chosen = select.value || select.dataset.current || '';
+    let maxLength = 0, defaultSize = 0;
+    try {
+        const response = await fetch('/api/ollama/context-length?model=' + encodeURIComponent(model));
+        const body = await response.json();
+        maxLength = Number(body.context_length) || 0;
+        defaultSize = Number(body.default_window) || 0;
+    } catch (error) { /* leave the list unbounded */ }
+    if (seq !== _pgWindowSeq) return;
+    const sizes = PG_WINDOW_SIZES.filter(function(size) { return !maxLength || size <= maxLength; });
+    if (maxLength && !sizes.includes(maxLength)) sizes.push(maxLength);
+    if (chosen && !sizes.includes(Number(chosen))) sizes.push(Number(chosen));
+    sizes.sort(function(a, b) { return a - b; });
+    select.innerHTML = '';
+    select.appendChild(new Option(
+        defaultSize ? `Default (${defaultSize.toLocaleString()} tokens)` : "Default (the model's full length when it fits in memory)", ''));
+    sizes.forEach(function(size) {
+        const over = maxLength && size > maxLength;
+        const option = new Option(`${size.toLocaleString()} tokens${size === maxLength ? ' (model maximum)' : ''}${over ? ' (more than the model supports)' : ''}`, String(size));
+        select.appendChild(option);
+    });
+    select.value = chosen && sizes.includes(Number(chosen)) ? chosen : '';
+    if (hint) {
+        const cost = 'Larger windows hold more of the conversation but use more memory, and long prompts take longer to read.';
+        let note = '';
+        if (maxLength && defaultSize >= maxLength) {
+            note = `${model} supports up to ${maxLength.toLocaleString()} tokens; Default uses all of it. `;
+        } else if (maxLength && defaultSize) {
+            note = `${model} supports up to ${maxLength.toLocaleString()} tokens; Default uses ${defaultSize.toLocaleString()}, the most that fits comfortably in this machine's memory. `;
+        } else if (maxLength) {
+            note = `${model} supports up to ${maxLength.toLocaleString()} tokens. `;
+        }
+        hint.textContent = note + cost;
+    }
+}
+
 async function playgroundCheckLocalModel() {
     const statusEl = document.getElementById('cfg-local-model-status');
     const fieldEl = document.getElementById('cfg-llm-model-field');
@@ -1318,6 +1427,7 @@ async function playgroundCheckLocalModel() {
 
     const provider = (document.getElementById('cfg-llm-provider').value || '').trim();
     const model = pgCurrentModel();
+    void pgRefreshContextWindow(provider, model);
 
     // MLX uses the same HF cache directory as `huggingface_hub`, so the
     // /api/huggingface/installed endpoint already covers it.
@@ -1347,7 +1457,7 @@ async function playgroundCheckLocalModel() {
     } catch (err) {
         if (seq !== _pgLocalCheckSeq) return;
         statusEl.innerHTML = '<div class="warning-message"><strong>Could not reach the UI server</strong>: '
-            + pgEscapeHtml(String(err)) + '</div>';
+            + escapeHtml(String(err)) + '</div>';
         return;
     }
     if (seq !== _pgLocalCheckSeq) return;
@@ -1372,8 +1482,8 @@ function pgRenderOllama(statusEl, model, info) {
     if (!info.reachable) {
         statusEl.innerHTML = '<div class="warning-message">'
             + '<strong>Ollama is not running</strong> at <code>'
-            + pgEscapeHtml(info.host) + '</code>'
-            + (info.error ? ' &mdash; ' + pgEscapeHtml(info.error) : '')
+            + escapeHtml(info.host) + '</code>'
+            + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
             + '.<br>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a> and start it, then '
             + '<a href="#" data-pg-refresh>refresh this check</a>.'
             + '</div>';
@@ -1387,15 +1497,15 @@ function pgRenderOllama(statusEl, model, info) {
     const libUrl = 'https://ollama.com/library/' + encodeURIComponent(base);
     const banner = installed
         ? '<div class="success-message">'
-            + '<strong><code>' + pgEscapeHtml(model) + '</code> is available offline</strong>'
-            + ' on Ollama at <code>' + pgEscapeHtml(info.host) + '</code>.'
+            + '<strong><code>' + escapeHtml(model) + '</code> is available offline</strong>'
+            + ' on Ollama at <code>' + escapeHtml(info.host) + '</code>.'
             + '</div>'
         : '<div class="warning-message">'
-            + '<strong>Pre-flight: <code>' + pgEscapeHtml(model) + '</code> is not installed locally.</strong><br>'
+            + '<strong>Pre-flight: <code>' + escapeHtml(model) + '</code> is not installed locally.</strong><br>'
             + 'Sending a message will fail with a 404. Run <code>ollama pull '
-            + pgEscapeHtml(model) + '</code>, click the download icon below, or '
+            + escapeHtml(model) + '</code>, click the download icon below, or '
             + '<a href="' + libUrl + '" target="_blank" rel="noopener">browse <code>'
-            + pgEscapeHtml(base) + '</code> on ollama.com</a>. Then '
+            + escapeHtml(base) + '</code> on ollama.com</a>. Then '
             + '<a href="#" data-pg-refresh>refresh</a>.'
             + '</div>';
     statusEl.innerHTML = banner + pgManageListHtml(info.models, 'ollama', 'Ollama');
@@ -1406,7 +1516,7 @@ function pgRenderHuggingFace(statusEl, model, info) {
     if (!info.available) {
         statusEl.innerHTML = '<div class="warning-message">'
             + '<strong>HuggingFace cache unavailable</strong>'
-            + (info.error ? ' &mdash; ' + pgEscapeHtml(info.error) : '')
+            + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
             + '.<br>Install it with <code>pip install memorizz[huggingface]</code>, then '
             + '<a href="#" data-pg-refresh>refresh</a>.'
             + '</div>';
@@ -1419,14 +1529,14 @@ function pgRenderHuggingFace(statusEl, model, info) {
     const cacheLoc = info.cache_dir || 'local HF cache';
     const banner = cached
         ? '<div class="success-message">'
-            + '<strong><code>' + pgEscapeHtml(model) + '</code> is cached locally</strong> at '
-            + '<code>' + pgEscapeHtml(cacheLoc) + '</code>.'
+            + '<strong><code>' + escapeHtml(model) + '</code> is cached locally</strong> at '
+            + '<code>' + escapeHtml(cacheLoc) + '</code>.'
             + '</div>'
         : '<div class="warning-message">'
-            + '<strong>Pre-flight: <code>' + pgEscapeHtml(model) + '</code> is not cached locally.</strong><br>'
+            + '<strong>Pre-flight: <code>' + escapeHtml(model) + '</code> is not cached locally.</strong><br>'
             + 'Sending a message will trigger a download (a few hundred MB to several GB) and may stall. '
             + 'Click the download icon below, or pre-download with '
-            + '<code>huggingface-cli download ' + pgEscapeHtml(model) + '</code>, '
+            + '<code>huggingface-cli download ' + escapeHtml(model) + '</code>, '
             + 'or <a href="' + repoUrl + '" target="_blank" rel="noopener">view the model card</a>. Then '
             + '<a href="#" data-pg-refresh>refresh</a>.'
             + '</div>';
@@ -1485,24 +1595,24 @@ function pgManageListHtml(installedModels, provider, label) {
         });
     }
     return '<details class="model-manager" open>'
-        + '<summary>Manage ' + pgEscapeHtml(label) + ' models</summary>'
+        + '<summary>Manage ' + escapeHtml(label) + ' models</summary>'
         + '<div class="model-list">' + rows.join('') + '</div>'
         + '</details>';
 }
 
 function pgModelRow(value, label, provider, action) {
-    const icon = action === 'delete' ? pgTrashIconSvg() : pgDownloadIconSvg();
+    const icon = action === 'delete' ? trashIconSvg() : downloadIconSvg();
     const title = action === 'delete' ? 'Remove from local cache' : 'Download to local cache';
     const aria = action === 'delete' ? ('Remove ' + value) : ('Download ' + value);
     const labelHtml = (label && label !== value)
-        ? '<span class="model-row-label"> &mdash; ' + pgEscapeHtml(label) + '</span>'
+        ? '<span class="model-row-label"> &mdash; ' + escapeHtml(label) + '</span>'
         : '';
     const isSelectable = action === 'delete';
     const isSelected = isSelectable && pgCurrentModel() === value;
-    const inner = '<code>' + pgEscapeHtml(value) + '</code>' + labelHtml;
+    const inner = '<code>' + escapeHtml(value) + '</code>' + labelHtml;
     const textHtml = isSelectable
         ? '<button type="button" class="model-row-select"'
-            + ' data-pg-select-model="' + pgEscapeHtml(value) + '"'
+            + ' data-pg-select-model="' + escapeHtml(value) + '"'
             + ' aria-pressed="' + (isSelected ? 'true' : 'false') + '"'
             + ' title="Use this model in the playground">'
             + (isSelected ? '<span class="model-row-check" aria-hidden="true">✓</span>' : '')
@@ -1515,28 +1625,12 @@ function pgModelRow(value, label, provider, action) {
         + textHtml
         + '<button type="button" class="model-action-btn"'
         + ' data-pg-action="' + action + '"'
-        + ' data-pg-provider="' + pgEscapeHtml(provider) + '"'
-        + ' data-pg-model="' + pgEscapeHtml(value) + '"'
-        + ' title="' + pgEscapeHtml(title) + '"'
-        + ' aria-label="' + pgEscapeHtml(aria) + '">'
+        + ' data-pg-provider="' + escapeHtml(provider) + '"'
+        + ' data-pg-model="' + escapeHtml(value) + '"'
+        + ' title="' + escapeHtml(title) + '"'
+        + ' aria-label="' + escapeHtml(aria) + '">'
         + icon + '</button>'
         + '</div>';
-}
-
-function pgTrashIconSvg() {
-    return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-        + '<polyline points="3 6 5 6 21 6"></polyline>'
-        + '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>'
-        + '<path d="M10 11v6"></path><path d="M14 11v6"></path>'
-        + '<path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>'
-        + '</svg>';
-}
-function pgDownloadIconSvg() {
-    return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-        + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>'
-        + '<polyline points="7 10 12 15 17 10"></polyline>'
-        + '<line x1="12" y1="15" x2="12" y2="3"></line>'
-        + '</svg>';
 }
 
 // Pull/delete plumbing lives in the shared handleLocalModelAction()
@@ -1606,104 +1700,6 @@ function addSkillPathRow(pathValue = '') {
     container.appendChild(row);
 }
 
-function addMcpServerRow(server = {}) {
-    const container = document.getElementById('cfg-mcp-server-rows');
-    if (!container) return;
-
-    const row = document.createElement('div');
-    row.className = 'config-dynamic-row config-dynamic-row--stacked';
-
-    const topRow = document.createElement('div');
-    topRow.className = 'config-mcp-top-row';
-
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.placeholder = 'Server name';
-    nameInput.className = 'config-dynamic-input cfg-mcp-name';
-    nameInput.value = server.name || '';
-
-    const transportSelect = document.createElement('select');
-    transportSelect.className = 'config-dynamic-input cfg-mcp-transport';
-    const stdioOption = document.createElement('option');
-    stdioOption.value = 'stdio';
-    stdioOption.textContent = 'stdio';
-    const httpOption = document.createElement('option');
-    httpOption.value = 'http';
-    httpOption.textContent = 'http';
-    transportSelect.appendChild(stdioOption);
-    transportSelect.appendChild(httpOption);
-    transportSelect.value = server.transport || 'stdio';
-
-    const timeoutInput = document.createElement('input');
-    timeoutInput.type = 'number';
-    timeoutInput.min = '1';
-    timeoutInput.max = '300';
-    timeoutInput.className = 'config-dynamic-input cfg-mcp-timeout';
-    timeoutInput.placeholder = 'Timeout';
-    timeoutInput.value = String(server.timeout || 30);
-
-    const removeButton = document.createElement('button');
-    removeButton.type = 'button';
-    removeButton.className = 'btn btn-sm';
-    removeButton.textContent = 'Remove';
-    removeButton.addEventListener('click', function() {
-        removeDynamicRow(removeButton);
-    });
-
-    topRow.appendChild(nameInput);
-    topRow.appendChild(transportSelect);
-    topRow.appendChild(timeoutInput);
-    topRow.appendChild(removeButton);
-
-    const stdioRow = document.createElement('div');
-    stdioRow.className = 'config-mcp-stdio-row';
-
-    const commandInput = document.createElement('input');
-    commandInput.type = 'text';
-    commandInput.className = 'config-dynamic-input cfg-mcp-command';
-    commandInput.placeholder = 'Command (e.g. npx)';
-    commandInput.value = server.command || '';
-
-    const argsInput = document.createElement('input');
-    argsInput.type = 'text';
-    argsInput.className = 'config-dynamic-input cfg-mcp-args';
-    argsInput.placeholder = 'Args JSON (e.g. ["-y","@pkg/server"])';
-    argsInput.value = server.args && server.args.length ? JSON.stringify(server.args) : '';
-
-    const envInput = document.createElement('input');
-    envInput.type = 'text';
-    envInput.className = 'config-dynamic-input cfg-mcp-env';
-    envInput.placeholder = 'Env JSON (e.g. {"API_KEY":"..."} )';
-    envInput.value = server.env && Object.keys(server.env).length ? JSON.stringify(server.env) : '';
-
-    stdioRow.appendChild(commandInput);
-    stdioRow.appendChild(argsInput);
-    stdioRow.appendChild(envInput);
-
-    const httpRow = document.createElement('div');
-    httpRow.className = 'config-mcp-http-row';
-
-    const urlInput = document.createElement('input');
-    urlInput.type = 'text';
-    urlInput.className = 'config-dynamic-input cfg-mcp-url';
-    urlInput.placeholder = 'HTTP URL (e.g. https://host/mcp)';
-    urlInput.value = server.url || '';
-    httpRow.appendChild(urlInput);
-
-    function syncTransportVisibility() {
-        const isStdio = transportSelect.value === 'stdio';
-        stdioRow.style.display = isStdio ? '' : 'none';
-        httpRow.style.display = isStdio ? 'none' : '';
-    }
-    transportSelect.addEventListener('change', syncTransportVisibility);
-    syncTransportVisibility();
-
-    row.appendChild(topRow);
-    row.appendChild(stdioRow);
-    row.appendChild(httpRow);
-    container.appendChild(row);
-}
-
 function collectSkillPaths() {
     const inputs = document.querySelectorAll('.cfg-skill-path-input');
     const values = [];
@@ -1714,54 +1710,12 @@ function collectSkillPaths() {
     return values;
 }
 
-function parseJsonField(raw, fallback, label) {
-    const text = (raw || '').trim();
-    if (!text) return fallback;
-    try {
-        return JSON.parse(text);
-    } catch (err) {
-        throw new Error(`Invalid ${label} JSON: ${err.message}`);
-    }
-}
-
-function collectMcpServers() {
-    const rows = document.querySelectorAll('#cfg-mcp-server-rows .config-dynamic-row');
-    const servers = [];
-    const seen = new Set();
-
-    rows.forEach(function(row) {
-        const name = ((row.querySelector('.cfg-mcp-name') || {}).value || '').trim();
-        if (!name || seen.has(name)) return;
-        const transport = ((row.querySelector('.cfg-mcp-transport') || {}).value || 'stdio').trim();
-        const timeoutRaw = ((row.querySelector('.cfg-mcp-timeout') || {}).value || '30').trim();
-        let timeout = parseInt(timeoutRaw, 10);
-        if (isNaN(timeout) || timeout <= 0) timeout = 30;
-
-        const entry = { name: name, transport: transport, timeout: timeout };
-        if (transport === 'stdio') {
-            entry.command = ((row.querySelector('.cfg-mcp-command') || {}).value || '').trim();
-            entry.args = parseJsonField((row.querySelector('.cfg-mcp-args') || {}).value, [], `${name} args`);
-            entry.env = parseJsonField((row.querySelector('.cfg-mcp-env') || {}).value, {}, `${name} env`);
-        } else {
-            entry.url = ((row.querySelector('.cfg-mcp-url') || {}).value || '').trim();
-        }
-        servers.push(entry);
-        seen.add(name);
-    });
-
-    return servers;
-}
-
 function serializeConfigCollections() {
     const skillPathsHidden = document.getElementById('cfg-skill-paths-json');
-    const mcpServersHidden = document.getElementById('cfg-mcp-servers-json');
     if (!skillPathsHidden) return true;
 
     try {
         skillPathsHidden.value = JSON.stringify(collectSkillPaths());
-        if (mcpServersHidden) {
-            mcpServersHidden.value = JSON.stringify(collectMcpServers());
-        }
         return true;
     } catch (err) {
         alert(err.message);
@@ -1769,16 +1723,41 @@ function serializeConfigCollections() {
     }
 }
 
+// Search-and-attach for skills and MCP servers; both save immediately.
+function initConfigCatalogs() {
+    if (!window.MemorizzCatalog) return;
+    MemorizzCatalog.mount(document.getElementById('cfg-skill-catalog'), {
+        onAttached: function(skill) {
+            if (!collectSkillPaths().includes(skill.path)) addSkillPathRow(skill.path);
+        },
+    });
+    MemorizzCatalog.mount(document.getElementById('cfg-mcp-catalog'), {
+        onAttached: function(server) {
+            const list = document.getElementById('cfg-mcp-servers');
+            if (!list) return;
+            list.querySelectorAll('.catalog-empty').forEach(function(el) { el.remove(); });
+            const item = document.createElement('li');
+            const label = document.createElement('span');
+            const name = document.createElement('strong');
+            name.textContent = server.name;
+            const where = document.createElement('span');
+            where.className = 'catalog-meta mono';
+            where.textContent = ' ' + (server.url || server.command || server.transport);
+            label.append(name, where);
+            const auth = document.createElement('span');
+            auth.className = 'catalog-meta';
+            auth.textContent = { oauth: 'Sign-in', bearer: 'Token' }[(server.auth || {}).type] || 'No auth';
+            item.append(label, auth);
+            list.appendChild(item);
+        },
+    });
+}
+document.addEventListener('DOMContentLoaded', initConfigCatalogs);
+
 function initConfigCollections() {
     if (Array.isArray(INITIAL_SKILL_PATHS) && INITIAL_SKILL_PATHS.length) {
         INITIAL_SKILL_PATHS.forEach(function(pathValue) {
             addSkillPathRow(pathValue);
-        });
-    }
-
-    if (Array.isArray(INITIAL_MCP_SERVERS) && INITIAL_MCP_SERVERS.length) {
-        INITIAL_MCP_SERVERS.forEach(function(server) {
-            addMcpServerRow(server || {});
         });
     }
 
@@ -1997,9 +1976,166 @@ function createThreadTab(memoryId, messageCount = 0) {
         useThreadMemoryId(memoryId);
     });
 
-    tabsContainer.prepend(btn);
+    const row = document.createElement('div');
+    row.className = 'pg-thread-row';
+    row.dataset.memoryId = memoryId;
+    row.appendChild(btn);
+    row.appendChild(pgThreadActions());
+    tabsContainer.prepend(row);
     return btn;
 }
+
+// ---------------------------------------------------------------------
+// Rename and delete a conversation from the list.
+// ---------------------------------------------------------------------
+
+const PG_ICON_RENAME = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+const PG_ICON_DELETE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>';
+
+function pgThreadActions() {
+    const actions = document.createElement('span');
+    actions.className = 'pg-thread-actions';
+    [['rename', 'Rename conversation', 'Rename', PG_ICON_RENAME, ''],
+     ['delete', 'Delete conversation', 'Delete', PG_ICON_DELETE, ' is-danger']].forEach(function(spec) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'pg-thread-action' + spec[4];
+        button.dataset.threadAction = spec[0];
+        button.setAttribute('aria-label', spec[1]);
+        button.title = spec[2];
+        button.innerHTML = spec[3];
+        actions.appendChild(button);
+    });
+    return actions;
+}
+
+function pgThreadUrl(memoryId) {
+    return `/api/agents/${encodeURIComponent(AGENT_ID)}/threads/${encodeURIComponent(memoryId)}`;
+}
+
+function pgActiveMemoryId() {
+    const memoryEl = document.getElementById('pg-memory-id');
+    return memoryEl ? (memoryEl.value || '').trim() : '';
+}
+
+function pgStartRename(row) {
+    const tab = row.querySelector('.playground-thread-tab');
+    const titleEl = tab && tab.querySelector('.thread-tab-title');
+    if (!titleEl || row.querySelector('.pg-thread-rename')) return;
+    const original = titleEl.textContent;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'pg-thread-rename';
+    input.value = original;
+    input.maxLength = 80;
+    input.setAttribute('aria-label', 'Conversation name');
+    // The field sits beside the tab, not in it: a button cannot hold an input.
+    tab.hidden = true;
+    row.classList.add('is-renaming');
+    tab.after(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async function(save) {
+        if (done) return;
+        done = true;
+        const title = input.value.trim();
+        input.remove();
+        tab.hidden = false;
+        row.classList.remove('is-renaming');
+        if (!save) tab.focus();
+        if (!save || title === original) return;
+        titleEl.textContent = title || original;
+        try {
+            const response = await fetch(pgThreadUrl(row.dataset.memoryId), {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({title: title}),
+            });
+            const body = await response.json().catch(function() { return {}; });
+            if (!response.ok || body.ok === false) throw new Error(body.detail || `HTTP ${response.status}`);
+            titleEl.textContent = body.title || original;
+        } catch (error) {
+            titleEl.textContent = original;
+            pgThreadNotice(row, `Could not rename: ${error.message}`);
+        }
+    };
+    input.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter') { event.preventDefault(); finish(true); }
+        else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false); }
+    });
+    input.addEventListener('blur', function() { finish(true); });
+}
+
+function pgThreadNotice(row, message) {
+    const notice = pgEl('p', 'pg-thread-confirm', message);
+    notice.setAttribute('role', 'status');
+    row.after(notice);
+    setTimeout(function() { notice.remove(); }, 4000);
+}
+
+function pgConfirmDelete(row) {
+    if (row.nextElementSibling && row.nextElementSibling.classList.contains('pg-thread-confirm')) return;
+    const memoryId = row.dataset.memoryId;
+    if (isStreaming && memoryId === pgActiveMemoryId()) {
+        pgThreadNotice(row, 'Stop the reply before deleting this conversation.');
+        return;
+    }
+    const title = (row.querySelector('.thread-tab-title') || {}).textContent || 'this conversation';
+    const confirm = document.createElement('div');
+    confirm.className = 'pg-thread-confirm';
+    confirm.setAttribute('role', 'group');
+    confirm.setAttribute('aria-label', 'Confirm delete');
+    const text = document.createElement('span');
+    text.textContent = `Delete “${title}” and its messages?`;
+    const yes = pgEl('button', 'btn btn-sm btn-danger', 'Delete');
+    yes.type = 'button';
+    const no = pgEl('button', 'btn btn-sm', 'Cancel');
+    no.type = 'button';
+    confirm.append(text, yes, no);
+    row.after(confirm);
+    no.addEventListener('click', function() { confirm.remove(); });
+    confirm.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') { event.stopPropagation(); confirm.remove(); }
+    });
+    yes.addEventListener('click', async function() {
+        yes.disabled = no.disabled = true;
+        yes.textContent = 'Deleting…';
+        try {
+            const response = await fetch(pgThreadUrl(memoryId), {method: 'DELETE'});
+            const body = await response.json().catch(function() { return {}; });
+            if (!response.ok || body.ok === false) throw new Error(body.detail || `HTTP ${response.status}`);
+            const wasActive = memoryId === pgActiveMemoryId();
+            const next = row.nextElementSibling === confirm ? confirm.nextElementSibling : row.nextElementSibling;
+            const previous = row.previousElementSibling;
+            confirm.remove();
+            row.remove();
+            if (wasActive) {
+                const fallback = [next, previous].find(function(el) { return el && el.classList.contains('pg-thread-row'); });
+                if (fallback) useThreadMemoryId(fallback.dataset.memoryId);
+                else startNewThread();
+            }
+        } catch (error) {
+            text.textContent = `Could not delete: ${error.message}`;
+            yes.disabled = no.disabled = false;
+            yes.textContent = 'Retry';
+        }
+    });
+    yes.focus();
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const list = document.getElementById('playground-thread-tabs');
+    if (!list) return;
+    list.addEventListener('click', function(event) {
+        const action = event.target.closest('[data-thread-action]');
+        if (!action) return;
+        const row = action.closest('.pg-thread-row');
+        if (!row) return;
+        event.stopPropagation();
+        if (action.dataset.threadAction === 'rename') pgStartRename(row);
+        else pgConfirmDelete(row);
+    });
+});
 
 function pgAgentName() {
     const app = document.getElementById('pg-app');
@@ -2408,6 +2544,8 @@ const PG_TOOL_REASONS = {
     invalid_tool_invocation: 'not callable here: undisclosed, unregistered in this process, or bad arguments',
     tool_budget_exhausted: 'per-turn tool budget used up',
     duplicate_tool_call: 'same call already succeeded this turn',
+    tool_not_disclosed: 'not shown to the model yet; shown now so it can retry',
+    unknown_tool: 'no tool has that name',
     tool_retry_limit: 'retry limit reached',
     approval_required: 'waiting for approval',
     provider_unavailable: 'tool provider unavailable',
@@ -2425,9 +2563,11 @@ function pgLiveActivity(messageEl, event) {
         list.appendChild(item);
     }
     const done = event.type === 'tool.completed';
-    const failed = done && event.status && !['success', 'completed', 'ok'].includes(String(event.status));
-    item.className = done ? (failed ? 'is-failed' : 'is-done') : 'is-running';
-    item.textContent = (done ? (failed ? 'Failed ' : 'Used ') : 'Using ') + event.tool_name;
+    // A call paused for approval has not failed; the approval card follows.
+    const waiting = done && String(event.status) === 'approval_required';
+    const failed = done && !waiting && event.status && !['success', 'completed', 'ok'].includes(String(event.status));
+    item.className = done ? (failed ? 'is-failed' : waiting ? 'is-running' : 'is-done') : 'is-running';
+    item.textContent = (done ? (failed ? 'Failed ' : waiting ? 'Waiting for approval: ' : 'Used ') : 'Using ') + event.tool_name;
     if (failed && event.reason_code) {
         const reason = document.createElement('span');
         reason.className = 'pg-live-reason';
@@ -2438,10 +2578,10 @@ function pgLiveActivity(messageEl, event) {
 }
 
 // Tokens and prompt-cache reuse for the turn, shown under the reply.
-function pgTurnFootnote(messageEl, usage) {
+function pgTurnFootnote(messageEl, usage, model) {
     if (!messageEl || !usage || !usage.calls) return;
     const parts = [
-        `${usage.calls} model call${usage.calls === 1 ? '' : 's'}`,
+        `${model ? model + ' · ' : ''}${usage.calls} model call${usage.calls === 1 ? '' : 's'}`,
         `${formatCacheCount(usage.input_tokens)} input · ${formatCacheCount(usage.output_tokens)} output tokens`,
     ];
     if (usage.read_percent != null) parts.push(`${usage.read_percent.toFixed(1)}% from prompt cache`);
@@ -2497,33 +2637,124 @@ function applyTokenStats(stats) {
     const percentageUsed = Math.max(0, Math.min(100, Number(stats.percentage_used) || 0));
     const messageCount = Number(stats.message_count) || 0;
     const composition = (stats && stats.composition) ? stats.composition : {};
+    const sentOf = Number(stats.thread_message_count) || 0;
 
     const tokenSummary = document.getElementById('token-summary');
     const tokenBarFill = document.getElementById('token-bar-fill');
     const tokenPercentage = document.getElementById('token-percentage');
     const tokenMessages = document.getElementById('token-messages');
-    const compInstruction = document.getElementById('token-comp-instruction');
-    const compPersona = document.getElementById('token-comp-persona');
-    const compTools = document.getElementById('token-comp-tools');
-    const compToolboxMemory = document.getElementById('token-comp-toolbox-memory');
-    const compWorkflowMemory = document.getElementById('token-comp-workflow-memory');
-    const compEntityMemory = document.getElementById('token-comp-entity-memory');
-    const compSummaryMemory = document.getElementById('token-comp-summary-memory');
-    const compHistory = document.getElementById('token-comp-history');
-
     if (tokenSummary) tokenSummary.textContent = `${formatCacheCount(totalTokens)} / ${formatCacheCount(contextWindowTokens)} tokens`;
     if (tokenBarFill) tokenBarFill.style.width = `${percentageUsed}%`;
     if (tokenPercentage) tokenPercentage.textContent = `${percentageUsed.toFixed(2)}% used`;
-    if (tokenMessages) tokenMessages.textContent = `${messageCount} message${messageCount === 1 ? '' : 's'}`;
-    if (compInstruction) compInstruction.textContent = `${formatCacheCount(composition.instruction)} tokens`;
-    if (compPersona) compPersona.textContent = `${formatCacheCount(composition.persona)} tokens`;
-    if (compTools) compTools.textContent = `${formatCacheCount(composition.tools)} tokens`;
-    if (compToolboxMemory) compToolboxMemory.textContent = `${formatCacheCount(composition.toolbox_memory)} tokens`;
-    if (compWorkflowMemory) compWorkflowMemory.textContent = `${formatCacheCount(composition.workflow_memory)} tokens`;
-    if (compEntityMemory) compEntityMemory.textContent = `${formatCacheCount(composition.entity_memory)} tokens`;
-    if (compSummaryMemory) compSummaryMemory.textContent = `${formatCacheCount(composition.summary_memory)} tokens`;
-    if (compHistory) compHistory.textContent = `${formatCacheCount(composition.history)} tokens`;
+    if (tokenMessages) tokenMessages.textContent = `${messageCount} of ${sentOf} message${sentOf === 1 ? '' : 's'} sent`;
+    const setComp = function(id, value) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = `${formatCacheCount(value)} tokens`;
+    };
+    setComp('token-comp-system', composition.system_prompt);
+    setComp('token-comp-tools', composition.tools);
+    setComp('token-comp-memory', composition.memory);
+    setComp('token-comp-history', composition.history);
+    const hint = document.getElementById('auto-compact-hint');
+    if (hint) {
+        hint.dataset.projected = String(Number(stats.projected_percentage) || 0);
+        hint.dataset.fixed = String(Number(stats.fixed_percentage) || 0);
+    }
+    const select = document.getElementById('auto-compact-at');
+    if (select && stats.compaction_available !== undefined) select.dataset.available = stats.compaction_available ? 'true' : 'false';
+    pgRenderCompactHint();
+    const modelNote = document.getElementById('token-model-note');
+    if (modelNote) {
+        const modelMax = Number(stats.model_context_tokens) || 0;
+        modelNote.hidden = !(modelMax > contextWindowTokens);
+        const nameEl = document.getElementById('token-model-name');
+        const maxEl = document.getElementById('token-model-max');
+        if (nameEl) nameEl.textContent = stats.model_name || '';
+        if (maxEl) maxEl.textContent = modelMax.toLocaleString();
+    }
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.querySelector('.playground-config-form');
+    const dirty = document.getElementById('cfg-dirty');
+    if (!form || !dirty) return;
+    const mark = function(event) {
+        // Catalog widgets save on their own; their search boxes are not edits.
+        if (event.target.closest('.catalog')) return;
+        dirty.hidden = false;
+    };
+    form.addEventListener('input', mark);
+    form.addEventListener('change', mark);
+    form.addEventListener('submit', function() { dirty.textContent = 'Saving…'; });
+});
+
+function pgEditContextWindow() {
+    openInspectorTab('settings');
+    const field = document.getElementById('cfg-context-window');
+    if (field && !field.disabled) {
+        field.scrollIntoView({block: 'center'});
+        field.focus();
+    }
+}
+
+// Auto-compaction threshold: saved on the agent; turning it on also turns on
+// summary memory, which compaction writes to.
+function pgRenderCompactHint() {
+    const select = document.getElementById('auto-compact-at');
+    const hint = document.getElementById('auto-compact-hint');
+    if (!select || !hint) return;
+    const value = Number(select.value) || 0;
+    const projected = Number(hint.dataset.projected) || 0;
+    if (!value) {
+        hint.textContent = 'Off: at 80% the oldest messages are dropped without a summary.';
+    } else if (select.dataset.available !== 'true') {
+        hint.textContent = `Summarizes older messages at ${value}%. Summary memory will be turned on for this agent.`;
+    } else {
+        hint.textContent = `Summarizes older messages when the next request would pass ${value}%, keeping the newest ones word for word. With the full history it would be ${projected.toFixed(0)}% now.`;
+    }
+    const fixed = Number(hint.dataset.fixed) || 0;
+    if (value && fixed >= value) {
+        hint.textContent += ` The prompt without any history already uses ${fixed.toFixed(0)}%, so this threshold compacts in batches every few turns; ${Math.min(80, Math.ceil((fixed + 10) / 10) * 10)}% or more suits this agent.`;
+    }
+}
+
+function pgShowMeasured(promptTokens) {
+    const el = document.getElementById('token-measured');
+    const summary = document.getElementById('token-summary');
+    if (!el || !promptTokens) return;
+    const windowText = summary ? summary.textContent.split('/')[1] : '';
+    const windowTokens = Number(String(windowText || '').replace(/[^0-9]/g, '')) || 0;
+    const share = windowTokens ? ` (${Math.round(promptTokens * 100 / windowTokens)}% of the window)` : '';
+    el.textContent = `Last request: ${formatCacheCount(promptTokens)} tokens, measured${share}.`;
+    el.hidden = false;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const select = document.getElementById('auto-compact-at');
+    if (!select) return;
+    pgRenderCompactHint();
+    let previous = select.value;
+    select.addEventListener('change', async function() {
+        const hint = document.getElementById('auto-compact-hint');
+        select.disabled = true;
+        try {
+            const response = await fetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/context-policy`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({compact_at: Number(select.value) || 0}),
+            });
+            const body = await response.json().catch(function() { return {}; });
+            if (!response.ok || body.ok === false) throw new Error((body && body.detail) || 'Could not save');
+            previous = select.value;
+            if (body.summary_memory) select.dataset.available = 'true';
+            pgRenderCompactHint();
+        } catch (error) {
+            select.value = previous;
+            if (hint) hint.textContent = `Not saved: ${error.message}`;
+        } finally {
+            select.disabled = false;
+        }
+    });
+});
 
 function updateThreadTabMeta(memoryId, messageCount, lastActivity) {
     const normalized = (memoryId || '').trim();
@@ -2628,6 +2859,7 @@ function useThreadMemoryId(memoryId, createIfMissing = false) {
     }
     setActiveThreadTab(normalized);
     renderThreadEmptyState(normalized);
+    if (window.pgHarnessAccess) window.pgHarnessAccess.render();
     void loadThreadMessages(normalized);
     const queryEl = document.getElementById('pg-query');
     if (queryEl) queryEl.focus();
@@ -2688,8 +2920,234 @@ function createStreamingMessage() {
     };
 }
 
+// Capability card: shown when the agent asks for a capability it lacks
+// (capability.requested) or the request clearly needs one
+// (capability.suggested). It reads live state each time it renders, so it
+// only offers what is actually missing and reflects each change at once.
+const PG_CAPABILITY_TIMEOUT_MS = 20000;
+
+async function pgCapabilityFetch(url, options) {
+    const response = await fetch(url, options);
+    let body = {};
+    try { body = await response.json(); } catch (_) { /* not JSON */ }
+    if (!response.ok || body.ok === false) {
+        const detail = body.detail;
+        throw new Error((detail && (detail.message || detail.error)) || (typeof detail === 'string' ? detail : '') || body.error || `Request failed (${response.status})`);
+    }
+    return body;
+}
+
+function renderCapabilityCard(messageContainer, ids, options) {
+    const body = messageContainer && messageContainer.querySelector('.pg-message-body');
+    if (!body || !ids || !ids.length) return;
+    const shown = new Set((messageContainer.dataset.capabilities || '').split(',').filter(Boolean));
+    const fresh = ids.filter(function(id) { return !shown.has(id); });
+    if (!fresh.length) return;
+    fresh.forEach(function(id) { shown.add(id); });
+    messageContainer.dataset.capabilities = Array.from(shown).join(',');
+
+    const card = document.createElement('div');
+    card.className = 'capability-card' + (options && options.suggested ? ' is-suggested' : '');
+    card.setAttribute('role', 'region');
+    card.setAttribute('aria-label', 'Enable a capability');
+    body.appendChild(card);
+    const query = (options && options.query) || '';
+    pgRenderCapabilities(card, fresh, options || {}, query);
+}
+
+async function pgRenderCapabilities(card, ids, options, query) {
+    let rows;
+    try {
+        const data = await pgCapabilityFetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/capabilities?ids=${encodeURIComponent(ids.join(','))}`);
+        rows = data.capabilities || [];
+    } catch (error) {
+        card.textContent = `Could not load the options to enable this: ${error.message}`;
+        return;
+    }
+    card.textContent = '';
+    rows.forEach(function(row) { card.appendChild(pgCapabilityRow(card, row, ids, options, query)); });
+}
+
+function pgEl(tag, className, text) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    if (text != null) el.textContent = text;
+    return el;
+}
+
+function pgCapabilityRow(card, row, ids, options, query) {
+    const section = pgEl('div', 'capability-row');
+    const rerender = function() { pgRenderCapabilities(card, ids, options, query); };
+    if (row.status === 'enabled') {
+        section.appendChild(pgEl('p', 'capability-title is-done', `${row.title} is on${row.via ? ` (${row.via})` : ''}.`));
+        if (query) {
+            const retry = pgEl('button', 'btn btn-primary btn-sm', 'Ask again');
+            retry.type = 'button';
+            retry.addEventListener('click', function() {
+                const input = document.getElementById('pg-query');
+                if (!input || isStreaming) return;
+                input.value = query;
+                sendMessage();
+            });
+            section.appendChild(retry);
+        }
+        return section;
+    }
+    const heading = row.status === 'needs_sign_in'
+        ? `${row.title} is connected (${row.via}) but not signed in.`
+        : options.suggested
+            ? `This looks like it needs ${row.title.toLowerCase()}, which isn't enabled for this agent.`
+            : `${row.title} isn't enabled for this agent.`;
+    section.appendChild(pgEl('p', 'capability-title', heading));
+    const actions = pgEl('div', 'capability-actions');
+    const status = pgEl('p', 'capability-status');
+    status.setAttribute('role', 'status');
+    (row.offers || []).forEach(function(offer) {
+        actions.appendChild(pgCapabilityOffer(row, offer, status, rerender));
+    });
+    section.append(actions, status);
+    return section;
+}
+
+function pgCapabilityOffer(row, offer, status, rerender) {
+    const enable = async function(payload, button) {
+        if (button) button.disabled = true;
+        status.textContent = 'Enabling…';
+        try {
+            await pgCapabilityFetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/capabilities/${encodeURIComponent(row.id)}/enable`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+            });
+            rerender();
+        } catch (error) {
+            status.textContent = error.message;
+            if (button) button.disabled = false;
+        }
+    };
+    const link = function(label, href) {
+        const a = pgEl('a', 'btn btn-sm', label);
+        a.href = href;
+        return a;
+    };
+    const agent = encodeURIComponent(AGENT_ID);
+    if (offer.kind === 'internet_provider') {
+        if (offer.key_set) {
+            const button = pgEl('button', 'btn btn-primary btn-sm', `Use ${offer.title}`);
+            button.type = 'button';
+            button.addEventListener('click', function() { enable({kind: offer.kind, provider: offer.provider}, button); });
+            return button;
+        }
+        const group = pgEl('div', 'capability-key');
+        const input = document.createElement('input');
+        input.type = 'password';
+        input.autocomplete = 'new-password';
+        input.placeholder = `${offer.title} API key`;
+        input.setAttribute('aria-label', `${offer.title} API key`);
+        const button = pgEl('button', 'btn btn-sm', `Use ${offer.title}`);
+        button.type = 'button';
+        button.addEventListener('click', function() {
+            const key = input.value.trim();
+            if (!key) { status.textContent = `Paste a ${offer.title} API key first.`; input.focus(); return; }
+            enable({kind: offer.kind, provider: offer.provider, api_key: key}, button);
+        });
+        input.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter') { event.preventDefault(); button.click(); }
+        });
+        const get = pgEl('a', 'capability-link', 'Get a key');
+        get.href = offer.signup_url; get.target = '_blank'; get.rel = 'noopener noreferrer';
+        group.append(input, button, get);
+        return group;
+    }
+    if (offer.kind === 'mcp_preset') {
+        const button = pgEl('button', 'btn btn-primary btn-sm', offer.title);
+        button.type = 'button';
+        button.title = offer.needs_client ? 'Needs a Google OAuth client, added on MCP connections before sign-in' : '';
+        button.addEventListener('click', function() { enable({kind: offer.kind}, button); });
+        return button;
+    }
+    if (offer.kind === 'mcp_sign_in') {
+        if (offer.needs_client) {
+            return link('Add OAuth client', `/mcp?agent_id=${agent}`);
+        }
+        const button = pgEl('button', 'btn btn-primary btn-sm', offer.title);
+        button.type = 'button';
+        button.addEventListener('click', async function() {
+            button.disabled = true;
+            status.textContent = 'Opening sign-in…';
+            try {
+                const body = await pgCapabilityFetch(`/api/mcp/agents/${agent}/servers/${encodeURIComponent(offer.server)}/authorize`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({return_to: window.location.pathname}),
+                });
+                if (body.authorization_url) { window.location.assign(body.authorization_url); return; }
+                status.textContent = body.already_authenticated ? 'Already signed in.' : (body.message || 'Sign-in did not start.');
+                rerender();
+            } catch (error) {
+                status.textContent = error.message;
+                button.disabled = false;
+            }
+        });
+        return button;
+    }
+    if (offer.kind === 'mcp_search') {
+        return link(offer.title, `/mcp?agent_id=${agent}&q=${encodeURIComponent(offer.query || '')}`);
+    }
+    if (offer.kind === 'setting') {
+        return link(offer.title, `/agents/${agent}/edit`);
+    }
+    return pgEl('span', '', '');
+}
+
+// Coming back from sign-in started on a capability card.
+document.addEventListener('DOMContentLoaded', function() {
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get('oauth');
+    const container = document.getElementById('playground-messages');
+    if (!outcome || !container) return;
+    const server = params.get('server') || 'the server';
+    const notice = pgEl('div', 'capability-card', outcome === 'success'
+        ? `Signed in to ${server}. Ask your question again.`
+        : outcome === 'pending'
+            ? `Sign-in to ${server} is still finishing. Try your question in a moment.`
+            : `Sign-in to ${server} failed. Check its OAuth client on MCP connections.`);
+    notice.setAttribute('role', 'status');
+    container.appendChild(notice);
+    params.delete('oauth'); params.delete('server');
+    const rest = params.toString();
+    window.history.replaceState(null, '', window.location.pathname + (rest ? `?${rest}` : ''));
+});
+
+// Plain words for the run stages the stream reports.
+const PG_STAGE_LABELS = {
+    preparing_agent: 'Preparing the agent…',
+    agent_ready: 'Agent ready',
+    context_ready: 'Gathering context…',
+    tool_phase: 'Working out what to do…',
+    provider_request: 'Thinking…',
+    provider_first_delta: 'Thinking…',
+    answer_generation: 'Writing the answer…',
+    compacting_context: 'Compacting older messages…',
+    mcp_tool_progress: 'Waiting for a tool…',
+    provider_retry: 'Asking the model again…',
+};
+
+async function pgLoadApprovalArguments(card, proposalId) {
+    const pre = card.querySelector('.pg-approval-args pre');
+    const hash = card.querySelector('.pg-approval-args code');
+    try {
+        const response = await fetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/approvals?status=pending&limit=100`);
+        const body = await response.json();
+        const match = (body.approvals || []).find(function(item) { return item.proposal_id === proposalId; });
+        if (!match) throw new Error('not found');
+        if (pre) pre.textContent = JSON.stringify(match.arguments || {}, null, 2);
+        if (hash && match.argument_hash) hash.textContent = match.argument_hash;
+    } catch (error) {
+        if (pre) pre.textContent = 'Could not load the arguments. Check them under Approvals before approving.';
+    }
+}
+
 function renderApprovalCard(messageContainer, payload) {
-    const proposal = payload && payload.proposal;
+    // Accepts the stream event ({proposal: ...}) or the proposal itself.
+    const proposal = payload && (payload.proposal || (payload.proposal_id ? payload : null));
     const body = messageContainer && messageContainer.querySelector('.pg-message-body');
     if (!proposal || !body) return;
 
@@ -2701,9 +3159,9 @@ function renderApprovalCard(messageContainer, payload) {
         <div><strong>Tool:</strong> <code>${escapeHtml(String(proposal.tool_name || 'unknown'))}</code></div>
         <div><strong>Policy:</strong> ${escapeHtml(String(proposal.policy_reason || 'Host approval required'))}</div>
         <div><strong>Expires:</strong> ${escapeHtml(String(proposal.expires_at || 'unknown'))}</div>
-        <details>
+        <details class="pg-approval-args" open>
             <summary>Exact arguments and digest</summary>
-            <pre>${escapeHtml(argsText)}</pre>
+            <pre>${escapeHtml(proposal.arguments ? argsText : 'Loading…')}</pre>
             <div><code>${escapeHtml(String(proposal.argument_hash || ''))}</code></div>
         </details>
         <div class="pg-approval-actions">
@@ -2718,6 +3176,9 @@ function renderApprovalCard(messageContainer, payload) {
     const rejectButton = card.querySelector('.pg-approval-reject');
     const status = card.querySelector('.pg-approval-status');
     const proposalId = String(proposal.proposal_id || '');
+    // The stream leaves arguments out of the event; show exactly what will be
+    // sent before anyone approves it.
+    if (!proposal.arguments && proposalId) void pgLoadApprovalArguments(card, proposalId);
 
     async function decide(action) {
         const approverId = window.prompt('Approver identity (email or operator ID):', 'local-ui');
@@ -2840,27 +3301,12 @@ function initTokenTooltip() {
     });
 }
 
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
+// Model output is untrusted: raw HTML in it shows as text (safe-markdown.js).
 function renderMarkdown(text) {
-    if (typeof marked === 'undefined' || !text || !text.trim()) {
+    if (!window.MemorizzMarkdown || !text || !text.trim()) {
         return escapeHtml(text || '');
     }
-    try {
-        marked.setOptions({
-            breaks: true,
-            gfm: true,
-            headerIds: false,
-            mangle: false,
-        });
-        return marked.parse(text);
-    } catch (e) {
-        return escapeHtml(text);
-    }
+    return window.MemorizzMarkdown.render(text);
 }
 
 async function compactContextWindow() {
@@ -2971,51 +3417,6 @@ function formatTraceContent(content) {
     } catch (err) {
         return text;
     }
-}
-
-function appendTraceBox(traceTimeline, traceEvent) {
-    if (!traceTimeline || !traceEvent || typeof traceEvent !== 'object') return;
-
-    const traceKind = String(traceEvent.trace_kind || traceEvent.kind || 'trace').toLowerCase();
-    const title = String(traceEvent.title || 'Trace');
-    const content = String(traceEvent.content || traceEvent.message || '').trim();
-    const traceId = String(traceEvent.trace_id || '').trim();
-    const appendMode = Boolean(traceEvent.append);
-    const outcomeMeta = traceOutcomeMeta(traceEvent);
-
-    if (!content && !appendMode) return;
-
-    let item = null;
-    if (traceId) {
-        item = Array.from(traceTimeline.querySelectorAll('.pg-trace-item')).find(function(node) {
-            return (node.dataset.traceId || '') === traceId;
-        }) || null;
-    }
-
-    if (appendMode && item) {
-        const contentEl = item.querySelector('.pg-trace-content');
-        if (content && contentEl) {
-            contentEl.textContent += content;
-        }
-        if (traceEvent.complete) {
-            item.classList.add('is-complete');
-        }
-        scrollToBottom();
-        return;
-    }
-
-    item = document.createElement('div');
-    item.className = `pg-trace-item pg-trace-item--${traceKind}${outcomeMeta ? ` pg-trace-item--outcome-${outcomeMeta.status}` : ''}`;
-    if (traceId) item.dataset.traceId = traceId;
-    const outcomeBadge = outcomeMeta
-        ? `<span class="pg-trace-outcome pg-trace-outcome--${outcomeMeta.status}">${escapeHtml(outcomeMeta.label)}</span>`
-        : '';
-    item.innerHTML = `
-        <div class="pg-trace-title">${escapeHtml(title)}${outcomeBadge}</div>
-        <div class="pg-trace-content">${escapeHtml(formatTraceContent(content))}</div>
-    `;
-    traceTimeline.appendChild(item);
-    scrollToBottom();
 }
 
 function setLoading(loading) {
@@ -3168,7 +3569,7 @@ function renderChip(chipId, data) {
 
     chip.innerHTML = `
         ${iconMarkup}
-        <span class="pg-kb-chip-name">${escapeChipHtml(filename)}</span>
+        <span class="pg-kb-chip-name">${escapeHtml(filename)}</span>
         <span class="pg-kb-chip-size">${bytes != null ? fmtBytes(bytes) : ''}</span>
         <button type="button" class="pg-kb-chip-remove" aria-label="Remove">×</button>
     `;
@@ -3209,12 +3610,6 @@ function kbBubbleAppend(bubbleId, text, variant) {
     const textEl = node.querySelector('.pg-kb-event-text');
     if (textEl) textEl.textContent = text;
     container.scrollTop = container.scrollHeight;
-}
-
-function escapeChipHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    })[c]);
 }
 
 function updateChip(chipId, patch) {
@@ -3300,16 +3695,16 @@ function renderKnowledgeBasePanel(container, entries) {
         return;
     }
     const items = entries.map(item => {
-        const ns = escapeChipHtml(item.namespace || 'knowledge');
+        const ns = escapeHtml(item.namespace || 'knowledge');
         const ts = item.timestamp
-            ? `<span class="context-summary-time">${escapeChipHtml(String(item.timestamp))}</span>`
+            ? `<span class="context-summary-time">${escapeHtml(String(item.timestamp))}</span>`
             : '';
         const preview = item.content_preview
-            ? `<div class="context-summary-content">${escapeChipHtml(item.content_preview)}</div>`
+            ? `<div class="context-summary-content">${escapeHtml(item.content_preview)}</div>`
             : '';
         const idSuffix = item.knowledge_base_id ? String(item.knowledge_base_id).slice(0, 8) : '';
         const meta = item.content_length
-            ? `<div class="context-toolbox-time">${item.content_length} chars · id ${escapeChipHtml(idSuffix)}</div>`
+            ? `<div class="context-toolbox-time">${item.content_length} chars · id ${escapeHtml(idSuffix)}</div>`
             : '';
         return `
             <div class="context-summary-item">
@@ -3426,6 +3821,9 @@ async function sendMessage() {
         setActiveThreadTab(newMemoryId);
     }
 
+    // A thread load still in flight (e.g. right after New chat) must not
+    // redraw the chat over this turn; the load after the reply refreshes it.
+    threadLoadSequence++;
     appendMessage('user', query);
     queryEl.value = '';
     pgAutosize();
@@ -3487,6 +3885,11 @@ async function sendMessage() {
         if (instructionInput && instructionInput.value.trim()) {
             formData.append('instruction', instructionInput.value.trim());
         }
+        if (window.pgHarnessAccess) {
+            const access = await window.pgHarnessAccess.forSend(memoryEl.value.trim());
+            if (access.grant) formData.append('harness_grant', access.grant);
+            if (access.workspace) formData.append('harness_workspace', access.workspace);
+        }
 
         // Create AbortController for this request
         currentAbortController = new AbortController();
@@ -3502,24 +3905,38 @@ async function sendMessage() {
         }
 
         // One ordered SDK contract; never append tool/private candidate text.
-        let runId = null, sequence = 0;
+        let runId = null, sequence = 0, lastPromptTokens = 0, answeringModel = null;
         await readSseStream(response, (payload) => {
             const event = JSON.parse(payload);
             if (event.version !== 1 || (runId && event.run_id !== runId) || event.seq !== sequence + 1) {
                 throw new Error('Invalid stream sequence');
             }
             runId = event.run_id; sequence = event.seq;
-            if (event.memory_id) memoryEl.value = event.memory_id;
+            if (event.memory_id) {
+                if (window.pgHarnessAccess) window.pgHarnessAccess.adopt(memoryEl.value.trim(), event.memory_id);
+                memoryEl.value = event.memory_id;
+            }
+            if (event.type === 'status' && event.scope === 'harness_access' && window.pgHarnessAccess) {
+                window.pgHarnessAccess.warn(event.message, event.grant_expired);
+            }
+            if (event.capabilities && event.capabilities.model) answeringModel = event.capabilities.model;
             if (event.type === 'answer.delta') {
                 fullText += event.delta;
                 schedulePaint();
             } else if (event.type === 'answer.done') {
                 paint(true);
                 showStatus('Answer ready — saving conversation…');
+            } else if (event.type === 'usage') {
+                lastPromptTokens = Math.max(lastPromptTokens, Number((event.usage || {}).prompt_tokens) || 0);
+            } else if (event.type === 'context.compacted') {
+                const note = pgEl('p', 'pg-compact-note', `Compacted ${event.messages} older message${event.messages === 1 ? '' : 's'} into a summary (${formatCacheCount(event.tokens_before)} → ${formatCacheCount(event.tokens_after)} tokens of history and prompt).`);
+                const body = streamMessage.container.querySelector('.pg-message-body');
+                if (body) body.prepend(note);
             } else if (event.type === 'run.done') {
+                pgShowMeasured(lastPromptTokens);
                 paint(true);
                 renderLastTurnCache(event.usage);
-                pgTurnFootnote(streamMessage.container, event.usage);
+                pgTurnFootnote(streamMessage.container, event.usage, answeringModel);
                 const failedWrites = Object.values(event.persistence || {}).includes('failed');
                 showStatus(event.status === 'completed'
                     ? (failedWrites ? 'Answer complete; a state write failed.' : '')
@@ -3528,7 +3945,11 @@ async function sendMessage() {
                 renderApprovalCard(streamMessage.container, event.proposal || event);
                 showStatus('Execution paused for approval.');
             } else if (event.type === 'status') {
-                showStatus(event.message || String(event.stage || '').replaceAll('_', ' '));
+                showStatus(event.message || PG_STAGE_LABELS[event.stage] || String(event.stage || '').replaceAll('_', ' '));
+            } else if (event.type === 'capability.requested') {
+                renderCapabilityCard(streamMessage.container, [event.capability], {query: query});
+            } else if (event.type === 'capability.suggested') {
+                renderCapabilityCard(streamMessage.container, event.capabilities || [], {suggested: true, query: query});
             } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
                 showStatus((event.type === 'tool.started' ? 'Running ' : 'Finished ') + event.tool_name);
                 pgLiveActivity(streamMessage.container, event);
@@ -3566,6 +3987,133 @@ async function sendMessage() {
         loadAgentPromptCache();
     }
 }
+
+// Harness delegates: the folder and access they may use in this conversation.
+// A grant (web access, edits or a chosen folder) is created once and sent with
+// each message; without one, each conversation gets its own fresh folder.
+window.pgHarnessAccess = document.getElementById('pg-hx') ? (function() {
+    const card = document.getElementById('pg-hx');
+    const form = document.getElementById('pg-hx-form');
+    const message = document.getElementById('pg-hx-message');
+    const approver = document.getElementById('pg-hx-approver');
+    const APPROVER_KEY = 'memorizz.harness.approver';
+    const keyFor = (memoryId) => 'memorizz.pg.hx.' + AGENT_ID + '.' + (memoryId || 'new');
+    const memoryId = () => (document.getElementById('pg-memory-id').value || '').trim();
+    const read = (memory) => { try { return JSON.parse(sessionStorage.getItem(keyFor(memory)) || 'null'); } catch (_) { return null; } };
+    const write = (memory, value) => { try { if (value) sessionStorage.setItem(keyFor(memory), JSON.stringify(value)); else sessionStorage.removeItem(keyFor(memory)); } catch (_) {} };
+    const say = (text, bad) => { message.textContent = text || ''; message.classList.toggle('is-bad', !!bad); };
+    const describe = (permissions) => {
+        const parts = [permissions.network === 'full' ? 'web access' : 'no web', permissions.workspace_mode === 'direct' ? 'edits' : 'read only'];
+        return parts.join(' · ');
+    };
+    const shortFolder = (path) => { const parts = String(path || '').split('/').filter(Boolean); return parts.length ? '…/' + parts.slice(-2).join('/') : 'fresh folder'; };
+    async function request(url, options) {
+        const response = await fetch(url, Object.assign({headers: {'Content-Type': 'application/json'}}, options || {}));
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Request failed (' + response.status + ')');
+        return body;
+    }
+    function render() {
+        const state = read(memoryId());
+        const grant = state && state.grant;
+        const active = document.getElementById('pg-hx-active');
+        active.hidden = !grant;
+        let summary = 'Fresh folder · no web';
+        if (grant) {
+            document.getElementById('pg-hx-active-folder').textContent = grant.workspace;
+            document.getElementById('pg-hx-active-access').textContent = describe(grant.permissions || {});
+            document.getElementById('pg-hx-active-approver').textContent = grant.approver_id || '—';
+            document.getElementById('pg-hx-active-until').textContent = grant.expires_at ? new Date(grant.expires_at).toLocaleString() : '—';
+            summary = shortFolder(grant.workspace) + ' · ' + describe(grant.permissions || {});
+        } else if (state && state.workspace) {
+            summary = shortFolder(state.workspace) + ' · no web';
+        }
+        document.getElementById('pg-hx-state').textContent = summary;
+        const chip = document.getElementById('pg-hx-chip');
+        if (chip) chip.textContent = 'Delegates · ' + summary;
+    }
+    async function check() {
+        // A grant kept from earlier may have expired since.
+        const memory = memoryId();
+        const state = read(memory);
+        if (!state || !state.grant) return;
+        try {
+            const body = await request('/api/agents/' + encodeURIComponent(AGENT_ID) + '/harness-access/' + encodeURIComponent(state.grant.grant_id));
+            write(memory, Object.assign({}, state, {grant: body.grant}));
+        } catch (_) {
+            write(memory, Object.assign({}, state, {grant: null}));
+            say('The access you allowed earlier has expired. Allow it again to use it.', true);
+        }
+        render();
+    }
+    form.addEventListener('submit', async function(event) {
+        event.preventDefault();
+        const network = document.getElementById('pg-hx-network').value;
+        const edits = document.getElementById('pg-hx-write').checked;
+        const name = approver.value.trim();
+        if ((network === 'full' || edits) && !name) { say('Give your name to approve web access or edits.', true); approver.focus(); return; }
+        const button = document.getElementById('pg-hx-allow');
+        button.disabled = true;
+        say('Allowing…');
+        try {
+            const body = await request('/api/agents/' + encodeURIComponent(AGENT_ID) + '/harness-access', {
+                method: 'POST',
+                body: JSON.stringify({workspace: document.getElementById('pg-hx-workspace').value.trim(), network: network, write: edits, approver_id: name}),
+            });
+            if (name) { try { localStorage.setItem(APPROVER_KEY, name); } catch (_) {} }
+            const memory = memoryId();
+            write(memory, Object.assign({}, read(memory) || {}, {grant: body.grant}));
+            say('Allowed for this conversation. Harness delegates use it from your next message.');
+            render();
+        } catch (error) {
+            say(error.message, true);
+        } finally {
+            button.disabled = false;
+        }
+    });
+    document.getElementById('pg-hx-clear').addEventListener('click', function() {
+        const memory = memoryId();
+        write(memory, Object.assign({}, read(memory) || {}, {grant: null}));
+        say('Stopped. Harness delegates go back to this conversation\u2019s own folder without web access.');
+        render();
+    });
+    try { approver.value = localStorage.getItem(APPROVER_KEY) || ''; } catch (_) {}
+    render();
+    void check();
+    return {
+        render: render,
+        // What to send with a message: the grant, else this conversation's folder.
+        forSend: async function(memory) {
+            const state = read(memory) || {};
+            if (state.grant) return {grant: state.grant.grant_id, workspace: state.workspace || ''};
+            if (!state.workspace) {
+                try {
+                    const body = await request('/api/agents/' + encodeURIComponent(AGENT_ID) + '/harness-workspace', {method: 'POST', body: '{}'});
+                    state.workspace = body.workspace;
+                    write(memory, state);
+                    render();
+                } catch (error) {
+                    say('Could not make a folder for harness delegates: ' + error.message, true);
+                }
+            }
+            return {grant: '', workspace: state.workspace || ''};
+        },
+        // A new conversation gets its memory ID with the first reply.
+        adopt: function(before, after) {
+            if (!after || before === after) return;
+            const state = read(before);
+            if (state && !read(after)) { write(after, state); write(before, null); }
+        },
+        warn: function(text, expired) {
+            if (expired) {
+                const memory = memoryId();
+                write(memory, Object.assign({}, read(memory) || {}, {grant: null}));
+                render();
+            }
+            say(text, true);
+        },
+    };
+})() : null;
 
 // Enter to send, Shift+Enter for newline
 document.getElementById('pg-query').addEventListener('keydown', function(e) {

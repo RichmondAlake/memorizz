@@ -1,0 +1,501 @@
+/* Compare harness runs (harness-compare.js): facts, a shared timeline and the
+   trajectories side by side, in a full-width dialog. */
+
+/* Step kinds. Three validated categorical hues (all-pairs CVD-safe in both
+   modes); subagents are an outlined bracket, not a fourth hue. */
+.hxcmp {
+    --cmp-model: #3987e5;
+    --cmp-tool: #d95926;
+    --cmp-command: #199e70;
+    --cmp-row: 14px;
+    width: min(1400px, calc(100vw - 32px));
+    max-width: none;
+    max-height: calc(100vh - 32px);
+    margin: auto;
+    padding: 0;
+    overflow: auto;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+body.theme-light .hxcmp {
+    --cmp-model: #2a78d6;
+    --cmp-tool: #eb6834;
+    --cmp-command: #1baf7a;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+
+.hxcmp::backdrop {
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.hxcmp-head {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 16px 20px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.hxcmp-head h2 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.hxcmp-task {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.hxcmp-status:empty {
+    display: none;
+}
+
+.hxcmp-status,
+.hxcmp > .hxcmp-note {
+    margin: 10px 20px 0;
+    font-size: 12px;
+}
+
+.hxcmp-section {
+    padding: 14px 20px 6px;
+}
+
+.hxcmp-section h3 {
+    margin: 0 0 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.hxcmp-muted {
+    color: var(--text-muted);
+}
+
+.hxcmp-note {
+    margin: 8px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.hxcmp-key {
+    display: inline-grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    flex: none;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 50%;
+    font-size: 10.5px;
+    font-weight: 600;
+    vertical-align: middle;
+}
+
+/* ---------- At a glance ---------- */
+.hxcmp-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+}
+
+.hxcmp-facts {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.hxcmp-facts th,
+.hxcmp-facts td {
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.hxcmp-facts tbody tr:last-child > * {
+    border-bottom: 0;
+}
+
+.hxcmp-facts thead th {
+    color: var(--text-primary);
+    background: var(--bg-card);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.hxcmp-facts tbody th {
+    width: 1%;
+    color: var(--text-muted);
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.hxcmp-facts small {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 11.5px;
+}
+
+.hxcmp-best {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    color: var(--accent-secondary);
+    background: color-mix(in srgb, var(--accent-secondary) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent-secondary) 40%, transparent);
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* ---------- Timeline ---------- */
+.hxcmp-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin: 0;
+    padding: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    list-style: none;
+}
+
+.hxcmp-legend li {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.hxcmp-swatch {
+    position: static;
+    display: inline-block;
+    width: 18px;
+    height: 10px;
+    border-radius: 3px;
+}
+
+.hxcmp-swatch-tick {
+    display: inline-block;
+    width: 8px;
+    height: 10px;
+}
+
+.hxcmp-swatch-end {
+    display: inline-block;
+    width: 2px;
+    height: 14px;
+    background: var(--text-secondary);
+}
+
+.hxcmp-scroll {
+    margin-top: 10px;
+    overflow-x: auto;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+}
+
+.hxcmp-timeline {
+    min-width: 640px;
+    padding: 6px 0 10px;
+}
+
+.hxcmp-axis,
+.hxcmp-lane {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr);
+    align-items: stretch;
+}
+
+.hxcmp-lane {
+    border-top: 1px solid var(--border-subtle);
+}
+
+.hxcmp-lane-label {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 6px;
+    align-content: flex-start;
+    align-items: center;
+    padding: 8px 10px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-subtle);
+    font-size: 12.5px;
+}
+
+.hxcmp-lane-label small {
+    width: 100%;
+    color: var(--text-muted);
+    font-family: var(--console-mono, ui-monospace, monospace);
+    font-size: 11px;
+}
+
+.hxcmp-axis .hxcmp-lane-label {
+    padding: 0;
+    border-right-color: transparent;
+}
+
+.hxcmp-axis-track {
+    position: relative;
+    height: 20px;
+    margin: 0 44px 0 12px;
+}
+
+.hxcmp-axis-tick {
+    position: absolute;
+    top: 2px;
+    color: var(--text-muted);
+    font-family: var(--console-mono, ui-monospace, monospace);
+    font-size: 10.5px;
+    white-space: nowrap;
+    transform: translateX(-50%);
+}
+
+.hxcmp-lane-track {
+    position: relative;
+    min-height: calc(18px + var(--rows) * var(--cmp-row));
+    margin: 8px 44px 8px 12px;
+}
+
+.hxcmp-ticks {
+    position: relative;
+    height: 12px;
+}
+
+.hxcmp-bars {
+    position: relative;
+    height: calc(var(--rows) * var(--cmp-row));
+    margin-top: 4px;
+}
+
+.hxcmp-bar {
+    position: absolute;
+    top: calc(var(--row) * var(--cmp-row));
+    min-width: 3px;
+    height: 10px;
+    border-radius: 3px;
+    box-shadow: 0 0 0 1px var(--bg-secondary);
+    cursor: default;
+}
+
+.hxcmp-bar--model { background: var(--cmp-model); }
+.hxcmp-bar--tool { background: var(--cmp-tool); }
+/* A tool call answered from the MemAgent tool cache: an outline, wide enough to see. */
+.hxcmp-bar.is-cached { background: transparent; border: 1.5px dashed var(--cmp-tool); min-width: 8px; }
+.hxcmp-swatch.is-cached { background: transparent; border: 1.5px dashed var(--cmp-tool); }
+.hxcmp-bar--command { background: var(--cmp-command); }
+
+.hxcmp-bar--subagent {
+    background: transparent;
+    border: 1.5px solid var(--text-secondary);
+    border-bottom-width: 0;
+    border-radius: 4px 4px 0 0;
+    box-shadow: none;
+}
+
+.hxcmp-bar.is-inner {
+    height: 6px;
+    margin-top: 2px;
+    border-radius: 2px;
+}
+
+.hxcmp-bar.is-error {
+    outline: 1.5px solid var(--accent-danger);
+    outline-offset: 1px;
+}
+
+.hxcmp-bar.is-running:not(.hxcmp-bar--subagent) {
+    background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.28) 0 4px, transparent 4px 8px);
+    background-size: 12px 12px;
+    animation: hxcmp-running 0.8s linear infinite;
+}
+
+.hxcmp-bar:hover {
+    z-index: 1;
+    filter: brightness(1.2);
+    box-shadow: 0 0 0 2px var(--text-primary);
+}
+
+@keyframes hxcmp-running {
+    to { background-position: 12px 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hxcmp-bar.is-running { animation: none; }
+}
+
+.hxcmp-tick {
+    position: absolute;
+    top: 2px;
+    width: 2px;
+    height: 10px;
+    border-radius: 1px;
+    transform: translateX(-1px);
+}
+
+.hxcmp-tick--thinking,
+.hxcmp-swatch-tick.hxcmp-tick--thinking { background: var(--text-muted); height: 7px; top: 5px; }
+.hxcmp-tick--message,
+.hxcmp-swatch-tick.hxcmp-tick--message { width: 7px; height: 7px; top: 4px; background: var(--text-secondary); border-radius: 50%; transform: translateX(-3px); }
+.hxcmp-tick--file { background: var(--accent-secondary); }
+.hxcmp-tick--error { background: var(--accent-danger); }
+
+.hxcmp-swatch-tick.hxcmp-tick--thinking,
+.hxcmp-swatch-tick.hxcmp-tick--message {
+    position: static;
+    transform: none;
+}
+
+.hxcmp-swatch-tick.hxcmp-tick--thinking {
+    width: 2px;
+}
+
+.hxcmp-end {
+    position: absolute;
+    top: -4px;
+    bottom: -4px;
+    width: 2px;
+    background: var(--text-secondary);
+    transform: translateX(-1px);
+}
+
+.hxcmp-end.is-bad { background: var(--accent-danger); }
+.hxcmp-end.is-running { background: var(--accent-primary); }
+
+.hxcmp-end > span {
+    position: absolute;
+    top: -2px;
+    left: 5px;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    white-space: nowrap;
+}
+
+/* ---------- Answers and steps ---------- */
+.hxcmp-cols {
+    display: grid;
+    grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+    gap: 12px;
+    padding-bottom: 14px;
+}
+
+.hxcmp-col {
+    min-width: 0;
+    padding: 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+}
+
+.hxcmp-col > header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+}
+
+.hxcmp-model {
+    padding: 0 6px;
+    color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    font-size: 11px;
+}
+
+.hxcmp-col h4 {
+    margin: 12px 0 6px;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.hxcmp-answer {
+    max-height: 260px;
+    padding: 8px 10px;
+    overflow: auto;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.hxcmp-answer > :first-child { margin-top: 0; }
+.hxcmp-answer > :last-child { margin-bottom: 0; }
+.hxcmp-answer table { border-collapse: collapse; font-size: 12.5px; }
+.hxcmp-answer th,
+.hxcmp-answer td { padding: 3px 8px; border: 1px solid var(--border-subtle); }
+
+.hxcmp-plain {
+    margin: 0;
+    white-space: pre-wrap;
+}
+
+.hxcmp-error {
+    margin: 0 0 8px;
+    color: var(--accent-danger);
+}
+
+.hxcmp-traj {
+    max-height: 520px;
+    overflow: auto;
+}
+
+@media (max-width: 900px) {
+    .hxcmp-cols { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 640px) {
+    .hxcmp {
+        width: calc(100vw - 16px);
+        max-height: calc(100dvh - 16px);
+    }
+    .hxcmp-head,
+    .hxcmp-section { padding-left: 12px; padding-right: 12px; }
+    .hxcmp-axis,
+    .hxcmp-lane { grid-template-columns: 104px minmax(0, 1fr); }
+}
+
+/* Narrow screens: facts scroll sideways inside their box with labels pinned. */
+.hxcmp-facts td,
+.hxcmp-facts thead th:not(:first-child) {
+    min-width: 170px;
+}
+
+.hxcmp-facts .mono {
+    white-space: nowrap;
+}
+
+.hxcmp-facts tbody th,
+.hxcmp-facts thead th:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--bg-secondary);
+}
+
+.hxcmp-facts thead th:first-child {
+    background: var(--bg-card);
+}

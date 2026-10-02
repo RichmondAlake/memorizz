@@ -4,12 +4,14 @@
 
 """Playground pages, chat streaming, and thread APIs.
 
-Extracted verbatim from ``ui/app.py``: GET /playground (agent selector), GET
-/agents/{agent_id}/playground, POST /agents/{agent_id}/playground/stream, POST
-/agents/{agent_id}/playground/compact, GET /agents/{agent_id}/playground/thread,
-and POST /agents/{agent_id}/playground/config, plus the thread-memory
-serializers, loaders, and token-stat builders used only by these routes. Route
-paths, response classes, template context keys, and behavior are unchanged.
+GET /playground (agent selector), GET /agents/{agent_id}/playground, POST
+/agents/{agent_id}/playground/stream, POST /agents/{agent_id}/playground/compact,
+GET /agents/{agent_id}/playground/thread, POST
+/agents/{agent_id}/playground/config, the thread APIs, and the access an
+agent's harness delegates may use from the playground (POST
+/api/agents/{agent_id}/harness-access, GET .../harness-access/{grant_id}, POST
+/api/agents/{agent_id}/harness-workspace), plus the thread-memory serializers,
+loaders, and token-stat builders used only by these routes.
 
 Agent instances are loaded per request via ``MemAgent.load`` — there is no
 module-level agent cache, so lifetime semantics are identical to the inline
@@ -44,6 +46,7 @@ from ..helpers import (
     _coerce_timestamp,
     _extract_agent_tools,
     _get_default_llm_model,
+    _json_object,
     _list_agents,
     _load_agent_knowledge_base,
     _load_agent_last_run_map,
@@ -199,61 +202,19 @@ def _serialize_workflow_memory_item(document: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _load_thread_toolbox_memory(
-    agent_id: str, memory_id: str, limit: Optional[int] = None
-) -> List[Dict[str, str]]:
-    """Load toolbox-memory rows relevant to the active agent thread."""
-    provider = _state.get("provider")
-    normalized_agent_id = _to_text(agent_id).strip()
-    normalized_memory_id = _to_text(memory_id).strip()
-    if not provider or not normalized_agent_id:
-        return []
-
-    try:
-        from ...enums.memory_type import MemoryType
-
-        documents = provider.list_all(MemoryType.TOOLBOX) or []
-    except Exception as exc:
-        logger.debug(
-            "Failed to load toolbox memory for agent %s thread %s: %s",
-            normalized_agent_id,
-            normalized_memory_id,
-            exc,
-        )
-        return []
-
-    filtered: List[Dict[str, str]] = []
-    for doc in documents:
-        if not isinstance(doc, dict):
-            continue
-
-        doc_agent_id = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
-        if doc_agent_id and doc_agent_id != normalized_agent_id:
-            continue
-
-        doc_memory_id = _to_text(doc.get("memory_id") or doc.get("memoryId")).strip()
-        if not doc_agent_id and not doc_memory_id:
-            continue
-        if normalized_memory_id:
-            if doc_memory_id and doc_memory_id != normalized_memory_id:
-                continue
-        elif doc_memory_id:
-            continue
-
-        filtered.append(_serialize_toolbox_memory_item(doc))
-
-    filtered.sort(
-        key=lambda item: _coerce_timestamp(item.get("timestamp")) or 0.0, reverse=True
-    )
-    if limit and limit > 0:
-        return filtered[:limit]
-    return filtered
-
-
-def _load_thread_workflow_memory(
-    agent_id: str, memory_id: str, limit: Optional[int] = None
+def _load_thread_memory(
+    memory_type: Any,
+    serialize: Any,
+    label: str,
+    agent_id: str,
+    memory_id: str,
+    limit: Optional[int] = None,
+    *,
+    require_memory_id: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Load workflow-memory rows relevant to the active agent thread."""
+    """Rows of one memory type relevant to the active agent thread, newest
+    first. Rows of another agent or another thread are left out; with
+    ``require_memory_id``, so are rows naming no thread when one is active."""
     provider = _state.get("provider")
     normalized_agent_id = _to_text(agent_id).strip()
     normalized_memory_id = _to_text(memory_id).strip()
@@ -261,12 +222,11 @@ def _load_thread_workflow_memory(
         return []
 
     try:
-        from ...enums.memory_type import MemoryType
-
-        documents = provider.list_all(MemoryType.WORKFLOW_MEMORY) or []
+        documents = provider.list_all(memory_type) or []
     except Exception as exc:
         logger.debug(
-            "Failed to load workflow memory for agent %s thread %s: %s",
+            "Failed to load %s memory for agent %s thread %s: %s",
+            label,
             normalized_agent_id,
             normalized_memory_id,
             exc,
@@ -288,12 +248,12 @@ def _load_thread_workflow_memory(
         if normalized_memory_id:
             if doc_memory_id and doc_memory_id != normalized_memory_id:
                 continue
-            if not doc_memory_id:
+            if require_memory_id and not doc_memory_id:
                 continue
         elif doc_memory_id:
             continue
 
-        filtered.append(_serialize_workflow_memory_item(doc))
+        filtered.append(serialize(doc))
 
     filtered.sort(
         key=lambda item: _coerce_timestamp(item.get("timestamp")) or 0.0, reverse=True
@@ -301,6 +261,42 @@ def _load_thread_workflow_memory(
     if limit and limit > 0:
         return filtered[:limit]
     return filtered
+
+
+def _load_thread_memories(
+    agent_id: str, memory_id: str
+) -> Dict[str, List[Dict[str, Any]]]:
+    """The thread-scoped memory the playground shows beside a conversation."""
+    from ...enums.memory_type import MemoryType
+
+    return {
+        "toolbox": _load_thread_memory(
+            MemoryType.TOOLBOX,
+            _serialize_toolbox_memory_item,
+            "toolbox",
+            agent_id,
+            memory_id,
+            require_memory_id=False,
+        ),
+        "workflow": _load_thread_memory(
+            MemoryType.WORKFLOW_MEMORY,
+            _serialize_workflow_memory_item,
+            "workflow",
+            agent_id,
+            memory_id,
+        ),
+        "entity": _load_thread_entity_memory(
+            agent_id=agent_id, memory_id=memory_id, limit=None
+        ),
+        "summary": _load_thread_memory(
+            MemoryType.SUMMARIES,
+            _serialize_summary_memory_item,
+            "summary",
+            agent_id,
+            memory_id,
+        ),
+        "tool_log": _load_thread_tool_log_memory(memory_id=memory_id, limit=20),
+    }
 
 
 def _serialize_skill_memory_item(document: Dict[str, Any]) -> Dict[str, Any]:
@@ -555,59 +551,6 @@ def _serialize_summary_memory_item(document: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _load_thread_summary_memory(
-    agent_id: str, memory_id: str, limit: Optional[int] = None
-) -> List[Dict[str, Any]]:
-    """Load summary-memory rows relevant to the active agent thread."""
-    provider = _state.get("provider")
-    normalized_agent_id = _to_text(agent_id).strip()
-    normalized_memory_id = _to_text(memory_id).strip()
-    if not provider or not normalized_agent_id:
-        return []
-
-    try:
-        from ...enums.memory_type import MemoryType
-
-        documents = provider.list_all(MemoryType.SUMMARIES) or []
-    except Exception as exc:
-        logger.debug(
-            "Failed to load summary memory for agent %s thread %s: %s",
-            normalized_agent_id,
-            normalized_memory_id,
-            exc,
-        )
-        return []
-
-    filtered: List[Dict[str, Any]] = []
-    for doc in documents:
-        if not isinstance(doc, dict):
-            continue
-
-        doc_agent_id = _to_text(doc.get("agent_id") or doc.get("agentId")).strip()
-        if doc_agent_id and doc_agent_id != normalized_agent_id:
-            continue
-
-        doc_memory_id = _to_text(doc.get("memory_id") or doc.get("memoryId")).strip()
-        if not doc_agent_id and not doc_memory_id:
-            continue
-        if normalized_memory_id:
-            if doc_memory_id and doc_memory_id != normalized_memory_id:
-                continue
-            if not doc_memory_id:
-                continue
-        elif doc_memory_id:
-            continue
-
-        filtered.append(_serialize_summary_memory_item(doc))
-
-    filtered.sort(
-        key=lambda item: _coerce_timestamp(item.get("timestamp")) or 0.0, reverse=True
-    )
-    if limit and limit > 0:
-        return filtered[:limit]
-    return filtered
-
-
 def _load_thread_tool_log_memory(
     memory_id: str, limit: Optional[int] = 20
 ) -> List[Dict[str, Any]]:
@@ -831,6 +774,81 @@ def _parse_trace_bundle_payload(raw_content: Any) -> Optional[List[Dict[str, str
     return events
 
 
+def _agent_context_window(agent: Any) -> int:
+    """The budget the agent really uses, not a generic 128k guess."""
+    from ...memagent.persistence import _saved_context_cap
+
+    live_window = getattr(agent, "_context_window_tokens", None)
+    if type(live_window) is int and live_window > 0:
+        return live_window
+    # A stored record's cap only counts where MemAgent.load would restore it.
+    cap = _saved_context_cap(agent, getattr(agent, "llm_config", None))
+    if type(cap) is int and cap > 0:
+        return cap
+    model = getattr(agent, "model", None)
+    if model is None or not hasattr(model, "get_context_window_tokens"):
+        # A stored record: build its provider the way MemAgent.load would.
+        llm_config = getattr(agent, "llm_config", None)
+        if isinstance(llm_config, dict) and llm_config.get("provider"):
+            try:
+                from ...llms.llm_factory import create_llm_provider
+
+                model = create_llm_provider(dict(llm_config))
+            except Exception:
+                model = None
+    if model is not None and hasattr(model, "get_context_window_tokens"):
+        try:
+            value = model.get_context_window_tokens()
+            if type(value) is int and value > 0:
+                return value
+        except Exception:
+            pass
+    return 128000
+
+
+def _model_label(agent: Any) -> Optional[str]:
+    model = getattr(agent, "model", None)
+    name = getattr(model, "model", None) if model is not None else None
+    if isinstance(name, str):
+        return name
+    config = getattr(agent, "llm_config", None)
+    return (
+        str(config.get("model"))
+        if isinstance(config, dict) and config.get("model")
+        else None
+    )
+
+
+def _model_max_context(live: Any) -> Optional[int]:
+    """The model's own context length, when the provider can report it."""
+    model = getattr(live, "model", None)
+    if type(model).__name__ != "OllamaLLM":
+        return None
+    try:
+        from ...llms.ollama import _model_context_length
+
+        return _model_context_length(model.client, model._host, model.model)
+    except Exception:
+        return None
+
+
+def _live_agent(agent: Any) -> Any:
+    """A MemAgent for a stored record, so estimates match what it sends."""
+    if agent is None or hasattr(agent, "_build_system_prompt"):
+        return agent
+    agent_id = getattr(agent, "agent_id", None)
+    provider = _state.get("provider")
+    if not agent_id or provider is None:
+        return None
+    try:
+        from ...memagent import MemAgent
+
+        return MemAgent.load(agent_id, memory_provider=provider)
+    except Exception as exc:
+        logger.debug("Could not load agent %s for context stats: %s", agent_id, exc)
+        return None
+
+
 def _build_token_stats(
     agent,
     context_window: List[Dict[str, Any]],
@@ -839,125 +857,86 @@ def _build_token_stats(
     entity_memory: Optional[List[Dict[str, Any]]] = None,
     summary_memory: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Estimate token usage based on current agent data and loaded context data."""
+    """Estimate the next request the way the agent builds it.
 
-    def estimate_tokens(text: str) -> int:
-        return len(text.split()) if text else 0
+    Counts the system prompt, tool schemas, memory context and the history
+    the agent would send after trimming, using the agent's own estimator.
+    Trace records shown in the thread and summarized messages are never sent,
+    so they are not counted; the toolbox rows are copies of the tools.
+    """
+    from ...conversation_history import is_trace_bundle_entry
+    from ...enums.memory_type import MemoryType
+    from ...memagent.managers.memory_manager import MemoryManager
+    from ...memagent.utils.prompt_budget import estimate_tokens
 
-    def estimate_collection_tokens(items: Optional[List[Dict[str, Any]]]) -> int:
-        if not items:
-            return 0
-        total = 0
-        for item in items:
-            if isinstance(item, dict):
-                parts: List[str] = []
-                for value in item.values():
-                    if value is None:
-                        continue
-                    if isinstance(value, (dict, list)):
-                        try:
-                            parts.append(json.dumps(value, ensure_ascii=False))
-                        except Exception:
-                            parts.append(_to_text(value))
-                    else:
-                        parts.append(_to_text(value))
-                total += estimate_tokens(" ".join(parts))
-            elif isinstance(item, list):
-                total += estimate_tokens(" ".join(_to_text(v) for v in item))
-            else:
-                total += estimate_tokens(_to_text(item))
-        return total
+    live = _live_agent(agent)
+    window = _agent_context_window(live if live is not None else agent)
 
-    instruction_tokens = estimate_tokens(str(getattr(agent, "instruction", "") or ""))
-
-    persona = getattr(agent, "persona", None)
-    persona_text = ""
-    if persona:
-        if isinstance(persona, dict):
-            persona_text = (
-                f"{persona.get('name', '')} {persona.get('role', '')} "
-                f"{persona.get('background', '')} {persona.get('goals', '')}"
-            )
-        else:
-            persona_text = (
-                f"{getattr(persona, 'name', '')} {getattr(persona, 'role', '')} "
-                f"{getattr(persona, 'background', '')} {getattr(persona, 'goals', '')}"
-            )
-    persona_tokens = estimate_tokens(persona_text)
-
-    tools = getattr(agent, "tools", None) or []
-    tools_text = " ".join([str(t) for t in tools]) if tools else ""
-    tools_tokens = estimate_tokens(tools_text)
-
-    context_window_size = getattr(agent, "context_window_tokens", None) or 128000
-
-    history_for_estimate = list(context_window or [])
-    if agent and history_for_estimate and hasattr(agent, "_prepare_history_messages"):
+    rows = [
+        row
+        for row in context_window or []
+        if isinstance(row, dict)
+        and row.get("role") in {"user", "assistant"}
+        and not is_trace_bundle_entry(row)
+        and not MemoryManager._is_summarized_message(row)
+    ]
+    if live is not None:
+        system_prompt = _to_text(live._build_system_prompt())
         try:
-            system_prompt = ""
-            if hasattr(agent, "_build_system_prompt"):
-                system_prompt = _to_text(agent._build_system_prompt())
-            prepared = agent._prepare_history_messages(
-                history_for_estimate, system_prompt, ""
-            )
-            if isinstance(prepared, list) and prepared:
-                history_for_estimate = prepared
+            sent = live._prepare_history_messages(rows, system_prompt, "")
         except Exception:
-            history_for_estimate = list(context_window or [])
-    elif history_for_estimate:
-        # Keep token estimates aligned with runtime prompt construction even when
-        # we only have the persisted MemAgentModel (not a live MemAgent instance).
-        history_limit = 60
-        if context_window_size >= 200000:
-            history_limit = 120
-        elif context_window_size >= 100000:
-            history_limit = 100
-        elif context_window_size >= 64000:
-            history_limit = 80
-        elif context_window_size >= 16000:
-            history_limit = 40
-        else:
-            history_limit = 24
-        history_for_estimate = history_for_estimate[-history_limit:]
+            sent = rows
+    else:
+        system_prompt = str(getattr(agent, "instruction", "") or "")
+        sent = rows[-40:]
 
-    history_tokens = 0
-    for msg in history_for_estimate:
-        content = msg.get("content") or msg.get("text") or ""
-        history_tokens += estimate_tokens(str(content))
+    def history_cost(messages: List[Dict[str, Any]]) -> int:
+        return sum(
+            estimate_tokens(_to_text(message.get("content") or "")) + 6
+            for message in messages
+        )
 
-    toolbox_tokens = estimate_collection_tokens(toolbox_memory)
-    workflow_tokens = estimate_collection_tokens(workflow_memory)
-    entity_tokens = estimate_collection_tokens(entity_memory)
-    summary_tokens = estimate_collection_tokens(summary_memory)
+    def memory_cost(items: Optional[List[Dict[str, Any]]]) -> int:
+        return estimate_tokens(items) if items else 0
 
-    total_tokens = (
-        instruction_tokens
-        + persona_tokens
-        + tools_tokens
-        + toolbox_tokens
-        + workflow_tokens
-        + entity_tokens
-        + summary_tokens
-        + history_tokens
+    system_tokens = estimate_tokens(system_prompt)
+    tools_tokens = live._estimated_tool_tokens() if live is not None else 0
+    memory_tokens = (
+        memory_cost(entity_memory)
+        + memory_cost(summary_memory)
+        + memory_cost(workflow_memory)
     )
-    percentage_used = (
-        (total_tokens / context_window_size) * 100 if context_window_size > 0 else 0
+    history_tokens = history_cost(sent)
+    total_tokens = system_tokens + tools_tokens + memory_tokens + history_tokens
+    projected_tokens = total_tokens - history_tokens + history_cost(rows)
+
+    policy = getattr(live, "context_policy", None)
+    compact_at = int(getattr(policy, "compact_at", 0) or 0)
+    compaction_available = bool(
+        live is not None and MemoryType.SUMMARIES in live.active_memory_types
     )
+
+    def share(tokens: int) -> float:
+        return round(tokens * 100 / window, 2) if window > 0 else 0
 
     return {
         "total_tokens": total_tokens,
-        "context_window_tokens": context_window_size,
-        "percentage_used": round(percentage_used, 2),
-        "message_count": len(history_for_estimate),
-        "thread_message_count": len(context_window or []),
+        "context_window_tokens": window,
+        "percentage_used": share(total_tokens),
+        "projected_tokens": projected_tokens,
+        "projected_percentage": share(projected_tokens),
+        # What compaction cannot shrink: the prompt without any history.
+        "fixed_percentage": share(total_tokens - history_tokens),
+        "message_count": len(sent),
+        "thread_message_count": len(rows),
+        "compact_at": compact_at,
+        "compaction_available": compaction_available,
+        "model_name": _model_label(live if live is not None else agent),
+        "model_context_tokens": _model_max_context(live),
         "composition": {
-            "instruction": instruction_tokens,
-            "persona": persona_tokens,
+            "system_prompt": system_tokens,
             "tools": tools_tokens,
-            "toolbox_memory": toolbox_tokens,
-            "workflow_memory": workflow_tokens,
-            "entity_memory": entity_tokens,
-            "summary_memory": summary_tokens,
+            "memory": memory_tokens,
             "history": history_tokens,
         },
     }
@@ -1004,87 +983,67 @@ def _parse_skill_paths_json(
     return paths, None
 
 
-def _parse_mcp_servers_json(
-    value: Optional[str],
-) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """Parse MCP server JSON payload from Playground config."""
-    if value is None:
-        return None, None
-    raw = str(value).strip()
-    if not raw:
-        return [], None
-    try:
-        parsed = json.loads(raw)
-    except Exception as exc:
-        return None, f"Invalid MCP servers JSON: {exc}"
-    if not isinstance(parsed, list):
-        return None, "MCP servers JSON must be an array."
+def _harness_delegates(agent: Any) -> List[str]:
+    """Labels of the delegates an agent hands work to that run their turns
+    on a harness ("Codex researcher (codex)"); empty when it delegates
+    nothing to harnesses."""
+    from ...metaharness.catalog import agent_name_of, delegates_work, harness_backing
 
-    normalized: List[Dict[str, Any]] = []
-    seen_names = set()
-    for index, item in enumerate(parsed):
-        if not isinstance(item, dict):
-            return None, f"MCP server entry {index + 1} must be an object."
-
-        name = str(item.get("name", "")).strip()
-        if not name:
-            return None, f"MCP server entry {index + 1} is missing 'name'."
-        if name in seen_names:
-            return None, f"MCP server name '{name}' is duplicated."
-
-        transport = str(item.get("transport", "stdio")).strip().lower() or "stdio"
-        if transport not in {"stdio", "http"}:
-            return None, (
-                f"MCP server '{name}' has unsupported transport '{transport}'. "
-                "Use 'stdio' or 'http'."
-            )
-
-        server: Dict[str, Any] = {"name": name, "transport": transport}
-        timeout = item.get("timeout")
-        if timeout not in (None, ""):
+    if agent is None or not delegates_work(agent):
+        return []
+    provider = _state.get("provider")
+    labels = []
+    for entry in getattr(agent, "delegates", None) or []:
+        delegate = entry
+        if isinstance(entry, str):
             try:
-                timeout_value = int(timeout)
+                delegate = provider.retrieve_memagent(entry) if provider else None
             except Exception:
-                return None, f"MCP server '{name}' has invalid timeout value."
-            server["timeout"] = max(1, min(timeout_value, 300))
-        else:
-            server["timeout"] = 30
+                delegate = None
+        backing = harness_backing(delegate) if delegate is not None else None
+        if backing:
+            labels.append(f"{agent_name_of(delegate)} ({backing['harness']})")
+    return labels
 
-        if transport == "stdio":
-            command = str(item.get("command", "")).strip()
-            if not command:
-                return (
-                    None,
-                    f"MCP server '{name}' requires a command for stdio transport.",
+
+def _harness_service():
+    from ..state import get_meta_harness
+
+    try:
+        return get_meta_harness()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _harness_parent(
+    service: Any, agent_id: str, grant_id: str, workspace: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """What a playground turn gives its harness delegates: the access grant
+    the page holds, else the conversation's own folder. Returns the parent
+    and a warning for the page when the grant or folder can't be used."""
+    warning = None
+    if grant_id:
+        grant = service.delegate_access(grant_id, agent_id=agent_id)
+        if grant is not None:
+            return grant, None
+        warning = (
+            "The access you allowed for harness delegates has expired; "
+            "allow it again in the inspector."
+        )
+    if workspace:
+        from ...metaharness.security import resolve_workspace
+
+        try:
+            if service.is_scratch_workspace(workspace):
+                folder = str(resolve_workspace(workspace))
+            else:
+                folder = str(
+                    resolve_workspace(workspace, service.allowed_workspace_roots)
                 )
-            server["command"] = command
-            args = item.get("args", [])
-            if args is None:
-                args = []
-            if not isinstance(args, list):
-                return None, f"MCP server '{name}' field 'args' must be an array."
-            server["args"] = [str(arg) for arg in args if str(arg).strip()]
-            env = item.get("env", {})
-            if env is None:
-                env = {}
-            if not isinstance(env, dict):
-                return None, f"MCP server '{name}' field 'env' must be an object."
-            server["env"] = {
-                str(key): str(val) for key, val in env.items() if str(key).strip()
-            }
-            cwd = str(item.get("cwd", "")).strip()
-            if cwd:
-                server["cwd"] = cwd
-        else:
-            url = str(item.get("url", "")).strip()
-            if not url:
-                return None, f"MCP server '{name}' requires 'url' for http transport."
-            server["url"] = url
-
-        normalized.append(server)
-        seen_names.add(name)
-
-    return normalized, None
+            return {"workspace": folder}, warning
+        except Exception as exc:
+            warning = warning or f"Harness delegates can't use that folder: {exc}"
+    return None, warning
 
 
 @router.get("/playground", response_class=HTMLResponse)
@@ -1184,30 +1143,12 @@ async def agent_playground(
             context_window.sort(
                 key=lambda row: _coerce_timestamp(row.get("timestamp")) or 0.0
             )
-            toolbox_memory = _load_thread_toolbox_memory(
-                agent_id=agent_id,
-                memory_id=default_memory_id,
-                limit=None,
-            )
-            workflow_memory = _load_thread_workflow_memory(
-                agent_id=agent_id,
-                memory_id=default_memory_id,
-                limit=None,
-            )
-            entity_memory = _load_thread_entity_memory(
-                agent_id=agent_id,
-                memory_id=default_memory_id,
-                limit=None,
-            )
-            summary_memory = _load_thread_summary_memory(
-                agent_id=agent_id,
-                memory_id=default_memory_id,
-                limit=None,
-            )
-            tool_log_memory = _load_thread_tool_log_memory(
-                memory_id=default_memory_id,
-                limit=20,
-            )
+            thread_memory = _load_thread_memories(agent_id, default_memory_id)
+            toolbox_memory = thread_memory["toolbox"]
+            workflow_memory = thread_memory["workflow"]
+            entity_memory = thread_memory["entity"]
+            summary_memory = thread_memory["summary"]
+            tool_log_memory = thread_memory["tool_log"]
         # Knowledge base entries are agent-scoped, not thread-scoped.
         knowledge_base_memory = _load_agent_knowledge_base(agent)
         # Learned skills are agent-scoped, not thread-scoped.
@@ -1243,6 +1184,9 @@ async def agent_playground(
         or llm_config.get("deployment_name")
         or _get_default_llm_model(llm_provider)
     )
+    llm_context_window = llm_config.get("context_window_tokens")
+    if type(llm_context_window) is not int or llm_context_window <= 0:
+        llm_context_window = ""
     instruction = getattr(agent, "instruction", "") or "" if agent else ""
     max_steps = getattr(agent, "max_steps", 20) if agent else 20
 
@@ -1339,6 +1283,16 @@ async def agent_playground(
         if _to_text(path).strip()
     )
 
+    harness_delegates = _harness_delegates(agent)
+    harness_roots: List[str] = []
+    if harness_delegates:
+        from ..state import get_meta_harness
+
+        try:
+            harness_roots = list(get_meta_harness().allowed_workspace_roots or [])
+        except Exception:
+            harness_roots = []
+
     return templates.TemplateResponse(
         "playground.html",
         {
@@ -1362,6 +1316,7 @@ async def agent_playground(
             # Config fields
             "llm_provider": llm_provider,
             "llm_model": llm_model,
+            "llm_context_window": llm_context_window,
             "instruction": instruction,
             "max_steps": max_steps,
             "sandbox_provider": sandbox_provider,
@@ -1398,6 +1353,8 @@ async def agent_playground(
             ).strip(),
             "threads": threads,
             "default_memory_id": default_memory_id,
+            "harness_delegates": harness_delegates,
+            "harness_roots": harness_roots,
         },
     )
 
@@ -1417,6 +1374,10 @@ async def agent_playground_stream(request: Request, agent_id: str):
     # Allow runtime overrides from the playground config panel
     override_model = str(form.get("llm_model", "")).strip() or None
     override_instruction = str(form.get("instruction", "")).strip() or None
+    # What this agent's harness delegates may use: an access grant from the
+    # inspector, else the conversation's own folder.
+    harness_grant = str(form.get("harness_grant", "")).strip()
+    harness_workspace = str(form.get("harness_workspace", "")).strip()
 
     if not query:
         raise HTTPException(status_code=400, detail="No query provided")
@@ -1654,7 +1615,29 @@ async def agent_playground_stream(request: Request, agent_id: str):
                 scope="persona",
                 message="Persona tools unavailable",
             )
-        return agent_instance, {"user_id": user_id} if user_id else {}
+        run_kwargs: Dict[str, Any] = {"user_id": user_id} if user_id else {}
+        if (harness_grant or harness_workspace) and _harness_delegates(agent_instance):
+            parent, warning = None, None
+            try:
+                from ..state import get_meta_harness
+
+                parent, warning = _harness_parent(
+                    get_meta_harness(), agent_id, harness_grant, harness_workspace
+                )
+            except Exception as exc:
+                warning = f"Harness delegates are unavailable: {exc}"
+            if warning:
+                session.emit(
+                    "status",
+                    stage="configuration_warning",
+                    scope="harness_access",
+                    message=warning,
+                    grant_expired=bool(harness_grant)
+                    and not (parent or {}).get("grant_id"),
+                )
+            if parent:
+                run_kwargs["tool_context"] = {"harness_parent": parent}
+        return agent_instance, run_kwargs
 
     def finalize(session):
         current_memory_id = session.identity["memory_id"]
@@ -1732,6 +1715,215 @@ async def agent_playground_stream(request: Request, agent_id: str):
     )
 
 
+@router.post("/api/agents/{agent_id}/harness-access")
+async def agent_harness_access_grant(request: Request, agent_id: str):
+    """Let this agent's harness delegates use a folder, the web or edits in
+    the playground. Web access and edits need an approver's name."""
+    if not _state["provider"]:
+        raise HTTPException(status_code=400, detail="Not connected")
+    body = await _json_object(request)
+    network = str(body.get("network") or "none").strip().lower()
+    if network not in {"none", "full"}:
+        raise HTTPException(status_code=400, detail="network must be none or full")
+    write = body.get("write", False)
+    if not isinstance(write, bool):
+        raise HTTPException(status_code=400, detail="write must be true or false")
+    approver = str(body.get("approver_id") or "").strip()
+    if (network == "full" or write) and not approver:
+        raise HTTPException(
+            status_code=400,
+            detail="Give your name to approve web access or edits for harness delegates",
+        )
+    workspace = str(body.get("workspace") or "").strip()
+    agent = await run_in_threadpool(_state["provider"].retrieve_memagent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if not await run_in_threadpool(_harness_delegates, agent):
+        raise HTTPException(
+            status_code=400, detail="This agent has no delegates that run on a harness"
+        )
+    service = _harness_service()
+    try:
+        grant = await run_in_threadpool(
+            lambda: service.grant_delegate_access(
+                agent_id=agent_id,
+                approver_id=approver or "playground",
+                workspace=workspace,
+                network=network,
+                write=write,
+            )
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        from ...metaharness.security import HarnessSecurityError
+
+        if isinstance(exc, HarnessSecurityError):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise
+    return {"ok": True, "grant": grant}
+
+
+@router.get("/api/agents/{agent_id}/harness-access/{grant_id}")
+async def agent_harness_access_status(agent_id: str, grant_id: str):
+    """A grant while it holds; 404 once it expired or belongs to another agent."""
+    grant = await run_in_threadpool(
+        _harness_service().delegate_access, grant_id, agent_id=agent_id
+    )
+    if grant is None:
+        raise HTTPException(status_code=404, detail="This access has expired")
+    return {"ok": True, "grant": grant}
+
+
+@router.post("/api/agents/{agent_id}/harness-workspace")
+async def agent_harness_workspace(agent_id: str):
+    """A fresh folder for one conversation's harness delegates, so they never
+    work in the folder the UI runs from."""
+    if not _state["provider"]:
+        raise HTTPException(status_code=400, detail="Not connected")
+    service = _harness_service()
+    folder = await run_in_threadpool(service.scratch_workspace)
+    return {"ok": True, "workspace": folder}
+
+
+@router.post("/api/agents/{agent_id}/threads/{memory_id}")
+async def agent_rename_thread(request: Request, agent_id: str, memory_id: str):
+    """Name a conversation; an empty title goes back to its first question."""
+    from ..helpers import _load_agent, _save_agent_fields
+
+    agent = _load_agent(agent_id)
+    if memory_id not in (getattr(agent, "memory_ids", None) or []):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    payload = await _json_object(request, required=False)
+    title = " ".join(str(payload.get("title") or "").split())[:80]
+    titles = dict(getattr(agent, "thread_titles", None) or {})
+    if title:
+        titles[memory_id] = title
+    else:
+        titles.pop(memory_id, None)
+    _save_agent_fields(agent, thread_titles=titles or None)
+    return {"ok": True, "memory_id": memory_id, "title": title or None}
+
+
+def _delete_conversation(
+    provider: Any, agent_id: str, memory_id: str
+) -> Dict[str, int]:
+    """Delete one conversation's messages, summaries and tool logs."""
+    from ...enums.memory_type import MemoryType
+    from ...memagent.managers.memory_manager import MemoryManager
+
+    def row_id(row: Dict[str, Any]) -> Optional[str]:
+        value = row.get("_id") or row.get("id")
+        return str(value) if value else None
+
+    def mine(row: Dict[str, Any]) -> bool:
+        owner = row.get("agent_id")
+        return not owner or str(owner) == agent_id
+
+    counts = {"messages": 0, "summaries": 0, "tool_logs": 0}
+    rows = provider.retrieve_conversation_history_ordered_by_timestamp(
+        memory_id=memory_id
+    )
+    for row in rows or []:
+        if isinstance(row, dict) and mine(row) and row_id(row):
+            if provider.delete_by_id(row_id(row), MemoryType.CONVERSATION_MEMORY):
+                counts["messages"] += 1
+    manager = MemoryManager(provider)
+    for summary in manager.load_summaries_for_thread(
+        memory_id=memory_id, agent_id=agent_id, limit=1000
+    ):
+        # The loader also returns the agent's summaries of other
+        # conversations; delete only this one's.
+        if summary.get("memory_id") != memory_id:
+            continue
+        if summary.get("summary_id") and provider.delete_by_id(
+            summary["summary_id"], MemoryType.SUMMARIES
+        ):
+            counts["summaries"] += 1
+    for log in manager.list_tool_logs(memory_id, limit=1000) or []:
+        if not isinstance(log, dict) or not mine(log):
+            continue
+        # Some stores key tool logs by tool_log_id rather than _id.
+        for candidate in dict.fromkeys((row_id(log), log.get("tool_log_id"))):
+            if candidate and provider.delete_by_id(str(candidate), MemoryType.TOOL_LOG):
+                counts["tool_logs"] += 1
+                break
+    return counts
+
+
+@router.delete("/api/agents/{agent_id}/threads/{memory_id}")
+async def agent_delete_thread(agent_id: str, memory_id: str):
+    """Delete a conversation: its messages, summaries and tool logs."""
+    from ..helpers import _load_agent, _save_agent_fields
+
+    agent = _load_agent(agent_id)
+    memory_ids = list(getattr(agent, "memory_ids", None) or [])
+    if memory_id not in memory_ids:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    titles = dict(getattr(agent, "thread_titles", None) or {})
+    titles.pop(memory_id, None)
+    # Leave the list first, so a failure below never shows a half-deleted
+    # conversation; the rows are then removed.
+    _save_agent_fields(
+        agent,
+        memory_ids=[item for item in memory_ids if item != memory_id],
+        thread_titles=titles or None,
+    )
+    try:
+        counts = await run_in_threadpool(
+            _delete_conversation, _state["provider"], agent_id, memory_id
+        )
+    except Exception as exc:
+        logger.error("Deleting conversation %s failed: %s", memory_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail="The conversation was removed from the list, "
+            "but some of its messages could not be deleted",
+        ) from exc
+    return {"ok": True, "memory_id": memory_id, "deleted": counts}
+
+
+@router.post("/api/agents/{agent_id}/context-policy")
+async def agent_context_policy(request: Request, agent_id: str):
+    """Change when the agent compacts its context (``compact_at``, percent).
+
+    Compaction stores summaries, so a threshold also turns on summary memory.
+    """
+    from ...enums.memory_type import MemoryType
+    from ...tooling import ContextPolicy
+    from ..helpers import _load_agent, _save_agent_fields
+
+    agent = _load_agent(agent_id)
+    payload = await _json_object(request, required=False)
+    if "compact_at" not in payload:
+        raise HTTPException(status_code=400, detail="compact_at is required")
+    try:
+        compact_at = int(payload["compact_at"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400, detail="compact_at must be a number"
+        ) from exc
+    current = getattr(agent, "context_policy", None) or {}
+    policy = ContextPolicy.from_value(
+        {**(current if isinstance(current, dict) else {}), "compact_at": compact_at}
+    )
+    fields: Dict[str, Any] = {"context_policy": policy.to_dict()}
+    memory_types = [
+        str(getattr(item, "value", item))
+        for item in getattr(agent, "memory_types", None) or []
+    ]
+    summaries = MemoryType.SUMMARIES.value
+    if policy.compact_at and memory_types and summaries not in memory_types:
+        fields["memory_types"] = memory_types + [summaries]
+    _save_agent_fields(agent, **fields)
+    return {
+        "ok": True,
+        "context_policy": policy.to_dict(),
+        "summary_memory": not memory_types
+        or summaries in (fields.get("memory_types") or memory_types),
+    }
+
+
 @router.post("/agents/{agent_id}/playground/compact")
 async def agent_playground_compact(request: Request, agent_id: str):
     """Compact/summarize the context window for the given agent thread."""
@@ -1756,11 +1948,17 @@ async def agent_playground_compact(request: Request, agent_id: str):
         if memory_id:
             agent_instance._current_memory_id = memory_id
 
-        # Use the agent's generate_summaries method
+        # Same as auto-compaction: the newest messages stay word for word.
+        keep = int(agent_instance.context_policy.keep_recent_messages)
         summary_ids = await run_in_threadpool(
             agent_instance.generate_summaries,
-            days_back=1,
-            max_memories_per_summary=20,
+            days_back=36500,
+            max_memories_per_summary=200,
+            memory_id=memory_id,
+            user_id=agent_instance._current_user_id,
+            thread_id=agent_instance._current_thread_id,
+            keep_recent=keep,
+            summary_type="compaction",
         )
 
         return JSONResponse(
@@ -1842,31 +2040,13 @@ async def agent_playground_thread(agent_id: str, memory_id: str = ""):
         )
 
     serialized = [_serialize_thread_message(msg) for msg in messages]
-    toolbox_memory = _load_thread_toolbox_memory(
-        agent_id=agent_id,
-        memory_id=requested_memory_id,
-        limit=None,
-    )
-    workflow_memory = _load_thread_workflow_memory(
-        agent_id=agent_id,
-        memory_id=requested_memory_id,
-        limit=None,
-    )
+    thread_memory = _load_thread_memories(agent_id, requested_memory_id)
+    toolbox_memory = thread_memory["toolbox"]
+    workflow_memory = thread_memory["workflow"]
     skill_memory = _load_thread_skill_memory(agent_id)
-    entity_memory = _load_thread_entity_memory(
-        agent_id=agent_id,
-        memory_id=requested_memory_id,
-        limit=None,
-    )
-    summary_memory = _load_thread_summary_memory(
-        agent_id=agent_id,
-        memory_id=requested_memory_id,
-        limit=None,
-    )
-    tool_log_memory = _load_thread_tool_log_memory(
-        memory_id=requested_memory_id,
-        limit=20,
-    )
+    entity_memory = thread_memory["entity"]
+    summary_memory = thread_memory["summary"]
+    tool_log_memory = thread_memory["tool_log"]
     token_stats = _build_token_stats(
         agent,
         messages,
@@ -1894,7 +2074,10 @@ async def agent_playground_thread(agent_id: str, memory_id: str = ""):
         "summary_memory": summary_memory,
         "tool_log_memory": tool_log_memory,
         "token_stats": token_stats,
-        "message_count": len(serialized),
+        # Same count as the conversation list: messages, not run traces.
+        "message_count": sum(
+            1 for row in serialized if row.get("message_type") != "trace_bundle"
+        ),
         "last_activity": last_activity,
     }
 
@@ -1904,8 +2087,6 @@ async def agent_playground_config_update(request: Request, agent_id: str):
     """Update agent config from the playground panel."""
     if not _state["provider"]:
         raise HTTPException(status_code=400, detail="Not connected")
-
-    from ...memagent.models import MemAgentModel
 
     existing = _state["provider"].retrieve_memagent(agent_id)
     if not existing:
@@ -1937,7 +2118,6 @@ async def agent_playground_config_update(request: Request, agent_id: str):
     new_persona_goals = str(form.get("persona_goals", "")).strip()
     new_persona_background = str(form.get("persona_background", "")).strip()
     raw_skill_paths = form.get("skill_paths_json")
-    raw_mcp_servers = form.get("mcp_servers_json")
     raw_enable_entity_memory = form.get("enable_entity_memory")
     raw_enable_workflow_memory = form.get("enable_workflow_memory")
     raw_self_aware = form.get("self_aware")
@@ -1948,13 +2128,12 @@ async def agent_playground_config_update(request: Request, agent_id: str):
     raw_default_timezone = form.get("default_timezone")
 
     parsed_skill_paths = None
-    parsed_mcp_servers = None
     parse_error = None
 
+    # MCP servers are edited only on the MCP connections page, which keeps
+    # their credentials encrypted; this form never replaces them.
     if raw_skill_paths is not None:
         parsed_skill_paths, parse_error = _parse_skill_paths_json(str(raw_skill_paths))
-    if not parse_error and raw_mcp_servers is not None:
-        parsed_mcp_servers, parse_error = _parse_mcp_servers_json(str(raw_mcp_servers))
     if parse_error:
         from urllib.parse import quote
 
@@ -1980,6 +2159,18 @@ async def agent_playground_config_update(request: Request, agent_id: str):
             llm_config["deployment_name"] = new_model
         else:
             llm_config["model"] = new_model
+    if "context_window_tokens" in form:
+        # Blank means the provider default (for Ollama, the model's own
+        # length when it fits in memory); a number pins the window.
+        raw_window = str(form.get("context_window_tokens") or "").strip()
+        extra = dict(llm_config.get("additional_config") or {})
+        extra.pop("num_ctx", None)
+        if extra or "additional_config" in llm_config:
+            llm_config["additional_config"] = extra
+        if raw_window.isdigit() and int(raw_window) > 0:
+            llm_config["context_window_tokens"] = int(raw_window)
+        else:
+            llm_config.pop("context_window_tokens", None)
 
     persona_payload = None
     existing_persona = getattr(existing, "persona", None)
@@ -2165,54 +2356,35 @@ async def agent_playground_config_update(request: Request, agent_id: str):
             status_code=302,
         )
 
-    updated = MemAgentModel(
-        agent_id=agent_id,
-        name=getattr(existing, "name", None),
-        instruction=new_instruction or getattr(existing, "instruction", None),
-        application_mode=getattr(existing, "application_mode", "assistant"),
-        memory_types=memory_types_value,
-        max_steps=max_steps_value,
-        tool_access=getattr(existing, "tool_access", "private"),
-        semantic_cache=bool(getattr(existing, "semantic_cache", False)),
-        is_favorite=bool(getattr(existing, "is_favorite", False)),
-        memory_ids=getattr(existing, "memory_ids", None),
-        persona=persona_payload,
-        llm_config=llm_config,
-        tools=getattr(existing, "tools", None),
-        delegates=getattr(existing, "delegates", None),
-        embedding_config=getattr(existing, "embedding_config", None),
-        semantic_cache_config=getattr(existing, "semantic_cache_config", None),
-        tool_result_policy=getattr(existing, "tool_result_policy", None),
-        context_policy=getattr(existing, "context_policy", None),
-        retrieval_policy=getattr(existing, "retrieval_policy", None),
-        delegation_config=getattr(existing, "delegation_config", None),
-        skill_retrieval=bool(getattr(existing, "skill_retrieval", False)),
-        skill_retrieval_config=getattr(existing, "skill_retrieval_config", None),
-        semantic_layer_config=getattr(existing, "semantic_layer_config", None),
-        context_window_tokens=getattr(existing, "context_window_tokens", None),
-        internet_access_provider=internet_value,
-        internet_access_config=internet_config_value,
-        skills_marketplace_provider=skills_marketplace_value,
-        skills_marketplace_config=skills_marketplace_config_value,
-        knowledge_base_ids=getattr(existing, "knowledge_base_ids", None),
-        sandbox_provider=sandbox_value,
-        browser_control=browser_control_config_value,
-        skill_paths=(
-            parsed_skill_paths
+    window_update: Dict[str, Any] = {}
+    if "context_window_tokens" in form:
+        # The window chosen here replaces any agent-level cap, so it is the
+        # one the agent actually runs with.
+        window_update = {"context_window_tokens": None, "context_window_source": None}
+    updated = existing.model_copy(
+        update={
+            "agent_id": agent_id,
+            "instruction": new_instruction or getattr(existing, "instruction", None),
+            "memory_types": memory_types_value,
+            "max_steps": max_steps_value,
+            "persona": persona_payload,
+            "llm_config": llm_config,
+            "internet_access_provider": internet_value,
+            "internet_access_config": internet_config_value,
+            "skills_marketplace_provider": skills_marketplace_value,
+            "skills_marketplace_config": skills_marketplace_config_value,
+            "sandbox_provider": sandbox_value,
+            "browser_control": browser_control_config_value,
+            "skill_paths": parsed_skill_paths
             if parsed_skill_paths is not None
-            else getattr(existing, "skill_paths", None)
-        ),
-        mcp_servers=(
-            parsed_mcp_servers
-            if parsed_mcp_servers is not None
-            else getattr(existing, "mcp_servers", None)
-        ),
-        self_aware=self_aware_enabled_value,
-        self_aware_config=self_aware_config_value,
-        continual_learning=bool(getattr(existing, "continual_learning", False)),
-        continual_learning_config=getattr(existing, "continual_learning_config", None),
-        automations_enabled=automations_enabled_value,
-        default_timezone=default_timezone_value,
+            else getattr(existing, "skill_paths", None),
+            "mcp_servers": getattr(existing, "mcp_servers", None),
+            "self_aware": self_aware_enabled_value,
+            "self_aware_config": self_aware_config_value,
+            "automations_enabled": automations_enabled_value,
+            "default_timezone": default_timezone_value,
+            **window_update,
+        }
     )
 
     try:

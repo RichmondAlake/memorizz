@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -177,3 +178,172 @@ def test_terminal_bench_forecast_cli_writes_unofficial_report(tmp_path):
     assert payload["accuracy_forecast"]["status"] == "withheld"
     assert payload["cost_forecast"]["nominal_guard_total_usd"] == 778.75
     assert json.loads(output.read_text(encoding="utf-8")) == payload
+
+
+@pytest.mark.unit
+def test_cli_terminal_bench_tasks_status_and_run(tmp_path):
+    from typer.testing import CliRunner
+
+    from memorizz.cli.app import app
+
+    cli = CliRunner()
+    listed = cli.invoke(app, ["eval", "terminal-bench", "tasks", "--compact"])
+    assert listed.exit_code == 0, listed.output
+    body = json.loads(listed.stdout)
+    assert body["version"] and body["count"] == len(body["tasks"]) > 0
+    assert all(not task.get("gpus") for task in body["tasks"])
+    one = body["tasks"][0]
+    narrowed = cli.invoke(
+        app,
+        ["eval", "terminal-bench", "tasks", "--category", one["category"], "--compact"],
+    )
+    assert {task["category"] for task in json.loads(narrowed.stdout)["tasks"]} == {
+        one["category"]
+    }
+
+    with patch(
+        "memorizz.benchmarks.terminal_bench_runner.environment_status",
+        return_value={"ready": False, "docker": {"ok": False}},
+    ):
+        status = cli.invoke(app, ["eval", "terminal-bench", "status", "--compact"])
+    assert status.exit_code == 0 and json.loads(status.stdout)["ready"] is False
+
+    seen = []
+    with patch(
+        "memorizz.benchmarks.terminal_bench_runner.main",
+        side_effect=lambda argv: seen.append(argv) or 0,
+    ):
+        ran = cli.invoke(
+            app,
+            [
+                "eval",
+                "terminal-bench",
+                "run",
+                "--harness",
+                "codex",
+                "--task",
+                f"{one['name']}",
+                "--output",
+                str(tmp_path / "out.json"),
+                "--codex-auth",
+                "chatgpt",
+                "--dry-run",
+            ],
+        )
+    assert ran.exit_code == 0, ran.output
+    argv = seen[0]
+    assert argv[argv.index("--tasks") + 1] == one["name"] and "--dry-run" in argv
+    assert argv[argv.index("--codex-auth") + 1] == "chatgpt"
+
+    # Bad options from the runner end the command with its exit code.
+    refused = cli.invoke(
+        app,
+        [
+            "eval",
+            "terminal-bench",
+            "run",
+            "--harness",
+            "codex",
+            "--task",
+            "not-a-task",
+            "--output",
+            str(tmp_path / "x.json"),
+        ],
+    )
+    assert refused.exit_code == 2
+
+
+@pytest.mark.unit
+def test_cli_eval_compare_runs_a_comparison_config(tmp_path):
+    cli = CliRunner()
+    missing = cli.invoke(app, ["eval", "compare", str(tmp_path / "nope.json")])
+    assert (
+        missing.exit_code == 2
+        and "Unable to load the comparison config" in missing.output
+    )
+    config = tmp_path / "comparison.json"
+    config.write_text("{}", encoding="utf-8")
+    seen = []
+    with patch(
+        "memorizz.benchmarks.comparison.ComparisonConfig.model_validate_json",
+        return_value="parsed",
+    ), patch(
+        "memorizz.benchmarks.comparison.run_comparison",
+        side_effect=lambda parsed, folder: seen.append((parsed, folder)),
+    ):
+        ran = cli.invoke(app, ["eval", "compare", str(config)])
+    assert ran.exit_code == 0, ran.output
+    assert seen == [("parsed", tmp_path.resolve())]
+
+
+@pytest.mark.unit
+def test_eval_run_takes_a_saved_agent_and_an_ollama_host(tmp_path, monkeypatch):
+    env = {
+        "MEMORIZZ_HOME": str(tmp_path / "home"),
+        "MEMORIZZ_BACKEND": "",
+        "MEMORIZZ_DEFAULT_LLM_PROVIDER": "",
+        "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER": "",
+        "OPENAI_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+        "OLLAMA_HOST": "127.0.0.1:1",
+    }
+    created = CliRunner().invoke(
+        app, ["agents", "create", "--name", "Under test", "--no-llm", "--json"], env=env
+    )
+    assert created.exit_code == 0, created.output
+    agent_id = json.loads(created.output)["agent"]["agent_id"]
+    data_path = tmp_path / "data"
+    data_path.mkdir()
+    captured = {}
+
+    def fake_run(benchmark_id, configured_data, **kwargs):
+        captured.update(kwargs)
+        return {
+            "benchmark": benchmark_id,
+            "protocol": {"profile": {"name": kwargs["profile"]}},
+            "comparison_label": "Diagnostic",
+            "paper_comparable": False,
+            "overall_score": 1.0,
+            "retrieval": {"recall_at_k": 1.0},
+            "answer_quality": {"gold_evidence_oracle_score": 1.0},
+            "usage": {"cost_usd": 0.0},
+        }
+
+    monkeypatch.setattr("memorizz.benchmarks.memory_suite.run_memory_suite", fake_run)
+    base = [
+        "eval",
+        "run",
+        "locomo-plus",
+        "--data-path",
+        str(data_path),
+        "--output",
+        str(tmp_path / "r.json"),
+        "--force",
+    ]
+    result = CliRunner().invoke(
+        app, [*base, "--evaluation-mode", "memagent", "--agent-id", agent_id], env=env
+    )
+    assert result.exit_code == 0, result.output
+    template = captured["agent_template"]
+    assert (
+        template.name == "Under test"
+        and template.tools == []
+        and template.meta_harness is False
+    )
+    assert (
+        captured["ollama_host"] == "http://127.0.0.1:1"
+    )  # OLLAMA_HOST, given a scheme
+
+    result = CliRunner().invoke(
+        app, [*base, "--ollama-host", "http://gpu-box:11434"], env=env
+    )
+    assert result.exit_code == 0 and captured["ollama_host"] == "http://gpu-box:11434"
+    missing = CliRunner().invoke(
+        app, [*base, "--evaluation-mode", "memagent", "--agent-id", "nope"], env=env
+    )
+    assert missing.exit_code != 0 and "Agent not found" in missing.output
+    wrong_mode = CliRunner().invoke(app, [*base, "--agent-id", agent_id], env=env)
+    assert (
+        wrong_mode.exit_code != 0
+        and "needs --evaluation-mode memagent" in wrong_mode.output
+    )

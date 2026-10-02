@@ -8,22 +8,12 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from ..._time import as_utc
 from ..models import AutomationDelivery, AutomationJob, AutomationRun
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _as_aware(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+from ..schedule import utcnow as _utcnow
 
 
 def _json_dumps(value: Any) -> Optional[str]:
@@ -99,9 +89,9 @@ class OracleAutomationStore:
             if interval_seconds is not None
             else None,
             timezone=str(timezone_name),
-            start_at=_as_aware(start_at),
-            next_run_at=_as_aware(next_run_at) or _utcnow(),
-            last_run_at=_as_aware(last_run_at),
+            start_at=as_utc(start_at),
+            next_run_at=as_utc(next_run_at) or _utcnow(),
+            last_run_at=as_utc(last_run_at),
             misfire_policy=str(misfire_policy or "skip"),
             max_run_seconds=int(max_run_seconds or 900),
             retry_max_attempts=int(retry_max_attempts or 1),
@@ -111,9 +101,9 @@ class OracleAutomationStore:
             delivery_type=str(delivery_type) if delivery_type is not None else None,
             delivery_config=_json_loads(delivery_config),
             locked_by=str(locked_by) if locked_by is not None else None,
-            lock_expires_at=_as_aware(lock_expires_at),
-            created_at=_as_aware(created_at),
-            updated_at=_as_aware(updated_at),
+            lock_expires_at=as_utc(lock_expires_at),
+            created_at=as_utc(created_at),
+            updated_at=as_utc(updated_at),
         )
 
     def _select_job_columns(self) -> str:
@@ -472,7 +462,7 @@ class OracleAutomationStore:
         return AutomationRun(
             run_id=run_id,
             job_id=job.job_id,
-            scheduled_for=_as_aware(scheduled_for) or scheduled_for,
+            scheduled_for=as_utc(scheduled_for) or scheduled_for,
             started_at=started_at,
             status="running",
             attempt=1,
@@ -546,15 +536,15 @@ class OracleAutomationStore:
         return AutomationRun(
             run_id=str(run_id_val),
             job_id=str(job_id),
-            scheduled_for=_as_aware(scheduled_for) or scheduled_for,
-            started_at=_as_aware(started_at),
-            finished_at=_as_aware(finished_at_val),
+            scheduled_for=as_utc(scheduled_for) or scheduled_for,
+            started_at=as_utc(started_at),
+            finished_at=as_utc(finished_at_val),
             status=str(status_val),
             attempt=int(attempt_val or 1),
             error=str(error_val) if error_val is not None else None,
             result_summary=str(summary_val) if summary_val is not None else None,
             result_payload=_json_loads(payload_val),
-            created_at=_as_aware(created_at),
+            created_at=as_utc(created_at),
         )
 
     def record_delivery(
@@ -628,9 +618,9 @@ class OracleAutomationStore:
                 AutomationRun(
                     run_id=str(run_id_val),
                     job_id=str(job_id_val),
-                    scheduled_for=_as_aware(scheduled_for) or scheduled_for,
-                    started_at=_as_aware(started_at),
-                    finished_at=_as_aware(finished_at_val),
+                    scheduled_for=as_utc(scheduled_for) or scheduled_for,
+                    started_at=as_utc(started_at),
+                    finished_at=as_utc(finished_at_val),
                     status=str(status_val),
                     attempt=int(attempt_val or 1),
                     error=str(error_val) if error_val is not None else None,
@@ -638,7 +628,7 @@ class OracleAutomationStore:
                     if summary_val is not None
                     else None,
                     result_payload=_json_loads(payload_val),
-                    created_at=_as_aware(created_at),
+                    created_at=as_utc(created_at),
                 )
             )
         return runs

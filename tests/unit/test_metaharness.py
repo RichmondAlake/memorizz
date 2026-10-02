@@ -1981,6 +1981,36 @@ def test_codex_restores_only_generated_memorizz_mcp_after_policy_reset(
         service.close()
 
 
+def test_the_mcp_server_opens_the_store_the_service_uses(tmp_path: Path) -> None:
+    from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+
+    provider = FileSystemProvider(
+        FileSystemConfig(root_path=tmp_path / "ui-store", lazy_vector_indexes=True)
+    )
+    service = MetaHarness(
+        memory_provider=provider,
+        adapters=[FakeHarness()],
+        run_store=SQLiteHarnessRunStore(tmp_path / "runs.sqlite3"),
+        approval_store=SQLiteApprovalStore(tmp_path / "approvals.sqlite3"),
+        allowed_workspace_roots=[str(tmp_path)],
+    )
+    task = HarnessTask(
+        task="x",
+        workspace=str(tmp_path),
+        permissions=HarnessPermissions(mcp_access="read_only"),
+    )
+    try:
+        service._configure_mcp(task, tmp_path)
+        config = json.loads((tmp_path / "mcp.json").read_text())
+        env = config["mcpServers"]["memorizz"]["env"]
+        assert env["MEMORIZZ_BACKEND"] == "filesystem"
+        assert env["MEMORIZZ_MEMORY_ROOT"] == str(tmp_path / "ui-store")
+        assert "MEMORIZZ_MCP_SERVER_AGENT_IDS" not in env
+    finally:
+        service.close()
+        provider.close()
+
+
 def test_capability_ready_and_task_tool_policy_are_fail_closed(tmp_path: Path) -> None:
     unavailable = HarnessCapabilities(
         name="auth-required",
@@ -2124,3 +2154,107 @@ def test_subprocess_runtime_authentication_failure_is_normalized(
         assert "Unauthorized" not in str(result.error)
     finally:
         service.close()
+
+
+def test_codex_searches_the_web_only_when_network_is_full(tmp_path: Path) -> None:
+    def configs(network: str, write: bool = False):
+        task = HarnessTask(
+            task="Look it up",
+            workspace=str(tmp_path),
+            harness="codex",
+            permissions=HarnessPermissions(
+                mcp_access="none",
+                network=network,
+                workspace_mode="direct" if write else "read_only",
+            ),
+            metadata={"codex_config": ['web_search="live"']},
+        )
+        command = CodexHarness().build_command(task, workspace=tmp_path, prompt="P")
+        return [
+            command[index + 1]
+            for index, value in enumerate(command[:-1])
+            if value == "--config"
+        ]
+
+    closed = configs("none")
+    # The host's setting comes last, so a caller cannot switch search on.
+    assert closed[-1] != 'web_search="live"'
+    assert closed.index('web_search="disabled"') > closed.index('web_search="live"')
+    assert "tools.web_search=false" in closed
+    assert "sandbox_workspace_write.network_access=false" in closed
+    opened = configs("full", write=True)
+    assert opened.count('web_search="live"') == 2 and "tools.web_search=true" in opened
+    assert "sandbox_workspace_write.network_access=true" in opened
+    assert "full" in CodexHarness().probe().metadata["network_modes"]
+
+
+def test_a_memagent_reaches_the_web_only_when_network_is_full(monkeypatch) -> None:
+    from memorizz import internet_access
+    from memorizz.internet_access.providers.offline import OfflineInternetProvider
+    from memorizz.metaharness import adapters
+
+    class Provider:
+        closed = False
+
+        def __init__(self, name):
+            self.name = name
+
+        def get_provider_name(self):
+            return self.name
+
+        def close(self):
+            self.closed = True
+
+    class Manager:
+        def __init__(self, provider):
+            self.provider = provider
+
+        def get_provider_name(self):
+            return self.provider.get_provider_name() if self.provider else None
+
+    class Agent:
+        def __init__(self, provider=None):
+            self.internet_access_manager = Manager(provider)
+            self.tools_on = provider is not None
+
+        def with_internet_access_provider(self, provider):
+            previous = self.internet_access_manager.provider
+            if previous and previous is not provider:
+                previous.close()
+            self.internet_access_manager.provider = provider
+            self.tools_on = provider is not None
+
+        def _register_internet_access_tools(self):
+            self.tools_on = True
+
+        def _unregister_internet_access_tools(self):
+            self.tools_on = False
+
+    # Network off hides the agent's own web tools, then gives them back unclosed.
+    own = Provider("tavily")
+    agent = Agent(own)
+    with adapters._run_web_access(agent, "none") as name:
+        assert name is None and agent.tools_on is False
+    assert agent.tools_on is True and agent.internet_access_manager.provider is own
+    assert own.closed is False
+    with adapters._run_web_access(agent, "full") as name:
+        assert name == "tavily"
+
+    # Network Full lends an agent without a provider MemoRizz's default for the run.
+    lent = Provider("firecrawl")
+    monkeypatch.setattr(
+        internet_access, "get_default_internet_access_provider", lambda: lent
+    )
+    bare = Agent()
+    with adapters._run_web_access(bare, "full") as name:
+        assert name == "firecrawl" and bare.tools_on is True
+    assert bare.internet_access_manager.provider is None and lent.closed is True
+
+    monkeypatch.setattr(
+        internet_access,
+        "get_default_internet_access_provider",
+        lambda: OfflineInternetProvider(reason="no key"),
+    )
+    with pytest.raises(adapters._NoInternetProvider, match="no search key"):
+        with adapters._run_web_access(Agent(), "full"):
+            pass

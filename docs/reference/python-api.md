@@ -9,12 +9,17 @@ This page covers the stable, high-value Python surface. Import public types from
     options:
       members:
         - run
-        - run_stream
+        - run_stream_events
+        - arun_stream_events
         - validate_configuration
         - capability_report
         - semantic_cache_stats
         - inspect_semantic_cache
         - invalidate_semantic_cache
+        - tool_cache_stats
+        - enable_tool_cache
+        - disable_tool_cache
+        - invalidate_tool_cache
         - generate_summaries
         - observability_summary
         - get_trace_context
@@ -149,6 +154,7 @@ authenticated runtime reads never adopt them automatically.
         - with_meta_harness
         - with_execution_harness
         - with_semantic_cache
+        - with_tool_cache
         - with_embedding_provider
         - with_retrieval_policy
         - with_context_policy
@@ -218,7 +224,17 @@ adapter security matrix and complete SDK, CLI, UI, and MCP workflows.
 
 ## Runtime policies
 
+::: memorizz.tooling.governed_tool
+    options:
+      show_source: false
+      show_root_heading: true
+
 ::: memorizz.tooling.ToolPolicy
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.tool_cache.ToolCacheConfig
     options:
       show_source: false
       show_root_heading: true

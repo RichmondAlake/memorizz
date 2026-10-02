@@ -255,29 +255,6 @@ class FirecrawlProvider(InternetAccessProvider):
             return truncated
         return value
 
-    @staticmethod
-    def _coerce_positive_int(value: Any) -> Optional[int]:
-        if value is None:
-            return None
-        try:
-            coerced = int(value)
-        except (TypeError, ValueError):
-            return None
-        return coerced if coerced > 0 else None
-
-    @staticmethod
-    def _truncate_text(
-        value: Optional[str], limit: Optional[int]
-    ) -> Tuple[Optional[str], bool, Optional[int]]:
-        if not value:
-            return value, False, None
-        if not limit or limit <= 0:
-            return value, False, len(value)
-        original_length = len(value)
-        if original_length <= limit:
-            return value, False, original_length
-        return value[:limit], True, original_length
-
 
 # Register provider on import
 register_provider(FirecrawlProvider.provider_name, FirecrawlProvider)

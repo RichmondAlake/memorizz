@@ -87,16 +87,13 @@
 }
 
 .page-header-text,
-.page-header.evaluation-header > div:first-child,
 .comparison-header > div:first-child {
     flex: 1 1 480px;
     min-width: 0;
 }
 
 .page-eyebrow,
-.evaluation-eyebrow,
-.harness-eyebrow,
-.pe-eyebrow {
+.harness-eyebrow {
     display: block;
     margin: 0 0 6px;
     color: var(--text-muted);
@@ -363,12 +360,9 @@ details[open].panel > summary {
     background: var(--bg-secondary);
 }
 
-/* ---------- Filter bars and form fields ---------- */
-
 .filter-bar,
 .traces-search-form,
 .usage-filters,
-.run-library-filters,
 .lcp-filters {
     display: flex;
     flex-wrap: wrap;
@@ -444,13 +438,10 @@ details[open].panel > summary {
     line-height: 1.5;
 }
 
-/* ---------- Tables ---------- */
-
 .data-table,
 .info-table,
 .usage-table-scroll table,
-.traces-agents-table,
-.harness-runs-table {
+.traces-agents-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 13px;
@@ -459,7 +450,6 @@ details[open].panel > summary {
 .data-table th,
 .usage-table-scroll th,
 .traces-agents-table th,
-.harness-runs-table th,
 .info-table thead th {
     padding: 9px 12px;
     color: var(--text-secondary);
@@ -474,8 +464,7 @@ details[open].panel > summary {
 
 .data-table td,
 .usage-table-scroll td,
-.traces-agents-table td,
-.harness-runs-table td {
+.traces-agents-table td {
     padding: 10px 12px;
     border-bottom: 1px solid var(--border-subtle);
     color: var(--text-primary);
@@ -540,8 +529,7 @@ details[open].panel > summary {
     font-size: 13px;
 }
 
-.empty-state strong,
-.empty-state-title {
+.empty-state strong {
     color: var(--text-primary);
     font-size: 14px;
     font-weight: 600;
@@ -644,14 +632,6 @@ a.kpi:hover .kpi-label {
     color: var(--text-primary);
 }
 
-.section-title,
-.stats-group-title {
-    margin: 24px 0 10px;
-    color: var(--text-secondary);
-    font-size: 13px;
-    font-weight: 600;
-}
-
 .detail-list {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -682,12 +662,6 @@ a.kpi:hover .kpi-label {
     vertical-align: middle;
 }
 
-.agent-facts {
-    margin: -8px 0 var(--console-gap);
-    grid-template-columns: repeat(auto-fit, minmax(160px, max-content));
-    column-gap: 40px;
-}
-
 .favorite-toggle--playground.is-active {
     color: var(--accent-warning);
 }
@@ -704,15 +678,7 @@ a.kpi:hover .kpi-label {
     white-space: pre-wrap;
 }
 
-.playground-config > summary .config-caret {
-    margin-left: auto;
-    color: var(--text-muted);
-}
-
-/* ---------- Observability trace insights ---------- */
-
-.trace-analysis-stat-kicker,
-.connection-card-kicker {
+.trace-analysis-stat-kicker {
     color: var(--text-secondary);
     font-size: 12px;
     font-weight: 500;
@@ -774,7 +740,6 @@ a.kpi:hover .kpi-label {
     font-size: 12px;
 }
 
-
 /* ---------- Header controls and row actions ---------- */
 
 /* Legacy styles.css spacing must not lift actions off the header baseline. */
@@ -782,7 +747,6 @@ a.kpi:hover .kpi-label {
     margin: 0;
 }
 
-.inline-field,
 .page-actions .agents-sort-controls {
     display: inline-flex;
     align-items: center;
@@ -793,8 +757,6 @@ a.kpi:hover .kpi-label {
     font-weight: 500;
 }
 
-.inline-field select,
-.inline-field input,
 .page-actions .agents-sort-controls select {
     min-height: 34px;
     padding: 6px 10px;
@@ -804,17 +766,6 @@ a.kpi:hover .kpi-label {
     border-radius: 7px;
     font: inherit;
     font-size: 13px;
-}
-
-.table-actions {
-    text-align: right;
-    white-space: nowrap;
-}
-
-.table-actions .btn + .btn,
-.table-actions .btn + form,
-.table-actions form + .btn {
-    margin-left: 6px;
 }
 
 /* ---------- Sentence case everywhere ----------
@@ -836,16 +787,6 @@ a.kpi:hover .kpi-label {
 .chart-eyebrow {
     letter-spacing: 0;
     text-transform: none;
-}
-
-/* ---------- Panel actions, empty-state alignment, nested filter bars ---------- */
-
-.panel-actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    margin-left: auto;
 }
 
 /* Legacy styles.css centres empty states; the shared one reads left-aligned. */

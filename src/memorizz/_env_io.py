@@ -132,6 +132,21 @@ def load_layered_env(extra_paths: Optional[Iterable[Path]] = None) -> List[Path]
     return loaded
 
 
+def env_text(name: str) -> Optional[str]:
+    """An environment variable without surrounding whitespace; None when unset
+    or blank."""
+    value = os.getenv(name)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """A boolean environment flag: 1, true, yes or on (any case) mean true."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def resolve_oracle_in_database_embedding_from_env() -> bool:
     """Resolve the embedding mode used by first-party Oracle clients.
 

@@ -10,6 +10,9 @@ from typing import Any, Dict
 
 from .llm_provider import LLMProvider
 
+# Providers that run the model on this machine: no per-call API charges.
+LOCAL_LLM_PROVIDERS = frozenset({"ollama", "mlx", "huggingface"})
+
 logger = logging.getLogger(__name__)
 
 

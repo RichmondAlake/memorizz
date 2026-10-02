@@ -203,3 +203,41 @@ def test_failed_override_never_falls_back_to_saved_model(saved_agent):
     assert loaded.model is None
     assert loaded.llm_config["provider"] == "invalid-provider"
     assert loaded._llm_init_error
+
+
+def test_unmarked_legacy_budget_gives_way_to_the_configured_window(saved_agent):
+    """Older releases saved the effective budget as if it were a cap."""
+    original, memory = saved_agent
+    record = memory.retrieve_memagent(original.agent_id)
+    assert record.context_window_source == "explicit"
+    record.context_window_source = None  # as written by earlier releases
+    memory.store_memagent(record)
+
+    loaded = MemAgent.load(
+        original.agent_id, memory_provider=memory, auto_register=False
+    )
+    assert loaded._context_window_tokens == loaded.model.context_window_tokens == 8192
+
+
+@pytest.mark.unit
+def test_a_borrowed_model_is_not_saved_over_the_agents_own(tmp_path):
+    """A harness run can run a saved agent on another model; a save during
+    that run (registering a new memory, say) keeps the agent's own model."""
+    from memorizz.memagent import persistence
+
+    provider = FileSystemProvider(
+        FileSystemConfig(root_path=tmp_path / "memory", lazy_vector_indexes=True)
+    )
+    own = {"provider": "openai", "model": "gpt-5"}
+    agent = MemAgent(llm_config=own, memory_provider=provider, instruction="x")
+    agent.save()
+    borrowed = MemAgent.load(
+        agent.agent_id,
+        memory_provider=provider,
+        llm_config={"provider": "openai", "model": "gpt-5.5"},
+    )
+    assert borrowed.model.get_config()["model"] == "gpt-5.5"
+    borrowed._pinned_llm_config = dict(own)
+    persistence.save_agent(borrowed)
+    assert provider.retrieve_memagent(agent.agent_id).llm_config["model"] == "gpt-5"
+    provider.close()

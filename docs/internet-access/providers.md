@@ -66,11 +66,10 @@ Responses include truncation metadata whenever `max_content_chars` shortens an e
 
 ## Firecrawl Provider
 
-The Firecrawl integration gives you search + crawl in a single dependency:
+The Firecrawl integration gives you search + crawl with no extra package:
 
-1. Install the `firecrawl` extra in your environment (if needed).
-2. Export `FIRECRAWL_API_KEY="<your-key>"`.
-3. Optionally configure `MEMORIZZ_DEFAULT_INTERNET_PROVIDER=firecrawl` to ensure every Deep Research agent uses Firecrawl by default.
+1. Export `FIRECRAWL_API_KEY="<your-key>"`.
+2. Optionally configure `MEMORIZZ_DEFAULT_INTERNET_PROVIDER=firecrawl` to ensure every Deep Research agent uses Firecrawl by default.
 
 ### Advanced Configuration
 
@@ -89,7 +88,7 @@ FirecrawlProvider(
 )
 ```
 
-When run via env variables, you can set the matching `MEMORIZZ_DEFAULT_INTERNET_PROVIDER_*` keys (or edit the config you pass to `create_internet_access_provider`) to tweak timeouts or base URLs.
+From the environment, only `MEMORIZZ_DEFAULT_INTERNET_PROVIDER` and its API key are read; to change timeouts or base URLs, pass them in the config you give `create_internet_access_provider`.
 
 ### Response Shape
 

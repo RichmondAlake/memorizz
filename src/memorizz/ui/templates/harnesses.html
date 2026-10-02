@@ -2,7 +2,14 @@
 
 {% block title %}Agent harnesses - Memorizz{% endblock %}
 {% block body_attrs %} data-sidebar-scope="harnesses" data-sidebar-default="collapsed"{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=3">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=24">
+<link rel="stylesheet" href="/static/css/components/dialogs.css?v=1">
+<script src="/static/js/page-dialogs.js?v=1"></script>
+<script src="/static/js/harness-trajectory.js?v=13"></script>
+<link rel="stylesheet" href="/static/css/pages/harness-compare.css?v=2">
+<script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
+<script src="/static/js/safe-markdown.js?v=2"></script>
+<script src="/static/js/harness-compare.js?v=5"></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state, id_chip %}
@@ -10,15 +17,44 @@
 {% set dot = {'good': 'healthy', 'warn': 'degraded', 'bad': 'failing', 'idle': 'idle', 'active': 'active'} %}
 {% set agent_names = {} %}
 {% for agent in agents %}{% set _ = agent_names.update({agent.agent_id|string: agent.name or agent.agent_id|string}) %}{% endfor %}
-{% call page_header('Agent harnesses', 'Route memory-grounded tasks to Codex, Claude Code, OpenHands or a native MemAgent, with durable approval and host verification.', 'Execution') %}
+<script>window.MemorizzAgentNames = {{ agent_names|tojson }};</script>
+{% call page_header('Agent harnesses', 'Run a memory-grounded task on one harness, chain harnesses into a staged plan, or compare them side by side, with durable approval and host verification.', 'Execution') %}
+    <span class="hx-live" id="hx-live" data-fingerprint="{{ activity.fingerprint }}" data-active="{{ 'true' if activity.active else 'false' }}" aria-live="polite">{{ 'Live' if activity.active else '' }}</span>
     <button class="btn" type="button" onclick="location.reload()">Refresh</button>
-    {% if not ui_read_only %}<button class="btn btn-primary" type="button" data-open-launch>New run</button>{% endif %}
+    {% if not ui_read_only %}<button class="btn btn-primary" type="button" data-focus-quick>New run</button>{% endif %}
 {% endcall %}
+
+{% if not ui_read_only %}
+<form class="hx-quick" id="hx-quick" autocomplete="off" novalidate>
+    <label class="visually-hidden" for="hx-quick-task">Task</label>
+    <textarea id="hx-quick-task" name="task" rows="1" placeholder="Ask a harness to do something, e.g. “Find why the tests fail in my project” or “What is MongoDB’s stock price today?”"></textarea>
+    <div class="hx-quick-row">
+        <label class="hx-quick-field"><span>Harness</span>
+            <select id="hx-quick-harness" name="harness">
+                <option value="auto" data-web="true">Auto route</option>
+                {% for item in harnesses if item.name != 'memagent' %}<option value="{{ item.name }}" data-web="{{ 'true' if 'full' in ((item.metadata or {}).network_modes or []) else 'false' }}"{% if not item.ready %} disabled data-unready="true"{% endif %}>{{ item.name }}{% if not item.ready %} · not ready{% endif %}</option>{% endfor %}
+            </select>
+        </label>
+        <label class="hx-quick-field hx-quick-model"><span>Model</span>
+            <input id="hx-quick-model" name="model" list="hx-quick-models" placeholder="Harness default" autocomplete="off" spellcheck="false">
+        </label>
+        <datalist id="hx-quick-models"></datalist>
+        <label class="hx-quick-field hx-quick-ws"><span>Project folder</span>
+            <input id="hx-quick-workspace" name="workspace" list="hx-workspaces" value="{{ request.query_params.get('workspace', '') }}" placeholder="None: a fresh scratch folder">
+        </label>
+        <datalist id="hx-workspaces">{% for ws in recent_workspaces %}<option value="{{ ws }}"></option>{% endfor %}</datalist>
+        <label class="harness-check"><input type="checkbox" name="web" id="hx-quick-web"> Web access</label>
+        <label class="harness-check"><input type="checkbox" name="write" id="hx-quick-write"> Allow edits</label>
+        <button class="btn btn-primary" type="submit" id="hx-quick-run">Run</button>
+    </div>
+    <div class="hx-quick-status" id="hx-quick-status" aria-live="polite"></div>
+</form>
+{% endif %}
 
 {% if error %}<div class="error-message" role="alert">{{ error }}</div>{% endif %}
 
 {% set c = m.counts %}
-<div class="fleet-tape" role="list" aria-label="Harness summary">
+<div class="fleet-tape" id="hx-region-tape" role="list" aria-label="Harness summary">
     <div role="listitem"><span>Harnesses ready</span><strong class="{{ 'is-good' if m.total_harnesses and m.ready == m.total_harnesses else ('is-warn' if m.ready else 'is-bad') }}">{{ m.ready }}<small>of {{ m.total_harnesses }}</small></strong></div>
     <div role="listitem"><span>Runs</span><strong>{{ m.run_count }}{% if m.has_more %}+{% endif %}</strong></div>
     <div role="listitem"><span>Active</span><strong>{{ c.active }}</strong></div>
@@ -65,53 +101,121 @@
 </section>
 
 {% if not ui_read_only %}
-<details class="panel harness-launch-panel hx-launch" id="harness-launch"{% if not runs %} open{% endif %}>
-    <summary><span id="harness-launch-title">Launch a bounded run</span><span class="hx-launch-meta">Direct edits, network access, secrets and governed writes need approval before the run starts.</span></summary>
-    <form id="harness-run-form" class="harness-run-form">
+{% set hx_harnesses = [] %}{% for item in harnesses %}{% set _ = hx_harnesses.append({'name': item.name, 'ready': item.ready, 'edits': not (item.metadata or {}).get('write_requires_external_isolation'), 'models': item.models or [], 'network': (item.metadata or {}).get('network_modes') or ['none'], 'tools': (item.metadata or {}).get('task_tool_policy', False), 'cost': (item.metadata or {}).get('cost_reporting', item.usage_reporting) is true, 'tokens': (item.metadata or {}).get('token_reporting', item.usage_reporting) is true, 'schema': (item.metadata or {}).get('output_schema', False) is true, 'subagents': (item.metadata or {}).get('subagents') or item.name == 'memagent', 'isolation': item.requires_external_isolation is true, 'edit_isolation': (item.metadata or {}).get('write_requires_external_isolation') is true, 'mcp': item.mcp or (item.metadata or {}).get('mcp_fallback') == 'context_pack', 'default_model': ((model_choices or {}).get(item.name) or {}).get('default') or (item.metadata or {}).get('default_model') or '', 'choices': ((model_choices or {}).get(item.name) or {}).get('groups') or []}) %}{% endfor %}
+{% set hx_agents = [] %}{% for agent in agents %}{% set _ = hx_agents.append({'id': agent.agent_id|string, 'name': agent_label(agent), 'model': (agent.llm_config.model if agent.llm_config and agent.llm_config.model else '')}) %}{% endfor %}
+<script type="application/json" id="hx-launch-data">{{ {'harnesses': hx_harnesses, 'agents': hx_agents, 'default_agent': default_memagent}|tojson }}</script>
+<details class="panel harness-launch-panel hx-launch" id="harness-launch">
+    <summary><span id="harness-launch-title">More launch options</span><span class="hx-launch-meta">Staged plans across harnesses, side-by-side comparisons, limits and policies. Edits, web access, secrets and governed writes need approval first.</span></summary>
+    <form id="harness-run-form" class="harness-run-form" data-mode="single" novalidate>
+        <div class="segmented hx-mode" role="radiogroup" aria-label="Launch mode">
+            <button type="button" class="segmented-item" role="radio" data-mode-choice="single" aria-checked="true">Single run</button>
+            <button type="button" class="segmented-item" role="radio" data-mode-choice="plan" aria-checked="false">Staged plan</button>
+            <button type="button" class="segmented-item" role="radio" data-mode-choice="compare" aria-checked="false">Compare</button>
+        </div>
+        <p class="hx-mode-hint" data-mode-only="single">One harness runs the task. Auto route picks one from past results.</p>
+        <p class="hx-mode-hint" data-mode-only="plan" hidden>Stages run in order, each on the harness you choose. Every stage receives the earlier stages' answers, changed files and verification results. At most one stage may edit files, and it waits for approval before it starts.</p>
+        <p class="hx-mode-hint" data-mode-only="compare" hidden>Every selected harness gets the same task, limits and memory snapshot, and they run at the same time. Comparisons are read-only.</p>
         <div class="form-group harness-task-field">
-            <label for="harness-task">Task</label>
+            <label for="harness-task"><span data-mode-only="single compare">Task</span><span data-mode-only="plan" hidden>Goal</span></label>
             <textarea id="harness-task" name="task" rows="4" required placeholder="Describe a concrete workspace outcome and acceptance criteria."></textarea>
         </div>
+
+        <fieldset class="hx-stages" data-mode-only="plan" hidden>
+            <legend>Stages</legend>
+            <div class="hx-stage-presets">
+                <span>Start from</span>
+                <button type="button" class="btn btn-sm" data-preset="plan-implement-review">Plan → Implement → Review</button>
+                <button type="button" class="btn btn-sm" data-preset="investigate-review">Investigate → Second opinion</button>
+            </div>
+            <ol class="hx-stage-list" id="hx-stage-list" aria-label="Plan stages"></ol>
+            <div class="hx-stage-foot">
+                <button type="button" class="btn btn-sm" id="hx-add-stage">Add stage</button>
+                <span class="form-hint" id="hx-stage-note" aria-live="polite"></span>
+            </div>
+            <template id="hx-stage-template">
+                <li class="hx-stage">
+                    <span class="hx-stage-num" aria-hidden="true"></span>
+                    <div class="hx-stage-main">
+                        <div class="hx-stage-row">
+                            <input class="hx-stage-name" aria-label="Stage name" placeholder="Stage name" maxlength="60">
+                            <select class="hx-stage-harness" aria-label="Harness"></select>
+                            <label class="harness-check hx-stage-write"><input type="checkbox" class="hx-stage-write-input"> Edits files</label>
+                        </div>
+                        <textarea class="hx-stage-instruction" rows="2" aria-label="What this stage does" placeholder="What this stage should do. The goal is added after it."></textarea>
+                        <details class="hx-stage-more">
+                            <summary>Model, agent and verification</summary>
+                            <div class="hx-stage-more-grid">
+                                <input class="hx-stage-model" aria-label="Model override" placeholder="Model override (adapter default)">
+                                <select class="hx-stage-agent" aria-label="Saved MemAgent"></select>
+                                <input class="hx-stage-verify" aria-label="Host verification command" placeholder="Host verification, e.g. pytest -q">
+                            </div>
+                        </details>
+                    </div>
+                    <div class="hx-stage-actions">
+                        <button type="button" class="btn btn-sm" data-stage-move="-1" aria-label="Move stage up">↑</button>
+                        <button type="button" class="btn btn-sm" data-stage-move="1" aria-label="Move stage down">↓</button>
+                        <button type="button" class="btn btn-sm" data-stage-remove aria-label="Remove stage">✕</button>
+                    </div>
+                </li>
+            </template>
+        </fieldset>
+
+        <fieldset class="hx-compare" data-mode-only="compare" hidden>
+            <legend>Harnesses to compare</legend>
+            <div class="hx-compare-list">
+                {% for item in harnesses %}
+                <label class="hx-compare-item{% if not item.ready %} is-disabled{% endif %}" data-unready="{{ 'false' if item.ready else 'true' }}"><input type="checkbox" name="compare_harness" value="{{ item.name }}"{% if not item.ready %} disabled{% endif %}><span class="mono">{{ item.name }}</span>{% if not item.ready %}<small>not ready</small>{% endif %}</label>
+                {% endfor %}
+            </div>
+            <div class="hx-compare-models" id="hx-compare-models" aria-label="Model per harness"></div>
+        </fieldset>
+
         <div class="harness-form-grid">
             <div class="form-group">
                 <label for="harness-workspace">Workspace</label>
-                <input id="harness-workspace" name="workspace" required value="{{ request.query_params.get('workspace', '') }}" placeholder="/absolute/path/to/project">
+                <input id="harness-workspace" name="workspace" list="hx-workspaces" value="{{ request.query_params.get('workspace', '') }}" placeholder="Blank: a fresh scratch folder"{% if workspace_roots %} aria-describedby="harness-workspace-hint"{% endif %}>
+                {% if workspace_roots %}<small class="form-hint" id="harness-workspace-hint">Blank, or an existing folder inside {% for root in workspace_roots %}<span class="mono">{{ root }}</span>{% if not loop.last %} or {% endif %}{% endfor %}.</small>{% endif %}
             </div>
-            <div class="form-group">
+            <div class="form-group" data-mode-only="single">
                 <label for="harness-name">Harness</label>
                 <select id="harness-name" name="harness">
                     <option value="auto">Auto route</option>
                     {% for item in harnesses %}<option value="{{ item.name }}" {% if not item.ready %}disabled{% endif %}>{{ item.name }}{% if not item.ready %} · unavailable{% endif %}</option>{% endfor %}
                 </select>
             </div>
-            <div class="form-group">
+            <div class="form-group" data-applies="agent">
                 <label for="harness-agent">Saved MemAgent <span class="optional">required for memagent</span></label>
                 <select id="harness-agent" name="agent_id">
                     <option value="">None</option>
-                    {% for agent in agents %}<option value="{{ agent.agent_id }}">{{ agent.name or agent.agent_id }}</option>{% endfor %}
+                    {% set teams = agent_teams or {} %}
+                    {% for agent in agents %}{% set team = teams.get(agent.agent_id|string) %}<option value="{{ agent.agent_id }}"{% if team %} data-team="{{ team|tojson|forceescape }}"{% endif %}>{{ agent_label(agent) }}</option>{% endfor %}
                 </select>
+                <small class="form-hint" id="hx-memagent-hint" aria-live="polite" hidden></small>
             </div>
-            <div class="form-group">
+            <div class="form-group" data-mode-only="single" data-applies="model">
                 <label for="harness-model">Model override <span class="optional">optional</span></label>
-                <input id="harness-model" name="model" placeholder="Use adapter default">
+                <input id="harness-model" name="model" list="hx-form-models" placeholder="Use adapter default" autocomplete="off" spellcheck="false" aria-describedby="hx-model-hint">
+                <datalist id="hx-form-models"></datalist>
+                <small class="form-hint is-bad" id="hx-model-hint" aria-live="polite" hidden></small>
             </div>
-            <div class="form-group">
+            <div class="form-group" data-mode-only="single compare">
                 <label for="harness-verify">Host verification <span class="optional">optional</span></label>
                 <input id="harness-verify" name="verification_command" placeholder="pytest -q">
             </div>
             <div class="form-group">
-                <label for="harness-memory">Memory ID <span class="optional">optional</span></label>
-                <input id="harness-memory" name="memory_id">
+                <label for="harness-memory">Memory ID <span class="optional">saves answers</span></label>
+                <input id="harness-memory" name="memory_id" placeholder="e.g. repo-name" aria-describedby="harness-memory-hint">
+                <small class="form-hint" id="harness-memory-hint">Plan and comparison answers are saved to this memory so later runs can recall them.</small>
             </div>
             <div class="form-group">
                 <label for="harness-user">User ID <span class="optional">optional</span></label>
                 <input id="harness-user" name="user_id">
             </div>
             <div class="form-group">
-                <label for="harness-timeout">Wall-time limit</label>
+                <label for="harness-timeout">Wall-time limit <span class="optional" data-mode-only="plan compare" hidden>per run</span></label>
                 <input id="harness-timeout" name="timeout_seconds" type="number" min="1" value="900">
             </div>
-            <div class="form-group">
+            <div class="form-group" data-applies="cost">
                 <label for="harness-cost">Cost limit (USD) <span class="optional">optional</span></label>
                 <input id="harness-cost" name="max_cost_usd" type="number" min="0" step="0.01">
             </div>
@@ -119,32 +223,64 @@
                 <label for="harness-steps">Action limit</label>
                 <input id="harness-steps" name="max_steps" type="number" min="1" value="80">
             </div>
-            <div class="form-group">
+            <div class="form-group" data-applies="tokens">
                 <label for="harness-input-tokens">Input-token limit <span class="optional">optional</span></label>
                 <input id="harness-input-tokens" name="max_input_tokens" type="number" min="1">
             </div>
-            <div class="form-group">
+            <div class="form-group" data-applies="tokens">
                 <label for="harness-output-tokens">Output-token limit <span class="optional">optional</span></label>
                 <input id="harness-output-tokens" name="max_output_tokens" type="number" min="1">
             </div>
-            <div class="form-group">
+            <div class="form-group" data-applies="isolation">
                 <label for="harness-backend">Isolation backend</label>
-                <select id="harness-backend" name="execution_backend"><option value="local">Local</option><option value="docker">Docker wrapper</option><option value="sandbox">Sandbox wrapper</option><option value="remote">Remote wrapper</option></select>
+                <select id="harness-backend" name="execution_backend" aria-describedby="hx-backend-hint"><option value="local">Local</option><option value="docker">Docker wrapper</option><option value="sandbox">Sandbox wrapper</option><option value="remote">Remote wrapper</option></select>
+                <small class="form-hint" id="hx-backend-hint">Codex and Claude Code sandbox themselves. A MemAgent runs code in its agent’s sandbox provider. The wrappers are for adapters whose command you have wrapped, such as OpenHands.</small>
             </div>
         </div>
+        <details class="hx-advanced">
+            <summary>Thread, environment, tools and output schema</summary>
+            <div class="harness-form-grid">
+                <div class="form-group">
+                    <label for="harness-thread">Thread ID <span class="optional">optional</span></label>
+                    <input id="harness-thread" name="thread_id">
+                </div>
+                <div class="form-group" data-applies="env">
+                    <label for="harness-env">Delegated environment <span class="optional">names, needs approval</span></label>
+                    <input id="harness-env" name="allowed_env" placeholder="GITHUB_TOKEN, NPM_TOKEN">
+                </div>
+                <div class="form-group" data-applies="tools">
+                    <label for="harness-allow-tools">Allowed tools <span class="optional">narrows the harness</span></label>
+                    <input id="harness-allow-tools" name="allowed_tools" placeholder="Read, Grep" aria-describedby="hx-tools-hint">
+                </div>
+                <div class="form-group" data-applies="tools">
+                    <label for="harness-deny-tools">Denied tools <span class="optional">optional</span></label>
+                    <input id="harness-deny-tools" name="denied_tools" placeholder="WebFetch" aria-describedby="hx-tools-hint">
+                </div>
+                <p class="form-hint hx-field-note" id="hx-tools-hint" data-applies="tools">Tool lists apply to Claude Code-based harnesses. <span class="mono">memagent</span> uses its saved agent’s tools and connected apps, set on the <a href="/agents">Agents page</a>. Codex uses its own shell and file tools.</p>
+                <div class="form-group hx-schema" data-mode-only="single" data-applies="schema">
+                    <label for="harness-schema">Output schema <span class="optional">JSON Schema for the answer</span></label>
+                    <textarea id="harness-schema" name="output_schema" rows="3" placeholder='{"type": "object", "properties": {"summary": {"type": "string"}}}'></textarea>
+                </div>
+            </div>
+        </details>
         <div class="harness-policy-row">
-            <label class="harness-check"><input type="checkbox" name="write"> Allow direct workspace edits</label>
-            <label class="harness-check"><input type="checkbox" name="allow_dirty_workspace"> Allow a Git worktree with uncommitted changes</label>
-            <label class="harness-inline-select">Network <select name="network"><option value="none">None</option><option value="restricted">Restricted</option><option value="full">Full</option></select></label>
-            <label class="harness-inline-select">MemoRizz MCP <select name="mcp_access"><option value="read_only">Read only</option><option value="none">Disabled</option><option value="governed_write">Governed write</option></select></label>
+            <label class="harness-check" data-mode-only="single" data-applies="edits"><input type="checkbox" name="write"> Allow direct workspace edits</label>
+            <label class="harness-check" data-mode-only="single plan" data-applies="dirty"><input type="checkbox" name="allow_dirty_workspace"> Allow a Git worktree with uncommitted changes</label>
+            <label class="harness-inline-select">Network <select name="network" aria-describedby="hx-access-note"><option value="none">None</option><option value="restricted">Restricted</option><option value="full">Full · web access</option></select></label>
+            <label class="harness-inline-select" data-applies="mcp">MemoRizz MCP <select name="mcp_access" aria-describedby="hx-access-note"><option value="read_only">Read only</option><option value="none">Disabled</option><option value="governed_write">Governed write</option></select></label>
+            <label class="harness-check" title="Let harnesses start their own subagents" data-applies="subagents"><input type="checkbox" name="allow_subagents" aria-describedby="hx-access-note"> Subagents</label>
         </div>
+        <p class="form-hint hx-access-note" id="hx-access-note" aria-live="polite"></p>
         <div class="harness-form-actions">
-            <button id="harness-submit" class="btn btn-primary" type="submit">Start run</button>
+            <button id="harness-submit" class="btn btn-primary" type="submit" data-label-single="Start run" data-label-plan="Start plan" data-label-compare="Start comparison">Start run</button>
             <span id="harness-submit-status" class="form-hint" aria-live="polite"></span>
         </div>
     </form>
 </details>
 {% endif %}
+
+{#- A run's actions at a glance: messages, commands, tool calls, file edits. -#}
+{% macro step_strip(steps) %}{% set labels = {'message': 'message', 'command': 'command', 'tool_call': 'tool call', 'file_change': 'file edit'} %}<span class="hx-strip" title="{% for kind, n in steps.items() if n %}{{ n }} {{ labels[kind] }}{{ '' if n == 1 else 's' }}{% if not loop.last %} · {% endif %}{% endfor %}">{% for kind, n in steps.items() if n %}<span class="hx-strip-part hx-strip--{{ kind }}"><i aria-hidden="true"></i>{{ n }}</span>{% endfor %}</span>{% endmacro %}
 
 {#- pane=True: inside the run's detail pane (task shown above it). Queue rows whose run is
     in the ledger link to it (show_run) and leave the policy text to the pane (reason). -#}
@@ -153,7 +289,7 @@
 {% set perms = args.permissions or {} %}
 <article class="harness-approval{% if pane %} hx-approval--pane{% endif %}" data-proposal-id="{{ proposal.proposal_id }}">
     <div>
-        <div class="harness-approval-title">{% if args.harness and args.harness != 'auto' %}<span class="mono">{{ args.harness }}</span>{% else %}Auto route{% endif %} · {{ args.mode or 'runtime' }} mode{% if perms.workspace_mode == 'direct' %} · <span class="is-warn">direct edits</span>{% endif %}{% if perms.network and perms.network != 'none' %} · network {{ perms.network }}{% endif %}</div>
+        <div class="harness-approval-title">{% if args.harness and args.harness != 'auto' %}<span class="mono">{{ args.harness }}</span>{% else %}Auto route{% endif %} · {{ args.mode or 'runtime' }} mode{% if perms.workspace_mode == 'direct' %} · <span class="is-warn">direct edits</span>{% endif %}{% if perms.network and perms.network != 'none' %} · network {{ perms.network }}{% endif %}{% if perms.allow_subagents %} · subagents{% endif %}</div>
         {% if not pane %}<div class="harness-approval-task" title="{{ args.task }}">{{ args.task }}</div>{% endif %}
         <div class="harness-approval-meta"><span class="mono">{{ args.workspace }}</span><span{% if proposal.expires %} title="{{ proposal.expires.strftime('%Y-%m-%d %H:%M:%S') }} UTC"{% endif %}>Expires {{ relative_time(proposal.expires, generated_at) if proposal.expires else proposal.expires_at }}</span>{% if show_run and args.run_id %}<button type="button" class="hx-link" data-select-run="{{ args.run_id }}">Show run</button>{% endif %}</div>
         {% if reason %}<div class="harness-approval-reason">{{ proposal.policy_reason }}</div>{% endif %}
@@ -168,6 +304,7 @@
 </article>
 {% endmacro %}
 
+<div id="hx-region-approvals">
 {% if m.approvals %}
 <section class="panel harness-approval-panel hx-approvals" aria-labelledby="harness-approvals-title">
     <div class="panel-header">
@@ -179,13 +316,90 @@
     </div>
 </section>
 {% endif %}
+</div>
+
+<div id="hx-region-workflows">
+{% if m.workflows %}
+<section class="hx-workflows" aria-labelledby="hx-workflows-title">
+    <h2 class="hx-section-title" id="hx-workflows-title">Workflows <span>{{ m.workflows|length }} recent{% if m.workflows_active %} · {{ m.workflows_active }} active{% endif %}</span>{% if m.workflows|length > 1 %}<button type="button" class="hx-link-btn" data-workflows-all>Collapse all</button>{% endif %}</h2>
+    <div class="hx-workflow-list">
+        {% for wf in m.workflows %}
+        <article class="hx-workflow hx-workflow--{{ wf.kind }}" id="hx-workflow-{{ wf.id }}" data-workflow-id="{{ wf.id }}" data-live="{{ 'true' if wf.group in ['active', 'approval'] else 'false' }}">
+            <header class="hx-workflow-head">
+                <button type="button" class="hx-workflow-toggle" data-workflow-toggle aria-expanded="true" aria-controls="hx-workflow-body-{{ wf.id }}" aria-label="Collapse workflow"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                <span class="fleet-health fleet-health--{{ dot[wf.signal] }}">{{ 'Canceling' if wf.canceling else wf.status_label }}</span>
+                <span class="hx-workflow-kind">{{ wf.kind_label }}</span>
+                <p class="hx-workflow-goal" title="{{ wf.goal }}">{{ wf.goal_line }}</p>
+                <span class="hx-workflow-meta mono">
+                    <span class="hx-workflow-dots" aria-hidden="true">{% for step in wf.steps %}<i class="hx-dot hx-dot--{{ step.signal }}" title="{{ step.name }}: {{ step.status_label }}"></i>{% endfor %}</span>
+                    <span>{{ wf.progress }}</span>
+                    {% if wf.duration_ms is not none %}<span>{{ fmt_duration(wf.duration_ms) }}</span>{% endif %}
+                    {% if wf.cost_usd is not none %}<span>{{ fmt_usd(wf.cost_usd) }}</span>{% endif %}
+                    {% if wf.updated_at %}<span title="{{ wf.updated_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC">{{ relative_time(wf.updated_at, generated_at) }}</span>{% endif %}
+                </span>
+                {% set wf_runs = wf.steps|map(attribute='run_id')|select|list %}
+                <span class="hx-workflow-actions">
+                    {% if wf_runs|length > 1 %}<button class="btn btn-sm hx-btn-quiet" type="button" data-compare-runs="{{ wf_runs|join(',') }}" data-compare-title="{{ wf.goal_line }}" title="See these runs' traces and timelines side by side">Compare traces</button>{% endif %}
+                    {% if wf.cancellable and not ui_read_only %}<button class="btn btn-sm hx-workflow-cancel" type="button" data-workflow-id="{{ wf.id }}">Cancel</button>{% endif %}
+                    {% if wf.rerunnable and not ui_read_only %}<button class="btn btn-sm" type="button" data-rerun-workflow="{{ wf.id }}" title="Start it again with the same settings">Run again</button><button class="btn btn-sm hx-btn-quiet" type="button" data-edit-workflow="{{ wf.id }}" title="Load its settings into the launch form to change them first">Edit and run</button>{% endif %}
+                    {% if wf.group not in ['active', 'approval'] and not ui_read_only %}<button class="btn btn-sm hx-btn-quiet hx-btn-delete" type="button" data-delete-workflow="{{ wf.id }}" data-delete-kind="{{ wf.kind }}" data-delete-count="{{ wf_runs|length }}" title="Delete this workflow and its runs">Delete</button>{% endif %}
+                </span>
+            </header>
+            {% if wf.setup and not ui_read_only %}<script type="application/json" data-workflow-setup="{{ wf.id }}">{{ wf.setup|tojson }}</script>{% endif %}
+            <div class="hx-workflow-body" id="hx-workflow-body-{{ wf.id }}">
+            <div class="hx-flow hx-flow--{{ wf.kind }}" data-flow>
+            <div class="hx-flow-root" data-flow-root>
+                <span class="hx-flow-root-label">{{ 'Goal' if wf.kind == 'plan' else 'Task' }}</span>
+                <span class="hx-flow-root-sub">{{ wf.steps|length }} {{ ('stage' if wf.kind == 'plan' else 'harness') ~ ('' if wf.steps|length == 1 else ('s' if wf.kind == 'plan' else 'es')) }}</span>
+            </div>
+            <ol class="hx-steps">
+                {% for step in wf.steps %}
+                <li class="hx-step hx-step--{{ step.signal }}" data-flow-node data-signal="{{ step.signal }}">
+                    <button type="button" class="hx-step-btn"{% if step.run_id %} data-select-run="{{ step.run_id }}" aria-label="Show {{ step.name }} run in the ledger"{% else %} disabled{% endif %}>
+                        <span class="hx-step-top">
+                            {% if wf.kind == 'plan' %}<span class="hx-step-num">{{ step.number }}</span>{% endif %}
+                            <strong>{{ step.name }}</strong>
+                            {% if wf.kind == 'plan' %}<span class="mono hx-step-harness">{{ step.harness }}</span>{% endif %}
+                            {% if step.run and step.run.model %}<span class="mono hx-step-model" title="Model{% if step.run.model_is_default %}, as the harness reported it{% endif %}">{{ step.run.model }}</span>{% endif %}
+                            {% if step.writes %}<span class="hx-step-edits">edits</span>{% endif %}
+                        </span>
+                        <span class="hx-step-status"><span class="fleet-health fleet-health--{{ dot[step.signal] }}">{{ step.status_label }}</span>
+                        {% if step.run %}<span class="mono hx-step-figures">{% if step.run.duration_ms is not none %}{{ fmt_duration(step.run.duration_ms) }}{% endif %}{% if step.run.total_cost_usd is not none %} · {{ '≈' if step.run.total_cost_estimated }}{{ fmt_usd(step.run.total_cost_usd) }}{% if step.run.delegate_runs %} with delegates{% endif %}{% endif %}{% if step.run.verify_state == 'verified' %} · <span class="is-good">verified</span>{% elif step.run.verify_state == 'failed' %} · <span class="is-bad">verification failed</span>{% endif %}</span>{% endif %}</span>
+                        {% if step.status == 'pending_approval' %}<span class="hx-step-excerpt is-warn">Waiting for approval in the queue above.</span>
+                        {% elif step.excerpt %}<span class="hx-step-excerpt{% if step.is_error %} is-bad{% endif %}">{{ step.excerpt }}</span>{% endif %}
+                        {% if step.files_changed %}<span class="hx-step-files mono" title="{{ step.files_changed|join(', ') }}">{{ step.files_changed|length }} file{{ '' if step.files_changed|length == 1 else 's' }} changed</span>{% endif %}
+                        {% if step.run and step.run.step_total %}{{ step_strip(step.run.steps) }}{% endif %}
+                    </button>
+                    {% if step.run_id %}{% set live = step.run and step.run.group in ['active', 'approval'] %}
+                    <button type="button" class="hx-node-trace-toggle" data-node-toggle="{{ step.run_id }}" aria-expanded="false" aria-controls="hx-node-trace-{{ step.run_id }}">{{ 'Live trace' if live else 'Trace' }}</button>
+                    <div class="hx-traj hx-node-trace" id="hx-node-trace-{{ step.run_id }}" data-node-panel="{{ step.run_id }}" data-trajectory-for="{{ step.run_id }}" data-active="{{ 'true' if live else 'false' }}" hidden></div>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ol>
+            <svg class="hx-flow-edges" aria-hidden="true" focusable="false"></svg>
+            </div>
+            {% if wf.error and wf.group != 'succeeded' %}<p class="hx-workflow-error">{{ wf.error }}</p>{% endif %}
+            <p class="hx-workflow-foot">
+                {% if wf.memory_id %}Answers saved to memory <span class="mono">{{ wf.memory_id }}</span>{% if wf.steps %} ({{ wf.remembered }} of {{ wf.steps|length }}){% endif %}{% else %}No memory ID, so answers are kept only in the run ledger{% endif %}
+                · {{ id_chip(wf.id, 8) }}
+                {% if wf.rerun_of %}· Run again from {{ id_chip(wf.rerun_of, 8) }}{% endif %}
+                · <a href="/api/harness-orchestrations/{{ wf.id }}" target="_blank" rel="noopener">JSON</a>
+            </p>
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+</div>
 
 {% if m.runs %}
 <h2 class="visually-hidden" id="harness-runs-title">Run ledger</h2>
 <div class="fleet-bar hx-bar">
     <label class="fleet-search">
         <kbd aria-hidden="true">/</kbd>
-        <input type="search" id="hx-filter" data-monitor-filter-for="hx-table" placeholder="Filter by task, harness or ID" aria-label="Filter runs by task, harness, workspace or ID" autocomplete="off">
+        <input type="search" id="hx-filter" data-monitor-filter-for="hx-table" placeholder="Filter by task, harness, agent or ID" aria-label="Filter runs by task, harness, MemAgent, workspace or ID" autocomplete="off">
     </label>
     <div class="segmented" role="group" aria-label="Show runs">
         <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span>{{ m.run_count }}</span></button>
@@ -204,6 +418,9 @@
         </select>
     </div>
     {% endif %}
+    <button type="button" class="btn btn-sm hx-compare-picked" id="hx-compare-picked" disabled title="Tick two to four runs in the ledger, then compare their traces">Compare selected</button>
+    {% if not ui_read_only %}<button type="button" class="btn btn-sm hx-btn-quiet hx-btn-delete" id="hx-delete-picked" disabled title="Tick runs in the ledger, then delete them">Delete selected</button>{% endif %}
+    <p class="hx-ledger-note" id="hx-ledger-note" aria-live="polite" hidden></p>
     <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>↵</kbd> evidence</span>{% if not ui_read_only %}<span><kbd>n</kbd> new run</span>{% endif %}</p>
 </div>
 
@@ -214,9 +431,11 @@
                 <caption class="visually-hidden">Run ledger, most recently updated first. Select a run to see its limits, verification, approval and outcome.</caption>
                 <thead>
                     <tr>
+                        <th scope="col" class="hx-col-pick"><input type="checkbox" id="hx-pick-all" aria-label="Select all runs shown" title="Select all runs shown"></th>
                         <th scope="col" aria-sort="none"><button type="button" data-sort="rank">Status</button></th>
                         <th scope="col" class="hx-col-harness" aria-sort="none"><button type="button" data-sort="harness" data-sort-type="text">Harness</button></th>
                         <th scope="col">Task</th>
+                        <th scope="col" class="num hx-col-steps" aria-sort="none"><button type="button" data-sort="steps">Steps</button></th>
                         <th scope="col" class="hx-col-mode">Mode</th>
                         <th scope="col" class="hx-col-verify" aria-sort="none"><button type="button" data-sort="verify" data-sort-type="text">Verification</button></th>
                         <th scope="col" class="num hx-col-cost" aria-sort="none"><button type="button" data-sort="cost">Cost</button></th>
@@ -233,18 +452,21 @@
                         data-harness="{{ run.harness }}"
                         data-rank="{{ {'bad': 5, 'warn': 4, 'active': 3, 'good': 2, 'idle': 1}.get(run.signal, 0) }}"
                         data-verify="{{ run.verify_label|lower }}"
-                        data-cost="{{ run.cost_usd if run.cost_usd is not none else -1 }}"
+                        data-cost="{{ run.total_cost_usd if run.total_cost_usd is not none else -1 }}"
                         data-duration="{{ run.duration_ms if run.duration_ms is not none else -1 }}"
+                        data-steps="{{ run.step_total or 0 }}"
                         data-updated="{{ run.updated_at.timestamp() if run.updated_at else 0 }}"
-                        data-search="{{ (run.task_line ~ ' ' ~ run.harness_label ~ ' ' ~ run.workspace ~ ' ' ~ run.run_id ~ ' ' ~ run.status_label ~ ' ' ~ run.model)|lower }}"
+                        data-search="{{ (run.task_line ~ ' ' ~ run.harness_label ~ ' ' ~ (agent_names.get(run.agent_id|string, '') if run.agent_id and run.harness == 'memagent' else '') ~ ' ' ~ run.workspace ~ ' ' ~ run.run_id ~ ' ' ~ run.status_label ~ ' ' ~ run.model ~ ' ' ~ (run.workflow.label ~ ' ' ~ run.workflow.name ~ ' ' ~ run.workflow.id if run.workflow else ''))|lower }}"
                         tabindex="-1">
+                        <td class="hx-col-pick"><input type="checkbox" data-compare-pick="{{ run.run_id }}" aria-label="Select {{ run.harness_label }} run {{ run.run_id[:8] }}"></td>
                         <td><span class="fleet-health fleet-health--{{ dot[run.signal] }}">{{ run.status_label }}</span></td>
-                        <td class="hx-col-harness mono">{{ run.harness_label }}</td>
-                        <td class="hx-task" title="{{ run.task_line }}">{{ run.task_line }}</td>
+                        <td class="hx-col-harness mono">{{ run.harness_label }}{% if run.agent_id and run.harness == 'memagent' and agent_names.get(run.agent_id|string) %}<small class="hx-cell-agent" title="MemAgent">{{ agent_names.get(run.agent_id|string) }}</small>{% endif %}{% if run.model %}<small class="hx-cell-model" title="Model">{{ run.model }}</small>{% endif %}</td>
+                        <td class="hx-task" title="{{ run.task_line }}">{% if run.workflow %}<span class="hx-tag" title="{{ run.workflow.name }}">{{ run.workflow.label }}</span>{% endif %}{% if run.parent_run_id %}<span class="hx-tag" title="A delegate's share of run {{ run.parent_run_id[:8] }}">Delegate</span>{% endif %}{{ run.task_line }}</td>
+                        <td class="num hx-col-steps"><button type="button" class="hx-steps-cell" data-show-trajectory="{{ run.run_id }}" title="Show this run's trajectory">{% if run.step_total %}{{ step_strip(run.steps) }}{% else %}<span class="hx-muted">—</span>{% endif %}</button></td>
                         <td class="hx-col-mode">{% if run.writes %}<span class="is-warn">Edits</span>{% else %}Read only{% endif %}</td>
                         <td class="hx-col-verify">{% if run.verify_state == 'verified' %}<span class="is-good">Verified</span>{% elif run.verify_state == 'failed' %}<span class="is-bad">Failed</span>{% elif run.verify_state == 'pending' %}Pending{% else %}<span class="hx-muted">—</span>{% endif %}</td>
-                        <td class="num hx-col-cost">{{ fmt_usd(run.cost_usd) if run.cost_usd is not none else '—' }}</td>
-                        <td class="num hx-col-duration">{{ fmt_duration(run.duration_ms) if run.duration_ms is not none else '—' }}</td>
+                        <td class="num hx-col-cost"{% if run.delegate_runs %} title="Its own model calls {{ fmt_usd(run.cost_usd) if run.cost_usd is not none else 'not priced' }}, plus {{ run.delegate_runs }} delegate run{{ '' if run.delegate_runs == 1 else 's' }} {{ fmt_usd(run.delegate_cost_usd) if run.delegate_cost_usd is not none else 'not priced' }}"{% elif run.cost_estimated %} title="List-rate estimate from token usage"{% endif %}>{% if run.total_cost_usd is not none %}{% if run.total_cost_estimated %}≈{% endif %}{{ fmt_usd(run.total_cost_usd) }}{% if run.delegate_runs %}<small class="hx-cell-model">with delegates</small>{% endif %}{% else %}—{% endif %}</td>
+                        <td class="num hx-col-duration"{% if run.status == 'running' and run.started_at %} data-live-since="{{ run.started_at.timestamp() }}"{% endif %}>{{ fmt_duration(run.duration_ms) if run.duration_ms is not none else '—' }}</td>
                         <td class="num" {% if run.updated_at %}title="{{ run.updated_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC"{% endif %}>{{ relative_time(run.updated_at, generated_at) if run.updated_at else '—' }}</td>
                         <td class="hx-col-id mono">{{ run.run_id[:8] }}</td>
                     </tr>
@@ -271,7 +493,14 @@
                 <a class="btn" href="/api/harness-runs/{{ run.run_id }}?include_events=true" target="_blank" rel="noopener">JSON</a>
                 {% if run.agent_id %}<a class="btn" href="/agents/{{ run.agent_id }}/playground">Agent</a>{% endif %}
                 {% if run.cancellable and not ui_read_only %}<button class="btn harness-cancel" type="button" data-run-id="{{ run.run_id }}">Cancel run</button>{% endif %}
+                {% if not run.cancellable and not ui_read_only %}<button class="btn harness-retry" type="button" data-run-id="{{ run.run_id }}">Retry</button>{% endif %}
+                {% if not ui_read_only and run.status not in ('pending_approval',) %}<a class="btn" href="/harnesses/chat?from={{ run.run_id }}" title="Keep talking to this harness with the same setup">Continue</a>{% endif %}
+                {% if not run.cancellable and not ui_read_only %}{% if run.workflow %}<button class="btn hx-btn-quiet hx-btn-delete" type="button" data-delete-workflow="{{ run.workflow.id }}" data-delete-kind="{{ run.workflow.kind }}" data-delete-count="{{ run.workflow.steps }}" title="This run is a step of a workflow, so it is deleted with the workflow">Delete workflow</button>{% else %}<button class="btn hx-btn-quiet hx-btn-delete harness-delete" type="button" data-run-id="{{ run.run_id }}" data-delegate-runs="{{ run.delegate_runs or 0 }}" data-scratch="{{ 'true' if run.scratch else 'false' }}" data-harness="{{ run.harness_label }}">Delete</button>{% endif %}{% endif %}
             </div>
+
+            {% if run.workflow %}
+            <p class="hx-part-of">{% if run.workflow.kind == 'plan' %}Stage {{ run.workflow.step + 1 }} of {{ run.workflow.steps }} ({{ run.workflow.name }}) in a staged plan{% else %}One of {{ run.workflow.steps }} harnesses in a comparison{% endif %} · <a href="#hx-workflow-{{ run.workflow.id }}">Show workflow</a></p>
+            {% endif %}
 
             {% if run.approval %}
             <h3 class="fleet-detail-title">Approval</h3>
@@ -279,10 +508,16 @@
             {% endif %}
 
             <dl class="fleet-stats">
-                <div><dt>Duration</dt><dd>{{ fmt_duration(run.duration_ms) if run.duration_ms is not none else '—' }}</dd></div>
-                <div><dt>Cost</dt><dd>{{ fmt_usd(run.cost_usd) if run.cost_usd is not none else '—' }}</dd></div>
+                <div><dt>Duration</dt><dd{% if run.status == 'running' and run.started_at %} data-live-since="{{ run.started_at.timestamp() }}"{% endif %}>{{ fmt_duration(run.duration_ms) if run.duration_ms is not none else '—' }}</dd></div>
+                <div><dt>Cost</dt><dd{% if run.total_cost_estimated %} title="Partly estimated at list rates from token usage; a subscription plan is not billed per token"{% endif %}>{% if run.total_cost_usd is not none %}{% if run.total_cost_estimated %}≈{% endif %}{{ fmt_usd(run.total_cost_usd) }}{% else %}—{% endif %}{% if run.delegate_runs %}<small class="hx-cost-split">{{ fmt_usd(run.cost_usd) if run.cost_usd is not none else 'unpriced' }} its own model calls + {{ fmt_usd(run.delegate_cost_usd) if run.delegate_cost_usd is not none else 'unpriced' }} for {{ run.delegate_runs }} delegate run{{ '' if run.delegate_runs == 1 else 's' }}{% if run.delegate_unpriced %} ({{ run.delegate_unpriced }} not priced){% endif %}</small>{% endif %}</dd></div>
                 <div><dt>Tokens</dt><dd>{{ fmt_compact(run.tokens) if run.tokens is not none else '—' }}</dd></div>
             </dl>
+
+            <div class="mem-body-head">
+                <h3 class="fleet-detail-title">Trajectory</h3>
+                <button type="button" class="btn btn-sm" data-trajectory-full="{{ run.run_id }}">Full view</button>
+            </div>
+            <div class="hx-traj" data-trajectory-for="{{ run.run_id }}" data-active="{{ 'true' if run.group == 'active' else 'false' }}"><p class="hx-muted">Select the run to load its steps.</p></div>
 
             <div class="mem-body-head">
                 <h3 class="fleet-detail-title">Task</h3>
@@ -326,10 +561,11 @@
                 <div><dt>Mode</dt><dd>{% if run.writes %}<span class="is-warn">{{ run.mode_label }}</span>{% else %}{{ run.mode_label }}{% endif %}</dd></div>
                 <div><dt>Network</dt><dd>{{ run.network }}</dd></div>
                 <div><dt>MemoRizz MCP</dt><dd>{{ run.mcp_access }}</dd></div>
+                <div><dt>Subagents</dt><dd>{{ 'Allowed' if run.allow_subagents else 'Off' }}</dd></div>
                 <div><dt>Isolation</dt><dd>{{ run.backend }}</dd></div>
                 <div><dt>Uncommitted changes</dt><dd>{{ 'Allowed' if run.allow_dirty else 'Not allowed' }}</dd></div>
-                <div><dt>Model</dt><dd class="mono">{{ run.model or 'Adapter default' }}</dd></div>
-                {% if run.agent_id %}<div><dt>MemAgent</dt><dd><a href="/agents/{{ run.agent_id }}/playground">{{ agent_names.get(run.agent_id, run.agent_id[:12]) }}</a></dd></div>{% endif %}
+                <div><dt>Model</dt><dd class="mono">{{ run.model or 'Adapter default' }}{% if run.model_is_default %} <span class="hx-muted">(harness default)</span>{% endif %}</dd></div>
+                {% if run.agent_id and run.harness == 'memagent' %}<div><dt>MemAgent</dt><dd><a href="/agents/{{ run.agent_id }}/playground">{{ agent_names.get(run.agent_id, run.agent_id[:12]) }}</a></dd></div>{% endif %}
                 {% if run.memory_id %}<div><dt>Memory ID</dt><dd>{{ id_chip(run.memory_id, 18) }}</dd></div>{% endif %}
                 {% if run.user_id %}<div><dt>User ID</dt><dd class="mono">{{ run.user_id }}</dd></div>{% endif %}
             </dl>
@@ -362,13 +598,18 @@
         <h2 class="panel-title" id="harness-runs-title">Run ledger</h2>
         <span class="panel-meta">0 recent</span>
     </div>
-    {{ empty_state('No harness runs yet', 'Runs started from the CLI or API appear here.' if ui_read_only else 'Launch a bounded run above to create the first durable run record.') }}
+    {{ empty_state('No harness runs yet', 'This console is read-only (MEMORIZZ_UI_READ_ONLY), so launching is turned off here. Runs, plans and comparisons started from the SDK, CLI or API appear here.' if ui_read_only else 'Launch a run, a staged plan or a comparison above to create the first durable run record.') }}
 </section>
 {% endif %}
 
 <dialog id="harness-run-dialog" class="harness-dialog" aria-labelledby="harness-dialog-title">
     <div class="harness-dialog-header"><div><span class="harness-eyebrow">Run evidence</span><h2 id="harness-dialog-title" class="mono">Harness run</h2></div><button id="harness-dialog-close" class="harness-dialog-close" type="button" aria-label="Close">×</button></div>
-    <pre id="harness-dialog-content"></pre>
+    <div class="hx-dialog-tabs" role="tablist" aria-label="Evidence views">
+        <button type="button" role="tab" data-dialog-tab="trajectory" aria-selected="true">Trajectory</button>
+        <button type="button" role="tab" data-dialog-tab="json" aria-selected="false">Raw record</button>
+    </div>
+    <div id="harness-dialog-trajectory" class="hx-traj hx-traj--full"></div>
+    <pre id="harness-dialog-content" hidden></pre>
 </dialog>
 {% endblock %}
 
@@ -390,56 +631,1186 @@
         return body;
     };
     const runIdOf = (button) => button.dataset.runId || button.closest('[data-run-id]').dataset.runId;
-    if (form) form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const data = new FormData(form);
-        const payload = Object.fromEntries(data.entries());
-        payload.write = data.has('write');
-        payload.allow_dirty_workspace = data.has('allow_dirty_workspace');
-        payload.timeout_seconds = Number(payload.timeout_seconds || 900);
-        payload.max_steps = Number(payload.max_steps || 80);
-        if (payload.max_cost_usd) payload.max_cost_usd = Number(payload.max_cost_usd); else delete payload.max_cost_usd;
-        if (payload.max_input_tokens) payload.max_input_tokens = Number(payload.max_input_tokens); else delete payload.max_input_tokens;
-        if (payload.max_output_tokens) payload.max_output_tokens = Number(payload.max_output_tokens); else delete payload.max_output_tokens;
-        status.textContent = 'Creating durable run…';
-        try { await request('/api/harness-runs', {method: 'POST', body: JSON.stringify(payload)}); location.reload(); }
-        catch (error) { status.textContent = error.message; }
-    });
-    document.querySelectorAll('.harness-decision').forEach(button => button.addEventListener('click', async () => {
-        const card = button.closest('.harness-approval');
-        const proposal = card.dataset.proposalId;
-        const approver = card.querySelector('.harness-approver').value.trim();
-        if (!approver) { card.querySelector('.harness-approver').focus(); return; }
-        button.disabled = true;
-        try {
-            await request(`/api/harness-approvals/${proposal}/${button.dataset.decision}`, {method: 'POST', body: JSON.stringify({approver_id: approver})});
-            if (button.dataset.decision === 'approve') await request(`/api/harness-approvals/${proposal}/resume`, {method: 'POST', body: '{}'});
-            location.reload();
-        } catch (error) { button.disabled = false; alert(error.message); }
-    }));
-    const dialog = document.getElementById('harness-run-dialog');
-    const content = document.getElementById('harness-dialog-content');
-    const inspect = async (runId) => {
-        try { const body = await request(`/api/harness-runs/${runId}?include_events=true`); document.getElementById('harness-dialog-title').textContent = runId; content.textContent = JSON.stringify(body.run, null, 2); dialog.showModal(); }
-        catch (error) { alert(error.message); }
+    const launchData = JSON.parse(document.getElementById('hx-launch-data')?.textContent || '{"harnesses":[],"agents":[]}');
+    const readyHarnesses = launchData.harnesses.filter(h => h.ready).map(h => h.name);
+    // Presets prefer vendor harnesses; a saved MemAgent needs an agent chosen.
+    const presetHarnesses = readyHarnesses.filter(name => name !== 'memagent');
+    const pick = (index) => presetHarnesses.length ? presetHarnesses[index % presetHarnesses.length] : 'auto';
+    // The edit stage goes to a harness that may edit here; planning and review
+    // go to a different harness when there is one, for a second perspective.
+    const editors = launchData.harnesses.filter(h => h.ready && h.edits && h.name !== 'memagent').map(h => h.name);
+    const implementer = editors[0] || 'auto';
+    const reviewer = presetHarnesses.find(name => name !== implementer) || implementer;
+    const PRESETS = {
+        'plan-implement-review': () => [
+            {name: 'Plan', harness: reviewer, instruction: 'Read the relevant code and write a short, concrete implementation plan: the files to change, the change in each, and how to check it. Do not edit files.'},
+            {name: 'Implement', harness: implementer, write: true, instruction: 'Carry out the plan from the previous stage. Keep the change as small as the goal allows and report exactly what you changed.'},
+            {name: 'Review', harness: reviewer, instruction: 'Review the change the previous stage made against the goal. Report bugs, missed requirements and risky edits, most severe first. Do not edit files.'},
+        ],
+        'investigate-review': () => [
+            {name: 'Investigate', harness: pick(0), instruction: 'Investigate the goal in the workspace and report your findings with file and line references. Do not edit files.'},
+            {name: 'Second opinion', harness: pick(1), instruction: "Check the previous stage's findings against the code. Confirm, correct or reject each one, and add anything it missed. Do not edit files."},
+        ],
     };
-    document.querySelectorAll('.harness-inspect').forEach(button => button.addEventListener('click', () => inspect(runIdOf(button))));
-    document.querySelectorAll('.harness-cancel').forEach(button => button.addEventListener('click', async () => {
-        const runId = runIdOf(button);
-        if (!confirm(`Cancel harness run ${runId}?`)) return;
-        try { await request(`/api/harness-runs/${runId}/cancel`, {method: 'POST', body: '{}'}); location.reload(); }
-        catch (error) { alert(error.message); }
-    }));
-    document.getElementById('harness-dialog-close')?.addEventListener('click', () => dialog.close());
+    const stageList = document.getElementById('hx-stage-list');
+    const stageTemplate = document.getElementById('hx-stage-template');
+    const stageNote = document.getElementById('hx-stage-note');
+    const MAX_STAGES = 8;
+    const option = (value, label, disabled) => { const o = document.createElement('option'); o.value = value; o.textContent = label; o.disabled = !!disabled; return o; };
+    const renumber = () => {
+        if (!stageList) return;
+        const stages = [...stageList.children];
+        stages.forEach((li, i) => {
+            li.querySelector('.hx-stage-num').textContent = i + 1;
+            li.querySelector('[data-stage-move="-1"]').disabled = i === 0;
+            li.querySelector('[data-stage-move="1"]').disabled = i === stages.length - 1;
+            li.querySelector('[data-stage-remove]').disabled = stages.length === 1;
+        });
+        const writers = stages.filter(li => li.querySelector('.hx-stage-write-input').checked).length;
+        stageNote.textContent = writers > 1 ? 'Only one stage may edit files.' : (writers ? 'The editing stage waits for approval before it starts.' : 'All stages are read-only.');
+        stageNote.classList.toggle('is-bad', writers > 1);
+        document.getElementById('hx-add-stage').disabled = stages.length >= MAX_STAGES;
+    };
+    const addStage = (stage = {}) => {
+        const li = stageTemplate.content.firstElementChild.cloneNode(true);
+        const harness = li.querySelector('.hx-stage-harness');
+        harness.append(option('auto', 'Auto route'));
+        launchData.harnesses.forEach(h => harness.append(option(h.name, h.ready ? h.name : h.name + ' · unavailable', !h.ready)));
+        harness.value = stage.harness || 'auto';
+        const agent = li.querySelector('.hx-stage-agent');
+        agent.append(option('', 'MemAgent: same as the form'));
+        launchData.agents.forEach(a => agent.append(option(a.id, a.name)));
+        li.querySelector('.hx-stage-name').value = stage.name || 'Stage ' + (stageList.children.length + 1);
+        li.querySelector('.hx-stage-instruction').value = stage.instruction || '';
+        li.querySelector('.hx-stage-write-input').checked = !!stage.write;
+        li.querySelector('.hx-stage-model').value = stage.model || '';
+        agent.value = stage.agent_id || '';
+        li.querySelector('.hx-stage-verify').value = stage.verification_command || '';
+        if (stage.model || stage.agent_id || stage.verification_command) li.querySelector('.hx-stage-more').open = true;
+        stageList.append(li);
+        renumber();
+        return li;
+    };
+    const applyPreset = (key) => { stageList.replaceChildren(); PRESETS[key]().forEach(addStage); };
+    document.querySelectorAll('[data-preset]').forEach(button => button.addEventListener('click', () => applyPreset(button.dataset.preset)));
+    document.getElementById('hx-add-stage')?.addEventListener('click', () => addStage({harness: pick(stageList.children.length)}).querySelector('.hx-stage-name').select());
+    stageList?.addEventListener('click', (event) => {
+        const li = event.target.closest('.hx-stage');
+        if (!li) return;
+        if (event.target.closest('[data-stage-remove]')) { li.remove(); renumber(); }
+        const move = event.target.closest('[data-stage-move]');
+        if (move) {
+            const sibling = move.dataset.stageMove === '-1' ? li.previousElementSibling : li.nextElementSibling;
+            if (sibling) (move.dataset.stageMove === '-1' ? sibling.before(li) : sibling.after(li));
+            renumber();
+            move.focus();
+        }
+    });
+    stageList?.addEventListener('change', (event) => { if (event.target.matches('.hx-stage-write-input')) renumber(); });
 
-    // New run: open the launch panel and put the cursor in the task field.
-    const openLaunch = () => {
-        if (!launch) return;
-        launch.open = true;
-        launch.scrollIntoView({block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+    // Launch modes show only the fields that apply.
+    const setMode = (mode) => {
+        if (!form) return;
+        form.dataset.mode = mode;
+        form.querySelectorAll('[data-mode-choice]').forEach(b => b.setAttribute('aria-checked', b.dataset.modeChoice === mode ? 'true' : 'false'));
+        form.querySelectorAll('[data-mode-only]').forEach(el => { el.hidden = !el.dataset.modeOnly.split(' ').includes(mode); });
+        const submit = document.getElementById('harness-submit');
+        submit.textContent = submit.dataset['label' + mode[0].toUpperCase() + mode.slice(1)];
+        if (mode === 'plan' && stageList && !stageList.children.length) applyPreset('plan-implement-review');
+        if (mode === 'compare') {
+            const boxes = [...form.querySelectorAll('input[name="compare_harness"]:not(:disabled)')].filter(b => b.value !== 'memagent');
+            if (!boxes.some(b => b.checked)) boxes.slice(0, 2).forEach(b => { b.checked = true; });
+        }
+        status.textContent = '';
+    };
+    form?.querySelectorAll('[data-mode-choice]').forEach(button => button.addEventListener('click', () => setMode(button.dataset.modeChoice)));
+    form?.querySelector('.hx-mode')?.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+        const choices = [...form.querySelectorAll('[data-mode-choice]')];
+        const current = choices.findIndex(b => b.getAttribute('aria-checked') === 'true');
+        const next = choices[(current + (event.key === 'ArrowRight' ? 1 : -1) + choices.length) % choices.length];
+        setMode(next.dataset.modeChoice); next.focus(); event.preventDefault();
+    });
+
+    // Edit and run: a finished workflow's settings, back in the launch form.
+    const loadWorkflow = (id) => {
+        const raw = [...document.querySelectorAll('script[data-workflow-setup]')].find(el => el.dataset.workflowSetup === id);
+        if (!raw || !form) return;
+        const setup = JSON.parse(raw.textContent || '{}');
+        const launch = form.closest('details');
+        if (launch) launch.open = true;
+        setMode(setup.mode === 'plan' ? 'plan' : 'compare');
+        const set = (name, value) => {
+            const field = form.querySelector('[name="' + name + '"]');
+            if (!field) return;
+            if (field.type === 'checkbox') field.checked = !!value;
+            else field.value = value == null ? '' : String(value);
+        };
+        ['task', 'workspace', 'agent_id', 'model', 'verification_command', 'memory_id', 'user_id', 'thread_id',
+         'timeout_seconds', 'max_cost_usd', 'max_steps', 'max_input_tokens', 'max_output_tokens',
+         'execution_backend', 'network', 'mcp_access', 'allowed_env', 'allowed_tools', 'denied_tools',
+         'allow_dirty_workspace', 'allow_subagents'].forEach(name => set(name, setup[name]));
+        const advanced = form.querySelector('.hx-advanced');
+        if (advanced && ['thread_id', 'allowed_env', 'allowed_tools', 'denied_tools'].some(name => setup[name])) advanced.open = true;
+        if (setup.mode === 'plan') {
+            stageList.replaceChildren();
+            (setup.stages || []).forEach(addStage);
+        } else {
+            form.querySelectorAll('input[name="compare_harness"]').forEach(box => { box.checked = !box.disabled && (setup.harnesses || []).includes(box.value); });
+            Object.assign(compareModels, setup.harness_models || {});
+        }
+        syncLaunch();
+        syncAccess();
+        syncApplies();
+        const missing = setup.mode === 'plan' ? [] : (setup.harnesses || []).filter(name => !form.querySelector('input[name="compare_harness"][value="' + CSS.escape(name) + '"]:checked'));
+        status.textContent = 'Loaded from workflow ' + id.slice(0, 8) + '. Change anything, then start it.' + (missing.length ? ' Not selectable with these settings: ' + missing.join(', ') + '.' : '');
+        form.scrollIntoView({behavior: 'smooth', block: 'start'});
         document.getElementById('harness-task')?.focus({preventScroll: true});
     };
-    document.querySelectorAll('[data-open-launch]').forEach(button => button.addEventListener('click', openLaunch));
+
+    const numberOrNone = (value) => value === '' || value == null ? undefined : Number(value);
+    const basePayload = () => {
+        const data = new FormData(form);
+        const value = (name) => (data.get(name) || '').toString().trim();
+        const payload = {
+            task: value('task'), workspace: value('workspace'), agent_id: value('agent_id'),
+            memory_id: value('memory_id'), user_id: value('user_id'),
+            execution_backend: value('execution_backend'), network: value('network'), mcp_access: value('mcp_access'),
+            allow_dirty_workspace: data.has('allow_dirty_workspace'), allow_subagents: data.has('allow_subagents'),
+            timeout_seconds: Number(value('timeout_seconds') || 900), max_steps: Number(value('max_steps') || 80),
+            max_cost_usd: numberOrNone(value('max_cost_usd')), max_input_tokens: numberOrNone(value('max_input_tokens')),
+            max_output_tokens: numberOrNone(value('max_output_tokens')),
+            thread_id: value('thread_id'),
+            allowed_env: value('allowed_env'), allowed_tools: value('allowed_tools'), denied_tools: value('denied_tools'),
+        };
+        if (form.dataset.mode === 'single' && value('output_schema')) payload.output_schema = value('output_schema');
+        return {payload, data, value};
+    };
+    if (form) form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const mode = form.dataset.mode;
+        const {payload, data, value} = basePayload();
+        if (!payload.task) { status.textContent = mode === 'plan' ? 'Describe the goal.' : 'Describe the task.'; form.task.focus(); return; }
+        let url = '/api/harness-runs';
+        let message = 'Creating durable run…';
+        if (mode === 'single') {
+            Object.assign(payload, {harness: value('harness'), model: value('model'), verification_command: value('verification_command'), write: data.has('write')});
+        } else if (mode === 'plan') {
+            const stages = [...stageList.children].map(li => ({
+                name: li.querySelector('.hx-stage-name').value.trim(),
+                harness: li.querySelector('.hx-stage-harness').value,
+                instruction: li.querySelector('.hx-stage-instruction').value.trim(),
+                write: li.querySelector('.hx-stage-write-input').checked,
+                model: li.querySelector('.hx-stage-model').value.trim(),
+                agent_id: li.querySelector('.hx-stage-agent').value,
+                verification_command: li.querySelector('.hx-stage-verify').value.trim(),
+            }));
+            if (!stages.length) { status.textContent = 'Add at least one stage.'; return; }
+            if (stages.filter(s => s.write).length > 1) { status.textContent = 'Only one stage may edit files.'; return; }
+            Object.assign(payload, {kind: 'plan', stages});
+            url = '/api/harness-orchestrations';
+            message = 'Starting plan…';
+        } else {
+            const harnesses = data.getAll('compare_harness');
+            if (harnesses.length < 2) { status.textContent = 'Pick at least two harnesses.'; return; }
+            // Each harness runs its own model; none means the harness default.
+            const harness_models = {};
+            form.querySelectorAll('[data-harness-model]').forEach(input => { if (input.value.trim()) harness_models[input.dataset.harnessModel] = input.value.trim(); });
+            Object.assign(payload, {kind: 'compare', harnesses, harness_models, verification_command: value('verification_command')});
+            url = '/api/harness-orchestrations';
+            message = 'Starting comparison…';
+        }
+        const submit = document.getElementById('harness-submit');
+        submit.disabled = true;
+        status.textContent = message;
+        try {
+            const body = await request(url, {method: 'POST', body: JSON.stringify(payload)});
+            status.textContent = body.memagent_agent ? 'Started. memagent is running ' + body.memagent_agent.name + '.' : '';
+            submit.disabled = false;
+            await refreshNow();
+            if (body.run && body.run.run_id) selectRun(body.run.run_id);
+        }
+        catch (error) { status.textContent = error.message; submit.disabled = false; }
+    });
+    // ------------------------------------------------------------------
+    // Shared helpers
+    // ------------------------------------------------------------------
+    const {esc, fmtDuration, fmtCount, humanize, render: renderTrajectory} = window.MemorizzTrajectory;
+    let monitor = null;
+    const APPROVER_KEY = 'memorizz.harness.approver';
+    const rememberedApprover = () => { try { return localStorage.getItem(APPROVER_KEY) || ''; } catch (_) { return ''; } };
+    const rememberApprover = (value) => { try { localStorage.setItem(APPROVER_KEY, value); } catch (_) {} };
+    const fillApprovers = () => document.querySelectorAll('.harness-approver').forEach(input => { if (!input.value) input.value = rememberedApprover(); });
+    fillApprovers();
+
+    // ------------------------------------------------------------------
+    // Refresh in place: fetch the page and patch only what changed, so
+    // running work updates without the whole page reloading.
+    // ------------------------------------------------------------------
+    const normalized = (element) => {
+        const clone = element.cloneNode(true);
+        clone.querySelectorAll('[data-trajectory-for]').forEach(el => { el.innerHTML = ''; });
+        clone.querySelectorAll('[data-live-since]').forEach(el => { el.textContent = ''; });
+        clone.querySelectorAll('.hx-flow-edges').forEach(el => { el.innerHTML = ''; });
+        // What the viewer opened or folded is theirs, not a page change.
+        clone.querySelectorAll('[data-node-panel]').forEach(el => { el.hidden = true; });
+        clone.querySelectorAll('[data-node-toggle]').forEach(el => el.setAttribute('aria-expanded', 'false'));
+        clone.querySelectorAll('[data-collapsed]').forEach(el => el.removeAttribute('data-collapsed'));
+        clone.querySelectorAll('[data-workflow-toggle]').forEach(el => { el.setAttribute('aria-expanded', 'true'); el.setAttribute('aria-label', 'Collapse workflow'); });
+        clone.querySelectorAll('[data-workflows-all]').forEach(el => { el.textContent = ''; });
+        return clone.innerHTML;
+    };
+    const patchRegion = (id, doc) => {
+        const here = document.getElementById(id);
+        const there = doc.getElementById(id);
+        if (!here || !there || normalized(here) === normalized(there)) return false;
+        here.innerHTML = there.innerHTML;
+        return true;
+    };
+    const ROW_ATTRS = ['data-run-id', 'data-tags', 'data-harness', 'data-rank', 'data-verify', 'data-cost', 'data-duration', 'data-steps', 'data-updated', 'data-search'];
+    const patchLedger = (doc) => {
+        const tbody = document.querySelector('#hx-table tbody');
+        const nextBody = doc.querySelector('#hx-table tbody');
+        const pane = document.querySelector('.fleet-pane');
+        const nextPane = doc.querySelector('.fleet-pane');
+        if (!tbody || !nextBody || !pane || !nextPane) return;
+        const nextRows = [...nextBody.rows];
+        const keys = new Set(nextRows.map(row => row.dataset.key));
+        [...tbody.rows].forEach(row => {
+            if (keys.has(row.dataset.key)) return;
+            document.getElementById('hx-detail-' + row.dataset.key)?.remove();
+            row.remove();
+        });
+        let anchor = null;
+        nextRows.forEach(next => {
+            const current = tbody.querySelector('tr[data-key="' + CSS.escape(next.dataset.key) + '"]');
+            if (current) {
+                ROW_ATTRS.forEach(name => {
+                    const value = next.getAttribute(name);
+                    if (value !== current.getAttribute(name)) {
+                        if (value == null) current.removeAttribute(name); else current.setAttribute(name, value);
+                    }
+                });
+                if (normalized(current) !== normalized(next)) current.innerHTML = next.innerHTML;
+                anchor = current;
+            } else {
+                const row = document.importNode(next, true);
+                if (anchor) anchor.after(row); else tbody.prepend(row);
+                anchor = row;
+            }
+        });
+        nextPane.querySelectorAll('.fleet-detail').forEach(next => {
+            const current = document.getElementById(next.id);
+            if (!current) {
+                const section = document.importNode(next, true);
+                section.hidden = true;
+                pane.append(section);
+                return;
+            }
+            const keep = current.querySelector('[data-trajectory-for]');
+            const nextSlot = next.querySelector('[data-trajectory-for]');
+            if (keep && nextSlot) keep.dataset.active = nextSlot.dataset.active;
+            if (normalized(current) === normalized(next)) return;
+            const hidden = current.hidden;
+            current.innerHTML = next.innerHTML;
+            const slot = current.querySelector('[data-trajectory-for]');
+            if (keep && slot) slot.replaceWith(keep);
+            current.hidden = hidden;
+        });
+        doc.querySelectorAll('[data-monitor-tag]').forEach(next => {
+            const here = document.querySelector('[data-monitor-tag="' + CSS.escape(next.dataset.monitorTag) + '"] span');
+            const there = next.querySelector('span');
+            if (here && there && here.textContent !== there.textContent) here.textContent = there.textContent;
+        });
+    };
+    const typingApproval = () => {
+        const focused = document.activeElement;
+        return !!(focused && focused.closest && focused.closest('#hx-region-approvals') && focused.matches('input, textarea') && focused.value);
+    };
+    const refreshInPlace = async () => {
+        const response = await fetch(location.pathname + location.search, {headers: {Accept: 'text/html'}});
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+        if (!document.getElementById('hx-table') !== !doc.getElementById('hx-table')) { location.reload(); return; }
+        patchRegion('hx-region-tape', doc);
+        if (!typingApproval()) patchRegion('hx-region-approvals', doc);
+        patchRegion('hx-region-workflows', doc);
+        applyCollapse();
+        restoreNodeTraces();
+        patchLedger(doc);
+        syncPicks();
+        const nextLive = doc.getElementById('hx-live');
+        const live = document.getElementById('hx-live');
+        if (live && nextLive) { live.dataset.fingerprint = nextLive.dataset.fingerprint; live.dataset.active = nextLive.dataset.active; }
+        fillApprovers();
+        drawFlows();
+        tickDurations();
+        if (monitor) {
+            const selected = monitor.selected();
+            const key = selected ? selected.dataset.key : null;
+            monitor.applyFilter();
+            const row = key && document.querySelector('#hx-table tr[data-key="' + CSS.escape(key) + '"]');
+            if (row && !row.hidden) monitor.select(row);
+        }
+    };
+    const refreshNow = async () => { try { await refreshInPlace(); } catch (_) { location.reload(); } };
+
+    // ------------------------------------------------------------------
+    // Live durations and the execution graph
+    // ------------------------------------------------------------------
+    const tickDurations = () => {
+        const now = Date.now();
+        document.querySelectorAll('[data-live-since]').forEach(el => { el.textContent = fmtDuration(now - Number(el.dataset.liveSince) * 1000); });
+    };
+    setInterval(tickDurations, 1000);
+    tickDurations();
+
+    const SVG = 'http://www.w3.org/2000/svg';
+    const drawFlows = () => {
+        document.querySelectorAll('[data-flow]').forEach((flow, index) => {
+            const svg = flow.querySelector('.hx-flow-edges');
+            const root = flow.querySelector('[data-flow-root]');
+            const nodes = [...flow.querySelectorAll('[data-flow-node]')];
+            if (!svg || !root || !nodes.length) return;
+            const box = flow.getBoundingClientRect();
+            if (!box.width) return;
+            svg.setAttribute('viewBox', '0 0 ' + box.width + ' ' + box.height);
+            svg.setAttribute('width', box.width);
+            svg.setAttribute('height', box.height);
+            const at = (el) => {
+                const r = el.getBoundingClientRect();
+                return {l: r.left - box.left, r: r.right - box.left, t: r.top - box.top, b: r.bottom - box.top, x: (r.left + r.right) / 2 - box.left, y: (r.top + r.bottom) / 2 - box.top};
+            };
+            // A marker takes its colour from where it is defined, not from the
+            // edge using it, so each edge colour gets its own arrowhead.
+            const SIGNALS = ['good', 'bad', 'warn', 'active', 'idle'];
+            const marker = (signal) => 'hx-arrow-' + index + '-' + (SIGNALS.includes(signal) ? signal : 'idle');
+            let paths = '<defs>' + SIGNALS.map(signal => '<marker id="' + marker(signal) + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path class="hx-edge-head hx-edge-head--' + signal + '" d="M1,1.5 L9,5 L1,8.5 z"></path></marker>').join('') + '</defs>';
+            const edge = (a, b, signal) => {
+                let d;
+                // The tip ends on the card's edge, not over its border.
+                if (b.l >= a.r - 2) {
+                    const dx = Math.max(24, (b.l - a.r) / 2);
+                    d = 'M' + a.r + ',' + a.y + ' C' + (a.r + dx) + ',' + a.y + ' ' + (b.l - dx) + ',' + b.y + ' ' + b.l + ',' + b.y;
+                } else {
+                    const dy = Math.max(16, (b.t - a.b) / 2);
+                    d = 'M' + a.x + ',' + a.b + ' C' + a.x + ',' + (a.b + dy) + ' ' + b.x + ',' + (b.t - dy) + ' ' + b.x + ',' + b.t;
+                }
+                paths += '<path class="hx-edge hx-edge--' + signal + '" d="' + d + '" marker-end="url(#' + marker(signal) + ')"></path>';
+            };
+            // Edges meet a node's card, not the trace panel opened below it.
+            const card = (node) => node.querySelector('.hx-step-btn') || node;
+            if (flow.classList.contains('hx-flow--compare')) {
+                const start = at(root);
+                nodes.forEach(node => edge(start, at(card(node)), node.dataset.signal || 'idle'));
+            } else {
+                let previous = root;
+                nodes.forEach(node => { edge(at(previous === root ? root : card(previous)), at(card(node)), node.dataset.signal || 'idle'); previous = node; });
+            }
+            svg.innerHTML = paths;
+        });
+    };
+    if ('ResizeObserver' in window) {
+        const observer = new ResizeObserver(() => drawFlows());
+        const watch = () => document.querySelectorAll('[data-flow]').forEach(flow => observer.observe(flow));
+        watch();
+        new MutationObserver(watch).observe(document.getElementById('hx-region-workflows') || document.body, {childList: true});
+    } else {
+        window.addEventListener('resize', drawFlows);
+    }
+    requestAnimationFrame(drawFlows);
+
+    // ------------------------------------------------------------------
+    // Trajectory: a run's events as the steps the harness took.
+    // ------------------------------------------------------------------
+    const trajectories = new Map();
+    let trajectoryTimer = null;
+    const trajectoryState = (runId) => {
+        if (!trajectories.has(runId)) trajectories.set(runId, {events: [], after: 0, loaded: false});
+        return trajectories.get(runId);
+    };
+    const fetchTrajectory = (runId) => {
+        const state = trajectoryState(runId);
+        // One request at a time per run, and never the same event twice.
+        if (state.pending) return state.pending;
+        state.pending = (async () => {
+            try {
+                for (let page = 0; page < 10; page += 1) {
+                    const body = await request('/api/harness-runs/' + encodeURIComponent(runId) + '/events?after=' + state.after + '&limit=1000');
+                    const events = (body.events || []).filter(event => event.sequence > state.after);
+                    if (!events.length) break;
+                    state.events.push(...events);
+                    state.after = events[events.length - 1].sequence;
+                    if (events.length < 1000) break;
+                }
+                state.loaded = true;
+                return state;
+            } finally { state.pending = null; }
+        })();
+        return state.pending;
+    };
+    const showTrajectory = async (runId) => {
+        const selector = '[data-trajectory-for="' + CSS.escape(runId) + '"]';
+        const state = trajectoryState(runId);
+        document.querySelectorAll(selector).forEach(container => renderTrajectory(container, state));
+        try { await fetchTrajectory(runId); }
+        catch (error) {
+            document.querySelectorAll(selector).forEach(container => { if (!state.events.length) container.innerHTML = '<p class="hx-muted">Could not load the steps: ' + esc(error.message) + '</p>'; });
+            return;
+        }
+        document.querySelectorAll(selector).forEach(container => renderTrajectory(container, state));
+    };
+    const followTrajectory = (runId) => {
+        clearTimeout(trajectoryTimer);
+        const panes = [...document.querySelectorAll('[data-trajectory-for="' + CSS.escape(runId) + '"]')];
+        if (!panes.some(pane => pane.dataset.active === 'true')) return;
+        trajectoryTimer = setTimeout(async () => { await showTrajectory(runId); followTrajectory(runId); }, 2000);
+    };
+    const openTrajectory = (runId) => { showTrajectory(runId).then(() => followTrajectory(runId)); };
+
+    // Ledger picks for a side-by-side comparison (two to four runs).
+    const picked = new Set();
+    const shownPicks = () => [...document.querySelectorAll('#hx-table tbody tr')].filter(row => !row.hidden).map(row => row.querySelector('[data-compare-pick]')).filter(Boolean);
+    const syncPicks = () => {
+        const present = new Set([...document.querySelectorAll('[data-compare-pick]')].map(box => box.dataset.comparePick));
+        [...picked].forEach(id => { if (!present.has(id)) picked.delete(id); });
+        document.querySelectorAll('[data-compare-pick]').forEach(box => { box.checked = picked.has(box.dataset.comparePick); });
+        const all = document.getElementById('hx-pick-all');
+        if (all) {
+            const shown = shownPicks();
+            const ticked = shown.filter(box => box.checked).length;
+            all.checked = shown.length > 0 && ticked === shown.length;
+            all.indeterminate = ticked > 0 && ticked < shown.length;
+        }
+        const button = document.getElementById('hx-compare-picked');
+        if (button) {
+            button.disabled = picked.size < 2 || picked.size > 4;
+            button.textContent = picked.size ? 'Compare selected (' + picked.size + ')' : 'Compare selected';
+            button.title = picked.size > 4 ? 'Compare takes up to four runs' : 'Tick two to four runs in the ledger, then compare their traces';
+        }
+        const remove = document.getElementById('hx-delete-picked');
+        if (remove) {
+            remove.disabled = picked.size < 1;
+            remove.textContent = picked.size ? 'Delete selected (' + picked.size + ')' : 'Delete selected';
+        }
+    };
+    document.addEventListener('change', (event) => {
+        if (event.target.id === 'hx-pick-all') {
+            shownPicks().forEach(box => { if (event.target.checked) picked.add(box.dataset.comparePick); else picked.delete(box.dataset.comparePick); });
+            syncPicks();
+            return;
+        }
+        const box = event.target.closest?.('[data-compare-pick]');
+        if (!box) return;
+        if (box.checked) picked.add(box.dataset.comparePick); else picked.delete(box.dataset.comparePick);
+        syncPicks();
+    });
+    // Filtering the ledger changes which runs "select all" covers.
+    document.querySelectorAll('[data-monitor-tag], #hx-harness, #hx-filter').forEach(el => el.addEventListener(el.matches('input') ? 'input' : el.matches('select') ? 'change' : 'click', () => setTimeout(syncPicks)));
+    const ledgerNote = (text) => {
+        const note = document.getElementById('hx-ledger-note');
+        if (!note) return;
+        note.textContent = text;
+        note.hidden = !text;
+    };
+    const plural = (count, word) => count + ' ' + word + (count === 1 ? '' : 's');
+    const KEEPS = 'Scratch folders MemoRizz made for them are removed too; files in your own folders and answers saved to memory stay.';
+    const KEEP_ONE = 'The scratch folder MemoRizz made for it is removed too, unless another run still uses it. Answers saved to memory stay.';
+    const KEEP_OWN = 'Files it wrote in its folder and answers saved to memory stay.';
+
+    // Live trace inside a workflow node: its reasoning, model and tool calls
+    // (and any subagents) as they happen. Open panels survive page refreshes.
+    const openNodes = new Set();
+    let nodeTimer = null;
+    const nodePanel = (runId) => [...document.querySelectorAll('[data-node-panel]')].find(el => el.dataset.nodePanel === runId);
+    const followNodes = () => {
+        clearTimeout(nodeTimer);
+        const live = [...openNodes].filter(runId => nodePanel(runId)?.dataset.active === 'true');
+        if (!live.length) return;
+        nodeTimer = setTimeout(async () => {
+            await Promise.all(live.map(runId => showTrajectory(runId).catch(() => {})));
+            drawFlows();
+            followNodes();
+        }, 1500);
+    };
+    const restoreNodeTraces = () => {
+        openNodes.forEach(runId => {
+            const panel = nodePanel(runId);
+            if (!panel) { openNodes.delete(runId); return; }
+            panel.hidden = false;
+            panel.closest('.hx-step')?.querySelector('[data-node-toggle]')?.setAttribute('aria-expanded', 'true');
+            renderTrajectory(panel, trajectoryState(runId));
+            showTrajectory(runId).then(drawFlows).catch(() => {});
+        });
+        followNodes();
+    };
+    const toggleNodeTrace = async (button) => {
+        const runId = button.dataset.nodeToggle;
+        const panel = nodePanel(runId);
+        if (!panel) return;
+        const open = !openNodes.has(runId);
+        if (open) openNodes.add(runId); else openNodes.delete(runId);
+        panel.hidden = !open;
+        button.setAttribute('aria-expanded', String(open));
+        drawFlows();
+        if (!open) return;
+        await showTrajectory(runId);
+        drawFlows();
+        followNodes();
+    };
+
+    // Collapsible workflow cards. The newest and any live workflow start
+    // open; the viewer's own choice is remembered per workflow.
+    const COLLAPSE_KEY = 'memorizz.harnesses.collapsed';
+    const collapsedPrefs = (() => { try { return JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '{}') || {}; } catch (_) { return {}; } })();
+    const saveCollapsed = () => {
+        try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(Object.fromEntries(Object.entries(collapsedPrefs).slice(-200)))); } catch (_) {}
+    };
+    const workflowCards = () => [...document.querySelectorAll('.hx-workflow[data-workflow-id]')];
+    const isCollapsed = (card, index) => Object.prototype.hasOwnProperty.call(collapsedPrefs, card.dataset.workflowId)
+        ? collapsedPrefs[card.dataset.workflowId]
+        : index > 0 && card.dataset.live !== 'true';
+    const applyCollapse = () => {
+        const cards = workflowCards();
+        cards.forEach((card, index) => {
+            const collapsed = isCollapsed(card, index);
+            if (collapsed) card.dataset.collapsed = 'true'; else delete card.dataset.collapsed;
+            const toggle = card.querySelector('[data-workflow-toggle]');
+            if (toggle) { toggle.setAttribute('aria-expanded', String(!collapsed)); toggle.setAttribute('aria-label', (collapsed ? 'Expand' : 'Collapse') + ' workflow'); }
+        });
+        const all = document.querySelector('[data-workflows-all]');
+        if (all) all.textContent = cards.some(card => !card.dataset.collapsed) ? 'Collapse all' : 'Expand all';
+    };
+    const setCollapsed = (cards, collapsed) => {
+        cards.forEach(card => { collapsedPrefs[card.dataset.workflowId] = collapsed; });
+        saveCollapsed();
+        applyCollapse();
+        drawFlows();
+    };
+    applyCollapse();
+    drawFlows();
+
+    // ------------------------------------------------------------------
+    // Evidence dialog: the trajectory in full, or the raw run record.
+    // ------------------------------------------------------------------
+    const dialog = document.getElementById('harness-run-dialog');
+    const content = document.getElementById('harness-dialog-content');
+    const dialogTrajectory = document.getElementById('harness-dialog-trajectory');
+    const setDialogTab = (tab) => {
+        dialog.querySelectorAll('[data-dialog-tab]').forEach(button => button.setAttribute('aria-selected', button.dataset.dialogTab === tab ? 'true' : 'false'));
+        content.hidden = tab !== 'json';
+        dialogTrajectory.hidden = tab !== 'trajectory';
+    };
+    const openEvidence = async (runId, tab) => {
+        document.getElementById('harness-dialog-title').textContent = runId;
+        dialog.dataset.runId = runId;
+        const pane = document.querySelector('.fleet-pane [data-trajectory-for="' + CSS.escape(runId) + '"]');
+        dialogTrajectory.dataset.trajectoryFor = runId;
+        dialogTrajectory.dataset.active = pane ? pane.dataset.active : 'false';
+        dialogTrajectory.dataset.signature = '';
+        content.textContent = 'Loading…';
+        setDialogTab(tab);
+        if (!dialog.open) dialog.showModal();
+        openTrajectory(runId);
+        try { const body = await request('/api/harness-runs/' + encodeURIComponent(runId) + '?include_events=true'); content.textContent = JSON.stringify(body.run, null, 2); }
+        catch (error) { content.textContent = error.message; }
+    };
+    dialog?.addEventListener('click', (event) => { const tab = event.target.closest('[data-dialog-tab]'); if (tab) setDialogTab(tab.dataset.dialogTab); });
+    document.getElementById('harness-dialog-close')?.addEventListener('click', () => dialog.close());
+    dialog?.addEventListener('close', () => { delete dialogTrajectory.dataset.trajectoryFor; });
+
+    // ------------------------------------------------------------------
+    // Actions, delegated so they keep working on refreshed content.
+    // ------------------------------------------------------------------
+    const selectRun = (runId, reveal) => {
+        const row = document.querySelector('#hx-table tr[data-key="' + CSS.escape(runId) + '"]');
+        if (!row || !monitor) return false;
+        if (row.hidden) {
+            const filter = document.getElementById('hx-filter');
+            if (filter) filter.value = '';
+            document.querySelector('[data-monitor-tag=""]')?.click();
+            const harness = document.getElementById('hx-harness');
+            if (harness && harness.value) { harness.value = ''; harness.dispatchEvent(new Event('change')); }
+        }
+        monitor.select(row, true);
+        if (reveal === 'trajectory') document.querySelector('#hx-detail-' + CSS.escape(runId) + ' [data-trajectory-for]')?.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+        else row.scrollIntoView({block: 'center'});
+        return true;
+    };
+    document.addEventListener('click', async (event) => {
+        const target = event.target;
+        const trajectoryCell = target.closest('[data-show-trajectory]');
+        if (trajectoryCell) { selectRun(trajectoryCell.dataset.showTrajectory, 'trajectory'); return; }
+        const full = target.closest('[data-trajectory-full]');
+        if (full) { openEvidence(full.dataset.trajectoryFull, 'trajectory'); return; }
+        const inspect = target.closest('.harness-inspect');
+        if (inspect) { openEvidence(runIdOf(inspect), 'trajectory'); return; }
+        const show = target.closest('[data-select-run]');
+        if (show) { selectRun(show.dataset.selectRun); return; }
+        const compareRuns = target.closest('[data-compare-runs]');
+        if (compareRuns && window.MemorizzCompare) {
+            window.MemorizzCompare.open(compareRuns.dataset.compareRuns.split(',').filter(Boolean), {title: compareRuns.dataset.compareTitle});
+            return;
+        }
+        if (target.closest('[data-compare-pick]')) { event.stopPropagation(); return; }
+        if (target.closest('#hx-compare-picked') && window.MemorizzCompare && picked.size >= 2) {
+            window.MemorizzCompare.open([...picked].slice(0, 4), {title: 'Selected runs'});
+            return;
+        }
+        const deletePicked = target.closest('#hx-delete-picked');
+        if (deletePicked && picked.size) {
+            const ids = [...picked];
+            if (!(await MemorizzDialogs.confirm('Delete ' + plural(ids.length, 'run') + ' and their traces?', {detail: 'Runs their delegates made go too. ' + KEEPS}))) return;
+            deletePicked.disabled = true;
+            try {
+                const body = await request('/api/harness-runs/delete', {method: 'POST', body: JSON.stringify({run_ids: ids})});
+                const reasons = {};
+                (body.kept || []).forEach(item => { reasons[item.reason] = (reasons[item.reason] || 0) + 1; });
+                const parts = ['Deleted ' + plural(body.deleted.length, 'run') + (body.delegates_deleted.length ? ' and ' + plural(body.delegates_deleted.length, 'delegate run') : '') + '.'];
+                if (reasons.active) parts.push('Kept ' + plural(reasons.active, 'run') + ' still working; cancel first.');
+                if (reasons.workflow) parts.push('Kept ' + plural(reasons.workflow, 'workflow step') + '; delete those from the workflow card.');
+                ids.forEach(id => picked.delete(id));
+                ledgerNote(parts.join(' '));
+                await refreshNow();
+            } catch (error) { MemorizzDialogs.notify(error.message); }
+            syncPicks();
+            return;
+        }
+        const deleteWorkflow = target.closest('[data-delete-workflow]');
+        if (deleteWorkflow) {
+            const count = Number(deleteWorkflow.dataset.deleteCount || 0);
+            const what = deleteWorkflow.dataset.deleteKind === 'plan' ? 'staged plan' : 'comparison';
+            if (!(await MemorizzDialogs.confirm('Delete this ' + what + ' and its ' + plural(count, 'run') + '?', {detail: KEEPS}))) return;
+            deleteWorkflow.disabled = true;
+            try {
+                await request('/api/harness-orchestrations/' + deleteWorkflow.dataset.deleteWorkflow, {method: 'DELETE'});
+                await refreshNow();
+            } catch (error) { deleteWorkflow.disabled = false; MemorizzDialogs.notify(error.message); }
+            return;
+        }
+        const deleteRun = target.closest('.harness-delete');
+        if (deleteRun) {
+            const runId = runIdOf(deleteRun);
+            const delegates = Number(deleteRun.dataset.delegateRuns || 0);
+            if (!(await MemorizzDialogs.confirm('Delete this ' + (deleteRun.dataset.harness || 'harness') + ' run (' + runId.slice(0, 8) + ') and its trace?', {detail: (delegates === 1 ? 'Its delegate run goes too. ' : delegates ? 'Its ' + delegates + ' delegate runs go too. ' : '') + (deleteRun.dataset.scratch === 'true' ? KEEP_ONE : KEEP_OWN)}))) return;
+            deleteRun.disabled = true;
+            try {
+                await request('/api/harness-runs/' + runId, {method: 'DELETE'});
+                picked.delete(runId);
+                await refreshNow();
+            } catch (error) { deleteRun.disabled = false; MemorizzDialogs.notify(error.message); }
+            return;
+        }
+        const nodeToggle = target.closest('[data-node-toggle]');
+        if (nodeToggle) { toggleNodeTrace(nodeToggle); return; }
+        const collapseAll = target.closest('[data-workflows-all]');
+        if (collapseAll) { const cards = workflowCards(); setCollapsed(cards, cards.some(card => !card.dataset.collapsed)); return; }
+        const workflowHead = target.closest('.hx-workflow-head');
+        if (workflowHead && !target.closest('button:not([data-workflow-toggle]), a, input, select, textarea')) {
+            const card = workflowHead.closest('.hx-workflow');
+            if (card && !(window.getSelection && String(window.getSelection()).trim())) setCollapsed([card], !card.dataset.collapsed);
+            return;
+        }
+        const rerun = target.closest('[data-rerun-workflow]');
+        if (rerun) {
+            rerun.disabled = true;
+            try {
+                const body = await request('/api/harness-orchestrations/' + rerun.dataset.rerunWorkflow + '/rerun', {method: 'POST', body: '{}'});
+                await refreshNow();
+                const id = body.orchestration && body.orchestration.orchestration_id;
+                const fresh = id && document.getElementById('hx-workflow-' + id);
+                if (fresh) {
+                    fresh.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+                    fresh.classList.add('is-new');
+                    setTimeout(() => fresh.classList.remove('is-new'), 1600);
+                }
+            } catch (error) { rerun.disabled = false; MemorizzDialogs.notify(error.message); }
+            return;
+        }
+        const editWorkflow = target.closest('[data-edit-workflow]');
+        if (editWorkflow) { loadWorkflow(editWorkflow.dataset.editWorkflow); return; }
+        const cancelWorkflow = target.closest('.hx-workflow-cancel');
+        if (cancelWorkflow) {
+            if (!(await MemorizzDialogs.confirm('Cancel this workflow?', {detail: 'Its active run stops and no later stage starts.', confirmLabel: 'Cancel workflow', cancelLabel: 'Keep it running'}))) return;
+            cancelWorkflow.disabled = true;
+            try { await request('/api/harness-orchestrations/' + cancelWorkflow.dataset.workflowId + '/cancel', {method: 'POST', body: '{}'}); await refreshNow(); }
+            catch (error) { cancelWorkflow.disabled = false; MemorizzDialogs.notify(error.message); }
+            return;
+        }
+        const decision = target.closest('.harness-decision');
+        if (decision) {
+            const card = decision.closest('.harness-approval');
+            const approver = card.querySelector('.harness-approver').value.trim();
+            if (!approver) { card.querySelector('.harness-approver').focus(); return; }
+            rememberApprover(approver);
+            decision.disabled = true;
+            try {
+                await request('/api/harness-approvals/' + card.dataset.proposalId + '/' + decision.dataset.decision, {method: 'POST', body: JSON.stringify({approver_id: approver})});
+                if (decision.dataset.decision === 'approve') await request('/api/harness-approvals/' + card.dataset.proposalId + '/resume', {method: 'POST', body: '{}'});
+                await refreshNow();
+            } catch (error) { decision.disabled = false; MemorizzDialogs.notify(error.message); }
+            return;
+        }
+        const cancel = target.closest('.harness-cancel');
+        if (cancel) {
+            const runId = runIdOf(cancel);
+            if (!(await MemorizzDialogs.confirm('Cancel harness run ' + runId.slice(0, 8) + '?', {detail: 'A memagent run also stops the runs its delegates started.', confirmLabel: 'Cancel run', cancelLabel: 'Keep it running'}))) return;
+            try { await request('/api/harness-runs/' + runId + '/cancel', {method: 'POST', body: '{}'}); await refreshNow(); }
+            catch (error) { MemorizzDialogs.notify(error.message); }
+            return;
+        }
+        const retry = target.closest('.harness-retry');
+        if (retry) {
+            retry.disabled = true;
+            try {
+                const body = await request('/api/harness-runs/' + runIdOf(retry) + '/retry', {method: 'POST', body: '{}'});
+                try { localStorage.setItem('memorizz.harnesses.selected', body.run.run_id); } catch (_) {}
+                await refreshNow();
+                selectRun(body.run.run_id);
+            } catch (error) { retry.disabled = false; MemorizzDialogs.notify(error.message); }
+        }
+    });
+
+    // Live refresh: poll a cheap fingerprint and patch the page when it moves.
+    const live = document.getElementById('hx-live');
+    if (live) {
+        let active = live.dataset.active === 'true';
+        const poll = async () => {
+            if (!document.hidden) {
+                try {
+                    const body = await request('/api/harness-activity');
+                    active = body.active;
+                    if (body.fingerprint !== live.dataset.fingerprint) {
+                        live.dataset.fingerprint = body.fingerprint;
+                        await refreshInPlace();
+                    }
+                    live.textContent = active ? 'Live' : '';
+                } catch (_) { /* keep the page; try again later */ }
+            }
+            setTimeout(poll, active ? 2500 : 15000);
+        };
+        setTimeout(poll, active ? 2500 : 15000);
+    }
+
+    // ------------------------------------------------------------------
+    // Launch helpers: model suggestions per harness, and the MemAgent that
+    // memagent will use.
+    // ------------------------------------------------------------------
+    const modelsFor = (name) => (launchData.harnesses.find(h => h.name === name) || {}).models || [];
+    const fillModels = (list, names, input) => {
+        if (!list) return;
+        const models = [...new Set(names.flatMap(modelsFor))];
+        list.replaceChildren(...models.map(model => { const o = document.createElement('option'); o.value = model; return o; }));
+        if (input) input.placeholder = names.length === 1 && names[0] === 'codex' && models.length ? 'Harness default (' + models[0] + ')' : 'Harness default';
+    };
+    const agentSelect = document.getElementById('harness-agent');
+    const agentHint = document.getElementById('hx-memagent-hint');
+    const memagentInvolved = () => {
+        if (!form) return false;
+        const mode = form.dataset.mode;
+        if (mode === 'single') return document.getElementById('harness-name')?.value === 'memagent';
+        if (mode === 'compare') return !!form.querySelector('input[name="compare_harness"][value="memagent"]:checked');
+        return [...(stageList?.children || [])].some(li => li.querySelector('.hx-stage-harness').value === 'memagent' && !li.querySelector('.hx-stage-agent').value);
+    };
+    const syncLaunch = () => {
+        if (form) {
+            const mode = form.dataset.mode;
+            const names = mode === 'compare' ? [...form.querySelectorAll('input[name="compare_harness"]:checked')].map(box => box.value) : [document.getElementById('harness-name')?.value].filter(Boolean);
+            fillModels(document.getElementById('hx-form-models'), names, document.getElementById('harness-model'));
+            // A model another harness lists won't run here (memagent keeps its agent's model).
+            const hint = document.getElementById('hx-model-hint');
+            const model = (document.getElementById('harness-model')?.value || '').trim();
+            const message = mode === 'single' ? modelMismatch(names[0], model) : '';
+            if (hint) {
+                hint.hidden = !message;
+                hint.textContent = message;
+            }
+        }
+        if (!agentSelect || !agentHint) return;
+        const involved = memagentInvolved();
+        const fallback = launchData.default_agent;
+        if (involved && !agentSelect.value && fallback) agentSelect.value = fallback.id;
+        agentHint.hidden = !involved;
+        if (!involved) return;
+        const chosen = agentSelect.selectedOptions[0];
+        let team = [];
+        try { team = JSON.parse(chosen?.dataset.team || '[]'); } catch (_) { team = []; }
+        const listed = team.length > 1 ? team.slice(0, -1).join(', ') + ' and ' + team[team.length - 1] : team.join('');
+        agentHint.textContent = !agentSelect.value
+            ? 'memagent runs a saved MemAgent, and there is none yet. Create one on the Agents page.'
+            : team.length
+                ? 'memagent will run ' + chosen.textContent + ', which hands parts of the task to ' + listed + '. They work at the same time and each shows as a subagent in this run\u2019s trace, with a link to its own run.'
+                : 'memagent will run ' + (chosen ? chosen.textContent : 'the selected agent') + '.';
+        agentHint.classList.toggle('is-bad', !agentSelect.value);
+    };
+    form?.addEventListener('change', syncLaunch);
+    document.getElementById('harness-model')?.addEventListener('input', syncLaunch);
+    form?.addEventListener('click', (event) => { if (event.target.closest('[data-mode-choice], [data-preset], #hx-add-stage')) setTimeout(syncLaunch); });
+    syncLaunch();
+
+    // What each harness can be given: web access follows Network, and tool
+    // lists only narrow harnesses that take them. Harnesses that cannot honour
+    // the choice are greyed out with the reason, instead of failing at start.
+    const accessNote = document.getElementById('hx-access-note');
+    const harnessInfo = (name) => launchData.harnesses.find(h => h.name === name) || {};
+    const WEB_HOW = { 'claude-code': 'WebSearch and WebFetch', deepseek: 'WebSearch and WebFetch', codex: 'live web search', memagent: 'its agent’s internet provider, or Tavily from MemoRizz', hermes: 'its web toolset', openhands: 'its browser' };
+    const accessBlock = (name) => {
+        const info = harnessInfo(name);
+        const network = form.querySelector('[name="network"]').value;
+        const modes = info.network || ['none'];
+        if (!modes.includes(network)) {
+            if (network === 'full') return 'no web access';
+            return modes.length === 1 && modes[0] === 'full' ? 'needs Network: Full' : 'no ' + network + ' network';
+        }
+        const tools = ['allowed_tools', 'denied_tools'].some(field => (form.querySelector('[name="' + field + '"]')?.value || '').trim());
+        if (tools && !info.tools) return 'no tool lists';
+        return '';
+    };
+    const syncAccess = () => {
+        if (!form) return;
+        form.querySelectorAll('input[name="compare_harness"]').forEach(box => {
+            const item = box.closest('.hx-compare-item');
+            const unready = item.dataset.unready === 'true';
+            const reason = unready ? '' : accessBlock(box.value);
+            box.disabled = unready || !!reason;
+            if (reason) box.checked = false;
+            item.classList.toggle('is-disabled', box.disabled);
+            let note = item.querySelector('small[data-access]');
+            if (reason && !note) { note = document.createElement('small'); note.dataset.access = ''; item.append(note); }
+            if (note) { note.textContent = reason; note.hidden = !reason; }
+        });
+        const selects = [document.getElementById('harness-name'), ...form.querySelectorAll('.hx-stage-harness')].filter(Boolean);
+        selects.forEach(select => {
+            [...select.options].forEach(o => {
+                if (o.value === 'auto') return;
+                const unready = !(harnessInfo(o.value).ready);
+                const reason = unready ? '' : accessBlock(o.value);
+                o.disabled = unready || !!reason;
+                o.textContent = o.value + (unready ? ' · unavailable' : reason ? ' · ' + reason : '');
+            });
+            if (select.selectedOptions[0]?.disabled) select.value = select.querySelector('option[value="auto"]') ? 'auto' : ([...select.options].find(o => !o.disabled)?.value || select.value);
+        });
+        if (!accessNote) return;
+        const network = form.querySelector('[name="network"]').value;
+        const mcp = form.querySelector('[name="mcp_access"]').value;
+        const lines = [];
+        if (network === 'full') {
+            const web = launchData.harnesses.filter(h => h.ready && (h.network || []).includes('full')).map(h => h.name + ' (' + (WEB_HOW[h.name] || 'its web tools') + ')');
+            lines.push(web.length ? 'Web access for ' + web.join(', ') + '. The run waits for your approval first.' : 'No ready harness can reach the web.');
+        } else if (network === 'none') {
+            lines.push('No web access: harnesses work only with the workspace and memory.');
+        }
+        if (mcp !== 'none') {
+            lines.push((mcp === 'governed_write' ? 'Harnesses can read and propose changes to' : 'Harnesses can read') + ' MemoRizz memory, and use the saved agent’s connected apps (Notion, Gmail…) when an agent is chosen' + (mcp === 'governed_write' ? '; every change waits for approval.' : ', read-only.'));
+        }
+        const subagents = form.querySelector('[name="allow_subagents"]');
+        if (subagents && !subagents.disabled && subagents.checked) {
+            lines.push('Subagents: Claude Code may use its Task tool and Codex its sub-agents, with the run’s own tools, and a memagent agent’s harness delegates may start their own. Each subagent shows nested in the node’s trace and adds cost. A memagent agent hands work to its delegates with or without this.');
+        }
+        accessNote.textContent = lines.join(' ');
+    };
+    // Model pickers: a dropdown of each harness's newest models per provider,
+    // and "Other model…" to type any name into the field behind it.
+    const MODEL_OTHER = '__other__';
+    // Which provider a model name belongs to, when it can be told. Function
+    // declarations, so the launch form can call them while the page starts.
+    function modelProvider(model) {
+        const name = String(model || '').trim().toLowerCase();
+        if (!name) return '';
+        if (name.includes('/')) return name.split('/')[0];
+        if (/^claude/.test(name)) return 'anthropic';
+        if (/^(gpt|o\d|codex|chatgpt)/.test(name)) return 'openai';
+        if (/^deepseek/.test(name)) return 'deepseek';
+        if (name.includes(':')) return 'ollama';
+        return '';
+    }
+    // A warning when a harness only runs other providers' models.
+    function modelMismatch(name, model) {
+        if (!name || name === 'auto' || name === 'memagent') return '';
+        const names = {anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek', ollama: 'Ollama'};
+        const info = launchData.harnesses.find(h => h.name === name) || {};
+        const provider = modelProvider(model);
+        const accepted = new Set((info.choices || []).flatMap(group => group.models.map(modelProvider)).filter(Boolean));
+        if (name === 'codex') accepted.add('openai');
+        if (!provider || !accepted.size || accepted.has(provider)) return '';
+        const label = names[provider] || provider;
+        return model + ' is ' + (/^[aeiou]/i.test(label) ? 'an ' : 'a ') + label + ' model; ' + name + ' runs ' + [...accepted].map(p => names[p] || p).join(' or ') + ' models.';
+    }
+    const modelDefaultLabel = (name) => {
+        if (name === 'memagent') {
+            const agent = launchData.agents.find(a => a.id === document.getElementById('harness-agent')?.value);
+            return 'Agent’s model' + (agent && agent.model ? ' (' + agent.model + ')' : '');
+        }
+        if (!name || name === 'auto') return 'Each harness’s default';
+        const info = harnessInfo(name);
+        return info.default_model ? 'Default (' + info.default_model + ')' : 'Harness default';
+    };
+    const attachModelSelect = (input, name) => {
+        if (!input) return null;
+        let select = input.previousElementSibling && input.previousElementSibling.matches('select.hx-model-select') ? input.previousElementSibling : null;
+        if (!select) {
+            select = document.createElement('select');
+            select.className = 'hx-model-select';
+            select.setAttribute('aria-label', input.getAttribute('aria-label') || 'Model');
+            input.before(select);
+            select.addEventListener('change', () => {
+                const other = select.value === MODEL_OTHER;
+                select.dataset.other = other ? '1' : '';
+                input.hidden = !other;
+                if (other) { input.value = ''; input.focus(); } else { input.value = select.value; }
+                input.dispatchEvent(new Event('input', {bubbles: true}));
+            });
+        }
+        const groups = name && name !== 'auto' ? (harnessInfo(name).choices || []) : [];
+        const opt = (value, label) => { const o = document.createElement('option'); o.value = value; o.textContent = label; return o; };
+        select.replaceChildren(
+            opt('', modelDefaultLabel(name)),
+            ...groups.map(group => { const g = document.createElement('optgroup'); g.label = group.label; group.models.forEach(model => g.append(opt(model, model))); return g; }),
+            opt(MODEL_OTHER, 'Other model…'),
+        );
+        const value = input.value.trim();
+        const known = groups.some(group => group.models.includes(value));
+        // "Other model…" stays open while its name is being typed.
+        select.value = !value ? (select.dataset.other ? MODEL_OTHER : '') : (known ? value : MODEL_OTHER);
+        input.hidden = select.value !== MODEL_OTHER;
+        input.placeholder = 'Type a model name';
+        select.disabled = input.disabled;
+        return select;
+    };
+
+    // Show only the options that apply to the chosen harness(es). Options
+    // that don't apply are hidden and left out of the launch.
+    const chosenHarnesses = () => {
+        if (!form) return [];
+        const mode = form.dataset.mode;
+        if (mode === 'compare') return [...form.querySelectorAll('input[name="compare_harness"]:checked')].map(box => box.value);
+        if (mode === 'plan') return [...form.querySelectorAll('.hx-stage-harness')].map(select => select.value);
+        return [document.getElementById('harness-name')?.value || 'auto'];
+    };
+    const editsOn = () => form.dataset.mode === 'plan'
+        ? [...form.querySelectorAll('.hx-stage-write-input')].some(box => box.checked)
+        : form.dataset.mode === 'single' && !!form.querySelector('[name="write"]')?.checked;
+    const APPLIES = {
+        agent: (h, all) => h.some(name => name === 'memagent'),
+        model: (h, all) => true,
+        cost: (h, all) => all.every(info => info.cost),
+        tokens: (h, all) => all.every(info => info.tokens),
+        // A wrapper matters for harnesses that always need one, or that need one to edit.
+        isolation: (h, all) => all.some(info => info.isolation) || (editsOn() && all.some(info => info.edit_isolation)),
+        tools: (h, all) => all.some(info => info.tools),
+        schema: (h, all) => all.some(info => info.schema),
+        env: (h, all) => all.some(info => info.name !== 'memagent'),
+        edits: (h, all) => all.some(info => info.edits),
+        dirty: (h, all) => editsOn(),
+        mcp: (h, all) => all.some(info => info.mcp),
+        subagents: (h, all) => all.some(info => info.subagents),
+    };
+    const syncApplies = () => {
+        if (!form) return;
+        const names = chosenHarnesses().filter(Boolean);
+        // Auto route (or a stage left on auto) could pick any ready harness.
+        const known = names.filter(name => name !== 'auto');
+        const pool = names.some(name => name === 'auto') ? launchData.harnesses.filter(h => h.ready && h.name !== 'memagent') : [];
+        const infos = [...known.map(harnessInfo), ...pool];
+        form.querySelectorAll('[data-applies]').forEach(el => {
+            const rule = APPLIES[el.dataset.applies];
+            const applies = !rule || !infos.length || rule(known, infos);
+            el.classList.toggle('is-na', !applies);
+            el.querySelectorAll('input, select, textarea').forEach(field => { field.disabled = !applies; });
+        });
+        // A harness that only runs behind an isolation wrapper (OpenHands) needs
+        // the run marked as isolated; its configured wrapper is Docker.
+        const backend = form.querySelector('[name="execution_backend"]');
+        if (backend && backend.value === 'local' && known.some(name => harnessInfo(name).isolation)) backend.value = 'docker';
+        attachModelSelect(document.getElementById('harness-model'), form.dataset.mode === 'single' ? document.getElementById('harness-name')?.value : null);
+        form.querySelectorAll('.hx-stage').forEach(li => attachModelSelect(li.querySelector('.hx-stage-model'), li.querySelector('.hx-stage-harness')?.value));
+        renderCompareModels();
+    };
+    // Comparisons: a model picker per harness, suggesting that harness's models.
+    const compareModels = {};
+    const renderCompareModels = () => {
+        const box = document.getElementById('hx-compare-models');
+        if (!box || !form) return;
+        box.querySelectorAll('[data-harness-model]').forEach(input => { compareModels[input.dataset.harnessModel] = input.value; });
+        const names = form.dataset.mode === 'compare' ? [...form.querySelectorAll('input[name="compare_harness"]:checked')].map(b => b.value) : [];
+        if (!names.length) { box.replaceChildren(); return; }
+        const agent = launchData.agents.find(a => a.id === document.getElementById('harness-agent')?.value);
+        const title = document.createElement('p');
+        title.className = 'hx-compare-models-title';
+        title.textContent = 'Model per harness';
+        const rows = names.map(name => {
+            const info = harnessInfo(name);
+            const row = document.createElement('label');
+            row.className = 'hx-compare-model';
+            const label = document.createElement('span');
+            label.className = 'mono';
+            label.textContent = name;
+            row.append(label);
+            const input = document.createElement('input');
+            input.dataset.harnessModel = name;
+            input.value = compareModels[name] || '';
+            input.autocomplete = 'off';
+            input.spellcheck = false;
+            const fallback = info.default_model || (name === 'codex' ? (info.models || [])[0] : '');
+            input.placeholder = fallback ? 'Default: ' + fallback : 'Harness default';
+            if ((info.models || []).length) {
+                const list = document.createElement('datalist');
+                list.id = 'hx-cm-' + name;
+                (info.models || []).forEach(model => { const o = document.createElement('option'); o.value = model; list.append(o); });
+                input.setAttribute('list', list.id);
+                row.append(input, list);
+            } else {
+                row.append(input);
+            }
+            const cell = document.createElement('span');
+            cell.className = 'hx-model-cell';
+            row.querySelectorAll(':scope > input, :scope > datalist').forEach(el => cell.append(el));
+            row.append(cell);
+            attachModelSelect(input, name);
+            const warn = document.createElement('small');
+            warn.className = 'form-hint is-bad';
+            const check = () => {
+                const message = modelMismatch(name, input.value.trim());
+                warn.hidden = !message;
+                warn.textContent = message;
+            };
+            input.addEventListener('input', () => { compareModels[name] = input.value; check(); });
+            check();
+            row.append(warn);
+            return row;
+        });
+        box.replaceChildren(title, ...rows);
+    };
+    // A model pick changes nothing else on the form, so it doesn't redraw it.
+    form?.addEventListener('change', (event) => { if (!event.target.matches('[data-harness-model], .hx-model-select, #harness-model, .hx-stage-model')) syncApplies(); });
+    form?.addEventListener('click', (event) => { if (event.target.closest('[data-mode-choice], [data-preset], #hx-add-stage, [data-stage-remove]')) setTimeout(syncApplies); });
+    syncApplies();
+    form?.addEventListener('change', syncAccess);
+    form?.addEventListener('input', (event) => { if (event.target.matches('[name="allowed_tools"], [name="denied_tools"]')) syncAccess(); });
+    form?.addEventListener('click', (event) => { if (event.target.closest('[data-mode-choice], [data-preset], #hx-add-stage')) setTimeout(syncAccess); });
+    syncAccess();
+
+    // Quick launch: a task, an optional model and project folder, and Run.
+    const quick = document.getElementById('hx-quick');
+    const quickTask = document.getElementById('hx-quick-task');
+    const quickStatus = document.getElementById('hx-quick-status');
+    const quickHarness = document.getElementById('hx-quick-harness');
+    const quickWeb = document.getElementById('hx-quick-web');
+    const quickModel = document.getElementById('hx-quick-model');
+    const syncQuickModels = () => {
+        if (!quickHarness) return;
+        const name = quickHarness.value;
+        fillModels(document.getElementById('hx-quick-models'), name === 'auto' ? [] : [name], quickModel);
+        if (quickModel) quickModel.disabled = name === 'auto';
+        if (quickModel && name === 'auto') { quickModel.value = ''; }
+        const select = attachModelSelect(quickModel, name);
+        if (select && name === 'auto') select.options[0].textContent = 'Chosen with the harness';
+    };
+    quickHarness?.addEventListener('change', syncQuickModels);
+    syncQuickModels();
+    const afterStart = async (runId) => {
+        try { localStorage.setItem('memorizz.harnesses.selected', runId); } catch (_) {}
+        await refreshNow();
+        selectRun(runId);
+    };
+    const growTask = () => { if (!quickTask) return; quickTask.style.height = 'auto'; quickTask.style.height = Math.min(quickTask.scrollHeight, 220) + 'px'; };
+    quickTask?.addEventListener('input', growTask);
+    quickTask?.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); quick.requestSubmit(); }
+    });
+    // Only harnesses that allow web access stay selectable with Web access on.
+    const syncWeb = () => {
+        if (!quickHarness) return;
+        [...quickHarness.options].forEach(o => { o.disabled = o.dataset.unready === 'true' || (quickWeb.checked && o.dataset.web !== 'true'); });
+        if (quickHarness.selectedOptions[0]?.disabled) { quickHarness.value = 'auto'; syncQuickModels(); }
+    };
+    quickWeb?.addEventListener('change', syncWeb);
+    const quickMessage = (text, tone) => {
+        quickStatus.replaceChildren();
+        const line = document.createElement('p');
+        line.textContent = text;
+        if (tone) line.className = 'is-' + tone;
+        quickStatus.append(line);
+    };
+    const askApproval = (runId, proposalId, reasons) => {
+        quickStatus.replaceChildren();
+        const box = document.createElement('div');
+        box.className = 'hx-quick-approve';
+        const text = document.createElement('p');
+        text.textContent = 'This run needs your approval first: ' + reasons.join(' and ') + '.';
+        const approver = document.createElement('input');
+        approver.className = 'harness-approver'; approver.placeholder = 'Your name or email'; approver.setAttribute('aria-label', 'Approver identity');
+        approver.value = rememberedApprover();
+        const approve = document.createElement('button');
+        approve.type = 'button'; approve.className = 'btn btn-primary'; approve.textContent = 'Approve & run';
+        const discard = document.createElement('button');
+        discard.type = 'button'; discard.className = 'btn'; discard.textContent = 'Discard';
+        approve.addEventListener('click', async () => {
+            const who = approver.value.trim();
+            if (!who) { approver.focus(); return; }
+            rememberApprover(who);
+            approve.disabled = discard.disabled = true;
+            try {
+                await request('/api/harness-approvals/' + proposalId + '/approve', {method: 'POST', body: JSON.stringify({approver_id: who})});
+                await request('/api/harness-approvals/' + proposalId + '/resume', {method: 'POST', body: '{}'});
+                quickStatus.replaceChildren();
+                await afterStart(runId);
+            } catch (error) { approve.disabled = discard.disabled = false; quickMessage(error.message, 'bad'); }
+        });
+        discard.addEventListener('click', async () => {
+            approve.disabled = discard.disabled = true;
+            try { await request('/api/harness-runs/' + runId + '/cancel', {method: 'POST', body: '{}'}); quickStatus.replaceChildren(); await refreshNow(); }
+            catch (error) { quickMessage(error.message, 'bad'); }
+        });
+        box.append(text, approver, approve, discard);
+        quickStatus.append(box);
+        (approver.value ? approve : approver).focus();
+    };
+    quick?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const task = quickTask.value.trim();
+        if (!task) { quickMessage('Describe the task.', 'bad'); quickTask.focus(); return; }
+        const data = new FormData(quick);
+        const web = data.has('web');
+        const write = data.has('write');
+        const payload = {
+            task, harness: data.get('harness') || 'auto',
+            model: (data.get('model') || '').toString().trim(),
+            workspace: (data.get('workspace') || '').toString().trim(),
+            network: web ? 'full' : 'none', write, mcp_access: 'read_only',
+        };
+        const button = document.getElementById('hx-quick-run');
+        button.disabled = true;
+        quickMessage(payload.workspace ? 'Starting…' : 'Starting in a fresh scratch folder…');
+        try {
+            const body = await request('/api/harness-runs', {method: 'POST', body: JSON.stringify(payload)});
+            if (body.status === 'approval_required' && body.proposal) {
+                const reasons = [];
+                if (write) reasons.push('file edits');
+                if (web) reasons.push('web access');
+                askApproval(body.run.run_id, body.proposal.proposal_id, reasons.length ? reasons : ['its permissions']);
+            } else {
+                quickStatus.replaceChildren();
+                quickTask.value = '';
+                growTask();
+                await afterStart(body.run.run_id);
+            }
+        } catch (error) { quickMessage(error.message, 'bad'); }
+        finally { button.disabled = false; }
+    });
+
+    // New run: put the cursor in the quick task field.
+    const openLaunch = () => {
+        if (quickTask) {
+            quick.scrollIntoView({block: 'nearest', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+            quickTask.focus();
+            return;
+        }
+        if (!launch) return;
+        launch.open = true;
+        document.getElementById('harness-task')?.focus({preventScroll: true});
+    };
+    document.querySelectorAll('[data-focus-quick]').forEach(button => button.addEventListener('click', openLaunch));
 
     // Availability chips toggle one setup panel at a time.
     const chips = document.querySelectorAll('[data-avail]');
@@ -458,11 +1829,12 @@
             });
             return;
         }
-        const monitor = MemorizzMonitor.init({
+        monitor = MemorizzMonitor.init({
             table: 'hx-table',
             storageKey: 'memorizz.harnesses.selected',
+            onSelect: (row) => openTrajectory(row.dataset.runId),
             keys: {
-                Enter: (row) => inspect(row.dataset.runId),
+                Enter: (row) => openEvidence(row.dataset.runId, 'trajectory'),
                 n: (row, event) => { event.preventDefault(); openLaunch(); },
                 a: (row, event) => {
                     const input = document.querySelector('#hx-detail-' + CSS.escape(row.dataset.key) + ' .harness-approver');
@@ -470,20 +1842,8 @@
                 },
             },
         });
-        // "Show run" in the approval queue selects that run in the ledger.
-        document.querySelectorAll('[data-select-run]').forEach(button => button.addEventListener('click', () => {
-            const row = document.querySelector('#hx-table tr[data-key="' + CSS.escape(button.dataset.selectRun) + '"]');
-            if (!row || !monitor) return;
-            if (row.hidden) {
-                const filter = document.getElementById('hx-filter');
-                if (filter) filter.value = '';
-                document.querySelector('[data-monitor-tag=""]')?.click();
-                const harness = document.getElementById('hx-harness');
-                if (harness && harness.value) { harness.value = ''; harness.dispatchEvent(new Event('change')); }
-            }
-            monitor.select(row, true);
-            row.scrollIntoView({block: 'center'});
-        }));
+        const selected = monitor && monitor.selected();
+        if (selected) openTrajectory(selected.dataset.runId);
     });
 })();
 </script>

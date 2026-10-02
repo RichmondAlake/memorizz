@@ -6,12 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict
 
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+from ..._env_io import env_bool
 
 
 @dataclass(frozen=True)
@@ -39,7 +34,7 @@ class LocalOracleRuntime:
                 "ORACLE_USER, ORACLE_PASSWORD, and ORACLE_DSN are required"
             )
         provision = (
-            _env_bool("MEMORIZZ_ORACLE_PROVISION_IF_MISSING")
+            env_bool("MEMORIZZ_ORACLE_PROVISION_IF_MISSING")
             if provision_if_missing is None
             else bool(provision_if_missing)
         )

@@ -11,8 +11,9 @@ def provider_error_message(code):
     """Actionable, content-free messages shared by the SDK and CLI."""
     return {
         "context_window_exceeded": (
-            "The current request and tools exceed the model's context budget. "
-            "Shorten the supplied context or increase context_window_tokens."
+            "The instructions, tools and current request exceed the model's "
+            "context budget. Raise context_window_tokens in the agent's LLM "
+            "settings (num_ctx for Ollama), or shorten the supplied context."
         ),
         "empty_response": "The model returned no answer. Retry the request or select another model.",
         "provider_length": (
@@ -92,10 +93,15 @@ def streaming_capabilities(provider):
     ):
         supported, reason = False, "tokenizer_unavailable"
     mode = getattr(provider, "api_mode", "chat_completions")
+    model = getattr(provider, "model", None) or getattr(
+        provider, "deployment_name", None
+    )
     return {
         "text_deltas": supported,
         "tool_calls": name not in {"HuggingFaceLLM", "MLXLLM"},
         "provider": name,
+        # Which model answered, so hosts can show it per reply.
+        "model": model if isinstance(model, str) else None,
         "api_mode": mode if isinstance(mode, str) else "unspecified",
         "fallback_reason": reason,
     }

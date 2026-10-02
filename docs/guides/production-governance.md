@@ -391,17 +391,16 @@ actionable error.
 
 ## Provider failures, observability, and shutdown
 
-`run_stream()` always emits a terminal `error` event containing `error_code`,
-`exception_type`, and optional `provider_status_code`. Hosts that prefer
-exception propagation can opt in:
+`run_stream_events()` ends every run with one `run.done` event. On a provider
+failure its `status` is `error` with an `error_code`, so hosts can turn it
+into an exception at one place:
 
 ```python
-for chunk in agent.run_stream(query, raise_on_provider_error=True):
-    ...
-```
-
-Authentication failures such as HTTP 401 are raised after the typed event is
-emitted. Operational summaries avoid notebook-side row deserialization:
+with agent.run_stream_events(query, user_id="tenant-a") as events:
+    for event in events:
+        if event["type"] == "run.done" and event["status"] == "error":
+            raise RuntimeError(event["error_code"])
+``` Operational summaries avoid notebook-side row deserialization:
 
 ```python
 summary = agent.observability_summary(

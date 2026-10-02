@@ -121,6 +121,16 @@ def normalize_delegation_plan(plan: Any) -> Any:
     return normalized
 
 
+def _count_call(agent: Any) -> None:
+    """Count a planning or combining call in the coordinator's run usage."""
+    counter = getattr(agent, "count_model_call", None)
+    if callable(counter):
+        try:
+            counter()
+        except Exception:
+            logger.debug("Could not count the model call", exc_info=True)
+
+
 def normalize_delegation_config(
     config: Any, *, for_persistence: bool = False
 ) -> Dict[str, Any]:
@@ -367,6 +377,7 @@ class TaskDecomposer:
             if not self.root_agent.model:
                 raise ValueError("Root agent has no configured LLMProvider")
             response = self.root_agent.model.generate(messages, tools=None)
+            _count_call(self.root_agent)
             response_text = self._response_text(response)
 
             logger.info(
@@ -578,7 +589,11 @@ SUB-TASK RESULTS:
             if len(result_text) > result_limit:
                 result_text = result_text[:result_limit] + "\u2026"
             prompt += f"\nTask: {result.get('description', 'Unknown task')}\n"
-            prompt += f"Agent: {result.get('assigned_agent_id', 'Unknown agent')}\n"
+            agent_id = result.get("assigned_agent_id", "Unknown agent")
+            name = result.get("assigned_agent_name")
+            prompt += (
+                f"Agent: {name} ({agent_id})\n" if name else f"Agent: {agent_id}\n"
+            )
             prompt += f"Status: {result.get('status', 'Unknown status')}\n"
             prompt += f"Result: {result_text}\n"
             prompt += "---\n"

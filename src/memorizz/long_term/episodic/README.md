@@ -5,7 +5,6 @@ Episodic memory captures what happened in interactions over time.
 Primary structures:
 
 - `ConversationMemoryUnit` for individual turns
-- `SummaryComponent` for compressed history snapshots
 
 ## Typical MemAgent Flow
 
@@ -43,7 +42,7 @@ print(summary_ids)
 ## Direct Models
 
 ```python
-from memorizz.long_term.episodic import ConversationMemoryUnit, SummaryComponent
+from memorizz.long_term.episodic import ConversationMemoryUnit
 
 turn = ConversationMemoryUnit(
     role="user",
@@ -51,15 +50,6 @@ turn = ConversationMemoryUnit(
     timestamp="2026-02-12T00:00:00",
     memory_id="user-42",
     thread_id="conv-1",
-)
-
-summary = SummaryComponent(
-    memory_id="user-42",
-    agent_id="agent-1",
-    summary_content="User shared timezone preference.",
-    period_start=1739328000.0,
-    period_end=1739331600.0,
-    memory_units_count=4,
 )
 ```
 

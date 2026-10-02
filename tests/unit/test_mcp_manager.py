@@ -16,7 +16,14 @@ import pytest
 
 from memorizz.mcp import MCPClientManager, MCPConfigurationError
 from memorizz.mcp.errors import MCPAuthorizationRequired
-from memorizz.mcp.manager import _find_mcp_error, _reject_auth_response
+from memorizz.mcp.manager import (
+    _find_mcp_error,
+    _reject_auth_response,
+    _same_origin_issuer,
+    _scope_pinned_metadata_class,
+    _sign_in_probe,
+    _tolerate_origin_issuer_slash,
+)
 from memorizz.mcp.oauth import OAuthFlowRegistry, PendingOAuthFlow
 
 SERVER = Path(__file__).parents[1] / "fixtures" / "mcp_stdio_server.py"
@@ -128,7 +135,7 @@ def test_inline_secrets_are_encrypted_and_never_exported(tmp_path, monkeypatch):
             }
         ],
     )
-    public = json.dumps(manager.export_public_configuration())
+    public = json.dumps(manager.server_dicts())
     assert "header-secret" not in public
     assert "bearer-secret" not in public
     assert manager.server_dicts()[0]["header_names"] == ["X-API-Key"]
@@ -319,3 +326,118 @@ def test_oauth_callback_state_is_single_use():
     assert completed is flow
     assert completed.callback_ready.is_set()
     assert registry.complete_callback(state="state-1", code="replay") is None
+
+
+@pytest.mark.unit
+def test_sign_in_probe_picks_an_argument_free_read_only_tool():
+    tools = [
+        {"name": "create_draft", "annotations": {"readOnlyHint": False}},
+        {
+            "name": "get_thread",
+            "annotations": {"readOnlyHint": True},
+            "inputSchema": {"required": ["threadId"]},
+        },
+        {"name": "search_threads", "annotations": {"readOnlyHint": True}},
+        {"name": "list_labels", "annotations": {"readOnlyHint": True}},
+        {"name": "list_everything"},
+    ]
+    assert _sign_in_probe(tools) == "list_labels"
+    assert _sign_in_probe(tools[:2]) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("auth", "raises_on_401"),
+    [
+        ({"type": "oauth", "redirect_uri": "http://127.0.0.1:8765/cb"}, False),
+        ({"type": "none"}, True),
+    ],
+)
+def test_oauth_clients_let_the_provider_see_401s(
+    tmp_path, monkeypatch, auth, raises_on_401
+):
+    """httpx runs response hooks before the auth flow, so an OAuth client
+    must not turn a 401 into an error before sign-in can start."""
+    import httpx2
+
+    captured = {}
+
+    class Stop(Exception):
+        pass
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            raise Stop()
+
+    monkeypatch.setattr(httpx2, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        "memorizz.mcp.manager.validate_remote_url", lambda *args, **kwargs: None
+    )
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        name="remote",
+        transport="streamable_http",
+        url="https://mcp.example.com/mcp",
+        command=None,
+        args=[],
+        auth=auth,
+    )
+
+    async def enter():
+        async def noop(*args):
+            return None
+
+        async with manager._client(
+            manager.get_server("remote"),
+            redirect_handler=noop,
+            callback_handler=noop,
+        ):
+            pass
+
+    with pytest.raises(Stop):
+        asyncio.run(enter())
+    assert bool(captured["event_hooks"]["response"]) is raises_on_401
+
+
+@pytest.mark.unit
+def test_configured_oauth_scopes_cannot_be_widened_by_the_sdk():
+    metadata_class = _scope_pinned_metadata_class()
+    pinned = metadata_class(
+        redirect_uris=["http://127.0.0.1:8765/cb"],
+        scope="https://www.googleapis.com/auth/gmail.readonly",
+    )
+    pinned.scope = (
+        "https://mail.google.com/ https://www.googleapis.com/auth/gmail.modify"
+    )
+    assert pinned.scope == "https://www.googleapis.com/auth/gmail.readonly"
+
+    open_ended = metadata_class(redirect_uris=["http://127.0.0.1:8765/cb"])
+    open_ended.scope = "default"
+    assert open_ended.scope == "default"
+
+
+@pytest.mark.unit
+def test_issuer_check_tolerates_only_a_bare_origin_slash():
+    from mcp.client.auth import oauth2
+    from mcp.client.auth.exceptions import OAuthFlowError
+
+    assert _same_origin_issuer(
+        "https://accounts.google.com", "https://accounts.google.com/"
+    )
+    assert not _same_origin_issuer(
+        "https://accounts.google.com", "https://evil.example/"
+    )
+    assert not _same_origin_issuer(
+        "https://as.example/tenant", "https://as.example/tenant/"
+    )
+
+    _tolerate_origin_issuer_slash()
+    _tolerate_origin_issuer_slash()  # idempotent
+    metadata = SimpleNamespace(issuer="https://accounts.google.com")
+    oauth2.validate_metadata_issuer(metadata, "https://accounts.google.com/")
+    with pytest.raises(OAuthFlowError):
+        oauth2.validate_metadata_issuer(metadata, "https://other.example/")

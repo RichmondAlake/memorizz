@@ -23,6 +23,7 @@ from packaging.version import InvalidVersion, Version
 from rich.text import Text
 
 from .. import __version__
+from .._env_io import env_bool
 from . import config as cfg
 
 PYPI_URL = "https://pypi.org/pypi/memorizz/json"
@@ -31,10 +32,7 @@ REQUEST_TIMEOUT = (2, 2)
 
 
 def _disabled() -> bool:
-    return any(
-        os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-        for name in ("MEMORIZZ_NO_UPDATE_CHECK", "CI")
-    )
+    return any(env_bool(name) for name in ("MEMORIZZ_NO_UPDATE_CHECK", "CI"))
 
 
 def _stable_version(value) -> Version:

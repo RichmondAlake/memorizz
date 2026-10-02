@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -256,30 +256,6 @@ class TavilyProvider(InternetAccessProvider):
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
-
-    @staticmethod
-    def _coerce_positive_int(value: Any) -> Optional[int]:
-        if value is None:
-            return None
-        try:
-            result = int(value)
-        except (TypeError, ValueError):
-            return None
-        return result if result > 0 else None
-
-    @staticmethod
-    def _truncate_text(
-        value: Optional[str], limit: Optional[int]
-    ) -> Tuple[Optional[str], bool, Optional[int]]:
-        if not value:
-            return value, False, None
-        if not limit or limit <= 0:
-            return value, False, len(value)
-        original_length = len(value)
-        if original_length <= limit:
-            return value, False, original_length
-        truncated = value[:limit]
-        return truncated, True, original_length
 
 
 # Register provider on import

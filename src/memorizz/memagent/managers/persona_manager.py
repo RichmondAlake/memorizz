@@ -146,32 +146,6 @@ class PersonaManager:
             logger.error("Failed to set persona: %s", exc, exc_info=True)
             return False
 
-    def load_persona(self, persona_id: str) -> Optional[Persona]:
-        """
-        Load a persona from the PERSONAS collection by storage id.
-
-        Returns a :class:`Persona` instance or None if not found.
-        """
-        if not persona_id:
-            return None
-        if persona_id in self._persona_cache:
-            return self._persona_cache[persona_id]
-
-        if self.memory_provider is None:
-            return None
-
-        try:
-            persona_data = Persona.retrieve_persona(persona_id, self.memory_provider)
-            if not persona_data:
-                logger.warning("Persona not found: %s", persona_id)
-                return None
-            persona = Persona.from_dict(persona_data)
-            self._persona_cache[persona_id] = persona
-            return persona
-        except Exception as exc:
-            logger.error("Failed to load persona %s: %s", persona_id, exc)
-            return None
-
     def delete_persona(self, agent_id: str, save: bool = False) -> bool:
         """Clear the agent's active persona (does not delete from storage).
 
@@ -242,16 +216,6 @@ class PersonaManager:
     # ------------------------------------------------------------------
     # Export / prompt
     # ------------------------------------------------------------------
-
-    def export_persona(self) -> Optional[Dict[str, Any]]:
-        """Return the current persona as a dict, including history."""
-        if self.current_persona is None:
-            return None
-        try:
-            return self.current_persona.to_dict()
-        except Exception as exc:
-            logger.error("Failed to export persona: %s", exc)
-            return None
 
     def get_persona_prompt(
         self,

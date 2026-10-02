@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.WARNING)
 
 ORACLE_KW = dict(
     user=os.getenv("MEMORIZZ_ORACLE_USER", "memorizz_user"),
-    password=os.getenv("MEMORIZZ_ORACLE_PASSWORD", "SecurePass123!"),
+    password=os.environ["MEMORIZZ_ORACLE_PASSWORD"],
     dsn=os.getenv("MEMORIZZ_ORACLE_DSN", "localhost:1521/FREEPDB1"),
 )
 

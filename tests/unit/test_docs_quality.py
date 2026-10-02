@@ -11,10 +11,7 @@ from urllib.parse import unquote
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCS_ROOT = REPO_ROOT / "docs"
-EXCLUDED_PAGES = {
-    Path("README.md"),
-    Path("observability-roadmap.md"),
-}
+EXCLUDED_PAGES = {Path("README.md")}
 
 
 def _markdown_files() -> list[Path]:
@@ -32,7 +29,7 @@ def _developer_documentation_files() -> list[Path]:
 
 def _is_published(path: Path) -> bool:
     relative = path.relative_to(DOCS_ROOT)
-    return relative not in EXCLUDED_PAGES and relative.parts[0] != "issues"
+    return relative not in EXCLUDED_PAGES
 
 
 def test_published_pages_are_present_in_navigation() -> None:

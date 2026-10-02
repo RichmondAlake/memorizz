@@ -1,0 +1,334 @@
+{% extends "base.html" %}
+
+{% block title %}Harness chat - Memorizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="harnesses" data-sidebar-default="collapsed"{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=23">
+<link rel="stylesheet" href="/static/css/components/dialogs.css?v=1">
+<script src="/static/js/page-dialogs.js?v=1"></script>
+<script src="/static/js/harness-trajectory.js?v=11"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
+<script src="/static/js/safe-markdown.js?v=2"></script>{% endblock %}
+
+{% block content %}
+{% from '_ui.html' import page_header, id_chip %}
+{% call page_header('Harness chat', 'Keep working with a harness. Each message is a new run with the setup on the right; earlier turns go with it as context, and it works in the same folder.', 'Execution') %}
+    <a class="btn" href="/harnesses">All runs</a>
+    {% if not ui_read_only %}<button type="button" class="btn hx-btn-quiet hx-btn-delete" id="hxc-delete">Delete conversation</button>{% endif %}
+{% endcall %}
+
+{% set hx_harnesses = [] %}{% for item in harnesses %}{% set _ = hx_harnesses.append({'name': item.name, 'ready': item.ready, 'models': item.models or []}) %}{% endfor %}
+<script type="application/json" id="hxc-data">{{ {'conversation_id': conversation_id, 'turns': turns, 'harnesses': hx_harnesses, 'default_agent': default_memagent, 'read_only': ui_read_only}|tojson }}</script>
+
+<div class="hxc">
+    <section class="hxc-main" aria-label="Conversation">
+        <p class="hxc-origin">Started from run {{ id_chip(first_run.run_id, 8) }} · {{ turns|length }} turn{{ '' if turns|length == 1 else 's' }} so far</p>
+        <ol class="hxc-turns" id="hxc-turns" aria-live="polite"></ol>
+        {% if not ui_read_only %}
+        <form class="hxc-composer" id="hxc-composer" autocomplete="off">
+            <label class="visually-hidden" for="hxc-message">Message</label>
+            <textarea id="hxc-message" rows="2" placeholder="Ask a follow-up, e.g. “Now add tests for that” (⌘↵ to send)"></textarea>
+            <div class="hxc-composer-row">
+                <span class="hxc-status" id="hxc-status" aria-live="polite"></span>
+                <button type="button" class="btn hxc-stop" id="hxc-stop" hidden>Stop</button>
+                <button type="submit" class="btn btn-primary" id="hxc-send">Send</button>
+            </div>
+        </form>
+        {% endif %}
+    </section>
+
+    <aside class="hxc-setup panel" aria-labelledby="hxc-setup-title">
+        <h2 class="hxc-setup-title" id="hxc-setup-title">Setup</h2>
+        <p class="hx-muted hxc-setup-note">Carried over from the latest run. Changes apply to your next message.</p>
+        <form id="hxc-setup-form" class="hxc-setup-form">
+            <label>Harness
+                <select name="harness" id="hxc-harness">
+                    {% for item in harnesses %}<option value="{{ item.name }}"{% if item.name == setup.harness %} selected{% endif %}{% if not item.ready %} disabled{% endif %}>{{ item.name }}{% if not item.ready %} · not ready{% endif %}</option>{% endfor %}
+                </select>
+            </label>
+            <label>Model
+                <input name="model" id="hxc-model" list="hxc-models" value="{{ setup.model }}" placeholder="{{ 'Harness default (' ~ setup.model_used ~ ')' if setup.model_used and not setup.model else 'Harness default' }}" autocomplete="off" spellcheck="false">
+                <datalist id="hxc-models"></datalist>
+            </label>
+            <label class="hxc-agent" id="hxc-agent-field">Saved MemAgent
+                <select name="agent_id" id="hxc-agent">
+                    <option value="">None</option>
+                    {% for agent in agents %}<option value="{{ agent.agent_id }}"{% if agent.agent_id|string == setup.agent_id %} selected{% endif %}>{{ agent_label(agent) }}</option>{% endfor %}
+                </select>
+            </label>
+            <label>Project folder
+                <input name="workspace" value="{{ setup.workspace }}" spellcheck="false">
+            </label>
+            <fieldset class="hxc-perms">
+                <legend>Permissions</legend>
+                <label class="harness-check"><input type="checkbox" name="write"{% if setup.write %} checked{% endif %}> Allow edits</label>
+                <label class="harness-check"><input type="checkbox" name="allow_dirty_workspace"{% if setup.allow_dirty_workspace %} checked{% endif %}> Allow uncommitted changes</label>
+                <label>Network
+                    <select name="network">{% for value, label in [('none', 'None'), ('restricted', 'Restricted'), ('full', 'Full')] %}<option value="{{ value }}"{% if setup.network == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+                </label>
+                <label>MemoRizz MCP
+                    <select name="mcp_access">{% for value, label in [('read_only', 'Read only'), ('none', 'Disabled'), ('governed_write', 'Governed write')] %}<option value="{{ value }}"{% if setup.mcp_access == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+                </label>
+                <p class="hx-muted">Edits and network access ask for approval before a run starts.</p>
+            </fieldset>
+            <label>Memory ID
+                <input name="memory_id" value="{{ setup.memory_id }}" placeholder="Saves answers to memory" spellcheck="false">
+            </label>
+            <div class="hxc-limits">
+                <label>Wall time (s)<input name="timeout_seconds" type="number" min="1" value="{{ setup.timeout_seconds }}"></label>
+                <label>Actions<input name="max_steps" type="number" min="1" value="{{ setup.max_steps }}"></label>
+                <label>Cost limit ($)<input name="max_cost_usd" type="number" min="0" step="0.01" value="{{ setup.max_cost_usd if setup.max_cost_usd is not none else '' }}"></label>
+            </div>
+            <label>Host verification
+                <input name="verification_command" value="{{ setup.verification_command }}" placeholder="e.g. pytest -q" spellcheck="false">
+            </label>
+            <input type="hidden" name="user_id" value="{{ setup.user_id }}">
+        </form>
+    </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const data = JSON.parse(document.getElementById('hxc-data').textContent);
+    const T = window.MemorizzTrajectory;
+    const {esc, fmtDuration, fmtCount} = T;
+    const list = document.getElementById('hxc-turns');
+    const composer = document.getElementById('hxc-composer');
+    const message = document.getElementById('hxc-message');
+    const status = document.getElementById('hxc-status');
+    const send = document.getElementById('hxc-send');
+    const stop = document.getElementById('hxc-stop');
+    const setupForm = document.getElementById('hxc-setup-form');
+    const harnessSelect = document.getElementById('hxc-harness');
+    const agentSelect = document.getElementById('hxc-agent');
+    let turns = data.turns;
+    const trajectories = new Map();
+    const openSteps = new Set();
+    const APPROVER_KEY = 'memorizz.harness.approver';
+    const remembered = () => { try { return localStorage.getItem(APPROVER_KEY) || ''; } catch (_) { return ''; } };
+    const remember = (value) => { try { localStorage.setItem(APPROVER_KEY, value); } catch (_) {} };
+
+    const request = async (url, options = {}) => {
+        const response = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...options});
+        const body = await response.json().catch(() => ({detail: 'Invalid server response'}));
+        if (!response.ok) {
+            const detail = body.detail ?? body.error ?? 'Request failed';
+            if (typeof detail === 'string') throw new Error(detail);
+            throw new Error([detail.message, detail.remediation].filter(Boolean).join(' ') || JSON.stringify(detail));
+        }
+        return body;
+    };
+    // Harness output is untrusted: raw HTML in it shows as text (safe-markdown.js).
+    const markdown = (text) => window.MemorizzMarkdown
+        ? window.MemorizzMarkdown.render(text)
+        : '<p>' + esc(text || '') + '</p>';
+
+    // ---------------------------------------------------------------- turns
+    const turnHtml = (turn, index) => {
+        const active = turn.group === 'active';
+        const figures = [
+            turn.started_at && active ? '<span data-live-since="' + turn.started_at + '"></span>' : (turn.duration_ms != null ? fmtDuration(turn.duration_ms) : ''),
+            turn.cost_usd != null ? (turn.cost_estimated ? '≈' : '') + '$' + Number(turn.cost_usd).toFixed(turn.cost_usd < 0.01 ? 4 : 2) : '',
+            turn.tokens ? fmtCount(turn.tokens) + ' tokens' : '',
+        ].filter(Boolean).join(' · ');
+        let body = '';
+        if (turn.status === 'pending_approval' && !data.read_only) {
+            body = '<div class="hxc-approve" data-proposal="' + esc(turn.approval_id) + '"><p>This message needs your approval before it runs (edits, network access or secrets).</p>'
+                + '<input class="harness-approver" aria-label="Approver identity" placeholder="Your name or email" value="' + esc(remembered()) + '">'
+                + '<button type="button" class="btn btn-primary" data-decide="approve">Approve &amp; run</button>'
+                + '<button type="button" class="btn" data-decide="reject">Reject</button></div>';
+        } else if (turn.answer) {
+            body = '<div class="hxc-answer md-rendered">' + markdown(turn.answer) + '</div>';
+        } else if (turn.error) {
+            body = '<div class="hx-outcome hx-outcome--bad"><strong>' + esc(turn.status_label) + '</strong><p>' + esc(turn.error) + '</p>' + (turn.remediation ? '<p class="hx-fix">' + esc(turn.remediation) + '</p>' : '') + '</div>';
+        } else if (active) {
+            body = '<p class="hx-muted">Working…</p>';
+        } else {
+            body = '<p class="hx-muted">' + esc(turn.status_label) + '. No answer text recorded.</p>';
+        }
+        const open = active || openSteps.has(turn.run_id);
+        return '<li class="hxc-turn" data-run-id="' + esc(turn.run_id) + '">'
+            + '<div class="hxc-user"><span class="hxc-who">You</span><div class="hxc-text">' + esc(turn.message) + '</div></div>'
+            + '<div class="hxc-reply">'
+            + '<header class="hxc-reply-head"><span class="fleet-health fleet-health--' + ({good: 'healthy', warn: 'degraded', bad: 'failing', idle: 'idle', active: 'active'}[turn.signal] || 'idle') + '">' + esc(turn.status_label) + '</span>'
+            + '<span class="mono">' + esc(turn.harness) + '</span>' + (turn.model ? '<span class="mono hx-muted">' + esc(turn.model) + '</span>' : '')
+            + (figures ? '<span class="hxc-figures mono">' + figures + '</span>' : '')
+            + '<a class="hxc-run-link mono" href="/harnesses" data-open-run="' + esc(turn.run_id) + '">run ' + esc(turn.run_id.slice(0, 8)) + '</a></header>'
+            + body
+            + '<details class="hxc-steps" data-steps-for="' + esc(turn.run_id) + '"' + (open ? ' open' : '') + '><summary>Trajectory ' + strip(turn.steps) + '</summary>'
+            + '<div class="hx-traj" data-trajectory-for="' + esc(turn.run_id) + '" data-active="' + (active ? 'true' : 'false') + '"></div></details>'
+            + '</div></li>';
+    };
+    const STRIP = [['message', 'message'], ['command', 'command'], ['tool_call', 'tool call'], ['file_change', 'file edit']];
+    const strip = (steps) => {
+        const parts = STRIP.filter(([kind]) => (steps || {})[kind]);
+        if (!parts.length) return '';
+        const title = parts.map(([kind, label]) => steps[kind] + ' ' + label + (steps[kind] === 1 ? '' : 's')).join(' · ');
+        return '<span class="hx-strip" title="' + esc(title) + '">' + parts.map(([kind]) => '<span class="hx-strip-part hx-strip--' + kind + '"><i aria-hidden="true"></i>' + steps[kind] + '</span>').join('') + '</span>';
+    };
+    const tick = () => {
+        const now = Date.now();
+        document.querySelectorAll('[data-live-since]').forEach(el => { el.textContent = fmtDuration(now - Number(el.dataset.liveSince) * 1000); });
+    };
+    setInterval(tick, 1000);
+
+    const loadSteps = (runId) => {
+        if (!trajectories.has(runId)) trajectories.set(runId, {events: [], after: 0, loaded: false, pending: null});
+        const state = trajectories.get(runId);
+        // One request at a time per run, and never the same event twice.
+        if (state.pending) return state.pending;
+        state.pending = (async () => {
+            try {
+                const body = await request('/api/harness-runs/' + encodeURIComponent(runId) + '/events?after=' + state.after + '&limit=1000');
+                const fresh = (body.events || []).filter(event => event.sequence > state.after);
+                if (fresh.length) { state.events.push(...fresh); state.after = fresh[fresh.length - 1].sequence; }
+                state.loaded = true;
+                document.querySelectorAll('[data-trajectory-for="' + CSS.escape(runId) + '"]').forEach(container => { container.dataset.signature = ''; T.render(container, state); });
+            } finally { state.pending = null; }
+        })();
+        return state.pending;
+    };
+    const render = () => {
+        const nearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
+        const known = new Map([...list.children].map(li => [li.dataset.runId, li]));
+        list.replaceChildren(...turns.map((turn, index) => {
+            const holder = document.createElement('template');
+            holder.innerHTML = turnHtml(turn, index);
+            const li = holder.content.firstElementChild;
+            const previous = known.get(turn.run_id);
+            const oldSteps = previous && previous.querySelector('[data-trajectory-for]');
+            if (oldSteps) { oldSteps.dataset.active = turn.group === 'active' ? 'true' : 'false'; li.querySelector('[data-trajectory-for]').replaceWith(oldSteps); }
+            return li;
+        }));
+        turns.forEach(turn => {
+            const details = list.querySelector('[data-steps-for="' + CSS.escape(turn.run_id) + '"]');
+            if (details && details.open) loadSteps(turn.run_id).catch(() => {});
+        });
+        tick();
+        const busy = turns.some(turn => turn.group === 'active' || turn.status === 'pending_approval');
+        if (send) send.disabled = busy;
+        const running = turns.find(turn => turn.group === 'active');
+        if (stop) { stop.hidden = !running; stop.dataset.runId = running ? running.run_id : ''; }
+        if (status && !status.dataset.sticky) status.textContent = busy ? (running ? 'The harness is working…' : 'Waiting for approval.') : '';
+        if (nearBottom) window.scrollTo({top: document.body.scrollHeight});
+    };
+    list.addEventListener('toggle', (event) => {
+        const details = event.target.closest && event.target.closest('[data-steps-for]');
+        if (!details) return;
+        const runId = details.dataset.stepsFor;
+        if (details.open) { openSteps.add(runId); loadSteps(runId).catch(() => {}); } else openSteps.delete(runId);
+    }, true);
+
+    let timer = null;
+    const refresh = async () => {
+        clearTimeout(timer);
+        try {
+            const body = await request('/api/harness-conversations/' + encodeURIComponent(data.conversation_id));
+            turns = body.turns;
+            render();
+            if (body.active) timer = setTimeout(refresh, 2000);
+        } catch (_) { timer = setTimeout(refresh, 5000); }
+    };
+
+    // ------------------------------------------------------------ actions
+    list.addEventListener('click', async (event) => {
+        const decide = event.target.closest('[data-decide]');
+        if (decide) {
+            const box = decide.closest('[data-proposal]');
+            const who = box.querySelector('.harness-approver').value.trim();
+            if (!who) { box.querySelector('.harness-approver').focus(); return; }
+            remember(who);
+            decide.disabled = true;
+            try {
+                await request('/api/harness-approvals/' + box.dataset.proposal + '/' + decide.dataset.decide, {method: 'POST', body: JSON.stringify({approver_id: who})});
+                if (decide.dataset.decide === 'approve') await request('/api/harness-approvals/' + box.dataset.proposal + '/resume', {method: 'POST', body: '{}'});
+            } catch (error) { decide.disabled = false; MemorizzDialogs.notify(error.message); return; }
+            refresh();
+            return;
+        }
+        const open = event.target.closest('[data-open-run]');
+        if (open) { try { localStorage.setItem('memorizz.harnesses.selected', open.dataset.openRun); } catch (_) {} }
+    });
+    stop?.addEventListener('click', async () => {
+        if (!stop.dataset.runId) return;
+        stop.disabled = true;
+        try { await request('/api/harness-runs/' + stop.dataset.runId + '/cancel', {method: 'POST', body: '{}'}); }
+        catch (error) { MemorizzDialogs.notify(error.message); }
+        finally { stop.disabled = false; refresh(); }
+    });
+
+    const setup = () => {
+        const form = new FormData(setupForm);
+        const value = (name) => (form.get(name) || '').toString().trim();
+        const number = (name) => value(name) === '' ? undefined : Number(value(name));
+        return {
+            harness: value('harness'), model: value('model'), agent_id: value('agent_id'),
+            workspace: value('workspace'), memory_id: value('memory_id'), user_id: value('user_id'),
+            write: form.has('write'), allow_dirty_workspace: form.has('allow_dirty_workspace'),
+            network: value('network') || 'none', mcp_access: value('mcp_access') || 'read_only',
+            timeout_seconds: number('timeout_seconds') || 900, max_steps: number('max_steps') || 80,
+            max_cost_usd: number('max_cost_usd'), verification_command: value('verification_command'),
+        };
+    };
+    composer?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const text = message.value.trim();
+        if (!text) { message.focus(); return; }
+        send.disabled = true;
+        status.dataset.sticky = '1';
+        status.textContent = 'Starting…';
+        try {
+            const body = await request('/api/harness-conversations/' + encodeURIComponent(data.conversation_id) + '/turns', {method: 'POST', body: JSON.stringify({...setup(), task: text})});
+            message.value = '';
+            delete status.dataset.sticky;
+            status.textContent = body.status === 'approval_required' ? 'Waiting for approval.' : '';
+            openSteps.add(body.run.run_id);
+            await refresh();
+            window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'});
+        } catch (error) {
+            status.textContent = error.message;
+            send.disabled = false;
+        }
+    });
+    message?.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); composer.requestSubmit(); }
+    });
+    message?.addEventListener('input', () => { message.style.height = 'auto'; message.style.height = Math.min(message.scrollHeight, 240) + 'px'; delete status.dataset.sticky; });
+
+    // ------------------------------------------------------------- setup
+    const modelsFor = (name) => (data.harnesses.find(h => h.name === name) || {}).models || [];
+    const syncSetup = () => {
+        const name = harnessSelect.value;
+        document.getElementById('hxc-models').replaceChildren(...modelsFor(name).map(model => { const o = document.createElement('option'); o.value = model; return o; }));
+        const memagent = name === 'memagent';
+        document.getElementById('hxc-agent-field').hidden = !memagent && !agentSelect.value;
+        if (memagent && !agentSelect.value && data.default_agent) agentSelect.value = data.default_agent.id;
+    };
+    harnessSelect?.addEventListener('change', syncSetup);
+    syncSetup();
+
+    // ------------------------------------------------------------- delete
+    document.getElementById('hxc-delete')?.addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        const count = turns.length;
+        if (!(await MemorizzDialogs.confirm('Delete this conversation and its ' + count + ' turn' + (count === 1 ? '' : 's') + '?', {detail: 'Each turn is a run; their traces and the runs their delegates made go too, and a scratch folder MemoRizz made for them is removed. Files in your own folders and answers saved to memory stay. Turns still working are kept.'}))) return;
+        button.disabled = true;
+        try {
+            const body = await request('/api/harness-conversations/' + encodeURIComponent(data.conversation_id), {method: 'DELETE'});
+            if ((body.kept || []).some(item => item.reason === 'active')) {
+                MemorizzDialogs.notify('Deleted ' + body.deleted.length + ' turns. A turn still working was kept; stop it, then delete again.', {tone: 'info'});
+                button.disabled = false;
+                await refresh();
+                return;
+            }
+            location.href = '/harnesses';
+        } catch (error) { button.disabled = false; MemorizzDialogs.notify(error.message); }
+    });
+
+    render();
+    if (turns.some(turn => turn.group === 'active' || turn.status === 'pending_approval')) refresh();
+    message?.focus();
+})();
+</script>
+{% endblock %}

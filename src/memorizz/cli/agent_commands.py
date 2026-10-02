@@ -69,6 +69,7 @@ def _agent_summary(agent: Any) -> Dict[str, Any]:
     application_mode = getattr(agent, "application_mode", None)
     if hasattr(application_mode, "value"):
         application_mode = application_mode.value
+    harness_config = getattr(agent, "harness_config", None) or {}
     cache_manager = getattr(agent, "cache_manager", None)
     semantic_cache = (
         bool(getattr(cache_manager, "enabled", False))
@@ -82,6 +83,10 @@ def _agent_summary(agent: Any) -> Dict[str, Any]:
         "application_mode": application_mode,
         "max_steps": getattr(agent, "max_steps", None),
         "semantic_cache": semantic_cache,
+        "tool_cache": bool(
+            getattr(agent, "tool_cache", None)
+            or getattr(agent, "tool_cache_config", None)
+        ),
         "continual_learning": bool(getattr(agent, "continual_learning", False)),
         "learning_control_plane": bool(
             getattr(
@@ -93,6 +98,23 @@ def _agent_summary(agent: Any) -> Dict[str, Any]:
         "meta_harness": bool(getattr(agent, "meta_harness", False)),
         "meta_harness_mode": getattr(agent, "meta_harness_mode", None),
         "default_harness": getattr(agent, "default_harness", "auto"),
+        "harness_model": (
+            harness_config.get("model") if isinstance(harness_config, dict) else None
+        ),
+        "harness_workspace": (
+            harness_config.get("workspace")
+            if isinstance(harness_config, dict)
+            else None
+        ),
+        "delegates": [
+            str(getattr(item, "agent_id", item) or "")
+            for item in (getattr(agent, "delegates", None) or [])
+        ],
+        "delegation": dict(
+            getattr(agent, "delegation_config", None)
+            or getattr(agent, "delegation", None)
+            or {}
+        ),
         "memory_ids": list(getattr(agent, "memory_ids", None) or []),
         "llm_provider": (
             (getattr(agent, "llm_config", None) or {}).get("provider")
@@ -125,6 +147,119 @@ def _print_payload(payload: Dict[str, Any], *, raw_json: bool) -> None:
     console.print_json(data=payload)
 
 
+DELEGATE = typer.Option(
+    None,
+    "--delegate",
+    help="A saved agent this one hands parts of a request to; repeat for more.",
+)
+DELEGATION = typer.Option(
+    True,
+    "--delegation/--no-delegation",
+    help="Whether the agent hands work to its delegates.",
+)
+DELEGATION_WORKERS = typer.Option(
+    None,
+    "--delegation-max-workers",
+    min=1,
+    max=8,
+    help="Delegates working at once (1-8).",
+)
+DELEGATION_CONSOLIDATION = typer.Option(
+    "model",
+    "--delegation-consolidation",
+    help="model (the agent writes one answer) or deterministic (list each delegate's result).",
+)
+ROOT_FALLBACK = typer.Option(
+    True,
+    "--root-fallback/--no-root-fallback",
+    help="Answer itself when delegating fails.",
+)
+
+
+def _harness_settings(
+    harness_mode: Optional[str],
+    default_harness: Optional[str],
+    harness_workspace: Optional[str],
+    harness_model: Optional[str],
+) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    """(mode, default harness, harness config) from the harness options."""
+    if harness_mode is None:
+        given = [
+            flag
+            for flag, value in (
+                ("--default-harness", default_harness),
+                ("--harness-workspace", harness_workspace),
+                ("--harness-model", harness_model),
+            )
+            if value
+        ]
+        if given:
+            raise typer.BadParameter(
+                f"{', '.join(given)} needs --harness-mode delegate or runtime"
+            )
+        return None
+    mode = str(harness_mode).strip().lower()
+    if mode not in {"delegate", "runtime"}:
+        raise typer.BadParameter("--harness-mode must be delegate or runtime")
+    harness = str(default_harness or "auto").strip().lower().replace("_", "-")
+    from ..metaharness.config import DEFAULT_HARNESS_CHOICES
+
+    if harness not in DEFAULT_HARNESS_CHOICES:
+        raise typer.BadParameter(
+            "--default-harness must be auto, codex, claude-code, "
+            "openhands, deepseek, pi, hermes, or native"
+        )
+    config: Dict[str, Any] = {}
+    if harness_workspace:
+        try:
+            workspace_path = Path(harness_workspace).expanduser().resolve(strict=True)
+        except OSError as exc:
+            raise typer.BadParameter(
+                "--harness-workspace must be an existing directory"
+            ) from exc
+        if not workspace_path.is_dir():
+            raise typer.BadParameter(
+                "--harness-workspace must be an existing directory"
+            )
+        config["workspace"] = str(workspace_path)
+        config["permissions"] = {"allowed_roots": [str(workspace_path)]}
+    if harness_model and harness_model.strip():
+        config["model"] = harness_model.strip()
+    return mode, harness, config
+
+
+def _with_delegates(
+    provider: Any,
+    agent_id: str,
+    delegates: List[str],
+    *,
+    enabled: bool,
+    max_workers: Optional[int],
+    consolidation: str,
+    root_fallback: bool,
+) -> None:
+    """Save validated delegates and delegation settings on a saved agent."""
+    from ..memagent.delegation_settings import delegation_settings
+
+    record = provider.retrieve_memagent(agent_id)
+    try:
+        ids, config = delegation_settings(
+            provider,
+            agent_id,
+            delegates,
+            enabled=enabled,
+            max_workers=max_workers,
+            consolidation=consolidation,
+            root_fallback=root_fallback,
+            existing_config=getattr(record, "delegation_config", None),
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--delegate") from exc
+    provider.store_memagent(
+        record.model_copy(update={"delegates": ids, "delegation_config": config})
+    )
+
+
 @agents_app.command("create")
 def create_agent(
     name: str = typer.Option(..., "--name", "-n", help="Agent display name."),
@@ -141,6 +276,11 @@ def create_agent(
         None, "--memory-id", help="Attach a memory ID; repeat for multiple IDs."
     ),
     semantic_cache: bool = typer.Option(False, "--semantic-cache/--no-semantic-cache"),
+    tool_cache: bool = typer.Option(
+        False,
+        "--tool-cache/--no-tool-cache",
+        help="Reuse results of repeated calls to cacheable tools (and read-only, idempotent MCP tools).",
+    ),
     continual_learning: bool = typer.Option(
         False, "--continual-learning/--no-continual-learning"
     ),
@@ -157,16 +297,26 @@ def create_agent(
         "--harness-mode",
         help="Enable the meta-harness in delegate or runtime mode.",
     ),
-    default_harness: str = typer.Option(
-        "auto",
+    default_harness: Optional[str] = typer.Option(
+        None,
         "--default-harness",
-        help="auto, codex, claude-code, or openhands.",
+        help="auto (default), codex, claude-code, openhands, deepseek, pi, hermes or native; needs --harness-mode.",
     ),
     harness_workspace: Optional[str] = typer.Option(
         None,
         "--harness-workspace",
-        help="Default workspace for runtime-mode harness turns.",
+        help="Default workspace for runtime-mode harness turns; needs --harness-mode.",
     ),
+    harness_model: Optional[str] = typer.Option(
+        None,
+        "--harness-model",
+        help="Model the harness runs (see `memorizz harness models`); needs --harness-mode.",
+    ),
+    delegate: Optional[List[str]] = DELEGATE,
+    delegation: bool = DELEGATION,
+    delegation_max_workers: Optional[int] = DELEGATION_WORKERS,
+    delegation_consolidation: str = DELEGATION_CONSOLIDATION,
+    root_fallback: bool = ROOT_FALLBACK,
     set_default: bool = typer.Option(
         False,
         "--set-default/--no-set-default",
@@ -196,6 +346,7 @@ def create_agent(
             .with_max_steps(max_steps)
             .with_memory_provider(provider)
             .with_semantic_cache(semantic_cache)
+            .with_tool_cache(tool_cache)
             .with_continual_learning(continual_learning)
             .with_learning_control_plane(learning_control_plane)
         )
@@ -207,43 +358,14 @@ def create_agent(
             )
         if resolved_llm:
             builder.with_llm_config(resolved_llm)
-        if harness_mode is not None:
-            normalized_harness_mode = str(harness_mode).strip().lower()
-            if normalized_harness_mode not in {"delegate", "runtime"}:
-                raise typer.BadParameter("--harness-mode must be delegate or runtime")
-            normalized_default_harness = (
-                str(default_harness or "auto").strip().lower().replace("_", "-")
-            )
-            if normalized_default_harness not in {
-                "auto",
-                "codex",
-                "claude-code",
-                "openhands",
-                "native",
-            }:
-                raise typer.BadParameter(
-                    "--default-harness must be auto, codex, claude-code, "
-                    "openhands, or native"
-                )
-            harness_config: Dict[str, Any] = {}
-            if harness_workspace:
-                try:
-                    workspace_path = (
-                        Path(harness_workspace).expanduser().resolve(strict=True)
-                    )
-                except OSError as exc:
-                    raise typer.BadParameter(
-                        "--harness-workspace must be an existing directory"
-                    ) from exc
-                if not workspace_path.is_dir():
-                    raise typer.BadParameter(
-                        "--harness-workspace must be an existing directory"
-                    )
-                harness_config["workspace"] = str(workspace_path)
-                harness_config["permissions"] = {"allowed_roots": [str(workspace_path)]}
+        harness_settings = _harness_settings(
+            harness_mode, default_harness, harness_workspace, harness_model
+        )
+        if harness_settings is not None:
+            mode_value, harness_value, harness_config = harness_settings
             builder.with_meta_harness(
-                mode=normalized_harness_mode,
-                default_harness=normalized_default_harness,
+                mode=mode_value,
+                default_harness=harness_value,
                 config=harness_config,
             )
         agent = builder.build()
@@ -253,12 +375,26 @@ def create_agent(
                 "credentials and configuration."
             )
         agent.save()
+        if delegate:
+            _with_delegates(
+                provider,
+                agent.agent_id,
+                delegate,
+                enabled=delegation,
+                max_workers=delegation_max_workers,
+                consolidation=delegation_consolidation,
+                root_fallback=root_fallback,
+            )
         if set_default:
             cfg.save_state({"agent_id": agent.agent_id})
         _print_payload(
             {
                 "ok": True,
-                "agent": _agent_summary(agent),
+                "agent": _agent_summary(
+                    provider.retrieve_memagent(agent.agent_id) or agent
+                )
+                if delegate
+                else _agent_summary(agent),
                 "default_agent": bool(set_default),
                 "warnings": warnings,
             },
@@ -330,3 +466,205 @@ def show_agent(
         close = getattr(provider, "close", None)
         if callable(close):
             close()
+
+
+def _close(provider: Any) -> None:
+    close = getattr(provider, "close", None)
+    if callable(close):
+        close()
+
+
+@agents_app.command("update")
+def update_agent(
+    agent_id: str = typer.Argument(..., help="Persisted agent ID."),
+    name: Optional[str] = typer.Option(None, "--name", "-n"),
+    instruction: Optional[str] = typer.Option(None, "--instruction", "-i"),
+    max_steps: Optional[int] = typer.Option(None, "--max-steps", min=1, max=1000),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider"),
+    model: Optional[str] = typer.Option(None, "--model", help="With --llm-provider."),
+    harness_mode: Optional[str] = typer.Option(
+        None,
+        "--harness-mode",
+        help="delegate, runtime, or off to turn the meta-harness off.",
+    ),
+    default_harness: Optional[str] = typer.Option(None, "--default-harness"),
+    harness_workspace: Optional[str] = typer.Option(None, "--harness-workspace"),
+    harness_model: Optional[str] = typer.Option(None, "--harness-model"),
+    delegate: Optional[List[str]] = typer.Option(
+        None,
+        "--delegate",
+        help="Replace the delegates with these saved agents; repeatable.",
+    ),
+    add_delegate: Optional[List[str]] = typer.Option(
+        None, "--add-delegate", help="Add a delegate; repeatable."
+    ),
+    remove_delegate: Optional[List[str]] = typer.Option(
+        None, "--remove-delegate", help="Remove a delegate; repeatable."
+    ),
+    delegation: Optional[bool] = typer.Option(None, "--delegation/--no-delegation"),
+    delegation_max_workers: Optional[int] = typer.Option(
+        None, "--delegation-max-workers", min=1, max=8
+    ),
+    delegation_consolidation: Optional[str] = typer.Option(
+        None, "--delegation-consolidation"
+    ),
+    root_fallback: Optional[bool] = typer.Option(
+        None, "--root-fallback/--no-root-fallback"
+    ),
+    raw_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+):
+    """Change a saved MemAgent's name, instruction, model, harness or delegates.
+
+    Options left out keep their current values.
+    """
+    provider, warnings = _provider()
+    try:
+        record = provider.retrieve_memagent(str(agent_id).strip())
+        if not record:
+            typer.echo(f"Agent not found: {agent_id}", err=True)
+            raise typer.Exit(1)
+        changes: Dict[str, Any] = {}
+        if name is not None:
+            if not name.strip():
+                raise typer.BadParameter("--name cannot be empty")
+            changes["name"] = name.strip()
+        if instruction is not None:
+            changes["instruction"] = instruction.strip()
+        if max_steps is not None:
+            changes["max_steps"] = max_steps
+        if llm_provider or model:
+            changes["llm_config"] = _llm_config(llm_provider, model, disabled=False)
+        if harness_mode is not None and harness_mode.strip().lower() == "off":
+            changes.update(meta_harness=False, meta_harness_mode=None)
+        elif (
+            harness_mode is not None
+            or default_harness
+            or harness_workspace
+            or harness_model
+        ):
+            settings = _harness_settings(
+                harness_mode or record.meta_harness_mode,
+                default_harness or record.default_harness,
+                harness_workspace,
+                harness_model,
+            )
+            if settings is None:
+                raise typer.BadParameter(
+                    "--default-harness, --harness-workspace and --harness-model need --harness-mode"
+                )
+            mode_value, harness_value, harness_config = settings
+            merged = dict(record.harness_config or {})
+            merged.update(harness_config)
+            changes.update(
+                meta_harness=True,
+                meta_harness_mode=mode_value,
+                default_harness=harness_value,
+                harness_config=merged,
+            )
+        if changes:
+            record = record.model_copy(update=changes)
+            provider.store_memagent(record)
+        current = list(record.delegates or [])
+        wanted = list(delegate) if delegate else list(current)
+        wanted += [item for item in add_delegate or [] if item not in wanted]
+        wanted = [item for item in wanted if item not in set(remove_delegate or [])]
+        config = dict(record.delegation_config or {})
+        if (
+            wanted != current
+            or delegation is not None
+            or delegation_max_workers is not None
+            or delegation_consolidation is not None
+            or root_fallback is not None
+        ):
+            _with_delegates(
+                provider,
+                record.agent_id,
+                wanted,
+                enabled=config.get("enabled", True)
+                if delegation is None
+                else delegation,
+                max_workers=delegation_max_workers
+                if delegation_max_workers is not None
+                else config.get("max_workers"),
+                consolidation=delegation_consolidation
+                or config.get("consolidation_strategy")
+                or "model",
+                root_fallback=config.get("allow_root_fallback", True)
+                if root_fallback is None
+                else root_fallback,
+            )
+        payload = {
+            "ok": True,
+            "agent": _agent_summary(provider.retrieve_memagent(record.agent_id)),
+            "warnings": warnings,
+        }
+        if raw_json:
+            typer.echo(json.dumps(payload, sort_keys=True))
+        else:
+            from rich.console import Console
+
+            Console().print_json(data=payload)
+    finally:
+        _close(provider)
+
+
+@agents_app.command("delete")
+def delete_agent(
+    agent_id: str = typer.Argument(..., help="Persisted agent ID."),
+    cascade: bool = typer.Option(
+        False, "--cascade", help="Also delete the agent's memories."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
+    raw_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+):
+    """Delete a saved MemAgent. Agents that had it as a delegate stop using it."""
+    provider, warnings = _provider()
+    try:
+        normalized = str(agent_id).strip()
+        record = provider.retrieve_memagent(normalized)
+        if not record:
+            typer.echo(f"Agent not found: {agent_id}", err=True)
+            raise typer.Exit(1)
+        if not yes and not typer.confirm(
+            f"Delete agent {record.name or normalized}"
+            + (" and its memories" if cascade else "")
+            + "?",
+            default=False,
+        ):
+            raise typer.Exit(1)
+        coordinators = []
+        for other in provider.list_memagents() or []:
+            read = (
+                other.get
+                if isinstance(other, dict)
+                else lambda key, o=other: getattr(o, key, None)
+            )
+            other_id = str(read("agent_id") or "")
+            if other_id and normalized in (read("delegates") or []):
+                saved = provider.retrieve_memagent(other_id)
+                provider.store_memagent(
+                    saved.model_copy(
+                        update={
+                            "delegates": [
+                                item
+                                for item in saved.delegates or []
+                                if item != normalized
+                            ]
+                        }
+                    )
+                )
+                coordinators.append(other_id)
+        deleted = bool(provider.delete_memagent(normalized, cascade=cascade))
+        payload = {
+            "ok": deleted,
+            "agent_id": normalized,
+            "deleted": deleted,
+            "cascade": cascade,
+            "removed_as_delegate_from": coordinators,
+            "warnings": warnings,
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, indent=None if raw_json else 2))
+        if not deleted:
+            raise typer.Exit(1)
+    finally:
+        _close(provider)

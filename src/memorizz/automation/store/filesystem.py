@@ -18,11 +18,13 @@ import contextlib
 import json
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..._time import as_utc
 from ..models import AutomationDelivery, AutomationJob, AutomationRun
+from ..schedule import utcnow as _utcnow
 
 try:
     import fcntl  # POSIX only
@@ -50,23 +52,6 @@ _UPDATABLE_FIELDS = {
     "locked_by",
     "lock_expires_at",
 }
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _as_aware(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
 
 
 class FileSystemAutomationStore:
@@ -155,7 +140,7 @@ class FileSystemAutomationStore:
             jobs = [j for j in jobs if j.agent_id == agent_id]
         if enabled is not None:
             jobs = [j for j in jobs if j.enabled == enabled]
-        jobs.sort(key=lambda j: _as_aware(j.created_at) or _utcnow(), reverse=True)
+        jobs.sort(key=lambda j: as_utc(j.created_at) or _utcnow(), reverse=True)
         return jobs
 
     def pause_job(self, job_id: str) -> AutomationJob:
@@ -189,17 +174,17 @@ class FileSystemAutomationStore:
         limit: int,
         lease_seconds: int,
     ) -> List[AutomationJob]:
-        now = _as_aware(now_utc) or _utcnow()
+        now = as_utc(now_utc) or _utcnow()
         lease_expiry = now + timedelta(seconds=int(lease_seconds or 0))
         claimed: List[AutomationJob] = []
         with self._lock, self._file_lock():
             due = []
             for job in self.list_jobs(enabled=True):
-                nxt = _as_aware(job.next_run_at)
-                lock = _as_aware(job.lock_expires_at)
+                nxt = as_utc(job.next_run_at)
+                lock = as_utc(job.lock_expires_at)
                 if nxt and nxt <= now and (lock is None or lock <= now):
                     due.append(job)
-            due.sort(key=lambda j: _as_aware(j.next_run_at) or now)
+            due.sort(key=lambda j: as_utc(j.next_run_at) or now)
             for job in due[: max(1, int(limit or 1))]:
                 job.locked_by = worker_id
                 job.lock_expires_at = lease_expiry
@@ -217,13 +202,13 @@ class FileSystemAutomationStore:
         lease_seconds: int,
         force_enable: bool = True,
     ) -> Optional[AutomationJob]:
-        now = _as_aware(now_utc) or _utcnow()
+        now = as_utc(now_utc) or _utcnow()
         lease_expiry = now + timedelta(seconds=int(lease_seconds or 0))
         with self._lock, self._file_lock():
             job = self.get_job(job_id)
             if job is None:
                 return None
-            lock = _as_aware(job.lock_expires_at)
+            lock = as_utc(job.lock_expires_at)
             if lock is not None and lock > now:
                 return None  # locked by another worker
             job.locked_by = worker_id
@@ -241,7 +226,7 @@ class FileSystemAutomationStore:
         run = AutomationRun(
             run_id=str(uuid.uuid4()),
             job_id=job.job_id,
-            scheduled_for=_as_aware(scheduled_for) or _utcnow(),
+            scheduled_for=as_utc(scheduled_for) or _utcnow(),
             started_at=_utcnow(),
             status="running",
             attempt=1,
@@ -278,7 +263,7 @@ class FileSystemAutomationStore:
         with self._lock:
             runs = [self._load(p, AutomationRun) for p in self._runs_dir.glob("*.json")]
         runs = [r for r in runs if r is not None and r.job_id == job_id]
-        runs.sort(key=lambda r: _as_aware(r.created_at) or _utcnow(), reverse=True)
+        runs.sort(key=lambda r: as_utc(r.created_at) or _utcnow(), reverse=True)
         return runs[: max(1, int(limit or 1))]
 
     # ----------------------------------------------------------- deliveries

@@ -51,6 +51,11 @@ isolation declaration. Create it with `memorizz harness init`; see the
 | `MEMORIZZ_DEFAULT_EMBEDDING_MODEL` | Embedding model name |
 | `MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS` | Dimension matching the persisted vector schema |
 | `MEMORIZZ_BACKEND` | `filesystem`, `mongodb`, `oracle`, or `notion` |
+| `OLLAMA_HOST` | Ollama server for models and embeddings; default `http://localhost:11434` |
+
+If `MEMORIZZ_BACKEND` is unset, CLI/UI agent creation uses filesystem memory.
+SDK construction also defaults to filesystem unless
+`memory_provider=False` is explicit.
 
 ## Meta-harness
 
@@ -65,9 +70,22 @@ isolation declaration. Create it with `memorizz harness init`; see the
 | `MEMORIZZ_MCP_SERVER_ALLOW_HARNESS_EXECUTION` | Enables first-party MCP harness tools |
 | `MEMORIZZ_MCP_SERVER_HARNESS_WORKSPACE_ROOTS` | Comma-separated MCP workspace roots |
 
-If `MEMORIZZ_BACKEND` is unset, CLI/UI agent creation uses filesystem memory.
-SDK construction also defaults to filesystem unless
-`memory_provider=False` is explicit.
+## Coding-agent plugins
+
+Settings the Codex and Claude Code plugins read (`memorizz config set NAME
+VALUE`, or the options of `memorizz plugin install`); see
+[MemoRizz in Codex and Claude Code](../guides/coding-agent-plugins.md).
+
+| Variable | Purpose |
+|---|---|
+| `MEMORIZZ_SESSION_CAPTURE` | `turns` (default) saves each turn; `off` saves no turns and makes no summaries |
+| `MEMORIZZ_SESSION_SUMMARY` | `false` keeps turns but skips session summaries (default `true`) |
+| `MEMORIZZ_PROMPT_RECALL` | `true` adds related memories to every prompt (default `false`) |
+| `MEMORIZZ_MCP_SERVER_LOCAL_PRINCIPAL` | The user whose memories a local (stdio) server reads and writes, for a shared store |
+| `MEMORIZZ_MCP_SERVER_INGEST_ROOTS` | Comma-separated folders `memorizz_ingest` may read (default: home for stdio, none for HTTP) |
+| `MEMORIZZ_PLUGIN_REMOTE_URL` | A hosted MemoRizz MCP server (`https://…/mcp`) used instead of the local store |
+| `MEMORIZZ_PLUGIN_REMOTE_TOKEN_ENV` | The environment variable holding that server's API key (default `MEMORIZZ_MCP_TOKEN`) |
+| `MEMORIZZ_BIN` | The `memorizz` executable the plugins run when the one recorded at install is gone |
 
 ## Credentials
 

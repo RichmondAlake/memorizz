@@ -796,7 +796,7 @@ def _create_user_and_grant_privileges(
                     else:
                         print(f"  ⚠ Could not create tablespace: {create_error}")
                         print(
-                            "    VECTOR types may not work - continuing anyway. See SETUP.md for manual tablespace steps."
+                            "    VECTOR types may not work - continuing anyway. See docs/memory-providers/oracle.md for manual tablespace steps."
                         )
 
             if not default_tablespace_set:

@@ -14,28 +14,12 @@ server-side.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from ..._time import as_utc
 from ..models import AutomationDelivery, AutomationJob, AutomationRun
-from .filesystem import _UPDATABLE_FIELDS
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _as_aware(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
+from .filesystem import _UPDATABLE_FIELDS, _utcnow
 
 
 def _strip_id(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -125,7 +109,7 @@ class MongoDBAutomationStore:
     ) -> List[AutomationJob]:
         from pymongo import ReturnDocument
 
-        now = _as_aware(now_utc) or _utcnow()
+        now = as_utc(now_utc) or _utcnow()
         lease_expiry = now + timedelta(seconds=int(lease_seconds or 0))
         claimed: List[AutomationJob] = []
         for _ in range(max(1, int(limit or 1))):
@@ -164,7 +148,7 @@ class MongoDBAutomationStore:
     ) -> Optional[AutomationJob]:
         from pymongo import ReturnDocument
 
-        now = _as_aware(now_utc) or _utcnow()
+        now = as_utc(now_utc) or _utcnow()
         lease_expiry = now + timedelta(seconds=int(lease_seconds or 0))
         update: Dict[str, Any] = {
             "locked_by": worker_id,
@@ -193,7 +177,7 @@ class MongoDBAutomationStore:
         run = AutomationRun(
             run_id=str(uuid.uuid4()),
             job_id=job.job_id,
-            scheduled_for=_as_aware(scheduled_for) or _utcnow(),
+            scheduled_for=as_utc(scheduled_for) or _utcnow(),
             started_at=_utcnow(),
             status="running",
             attempt=1,

@@ -543,6 +543,45 @@ def test_orchestrator_model_synthesis_is_grounded_in_coordinator_memory():
 
 
 @pytest.mark.unit
+def test_consolidation_names_each_delegate_and_its_harness():
+    provider = MockMemoryProvider()
+    model = MockLLMProvider(responses=["Named synthesis"])
+    root = MemAgent(model=model, memory_provider=provider, agent_id="root")
+    reviewer = MemAgent(
+        memory_provider=provider, agent_id="delegate-1", name="Careful reviewer"
+    )
+    hunter = MemAgent(
+        memory_provider=provider,
+        agent_id="delegate-2",
+        name="Codex bug hunter",
+        meta_harness=True,
+        meta_harness_mode="runtime",
+        default_harness="codex",
+    )
+    unnamed = MemAgent(memory_provider=provider, agent_id="delegate-3")
+    orchestrator = MultiAgentOrchestrator(root, [reviewer, hunter, unnamed])
+    orchestrator._coordinator_memory_context = Mock(return_value=("", {}))
+
+    orchestrator._consolidate_results(
+        "Review the module",
+        [
+            {
+                "description": "Read",
+                "assigned_agent_id": agent_id,
+                "result": "ok",
+                "status": "completed",
+            }
+            for agent_id in ("delegate-1", "delegate-2", "delegate-3")
+        ],
+    )
+
+    prompt = model.last_messages[1]["content"]
+    assert "Agent: Careful reviewer (delegate-1)" in prompt
+    assert "Agent: Codex bug hunter (runs on codex) (delegate-2)" in prompt
+    assert "Agent: delegate-3\n" in prompt
+
+
+@pytest.mark.unit
 def test_primary_consolidation_avoids_an_extra_model_call():
     provider = MockMemoryProvider()
     model = MockLLMProvider(responses=["must not be called"])
@@ -916,20 +955,22 @@ def test_orchestrator_marks_failed_runtime_harness_delegate_as_failed():
             task, delegate, memory_id="memory-1", thread_id="thread-1"
         )
 
-    delegate.run_on_harness.assert_called_once_with(
-        "Review the code",
-        memory_id="memory-1",
-        thread_id="thread-1",
-        user_id="alice",
-        context={
-            "delegation": {
-                "workflow_id": orchestrator.workflow_id,
-                "trace_id": None,
-                "task_id": "review",
-                "dependencies": [],
-            }
-        },
-    )
+    delegate.run_on_harness.assert_called_once()
+    args, kwargs = delegate.run_on_harness.call_args
+    assert args == ("Review the code",)
+    assert kwargs["memory_id"] == "memory-1" and kwargs["thread_id"] == "thread-1"
+    assert kwargs["user_id"] == "alice"
+    assert kwargs["context"] == {
+        "delegation": {
+            "workflow_id": orchestrator.workflow_id,
+            "trace_id": None,
+            "task_id": "review",
+            "dependencies": [],
+        }
+    }
+    # Outside a harness run there is no parent run to share; the start of the
+    # delegate's own harness run is still reported.
+    assert kwargs["parent_run"] is None and callable(kwargs["on_start"])
 
 
 @pytest.mark.unit

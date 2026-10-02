@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from .helpers import _agent_field
+
 AUDIT_TAIL_BYTES = 1_000_000
 WINDOW_DAYS = 7
 CACHED_TOOLS_LIMIT = 200
@@ -41,6 +43,11 @@ STATES = {
 
 # What to do about each MCP error code the client reports.
 ERROR_HINTS = {
+    "oauth_client_required": (
+        "This provider needs its own OAuth client. Create one (for Google: a "
+        "Web application client in Google Cloud), register the redirect URI, "
+        "then select Edit, add the client ID and secret, and Authorize again."
+    ),
     "authorization_required": (
         "Sign-in expired or was never completed. Select Authorize for OAuth "
         "servers, or Edit to paste a new bearer token, then select Test."
@@ -243,6 +250,16 @@ def _server_state(
     return "unchecked"
 
 
+def _client_preset(url: Any) -> Optional[Dict[str, Any]]:
+    """The built-in preset for ``url`` when that provider needs an OAuth client."""
+    from ..mcp import catalog
+
+    for preset in catalog.presets():
+        if preset["needs_client"] and str(url or "").rstrip("/") == preset["url"]:
+            return preset
+    return None
+
+
 def build_mcp_view(
     servers: Iterable[Dict[str, Any]],
     statuses: Iterable[Dict[str, Any]],
@@ -329,6 +346,11 @@ def build_mcp_view(
             check_time = cached_time
         auth_type = (server.get("auth") or {}).get("type") or "none"
         transport = server.get("transport") or "stdio"
+        client_preset = (
+            _client_preset(server.get("url"))
+            if auth_type == "oauth" and not (server.get("auth") or {}).get("client_id")
+            else None
+        )
         tags = [state]
         if auth_type == "oauth":
             tags.append("oauth")
@@ -341,6 +363,7 @@ def build_mcp_view(
                 "endpoint": endpoint,
                 "auth_type": auth_type,
                 "auth_label": AUTH_LABELS.get(auth_type, auth_type),
+                "client_preset": client_preset,
                 "state": state,
                 "state_label": label,
                 "health": health,
@@ -408,24 +431,24 @@ def build_mcp_view(
 # -------------------------------------------------------------- Vercel skills
 
 
-def _attr(value: Any, key: str) -> Any:
-    return value.get(key) if isinstance(value, dict) else getattr(value, key, None)
-
-
 def skills_marketplace_agents(
     agents: Iterable[Any], provider: str = "vercel"
 ) -> List[Dict[str, str]]:
     """Agents whose skills marketplace is ``provider``, as ``{agent_id, name}``."""
     rows = []
     for agent in agents:
-        value = _attr(agent, "skills_marketplace_provider")
+        value = _agent_field(agent, "skills_marketplace_provider")
         if isinstance(value, dict):  # same normalization as the agent form
             value = value.get("provider") or value.get("name")
         if str(value or "").strip().lower() != provider:
             continue
-        agent_id = str(_attr(agent, "agent_id") or _attr(agent, "_id") or "")
-        persona = _attr(agent, "persona")
-        name = _attr(agent, "name") or (_attr(persona, "name") if persona else None)
+        agent_id = str(
+            _agent_field(agent, "agent_id") or _agent_field(agent, "_id") or ""
+        )
+        persona = _agent_field(agent, "persona")
+        name = _agent_field(agent, "name") or (
+            _agent_field(persona, "name") if persona else None
+        )
         rows.append(
             {"agent_id": agent_id, "name": str(name or agent_id[:8] or "Agent")}
         )

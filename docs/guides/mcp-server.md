@@ -161,10 +161,26 @@ external origin, not the internal bind address.
 | Start a bounded harness run | `memorizz_start_harness_run` | `memorizz:execute`; writes also require `memorizz:write` |
 | Read/list harness runs | `memorizz_get_harness_run`, `memorizz_list_harness_runs` | `memorizz:read` |
 | Read normalized harness events | `memorizz_get_harness_events` | `memorizz:read` |
-| Cancel an owned harness run | `memorizz_cancel_harness_run` | `memorizz:execute` |
+| Cancel or retry an owned harness run | `memorizz_cancel_harness_run`, `memorizz_retry_harness_run` | `memorizz:execute`; retrying an edit run also requires `memorizz:write` |
+| Start a staged plan or a comparison | `memorizz_start_harness_plan`, `memorizz_start_harness_comparison` | `memorizz:execute`; an edit stage also requires `memorizz:write` |
+| Read/list/cancel owned plans and comparisons | `memorizz_get_harness_workflow`, `memorizz_list_harness_workflows`, `memorizz_cancel_harness_workflow` | `memorizz:read`; cancel requires `memorizz:execute` |
+| Run an owned plan or comparison again | `memorizz_rerun_harness_workflow` | `memorizz:execute`; one with an edit stage also requires `memorizz:write` |
+| Read or continue an owned harness conversation | `memorizz_get_harness_conversation`, `memorizz_continue_harness_conversation` | `memorizz:read`; continuing requires `memorizz:execute` (and `memorizz:write` for edits) |
+| Delete owned finished runs, plans and comparisons | `memorizz_delete_harness_runs`, `memorizz_delete_harness_workflow` | `memorizz:execute` + `memorizz:write` |
+| List an exposed agent's MCP servers and tools | `memorizz_list_connected_tools` | `memorizz:read` |
+| Call a read-only tool on the agent's MCP server | `memorizz_read_connected_tool` | `memorizz:read` |
+| Call any tool on the agent's MCP server | `memorizz_call_connected_tool` | `memorizz:read`; tools that change data also need `memorizz:write` and return a durable proposal |
+| Run an approved connected-tool call | `memorizz_resume_connected_tool_call` | `memorizz:write` |
 | List/search/read memories | `memorizz_list_memories`, `memorizz_search_memories`, `memorizz_get_memory` | `memorizz:read` |
+| Report backend, policy, embedding readiness and record counts | `memorizz_memory_status` | `memorizz:read` |
 | Store memory | `memorizz_store_memory` | `memorizz:write` |
+| Replace a memory, keeping the old one as superseded | `memorizz_update_memory` | `memorizz:write` |
+| Ingest local files and folders into the knowledge base | `memorizz_ingest` | `memorizz:write`; only inside the ingest folders |
+| Find entities by name or query | `memorizz_lookup_entities` | `memorizz:read` |
+| Create an entity or merge facts into it | `memorizz_upsert_entity` | `memorizz:write` |
 | Propose deletion of owned memory | `memorizz_forget_memory` | `memorizz:write`; returns a durable proposal |
+| Save one turn of a session (secrets removed) | `memorizz_record_turn` | `memorizz:write` |
+| Summarize a session's turns with the server's model | `memorizz_summarize_session` | `memorizz:write` |
 | List/read conversations | `memorizz_list_conversations`, `memorizz_get_conversation` | `memorizz:read` |
 
 `memorizz_preview_personalization` never performs cross-thread recall unless
@@ -194,7 +210,102 @@ The server also exposes:
 - `memorizz://harness-runs/{run_id}`; and
 - the `memorizz_memory_assistant` prompt.
 
-Direct memory writes are limited to `knowledge_base` and `short_term_memory`.
+Direct memory writes are limited to `knowledge_base` and `short_term_memory`
+(plus entities through `memorizz_upsert_entity`).
+
+### Searching, updating and ingesting memory
+
+**Search with or without embeddings.** `memorizz_search_memories` returns
+`search_mode`. It is `semantic` when an embedding model works. It is `keyword`
+when none does, or when semantic search fails: records then rank by how many
+query words they share, case-insensitively, with the same `memory_id`, tenant
+and superseded filters. Keyword results carry a `note` saying how to turn
+semantic search on, for example
+`memorizz config set MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER ollama` and
+`memorizz config set MEMORIZZ_DEFAULT_EMBEDDING_MODEL nomic-embed-text`. It is
+`hybrid` when keyword matches fill out a short semantic list, which happens
+when some records were stored before embeddings were on. `memorizz_store_memory`
+embeds what it stores whenever an embedding model works.
+
+**Update instead of delete.** `memorizz_update_memory(record_id, content,
+memory_type="knowledge_base", reason=None, duplicate_of=None)` stores a new
+record and keeps the old one:
+
+| Record | Fields set |
+|---|---|
+| New | `supersedes` (the old record ID), `supersede_reason` |
+| Old | `status: "superseded"`, `superseded_by` (the new record ID), `superseded_at` |
+
+`memorizz_list_memories` and `memorizz_search_memories` hide superseded records
+unless you pass `include_superseded=true`. Nothing is deleted, so you can always
+see the history. Updating a superseded record fails with `memory_superseded` and
+names the newer record. A backend that can't store these fields (Oracle's
+fixed-column knowledge-base table) fails with `supersede_unsupported` and changes
+nothing. Entity consolidation uses the same idea, as `metadata.superseded_by`,
+and the filters treat both forms the same.
+
+To retire a duplicate, pass `duplicate_of` (the memory to keep, in the same
+`memory_id`) instead of `content`: the duplicate is marked superseded by that
+memory and nothing new is stored.
+
+**Session memory.** `memorizz_record_turn(memory_id, thread_id, user_message,
+assistant_message, agent_id=None)` saves one turn as two conversation-memory
+records for the calling principal, with secrets removed and embeddings when a
+model works. `memorizz_summarize_session(memory_id, thread_id, agent_id=None)`
+summarizes that principal's turns in the thread with the server's default
+model (`MEMORIZZ_DEFAULT_LLM_PROVIDER` / `_MODEL`) into the summaries store;
+without a model it returns `ok=false` and `reason="no_model"`. The Codex and
+Claude Code plugins call these in remote mode
+([MemoRizz in Codex and Claude Code](coding-agent-plugins.md)).
+
+**Ingest files.** `memorizz_ingest(paths, memory_id, recursive=True,
+include=None, chunk_size=None, chunk_overlap=None)` chunks text, Markdown, code, config,
+HTML, JSON, CSV and PDF (with `pypdf` installed) into the knowledge base under
+`memory_id`. Each chunk records `source_path`, `source_name`, `source_sha256`,
+`chunk_index` and `chunk_count`. The result counts the files ingested, the
+chunks stored and embedded, and the files skipped, each with a reason.
+
+- **Where it reads.** Absolute paths inside the ingest folders only:
+  `MEMORIZZ_MCP_SERVER_INGEST_ROOTS` or `--ingest-root`. By default that is
+  your home folder for a local stdio server, and nothing for a remote one, so a
+  remote server can't ingest until the operator names folders. A path outside
+  them is refused (`path_not_allowed`), and so is a symlink that leads outside
+  them.
+- **What it skips.**
+  - Hidden files and folders.
+  - `.git`, `node_modules`, `.venv` and similar folders.
+  - MemoRizz's own data folder.
+  - Unsupported file types.
+  - Anything that looks like a secret: `.env*`, `*.pem`, `*.key`, `id_rsa*` and
+    other SSH keys, `*.p12`, `*.pfx`, keystores, `credentials*` and `secrets*`.
+- **Limits.** At most 500 files and 20 MB per call. A larger batch is refused
+  (`ingest_too_large`) before anything is stored; narrow it with `include`
+  patterns such as `["*.md"]`.
+- **Ingesting again.** Unchanged files are skipped. When a file has changed, its
+  new chunks are stored and the old ones are marked superseded.
+- **Without embeddings.** Chunks are stored without embeddings, and keyword
+  search still finds them.
+
+**Entities.** `memorizz_upsert_entity(name, entity_type=None, attributes=None,
+relations=None, memory_id=None)` creates an entity or merges facts into the one
+with that name. `attributes` maps fact names to values, such as
+`{"role": "tech lead"}`. Each relation is `{"target", "relation_type"}`, where
+the target is another entity's name or ID; a target that doesn't exist yet is
+created by name. `memorizz_lookup_entities(query=None, name=None,
+memory_id=None, limit=10)` finds entities by case-insensitive name, by query
+(semantic, or keyword without embeddings), or by both.
+
+**Status.** `memorizz_memory_status(memory_id=None)` reports:
+
+- the version and transport;
+- the policy flags (writes, agent execution, harness execution, trace queries);
+- the backend and where it stores data (a database's connection string is never
+  shown);
+- the writable memory types;
+- the embedding provider and model, and whether a short embedding call works
+  (checked with a timeout; it never fails the tool);
+- active and superseded record counts per memory type; and
+- the ingest folders and limits.
 Remote callers cannot access global configuration stores such as
 personas, toolboxes, agents, shared memory, or skill definitions through the
 generic memory tools.
@@ -228,7 +339,7 @@ memorizz mcp server-resume PROPOSAL_ID
 
 ## Form-factor parity and trust boundary
 
-The 24-tool MCP surface covers the common operational capabilities available
+The 44-tool MCP surface covers the common operational capabilities available
 through the SDK, CLI, and local UI: agent lifecycle and execution, scoped memory
 and conversations, capability/cache/learning/observability inspection,
 continual-learning compilation, conversation compaction, and governed harness
@@ -240,7 +351,7 @@ Some host-administration functions intentionally remain outside model-visible
 MCP tools:
 
 - credentials and API-key management;
-- ingestion from arbitrary local paths;
+- ingestion outside the operator's ingest folders;
 - approval, rejection, and resumption decisions; and
 - configuration of outbound MCP connections.
 
@@ -280,6 +391,7 @@ Every CLI option has a deployment-friendly environment equivalent:
 | `MEMORIZZ_MCP_SERVER_ALLOW_AGENT_EXECUTION` | Enable agent turns |
 | `MEMORIZZ_MCP_SERVER_ALLOW_HARNESS_EXECUTION` | Enable governed external harness runs |
 | `MEMORIZZ_MCP_SERVER_HARNESS_WORKSPACE_ROOTS` | Comma-separated allowed workspace roots |
+| `MEMORIZZ_MCP_SERVER_INGEST_ROOTS` | Comma-separated folders `memorizz_ingest` may read (`--ingest-root`); default: home folder for stdio, none for HTTP |
 | `MEMORIZZ_MCP_SERVER_AGENT_IDS` | Comma-separated remote agent allowlist |
 | `MEMORIZZ_MCP_SERVER_ALLOW_ANONYMOUS` | Explicitly disable HTTP auth |
 | `MEMORIZZ_MCP_SERVER_STATELESS_HTTP` | Stateless Streamable HTTP sessions |

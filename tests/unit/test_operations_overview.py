@@ -343,3 +343,24 @@ def test_attention_explains_causes_without_trace_content():
     assert items["1 anthropic / claude-opus-4-8 call without a price"].startswith(
         "Cached-token usage was not reported"
     )
+
+
+@pytest.mark.unit
+def test_a_retried_provider_error_counts_its_failed_run_once():
+    error = {
+        "trace_kind": "model_result",
+        "turn_id": "t1",
+        "agent_id": "a1",
+        "status": "error",
+        "provider": "ollama",
+        "model": "qwen2.5:7b",
+        "error_code": "ProviderStreamError",
+        "timestamp": _at(5),
+    }
+    events = [*_run("t1", "a1", minutes_ago=5, status="error"), error, dict(error)]
+    overview = build_operations_overview(events, window="24h", now=NOW)
+    failed = next(
+        item for item in overview["attention"] if "failed run" in item["title"]
+    )
+    assert "(in 1 of 1 failed run)" in failed["detail"]
+    assert "2 of 1" not in failed["detail"]

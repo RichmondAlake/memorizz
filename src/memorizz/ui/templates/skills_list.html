@@ -5,10 +5,11 @@
 {% block head %}<link rel="stylesheet" href="/static/css/pages/learning.css?v=11">{% endblock %}
 
 {% block content %}
-{% from '_ui.html' import page_header, page_tabs, empty_state, id_chip %}
+{% from '_ui.html' import page_header, empty_state, id_chip %}
+{% from '_learning_tabs.html' import learning_tabs %}
 {% set s = view.summary %}
 {% set c = view.counts %}
-{% call page_header('Learned skills', 'Skills distilled from repeated, successful workflow trajectories. Shadow skills are observed passively; activation is always an explicit reviewer decision.', 'Continual learning', nav=page_tabs(learning_tabs, 'skills', 'Continual learning views')) %}
+{% call page_header('Learned skills', 'Skills distilled from repeated, successful workflow trajectories. Shadow skills are observed passively; activation is always an explicit reviewer decision.', 'Continual learning', nav=learning_tabs('skills')) %}
     <a class="btn" href="/memory/workflows">View trajectory classes</a>
 {% endcall %}
 

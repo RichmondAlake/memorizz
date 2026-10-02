@@ -19,6 +19,27 @@
 </div>
 {% endif %}
 
+{% if not is_edit and agent_templates %}
+{% for template in agent_templates %}
+<details class="panel agent-template" id="agent-template-{{ template.key }}">
+    <summary><span>Start from a template: {{ template.title }}</span><span class="agent-template-meta">{{ template.summary }}</span></summary>
+    <form method="post" action="/agents/templates/{{ template.key }}" class="agent-template-form">
+        <p class="form-hint">Creates the agent with instructions, a persona and memory for people and projects, and attaches {{ template.connections|join(', ') }} over MCP. You then sign in to each one on MCP connections. Changes such as drafts or Notion edits wait for your approval.</p>
+        <p class="form-hint">Gmail and Google Calendar are Google Developer Previews and need a Google OAuth client (Web application) with the redirect URI <code data-callback-url>/api/mcp/oauth/callback</code>. You can add it now or later with Edit on MCP connections. <a href="https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server" target="_blank" rel="noopener noreferrer">Google setup guide</a>.</p>
+        <div class="form-grid">
+            <div class="form-group"><label for="tpl-{{ template.key }}-client-id">Google OAuth client ID (optional)</label><input id="tpl-{{ template.key }}-client-id" name="google_client_id" autocomplete="off"></div>
+            <div class="form-group"><label for="tpl-{{ template.key }}-client-secret">Google OAuth client secret (optional)</label><input id="tpl-{{ template.key }}-client-secret" name="google_client_secret" type="password" autocomplete="new-password"><small class="form-hint">Encrypted at rest; never stored in the agent record.</small></div>
+        </div>
+        <p class="form-hint">Uses the default model ({{ llm_provider }} · {{ llm_model }}). Change it later in the playground.</p>
+        <button type="submit" class="btn btn-primary">Create {{ template.persona.name }}</button>
+    </form>
+</details>
+{% endfor %}
+<script>
+    document.querySelectorAll('[data-callback-url]').forEach(function(el) { el.textContent = window.location.origin + '/api/mcp/oauth/callback'; });
+</script>
+{% endif %}
+
 <form method="post" action="{{ form_action }}" class="agent-form">
     <!-- Basics — always visible -->
     <section class="panel agent-form-section" aria-labelledby="agent-form-basics-title">
@@ -73,6 +94,13 @@
                     <input type="checkbox" name="semantic_cache" {% if semantic_cache %}checked{% endif %}>
                     Enable semantic cache
                 </label>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="tool_cache" {% if tool_cache %}checked{% endif %}>
+                    Enable tool call cache
+                </label>
+                <small class="form-hint">Reuse results of repeated calls to tools marked cacheable, and MCP tools their server marks read-only and idempotent. Results stay fresh for 5 minutes.</small>
             </div>
             <div class="form-group checkbox-group">
                 <label>
@@ -353,12 +381,6 @@
         const REQUIRES_LOCAL = new Set(['ollama', 'huggingface', 'mlx']);
         let _seq = 0;
         let _debounce = null;
-
-        function escapeHtml(s) {
-            return String(s).replace(/[&<>"']/g, function (c) {
-                return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
-            });
-        }
 
         function currentProvider() {
             const el = document.getElementById('llm_provider');
@@ -699,7 +721,18 @@
                         <option value="codex" {% if default_harness == 'codex' %}selected{% endif %}>Codex</option>
                         <option value="claude-code" {% if default_harness == 'claude-code' %}selected{% endif %}>Claude Code</option>
                         <option value="openhands" {% if default_harness == 'openhands' %}selected{% endif %}>OpenHands</option>
+                        <option value="deepseek" {% if default_harness == 'deepseek' %}selected{% endif %}>DeepSeek (Claude Code runtime)</option>
+                        <option value="pi" {% if default_harness == 'pi' %}selected{% endif %}>pi</option>
+                        <option value="hermes" {% if default_harness == 'hermes' %}selected{% endif %}>Hermes Agent</option>
                     </select>
+                </div>
+                <div class="form-group">
+                    <label for="harness_model_select">Harness model <span class="optional">optional</span></label>
+                    <select id="harness_model_select" class="harness-model-select" aria-describedby="harness_model_hint">
+                        <option value="{{ harness_model|default('') }}" selected>{% if harness_model %}{{ harness_model }}{% else %}Harness default{% endif %}</option>
+                    </select>
+                    <input id="harness_model" name="harness_model" value="{{ harness_model|default('') }}" placeholder="Type a model name" autocomplete="off" spellcheck="false" hidden>
+                    <p class="form-hint" id="harness_model_hint">The model the harness runs. Blank uses the harness's own default.</p>
                 </div>
                 <div class="form-group">
                     <label for="harness_workspace">Default workspace <span class="optional">optional</span></label>
@@ -708,6 +741,82 @@
             </div>
             <p class="form-hint">MemoRizz remains the memory, approval, observability, and verification control plane. Runtime mode routes the complete turn externally; delegate mode gives the native MemAgent bounded harness tools. Risky run envelopes require host approval.</p>
             <p class="form-hint"><a href="/harnesses">Open the Agent Harnesses console</a> to probe adapters and inspect durable runs.</p>
+        </div>
+    </details>
+
+    <!-- Delegates — collapsible -->
+    <details class="panel agent-form-section agent-delegates" {% if delegate_ids %}open{% endif %}>
+        <summary>Delegates{% if delegate_ids %} <span class="summary-count">{{ delegate_ids|length }}</span>{% endif %}</summary>
+        <div class="section-body">
+            <input type="hidden" name="delegation_form" value="1">
+            <p class="form-hint">Delegates are other saved agents this agent hands parts of a request to. The agent's model splits each request among them, each delegate works on its part as a subagent, and the agent combines their results. In harness runs each delegate shows as a subagent in the trace. Every delegate makes its own model calls, so delegated requests cost more.</p>
+            <fieldset class="delegate-list" id="delegate-list">
+                <legend>Agents to delegate to</legend>
+                {% for choice in delegate_choices %}
+                <label class="delegate-choice{% if choice.runs_on %} delegate-choice--harness{% endif %}">
+                    <input type="checkbox" name="delegate_ids" value="{{ choice.id }}" {% if choice.selected %}checked{% endif %}>
+                    <span class="delegate-name">{{ choice.name }}</span>
+                    <span class="delegate-meta mono">{% if choice.runs_on %}<span class="delegate-runs-on">runs on {{ choice.runs_on.label }}{% if choice.runs_on.model %} · {{ choice.runs_on.model }}{% endif %}</span> · {% endif %}{{ choice.id[:8] }}{% if choice.model and not choice.runs_on %} · {{ choice.model }}{% endif %}{% if choice.has_delegates %} · has its own delegates{% endif %}</span>
+                </label>
+                {% else %}
+                <p class="form-hint delegate-empty">There are no other saved agents yet. Add a harness below, or create the agents you want to delegate to first, then pick them here.</p>
+                {% endfor %}
+            </fieldset>
+            {% if not ui_read_only %}
+            <div class="harness-delegate-add" id="harness-delegate-add" hidden>
+                <p class="harness-delegate-title">Add a harness as a delegate</p>
+                <div class="harness-delegate-row">
+                    <div class="form-group">
+                        <label for="harness_delegate_harness">Harness</label>
+                        <select id="harness_delegate_harness"></select>
+                    </div>
+                    <div class="form-group">
+                        <label for="harness_delegate_model_select">Model</label>
+                        <select id="harness_delegate_model_select" class="harness-model-select"></select>
+                        <input id="harness_delegate_model" placeholder="Type a model name" autocomplete="off" spellcheck="false" hidden>
+                    </div>
+                    <div class="form-group">
+                        <label for="harness_delegate_name">Name <span class="optional">optional</span></label>
+                        <input id="harness_delegate_name" placeholder="Codex delegate" maxlength="80" autocomplete="off">
+                    </div>
+                    <button type="button" class="btn btn-sm" id="harness_delegate_add">Add delegate</button>
+                </div>
+                <p class="form-hint harness-delegate-status" id="harness_delegate_status" aria-live="polite"></p>
+                <p class="form-hint">A harness delegate runs its part on that harness, with the harness's own tools and sandbox. On Agent Harnesses it works in that run's workspace; in the playground it uses the workspace set on the delegate (its agent harness settings), or else the folder the UI runs in. Agent delegates run on their own models with MemoRizz's tools. Mixing both works well: send code and file work to a harness, research and writing to an agent.</p>
+            </div>
+            {% endif %}
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="delegation_enabled" value="1" {% if delegation_enabled %}checked{% endif %}>
+                        Delegate requests
+                    </label>
+                    <p class="form-hint">Off keeps the delegates saved but the agent answers every request itself.</p>
+                </div>
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="delegation_root_fallback" value="1" {% if delegation_root_fallback %}checked{% endif %}>
+                        Answer itself when a request can't be split
+                    </label>
+                    <p class="form-hint">Off makes such a request fail instead.</p>
+                </div>
+                <div class="form-group">
+                    <label for="delegation_consolidation">Combine results</label>
+                    <select id="delegation_consolidation" name="delegation_consolidation">
+                        {% for value, label in delegation_consolidations.items() %}
+                        <option value="{{ value }}" {% if delegation_consolidation == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                    <p class="form-hint">Listing them skips one model call.</p>
+                </div>
+                <div class="form-group">
+                    <label for="delegation_max_workers">Delegates working at once <span class="optional">optional</span></label>
+                    <input id="delegation_max_workers" name="delegation_max_workers" type="number" min="1" max="8" step="1" value="{{ delegation_max_workers }}" placeholder="All of them">
+                </div>
+            </div>
+            {% if delegation_has_plan %}
+            <p class="form-hint">This agent follows a fixed plan set in code. The plan is kept as it is; these settings choose which agents it can use and how their results are combined.</p>
+            {% endif %}
         </div>
     </details>
 
@@ -855,64 +964,19 @@
                     <option value="skillsmp" {% if skills_marketplace_provider == 'skillsmp' %}selected{% endif %}>SkillsMP (skillsmp.com)</option>
                     <option value="vercel" {% if skills_marketplace_provider == 'vercel' %}selected{% endif %}>Vercel Agent Skills (skills.sh)</option>
                 </select>
-                <p class="form-hint" id="skills-marketplace-hint">
-                    {% if skills_marketplace_provider == 'vercel' %}
-                    Agent gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code> tools to search and use skills from the open Vercel ecosystem. A <code>GITHUB_TOKEN</code> is required for search (raises rate limits from 60 to 5,000/hr).
-                    {% elif skills_marketplace_provider == 'skillsmp' %}
-                    Agent gets the <code>skills_marketplace_search</code> tool. Configure <code>SKILLSMP_API_KEY</code> in Settings.
-                    {% else %}
-                    When enabled, the agent gets marketplace search tools. SkillsMP requires <code>SKILLSMP_API_KEY</code>. Vercel Skills requires <code>GITHUB_TOKEN</code> for search.
-                    {% endif %}
-                </p>
-                <p class="form-hint sandbox-error-hint" id="skills-marketplace-token-warning" style="display:none;">
-                    Vercel Agent Skills is selected but <code>GITHUB_TOKEN</code> is not set. Skill search will fail (HTTP 401) until you add a token in
-                    <a href="/settings#GITHUB_TOKEN">Settings</a>, or create one at
-                    <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>
-                    (no scopes required) — see the
-                    <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noopener noreferrer">GitHub docs</a>.
-                </p>
+                <p class="form-hint" id="skills-marketplace-hint"></p>
                 <script>
                     (function() {
                         var select = document.getElementById('skills_marketplace_provider');
                         var hint = document.getElementById('skills-marketplace-hint');
-                        var warning = document.getElementById('skills-marketplace-token-warning');
-                        var githubTokenPresent = null;
-
-                        function renderHint() {
-                            if (select.value === 'vercel') {
-                                hint.innerHTML = 'Agent gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code> tools to search and use skills from the open Vercel ecosystem. A <code>GITHUB_TOKEN</code> is required for search (raises rate limits from 60 to 5,000/hr).';
-                            } else if (select.value === 'skillsmp') {
-                                hint.innerHTML = 'Agent gets the <code>skills_marketplace_search</code> tool. Configure <code>SKILLSMP_API_KEY</code> in Settings.';
-                            } else {
-                                hint.innerHTML = 'When enabled, the agent gets marketplace search tools. SkillsMP requires <code>SKILLSMP_API_KEY</code>. Vercel Skills requires <code>GITHUB_TOKEN</code> for search.';
-                            }
-                        }
-
-                        function renderWarning() {
-                            if (select.value === 'vercel' && githubTokenPresent === false) {
-                                warning.style.display = '';
-                            } else {
-                                warning.style.display = 'none';
-                            }
-                        }
-
-                        function refreshTokenStatus() {
-                            fetch('/vercel-skills/api/token-status')
-                                .then(function(r) { return r.json(); })
-                                .then(function(data) {
-                                    githubTokenPresent = !!(data && data.github_token_present);
-                                    renderWarning();
-                                })
-                                .catch(function() { /* ignore — warning stays hidden */ });
-                        }
-
-                        select.addEventListener('change', function() {
-                            renderHint();
-                            renderWarning();
-                        });
-
+                        var HINTS = {
+                            vercel: 'Agent gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code> to search skills.sh and read skills from GitHub. No token needed; a <code>GITHUB_TOKEN</code> only raises GitHub rate limits.',
+                            skillsmp: 'Agent gets the <code>skills_marketplace_search</code> tool. Configure <code>SKILLSMP_API_KEY</code> in Settings.',
+                            '': 'When enabled, the agent can search a marketplace for skills itself. To pin specific skills instead, attach them on the <a href="/vercel-skills">Skills</a> page.'
+                        };
+                        function renderHint() { hint.innerHTML = HINTS[select.value] || HINTS['']; }
+                        select.addEventListener('change', renderHint);
                         renderHint();
-                        refreshTokenStatus();
                     })();
                 </script>
             </div>
@@ -1093,5 +1157,144 @@ function syncSkillAuthorityReview() {
         reviewCheckbox.checked = true;
     }
 }
+</script>
+<script>
+// Harness models and harness delegates. Options load after the page so the
+// form never waits on harness probes.
+(function () {
+    const OTHER = '__other__';
+    const coordinatorId = {{ (agent_id or '')|tojson }};
+    let options = {harnesses: [], models: {}};
+    const esc = escapeHtml; // base.html
+
+    // A model dropdown for one harness: its default, its providers' newest
+    // models, and "Other model…" to type any name into the input behind it.
+    function fillModels(select, input, harness) {
+        if (!select || !input) return;
+        const info = options.models[harness] || {};
+        const groups = info.groups || [];
+        const current = input.value.trim();
+        select.innerHTML = '';
+        const add = (parent, value, label) => { const o = document.createElement('option'); o.value = value; o.textContent = label; parent.append(o); return o; };
+        add(select, '', info.default ? 'Default (' + info.default + ')' : 'Harness default');
+        groups.forEach(group => {
+            const g = document.createElement('optgroup');
+            g.label = group.label;
+            group.models.forEach(model => add(g, model, model));
+            select.append(g);
+        });
+        add(select, OTHER, 'Other model…');
+        const known = groups.some(group => group.models.includes(current));
+        select.value = !current ? (select.dataset.other ? OTHER : '') : (known ? current : OTHER);
+        input.hidden = select.value !== OTHER;
+    }
+    function bindModels(select, input) {
+        if (!select || !input) return;
+        select.addEventListener('change', () => {
+            const other = select.value === OTHER;
+            select.dataset.other = other ? '1' : '';
+            input.hidden = !other;
+            if (other) { input.value = ''; input.focus(); } else { input.value = select.value; }
+        });
+    }
+
+    // The agent's own harness model follows its default harness.
+    const harnessSelect = document.getElementById('default_harness');
+    const modelSelect = document.getElementById('harness_model_select');
+    const modelInput = document.getElementById('harness_model');
+    bindModels(modelSelect, modelInput);
+    const syncOwnModel = () => fillModels(modelSelect, modelInput, harnessSelect ? harnessSelect.value : 'auto');
+    harnessSelect?.addEventListener('change', () => {
+        // A model picked for one harness rarely runs on another.
+        if (modelSelect && modelSelect.value !== OTHER) modelInput.value = '';
+        syncOwnModel();
+    });
+
+    // Add a harness as a delegate.
+    const panel = document.getElementById('harness-delegate-add');
+    const pick = document.getElementById('harness_delegate_harness');
+    const pickModel = document.getElementById('harness_delegate_model_select');
+    const pickModelInput = document.getElementById('harness_delegate_model');
+    const pickName = document.getElementById('harness_delegate_name');
+    const addButton = document.getElementById('harness_delegate_add');
+    const status = document.getElementById('harness_delegate_status');
+    const list = document.getElementById('delegate-list');
+    bindModels(pickModel, pickModelInput);
+    const syncPick = () => {
+        fillModels(pickModel, pickModelInput, pick.value);
+        const row = options.harnesses.find(h => h.name === pick.value);
+        pickName.placeholder = (row ? row.label : 'Harness') + ' delegate';
+    };
+    pick?.addEventListener('change', () => { pickModelInput.value = ''; pickModel.dataset.other = ''; syncPick(); });
+
+    const addChoice = (agent) => {
+        list.querySelector('.delegate-empty')?.remove();
+        const label = document.createElement('label');
+        label.className = 'delegate-choice delegate-choice--harness';
+        const runsOn = agent.runs_on || {};
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.name = 'delegate_ids';
+        box.value = agent.id;
+        box.checked = true;
+        label.append(box);
+        label.insertAdjacentHTML('beforeend', '<span class="delegate-name">' + esc(agent.name) + '</span>'
+            + '<span class="delegate-meta mono"><span class="delegate-runs-on">runs on ' + esc(runsOn.label || runsOn.harness) + (runsOn.model ? ' · ' + esc(runsOn.model) : '') + '</span> · ' + esc(String(agent.id).slice(0, 8)) + '</span>');
+        list.append(label);
+        const count = list.querySelectorAll('input[name=delegate_ids]:checked').length;
+        const summary = list.closest('details')?.querySelector('summary');
+        if (summary) {
+            let badge = summary.querySelector('.summary-count');
+            if (!badge) { badge = document.createElement('span'); badge.className = 'summary-count'; summary.append(' ', badge); }
+            badge.textContent = count;
+        }
+    };
+    addButton?.addEventListener('click', async () => {
+        const model = (pickModel.value === OTHER ? pickModelInput.value : pickModel.value).trim();
+        addButton.disabled = true;
+        status.classList.remove('is-bad');
+        status.textContent = 'Adding…';
+        try {
+            const response = await fetch('/api/harness-delegates', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', Accept: 'application/json'},
+                body: JSON.stringify({harness: pick.value, model, name: pickName.value.trim(), coordinator_id: coordinatorId}),
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body.detail || 'Could not add the delegate');
+            addChoice(body.agent);
+            pickName.value = '';
+            status.textContent = body.agent.name + ' was saved and ticked. Save this form to keep it as a delegate.';
+        } catch (error) {
+            status.classList.add('is-bad');
+            status.textContent = error.message;
+        } finally {
+            addButton.disabled = false;
+        }
+    });
+
+    fetch('/api/harness-delegates/options', {headers: {Accept: 'application/json'}})
+        .then(response => response.ok ? response.json() : null)
+        .then(data => {
+            if (!data) return;
+            options = {harnesses: data.harnesses || [], models: data.models || {}};
+            syncOwnModel();
+            if (!pick || !options.harnesses.length) return;
+            pick.innerHTML = '';
+            options.harnesses.forEach(h => {
+                const o = document.createElement('option');
+                o.value = h.name;
+                o.textContent = h.label + (h.ready ? '' : ' · not ready');
+                o.disabled = !h.ready;
+                pick.append(o);
+            });
+            const first = options.harnesses.find(h => h.ready);
+            if (!first) return;
+            pick.value = first.name;
+            syncPick();
+            panel.hidden = false;
+        })
+        .catch(() => {});
+})();
 </script>
 {% endblock %}

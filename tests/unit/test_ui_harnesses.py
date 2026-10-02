@@ -193,3 +193,251 @@ def test_harness_ui_renders_and_returns_missing_authentication_guidance(
     finally:
         meta.close()
         provider.close()
+
+
+class _UINamedHarness(_UIHarness):
+    def __init__(self, name):
+        self.name = name
+
+
+def _workflow_app(tmp_path: Path, *names):
+    provider = FileSystemProvider(
+        FileSystemConfig(root_path=tmp_path / "memory", lazy_vector_indexes=True)
+    )
+    meta = MetaHarness(
+        memory_provider=provider,
+        adapters=[_UINamedHarness(name) for name in names],
+        run_store=SQLiteHarnessRunStore(tmp_path / "runs.sqlite3"),
+        approval_store=SQLiteApprovalStore(tmp_path / "approvals.sqlite3"),
+        allowed_workspace_roots=[str(tmp_path)],
+    )
+    values = {
+        "provider": provider,
+        "provider_type": "filesystem",
+        "connection_info": {"path": str(tmp_path / "memory")},
+        "meta_harness": meta,
+        "meta_harness_provider": provider,
+        "read_only": False,
+    }
+    return provider, meta, values
+
+
+def _wait_workflow(client, workflow_id, until, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        body = client.get(f"/api/harness-orchestrations/{workflow_id}").json()
+        if until(body["orchestration"]):
+            return body
+        assert time.monotonic() < deadline, body
+        time.sleep(0.02)
+
+
+@pytest.mark.unit
+def test_harness_ui_runs_a_staged_plan_through_approval(tmp_path: Path):
+    provider, meta, values = _workflow_app(tmp_path, "alpha", "beta")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    try:
+        with patch.dict(state._state, values):
+            client = TestClient(create_app(), follow_redirects=False)
+            page = client.get("/harnesses")
+            assert "Staged plan" in page.text and "Compare" in page.text
+            assert 'id="hx-launch-data"' in page.text
+
+            started = client.post(
+                "/api/harness-orchestrations",
+                json={
+                    "kind": "plan",
+                    "task": "Add a result file",
+                    "workspace": str(workspace),
+                    "mcp_access": "none",
+                    "memory_id": "ui-workflows",
+                    "stages": [
+                        {"name": "Plan", "harness": "alpha", "instruction": "Plan it"},
+                        {"name": "Build", "harness": "beta", "write": True},
+                    ],
+                },
+            )
+            assert started.status_code == 200, started.text
+            workflow_id = started.json()["orchestration"]["orchestration_id"]
+            waiting = _wait_workflow(
+                client, workflow_id, lambda w: w["status"] == "pending_approval"
+            )
+            first = waiting["runs"][0]
+            # The stage's role comes first and the goal follows it.
+            assert first["task"]["task"] == "Plan it\n\nGoal:\nAdd a result file"
+            assert first["task"]["metadata"]["orchestration"]["id"] == workflow_id
+
+            page = client.get("/harnesses")
+            assert "Workflows" in page.text
+            assert f'id="hx-workflow-{workflow_id}"' in page.text
+            assert "Waiting for approval in the queue above." in page.text
+            assert "Stage 2/2" in page.text  # ledger tag on the stage run
+
+            proposal = client.get("/api/harness-runs").json()["runs"][0][
+                "approval_proposal_id"
+            ]
+            assert (
+                client.post(
+                    f"/api/harness-approvals/{proposal}/approve",
+                    json={"approver_id": "ui-operator@example.com"},
+                ).status_code
+                == 200
+            )
+            assert (
+                client.post(
+                    f"/api/harness-approvals/{proposal}/resume", json={}
+                ).status_code
+                == 200
+            )
+            done = _wait_workflow(
+                client, workflow_id, lambda w: w["status"] == "succeeded"
+            )
+            assert (workspace / "ui-result.txt").exists()
+            assert all(
+                step["handoff"]["memory_record_id"]
+                for step in done["orchestration"]["steps"]
+            )
+
+            listed = client.get("/api/harness-orchestrations").json()
+            assert listed["count"] == 1
+            activity = client.get("/api/harness-activity").json()
+            assert activity["active"] is False and len(activity["fingerprint"]) == 16
+            page = client.get("/harnesses")
+            assert "Answers saved to memory" in page.text and "(2 of 2)" in page.text
+    finally:
+        meta.close()
+        provider.close()
+
+
+@pytest.mark.unit
+def test_harness_ui_compares_harnesses_and_validates_requests(tmp_path: Path):
+    provider, meta, values = _workflow_app(tmp_path, "alpha", "beta")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    base = {"task": "Inspect", "workspace": str(workspace), "mcp_access": "none"}
+    try:
+        with patch.dict(state._state, values):
+            client = TestClient(create_app(), follow_redirects=False)
+            started = client.post(
+                "/api/harness-orchestrations",
+                json={**base, "kind": "compare", "harnesses": ["alpha", "beta"]},
+            )
+            assert started.status_code == 200, started.text
+            workflow_id = started.json()["orchestration"]["orchestration_id"]
+            done = _wait_workflow(
+                client, workflow_id, lambda w: w["status"] == "succeeded"
+            )
+            assert {run["harness"] for run in done["runs"]} == {"alpha", "beta"}
+            assert "Comparison" in client.get("/harnesses").text
+
+            for body, message in [
+                ({**base, "kind": "compare", "harnesses": ["alpha"]}, "at least two"),
+                ({**base, "kind": "plan", "stages": []}, "at least one stage"),
+                ({**base, "kind": "other"}, "kind must be plan or compare"),
+                (
+                    {
+                        **base,
+                        "kind": "plan",
+                        "stages": [
+                            {"harness": "alpha", "write": True},
+                            {"harness": "beta", "write": True},
+                        ],
+                    },
+                    "at most one write-capable",
+                ),
+            ]:
+                response = client.post("/api/harness-orchestrations", json=body)
+                assert response.status_code == 400, response.text
+                assert message in response.json()["detail"]
+            assert (
+                client.post(
+                    f"/api/harness-orchestrations/{workflow_id}/cancel", json={}
+                ).json()["reason"]
+                == "already_terminal"
+            )
+            assert client.get("/api/harness-orchestrations/missing").status_code == 404
+    finally:
+        meta.close()
+        provider.close()
+
+
+@pytest.mark.unit
+def test_read_only_harness_ui_hides_launch_and_blocks_workflows(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("MEMORIZZ_UI_READ_ONLY", "true")
+    provider, meta, values = _workflow_app(tmp_path, "alpha", "beta")
+    try:
+        with patch.dict(state._state, values):
+            client = TestClient(create_app(), follow_redirects=False)
+            page = client.get("/harnesses")
+            assert page.status_code == 200
+            assert 'id="harness-run-form"' not in page.text
+            assert "launching is turned off here" in page.text
+            blocked = client.post(
+                "/api/harness-orchestrations",
+                json={"kind": "compare", "harnesses": ["alpha", "beta"]},
+            )
+            assert blocked.status_code == 403
+    finally:
+        meta.close()
+        provider.close()
+
+
+@pytest.mark.unit
+def test_quick_launch_runs_a_task_without_a_project_folder(
+    tmp_path: Path, monkeypatch, tmp_path_factory
+):
+    # The managed scratch folder lives outside the operator's workspace roots.
+    home = tmp_path_factory.mktemp("memorizz-home")
+    monkeypatch.setenv("MEMORIZZ_HOME", str(home))
+    provider, meta, values = _workflow_app(tmp_path, "alpha", "beta")
+    try:
+        with patch.dict(state._state, values):
+            client = TestClient(create_app(), follow_redirects=False)
+            page = client.get("/harnesses")
+            assert 'id="hx-quick"' in page.text
+            assert "None: a fresh scratch folder" in page.text
+
+            started = client.post(
+                "/api/harness-runs",
+                json={
+                    "task": "Answer a question",
+                    "harness": "alpha",
+                    "mcp_access": "none",
+                },
+            )
+            assert started.status_code == 200, started.text
+            run_id = started.json()["run"]["run_id"]
+            deadline = time.monotonic() + 3
+            while True:
+                run = client.get(f"/api/harness-runs/{run_id}").json()["run"]
+                if run["status"] == HarnessStatus.SUCCEEDED.value:
+                    break
+                assert time.monotonic() < deadline, run
+                time.sleep(0.02)
+            workspace = Path(run["task"]["workspace"])
+            assert workspace.is_dir() and not any(workspace.iterdir())
+            assert workspace.parent == (home / "harness-workspaces").resolve()
+            # Scratch folders are not suggested as project folders.
+            assert (
+                str(workspace)
+                not in client.get("/harnesses").text.split("hx-workspaces")[1]
+            )
+
+            empty = client.post("/api/harness-runs", json={"task": "  "})
+            assert (
+                empty.status_code == 400
+                and empty.json()["detail"] == "Describe the task"
+            )
+            bad = client.post(
+                "/api/harness-orchestrations",
+                json={"kind": "plan", "task": "Goal", "stages": []},
+            )
+            assert bad.status_code == 400
+            # Validation failures create no scratch folder.
+            assert len(list((home / "harness-workspaces").iterdir())) == 1
+    finally:
+        meta.close()
+        provider.close()

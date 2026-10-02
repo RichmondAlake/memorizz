@@ -214,13 +214,9 @@ class E2BSandboxProvider(SandboxProvider):
                 ),
             },
         }
-        factory = getattr(Sandbox, "create", None)
-        if callable(factory):
-            self._factory_mode = "Sandbox.create"
-            return factory(**self._accepted_kwargs(factory, values))
-        # Compatibility for pre-v2 SDKs. New installations always use create().
-        self._factory_mode = "Sandbox constructor (legacy compatibility)"
-        return Sandbox(**self._accepted_kwargs(Sandbox, values))
+        # The pinned e2b>=2.26 SDK always provides Sandbox.create().
+        self._factory_mode = "Sandbox.create"
+        return Sandbox.create(**self._accepted_kwargs(Sandbox.create, values))
 
     def _session(self) -> Any:
         with self._lock:

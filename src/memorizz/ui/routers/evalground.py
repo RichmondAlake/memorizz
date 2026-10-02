@@ -16,7 +16,6 @@ The run registry is process-global module state used only by these routes;
 shutdown to terminate any benchmark subprocesses that are still running.
 """
 
-import importlib.util
 import json
 import logging
 import os
@@ -26,15 +25,16 @@ import sys
 import tempfile
 import threading
 import uuid
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from ...benchmarks.agent_template import secret_free_agent_template
 from ...benchmarks.memory_suite import BENCHMARK_CATALOG, get_benchmark_spec
+from ...benchmarks.terminal_bench_runner import environment_status
 from ...observability import ObservabilityStore
 from ...observability.analytics import finite_number
 from ..analytics import eval_charts
@@ -62,71 +62,7 @@ def _list_trace_experiments() -> List[Dict[str, Any]]:
 
 _eval_run_processes: Dict[str, subprocess.Popen] = {}
 _EVAL_RUN_MAX_LOG_LINES = 2000
-_AGENT_TEMPLATE_SECRET_MARKERS = (
-    "api_key",
-    "apikey",
-    "token",
-    "secret",
-    "password",
-    "credential",
-    "cookie",
-    "private_key",
-)
-
-
-def _secret_free_agent_template(agent: Any) -> Dict[str, Any]:
-    """Return the persisted agent configuration needed by an isolated eval."""
-
-    if hasattr(agent, "model_dump"):
-        payload = agent.model_dump(
-            mode="python",
-            exclude={"model", "tools"},
-            exclude_none=True,
-        )
-    elif isinstance(agent, dict):
-        payload = {
-            key: value for key, value in agent.items() if key not in {"model", "tools"}
-        }
-    else:
-        raise TypeError("Selected agent does not expose a serializable configuration")
-
-    def clean(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                str(key): clean(child)
-                for key, child in value.items()
-                if not any(
-                    marker in str(key).casefold()
-                    for marker in _AGENT_TEMPLATE_SECRET_MARKERS
-                )
-            }
-        if isinstance(value, (list, tuple, set)):
-            return [clean(item) for item in value]
-        enum_value = getattr(value, "value", None)
-        if isinstance(enum_value, (str, int, float, bool)):
-            return enum_value
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        return str(value)
-
-    snapshot = clean(payload)
-    snapshot.update(
-        {
-            "tools": [],
-            "delegates": [],
-            "mcp_servers": [],
-            "internet_access_provider": None,
-            "internet_access_config": None,
-            "sandbox_provider": None,
-            "browser_control": None,
-            "meta_harness": False,
-            "continual_learning": False,
-            "learning_control_plane": False,
-            "learning_control_plane_config": None,
-            "automations_enabled": False,
-        }
-    )
-    return snapshot
+_secret_free_agent_template = secret_free_agent_template
 
 
 # -----------------------------------------------------------------------------
@@ -270,6 +206,7 @@ def _build_eval_run_history_rows(
                 else None,
                 "agent_id": agent_id,
                 "agent_name": agent_name,
+                "harness": run.get("harness"),
                 "model": run.get("model"),
                 "evaluation_mode": run.get("evaluation_mode"),
                 "overall_accuracy": overall_accuracy,
@@ -438,9 +375,27 @@ async def evalground(request: Request):
     eval_output_path = None
     run_output = None
     error = None
+    tb_run = None
 
     if run_id:
         run_state = _get_eval_run_snapshot(run_id)
+        if run_state and run_state.get("benchmark") == TERMINAL_BENCH:
+            tb_run = {
+                key: run_state.get(key)
+                for key in (
+                    "run_id",
+                    "status",
+                    "harness",
+                    "model",
+                    "tasks",
+                    "attempts",
+                    "n_concurrent",
+                    "agent_timeout_multiplier",
+                    "memory_id",
+                    "learn",
+                    "codex_auth",
+                )
+            }
         if run_state:
             selected_agent_id = run_state.get("agent_id") or ""
             benchmark = run_state.get("benchmark") or benchmark
@@ -561,6 +516,8 @@ async def evalground(request: Request):
             "trace_experiments": _list_trace_experiments(),
             "selected_run_id": run_id,
             "selected_run_status": selected_run_status,
+            "terminal_bench": _terminal_bench_catalog(),
+            "tb_run": tb_run,
             "active_page": "evalground",
         },
     )
@@ -717,6 +674,8 @@ def _run_evalground_job(
                         "Oracle evaluation requires ORACLE_USER, ORACLE_PASSWORD, "
                         "and ORACLE_DSN or an active Oracle UI connection."
                     )
+        elif benchmark == TERMINAL_BENCH:
+            command = _terminal_bench_command(current_run, output_path, paths)
         else:
             eval_script = paths["evaluator_script"]
             secrets = _state.get("provider_secrets") or {}
@@ -1189,7 +1148,13 @@ async def evalground_stop_run(run_id: str):
     _append_eval_run_log(run_id, "Stop requested by user.")
 
     process = _get_eval_run_process(run_id)
-    if process and process.poll() is None:
+    if (
+        process
+        and process.poll() is None
+        and run_state.get("benchmark") == TERMINAL_BENCH
+    ):
+        _stop_terminal_bench(run_id, process)
+    elif process and process.poll() is None:
         try:
             os.killpg(process.pid, signal.SIGTERM)
             _append_eval_run_log(
@@ -1228,6 +1193,260 @@ async def evalground_stop_run(run_id: str):
 
     latest_state = _get_eval_run_snapshot(run_id) or {}
     return {"run_id": run_id, "status": latest_state.get("status") or "canceling"}
+
+
+# -----------------------------------------------------------------------------
+# Terminal-Bench 4.0: test a harness in Harbor's task containers
+# -----------------------------------------------------------------------------
+
+TERMINAL_BENCH = "terminal-bench"
+TERMINAL_BENCH_HARNESSES = ("codex", "claude-code", "memagent", "oracle")
+TERMINAL_BENCH_MAX_TASKS = 20
+_TERMINAL_BENCH_STOP_GRACE_SECONDS = 150
+
+
+def _terminal_bench_catalog() -> Dict[str, Any]:
+    from ...benchmarks.terminal_bench_runner import DEFAULT_MODELS, task_catalog
+
+    catalog = task_catalog()
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for task in catalog["tasks"]:
+        if task.get("gpus"):
+            continue  # needs a GPU
+        groups.setdefault(task.get("category") or "Other", []).append(task)
+    return {
+        "dataset": f"{catalog['dataset']}@{catalog['version']}",
+        "smoke": catalog.get("smoke", []),
+        "groups": [
+            {"category": name, "tasks": sorted(tasks, key=lambda t: t["name"])}
+            for name, tasks in sorted(groups.items())
+        ],
+        "task_count": sum(len(tasks) for tasks in groups.values()),
+        "gpu_tasks": [t["name"] for t in catalog["tasks"] if t.get("gpus")],
+        "default_models": DEFAULT_MODELS,
+    }
+
+
+def _terminal_bench_memory_root() -> Optional[str]:
+    """The connected FileSystem store's folder; other stores are not supported."""
+    if _state.get("provider_type") != "filesystem":
+        return None
+    root = getattr(getattr(_state.get("provider"), "config", None), "root_path", None)
+    if root:
+        return str(root)
+    path = (_state.get("connection_info") or {}).get("path")
+    return str(path) if path else None
+
+
+def _terminal_bench_status() -> Dict[str, Any]:
+    return environment_status(_terminal_bench_memory_root())
+
+
+def _terminal_bench_command(
+    run: Dict[str, Any], output_path: Path, paths: Dict[str, Any]
+) -> List[str]:
+    command = [
+        sys.executable,
+        "-u",
+        "-m",
+        "memorizz.benchmarks.terminal_bench_runner",
+        "--harness",
+        str(run["harness"]),
+        "--tasks",
+        ",".join(run["tasks"]),
+        "--attempts",
+        str(run["attempts"]),
+        "--n-concurrent",
+        str(run["n_concurrent"]),
+        "--agent-timeout-multiplier",
+        str(run["agent_timeout_multiplier"]),
+        "--max-cost-per-task",
+        str(run["max_cost_per_task"]),
+        "--codex-auth",
+        str(run["codex_auth"]),
+        "--output",
+        str(output_path),
+        "--jobs-dir",
+        str(paths["results_dir"] / "terminal-bench-jobs"),
+        "--job-name",
+        f"evalground-{run['run_id'][:12]}",
+    ]
+    if run.get("harness") != "oracle" and run.get("model"):
+        command.extend(["--model", str(run["model"])])
+    if run.get("memory_root"):
+        command.extend(
+            [
+                "--memory-root",
+                str(run["memory_root"]),
+                "--memory-id",
+                str(run["memory_id"]),
+            ]
+        )
+        if run.get("learn"):
+            command.append("--learn")
+    return command
+
+
+def _stop_terminal_bench(run_id: str, process: subprocess.Popen) -> None:
+    """Stop Harbor so it takes its task containers down.
+
+    Harbor cancels trials and removes their containers on SIGINT; a killed
+    process group would leave them running. Give it time before forcing.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGINT)
+    except ProcessLookupError:
+        return
+    _append_eval_run_log(
+        run_id, "Stopping Harbor; it removes the task containers before exiting."
+    )
+
+    def _force_later() -> None:
+        try:
+            process.wait(timeout=_TERMINAL_BENCH_STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                _append_eval_run_log(
+                    run_id,
+                    "Harbor did not stop in time and was killed; check `docker ps` "
+                    "for leftover task containers.",
+                )
+            except ProcessLookupError:
+                pass
+
+    threading.Thread(target=_force_later, daemon=True).start()
+
+
+@router.get("/evalground/terminal-bench/status")
+async def evalground_terminal_bench_status():
+    """What a Terminal-Bench run needs, and what this machine has."""
+    import asyncio
+
+    return await asyncio.to_thread(_terminal_bench_status)
+
+
+@router.post("/evalground/terminal-bench/runs")
+async def evalground_terminal_bench_start(
+    harness: str = Form("codex"),
+    model: str = Form(""),
+    tasks: List[str] = Form([]),
+    attempts: str = Form("1"),
+    n_concurrent: str = Form("1"),
+    agent_timeout_multiplier: str = Form("0.1"),
+    max_cost_per_task: str = Form("4"),
+    memory: str = Form("off"),
+    memory_id: str = Form("terminal-bench"),
+    learn: str = Form(""),
+    codex_auth: str = Form("api_key"),
+):
+    """Start Terminal-Bench 4.0 for one harness and return the run ID."""
+    import asyncio
+
+    from ...benchmarks.terminal_bench_runner import DEFAULT_MODELS, task_catalog
+
+    def bad(message: str, status: int = 400):
+        return JSONResponse(status_code=status, content={"error": message})
+
+    if not _state["provider"]:
+        return bad("Memory provider is not connected.")
+    harness = str(harness or "").strip().lower()
+    if harness not in TERMINAL_BENCH_HARNESSES:
+        return bad("Choose codex, claude-code, memagent or oracle.")
+    known = {task["name"]: task for task in task_catalog()["tasks"]}
+    names = list(dict.fromkeys(str(t).strip() for t in tasks if str(t).strip()))
+    if not names:
+        return bad("Choose at least one task.")
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        return bad("Unknown tasks: " + ", ".join(unknown))
+    gpu = [name for name in names if known[name].get("gpus")]
+    if gpu:
+        return bad("These tasks need a GPU: " + ", ".join(gpu))
+    if len(names) > TERMINAL_BENCH_MAX_TASKS:
+        return bad(f"Choose at most {TERMINAL_BENCH_MAX_TASKS} tasks per run.")
+    try:
+        attempts_value = int(attempts)
+        concurrent_value = int(n_concurrent)
+        multiplier_value = float(agent_timeout_multiplier)
+        cost_cap = float(max_cost_per_task)
+    except (TypeError, ValueError):
+        return bad(
+            "Attempts, parallel trials, time limit and cost cap must be numbers."
+        )
+    if not 1 <= attempts_value <= 5:
+        return bad("Attempts must be between 1 and 5.")
+    if not 1 <= concurrent_value <= 4:
+        return bad("Parallel trials must be between 1 and 4.")
+    if not 0.01 <= multiplier_value <= 1:
+        return bad("The time limit must be between 1% and 100% of the task's 8 hours.")
+    if cost_cap <= 0:
+        return bad("The cost cap must be above zero.")
+    model = str(model or "").strip()
+    if harness == "oracle":
+        model = ""
+    else:
+        model = model or DEFAULT_MODELS[harness]
+        if "/" not in model:
+            return bad("Write the model as provider/model, e.g. openai/gpt-5.6-terra.")
+        if harness == "memagent" and not model.startswith("openai/"):
+            return bad("memagent on Terminal-Bench supports openai/<model> models.")
+    codex_auth = "chatgpt" if codex_auth == "chatgpt" else "api_key"
+
+    status = await asyncio.to_thread(_terminal_bench_status)
+    if not status["harbor"]["ok"]:
+        return bad(status["harbor"]["detail"])
+    if not status["docker"]["ok"]:
+        return bad(status["docker"]["detail"] + " Start Docker Desktop and try again.")
+    keys = status["keys"]
+    if harness == "claude-code" and not keys["anthropic"]:
+        return bad("Claude Code needs ANTHROPIC_API_KEY in ~/.memorizz/.env.")
+    if harness == "memagent" and not keys["openai"]:
+        return bad("memagent needs OPENAI_API_KEY in ~/.memorizz/.env.")
+    if harness == "codex" and codex_auth == "api_key" and not keys["openai"]:
+        return bad("Codex needs OPENAI_API_KEY, or choose ChatGPT sign-in.")
+    if harness == "codex" and codex_auth == "chatgpt" and not keys["codex_chatgpt"]:
+        return bad("ChatGPT sign-in needs ~/.codex/auth.json; run `codex login` first.")
+    memory_root = None
+    memory_id = str(memory_id or "terminal-bench").strip() or "terminal-bench"
+    use_memory = str(memory).lower() in {"on", "true", "1", "yes"}
+    if use_memory and harness != "oracle":
+        memory_root = status["memory_root"]
+        if not memory_root:
+            return bad(
+                "MemoRizz memory for Terminal-Bench needs a connected FileSystem store."
+            )
+
+    run_id = _create_eval_run(
+        {
+            "benchmark": TERMINAL_BENCH,
+            "dataset_variant": "4.0.0",
+            "num_samples": len(names),
+            "model": model or "reference solutions",
+            "evaluation_mode": "harness",
+            "memory_provider": "filesystem" if memory_root else "none",
+        }
+    )
+    _update_eval_run(
+        run_id,
+        harness=harness,
+        tasks=names,
+        attempts=attempts_value,
+        n_concurrent=concurrent_value,
+        agent_timeout_multiplier=multiplier_value,
+        max_cost_per_task=cost_cap,
+        memory_root=memory_root,
+        memory_id=memory_id if memory_root else None,
+        learn=bool(memory_root) and str(learn).lower() in {"on", "true", "1", "yes"},
+        codex_auth=codex_auth,
+    )
+    worker = threading.Thread(
+        target=_run_evalground_job,
+        args=(run_id, "", "4.0.0", len(names), _get_longmemeval_paths()),
+        daemon=True,
+    )
+    worker.start()
+    return {"run_id": run_id, "status": "queued"}
 
 
 @router.post("/evalground/datasets", response_class=HTMLResponse)
@@ -1348,62 +1567,6 @@ async def evalground_download(request: Request):
 # -----------------------------------------------------------------------------
 # LongMemEval path/dataset helpers and log capture
 # -----------------------------------------------------------------------------
-
-
-class _EvalgroundLogHandler(logging.Handler):
-    """Capture a bounded set of log lines for Evalground run output."""
-
-    def __init__(
-        self,
-        max_lines: int = 800,
-        on_line: Optional[Callable[[str], None]] = None,
-    ):
-        super().__init__(level=logging.INFO)
-        self.max_lines = max_lines
-        self._on_line = on_line
-        self._lines: List[str] = []
-        self.setFormatter(
-            logging.Formatter(
-                fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                datefmt="%H:%M:%S",
-            )
-        )
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            line = self.format(record)
-        except Exception:
-            return
-        if self._on_line:
-            try:
-                self._on_line(line)
-            except Exception:
-                pass
-        self._lines.append(line)
-        if len(self._lines) > self.max_lines:
-            self._lines = self._lines[-self.max_lines :]
-
-    def render(self) -> Optional[str]:
-        if not self._lines:
-            return None
-        return "\n".join(self._lines)
-
-
-@contextmanager
-def _capture_logs(
-    handler: logging.Handler, minimum_level: int = logging.INFO
-) -> Iterator[None]:
-    """Attach a temporary log handler and restore logger state afterwards."""
-    root_logger = logging.getLogger()
-    original_level = root_logger.level
-    if original_level > minimum_level:
-        root_logger.setLevel(minimum_level)
-    root_logger.addHandler(handler)
-    try:
-        yield
-    finally:
-        root_logger.removeHandler(handler)
-        root_logger.setLevel(original_level)
 
 
 def _is_site_packages_path(path: Path) -> bool:
@@ -1588,29 +1751,3 @@ def _run_longmemeval_dataset_download() -> Tuple[bool, str]:
         return False, f"Dataset download did not complete successfully.\n{detail}"
 
     return True, "Dataset download complete."
-
-
-def _load_longmemeval_evaluator():
-    """Load the LongMemEval evaluator class via importlib."""
-    cached = getattr(_load_longmemeval_evaluator, "_cached", None)
-    if cached:
-        return cached
-
-    evaluator_path = _get_longmemeval_paths()["evaluator_script"]
-    if not evaluator_path.exists():
-        raise FileNotFoundError(f"LongMemEval evaluator not found at {evaluator_path}")
-
-    spec = importlib.util.spec_from_file_location(
-        "memorizz_longmemeval", evaluator_path
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError("Unable to load LongMemEval evaluator module.")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    evaluator_cls = getattr(module, "LongMemEvalEvaluator", None)
-    if evaluator_cls is None:
-        raise ImportError("LongMemEvalEvaluator is missing in evaluator script.")
-
-    _load_longmemeval_evaluator._cached = evaluator_cls
-    return evaluator_cls

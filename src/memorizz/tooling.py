@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import inspect
 import json
@@ -194,6 +195,21 @@ class ToolPolicy:
     domains: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
     deprecated_arguments: Mapping[str, str] = field(default_factory=dict)
+    # Opt in to the MemAgent tool cache (``tool_cache=``): repeated calls with
+    # the same arguments reuse a fresh result instead of running again.
+    cacheable: bool = False
+    cache_ttl_seconds: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.cacheable and (
+            not self.deterministic or self.side_effects or self.requires_approval
+        ):
+            raise ValueError(
+                "A cacheable tool must be deterministic, without side effects "
+                "and not need approval"
+            )
+        if self.cache_ttl_seconds is not None and float(self.cache_ttl_seconds) < 0:
+            raise ValueError("cache_ttl_seconds cannot be negative")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -204,6 +220,8 @@ class ToolPolicy:
             "domains": list(self.domains),
             "aliases": list(self.aliases),
             "deprecated_arguments": dict(self.deprecated_arguments),
+            "cacheable": self.cacheable,
+            "cache_ttl_seconds": self.cache_ttl_seconds,
         }
 
 
@@ -216,8 +234,16 @@ def governed_tool(
     domains: Sequence[str] = (),
     aliases: Sequence[str] = (),
     deprecated_arguments: Optional[Mapping[str, str]] = None,
+    cacheable: bool = False,
+    cache_ttl_seconds: Optional[float] = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Decorate a callable with explicit tool and cache governance metadata."""
+    """Decorate a callable with explicit tool and cache governance metadata.
+
+    ``cacheable=True`` lets a MemAgent with a tool cache reuse this tool's
+    result for a repeated call with the same arguments, for
+    ``cache_ttl_seconds`` (else the cache's default). Only a deterministic tool
+    without side effects can be cacheable.
+    """
 
     def decorator(function: Callable[..., Any]) -> Callable[..., Any]:
         policy = ToolPolicy(
@@ -232,6 +258,10 @@ def governed_tool(
             domains=tuple(str(item) for item in domains if str(item).strip()),
             aliases=tuple(str(item) for item in aliases if str(item).strip()),
             deprecated_arguments=dict(deprecated_arguments or {}),
+            cacheable=bool(cacheable),
+            cache_ttl_seconds=(
+                None if cache_ttl_seconds is None else float(cache_ttl_seconds)
+            ),
         )
         setattr(function, "__memorizz_tool_policy__", policy)
         return function
@@ -350,14 +380,31 @@ class ContextPolicy:
     # many, so the tool schemas (the first bytes of the provider prompt-cache
     # prefix) change only when a new tool is needed. 0 re-selects every turn.
     sticky_tool_limit: int = 15
+    # When all of an agent's tool schemas fit in this many tokens, every tool
+    # is sent on every turn instead: the tool list then never changes, and a
+    # newly relevant tool no longer rewrites the provider prompt cache for the
+    # whole conversation. Larger catalogs keep progressive disclosure. 0 off.
+    stable_tool_list_tokens: int = 6000
     approval_ttl_seconds: int = 900
     max_tool_invocations_per_turn: int = 20
     max_tool_attempts_per_call: int = 2
+    # Auto-compaction: when the next request would use this share of the
+    # context window, older messages are summarized first. 0 turns it off.
+    # Requests are capped at 80% of the window to leave room for the answer,
+    # so higher values would never trigger.
+    compact_at: int = 80
+    # Messages kept word for word when compacting.
+    keep_recent_messages: int = 6
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_top_k", max(1, min(int(self.tool_top_k), 50)))
         object.__setattr__(
             self, "sticky_tool_limit", max(0, min(int(self.sticky_tool_limit), 50))
+        )
+        object.__setattr__(
+            self,
+            "stable_tool_list_tokens",
+            max(0, min(int(self.stable_tool_list_tokens), 100_000)),
         )
         object.__setattr__(
             self,
@@ -373,6 +420,15 @@ class ContextPolicy:
             self,
             "max_tool_attempts_per_call",
             max(1, int(self.max_tool_attempts_per_call)),
+        )
+        compact_at = int(self.compact_at)
+        object.__setattr__(
+            self, "compact_at", 0 if compact_at <= 0 else max(30, min(compact_at, 80))
+        )
+        object.__setattr__(
+            self,
+            "keep_recent_messages",
+            max(2, min(int(self.keep_recent_messages), 40)),
         )
 
     @classmethod
@@ -390,9 +446,12 @@ class ContextPolicy:
             "progressive_tool_disclosure": self.progressive_tool_disclosure,
             "tool_top_k": self.tool_top_k,
             "sticky_tool_limit": self.sticky_tool_limit,
+            "stable_tool_list_tokens": self.stable_tool_list_tokens,
             "approval_ttl_seconds": self.approval_ttl_seconds,
             "max_tool_invocations_per_turn": self.max_tool_invocations_per_turn,
             "max_tool_attempts_per_call": self.max_tool_attempts_per_call,
+            "compact_at": self.compact_at,
+            "keep_recent_messages": self.keep_recent_messages,
         }
 
 
@@ -465,6 +524,12 @@ class ToolNotCallableError(LookupError):
     """The tool name has no trusted callable registered in this process."""
 
     code = "tool_not_callable"
+
+
+class UnknownToolError(LookupError):
+    """No registered tool has this name."""
+
+    code = "unknown_tool"
 
 
 class ToolArgumentsError(TypeError):
@@ -554,6 +619,7 @@ class SemanticToolRouter:
         max_invocations_per_turn: int = 20,
         max_attempts_per_call: int = 2,
         sticky_limit: int = 0,
+        stable_under_tokens: int = 0,
     ) -> None:
         self._turn_state_var: ContextVar[
             Optional[SemanticToolRouter._TurnState]
@@ -572,6 +638,7 @@ class SemanticToolRouter:
         self.max_invocations_per_turn = max(1, int(max_invocations_per_turn))
         self.max_attempts_per_call = max(1, int(max_attempts_per_call))
         self.sticky_limit = max(0, int(sticky_limit))
+        self.stable_under_tokens = max(0, int(stable_under_tokens))
         self._selected: set[str] = set()
         self._call_attempts: Dict[str, int] = {}
         self._successful_calls: set[str] = set()
@@ -597,37 +664,57 @@ class SemanticToolRouter:
         normalized = str(name or "").strip()
         return self.aliases.get(normalized, normalized)
 
-    def _lexical_candidates(self, query: str, limit: int) -> List[str]:
-        stop_words = {
-            "a",
-            "an",
-            "and",
-            "at",
-            "for",
-            "from",
-            "in",
-            "of",
-            "on",
-            "or",
-            "the",
-            "to",
-            "with",
+    # Chat filler that says nothing about which tool is wanted. As substrings
+    # these matched inside almost every description ("it" in "edit").
+    _FILLER_WORDS = frozenset(
+        "a about all an and any are as at be by can could did do does for from "
+        "get give has have he her him his how i if in into is it its just me my "
+        "need no not of on or our please she so some that the their them then "
+        "there these they this those to up us want was we were what when which "
+        "who will with would yes you your".split()
+    )
+
+    @staticmethod
+    def _word_stem(word: str) -> str:
+        """Fold simple plurals so "page" matches "pages"."""
+        if len(word) > 4 and word.endswith("ies"):
+            return word[:-3] + "y"
+        if len(word) > 4 and word.endswith(("ches", "shes", "sses", "xes", "zes")):
+            return word[:-2]
+        if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+            return word[:-1]
+        return word
+
+    def _words(self, text: str) -> set[str]:
+        return {
+            self._word_stem(word)
+            for word in re.findall(r"[a-z0-9]+", str(text).lower())
+            if len(word) > 1 and word not in self._FILLER_WORDS
         }
-        terms = {
-            term
-            for term in re.findall(r"[a-z0-9]+", str(query).lower())
-            if term not in stop_words
-        }
+
+    def _lexical_candidates(
+        self, query: str, limit: int, *, min_score: int = 1, source: str = ""
+    ) -> List[str]:
+        # Whole words (plurals folded), and a word in the tool's name counts
+        # three times one in its description, so "create a page" finds
+        # notion-create-pages rather than tools with long descriptions.
+        terms = self._words(query)
         scored: List[tuple[int, str]] = []
         for metadata in self._metadata():
             name = self._name(metadata)
             if not name or name in {self.DISCOVERY_TOOL, self.INVOCATION_TOOL}:
                 continue
-            haystack = " ".join([name, str(metadata.get("description") or "")]).lower()
-            score = sum(1 for term in terms if term in haystack)
+            if source and metadata.get("source") != source:
+                continue
+            name_words = self._words(name.replace("_", " "))
+            description_words = self._words(str(metadata.get("description") or ""))
+            score = sum(
+                3 if term in name_words else 1 if term in description_words else 0
+                for term in terms
+            )
             scored.append((score, name))
         scored.sort(key=lambda item: (-item[0], item[1]))
-        return [name for score, name in scored if score > 0][:limit]
+        return [name for score, name in scored if score >= min_score][:limit]
 
     def _semantic_candidates(
         self, query: str, *, user_id: Optional[str], limit: int
@@ -697,8 +784,26 @@ class SemanticToolRouter:
         """Select candidates without mutating the active turn allowlist."""
         bounded = max(1, min(int(limit or self.top_k), self.top_k))
         semantic = self._semantic_candidates(query, user_id=user_id, limit=bounded)
-        candidates = semantic or self._lexical_candidates(query, bounded)
-        return candidates[:bounded]
+        if not semantic:
+            return self._lexical_candidates(query, bounded)
+        # MCP tools are not in the toolbox's semantic index, so clear keyword
+        # matches among them share the slots instead of never appearing. Clear
+        # means two words in the tool's name, or one plus its description.
+        mcp = [
+            name
+            for name in self._lexical_candidates(
+                query, max(1, bounded // 2), min_score=4, source="mcp"
+            )
+            if name not in semantic
+        ]
+        return (semantic[: bounded - len(mcp)] + mcp)[:bounded]
+
+    def disclose(self, names: Iterable[str]) -> None:
+        """Make registered tools visible and callable for the rest of the turn."""
+        registered = set(self.tool_manager.list_tools())
+        visible = [name for name in names if name in registered]
+        self._selected.update(visible)
+        self._remember_sticky(visible)
 
     @staticmethod
     def _meta_schemas() -> List[Dict[str, Any]]:
@@ -755,6 +860,9 @@ class SemanticToolRouter:
                 for metadata in self._metadata()
                 if (schema := tool_metadata_to_openai(metadata)) is not None
             ]
+        stable = self._stable_tool_list()
+        if stable is not None:
+            return stable
         self.select(query, user_id=user_id)
         if cache_scope and self.sticky_limit:
             # Relevance ranking moves every turn; re-exposing a different
@@ -778,6 +886,27 @@ class SemanticToolRouter:
         schemas.sort(key=lambda item: item["function"]["name"])
         return schemas
 
+    def _stable_tool_list(self) -> Optional[List[Dict[str, Any]]]:
+        """Every tool, sorted, when the whole list fits ``stable_under_tokens``.
+
+        A constant tool list keeps the provider prompt-cache prefix intact
+        from turn to turn; selecting per query would change it whenever a new
+        tool became relevant. All listed tools are callable this turn.
+        """
+        if not self.stable_under_tokens:
+            return None
+        schemas = [
+            schema
+            for metadata in self._metadata()
+            if self._name(metadata) not in {self.DISCOVERY_TOOL, self.INVOCATION_TOOL}
+            and (schema := tool_metadata_to_openai(metadata)) is not None
+        ]
+        if len(json.dumps(schemas, default=str)) // 4 > self.stable_under_tokens:
+            return None
+        schemas.sort(key=lambda item: item["function"]["name"])
+        self._selected.update(schema["function"]["name"] for schema in schemas)
+        return schemas
+
     def discover_tools(
         self, query: str, limit: int = 5, *, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -796,6 +925,47 @@ class SemanticToolRouter:
                 )
         return {"ok": True, "query": query, "tools": tools, "count": len(tools)}
 
+    def _reject_undisclosed(self, name: str) -> None:
+        """Explain a call to a tool the model was not shown, so it can recover.
+
+        A real tool named exactly (say, from an MCP tool listing) is disclosed
+        now and its schema returned; the model calls it again with arguments
+        that fit. A near-miss name gets the real names, disclosed the same
+        way. The call itself never runs before the model has seen a schema.
+        """
+        registered = set(self.tool_manager.list_tools()) - {
+            self.DISCOVERY_TOOL,
+            self.INVOCATION_TOOL,
+        }
+        if name in registered:
+            self.disclose([name])
+            raise ToolNotDisclosedError(
+                f"Tool '{name}' was not disclosed for this turn. It is disclosed "
+                f"now; call it again with arguments matching this schema: "
+                f"{self._schema_text(name)}"
+            )
+        close = difflib.get_close_matches(name, sorted(registered), n=3, cutoff=0.8)
+        if close:
+            self.disclose(close)
+            schemas = "; ".join(f"{item}: {self._schema_text(item)}" for item in close)
+            raise UnknownToolError(
+                f"There is no tool named '{name}'. Did you mean "
+                f"{' or '.join(repr(item) for item in close)}? Available now, "
+                f"with these schemas: {schemas}"
+            )
+        raise UnknownToolError(
+            f"There is no tool named '{name}'. Call discover_tools to find one."
+        )
+
+    def _schema_text(self, name: str, limit: int = 1200) -> str:
+        metadata = next(
+            (item for item in self._metadata() if self._name(item) == name), {}
+        )
+        schema = tool_metadata_to_openai(metadata) or {}
+        parameters = (schema.get("function") or {}).get("parameters") or {}
+        text = json.dumps(parameters, separators=(",", ":"), default=str)
+        return text if len(text) <= limit else text[:limit] + "…"
+
     def normalize_invocation(
         self, tool_name: str, arguments: Mapping[str, Any]
     ) -> tuple[str, Dict[str, Any], List[str]]:
@@ -809,9 +979,7 @@ class SemanticToolRouter:
             and name not in self._selected
             and name not in self.always_visible
         ):
-            raise ToolNotDisclosedError(
-                f"Tool '{name}' was not disclosed for this turn; call discover_tools first"
-            )
+            self._reject_undisclosed(name)
         if name in {self.DISCOVERY_TOOL, self.INVOCATION_TOOL}:
             raise PermissionError("Meta-tools cannot invoke themselves")
         values = dict(arguments)

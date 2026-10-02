@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from fastapi import Request
 
+from .._env_io import env_bool
 from ..observability.privacy import pseudonym, validate_opaque
 from .trace_access import PERMISSIONS, TracePrincipal, current_principal
 
@@ -35,15 +36,8 @@ _URI_CREDENTIALS = re.compile(
 _QUERY_SECRET = re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password)=)[^&#\s]+")
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def ui_read_only() -> bool:
-    return _env_bool("MEMORIZZ_UI_READ_ONLY", False)
+    return env_bool("MEMORIZZ_UI_READ_ONLY", False)
 
 
 class ReadOnlyProviderProxy:
@@ -246,9 +240,6 @@ class UIAccessController:
             return self._principal(name)
         except Exception:
             return None
-
-    def session_is_valid(self, value: Optional[str]) -> bool:
-        return self._session_principal(value) is not None
 
     def principal_for_request(self, request):
         if not self.enabled:

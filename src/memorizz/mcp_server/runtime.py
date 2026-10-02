@@ -6,10 +6,15 @@
 
 from __future__ import annotations
 
+import fnmatch
+import hashlib
 import inspect
+import json
 import logging
 import os
+import re
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +28,7 @@ from ..approval import (
 )
 from ..enums.memory_type import MemoryType
 from ..mcp.security import redact
+from ..metaharness.config import DEFAULT_HARNESS_CHOICES
 from .auth import RequestIdentity
 from .config import EXECUTE_SCOPE, READ_SCOPE, WRITE_SCOPE, MemorizzMCPServerConfig
 
@@ -85,7 +91,18 @@ def _accepts_keyword(function: Callable[..., Any], keyword: str) -> bool:
 
 def _json_value(value: Any) -> Any:
     if hasattr(value, "model_dump"):
-        return _json_value(value.model_dump(mode="json", exclude_none=True))
+        try:
+            dumped = value.model_dump(mode="json", exclude_none=True)
+        except Exception:
+            # A field holds an object Pydantic cannot serialise (an agent's
+            # Persona, say); dump it as Python and convert the parts here.
+            dumped = value.model_dump(exclude_none=True)
+        return _json_value(dumped)
+    if callable(getattr(value, "to_dict", None)):
+        try:
+            return _json_value(value.to_dict())
+        except Exception:
+            return str(value)
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
@@ -129,6 +146,121 @@ def _workspace_is_allowed(path: str, roots: Any) -> bool:
     )
 
 
+# memorizz_ingest limits: a model can't ask for the whole disk at once.
+_INGEST_MAX_FILES = 500
+_INGEST_MAX_BYTES = 20 * 1024 * 1024
+_INGEST_MAX_PATHS = 50
+_INGEST_SKIP_DIRS = frozenset(
+    {".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__"}
+)
+_INGEST_SECRET_PATTERNS = (
+    ".env*",
+    "*.pem",
+    "*.key",
+    "id_rsa*",
+    "id_dsa*",
+    "id_ecdsa*",
+    "id_ed25519*",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    "credentials*",
+    "secrets*",
+)
+_EMBEDDING_STATUS_TTL_SECONDS = 300.0
+_EMBEDDING_PROBE_TIMEOUT_SECONDS = 4.0
+_EMBEDDINGS_HINT = (
+    "To turn semantic search on, run `memorizz config set "
+    "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER ollama` and `memorizz config set "
+    "MEMORIZZ_DEFAULT_EMBEDDING_MODEL nomic-embed-text` (or set OPENAI_API_KEY)."
+)
+_NO_EMBEDDINGS_NOTE = (
+    "No embedding model is working, so these are keyword matches. " + _EMBEDDINGS_HINT
+)
+_UPDATE_DROPPED_FIELDS = frozenset(
+    {
+        "_id",
+        "id",
+        "embedding",
+        "content",
+        "text",
+        "timestamp",
+        "created_at",
+        "updated_at",
+        "status",
+        "superseded_by",
+        "superseded_at",
+        "supersedes",
+        "supersede_reason",
+        "score",
+        "has_embedding",
+    }
+)
+_STOPWORDS = frozenset(
+    "a an and are as at be but by do does for from how i in is it of on or our "
+    "that the this to was we what when where which who why with you your".split()
+)
+_WORD = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+
+def _is_superseded(document: Any) -> bool:
+    """Replaced by memorizz_update_memory (top-level fields) or by entity
+    consolidation (``metadata.superseded_by``)."""
+    if not isinstance(document, dict):
+        return False
+    if str(document.get("status") or "").strip().lower() == "superseded":
+        return True
+    if str(document.get("superseded_by") or "").strip():
+        return True
+    metadata = document.get("metadata")
+    return isinstance(metadata, dict) and bool(
+        str(metadata.get("superseded_by") or "").strip()
+    )
+
+
+def _document_text(document: Dict[str, Any]) -> str:
+    content = document.get("content")
+    if isinstance(content, dict):
+        content = content.get("content") or content.get("text")
+    text = str(content or document.get("text") or "")
+    if not text and document.get("name"):
+        facts = " ".join(
+            f"{item.get('name')} {item.get('value')}"
+            for item in document.get("attributes") or []
+            if isinstance(item, dict)
+        )
+        text = f"{document.get('name')} {document.get('entity_type') or ''} {facts}"
+    return text
+
+
+def _stem(word: str) -> str:
+    for suffix in ("ments", "ment", "ings", "ing", "ies", "es", "ed", "s"):
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def _keywords(text: str) -> set:
+    return {
+        _stem(word)
+        for word in _WORD.findall(str(text or "").lower())
+        if len(word) > 1 and word not in _STOPWORDS
+    }
+
+
+def _ingest_skip_reason(path: Path, *, is_dir: bool) -> Optional[str]:
+    name = path.name
+    lowered = name.lower()
+    if is_dir:
+        if lowered in _INGEST_SKIP_DIRS:
+            return "dependency or version-control folder"
+        return "hidden folder" if name.startswith(".") else None
+    if any(fnmatch.fnmatch(lowered, pattern) for pattern in _INGEST_SECRET_PATTERNS):
+        return "looks like a secret"
+    return "hidden file" if name.startswith(".") else None
+
+
 class MemorizzRuntime:
     """Lazy, synchronized access to one Memorizz deployment."""
 
@@ -151,6 +283,8 @@ class MemorizzRuntime:
         self.approval_store = approval_store or default_approval_store()
         self._meta_harness = meta_harness
         self._meta_harness_lock = threading.RLock()
+        self._embedding_lock = threading.Lock()
+        self._embedding_cache: Optional[Tuple[float, Dict[str, Any]]] = None
 
     @staticmethod
     def _approval_owner(identity: RequestIdentity) -> str:
@@ -327,7 +461,17 @@ class MemorizzRuntime:
                     "delete",
                     "execute",
                 ],
-                "memory": ["list", "search", "read", "store", "forget"],
+                "memory": [
+                    "list",
+                    "search",
+                    "read",
+                    "store",
+                    "update",
+                    "forget",
+                    "ingest",
+                    "entities",
+                    "status",
+                ],
                 "conversation": ["list", "read", "compact"],
                 "meta_harness": [
                     "list",
@@ -346,7 +490,6 @@ class MemorizzRuntime:
                 ],
                 "trusted_host_only": [
                     "credential_management",
-                    "local_path_ingestion",
                     "approval_decisions",
                     "outbound_mcp_configuration",
                 ],
@@ -495,16 +638,10 @@ class MemorizzRuntime:
         normalized_default_harness = (
             str(default_harness or "auto").strip().lower().replace("_", "-")
         )
-        if normalized_default_harness not in {
-            "auto",
-            "codex",
-            "claude-code",
-            "openhands",
-            "native",
-        }:
+        if normalized_default_harness not in DEFAULT_HARNESS_CHOICES:
             raise MemorizzServerError(
                 "invalid_agent",
-                "default_harness must be auto, codex, claude-code, openhands, or native",
+                "default_harness must be auto, codex, claude-code, openhands, deepseek, pi, hermes, or native",
             )
         normalized_harness_workspace = str(harness_workspace or "").strip()
         harness_config: Dict[str, Any] = {}
@@ -869,16 +1006,10 @@ class MemorizzRuntime:
             normalized_default_harness = (
                 str(default_harness or "auto").strip().lower().replace("_", "-")
             )
-            if normalized_default_harness not in {
-                "auto",
-                "codex",
-                "claude-code",
-                "openhands",
-                "native",
-            }:
+            if normalized_default_harness not in DEFAULT_HARNESS_CHOICES:
                 raise MemorizzServerError(
                     "invalid_agent",
-                    "default_harness must be auto, codex, claude-code, openhands, or native",
+                    "default_harness must be auto, codex, claude-code, openhands, deepseek, pi, hermes, or native",
                 )
             updated.default_harness = normalized_default_harness
         if harness_workspace is not None:
@@ -1608,6 +1739,7 @@ class MemorizzRuntime:
         *,
         memory_id: Optional[str] = None,
         limit: int = 20,
+        include_superseded: bool = False,
     ) -> Dict[str, Any]:
         self._require_scope(identity, READ_SCOPE)
         resolved_type = self._normalize_memory_type(memory_type, identity)
@@ -1628,6 +1760,8 @@ class MemorizzRuntime:
                 for row in rows or []
                 if isinstance(row, dict) and row.get("memory_id") == memory_id
             ]
+        if not include_superseded:
+            rows = [row for row in rows or [] if not _is_superseded(row)]
         values = self._tenant_rows(rows, identity, resolved_limit)
         return {
             "ok": True,
@@ -1644,35 +1778,244 @@ class MemorizzRuntime:
         *,
         memory_id: Optional[str] = None,
         limit: int = 10,
+        include_superseded: bool = False,
     ) -> Dict[str, Any]:
+        """Semantic search, falling back to keyword matches when no embedding
+        model works or semantic search finds nothing; ``search_mode`` says
+        which (``semantic``, ``keyword``, or ``hybrid`` when keyword matches
+        fill out a short semantic list)."""
         self._require_scope(identity, READ_SCOPE)
         text = str(query or "").strip()
         if not text:
             raise MemorizzServerError("invalid_query", "Search query cannot be empty")
         resolved_type = self._normalize_memory_type(memory_type, identity)
         resolved_limit = self._bounded_limit(limit)
-        retrieve = self.provider.retrieve_by_query
-        kwargs = {
-            "memory_store_type": resolved_type,
-            "memory_id": memory_id,
-            "limit": resolved_limit,
+        embedder = self._embedding_status()
+        values: List[Dict[str, Any]] = []
+        note: Optional[str] = None
+        semantic_failed = False
+        if embedder.get("ready"):
+            retrieve = self.provider.retrieve_by_query
+            kwargs = {
+                "memory_store_type": resolved_type,
+                "memory_id": memory_id,
+                # Room for rows the superseded filter drops.
+                "limit": min(self.config.max_result_items, resolved_limit * 3),
+            }
+            if _accepts_keyword(retrieve, "user_id"):
+                kwargs["user_id"] = identity.principal
+            try:
+                rows = retrieve(text, **kwargs)
+            except Exception as exc:
+                semantic_failed = True
+                logger.warning(
+                    "Semantic memory search failed; using keyword matches (%s)",
+                    type(exc).__name__,
+                )
+            else:
+                if not include_superseded:
+                    rows = [row for row in rows or [] if not _is_superseded(row)]
+                values = self._tenant_rows(rows, identity, resolved_limit)
+        mode = "semantic"
+        if not embedder.get("ready") or semantic_failed:
+            values = self._keyword_matches(
+                text,
+                resolved_type,
+                identity,
+                memory_id=memory_id,
+                limit=resolved_limit,
+                include_superseded=include_superseded,
+            )
+            mode = "keyword"
+            note = (
+                _NO_EMBEDDINGS_NOTE
+                if not embedder.get("ready")
+                else "Semantic search failed, so these are keyword matches."
+            )
+        elif len(values) < resolved_limit:
+            # Rows stored before embeddings were on have no vector, so semantic
+            # search can't see them; keyword matches fill the gap.
+            seen = {str(item.get("_id") or item.get("id")) for item in values}
+            extra = [
+                item
+                for item in self._keyword_matches(
+                    text,
+                    resolved_type,
+                    identity,
+                    memory_id=memory_id,
+                    limit=resolved_limit,
+                    include_superseded=include_superseded,
+                )
+                if str(item.get("_id") or item.get("id")) not in seen
+            ]
+            if extra:
+                mode = "hybrid" if values else "keyword"
+                if not values:
+                    note = "No semantic matches, so these are keyword matches."
+                values = (values + extra)[:resolved_limit]
+        result = {
+            "ok": True,
+            "query": text,
+            "memory_type": resolved_type.value,
+            "search_mode": mode,
+            "memories": values,
+            "count": len(values),
         }
-        if _accepts_keyword(retrieve, "user_id"):
+        if note:
+            result["note"] = note
+        return result
+
+    def _scoped_rows(
+        self,
+        memory_type: MemoryType,
+        identity: RequestIdentity,
+        *,
+        memory_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        list_all = self.provider.list_all
+        kwargs = {}
+        if _accepts_keyword(list_all, "user_id"):
             kwargs["user_id"] = identity.principal
+        return [
+            row
+            for row in list_all(memory_type, **kwargs) or []
+            if isinstance(row, dict)
+            and (not memory_id or row.get("memory_id") == memory_id)
+            and _document_user_id(row) == identity.principal
+        ]
+
+    def _keyword_matches(
+        self,
+        query: str,
+        memory_type: MemoryType,
+        identity: RequestIdentity,
+        *,
+        memory_id: Optional[str],
+        limit: int,
+        include_superseded: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Rows sharing words with the query, best overlap first, newest
+        first among equals."""
+        wanted = _keywords(query)
+        if not wanted:
+            return []
         try:
-            rows = retrieve(text, **kwargs)
+            rows = self._scoped_rows(memory_type, identity, memory_id=memory_id)
         except Exception as exc:
             raise MemorizzServerError(
                 "provider_error", "The memory provider could not search memories"
             ) from exc
-        values = self._tenant_rows(rows, identity, resolved_limit)
-        return {
-            "ok": True,
-            "query": text,
-            "memory_type": resolved_type.value,
-            "memories": values,
-            "count": len(values),
+        scored = []
+        for row in rows:
+            if not include_superseded and _is_superseded(row):
+                continue
+            overlap = len(wanted & _keywords(_document_text(row)))
+            if overlap:
+                scored.append(
+                    (
+                        overlap / len(wanted),
+                        str(row.get("timestamp") or row.get("created_at") or ""),
+                        row,
+                    )
+                )
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        values = []
+        for score, _when, row in scored[:limit]:
+            value = _json_value(row)
+            value["score"] = round(score, 3)
+            values.append(value)
+        return values
+
+    def _probe_embeddings(self) -> Dict[str, Any]:
+        from ..memory_provider.base import provider_manages_embeddings
+        from ..metaharness.security import redact as redact_text
+
+        status: Dict[str, Any] = {
+            "ready": False,
+            "provider": None,
+            "model": None,
+            "managed_by_provider": False,
+            "error": None,
         }
+        try:
+            managed = provider_manages_embeddings(self.provider)
+        except Exception:
+            managed = False
+        if managed:
+            status.update(ready=True, managed_by_provider=True)
+            return status
+        status["provider"] = (
+            os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", "").strip().lower()
+            or "openai"
+        )
+        try:
+            from ..embeddings import get_embedding_manager
+
+            manager = get_embedding_manager()
+            info = manager.get_provider_info()
+            status["provider"] = info.get("provider")
+            status["model"] = info.get("model")
+        except Exception as exc:
+            status["error"] = redact_text(f"{type(exc).__name__}: {exc}")[:300]
+            return status
+        outcome: Dict[str, Any] = {}
+
+        def probe() -> None:
+            try:
+                vector = manager.get_embedding("memorizz embedding check")
+                outcome["ready"] = bool(vector)
+            except Exception as exc:
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+        worker = threading.Thread(
+            target=probe, name="memorizz-embedding-probe", daemon=True
+        )
+        worker.start()
+        worker.join(_EMBEDDING_PROBE_TIMEOUT_SECONDS)
+        if worker.is_alive():
+            status[
+                "error"
+            ] = f"The embedding model didn't answer within {_EMBEDDING_PROBE_TIMEOUT_SECONDS:.0f} s"
+        elif outcome.get("ready"):
+            status["ready"] = True
+        else:
+            status["error"] = redact_text(
+                str(outcome.get("error") or "No embedding returned")
+            )[:300]
+        return status
+
+    def _embedding_status(self, *, refresh: bool = False) -> Dict[str, Any]:
+        """Whether an embedding model works, checked at most every few
+        minutes (one tiny embedding call)."""
+        with self._embedding_lock:
+            cached = self._embedding_cache
+            if (
+                cached
+                and not refresh
+                and time.monotonic() - cached[0] < _EMBEDDING_STATUS_TTL_SECONDS
+            ):
+                return dict(cached[1])
+        status = self._probe_embeddings()
+        with self._embedding_lock:
+            self._embedding_cache = (time.monotonic(), dict(status))
+        return status
+
+    def _embed_or_none(self, text: str) -> Optional[List[float]]:
+        """An embedding for a record being written, when a model works and
+        the provider doesn't embed on its own; never fails the write."""
+        status = self._embedding_status()
+        if not status.get("ready") or status.get("managed_by_provider"):
+            return None
+        try:
+            from ..embeddings import get_embedding
+
+            vector = get_embedding(text)
+            return list(vector) if vector else None
+        except Exception as exc:
+            logger.warning(
+                "Storing memory without an embedding (%s)", type(exc).__name__
+            )
+            return None
 
     def get_memory(
         self, record_id: str, memory_type: str, identity: RequestIdentity
@@ -1732,6 +2075,9 @@ class MemorizzRuntime:
             "memory_type": resolved_type.value,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        embedding = self._embed_or_none(text)
+        if embedding:
+            document["embedding"] = embedding
         try:
             record_id = self.provider.store(
                 document,
@@ -1807,6 +2153,1008 @@ class MemorizzRuntime:
             "memory_type": resolved_type.value,
             "deleted": deleted,
         }
+
+    # ------------------------------------------- update, ingest, entities
+
+    def _episodic_scope(self, memory_id: Any, thread_id: Any) -> tuple:
+        memory = str(memory_id or "").strip()
+        thread = str(thread_id or "").strip()
+        if not memory or not thread or len(memory) > 200 or len(thread) > 200:
+            raise MemorizzServerError(
+                "invalid_conversation_scope",
+                "memory_id and thread_id are required (at most 200 characters)",
+            )
+        return memory, thread
+
+    def record_turn(
+        self,
+        memory_id: str,
+        thread_id: str,
+        user_message: str,
+        assistant_message: str,
+        identity: RequestIdentity,
+        *,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Save one turn of a coding session (request and answer, secrets
+        removed) to conversation memory for this caller."""
+        from ..episodic_capture import record_turn
+
+        self._require_scope(identity, WRITE_SCOPE)
+        memory, thread = self._episodic_scope(memory_id, thread_id)
+        for text in (user_message, assistant_message):
+            if len(str(text or "")) > self.config.max_text_chars:
+                raise MemorizzServerError(
+                    "content_too_large",
+                    f"A message exceeds {self.config.max_text_chars} characters",
+                )
+        if (
+            not str(user_message or "").strip()
+            and not str(assistant_message or "").strip()
+        ):
+            raise MemorizzServerError("invalid_content", "The turn has no text")
+        try:
+            record_ids = record_turn(
+                self.provider,
+                memory_id=memory,
+                thread_id=thread,
+                user_message=user_message,
+                assistant_message=assistant_message,
+                agent_id=str(agent_id or "").strip()[:80] or None,
+                user_id=identity.principal,
+            )
+        except Exception as exc:
+            logger.exception("Memorizz MCP turn capture failed")
+            raise MemorizzServerError(
+                "provider_error", "The memory provider could not store the turn"
+            ) from exc
+        return {
+            "ok": True,
+            "memory_id": memory,
+            "thread_id": thread,
+            "record_ids": record_ids,
+        }
+
+    def summarize_session(
+        self,
+        memory_id: str,
+        thread_id: str,
+        identity: RequestIdentity,
+        *,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Summarize a coding session's recorded turns with the server's
+        default model into the summaries store."""
+        from ..episodic_capture import default_model, summarize_thread
+
+        self._require_scope(identity, WRITE_SCOPE)
+        memory, thread = self._episodic_scope(memory_id, thread_id)
+        model = default_model()
+        if model is None:
+            return {
+                "ok": False,
+                "summary_ids": [],
+                "reason": "no_model",
+                "note": "The server has no default model (MEMORIZZ_DEFAULT_LLM_PROVIDER / _MODEL).",
+            }
+        try:
+            summary_ids = summarize_thread(
+                self.provider,
+                memory_id=memory,
+                thread_id=thread,
+                agent_id=str(agent_id or "").strip()[:80] or None,
+                user_id=identity.principal,
+                model=model,
+            )
+        except Exception as exc:
+            logger.exception("Memorizz MCP session summary failed")
+            raise MemorizzServerError(
+                "summary_failed", "The session could not be summarized"
+            ) from exc
+        return {
+            "ok": bool(summary_ids),
+            "memory_id": memory,
+            "thread_id": thread,
+            "summary_ids": summary_ids,
+        }
+
+    def _mark_superseded(
+        self,
+        old_id: str,
+        new_id: str,
+        when: str,
+        memory_type: MemoryType,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """Mark a record superseded by another, and check the mark was kept
+        (some backends keep only fixed columns)."""
+        fields = {
+            "status": "superseded",
+            "superseded_by": new_id,
+            "superseded_at": when,
+        }
+        if reason:
+            fields["supersede_reason"] = reason
+        try:
+            return bool(
+                self.provider.update_by_id(old_id, fields, memory_type)
+            ) and _is_superseded(self.provider.retrieve_by_id(old_id, memory_type))
+        except Exception:
+            logger.exception("Memorizz MCP could not mark a memory superseded")
+            return False
+
+    def update_memory(
+        self,
+        record_id: str,
+        content: str,
+        identity: RequestIdentity,
+        *,
+        memory_type: str = "knowledge_base",
+        reason: Optional[str] = None,
+        duplicate_of: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Replace a memory with a new record and mark the old one superseded,
+        or (with ``duplicate_of``) mark it superseded by an existing memory
+        that already says it.
+
+        Nothing is deleted: the old record keeps its content and gains
+        ``status="superseded"``, ``superseded_by`` and ``superseded_at``; the
+        new record carries ``supersedes`` and ``supersede_reason``. List and
+        search hide superseded records unless asked for them.
+        """
+        self._require_scope(identity, WRITE_SCOPE)
+        text = str(content or "").strip()
+        keep_id = str(duplicate_of or "").strip()
+        if bool(text) == bool(keep_id):
+            raise MemorizzServerError(
+                "invalid_update",
+                "Give the new content, or duplicate_of (an existing memory that "
+                "already says it), not both",
+            )
+        if len(text) > self.config.max_text_chars:
+            raise MemorizzServerError(
+                "content_too_large",
+                f"Memory content exceeds {self.config.max_text_chars} characters",
+            )
+        why = str(reason or "").strip()[:1000] or None
+        resolved_type = self._normalize_memory_type(
+            memory_type, identity, writable=True
+        )
+        old = self.get_memory(record_id, resolved_type.value, identity)["memory"]
+        if _is_superseded(old):
+            newer = old.get("superseded_by") or (old.get("metadata") or {}).get(
+                "superseded_by"
+            )
+            raise MemorizzServerError(
+                "memory_superseded",
+                f"Memory {record_id} was already replaced by {newer}; update that one",
+            )
+        old_id = str(old.get("_id") or old.get("id") or record_id)
+        now = datetime.now(timezone.utc).isoformat()
+        if keep_id:
+            kept = self.get_memory(keep_id, resolved_type.value, identity)["memory"]
+            kept_id = str(kept.get("_id") or kept.get("id") or keep_id)
+            if kept_id == old_id or kept.get("memory_id") != old.get("memory_id"):
+                raise MemorizzServerError(
+                    "invalid_update",
+                    "duplicate_of must be another memory in the same memory_id",
+                )
+            if _is_superseded(kept):
+                raise MemorizzServerError(
+                    "memory_superseded",
+                    f"Memory {kept_id} was itself replaced; use the newer one",
+                )
+            if not self._mark_superseded(old_id, kept_id, now, resolved_type, why):
+                raise MemorizzServerError(
+                    "supersede_unsupported",
+                    "This memory backend could not mark the memory superseded, so "
+                    "nothing changed; forget the duplicate instead",
+                )
+            return {
+                "ok": True,
+                "record_id": kept_id,
+                "memory_id": old.get("memory_id"),
+                "memory_type": resolved_type.value,
+                "supersede_reason": why,
+                "superseded": {
+                    "record_id": old_id,
+                    "status": "superseded",
+                    "superseded_by": kept_id,
+                    "superseded_at": now,
+                },
+            }
+        document = {
+            key: value
+            for key, value in old.items()
+            if key not in _UPDATE_DROPPED_FIELDS
+        }
+        memory_id = str(old.get("memory_id") or uuid.uuid4())
+        document.update(
+            {
+                "content": text,
+                "text": text,
+                "memory_id": memory_id,
+                "user_id": identity.principal,
+                "memory_type": resolved_type.value,
+                "timestamp": now,
+                "supersedes": old_id,
+            }
+        )
+        if why:
+            document["supersede_reason"] = why
+        embedding = self._embed_or_none(text)
+        if embedding:
+            document["embedding"] = embedding
+        try:
+            new_id = str(
+                self.provider.store(
+                    document, memory_store_type=resolved_type, memory_id=memory_id
+                )
+            )
+        except Exception as exc:
+            logger.exception("Memorizz MCP memory update failed")
+            raise MemorizzServerError(
+                "provider_error", "The memory provider could not store the new memory"
+            ) from exc
+        if not self._mark_superseded(old_id, new_id, now, resolved_type):
+            try:
+                self.provider.delete_by_id(new_id, resolved_type)
+            except Exception:
+                logger.exception("Memorizz MCP could not roll back memory %s", new_id)
+            raise MemorizzServerError(
+                "supersede_unsupported",
+                "This memory backend could not mark the old memory superseded, so "
+                "nothing changed; store a new memory and forget the old one instead",
+            )
+        return {
+            "ok": True,
+            "record_id": new_id,
+            "memory_id": memory_id,
+            "memory_type": resolved_type.value,
+            "supersedes": old_id,
+            "supersede_reason": why,
+            "superseded": {
+                "record_id": old_id,
+                "status": "superseded",
+                "superseded_by": new_id,
+                "superseded_at": now,
+            },
+        }
+
+    def _ingest_roots(self) -> List[Path]:
+        if self.config.ingest_roots is not None:
+            return [Path(root) for root in sorted(self.config.ingest_roots)]
+        if self.config.transport == "stdio":
+            return [Path.home().resolve()]
+        return []
+
+    def ingest(
+        self,
+        paths: List[str],
+        memory_id: str,
+        identity: RequestIdentity,
+        *,
+        recursive: bool = True,
+        include: Optional[List[str]] = None,
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Chunk files and folders into the knowledge base under ``memory_id``.
+
+        Reads only inside the allowed folders, never hidden, dependency or
+        version-control folders or secret-looking files, and refuses a batch
+        over the file or size cap before storing anything. A file ingested
+        before is skipped when unchanged; when changed, its old chunks are
+        marked superseded.
+        """
+        from .._env_io import memorizz_home
+        from ..long_term.semantic.extractors import ExtractorError, supported_extensions
+        from ..long_term.semantic.knowledge_base import KnowledgeBase
+
+        self._require_scope(identity, WRITE_SCOPE)
+        resolved_type = self._normalize_memory_type("knowledge_base", identity)
+        memory_id = str(memory_id or "").strip()
+        if not memory_id or len(memory_id) > 200:
+            raise MemorizzServerError(
+                "invalid_memory_id", "Give a memory_id (up to 200 characters)"
+            )
+        requested = [str(item).strip() for item in (paths or []) if str(item).strip()]
+        if not requested:
+            raise MemorizzServerError(
+                "invalid_paths", "Give at least one file or folder path"
+            )
+        if len(requested) > _INGEST_MAX_PATHS:
+            raise MemorizzServerError(
+                "invalid_paths", f"Give at most {_INGEST_MAX_PATHS} paths per call"
+            )
+        patterns = [str(item).strip() for item in (include or []) if str(item).strip()]
+        size = int(chunk_size) if chunk_size else None
+        overlap = int(chunk_overlap) if chunk_overlap is not None else None
+        if size is not None and not 100 <= size <= 20_000:
+            raise MemorizzServerError(
+                "invalid_chunking", "chunk_size must be 100 to 20000 characters"
+            )
+        if overlap is not None and not 0 <= overlap < (size or 1000):
+            raise MemorizzServerError(
+                "invalid_chunking",
+                "chunk_overlap must be at least 0 and less than chunk_size",
+            )
+
+        roots = self._ingest_roots()
+        if not roots:
+            raise MemorizzServerError(
+                "ingest_disabled",
+                "This server has no ingest folders; set MEMORIZZ_MCP_SERVER_INGEST_ROOTS "
+                "or pass --ingest-root",
+            )
+        extensions = {ext.lower() for ext in supported_extensions()}
+        own_data = memorizz_home().expanduser().resolve()
+        skipped: List[Dict[str, str]] = []
+        planned: Dict[str, Path] = {}
+
+        def root_of(path: Path) -> Optional[Path]:
+            for root in roots:
+                if path == root or root in path.parents:
+                    return root
+            return None
+
+        def blocked(path: Path, root: Path, *, is_dir: bool) -> Optional[str]:
+            if path == own_data or own_data in path.parents:
+                return "MemoRizz's own data folder"
+            parts = path.relative_to(root).parts
+            for index, part in enumerate(parts):
+                reason = _ingest_skip_reason(
+                    Path(part), is_dir=is_dir or index < len(parts) - 1
+                )
+                if reason:
+                    return reason
+            return None
+
+        def consider(path: Path, top: Path) -> None:
+            resolved = path.resolve()
+            root = root_of(resolved)
+            if root is None:
+                skipped.append(
+                    {"path": str(path), "reason": "links outside the allowed folders"}
+                )
+                return
+            reason = blocked(resolved, root, is_dir=False)
+            if not reason and resolved.suffix.lower() not in extensions:
+                reason = "unsupported file type"
+            if not reason and patterns:
+                relative = (
+                    path.relative_to(top).as_posix() if top != path else path.name
+                )
+                if not any(
+                    fnmatch.fnmatch(path.name, pattern)
+                    or fnmatch.fnmatch(relative, pattern)
+                    for pattern in patterns
+                ):
+                    reason = "not matched by include"
+            if reason:
+                skipped.append({"path": str(path), "reason": reason})
+            else:
+                planned.setdefault(str(resolved), resolved)
+
+        for raw in requested:
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                raise MemorizzServerError(
+                    "invalid_paths", f"Use an absolute path: {raw}"
+                )
+            if not candidate.exists():
+                skipped.append({"path": raw, "reason": "not found"})
+                continue
+            resolved = candidate.resolve()
+            root = root_of(resolved)
+            if root is None:
+                allowed = ", ".join(str(item) for item in roots)
+                raise MemorizzServerError(
+                    "path_not_allowed",
+                    f"{raw} is outside the folders this server may ingest ({allowed}); "
+                    "the operator sets them with MEMORIZZ_MCP_SERVER_INGEST_ROOTS",
+                )
+            if resolved.is_file():
+                consider(candidate, candidate)
+                continue
+            reason = blocked(resolved, root, is_dir=True)
+            if reason:
+                skipped.append({"path": raw, "reason": reason})
+                continue
+            for folder, dirnames, filenames in os.walk(resolved, followlinks=False):
+                kept = []
+                for name in sorted(dirnames):
+                    reason = _ingest_skip_reason(Path(name), is_dir=True)
+                    if reason:
+                        skipped.append(
+                            {"path": os.path.join(folder, name), "reason": reason}
+                        )
+                    else:
+                        kept.append(name)
+                dirnames[:] = kept if recursive else []
+                for name in sorted(filenames):
+                    consider(Path(folder) / name, resolved)
+                if len(planned) > _INGEST_MAX_FILES:
+                    break
+
+        files = list(planned.values())
+        total_bytes = sum(path.stat().st_size for path in files)
+        if len(files) > _INGEST_MAX_FILES or total_bytes > _INGEST_MAX_BYTES:
+            raise MemorizzServerError(
+                "ingest_too_large",
+                f"That is {'over ' if len(files) > _INGEST_MAX_FILES else ''}{len(files)} files "
+                f"and {total_bytes / 1_048_576:.1f} MB; one call takes at most "
+                f"{_INGEST_MAX_FILES} files and {_INGEST_MAX_BYTES // 1_048_576} MB. "
+                "Narrow the paths or pass include patterns, then call again",
+            )
+
+        try:
+            existing = self._scoped_rows(resolved_type, identity, memory_id=memory_id)
+        except Exception as exc:
+            raise MemorizzServerError(
+                "provider_error",
+                "The memory provider could not list the knowledge base",
+            ) from exc
+        previous: Dict[str, List[Dict[str, Any]]] = {}
+        for row in existing:
+            if row.get("source_path") and not _is_superseded(row):
+                previous.setdefault(str(row["source_path"]), []).append(row)
+
+        embedder = self._embedding_status()
+        mode = "optional" if embedder.get("ready") else "off"
+        knowledge = KnowledgeBase(self.provider)
+        ingested: List[Dict[str, Any]] = []
+        chunks_stored = embedded = replaced = 0
+        for path in files:
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as exc:
+                skipped.append(
+                    {"path": str(path), "reason": f"unreadable ({type(exc).__name__})"}
+                )
+                continue
+            earlier = previous.get(str(path), [])
+            if any(row.get("source_sha256") == digest for row in earlier):
+                skipped.append(
+                    {"path": str(path), "reason": "unchanged since the last ingest"}
+                )
+                continue
+            options: Dict[str, Any] = {}
+            if size:
+                options["chunk_size"] = size
+            if overlap is not None:
+                options["chunk_overlap"] = overlap
+            try:
+                knowledge_base_id = knowledge.ingest_file(
+                    path,
+                    namespace=memory_id,
+                    user_id=identity.principal,
+                    metadata={
+                        "memory_id": memory_id,
+                        "memory_type": resolved_type.value,
+                        "source_path": str(path),
+                        "source_name": path.name,
+                        "source_sha256": digest,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                    embeddings=mode,
+                    **options,
+                )
+            except ExtractorError as exc:
+                skipped.append(
+                    {"path": str(path), "reason": f"couldn't read: {exc}"[:300]}
+                )
+                continue
+            except Exception as exc:
+                logger.exception("Memorizz MCP ingest failed for one file")
+                skipped.append(
+                    {"path": str(path), "reason": f"failed ({type(exc).__name__})"}
+                )
+                continue
+            stats = dict(knowledge.last_ingest or {})
+            count = int(stats.get("chunks") or 0)
+            if not count:
+                skipped.append({"path": str(path), "reason": "no text"})
+                continue
+            chunks_stored += count
+            embedded += int(stats.get("embedded") or 0)
+            for row in earlier:
+                row_id = row.get("_id") or row.get("id")
+                try:
+                    if row_id and self.provider.update_by_id(
+                        str(row_id),
+                        {
+                            "status": "superseded",
+                            "superseded_by": knowledge_base_id,
+                            "superseded_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                        resolved_type,
+                    ):
+                        replaced += 1
+                except Exception:
+                    logger.exception("Memorizz MCP could not supersede an old chunk")
+            ingested.append(
+                {
+                    "path": str(path),
+                    "chunks": count,
+                    "knowledge_base_id": knowledge_base_id,
+                }
+            )
+
+        reasons: Dict[str, int] = {}
+        for item in skipped:
+            key = item["reason"].split(":")[0]
+            reasons[key] = reasons.get(key, 0) + 1
+        result = {
+            "ok": True,
+            "memory_id": memory_id,
+            "memory_type": resolved_type.value,
+            "files_ingested": len(ingested),
+            "chunks_stored": chunks_stored,
+            "chunks_embedded": embedded,
+            "old_chunks_superseded": replaced,
+            "files_skipped": len(skipped),
+            "skipped_by_reason": reasons,
+            "files": ingested[:100],
+            "skipped": skipped[:100],
+        }
+        if chunks_stored and embedded < chunks_stored:
+            result["note"] = (
+                f"{chunks_stored - embedded} chunks were stored without embeddings: "
+                "keyword search finds them, semantic search doesn't. "
+                + _EMBEDDINGS_HINT
+            )
+        return result
+
+    def _entity_memory(self):
+        from ..long_term.semantic.entity_memory import EntityMemory
+
+        return EntityMemory(self.provider)
+
+    @staticmethod
+    def _entity_public(record: Dict[str, Any]) -> Dict[str, Any]:
+        return _json_value(record)
+
+    def lookup_entities(
+        self,
+        identity: RequestIdentity,
+        *,
+        query: Optional[str] = None,
+        name: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        limit: int = 10,
+        include_superseded: bool = False,
+    ) -> Dict[str, Any]:
+        """Find entities (people, projects, services) by exact name or by
+        meaning; ``search_mode`` says how they were found."""
+        self._require_scope(identity, READ_SCOPE)
+        resolved_type = self._normalize_memory_type("entity_memory", identity)
+        text = str(query or "").strip()
+        exact = str(name or "").strip()
+        if not text and not exact:
+            raise MemorizzServerError("invalid_query", "Give a query or a name")
+        resolved_limit = self._bounded_limit(limit)
+        entities = self._entity_memory()
+        found: List[Dict[str, Any]] = []
+        mode = "name"
+        note = None
+        try:
+            if exact:
+                rows = [
+                    row
+                    for row in entities.list_entities(
+                        memory_id=memory_id,
+                        user_id=identity.principal,
+                        include_superseded=include_superseded,
+                    )
+                    if str(row.get("name") or "").strip().lower() == exact.lower()
+                ]
+                found.extend(rows)
+            if text and len(found) < resolved_limit:
+                if self._embedding_status().get("ready"):
+                    rows, diagnostics = entities.search_entities_with_diagnostics(
+                        text,
+                        limit=resolved_limit,
+                        memory_id=memory_id,
+                        user_id=identity.principal,
+                    )
+                    mode = (
+                        "semantic"
+                        if diagnostics.get("semantic_match_count")
+                        else "keyword"
+                    )
+                    found.extend(rows)
+                if len(found) < resolved_limit:
+                    seen = {
+                        str(row.get("entity_id") or row.get("_id"))
+                        for row in found
+                        if isinstance(row, dict)
+                    }
+                    keyword = [
+                        row
+                        for row in self._keyword_matches(
+                            text,
+                            resolved_type,
+                            identity,
+                            memory_id=memory_id,
+                            limit=resolved_limit,
+                            include_superseded=include_superseded,
+                        )
+                        if str(row.get("entity_id") or row.get("_id")) not in seen
+                    ]
+                    if keyword:
+                        mode = "hybrid" if mode == "semantic" else "keyword"
+                    found.extend(keyword)
+                if not self._embedding_status().get("ready"):
+                    note = _NO_EMBEDDINGS_NOTE
+        except MemorizzServerError:
+            raise
+        except Exception as exc:
+            raise MemorizzServerError(
+                "provider_error", "The memory provider could not look up entities"
+            ) from exc
+        values: List[Dict[str, Any]] = []
+        seen = set()
+        for row in found:
+            if (
+                not isinstance(row, dict)
+                or _document_user_id(row) != identity.principal
+            ):
+                continue
+            if not include_superseded and _is_superseded(row):
+                continue
+            key = str(row.get("entity_id") or row.get("_id") or row.get("id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(self._entity_public(row))
+            if len(values) >= resolved_limit:
+                break
+        result = {
+            "ok": True,
+            "search_mode": mode if text else "name",
+            "entities": values,
+            "count": len(values),
+        }
+        if note:
+            result["note"] = note
+        return result
+
+    def upsert_entity(
+        self,
+        name: str,
+        identity: RequestIdentity,
+        *,
+        entity_type: Optional[str] = None,
+        attributes: Optional[Dict[str, Any]] = None,
+        relations: Optional[List[Dict[str, Any]]] = None,
+        memory_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create an entity or merge facts into the one with this name.
+
+        ``attributes`` maps fact names to values. Each relation names another
+        entity by ``target`` (name or entity ID) and a ``relation_type``; a
+        target that doesn't exist yet is created with just its name.
+        """
+        self._require_scope(identity, WRITE_SCOPE)
+        self._normalize_memory_type("entity_memory", identity)
+        label = str(name or "").strip()
+        if not label or len(label) > 200:
+            raise MemorizzServerError(
+                "invalid_entity", "Give an entity name (up to 200 characters)"
+            )
+        facts = []
+        for key, value in dict(attributes or {}).items():
+            key = str(key).strip()
+            if not key:
+                continue
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, sort_keys=True)
+            text = str(value).strip()
+            if len(text) > 2_000:
+                raise MemorizzServerError(
+                    "invalid_entity", f"Attribute {key} is over 2000 characters"
+                )
+            facts.append({"name": key, "value": text, "source": "mcp"})
+        if len(facts) > 100:
+            raise MemorizzServerError(
+                "invalid_entity", "Give at most 100 attributes per call"
+            )
+        entities = self._entity_memory()
+        scope = {"memory_id": memory_id, "user_id": identity.principal}
+        created_targets: List[str] = []
+        links = []
+        try:
+            for relation in list(relations or [])[:50]:
+                target = str(relation.get("target") or "").strip()
+                kind = str(relation.get("relation_type") or "").strip()
+                if not target or not kind:
+                    raise MemorizzServerError(
+                        "invalid_entity",
+                        "Each relation needs a target and a relation_type",
+                    )
+                match = entities._fetch_one(
+                    {"entity_id": target}, **scope
+                ) or entities.get_entity_by_name(target, **scope)
+                if match:
+                    target_id = str(match.get("entity_id"))
+                else:
+                    target_id = entities.upsert_entity(name=target, **scope)
+                    created_targets.append(target)
+                links.append({"entity_id": target_id, "relation_type": kind})
+            existed = entities.get_entity_by_name(label, **scope) is not None
+            entity_id = entities.upsert_entity(
+                name=label,
+                entity_type=str(entity_type).strip() if entity_type else None,
+                attributes=facts or None,
+                relations=links or None,
+                **scope,
+            )
+            record = entities._fetch_one({"entity_id": entity_id}, **scope)
+        except MemorizzServerError:
+            raise
+        except Exception as exc:
+            logger.exception("Memorizz MCP entity upsert failed")
+            raise MemorizzServerError(
+                "provider_error", "The memory provider could not store the entity"
+            ) from exc
+        return {
+            "ok": True,
+            "entity_id": entity_id,
+            "created": not existed,
+            "created_related_entities": created_targets,
+            "entity": self._entity_public(
+                record or {"entity_id": entity_id, "name": label}
+            ),
+        }
+
+    def memory_status(
+        self, identity: RequestIdentity, *, memory_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """What this server can do right now: backend, policy, embeddings,
+        record counts. Never fails because a part is unavailable."""
+        self._require_scope(identity, READ_SCOPE)
+        from .. import __version__
+
+        backend: Dict[str, Any] = {}
+        try:
+            provider = self.provider
+            backend["name"] = type(provider).__name__
+            root = getattr(provider, "root_path", None)
+            backend["location"] = (
+                str(root) if root else "database (connection details not shown)"
+            )
+        except Exception as exc:
+            backend = {"name": None, "error": f"{type(exc).__name__}"}
+        visible = [
+            item
+            for item in MemoryType
+            if self.config.transport == "stdio" or item in _TENANT_MEMORY_TYPES
+        ]
+        counts: Dict[str, Any] = {}
+        if "error" not in backend:
+            for item in (
+                MemoryType.KNOWLEDGE_BASE,
+                MemoryType.SHORT_TERM_MEMORY,
+                MemoryType.ENTITY_MEMORY,
+                MemoryType.CONVERSATION_MEMORY,
+                MemoryType.SUMMARIES,
+                MemoryType.WORKFLOW_MEMORY,
+            ):
+                if item not in visible:
+                    continue
+                try:
+                    rows = self._scoped_rows(item, identity, memory_id=memory_id)
+                    superseded = sum(1 for row in rows if _is_superseded(row))
+                    counts[item.value] = {
+                        "active": len(rows) - superseded,
+                        "superseded": superseded,
+                    }
+                except Exception as exc:
+                    counts[item.value] = {"error": type(exc).__name__}
+        roots = self._ingest_roots()
+        return {
+            "ok": True,
+            "version": __version__,
+            "transport": self.config.transport,
+            "principal": identity.principal,
+            "policy": {
+                "allow_writes": bool(self.config.allow_writes),
+                "writes_available": self._writes_allowed(identity),
+                "allow_agent_execution": bool(self.config.allow_agent_execution),
+                "allow_harness_execution": bool(self.config.allow_harness_execution),
+                "allow_trace_queries": bool(self.config.allow_trace_queries),
+                "max_result_items": self.config.max_result_items,
+            },
+            "backend": backend,
+            "directly_writable_memory_types": sorted(
+                item.value for item in _WRITABLE_MEMORY_TYPES
+            ),
+            "embeddings": self._embedding_status(refresh=True),
+            "memory_id": memory_id,
+            "counts": counts,
+            "ingest": {
+                "available": bool(roots) and self._writes_allowed(identity),
+                "roots": [str(item) for item in roots],
+                "max_files": _INGEST_MAX_FILES,
+                "max_megabytes": _INGEST_MAX_BYTES // 1_048_576,
+            },
+        }
+
+    # ------------------------------------------------ the agent's MCP servers
+
+    def _connected_manager(self, agent_id: str, identity: RequestIdentity):
+        """The agent's own MCP connections, with its stored credentials.
+
+        Harnesses reach Notion, Gmail and the rest only through here: tokens
+        stay in MemoRizz, calls are audited, and changes need approval.
+        """
+        from ..mcp import MCPClientManager
+
+        normalized = str(agent_id or "").strip()
+        exposed = self.config.exposed_agent_ids or set()
+        if not normalized and len(exposed) == 1:
+            # A harness run's server exposes only the agent it works for.
+            normalized = next(iter(exposed))
+        if not normalized:
+            raise MemorizzServerError(
+                "invalid_agent",
+                "No agent is attached to this server, so pass agent_id "
+                "(memorizz_list_agents lists the agents you can use)",
+            )
+        self._assert_agent_exposed(normalized, identity)
+        try:
+            record = self.provider.retrieve_memagent(normalized)
+        except Exception as exc:
+            raise MemorizzServerError("agent_not_found", "Agent was not found") from exc
+        if not record:
+            raise MemorizzServerError("agent_not_found", "Agent was not found")
+        servers = (
+            record.get("mcp_servers")
+            if isinstance(record, dict)
+            else getattr(record, "mcp_servers", None)
+        )
+        return MCPClientManager(owner_id=normalized, servers=list(servers or []))
+
+    def list_connected_tools(
+        self, agent_id: str, identity: RequestIdentity, *, refresh: bool = False
+    ) -> Dict[str, Any]:
+        """The tools on the agent's MCP servers, and which ones change data."""
+        from ..mcp.security import tool_is_mutating
+
+        self._require_scope(identity, READ_SCOPE)
+        if (
+            not str(agent_id or "").strip()
+            and len(self.config.exposed_agent_ids or set()) != 1
+        ):
+            # Nothing to list rather than an error: a harness run started
+            # without an agent simply has no connected tools.
+            return {
+                "ok": True,
+                "agent_id": None,
+                "writes_allowed": self._writes_allowed(identity),
+                "servers": [],
+                "note": (
+                    "No agent is attached to this server, so there are no "
+                    "connected tools. Pass agent_id to see an agent's tools; "
+                    "memorizz_list_agents lists the agents you can use."
+                ),
+            }
+        manager = self._connected_manager(agent_id, identity)
+        statuses = {
+            row.get("name"): row
+            for row in manager.connection_status().get("servers") or []
+        }
+        rows = []
+        for server in manager.server_dicts():
+            name = str(server.get("name") or "")
+            config = manager.get_server(name)
+            tools = manager.cached_tools(name)
+            error_code = None
+            if refresh or not tools:
+                listed = manager.list_tools(name)
+                if listed.get("ok"):
+                    tools = manager.cached_tools(name)
+                else:
+                    error_code = listed.get("error_code")
+            rows.append(
+                {
+                    "server_name": name,
+                    "signed_in": bool(statuses.get(name, {}).get("authenticated")),
+                    "error_code": error_code,
+                    "tools": [
+                        {
+                            "name": tool["name"],
+                            "description": tool.get("description") or "",
+                            "input_schema": tool.get("inputSchema") or {},
+                            "changes_data": tool_is_mutating(
+                                tool["name"],
+                                tool,
+                                read_only_tools=config.read_only_tools,
+                                mutation_tools=config.mutation_tools,
+                            ),
+                        }
+                        for tool in tools
+                    ],
+                }
+            )
+        return {
+            "ok": True,
+            "agent_id": manager.owner_id,
+            "writes_allowed": self._writes_allowed(identity),
+            "servers": rows,
+        }
+
+    def _writes_allowed(self, identity: RequestIdentity) -> bool:
+        return WRITE_SCOPE in identity.scopes and bool(self.config.allow_writes)
+
+    def call_connected_tool(
+        self,
+        agent_id: str,
+        server_name: str,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]],
+        identity: RequestIdentity,
+        *,
+        read_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Call a tool on the agent's MCP server under the agent's policy.
+
+        Reads run at once. A tool that changes data needs write access and then
+        returns ``approval_required``: a person approves it on MCP connections
+        before ``memorizz_resume_connected_tool_call`` runs it. With
+        ``read_only`` the call is refused for such tools instead, which lets
+        hosts that never prompt (Codex runs) allow the read path.
+        """
+        from ..mcp.security import tool_is_mutating
+
+        self._require_scope(identity, READ_SCOPE)
+        manager = self._connected_manager(agent_id, identity)
+        try:
+            config = manager.get_server(server_name)
+        except Exception as exc:
+            raise MemorizzServerError(
+                "mcp_server_not_found", "The agent has no MCP server with that name"
+            ) from exc
+        metadata = next(
+            (
+                tool
+                for tool in manager.cached_tools(config.name)
+                if tool["name"] == tool_name
+            ),
+            None,
+        )
+        changes_data = tool_is_mutating(
+            tool_name,
+            metadata,
+            read_only_tools=config.read_only_tools,
+            mutation_tools=config.mutation_tools,
+        )
+        if changes_data and read_only:
+            raise MemorizzServerError(
+                "changes_data",
+                "This tool changes data. Use memorizz_call_connected_tool, which "
+                "asks a person to approve it.",
+            )
+        if changes_data and not self._writes_allowed(identity):
+            raise MemorizzServerError(
+                "read_only",
+                "This tool changes data and this connection is read-only. Run "
+                "the harness with write access to propose it for approval.",
+            )
+        return manager.call_tool(
+            server_name=config.name,
+            tool_name=tool_name,
+            arguments=dict(arguments or {}),
+        )
+
+    def resume_connected_tool_call(
+        self, agent_id: str, proposal_id: str, identity: RequestIdentity
+    ) -> Dict[str, Any]:
+        """Run a connected-tool call a person approved, exactly as proposed."""
+        self._require_scope(identity, WRITE_SCOPE)
+        manager = self._connected_manager(agent_id, identity)
+        return manager.resume_tool_call(str(proposal_id or ""))
 
     def list_approvals(
         self,
@@ -1962,31 +3310,21 @@ class MemorizzRuntime:
             )
         return value
 
-    def start_harness_run(
+    def _harness_request(
         self,
         task: str,
-        workspace: str,
+        workspace: Optional[str],
         identity: RequestIdentity,
         *,
-        harness: str = "auto",
-        model: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        memory_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
         write: bool = False,
-        allow_dirty_workspace: bool = False,
-        network: str = "none",
         mcp_access: str = "read_only",
+        agent_id: Optional[str] = None,
         allowed_env: Optional[List[str]] = None,
-        execution_backend: str = "local",
         verification_command: Optional[str] = None,
-        timeout_seconds: int = 900,
-        max_steps: int = 80,
-        max_cost_usd: Optional[float] = None,
-        max_input_tokens: Optional[int] = None,
-        max_output_tokens: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Start one tenant-bound run; risky envelopes return durable approval."""
+        execution_backend: str = "local",
+        **options: Any,
+    ):
+        """Validate a model-supplied launch and build its tenant-bound task."""
         self._require_harness_execution(identity)
         instruction = str(task or "").strip()
         if not instruction:
@@ -2026,41 +3364,27 @@ class MemorizzRuntime:
                 "invalid_harness_verification",
                 "Verification command cannot exceed 4000 characters",
             )
+        roots = sorted(self.config.harness_workspace_roots or [])
+        folder = str(workspace or "").strip()
+        if not folder:
+            # No project: a fresh empty folder the host creates and allows.
+            folder = self.meta_harness.scratch_workspace()
+            roots.append(folder)
 
-        from ..metaharness import (
-            HarnessBudget,
-            HarnessPermissions,
-            HarnessTask,
-            VerificationSpec,
-        )
+        from ..metaharness.requests import harness_task
 
         try:
-            request = HarnessTask(
-                task=instruction,
-                workspace=str(workspace or "").strip(),
-                harness=harness,
-                model=str(model).strip() if model else None,
+            return harness_task(
+                instruction,
+                folder,
                 agent_id=normalized_agent_id,
-                memory_id=str(memory_id).strip() if memory_id else None,
-                thread_id=str(thread_id).strip() if thread_id else None,
                 user_id=identity.principal,
+                write=write,
+                mcp_access=mcp_access,
+                allowed_env=env_names,
+                allowed_roots=roots,
+                verification_command=verify,
                 mode="delegate",
-                permissions=HarnessPermissions(
-                    workspace_mode="direct" if write else "read_only",
-                    allowed_roots=sorted(self.config.harness_workspace_roots or []),
-                    allow_dirty_workspace=bool(allow_dirty_workspace),
-                    network=network,
-                    allowed_env=env_names,
-                    mcp_access=mcp_access,
-                ),
-                budget=HarnessBudget(
-                    max_wall_time_seconds=timeout_seconds,
-                    max_steps=max_steps,
-                    max_cost_usd=max_cost_usd,
-                    max_input_tokens=max_input_tokens,
-                    max_output_tokens=max_output_tokens,
-                ),
-                verification=VerificationSpec(command=verify),
                 metadata={
                     "execution_backend": str(execution_backend or "local").lower(),
                     "approval_owner_id": self._approval_owner(identity),
@@ -2068,10 +3392,13 @@ class MemorizzRuntime:
                     "source": "mcp-server",
                     "model_initiated": True,
                 },
+                **options,
             )
         except (TypeError, ValueError) as exc:
             raise MemorizzServerError("invalid_harness_task", str(exc)) from exc
-        run = self.meta_harness.start(request)
+
+    def _started_run(self, run: Any) -> Dict[str, Any]:
+        """A started run as the tools report it: failed, awaiting approval or queued."""
         current = self.meta_harness.get_run(run.run_id) or run.to_dict()
         if current.get("status") == "failed":
             failure = dict(current.get("result") or {})
@@ -2097,6 +3424,280 @@ class MemorizzRuntime:
                 ),
             )
         return result
+
+    def start_harness_run(
+        self,
+        task: str,
+        workspace: Optional[str],
+        identity: RequestIdentity,
+        **options: Any,
+    ) -> Dict[str, Any]:
+        """Start one tenant-bound run; risky envelopes return durable approval.
+        A blank workspace runs in a fresh scratch folder."""
+        request = self._harness_request(task, workspace, identity, **options)
+        return self._started_run(self.meta_harness.start(request))
+
+    def retry_harness_run(
+        self, run_id: str, identity: RequestIdentity
+    ) -> Dict[str, Any]:
+        """Start a finished run's exact task again; risky runs ask again."""
+        self._require_harness_execution(identity)
+        previous = self._harness_run_for_identity(run_id, identity)
+        permissions = (previous.get("task") or {}).get("permissions") or {}
+        if (
+            permissions.get("workspace_mode") == "direct"
+            or permissions.get("mcp_access") == "governed_write"
+        ):
+            self._require_scope(identity, WRITE_SCOPE)
+        try:
+            run = self.meta_harness.retry_start(run_id)
+        except ValueError as exc:
+            raise MemorizzServerError("invalid_harness_retry", str(exc)) from exc
+        return self._started_run(run)
+
+    def start_harness_plan(
+        self,
+        task: str,
+        stages: List[Dict[str, Any]],
+        workspace: Optional[str],
+        identity: RequestIdentity,
+        **options: Any,
+    ) -> Dict[str, Any]:
+        """Start stages in order, each on its own harness; an edit stage waits
+        for host approval like any edit run."""
+        from ..metaharness.requests import plan_stages
+
+        rows = list(stages or [])
+        for row in rows:
+            if not isinstance(row, dict):
+                raise MemorizzServerError(
+                    "invalid_harness_plan", "Each stage must be an object"
+                )
+            if len(str(row.get("instruction") or "")) > self.config.max_text_chars:
+                raise MemorizzServerError(
+                    "invalid_harness_plan", "A stage instruction is too long"
+                )
+        if any(bool(row.get("write")) for row in rows):
+            self._require_harness_execution(identity)
+            self._require_scope(identity, WRITE_SCOPE)
+        # The base task is read-only; each stage sets its own mode.
+        request = self._harness_request(task, workspace, identity, **options)
+        try:
+            value = self.meta_harness.start_plan(
+                request, plan_stages(rows, request.task)
+            )
+        except (TypeError, ValueError) as exc:
+            raise MemorizzServerError("invalid_harness_plan", str(exc)) from exc
+        return {"ok": True, "workflow": value}
+
+    def start_harness_comparison(
+        self,
+        task: str,
+        harnesses: List[str],
+        workspace: Optional[str],
+        identity: RequestIdentity,
+        *,
+        harness_models: Optional[Dict[str, str]] = None,
+        **options: Any,
+    ) -> Dict[str, Any]:
+        """Run one read-only task on several harnesses at once, each on its
+        own model when ``harness_models`` names one."""
+        request = self._harness_request(task, workspace, identity, **options)
+        try:
+            value = self.meta_harness.start_compare(
+                request,
+                list(harnesses or []),
+                models=dict(harness_models or {}) or None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise MemorizzServerError("invalid_harness_comparison", str(exc)) from exc
+        return {"ok": True, "workflow": value}
+
+    def rerun_harness_workflow(
+        self, workflow_id: str, identity: RequestIdentity
+    ) -> Dict[str, Any]:
+        """Run a finished plan or comparison again with the same settings."""
+        self._require_harness_execution(identity)
+        value = self._workflow_for_identity(workflow_id, identity)
+        steps = value.get("steps") or []
+        permissions = (value.get("task") or {}).get("permissions") or {}
+        if any(step.get("workspace_mode") == "direct" for step in steps) or (
+            permissions.get("mcp_access") == "governed_write"
+        ):
+            self._require_scope(identity, WRITE_SCOPE)
+        try:
+            started = self.meta_harness.rerun_orchestration(value["orchestration_id"])
+        except (TypeError, ValueError) as exc:
+            raise MemorizzServerError("invalid_harness_rerun", str(exc)) from exc
+        return {"ok": True, "workflow": started}
+
+    def delete_harness_workflow(
+        self, workflow_id: str, identity: RequestIdentity, *, keep_scratch: bool = False
+    ) -> Dict[str, Any]:
+        """Delete a finished plan or comparison with all its runs."""
+        self._require_harness_execution(identity)
+        self._require_scope(identity, WRITE_SCOPE)
+        value = self._workflow_for_identity(workflow_id, identity)
+        try:
+            return self.meta_harness.delete_orchestration(
+                value["orchestration_id"], remove_scratch=not keep_scratch
+            )
+        except (TypeError, ValueError) as exc:
+            raise MemorizzServerError("harness_workflow_not_deleted", str(exc)) from exc
+
+    def delete_harness_runs(
+        self,
+        run_ids: List[str],
+        identity: RequestIdentity,
+        *,
+        keep_scratch: bool = False,
+    ) -> Dict[str, Any]:
+        """Delete this caller's finished runs (and their delegates' runs);
+        others' runs, runs still working and workflow steps are kept."""
+        self._require_harness_execution(identity)
+        self._require_scope(identity, WRITE_SCOPE)
+        owned: List[str] = []
+        kept: List[Dict[str, Any]] = []
+        for run_id in list(run_ids or [])[: self.config.max_result_items]:
+            try:
+                owned.append(self._harness_run_for_identity(run_id, identity)["run_id"])
+            except MemorizzServerError:
+                kept.append({"run_id": str(run_id), "reason": "not_found"})
+        try:
+            result = self.meta_harness.delete_runs(
+                owned, remove_scratch=not keep_scratch
+            )
+        except TypeError as exc:
+            raise MemorizzServerError("harness_runs_not_deleted", str(exc)) from exc
+        result["kept"] = kept + list(result.get("kept") or [])
+        return result
+
+    def _conversation_for_identity(
+        self, conversation: str, identity: RequestIdentity
+    ) -> tuple:
+        self._require_scope(identity, READ_SCOPE)
+        value = str(conversation or "").strip()
+        if not value.startswith("hxc-"):
+            value = self.meta_harness.conversation_id_for(
+                self._harness_run_for_identity(value, identity)
+            )
+        runs = [
+            run
+            for run in self.meta_harness.conversation(value)
+            if identity.principal is None
+            or (run.get("task") or {}).get("user_id") == identity.principal
+        ]
+        if not runs:
+            raise MemorizzServerError(
+                "harness_conversation_not_found", "Harness conversation was not found"
+            )
+        return value, runs
+
+    def get_harness_conversation(
+        self, conversation: str, identity: RequestIdentity
+    ) -> Dict[str, Any]:
+        """A harness conversation's turns, oldest first."""
+        conversation_id, runs = self._conversation_for_identity(conversation, identity)
+        turns = [
+            {
+                "run_id": run.get("run_id"),
+                "status": run.get("status"),
+                "harness": run.get("harness"),
+                "request": (run.get("task") or {}).get("task"),
+                "answer": (run.get("result") or {}).get("final_response"),
+            }
+            for run in runs
+        ]
+        return {"ok": True, "conversation_id": conversation_id, "turns": turns}
+
+    def continue_harness_conversation(
+        self,
+        conversation: str,
+        message: str,
+        identity: RequestIdentity,
+        **overrides: Any,
+    ) -> Dict[str, Any]:
+        """Start the next turn of a conversation with the latest turn's setup
+        (and any overrides); earlier turns go with it as context."""
+        from ..metaharness import catalog
+
+        conversation_id, runs = self._conversation_for_identity(conversation, identity)
+        setup = catalog.chat_setup(runs[-1])
+        options = {
+            "harness": setup["harness"],
+            "model": setup["model"] or None,
+            "agent_id": setup["agent_id"] or None,
+            "memory_id": setup["memory_id"] or None,
+            "write": setup["write"],
+            "allow_dirty_workspace": setup["allow_dirty_workspace"],
+            "network": setup["network"],
+            "mcp_access": setup["mcp_access"],
+            "allow_subagents": setup["allow_subagents"],
+            "timeout_seconds": setup["timeout_seconds"],
+            "max_steps": setup["max_steps"],
+            "max_cost_usd": setup["max_cost_usd"],
+            "execution_backend": setup["execution_backend"],
+        }
+        options.update(
+            {key: value for key, value in overrides.items() if value is not None}
+        )
+        request = self._harness_request(
+            message, setup["workspace"], identity, **options
+        )
+        return self._started_run(
+            self.meta_harness.continue_conversation(conversation_id, request)
+        )
+
+    def _workflow_for_identity(
+        self, workflow_id: str, identity: RequestIdentity
+    ) -> Dict[str, Any]:
+        self._require_scope(identity, READ_SCOPE)
+        value = self.meta_harness.get_orchestration(str(workflow_id or "").strip())
+        owner = ((value or {}).get("task") or {}).get("user_id")
+        if value is None or (
+            identity.principal is not None and owner != identity.principal
+        ):
+            raise MemorizzServerError(
+                "harness_workflow_not_found", "Harness workflow was not found"
+            )
+        return value
+
+    def list_harness_workflows(
+        self,
+        identity: RequestIdentity,
+        *,
+        status: Optional[str] = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        self._require_scope(identity, READ_SCOPE)
+        rows = self.meta_harness.list_orchestrations(
+            status=status, limit=self._bounded_limit(limit)
+        )
+        if identity.principal is not None:
+            rows = [
+                row
+                for row in rows
+                if (row.get("task") or {}).get("user_id") == identity.principal
+            ]
+        return {"ok": True, "workflows": rows, "count": len(rows)}
+
+    def get_harness_workflow(
+        self, workflow_id: str, identity: RequestIdentity
+    ) -> Dict[str, Any]:
+        value = self._workflow_for_identity(workflow_id, identity)
+        runs = [
+            self.meta_harness.get_run(step["run_id"])
+            for step in value.get("steps") or []
+            if step.get("run_id")
+        ]
+        return {"ok": True, "workflow": value, "runs": [run for run in runs if run]}
+
+    def cancel_harness_workflow(
+        self, workflow_id: str, identity: RequestIdentity
+    ) -> Dict[str, Any]:
+        self._require_harness_execution(identity)
+        self._workflow_for_identity(workflow_id, identity)
+        return self.meta_harness.cancel_orchestration(workflow_id)
 
     def get_harness_run(
         self, run_id: str, identity: RequestIdentity, *, include_events: bool = False

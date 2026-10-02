@@ -49,12 +49,6 @@ class SQLSpanIndex(SpanIndex):
         except Exception:
             return False
 
-    def _require_ready(self):
-        if not self.ready():
-            raise RuntimeError(
-                "Observability index is not initialized; run the explicit migration"
-            )
-
     def _insert(self, cursor, table, values):
         columns = ", ".join(values)
         binds = ", ".join(":" + key for key in values)

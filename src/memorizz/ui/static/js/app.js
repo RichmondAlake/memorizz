@@ -1,5 +1,22 @@
 /* Memorizz UI JavaScript */
 
+// One rule for charges across the console's monitor pages:
+// 2 decimals from $1, 4 under $1, 6 under one cent.
+window.MemorizzFormat = {
+    usd(value) {
+        if (value == null) return "Unknown";
+        if (value === 0) return "$0.00";
+        const size = Math.abs(value);
+        if (size >= 1) {
+            return "$" + value.toLocaleString("en-US", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+            });
+        }
+        return "$" + value.toFixed(size >= 0.01 ? 4 : 6);
+    },
+};
+
 function initializeMemorizzUI() {
     const storageKeys = {
         sidebarCollapsed: "memorizz_ui_sidebar_collapsed",

@@ -170,7 +170,8 @@ def test_hidden_direct_tool_name_is_rejected_even_if_registered():
 
     agent = MemAgent(
         tools=[safe_read, hidden_delete],
-        context_policy=ContextPolicy(tool_top_k=1),
+        # Progressive disclosure, not the small-agent stable tool list.
+        context_policy=ContextPolicy(tool_top_k=1, stable_tool_list_tokens=0),
     )
     _prepare_direct_tool(agent, "read safe public data")
     messages = []
@@ -238,6 +239,58 @@ def test_durable_approval_resumes_exact_checkpoint_once(tmp_path):
     replay = agent.resume_approval(proposal.proposal_id)
     assert replay.error_code == "invalid_approval_state"
     assert executions == ["customer-7"]
+
+
+@pytest.mark.unit
+def test_resumed_answer_is_not_told_to_call_the_stream_finalizer(tmp_path):
+    @governed_tool(side_effects=True, requires_approval=True)
+    def create_item(name: str) -> dict:
+        return {"created": name}
+
+    store = SQLiteApprovalStore(tmp_path / "approvals.sqlite3")
+    agent = MemAgent(tools=[create_item], approval_store=store)
+    agent._current_memory_id = "memory-1"
+    _prepare_direct_tool(agent, "create item", user_id="alice")
+    streamed_turn = [
+        {"role": "user", "content": "create item x"},
+        {
+            "role": "system",
+            "content": "Use tools to collect evidence, then call "
+            "memorizz_finalize_answer alone.",
+        },
+    ]
+    with pytest.raises(ApprovalRequired) as raised:
+        agent._execute_and_record_tool_call(
+            _tool_call("create_item", {"name": "x"}),
+            streamed_turn,
+            workflow=None,
+            user_id="alice",
+            query="create item x",
+        )
+    proposal = raised.value.proposal
+    agent.approve(proposal.proposal_id, approver_id="operator@example.com")
+    sent = []
+
+    class _Model:
+        model = "fake"
+
+        def generate(self, messages, tools=None, **kwargs):
+            sent.append(messages)
+            return "Created x."
+
+        def get_config(self):
+            return {"provider": "openai", "model": "fake"}
+
+        def get_context_window_tokens(self):
+            return 32768
+
+        def get_last_usage(self):
+            return None
+
+    agent.model = _Model()
+    resumed = agent.resume_approval(proposal.proposal_id)
+    assert resumed.assistant_response == "Created x."
+    assert "memorizz_finalize_answer" not in json.dumps(sent)
 
 
 @pytest.mark.unit

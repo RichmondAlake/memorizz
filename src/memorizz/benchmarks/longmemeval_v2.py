@@ -454,9 +454,7 @@ def register_longmemeval_v2_backend():
             self._chunk_count = 0
             self._summary_ids: List[str] = []
             self._compaction_duration_seconds = 0.0
-            self._last_query: Optional[str] = None
             self._last_request_context: Optional[Dict[str, Any]] = None
-            self._last_memory_context: List[Dict[str, str]] = []
             self._last_query_stats: Dict[str, Any] = {}
             self._ingest_started = time.perf_counter()
 
@@ -706,9 +704,7 @@ def register_longmemeval_v2_backend():
             context_items.append(
                 {"type": "text", "value": "MemoRizz memory briefing:\n" + briefing}
             )
-            self._last_query = query
             self._last_request_context = request_context
-            self._last_memory_context = context_items
             self._last_query_stats = {
                 "duration_seconds": time.perf_counter() - started,
                 "retrieval_query_chars": len(retrieval_query),

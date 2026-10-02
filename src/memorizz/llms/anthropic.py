@@ -3,14 +3,14 @@
 # See LICENSE file in the project root for full license information.
 
 import copy
-import inspect
 import json
 import logging
 import os
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
-from .llm_provider import LLMProvider
+from .llm_provider import LLMProvider, ResponseMetadataMixin
+from .tool_metadata import JsonPromptToolMetadataMixin
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ _CACHEABLE_CONTENT_BLOCK_TYPES = frozenset(
 )
 
 
-class Anthropic(LLMProvider):
+class Anthropic(JsonPromptToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
     """LLM provider for Anthropic's Claude models.
 
     Uses the ``anthropic`` Python SDK to call the Messages API.
@@ -180,39 +180,6 @@ class Anthropic(LLMProvider):
     # ------------------------------------------------------------------
     # Tool metadata helpers (delegate to a simple LLM call)
     # ------------------------------------------------------------------
-
-    def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
-        """Generate tool metadata by introspecting the function signature."""
-        sig = inspect.signature(func)
-        docstring = func.__doc__ or ""
-        func_name = func.__name__
-
-        prompt = (
-            f"Generate enriched metadata for the function `{func_name}`.\n\n"
-            f"- Docstring: {docstring}\n"
-            f"- Signature: {sig}\n\n"
-            "Produce a JSON object with keys: name (string, must be '{func_name}'), "
-            "description (string), parameters (object with properties, each having "
-            "type and description), and required (list of required param names).\n"
-            "Return ONLY the JSON."
-        )
-        raw = self.generate_text(prompt, instructions="Return valid JSON only.")
-        return self._safe_json_parse(raw)
-
-    def augment_docstring(self, docstring: str) -> str:
-        return self.generate_text(
-            f"Augment the docstring by adding more details and examples:\n\n{docstring}",
-        )
-
-    def generate_queries(self, docstring: str) -> List[str]:
-        raw = self.generate_text(
-            f"Generate example user queries for a tool with this docstring:\n\n{docstring}\n\n"
-            "Return a JSON array of strings."
-        )
-        parsed = self._safe_json_parse(raw)
-        if isinstance(parsed, list):
-            return parsed
-        return [raw]
 
     # ------------------------------------------------------------------
     # Simple text generation
@@ -490,7 +457,32 @@ class Anthropic(LLMProvider):
             len(messages),
         )
         stable, _ = self._split_system(messages[:leading])
-        trailing, _ = self._split_system(messages[leading:])
+        later = messages[leading:]
+        if self._enable_prompt_caching:
+            # Notes added during the turn (after its user message: host
+            # notes, completion retries) stay where they were added, as text
+            # in the user turn they follow. Merged into the top-level system
+            # they would change it and invalidate the cached conversation on
+            # every call that adds one. Instructions placed before the user
+            # message (reviewed developer skills) keep their system block.
+            last_user = max(
+                (i for i, m in enumerate(later) if m.get("role") == "user"),
+                default=-1,
+            )
+            later_developer = [
+                m
+                for i, m in enumerate(later)
+                if m.get("role") in ("system", "developer") and i < last_user
+            ]
+            api_messages = [
+                m
+                for i, m in enumerate(later)
+                if m.get("role") not in ("system", "developer") or i > last_user
+            ]
+            trailing, _ = self._split_system(later_developer)
+            system_content, _ = self._split_system(messages[:leading] + later_developer)
+        else:
+            trailing, _ = self._split_system(later)
         system_boundary = None
         if (
             self._enable_prompt_caching
@@ -760,11 +752,6 @@ class Anthropic(LLMProvider):
                 )
         return extracted
 
-    def get_last_response_metadata(self) -> Dict[str, Any]:
-        from .response_metadata import last_response_metadata
-
-        return last_response_metadata(self)
-
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage
 
@@ -858,6 +845,34 @@ class Anthropic(LLMProvider):
 
             # A non-tool message closes any open run of tool results.
             flush_results()
+
+            if role in ("system", "developer"):
+                # A host note added mid-conversation: extend the user turn it
+                # follows rather than the system prompt, so the prefix sent
+                # earlier in the turn is unchanged.
+                note = msg.get("content")
+                blocks = (
+                    [
+                        {
+                            "type": "text",
+                            "text": f"<system-reminder>\n{note}\n</system-reminder>",
+                        }
+                    ]
+                    if isinstance(note, str)
+                    else list(note or [])
+                )
+                if not blocks or (isinstance(note, str) and not note.strip()):
+                    continue
+                if converted and converted[-1].get("role") == "user":
+                    previous = converted[-1]
+                    if isinstance(previous.get("content"), str):
+                        previous["content"] = [
+                            {"type": "text", "text": previous["content"]}
+                        ]
+                    previous["content"] = list(previous["content"]) + blocks
+                else:
+                    converted.append({"role": "user", "content": blocks})
+                continue
 
             if role == "assistant" and msg.get("tool_calls"):
                 blocks: List[Dict[str, Any]] = []
@@ -971,16 +986,3 @@ class Anthropic(LLMProvider):
             tool_calls=tool_calls if tool_calls else None,
         )
         return SimpleNamespace(choices=[SimpleNamespace(message=message_ns)])
-
-    @staticmethod
-    def _safe_json_parse(text: str) -> Any:
-        """Try to parse JSON from text, handling markdown code fences."""
-        text = text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [line for line in lines if not line.strip().startswith("```")]
-            text = "\n".join(lines).strip()
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text

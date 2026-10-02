@@ -123,3 +123,37 @@ async def ollama_installed():
         if name:
             models.append(name)
     return JSONResponse({"reachable": True, "host": host, "models": models})
+
+
+@router.get("/context-length")
+async def ollama_context_length(model: str = ""):
+    """A local model's longest context window and the default MemoRizz uses."""
+    import asyncio
+
+    from ...llms.ollama import _auto_context_window, _model_context_length
+
+    name = str(model or "").strip()
+    if not name:
+        return JSONResponse(
+            {"ok": False, "error": "model is required"}, status_code=400
+        )
+    try:
+        import ollama as _ollama
+
+        client = _ollama.Client(host=_ollama_host(), timeout=5)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)})
+    length = await asyncio.to_thread(
+        _model_context_length, client, _ollama_host(), name
+    )
+    default = await asyncio.to_thread(
+        _auto_context_window, client, _ollama_host(), name
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "model": name,
+            "context_length": length,
+            "default_window": default,
+        }
+    )

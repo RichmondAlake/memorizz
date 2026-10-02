@@ -39,6 +39,7 @@ class MemAgentBuilder:
         self._embedding_provider = None
         self._embedding_config = None
         self._semantic_cache_config = None
+        self._tool_cache_config = None
         self._entity_memory_enabled = None
         self._internet_access_provider = None
         self._skills_marketplace_provider = None
@@ -426,11 +427,6 @@ class MemAgentBuilder:
         self._automations_enabled = bool(enabled)
         return self
 
-    def with_auto_registration(self, enabled: bool = True) -> "MemAgentBuilder":
-        """Control fail-soft persistence of agent metadata on the first run."""
-        self._auto_register = bool(enabled)
-        return self
-
     def as_ephemeral(self, enabled: bool = True) -> "MemAgentBuilder":
         """Build a run-scoped agent without persisting its tool/config snapshot.
 
@@ -459,6 +455,27 @@ class MemAgentBuilder:
                 "similarity_threshold": threshold,
                 "scope": scope,
             }
+        return self
+
+    def with_tool_cache(
+        self,
+        enabled: bool = True,
+        *,
+        ttl_seconds: float = 300.0,
+        scope: str = "agent",
+        mcp: str = "annotated",
+    ) -> "MemAgentBuilder":
+        """Reuse results of repeated calls to cacheable tools.
+
+        Python tools opt in with ``@governed_tool(cacheable=True)``; MCP tools
+        are cached when their server marks them read-only and idempotent
+        (``mcp="off"`` to never cache MCP results).
+        """
+        self._tool_cache_config = (
+            {"enabled": True, "ttl_seconds": ttl_seconds, "scope": scope, "mcp": mcp}
+            if enabled
+            else None
+        )
         return self
 
     def with_retrieval_policy(self, policy: Any) -> "MemAgentBuilder":
@@ -548,6 +565,7 @@ class MemAgentBuilder:
                 embedding_config=self._embedding_config,
                 semantic_cache=self.config.semantic_cache,
                 semantic_cache_config=self._semantic_cache_config,
+                tool_cache=self._tool_cache_config,
                 retrieval_policy=self._retrieval_policy,
                 context_window_tokens=getattr(
                     self.config, "context_window_tokens", None
@@ -653,6 +671,9 @@ class MemAgentBuilder:
         new_builder._semantic_cache_config = (
             self._semantic_cache_config.copy() if self._semantic_cache_config else None
         )
+        new_builder._tool_cache_config = (
+            dict(self._tool_cache_config) if self._tool_cache_config else None
+        )
         new_builder._skill_paths = self._skill_paths.copy()
         new_builder._mcp_servers = self._mcp_servers.copy()
         new_builder._sandbox_provider = self._sandbox_provider
@@ -706,55 +727,6 @@ class MemAgentBuilder:
         }
 
         return new_builder
-
-
-# Convenience functions for common patterns
-def create_assistant(
-    name: str = "Assistant", expertise: List[str] = None
-) -> MemAgentBuilder:
-    """Create a builder configured for a general assistant."""
-    return (
-        MemAgentBuilder()
-        .with_name(name)
-        .with_instruction("You are a helpful AI assistant.")
-        .with_persona(name=name, expertise=expertise or [])
-        .with_application_mode("assistant")
-    )
-
-
-def create_chatbot(
-    personality: str = "friendly", memory_enabled: bool = True
-) -> MemAgentBuilder:
-    """Create a builder configured for a chatbot."""
-    instruction = f"You are a {personality} chatbot focused on engaging conversations."
-    builder = (
-        MemAgentBuilder().with_instruction(instruction).with_application_mode("chatbot")
-    )
-
-    if memory_enabled:
-        builder = builder.with_semantic_cache(enabled=True)
-
-    return builder
-
-
-def create_task_agent(
-    task_description: str, tools: List[Any] = None
-) -> MemAgentBuilder:
-    """Create a builder configured for a task-oriented agent."""
-    instruction = (
-        f"You are a task-oriented agent. Your primary task: {task_description}"
-    )
-    builder = (
-        MemAgentBuilder()
-        .with_instruction(instruction)
-        .with_application_mode("agent")
-        .with_max_steps(30)
-    )
-
-    if tools:
-        builder = builder.with_tools(tools)
-
-    return builder
 
 
 def create_deep_research_agent(

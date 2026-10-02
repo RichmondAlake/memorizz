@@ -28,6 +28,109 @@ def _worker_id() -> str:
     return f"{host}:{pid}:{suffix}"
 
 
+def _delivery_outcome(result_payload: Any) -> tuple[str, Optional[str]]:
+    """A run whose every delivery failed counts as failed, so retries kick in."""
+    summary = (
+        result_payload.get("delivery_summary")
+        if isinstance(result_payload, dict)
+        else None
+    )
+    if (
+        isinstance(summary, dict)
+        and int(summary.get("total") or 0) > 0
+        and int(summary.get("sent") or 0) == 0
+        and int(summary.get("failed") or 0) > 0
+    ):
+        return "failed", str(
+            result_payload.get("delivery_error") or "All deliveries failed."
+        )
+    return "succeeded", None
+
+
+def execute_claimed_job(
+    job: Any,
+    run: Any,
+    *,
+    scheduled_for: Any,
+    memory_provider: Any,
+    store: Any,
+) -> None:
+    """Run a claimed job with retries, then reschedule or disable it, unlock it
+    and finish its run record. Used by the worker and the UI's Run now."""
+    attempt = 1
+    last_error: Optional[str] = None
+    result_payload: Any = None
+    status = "failed"
+    max_seconds = max(30, int(job.max_run_seconds or 900))
+    attempts = int(job.retry_max_attempts or 1)
+    try:
+        for attempt in range(1, attempts + 1):
+            # A separate thread bounds each attempt; shutdown(wait=False) keeps
+            # a hung model call from blocking past the timeout.
+            inner = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = inner.submit(
+                    run_job_once,
+                    job,
+                    run_id=run.run_id,
+                    scheduled_for_utc=scheduled_for,
+                    memory_provider=memory_provider,
+                    store=store,
+                )
+                result_payload = future.result(timeout=max_seconds)
+                status, last_error = _delivery_outcome(result_payload)
+                break
+            except Exception as exc:
+                last_error = str(exc) or type(exc).__name__
+                status = "failed"
+                if attempt < attempts:
+                    time.sleep(max(1, int(job.retry_backoff_seconds or 60)))
+            finally:
+                inner.shutdown(wait=False)
+
+        now_utc = utcnow()
+        patch = {"last_run_at": now_utc, "locked_by": None, "lock_expires_at": None}
+        try:
+            if str(job.schedule_type) == "one_shot":
+                patch.update(enabled=False, next_run_at=now_utc)
+            else:
+                patch["next_run_at"] = compute_next_run_at(
+                    schedule_type=job.schedule_type,
+                    cron_expr=job.cron_expr,
+                    interval_seconds=job.interval_seconds,
+                    tz_name=job.timezone,
+                    after_utc=now_utc,
+                )
+        except Exception as exc:
+            # An invalid schedule would otherwise retry in a tight loop.
+            patch.update(enabled=False, next_run_at=now_utc)
+            last_error = last_error or f"Reschedule failed: {exc}"
+            status = "failed"
+        try:
+            store.update_job(job.job_id, patch)
+        except Exception:
+            logger.exception("Failed to reschedule automation %s", job.job_id)
+            try:
+                store.update_job(
+                    job.job_id, {"locked_by": None, "lock_expires_at": None}
+                )
+            except Exception:
+                logger.exception("Failed to unlock automation %s", job.job_id)
+    finally:
+        payload = result_payload if isinstance(result_payload, dict) else {}
+        try:
+            store.finish_run(
+                run.run_id,
+                status=status,
+                error=last_error,
+                result_summary=str(payload.get("response") or "")[:2000] or None,
+                result_payload=payload,
+                attempt=attempt,
+            )
+        except Exception:
+            logger.exception("Failed to finish automation run %s", run.run_id)
+
+
 def run_worker(
     *,
     store: Any,
@@ -43,91 +146,14 @@ def run_worker(
     max_concurrency = max(1, int(max_concurrency or 1))
 
     def _process_job(job):
-        scheduled_for = job.next_run_at
-        run = store.start_run(job, scheduled_for, worker_id)
-        attempt = 1
-        last_error = None
-        result_payload = None
-        status = "failed"
-        max_seconds = max(30, int(job.max_run_seconds or 900))
-
-        try:
-            for attempt in range(1, int(job.retry_max_attempts or 1) + 1):
-                try:
-                    # Run with timeout to prevent hung LLM calls from blocking the thread pool.
-                    with ThreadPoolExecutor(max_workers=1) as inner:
-                        future = inner.submit(
-                            run_job_once,
-                            job,
-                            run_id=run.run_id,
-                            scheduled_for_utc=scheduled_for,
-                            memory_provider=memory_provider,
-                            store=store,
-                        )
-                        result_payload = future.result(timeout=max_seconds)
-                    # Treat "all deliveries failed" as a failed run so retries kick in.
-                    delivery_summary = (
-                        result_payload.get("delivery_summary")
-                        if isinstance(result_payload, dict)
-                        else None
-                    )
-                    if (
-                        isinstance(delivery_summary, dict)
-                        and int(delivery_summary.get("total") or 0) > 0
-                        and int(delivery_summary.get("sent") or 0) == 0
-                        and int(delivery_summary.get("failed") or 0) > 0
-                    ):
-                        status = "failed"
-                        last_error = str(
-                            result_payload.get("delivery_error")
-                            or "All deliveries failed."
-                        )
-                    else:
-                        status = "succeeded"
-                        last_error = None
-                    break
-                except Exception as exc:
-                    last_error = str(exc)
-                    status = "failed"
-                    if attempt < int(job.retry_max_attempts or 1):
-                        time.sleep(max(1, int(job.retry_backoff_seconds or 60)))
-
-            # Reschedule / disable
-            now_utc = utcnow()
-            patch = {
-                "last_run_at": now_utc,
-                "locked_by": None,
-                "lock_expires_at": None,
-            }
-
-            if str(job.schedule_type) == "one_shot":
-                patch["enabled"] = False
-                patch["next_run_at"] = now_utc
-            else:
-                patch["next_run_at"] = compute_next_run_at(
-                    schedule_type=job.schedule_type,
-                    cron_expr=job.cron_expr,
-                    interval_seconds=job.interval_seconds,
-                    tz_name=job.timezone,
-                    after_utc=now_utc,
-                )
-
-            store.update_job(job.job_id, patch)
-
-        finally:
-            try:
-                store.finish_run(
-                    run.run_id,
-                    status=status,
-                    error=last_error,
-                    result_summary=None,
-                    result_payload=result_payload
-                    if isinstance(result_payload, dict)
-                    else {},
-                    attempt=attempt,
-                )
-            except Exception:
-                logger.exception("Failed to finish automation run %s", run.run_id)
+        run = store.start_run(job, job.next_run_at, worker_id)
+        execute_claimed_job(
+            job,
+            run,
+            scheduled_for=job.next_run_at,
+            memory_provider=memory_provider,
+            store=store,
+        )
 
     with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
         inflight = set()

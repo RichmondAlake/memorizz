@@ -64,6 +64,23 @@ application; never let the model construct that client or its credentials.
 Side-effecting tools bypass semantic-cache admission. The model never receives
 an `approved` or `confirm` argument.
 
+## Reuse results of repeated calls
+
+A slow or rate-limited read can opt in to the MemAgent tool cache, so a
+repeated call with the same arguments reuses a fresh result instead of running
+again:
+
+```python
+@governed_tool(cacheable=True, cache_ttl_seconds=600, domains=("orders",))
+def lookup_order(order_id: str) -> dict:
+    """Look up an order's status, carrier and dates."""
+    return orders_api.get(order_id)
+```
+
+Enable the cache on the agent with `tool_cache=True` or `.with_tool_cache()`.
+Only a deterministic tool without side effects or approval can be cacheable.
+See [Tool call cache](context-efficiency.md#tool-call-cache).
+
 ## Durable approval lifecycle
 
 When a governed tool requires approval, `agent.run()` pauses with an exact,

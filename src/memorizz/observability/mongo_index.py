@@ -39,12 +39,6 @@ class MongoSpanIndex(SpanIndex):
         )
         return self.capabilities()
 
-    def _require_ready(self):
-        if not self.ready():
-            raise RuntimeError(
-                "Observability index is not initialized; run the explicit migration"
-            )
-
     def put(self, summary, records):
         self._require_ready()
         existing = self.bundles.find_one({"_id": summary["bundle_key"]})

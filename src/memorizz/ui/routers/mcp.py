@@ -16,15 +16,19 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..._env_io import memorizz_home
-from ...mcp import MCPClientError, MCPClientManager
+from ...mcp import MCPClientError, MCPClientManager, catalog
 from ...mcp.audit import MCPAuditLogger
 from .. import integrations_view as view
 from ..dashboard import relative_time
 from ..helpers import (
+    _agent_field,
+    _approval_payload,
     _build_agent_nav_items,
     _extract_agent_identifier,
     _extract_agent_persona_name,
     _list_agents,
+    _load_agent,
+    _save_agent_fields,
 )
 from ..state import _state, templates
 
@@ -55,30 +59,8 @@ def _remember_tools(
         logger.warning("Could not store the MCP tool list: %s", exc)
 
 
-def _require_provider():
-    provider = _state.get("provider")
-    if not provider:
-        raise HTTPException(status_code=400, detail="Memory provider is not connected")
-    return provider
-
-
-def _load_agent(agent_id: str):
-    provider = _require_provider()
-    try:
-        agent = provider.retrieve_memagent(agent_id)
-    except Exception as exc:
-        logger.error("Failed to retrieve agent %s for MCP: %s", agent_id, exc)
-        raise HTTPException(status_code=500, detail="Failed to load agent") from exc
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    return agent
-
-
 def _agent_servers(agent: Any) -> List[Dict[str, Any]]:
-    if isinstance(agent, dict):
-        value = agent.get("mcp_servers")
-    else:
-        value = getattr(agent, "mcp_servers", None)
+    value = _agent_field(agent, "mcp_servers")
     return list(value) if isinstance(value, list) else []
 
 
@@ -87,21 +69,7 @@ def _manager(agent_id: str, agent: Any) -> MCPClientManager:
 
 
 def _save_servers(agent: Any, servers: List[Dict[str, Any]]) -> None:
-    provider = _require_provider()
-    if isinstance(agent, dict):
-        agent["mcp_servers"] = servers
-    else:
-        agent.mcp_servers = servers
-    try:
-        if hasattr(provider, "update_memagent"):
-            provider.update_memagent(agent)
-        else:
-            provider.store_memagent(agent)
-    except Exception as exc:
-        logger.error("Failed to persist MCP server configuration: %s", exc)
-        raise HTTPException(
-            status_code=500, detail="Failed to persist MCP configuration"
-        ) from exc
+    _save_agent_fields(agent, mcp_servers=servers)
     try:
         from ...cli.mcp_config import save_servers
 
@@ -123,6 +91,14 @@ async def _manager_call(function, *args, **kwargs):
         return await asyncio.to_thread(function, *args, **kwargs)
     except Exception as exc:
         _raise_client_error(exc)
+
+
+def _created_template(key: Optional[str]):
+    if not key:
+        return None
+    from ...memagent.templates import TEMPLATES
+
+    return TEMPLATES.get(key)
 
 
 @router.get("/mcp", response_class=HTMLResponse)
@@ -179,12 +155,74 @@ async def mcp_page(request: Request, agent_id: Optional[str] = None):
             "server_statuses": statuses,
             "monitor": monitor,
             "error_hints": view.ERROR_HINTS,
+            "presets": catalog.presets(),
             "generated_at": now,
             "relative_time": relative_time,
             "oauth_result": request.query_params.get("oauth"),
             "oauth_server": request.query_params.get("server"),
+            "created_template": _created_template(request.query_params.get("created")),
         },
     )
+
+
+@router.get("/api/mcp/catalog")
+async def api_mcp_catalog(q: str = "", cursor: Optional[str] = None, limit: int = 20):
+    """Built-in presets and MCP Registry servers matching ``q``."""
+    matching_presets = catalog.presets(q) if not cursor else []
+    if not q.strip():
+        return {
+            "ok": True,
+            "presets": matching_presets,
+            "servers": [],
+            "next_cursor": None,
+        }
+    result = await asyncio.to_thread(
+        catalog.search_registry, q, limit=limit, cursor=cursor
+    )
+    return {**result, "presets": matching_presets}
+
+
+@router.post("/api/mcp/catalog/auth")
+async def api_mcp_catalog_auth(request: Request):
+    """How a hosted server signs in: ``oauth``, ``bearer`` or ``none``."""
+    payload = await request.json()
+    url = str((payload or {}).get("url") or "").strip()
+    try:
+        auth = await asyncio.to_thread(catalog.detect_remote_auth, url)
+    except Exception as exc:
+        _raise_client_error(exc)
+    return {"ok": True, "auth": auth}
+
+
+def _callback_url(request: Request) -> str:
+    return str(request.url_for("api_mcp_oauth_callback"))
+
+
+@router.post("/api/mcp/agents/{agent_id}/presets/{preset}")
+async def api_mcp_attach_preset(agent_id: str, preset: str, request: Request):
+    """Attach Notion, Google Calendar or Gmail with this app's redirect URI."""
+    agent = _load_agent(agent_id)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    try:
+        config = catalog.preset_config(
+            preset,
+            name=str(payload.get("name") or "").strip() or None,
+            redirect_uri=_callback_url(request),
+            client_id=str(payload.get("client_id") or "").strip() or None,
+            client_secret=str(payload.get("client_secret") or "").strip() or None,
+        )
+        manager = _manager(agent_id, agent)
+        server = manager.upsert_server(config)
+        _save_servers(agent, manager.server_dicts())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_client_error(exc)
+    return {"ok": True, "server": server}
 
 
 @router.get("/api/mcp/agents/{agent_id}/servers")
@@ -267,14 +305,8 @@ async def api_mcp_approvals(
 @router.post("/api/mcp/agents/{agent_id}/approvals/{proposal_id}/approve")
 async def api_mcp_approve(agent_id: str, proposal_id: str, request: Request):
     manager = _manager(agent_id, _load_agent(agent_id))
-    payload = await request.json()
-    approver_id = str((payload or {}).get("approver_id") or "").strip()
-    if not approver_id:
-        raise HTTPException(status_code=400, detail="approver_id is required")
     proposal = manager.approve_tool_call(
-        proposal_id,
-        approver_id=approver_id,
-        reason=(payload or {}).get("reason"),
+        proposal_id, **await _approval_payload(request)
     )
     return {"ok": True, "proposal": proposal}
 
@@ -282,15 +314,7 @@ async def api_mcp_approve(agent_id: str, proposal_id: str, request: Request):
 @router.post("/api/mcp/agents/{agent_id}/approvals/{proposal_id}/reject")
 async def api_mcp_reject(agent_id: str, proposal_id: str, request: Request):
     manager = _manager(agent_id, _load_agent(agent_id))
-    payload = await request.json()
-    approver_id = str((payload or {}).get("approver_id") or "").strip()
-    if not approver_id:
-        raise HTTPException(status_code=400, detail="approver_id is required")
-    proposal = manager.reject_tool_call(
-        proposal_id,
-        approver_id=approver_id,
-        reason=(payload or {}).get("reason"),
-    )
+    proposal = manager.reject_tool_call(proposal_id, **await _approval_payload(request))
     return {"ok": True, "proposal": proposal}
 
 
@@ -339,10 +363,29 @@ async def api_mcp_get_prompt(agent_id: str, server_name: str, request: Request):
     )
 
 
+def _local_path(value: Any) -> Optional[str]:
+    """A same-site path such as ``/agents/x/playground``; never another host."""
+    path = str(value or "").strip()
+    if not path.startswith("/") or path.startswith("//") or "\\" in path:
+        return None
+    if any(character in path for character in ("\r", "\n")) or "://" in path:
+        return None
+    return path
+
+
 @router.post("/api/mcp/agents/{agent_id}/servers/{server_name}/authorize")
-async def api_mcp_authorize(agent_id: str, server_name: str):
+async def api_mcp_authorize(agent_id: str, server_name: str, request: Request):
     manager = _manager(agent_id, _load_agent(agent_id))
-    return await _manager_call(manager.begin_oauth, server_name)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return_to = (
+        _local_path((payload or {}).get("return_to"))
+        if isinstance(payload, dict)
+        else None
+    )
+    return await _manager_call(manager.begin_oauth, server_name, return_to=return_to)
 
 
 @router.delete("/api/mcp/agents/{agent_id}/servers/{server_name}/credentials")
@@ -381,10 +424,12 @@ async def api_mcp_oauth_callback(
         if result.get("pending")
         else "success"
     )
+    status = f"oauth={outcome}&server={quote(str(result['server_name']))}"
+    return_to = _local_path(result.get("return_to"))
+    if return_to:
+        separator = "&" if "?" in return_to else "?"
+        return RedirectResponse(url=f"{return_to}{separator}{status}", status_code=302)
     return RedirectResponse(
-        url=(
-            f"/mcp?agent_id={quote(str(result['owner_id']))}"
-            f"&oauth={outcome}&server={quote(str(result['server_name']))}"
-        ),
+        url=f"/mcp?agent_id={quote(str(result['owner_id']))}&{status}",
         status_code=302,
     )

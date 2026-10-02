@@ -128,6 +128,9 @@ class MemorizzMCPServerConfig:
     allow_agent_execution: Optional[bool] = None
     allow_harness_execution: Optional[bool] = None
     harness_workspace_roots: Optional[Set[str]] = None
+    # Folders memorizz_ingest may read. Unset: a local stdio server reads
+    # inside the user's home folder; a remote server can't ingest at all.
+    ingest_roots: Optional[Set[str]] = None
     api_key_grants: List[StaticAPIKeyGrant] = field(default_factory=list)
     exposed_agent_ids: Optional[Set[str]] = None
     max_result_items: int = 100
@@ -172,6 +175,13 @@ class MemorizzMCPServerConfig:
             self.harness_workspace_roots = {
                 os.path.realpath(os.path.expanduser(str(value).strip()))
                 for value in self.harness_workspace_roots
+                if str(value).strip()
+            }
+
+        if self.ingest_roots is not None:
+            self.ingest_roots = {
+                os.path.realpath(os.path.expanduser(str(value).strip()))
+                for value in self.ingest_roots
                 if str(value).strip()
             }
 
@@ -244,6 +254,7 @@ class MemorizzMCPServerConfig:
             "allow_agent_execution": bool(self.allow_agent_execution),
             "allow_harness_execution": bool(self.allow_harness_execution),
             "harness_workspace_roots": sorted(self.harness_workspace_roots or []),
+            "ingest_roots": sorted(self.ingest_roots or []),
             "agent_creation": {
                 "available": bool(self.transport == "stdio" and self.allow_writes),
                 "transport": "stdio",
@@ -285,6 +296,7 @@ class MemorizzMCPServerConfig:
             "harness_workspace_roots": _env_csv(
                 "MEMORIZZ_MCP_SERVER_HARNESS_WORKSPACE_ROOTS"
             ),
+            "ingest_roots": _env_csv("MEMORIZZ_MCP_SERVER_INGEST_ROOTS"),
             "exposed_agent_ids": _env_csv("MEMORIZZ_MCP_SERVER_AGENT_IDS"),
             "approval_ttl_seconds": int(
                 os.environ.get("MEMORIZZ_MCP_SERVER_APPROVAL_TTL", "900")

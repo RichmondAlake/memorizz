@@ -15,9 +15,13 @@ from pymongo.operations import SearchIndexModel
 
 from ...embeddings import get_embedding
 from ...enums.memory_type import MemoryType
-from ...long_term.semantic.persona.persona import Persona
 from ...memagent import MemAgentModel
-from ..base import MemoryProvider, MemoryProviderCapabilities
+from ..base import (
+    FilteredSkillboxSearchMixin,
+    GlobalEmbeddingFallbackMixin,
+    MemoryProvider,
+    MemoryProviderCapabilities,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +180,9 @@ class MongoDBConfig:
         self.embedding_config = embedding_config or {}
 
 
-class MongoDBProvider(MemoryProvider):
+class MongoDBProvider(
+    GlobalEmbeddingFallbackMixin, FilteredSkillboxSearchMixin, MemoryProvider
+):
     """MongoDB implementation of the MemoryProvider interface."""
 
     def memory_capabilities(self) -> MemoryProviderCapabilities:
@@ -716,50 +722,6 @@ class MongoDBProvider(MemoryProvider):
         else:
             # Assume it's already an EmbeddingManager instance
             return config.embedding_provider
-
-    def _get_embedding_provider(self):
-        """
-        Get the embedding provider to use, with fallback logic.
-
-        Returns:
-        --------
-        EmbeddingManager or function
-            The embedding provider to use
-        """
-        if self._embedding_provider is not None:
-            # Use explicitly provided embedding provider
-            return self._embedding_provider
-        else:
-            # Fall back to global embedding configuration
-            from ...embeddings import get_embedding_manager
-
-            return get_embedding_manager()
-
-    def _get_embedding_dimensions_safe(self) -> int:
-        """
-        Safely get embedding dimensions with error handling.
-
-        Returns:
-        --------
-        int
-            The embedding dimensions, or None if not available
-        """
-        try:
-            if self._embedding_provider is not None:
-                # Use explicit provider
-                return self._embedding_provider.get_dimensions()
-            else:
-                # Use global configuration
-                from ...embeddings import get_embedding_dimensions
-
-                return get_embedding_dimensions()
-        except Exception as e:
-            logger.error(f"Failed to get embedding dimensions: {e}")
-            raise RuntimeError(
-                "Cannot determine embedding dimensions. Please configure embeddings first using:\n"
-                "configure_embeddings('openai', {'model': 'text-embedding-3-small', 'dimensions': 512})\n"
-                "Or use lazy_vector_indexes=True to defer vector index creation."
-            )
 
     def _ensure_vector_index_for_collection(
         self, collection, collection_name: str, memory_store: bool = False
@@ -1483,13 +1445,17 @@ class MongoDBProvider(MemoryProvider):
         if memory_store_type == MemoryType.SEMANTIC_CACHE:
             projection = {"embedding": 0}
 
-        # Retrieve using MongoDB _id only
         try:
+            doc = None
             if ObjectId.is_valid(id):
                 doc = collection.find_one({"_id": ObjectId(id)}, projection)
-                if doc and memory_store_type == MemoryType.CONVERSATION_MEMORY:
-                    self._normalize_legacy_fields(doc)
-                return doc
+            # Tool logs also carry a UUID tool_log_id, and that is the ID the
+            # recent-logs hint shows the model in later turns.
+            if doc is None and memory_store_type == MemoryType.TOOL_LOG:
+                doc = collection.find_one({"tool_log_id": str(id)}, projection)
+            if doc and memory_store_type == MemoryType.CONVERSATION_MEMORY:
+                self._normalize_legacy_fields(doc)
+            return doc
         except Exception:
             pass
 
@@ -1643,27 +1609,6 @@ class MongoDBProvider(MemoryProvider):
         )
         return results if results else None
 
-    def retrieve_skillbox_candidates(
-        self,
-        query: str,
-        *,
-        limit: int,
-        statuses: List[str],
-        agent_id: Optional[str],
-        user_id: Optional[str],
-    ) -> List[Dict[str, Any]]:
-        """Atlas vector search with lifecycle and tenant pre-filters."""
-        return list(
-            self.retrieve_skillbox_item(
-                query,
-                limit,
-                statuses=statuses,
-                agent_id=agent_id,
-                user_id=user_id,
-            )
-            or []
-        )
-
     def retrieve_entity_memory_records(
         self,
         query: Union[Dict[str, Any], str],
@@ -1786,81 +1731,6 @@ class MongoDBProvider(MemoryProvider):
             self.summaries_collection, pipeline, label="summaries"
         )
         return results if results else None
-
-    def get_summaries_by_memory_id(
-        self, memory_id: str, limit: int = 10
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve summaries for a specific memory_id, ordered by timestamp (most recent first).
-
-        Parameters:
-        -----------
-        memory_id : str
-            The memory_id to retrieve summaries for.
-        limit : int
-            The maximum number of summaries to return.
-
-        Returns:
-        --------
-        List[Dict[str, Any]]
-            List of summaries for the memory_id.
-        """
-        return list(
-            self.summaries_collection.find({"memory_id": memory_id}, {"embedding": 0})
-            .sort("period_end", -1)
-            .limit(limit)
-        )
-
-    def get_summaries_by_time_range(
-        self, memory_id: str, start_time: float, end_time: float
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve summaries for a specific memory_id within a time range based on the period they cover.
-
-        NOTE: This filters by the time period that the summary covers (period_start/period_end),
-        not when the summary was created.
-
-        Parameters:
-        -----------
-        memory_id : str
-            The memory_id to retrieve summaries for.
-        start_time : float
-            Start timestamp for the memory period range.
-        end_time : float
-            End timestamp for the memory period range.
-
-        Returns:
-        --------
-        List[Dict[str, Any]]
-            List of summaries whose covered period falls within the time range.
-        """
-        from datetime import datetime
-
-        # Convert to ISO string for compatibility with existing string timestamps
-        start_iso = datetime.fromtimestamp(start_time).isoformat()
-        end_iso = datetime.fromtimestamp(end_time).isoformat()
-
-        # Query supports both float and string timestamps
-        return list(
-            self.summaries_collection.find(
-                {
-                    "memory_id": memory_id,
-                    "$or": [
-                        # Float timestamps (new format)
-                        {
-                            "period_start": {"$gte": start_time, "$type": "number"},
-                            "period_end": {"$lte": end_time, "$type": "number"},
-                        },
-                        # String timestamps (legacy format)
-                        {
-                            "period_start": {"$gte": start_iso, "$type": "string"},
-                            "period_end": {"$lte": end_iso, "$type": "string"},
-                        },
-                    ],
-                },
-                {"embedding": 0},
-            ).sort("period_start", 1)
-        )
 
     def find_similar_conversation_entries(
         self, query: str, limit: int = 5, **kwargs
@@ -2866,59 +2736,8 @@ class MongoDBProvider(MemoryProvider):
 
         return memagent_dict
 
-    def _sync_agent_tools_to_toolbox(
-        self, agent_id: str, tools: Optional[List[Dict[str, Any]]]
-    ) -> None:
-        """Mirror an agent's tool list into the TOOLBOX collection.
-
-        Deletes any existing TOOLBOX rows for this ``agent_id`` before
-        re-inserting the current set so tools removed from the agent
-        don't linger in the playground's toolbox-memory pane.
-        ``tools=None`` is treated as "caller didn't include tools in this
-        save" and is a no-op — only an explicit empty list clears rows.
-        """
-        if not agent_id or tools is None:
-            return
-
-        try:
-            self.toolbox_collection.delete_many({"agent_id": agent_id})
-        except Exception as exc:
-            logger.warning(
-                "Failed to clear toolbox rows for agent %s: %s", agent_id, exc
-            )
-            return
-
-        if not tools:
-            return
-
-        for tool_meta in tools:
-            if not isinstance(tool_meta, dict):
-                continue
-            raw_id = tool_meta.get("_id") or tool_meta.get("name")
-            if not raw_id:
-                continue
-            tool_doc = {
-                "_id": f"{agent_id}:{raw_id}",
-                "tool_id": f"{agent_id}:{raw_id}",
-                "name": tool_meta.get("name"),
-                "description": tool_meta.get("description", ""),
-                "signature": tool_meta.get("signature", ""),
-                "docstring": tool_meta.get(
-                    "docstring", tool_meta.get("description", "")
-                ),
-                "tool_type": tool_meta.get("type", "function"),
-                "parameters": tool_meta.get("parameters", {}),
-                "agent_id": agent_id,
-            }
-            try:
-                self.store(tool_doc, memory_store_type=MemoryType.TOOLBOX)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to sync tool %s for agent %s to TOOLBOX: %s",
-                    tool_doc.get("name"),
-                    agent_id,
-                    exc,
-                )
+    def _clear_agent_toolbox_rows(self, agent_id: str) -> None:
+        self.toolbox_collection.delete_many({"agent_id": agent_id})
 
     def retrieve_memagent(self, agent_id: str) -> "MemAgentModel":
         """
@@ -2944,60 +2763,7 @@ class MongoDBProvider(MemoryProvider):
         if not document:
             return None
 
-        # Create a new MemAgent with data from the document
-        # Use the MongoDB _id as agent_id since we no longer store agent_id field
-        memagent = MemAgentModel(
-            name=document.get("name"),
-            application_id=document.get("application_id"),
-            instruction=document.get("instruction"),
-            application_mode=document.get("application_mode", "assistant"),
-            memory_types=document.get("memory_types"),
-            max_steps=document.get("max_steps"),
-            memory_ids=document.get("memory_ids") or [],
-            agent_id=document.get("agent_id") or str(document.get("_id")),
-            is_favorite=bool(document.get("is_favorite", False)),
-            tools=document.get("tools"),
-            tool_access=document.get("tool_access"),
-            knowledge_base_ids=document.get("knowledge_base_ids"),
-            delegates=document.get("delegates"),
-            llm_config=document.get("llm_config"),
-            embedding_config=document.get("embedding_config"),
-            semantic_cache=bool(document.get("semantic_cache", False)),
-            semantic_cache_config=document.get("semantic_cache_config"),
-            retrieval_policy=document.get("retrieval_policy"),
-            context_window_tokens=document.get("context_window_tokens"),
-            sandbox_provider=document.get("sandbox_provider"),
-            browser_control=document.get("browser_control"),
-            meta_harness=bool(document.get("meta_harness", False)),
-            meta_harness_mode=document.get("meta_harness_mode"),
-            default_harness=document.get("default_harness", "auto"),
-            harness_config=document.get("harness_config"),
-            internet_access_provider=document.get("internet_access_provider"),
-            internet_access_config=document.get("internet_access_config"),
-            skills_marketplace_provider=document.get("skills_marketplace_provider"),
-            skills_marketplace_config=document.get("skills_marketplace_config"),
-            skill_paths=document.get("skill_paths"),
-            mcp_servers=document.get("mcp_servers"),
-            self_aware=bool(document.get("self_aware", False)),
-            continual_learning=bool(document.get("continual_learning", False)),
-            continual_learning_config=document.get("continual_learning_config"),
-            learning_control_plane=bool(document.get("learning_control_plane", False)),
-            learning_control_plane_config=document.get("learning_control_plane_config"),
-            self_aware_config=document.get("self_aware_config"),
-            automations_enabled=bool(document.get("automations_enabled", True)),
-            default_timezone=document.get("default_timezone"),
-            whatsapp_enabled=bool(document.get("whatsapp_enabled", False)),
-            whatsapp_config=document.get("whatsapp_config"),
-            memory_provider=self,
-        )
-
-        # Construct persona if present in the document. Use from_dict so
-        # stored goals/background aren't double-merged with role defaults and
-        # version/evolution_history/storage_id round-trip correctly.
-        if document.get("persona"):
-            memagent.persona = Persona.from_dict(document.get("persona"))
-
-        return memagent
+        return MemAgentModel.from_document(document)
 
     def list_memagents(self) -> List["MemAgentModel"]:
         """
@@ -3008,66 +2774,8 @@ class MongoDBProvider(MemoryProvider):
         List[MemAgentModel]
             The list of memagents.
         """
-
-        documents = list(self.memagent_collection.find({}, {"embedding": 0}))
-        agents = []
-
-        for doc in documents:
-            # Use the MongoDB _id as agent_id since we no longer store agent_id field
-            agent = MemAgentModel(
-                name=doc.get("name"),
-                application_id=doc.get("application_id"),
-                instruction=doc.get("instruction"),
-                application_mode=doc.get("application_mode", "assistant"),
-                memory_types=doc.get("memory_types"),
-                max_steps=doc.get("max_steps"),
-                memory_ids=doc.get("memory_ids") or [],
-                agent_id=doc.get("agent_id") or str(doc.get("_id")),
-                is_favorite=bool(doc.get("is_favorite", False)),
-                tools=doc.get("tools"),  # Include tools from document
-                tool_access=doc.get("tool_access"),
-                knowledge_base_ids=doc.get("knowledge_base_ids"),
-                delegates=doc.get("delegates"),
-                llm_config=doc.get("llm_config"),
-                embedding_config=doc.get("embedding_config"),
-                semantic_cache=bool(doc.get("semantic_cache", False)),
-                semantic_cache_config=doc.get("semantic_cache_config"),
-                retrieval_policy=doc.get("retrieval_policy"),
-                context_window_tokens=doc.get("context_window_tokens"),
-                sandbox_provider=doc.get("sandbox_provider"),
-                browser_control=doc.get("browser_control"),
-                meta_harness=bool(doc.get("meta_harness", False)),
-                meta_harness_mode=doc.get("meta_harness_mode"),
-                default_harness=doc.get("default_harness", "auto"),
-                harness_config=doc.get("harness_config"),
-                internet_access_provider=doc.get("internet_access_provider"),
-                internet_access_config=doc.get("internet_access_config"),
-                skills_marketplace_provider=doc.get("skills_marketplace_provider"),
-                skills_marketplace_config=doc.get("skills_marketplace_config"),
-                skill_paths=doc.get("skill_paths"),
-                mcp_servers=doc.get("mcp_servers"),
-                self_aware=bool(doc.get("self_aware", False)),
-                continual_learning=bool(doc.get("continual_learning", False)),
-                continual_learning_config=doc.get("continual_learning_config"),
-                learning_control_plane=bool(doc.get("learning_control_plane", False)),
-                learning_control_plane_config=doc.get("learning_control_plane_config"),
-                self_aware_config=doc.get("self_aware_config"),
-                automations_enabled=bool(doc.get("automations_enabled", True)),
-                default_timezone=doc.get("default_timezone"),
-                whatsapp_enabled=bool(doc.get("whatsapp_enabled", False)),
-                whatsapp_config=doc.get("whatsapp_config"),
-                memory_provider=self,
-            )
-
-            # Construct persona if present in the document. Use from_dict so
-            # stored goals/background aren't double-merged with role defaults
-            # and version/evolution_history/storage_id round-trip correctly.
-            if doc.get("persona"):
-                agent.persona = Persona.from_dict(doc.get("persona"))
-
-            agents.append(agent)
-
-        return agents
+        documents = self.memagent_collection.find({}, {"embedding": 0})
+        return [MemAgentModel.from_document(doc) for doc in documents]
 
     def supports_entity_memory(self) -> bool:
         """MongoDB provider supports entity memory operations."""

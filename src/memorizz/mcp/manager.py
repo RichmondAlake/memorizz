@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import hashlib
 import json
 import logging
+import os
 import queue
 import random
 import re
@@ -17,9 +20,12 @@ import threading
 import time
 import webbrowser
 from contextlib import asynccontextmanager
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from .._env_io import memorizz_home
 from ..approval import ApprovalStatus, ApprovalStore, default_approval_store
 from .audit import MCPAuditLogger
 from .credentials import (
@@ -33,7 +39,6 @@ from .oauth import PendingOAuthFlow, oauth_flows
 from .security import (
     enforce_tool_policy,
     names_only,
-    redact,
     tool_is_mutating,
     validate_remote_url,
     validate_stdio_command,
@@ -91,6 +96,73 @@ async def _reject_auth_response(response: Any, server_name: str) -> None:
         )
 
 
+@functools.lru_cache(maxsize=1)
+def _scope_pinned_metadata_class():
+    """OAuth client metadata whose configured scopes the SDK cannot widen.
+
+    Given no scope challenge, the MCP SDK requests every scope the server
+    advertises (for Gmail that includes full mailbox access). When a
+    connection lists its scopes, those are what the user signs in to.
+    """
+    from mcp.shared.auth import OAuthClientMetadata
+
+    class ScopePinnedClientMetadata(OAuthClientMetadata):
+        def __setattr__(self, name: str, value: Any) -> None:
+            if name == "scope" and self.__dict__.get("scope"):
+                return
+            super().__setattr__(name, value)
+
+    return ScopePinnedClientMetadata
+
+
+def _same_origin_issuer(issuer: str, expected: str) -> bool:
+    """Whether two issuers differ only by the slash after a bare origin."""
+    if issuer.rstrip("/") != expected.rstrip("/"):
+        return False
+    return urlparse(issuer).path in ("", "/") and urlparse(expected).path in ("", "/")
+
+
+def _tolerate_origin_issuer_slash() -> None:
+    """Accept ``https://host`` and ``https://host/`` as the same issuer.
+
+    The MCP SDK parses protected-resource metadata with pydantic URLs, which
+    can add a slash to a bare origin, then compares the authorization server's
+    ``issuer`` as an exact string. Google's MCP servers (Gmail, Calendar) fail
+    that check. Only this case is relaxed: same scheme, host and port, and no
+    path on either side.
+    """
+    from mcp.client.auth import oauth2
+
+    current = oauth2.validate_metadata_issuer
+    if getattr(current, "_memorizz_origin_slash", False):
+        return
+
+    def validate(oauth_metadata, expected_issuer: str) -> None:
+        if _same_origin_issuer(str(oauth_metadata.issuer), str(expected_issuer)):
+            return
+        current(oauth_metadata, expected_issuer)
+
+    validate._memorizz_origin_slash = True
+    oauth2.validate_metadata_issuer = validate
+
+
+def _sign_in_probe(tools: List[Any]) -> Optional[str]:
+    """A read-only tool that takes no arguments, to trigger OAuth sign-in."""
+    candidates = []
+    for tool in tools:
+        if not isinstance(tool, dict) or not tool.get("name"):
+            continue
+        annotations = tool.get("annotations") or {}
+        schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+        if annotations.get("readOnlyHint") is not True or schema.get("required"):
+            continue
+        name = str(tool["name"])
+        candidates.append((not name.startswith("list_"), len(name), name))
+    return min(candidates)[2] if candidates else None
+
+
+MAX_CACHED_TOOLS = 100
+
 AuthorizationURLHandler = Callable[[str], None]
 AuthorizationCallbackReader = Callable[[], str]
 
@@ -110,6 +182,159 @@ def _model_dict(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_model_dict(item) for item in value]
     return value
+
+
+def _describe_schema_error(error: Any) -> str:
+    """A schema violation phrased so a model can fix the call."""
+    schema = error.schema if isinstance(error.schema, dict) else {}
+    if error.validator == "additionalProperties" and isinstance(error.instance, dict):
+        properties = schema.get("properties") or {}
+        notes = []
+        for key in sorted(set(error.instance) - set(properties)):
+            # A field documented under another property belongs inside it,
+            # e.g. a Notion page "title" goes in "properties".
+            home = next(
+                (
+                    name
+                    for name, sub in properties.items()
+                    if isinstance(sub, dict)
+                    and re.search(
+                        rf"[\"'`]{re.escape(key)}[\"'`]",
+                        str(sub.get("description") or ""),
+                    )
+                ),
+                None,
+            )
+            notes.append(
+                f"'{key}' is not allowed here; put it inside '{home}', "
+                f'like {{"{home}": {{"{key}": ...}}}}'
+                if home
+                else f"'{key}' is not allowed here"
+            )
+        allowed = ", ".join(sorted(properties))
+        return "; ".join(notes) + (f" (allowed: {allowed})" if allowed else "")
+    if error.validator in {"anyOf", "oneOf"} and isinstance(
+        error.validator_value, list
+    ):
+        kinds = []
+        for option in error.validator_value:
+            if not isinstance(option, dict) or "type" not in option:
+                continue
+            kind = option["type"]
+            if kind == "array" and isinstance(option.get("items"), dict):
+                kind = f"array of {option['items'].get('type', 'values')}s"
+            kinds.append(str(kind))
+        if kinds:
+            got = type(error.instance).__name__.replace("dict", "object")
+            message = f"expected {' or '.join(kinds)}, got {got}"
+            # Models used to REST APIs wrap text, e.g. {"text": {"content":
+            # "Title"}}. Quote the text they meant as the value to send.
+            text = _first_text(error.instance) if "string" in kinds else None
+            if text is not None:
+                message += f"; use the plain value {json.dumps(text)}"
+            return message
+    return str(error.message)
+
+
+def _texts(value: Any, depth: int = 0) -> List[str]:
+    """Every non-empty string inside a nested object or list."""
+    if depth > 6:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    items = (
+        value.values()
+        if isinstance(value, dict)
+        else value
+        if isinstance(value, list)
+        else []
+    )
+    return [text for item in items for text in _texts(item, depth + 1)]
+
+
+def _allows_string(schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    kind = schema.get("type")
+    if kind == "string" or (isinstance(kind, list) and "string" in kind):
+        return True
+    return any(
+        _allows_string(option)
+        for key in ("anyOf", "oneOf")
+        for option in schema.get(key) or []
+    )
+
+
+def _documented_home(key: str, properties: Dict[str, Any]) -> Optional[str]:
+    """The object property whose description names ``key`` in quotes."""
+    pattern = rf"[\"'`]{re.escape(key)}[\"'`]"
+    for name, sub in properties.items():
+        if (
+            isinstance(sub, dict)
+            and sub.get("type") == "object"
+            and re.search(pattern, str(sub.get("description") or ""))
+        ):
+            return name
+    return None
+
+
+def _repair_schema_error(root: Any, error: Any, notes: List[str]) -> bool:
+    """Apply one certain repair for ``error`` inside ``root``; True if changed."""
+    path = list(error.absolute_path)
+    where = "".join(
+        f"[{part}]" if isinstance(part, int) else f".{part}" for part in path
+    ).lstrip(".")
+    schema = error.schema if isinstance(error.schema, dict) else {}
+    instance = error.instance
+    if error.validator == "additionalProperties" and isinstance(instance, dict):
+        properties = schema.get("properties") or {}
+        for key in sorted(set(instance) - set(properties)):
+            home = _documented_home(key, properties)
+            if home is None:
+                continue
+            target = instance.setdefault(home, {})
+            if not isinstance(target, dict):
+                continue
+            if key not in target:
+                target[key] = instance.pop(key)
+                notes.append(f"moved {where or 'arguments'}.{key} into {home}")
+                return True
+            if _texts(target[key])[:1] == _texts(instance[key])[:1]:
+                instance.pop(key)
+                notes.append(f"dropped {where or 'arguments'}.{key}, already in {home}")
+                return True
+        return False
+    if (
+        error.validator in {"anyOf", "oneOf", "type"}
+        and isinstance(instance, (dict, list))
+        and _allows_string(schema)
+        and path
+    ):
+        texts = list(dict.fromkeys(_texts(instance)))
+        if len(texts) != 1:
+            return False
+        parent = root
+        for part in path[:-1]:
+            parent = parent[part]
+        parent[path[-1]] = texts[0]
+        notes.append(f"used the text of {where} as its value")
+        return True
+    return False
+
+
+def _first_text(value: Any, depth: int = 0) -> Optional[str]:
+    """The first non-empty string inside a nested object or list."""
+    if depth > 6:
+        return None
+    if isinstance(value, str):
+        return value if value.strip() else None
+    items = value.values() if isinstance(value, dict) else value
+    if isinstance(value, (dict, list)):
+        for item in items:
+            found = _first_text(item, depth + 1)
+            if found is not None:
+                return found
+    return None
 
 
 class MCPClientManager:
@@ -287,20 +512,6 @@ class MCPClientManager:
 
     # -------------------------------------------------------------- credentials
 
-    def set_bearer_token(self, server_name: str, token: str) -> None:
-        server = self.get_server(server_name)
-        token_value = str(token or "").strip()
-        if not token_value:
-            raise MCPConfigurationError("Bearer token cannot be empty", server_name)
-        if not server.auth.credential_ref:
-            raise MCPConfigurationError(
-                "Server has no credential reference", server_name
-            )
-        self.credential_store.update(
-            server.auth.credential_ref, {"bearer_token": token_value}
-        )
-        server.auth.type = "bearer"
-
     def disconnect(self, server_name: str) -> bool:
         server = self.get_server(server_name)
         if not server.auth.credential_ref:
@@ -345,8 +556,6 @@ class MCPClientManager:
     # --------------------------------------------------------------- transports
 
     def _oauth_metadata(self, server: MCPServerConfig):
-        from mcp.shared.auth import OAuthClientMetadata
-
         from .. import __version__
 
         redirect_uri = server.auth.redirect_uri
@@ -362,7 +571,7 @@ class MCPClientManager:
             else "web"
         )
         record = self._credential_record(server)
-        return OAuthClientMetadata(
+        return _scope_pinned_metadata_class()(
             redirect_uris=[redirect_uri],
             token_endpoint_auth_method=server.auth.token_endpoint_auth_method
             or ("client_secret_post" if record.get("oauth_client_secret") else "none"),
@@ -381,6 +590,8 @@ class MCPClientManager:
         callback_handler=None,
     ):
         from mcp.client.auth import OAuthClientProvider
+
+        _tolerate_origin_issuer_slash()
 
         if not server.url or not server.auth.credential_ref:
             raise MCPConfigurationError("OAuth requires a URL and credential reference")
@@ -482,6 +693,9 @@ class MCPClientManager:
                 async def validate_response(response) -> None:
                     await _reject_auth_response(response, server.name)
 
+                # Response hooks run before httpx hands a 401 to the auth
+                # flow, so with OAuth the provider must see it first to start
+                # sign-in or refresh tokens.
                 managed_http_client = httpx2.AsyncClient(
                     headers=headers,
                     auth=auth,
@@ -490,7 +704,7 @@ class MCPClientManager:
                     trust_env=False,
                     event_hooks={
                         "request": [validate_request],
-                        "response": [validate_response],
+                        "response": [] if auth is not None else [validate_response],
                     },
                 )
                 await managed_http_client.__aenter__()
@@ -516,7 +730,9 @@ class MCPClientManager:
                         trust_env=False,
                         event_hooks={
                             "request": [validate_request],
-                            "response": [validate_response],
+                            "response": (
+                                [] if auth is not None else [validate_response]
+                            ),
                         },
                     )
 
@@ -611,6 +827,18 @@ class MCPClientManager:
         message = _exception_message(exc)
         message = _SECRET_IN_ERROR_RE.sub(r"\1\2***", message)
         lowered = message.lower()
+        if "registration failed" in lowered and not server.auth.client_id:
+            return MCPClientError(
+                message=(
+                    f"MCP server '{server.name}' signs in through a provider that "
+                    "does not register clients automatically. Create an OAuth "
+                    f"client there with the redirect URI {server.auth.redirect_uri}, "
+                    "then edit this connection and add its client ID and secret."
+                ),
+                code="oauth_client_required",
+                retryable=False,
+                server_name=server.name,
+            )
         if any(
             marker in lowered
             for marker in (
@@ -717,6 +945,7 @@ class MCPClientManager:
                 for item in (result.get("tools") or [])
                 if isinstance(item, dict) and item.get("name")
             }
+            self._remember_tool_listing(server, result.get("tools") or [])
             self._record_metric(server.name, "tools/list", True)
             return result
         except BaseException as exc:
@@ -798,7 +1027,7 @@ class MCPClientManager:
     def tool_requires_approval(self, server_name: str, tool_name: str) -> bool:
         """Return the host/MCP-annotation-aware mutation decision."""
         server = self.get_server(server_name)
-        metadata = self._tool_metadata.get(server.name, {}).get(str(tool_name))
+        metadata = self._known_tool(server.name, str(tool_name))
         return bool(server.require_approval) and tool_is_mutating(
             tool_name,
             metadata,
@@ -866,6 +1095,20 @@ class MCPClientManager:
                 raise MCPConfigurationError("MCP tool name cannot be empty")
             if not isinstance(values, dict):
                 raise MCPConfigurationError("MCP tool arguments must be an object")
+            values, _ = self.repair_arguments(server.name, tool_name, values)
+            problems = self._argument_problems(server.name, tool_name, values)
+            if problems:
+                # Caught here, the call never reaches the server or becomes an
+                # approval request, and the model gets the exact fix.
+                return {
+                    "ok": False,
+                    "error_code": "invalid_arguments",
+                    "error": (
+                        f"The arguments do not match {tool_name}'s input schema: "
+                        + "; ".join(problems)
+                        + ". Fix them and call the tool again."
+                    ),
+                }
             mutation_requires_approval = self.tool_requires_approval(
                 server.name, tool_name
             )
@@ -902,6 +1145,82 @@ class MCPClientManager:
             safe = self._safe_error(exc, server)
             self._record_metric(server.name, "tools/call", False)
             return safe.to_dict()
+
+    def _known_tool(self, server_name: str, tool_name: str) -> Optional[Dict[str, Any]]:
+        """This process's listing of a tool, else the cached one."""
+        listed = self._tool_metadata.get(server_name, {}).get(tool_name)
+        if listed:
+            return listed
+        try:
+            cached = self.cached_tools(server_name)
+        except Exception:
+            return None
+        return next((item for item in cached if item.get("name") == tool_name), None)
+
+    def _input_validator(self, server_name: str, tool_name: str) -> Any:
+        """A validator for the tool's advertised input schema, if usable."""
+        tool = self._known_tool(server_name, tool_name)
+        schema = (tool or {}).get("inputSchema") or (tool or {}).get("input_schema")
+        if not isinstance(schema, dict) or not schema:
+            return None
+        try:
+            import jsonschema
+
+            validator_class = jsonschema.validators.validator_for(
+                schema, default=jsonschema.Draft202012Validator
+            )
+            validator_class.check_schema(schema)
+            return validator_class(schema)
+        except Exception as exc:  # an unusable schema is the server's to judge
+            logger.debug("Skipping argument check for %s: %s", tool_name, exc)
+            return None
+
+    def repair_arguments(
+        self, server_name: str, tool_name: str, values: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """Fit the model's own values to the schema where the fix is certain.
+
+        Two repairs, both guided by the schema and never inventing content: a
+        field the schema documents under a sibling object moves into it (a
+        Notion page "title" into "properties"), and an object holding a single
+        piece of text becomes that text where only a plain value is allowed.
+        Returns the arguments and a note per change.
+        """
+        validator = self._input_validator(server_name, tool_name)
+        if validator is None or not isinstance(values, dict):
+            return values, []
+        fixed = json.loads(json.dumps(values, default=str))
+        notes: List[str] = []
+        for _ in range(8):
+            errors = sorted(
+                validator.iter_errors(fixed),
+                key=lambda error: len(error.absolute_path),
+                reverse=True,
+            )
+            if not any(_repair_schema_error(fixed, error, notes) for error in errors):
+                break
+        return (fixed, notes) if notes else (values, [])
+
+    def _argument_problems(
+        self, server_name: str, tool_name: str, values: Dict[str, Any]
+    ) -> List[str]:
+        """Where ``values`` break the tool's advertised input schema, if known."""
+        validator = self._input_validator(server_name, tool_name)
+        if validator is None:
+            return []
+        try:
+            errors = list(validator.iter_errors(values))
+        except Exception as exc:
+            logger.debug("Skipping argument check for %s: %s", tool_name, exc)
+            return []
+        problems = []
+        for error in sorted(errors, key=lambda e: list(e.absolute_path))[:5]:
+            where = "".join(
+                f"[{part}]" if isinstance(part, int) else f".{part}"
+                for part in error.absolute_path
+            ).lstrip(".")
+            problems.append(f"{where or 'arguments'}: {_describe_schema_error(error)}")
+        return problems
 
     def approve_tool_call(
         self, proposal_id: str, *, approver_id: str, reason: Optional[str] = None
@@ -1104,6 +1423,79 @@ class MCPClientManager:
         except BaseException as exc:
             return self._safe_error(exc, server).to_dict()
 
+    # ------------------------------------------------------------ tool catalog
+
+    def _tool_catalog_path(self) -> Path:
+        owner = _safe_ref_part(self.owner_id or "default") or "default"
+        return memorizz_home() / "mcp_tools" / f"{owner}.json"
+
+    @staticmethod
+    def _server_fingerprint(server: MCPServerConfig) -> str:
+        """Identifies where a server's tools came from, not its credentials."""
+        raw = json.dumps(
+            [server.transport, server.url, server.command, list(server.args)],
+            sort_keys=True,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _read_tool_catalog(self) -> Dict[str, Any]:
+        try:
+            data = json.loads(self._tool_catalog_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _remember_tool_listing(self, server: MCPServerConfig, tools: List[Any]) -> None:
+        """Keep the last tool list so agents can expose tools without a call."""
+        rows = []
+        for tool in tools[:MAX_CACHED_TOOLS]:
+            if not isinstance(tool, dict) or not tool.get("name"):
+                continue
+            rows.append(
+                {
+                    "name": str(tool["name"]),
+                    "description": str(tool.get("description") or "")[:1000],
+                    "inputSchema": tool.get("inputSchema")
+                    or tool.get("input_schema")
+                    or {},
+                    "annotations": tool.get("annotations") or {},
+                }
+            )
+        path = self._tool_catalog_path()
+        try:
+            catalog = self._read_tool_catalog()
+            catalog[server.name] = {
+                "fingerprint": self._server_fingerprint(server),
+                "listed_at": datetime.now(timezone.utc).isoformat(),
+                "tools": rows,
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(catalog), encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError as exc:
+            logger.debug("Could not cache MCP tools for %s: %s", server.name, exc)
+
+    def cached_tools(self, server_name: str) -> List[Dict[str, Any]]:
+        """Tools from the last successful listing of this server, if unchanged.
+
+        Blocked tools and tools outside an allowlist are left out.
+        """
+        server = self.get_server(server_name)
+        entry = self._read_tool_catalog().get(server.name)
+        if not isinstance(entry, dict):
+            return []
+        if entry.get("fingerprint") != self._server_fingerprint(server):
+            return []
+        return [
+            dict(tool)
+            for tool in entry.get("tools") or []
+            if isinstance(tool, dict)
+            and tool.get("name")
+            and (not server.allowed_tools or tool["name"] in server.allowed_tools)
+            and tool["name"] not in server.blocked_tools
+        ]
+
     def test_connection(self, server_name: str) -> Dict[str, Any]:
         result = self.list_tools(server_name)
         if result.get("ok"):
@@ -1114,7 +1506,10 @@ class MCPClientManager:
     # ------------------------------------------------------------------- OAuth
 
     def begin_oauth(
-        self, server_name: str, wait_seconds: float = 20.0
+        self,
+        server_name: str,
+        wait_seconds: float = 20.0,
+        return_to: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Begin browser OAuth for the UI and return the authorization URL."""
         server = self.get_server(server_name)
@@ -1123,7 +1518,9 @@ class MCPClientManager:
                 f"MCP server '{server.name}' is not configured for OAuth",
                 server.name,
             )
-        flow = PendingOAuthFlow(owner_id=self.owner_id, server_name=server.name)
+        flow = PendingOAuthFlow(
+            owner_id=self.owner_id, server_name=server.name, return_to=return_to
+        )
 
         async def redirect_handler(url: str) -> None:
             flow.authorization_url = url
@@ -1162,6 +1559,24 @@ class MCPClientManager:
                         callback_handler=callback_handler,
                     )
                 )
+                # Some servers (Google's) list tools anonymously and ask for
+                # sign-in only on a call; a read-only call starts it.
+                probe = (
+                    None
+                    if flow.authorization_url
+                    or self._credential_record(server).get("oauth_tokens")
+                    else _sign_in_probe(flow.result.get("tools") or [])
+                )
+                if probe:
+                    asyncio.run(
+                        self._with_retry(
+                            server,
+                            lambda client: client.call_tool(probe, {}),
+                            allow_retry=False,
+                            redirect_handler=redirect_handler,
+                            callback_handler=callback_handler,
+                        )
+                    )
                 if not flow.authorization_url:
                     flow.url_ready.set()
             except BaseException as exc:
@@ -1181,16 +1596,34 @@ class MCPClientManager:
                 server_name=server.name,
             )
         if flow.error and not flow.authorization_url:
+            code = (
+                (flow.result or {}).get("error_code")
+                if isinstance(flow.result, dict)
+                else None
+            )
+            if code and code != "authorization_required":
+                raise MCPClientError(
+                    message=flow.error,
+                    code=code,
+                    retryable=False,
+                    server_name=server.name,
+                )
             raise MCPAuthorizationRequired(flow.error, server.name)
         if (
             not flow.authorization_url
             and isinstance(flow.result, dict)
             and flow.result.get("ok")
         ):
+            signed_in = bool(self._credential_record(server).get("oauth_tokens"))
             return {
                 "ok": True,
                 "server_name": server.name,
-                "already_authenticated": True,
+                "already_authenticated": signed_in,
+                "message": (
+                    None
+                    if signed_in
+                    else "The server answered without asking for sign-in."
+                ),
             }
         return {
             "ok": True,
@@ -1221,6 +1654,7 @@ class MCPClientManager:
             "ok": not bool(error) and (exchange_ok if completed else True),
             "owner_id": flow.owner_id,
             "server_name": flow.server_name,
+            "return_to": flow.return_to,
             "completed": completed,
             "pending": not completed,
             **(
@@ -1285,17 +1719,30 @@ class MCPClientManager:
             return AuthorizationCodeResult(code=code, state=state, iss=issuer)
 
         try:
-            return self._run_async(
+            result = self._run_async(
                 self._list_tools_async(
                     server,
                     redirect_handler=redirect_handler,
                     callback_handler=callback_handler,
                 )
             )
+            probe = (
+                None
+                if self._credential_record(server).get("oauth_tokens")
+                else _sign_in_probe(result.get("tools") or [])
+            )
+            if probe:
+                self._run_async(
+                    self._with_retry(
+                        server,
+                        lambda client: client.call_tool(probe, {}),
+                        allow_retry=False,
+                        redirect_handler=redirect_handler,
+                        callback_handler=callback_handler,
+                    )
+                )
+            return result
         except BaseException as exc:
             return self._safe_error(exc, server).to_dict()
 
     # --------------------------------------------------------------- safe export
-
-    def export_public_configuration(self) -> Dict[str, Any]:
-        return {"servers": redact(self.server_dicts())}

@@ -8,6 +8,8 @@ retains its complete-string return contract.
 
 The Memorizz local UI gives you a browser-based workflow for connecting to your memory provider, creating/editing agents, running conversations, and inspecting memory state without writing extra code.
 
+![The agent dashboard: runs, success rate, run time, model calls, tokens and spend across every agent, and what needs attention.](../assets/screenshots/dashboard-dark.png)
+
 ## What You Can Do
 
 - Connect to Oracle, MongoDB, or filesystem providers.
@@ -135,6 +137,10 @@ files; keep them out of version control and review warnings about project
    review** enabled. Developer authority cannot be saved without review.
    Enable **Memory-first learning control plane** to use bounded EvidencePack
    retrieval and the operator page.
+   Enable **Tool call cache** to reuse the results of repeated calls to tools
+   marked cacheable, and to MCP tools their server marks read-only and
+   idempotent, for five minutes
+   ([Tool call cache](../guides/context-efficiency.md#tool-call-cache)).
    Select **Browser Use** under Browser Control only after installing the
    isolated `browser-use` CLI and configuring its matching LLM key.
 3. Open that agent in `Playground`.
@@ -149,13 +155,21 @@ files; keep them out of version control and review warnings about project
 
 ## Agent Harnesses in the UI
 
+![The harness dashboard: launch a task, see which harnesses are ready, and follow plans and comparisons.](../assets/screenshots/harnesses-dark.png)
+
 The `/harnesses` page is an operator surface, not a vendor terminal emulator.
 It shows adapter capability probes, bounded launch controls, durable runs and
 events, token/cost data when the adapter reports it, workspace changes, host
 verification, and pending exact-envelope proposals. `MEMORIZZ_UI_READ_ONLY=true`
 blocks launches, cancellation, approval, rejection, and resume endpoints.
-Select a saved agent when choosing the `memagent` adapter; native execution is
-explicit-only and never wins automatic routing.
+The `memagent` adapter runs a saved agent: pick one, or MemoRizz uses the one
+you last ran a harness with (native execution never wins automatic routing).
+Running items spin and update in place; select a run to see its trajectory, and
+**Continue** keeps talking to the same harness with the run's setup. Filter the
+runs by task, harness, MemAgent name or ID, and tick two to four runs for
+**Compare selected**: their facts, timelines and steps side by side, including
+two MemAgents (for example the same agent with and without a tool cache). See
+[Local UI in the meta-harness guide](../guides/meta-harness.md#local-ui).
 
 Agent create/edit forms can persist `runtime` mode, where an external harness
 owns the full turn, or `delegate` mode, where MemAgent receives governed
@@ -184,6 +198,38 @@ that single-use proposal; **Reject** prevents execution. A model-visible
 `approved` or `confirm` field does not exist.
 
 See the [Browser Control guide](../browser-control/index.md).
+
+## Playground conversations
+
+- **Stop a reply:** while a reply streams, the send button turns into a red
+  stop button; click it or press Esc. The partial answer is kept.
+- **Rename or delete:** hover a conversation in the left pane. The pencil
+  renames it in place (Enter saves, Esc cancels; an empty name goes back to
+  the first question). The bin asks for confirmation, then deletes the
+  conversation's messages, summaries and tool logs for this agent. Run
+  traces stay on the Traces page.
+- **Settings:** the Save button stays at the bottom of the Settings tab and
+  shows "Unsaved changes" once you edit a field.
+
+## Enabling what an agent can't do yet
+
+When a question needs something the agent lacks, such as web search, email,
+calendar, notes, running code or a browser, the playground shows a card under
+the reply instead of letting the model improvise. The card is built from the
+agent's live configuration each time it appears, so it only offers what is
+actually missing:
+
+- **Web search:** use Tavily or Firecrawl in one click when its key is already
+  set, or paste a key (saved like the Settings page, in `~/.memorizz/.env`);
+  or find a search server in the MCP Registry.
+- **Email, calendar, notes:** connect Gmail, Google Calendar or Notion; if a
+  connection exists but is not signed in, sign in from the card and return to
+  the playground.
+- **Run code, browser:** a link to the agent's settings.
+
+Once something is enabled the card offers **Ask again**. The agent also lists
+what it cannot do in its instructions and calls `request_capability` rather
+than claiming it can or can't.
 
 ## MCP in the UI
 

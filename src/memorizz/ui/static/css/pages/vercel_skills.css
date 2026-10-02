@@ -1,4 +1,4 @@
-/* Vercel skills: search strip, results grid and the skill pane.
+/* Agent skills: search strip, results grid and the skill pane.
    Loaded before console.css; refinements of shared rules are scoped. */
 
 /* The sticky detail pane needs a page that is not a scroll container. */
@@ -7,14 +7,6 @@
     overflow-y: visible;
 }
 
-
-.skills-token-alert p {
-    line-height: 1.55;
-}
-
-.skills-token-alert p + p {
-    margin-top: 8px;
-}
 
 /* ---------- Search strip ---------- */
 
@@ -140,18 +132,6 @@
     text-overflow: ellipsis;
 }
 
-.skills .fleet-table td.skills-col-path {
-    max-width: 220px;
-    overflow: hidden;
-    color: var(--text-muted);
-    font-size: 11.5px;
-    text-overflow: ellipsis;
-}
-
-@container (max-width: 860px) {
-    .skills-col-path { display: none; }
-}
-
 @container (max-width: 560px) {
     .skills-col-desc { display: none; }
     .skills .fleet-table td.skills-col-repo { max-width: 150px; }
@@ -181,7 +161,6 @@
 
 .skills-intro p,
 .skills-desc,
-.skills-access,
 .skill-meta-desc {
     margin: 0;
     color: var(--text-secondary);
@@ -189,12 +168,56 @@
     line-height: 1.55;
 }
 
-.skills-access {
-    padding: 8px 10px;
+.skills-attach {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 10px;
+    padding: 10px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
+}
+
+.skills-attach[hidden] {
+    display: none;
+}
+
+.skills-attach-label {
+    display: flex;
+    flex: 1 1 220px;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    color: var(--text-secondary);
     font-size: 12px;
+}
+
+.skills-attach-label select {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 32px;
+    padding: 6px 10px;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    font: inherit;
+    font-size: 13px;
+}
+
+.skills-attach-label {
+    white-space: nowrap;
+}
+
+.skills .fleet-config dd {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.skills-attach .form-hint {
+    flex-basis: 100%;
+    margin: 0;
 }
 
 .skills-agents {

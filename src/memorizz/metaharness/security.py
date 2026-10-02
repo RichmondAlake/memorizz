@@ -15,7 +15,7 @@ _SENSITIVE_KEYS = re.compile(
 )
 _TOKEN_TELEMETRY_KEYS = re.compile(
     r"^(?:[a-z0-9]+_)*(?:input|output|total|prompt|completion|reasoning|"
-    r"cached|candidate|context|memory|evidence)_tokens(?:_details)?"
+    r"cached|candidate|context|memory|evidence|thinking|write)_tokens(?:_details)?"
     r"(?:_(?:mean|median|min|max|sum|stdev|sample_stdev|p(?:50|90|95|99)|"
     r"mean_delta|paired_deltas))?$|"
     r"^(?:tokens_(?:used|saved|avoided)|token_estimates?|token_count)$|"
@@ -56,9 +56,19 @@ class HarnessSecurityError(ValueError):
 
 def _is_safe_token_telemetry(key: str, value: Any) -> bool:
     """Distinguish safe token telemetry from similarly named credentials."""
-    normalized_key = key.replace("-", "_").lower()
+    # camelCase counters (pi's ``totalTokens``) match their snake_case form.
+    normalized_key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    normalized_key = normalized_key.replace("-", "_").lower()
     if normalized_key == "token_reporting":
         return isinstance(value, bool) or value is None
+    if normalized_key in {"tokens", "token_usage"}:
+        # A block of counters (Hermes reports ``tokens: {input, output, ...}``).
+        return isinstance(value, Mapping) and all(
+            isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            or item is None
+            for item in value.values()
+        )
     if not _TOKEN_TELEMETRY_KEYS.fullmatch(normalized_key):
         return False
     if isinstance(value, bool):
@@ -136,13 +146,28 @@ def build_child_environment(
 
 
 def resolve_workspace(workspace: str, allowed_roots: Iterable[str] = ()) -> Path:
-    path = Path(workspace).expanduser().resolve(strict=True)
-    if not path.is_dir():
-        raise HarnessSecurityError("Harness workspace must be an existing directory")
     roots = [Path(root).expanduser().resolve(strict=True) for root in allowed_roots]
+    allowed = (
+        " Allowed workspace roots: " + ", ".join(str(root) for root in roots) + "."
+        if roots
+        else ""
+    )
+    try:
+        path = Path(workspace).expanduser().resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError):
+        raise HarnessSecurityError(
+            f"Workspace {workspace} does not exist on this machine. Use the "
+            f"absolute path of an existing folder.{allowed}"
+        ) from None
+    if not path.is_dir():
+        raise HarnessSecurityError(
+            f"Workspace {path} is not a folder. Use the absolute path of an "
+            f"existing folder.{allowed}"
+        )
     if roots and not any(path == root or root in path.parents for root in roots):
         raise HarnessSecurityError(
-            f"Workspace {path} is outside the configured allowed roots"
+            f"Workspace {path} is outside the configured allowed roots.{allowed} "
+            "Add it to allowed_workspace_roots in harnesses.json to use it."
         )
     return path
 

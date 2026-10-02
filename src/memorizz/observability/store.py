@@ -12,6 +12,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
+from .._json import read_json_object
 from ..enums.memory_type import MemoryType
 
 _RECOMMENDATION = "observability_recommendation"
@@ -41,25 +42,6 @@ def _record_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}-{digest}"
 
 
-def _read_content(value: Any) -> Any:
-    if hasattr(value, "read"):
-        try:
-            value = value.read()
-        except Exception:
-            return None
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="replace")
-    if isinstance(value, dict):
-        return dict(value)
-    if not isinstance(value, str):
-        return None
-    try:
-        result = json.loads(value)
-    except (TypeError, ValueError):
-        return None
-    return result if isinstance(result, dict) else None
-
-
 class ObservabilityStore:
     """Provider-neutral control plane layered on private shared memory.
 
@@ -75,7 +57,7 @@ class ObservabilityStore:
 
     @staticmethod
     def _payload(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        payload = _read_content(row.get("content"))
+        payload = read_json_object(row.get("content"))
         if not payload:
             return None
         payload.setdefault(

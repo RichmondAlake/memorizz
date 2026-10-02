@@ -13,7 +13,8 @@ unchanged.
 
 import logging
 import uuid
-from typing import List, Optional
+from contextvars import ContextVar
+from typing import Any, FrozenSet, List, Optional
 
 from ..enums import ApplicationMode, MemoryType
 from ..task_decomposition import normalize_delegation_config
@@ -91,7 +92,12 @@ def save_agent(agent):
         # Get semantic cache config for saving
         semantic_cache_config_to_save = _serialize_semantic_cache_config(agent)
         llm_config_to_save = None
-        if agent.model and hasattr(agent.model, "get_config"):
+        # A run on a borrowed model (a harness run's model pick) keeps the
+        # agent's own model in the saved record.
+        pinned = getattr(agent, "_pinned_llm_config", None)
+        if isinstance(pinned, dict):
+            llm_config_to_save = dict(pinned)
+        elif agent.model and hasattr(agent.model, "get_config"):
             candidate_llm_config = agent.model.get_config()
             if isinstance(candidate_llm_config, dict):
                 llm_config_to_save = candidate_llm_config
@@ -128,6 +134,9 @@ def save_agent(agent):
             ),
             semantic_cache_config=semantic_cache_config_to_save,
             tool_result_policy=agent.tool_result_policy.to_dict(),
+            tool_cache_config=(
+                agent.tool_cache_config.to_dict() if agent.tool_cache_config else None
+            ),
             context_policy=agent.context_policy.to_dict(),
             completion_policy=agent.completion_policy.to_dict(),
             retrieval_policy=agent.retrieval_policy.to_dict(),
@@ -142,7 +151,11 @@ def save_agent(agent):
                 and hasattr(agent.semantic_layer, "to_dict")
                 else None
             ),
-            context_window_tokens=agent._context_window_tokens,
+            context_window_tokens=getattr(agent, "_context_window_cap", None),
+            context_window_source=(
+                "explicit" if getattr(agent, "_context_window_cap", None) else None
+            ),
+            thread_titles=dict(getattr(agent, "thread_titles", None) or {}) or None,
             is_favorite=agent.is_favorite,
             internet_access_provider=agent.get_internet_access_provider_name(),
             internet_access_config=(
@@ -276,6 +289,10 @@ def _serialize_tools_for_save(agent):
     # them visible on every thread for this agent.
     serializable_tools = []
     for tool_meta in tools_metadata:
+        # MCP tools are rebuilt from the server's cached listing on load; a
+        # saved copy would outlive the server as a tool with nothing to call.
+        if isinstance(tool_meta, dict) and tool_meta.get("source") == "mcp":
+            continue
         if isinstance(tool_meta, dict):
             serializable_tool = {
                 "_id": tool_meta.get("_id") or tool_meta.get("name"),
@@ -393,6 +410,42 @@ def _serialize_semantic_cache_config(agent):
     return None
 
 
+def _saved_context_cap(saved_memagent: Any, llm_config: Any) -> Optional[int]:
+    """The agent-level context cap to restore on load.
+
+    Older releases saved the effective budget, including a model default,
+    as if it were a cap, so it outlived later changes to the model's window.
+    Such unmarked values give way to a window the LLM configuration sets.
+    """
+    cap = getattr(saved_memagent, "context_window_tokens", None)
+    if getattr(saved_memagent, "context_window_source", None) == "explicit":
+        return cap
+    return None if _config_context_window(llm_config) else cap
+
+
+def _config_context_window(llm_config: Any) -> Optional[int]:
+    """The context window an LLM configuration sets itself, if any."""
+    if not isinstance(llm_config, dict):
+        return None
+    extra = llm_config.get("additional_config")
+    for value in (
+        llm_config.get("context_window_tokens"),
+        llm_config.get("max_context_tokens"),
+        llm_config.get("context_window"),
+        extra.get("num_ctx") if isinstance(extra, dict) else None,
+    ):
+        if type(value) is int and value > 0:
+            return value
+    return None
+
+
+# The agents being loaded along the current delegate chain. A saved delegate
+# loop (A delegates to B, B back to A) would otherwise recurse forever.
+_LOADING_CHAIN: ContextVar[FrozenSet[str]] = ContextVar(
+    "memorizz_loading_delegate_chain", default=frozenset()
+)
+
+
 def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     """Load a MemAgent from the memory provider (see MemAgent.load)."""
     # ``create_llm_provider`` is resolved through the core module at call
@@ -459,16 +512,29 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     loaded_delegates = None
     if hasattr(saved_memagent, "delegates") and saved_memagent.delegates:
         loaded_delegates = []
-        for delegate_id in saved_memagent.delegates:
-            try:
-                delegate_agent = cls.load(
-                    delegate_id,
-                    memory_provider,
-                    runtime_memory_provider=runtime_memory_provider,
-                )
-                loaded_delegates.append(delegate_agent)
-            except Exception as e:
-                logger.warning(f"Could not load delegate agent {delegate_id}: {e}")
+        chain = _LOADING_CHAIN.get() | {str(agent_id)}
+        token = _LOADING_CHAIN.set(chain)
+        try:
+            for delegate_id in saved_memagent.delegates:
+                if str(delegate_id) in chain:
+                    logger.warning(
+                        "Skipped delegate %s of agent %s: it would load an agent "
+                        "already in this delegate chain",
+                        delegate_id,
+                        agent_id,
+                    )
+                    continue
+                try:
+                    delegate_agent = cls.load(
+                        delegate_id,
+                        memory_provider,
+                        runtime_memory_provider=runtime_memory_provider,
+                    )
+                    loaded_delegates.append(delegate_agent)
+                except Exception as e:
+                    logger.warning(f"Could not load delegate agent {delegate_id}: {e}")
+        finally:
+            _LOADING_CHAIN.reset(token)
 
     # Reconstruct semantic cache config
     semantic_cache_config_to_load = None
@@ -619,6 +685,10 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     if not isinstance(saved_tool_result_policy, dict):
         saved_tool_result_policy = None
 
+    saved_tool_cache = getattr(saved_memagent, "tool_cache_config", None)
+    if not isinstance(saved_tool_cache, dict):
+        saved_tool_cache = None
+
     saved_context_policy = getattr(saved_memagent, "context_policy", None)
     if not isinstance(saved_context_policy, dict):
         saved_context_policy = None
@@ -677,7 +747,7 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
             "context_window_tokens",
             None
             if "llm_config" in overrides or override_model is not None
-            else getattr(saved_memagent, "context_window_tokens", None),
+            else _saved_context_cap(saved_memagent, resolved_llm_config),
         ),
         tools=overrides.get("tools", getattr(saved_memagent, "tools", None)),
         persona=overrides.get("persona", getattr(saved_memagent, "persona", None)),
@@ -712,6 +782,7 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
             "tool_result_policy",
             saved_tool_result_policy,
         ),
+        tool_cache=overrides.get("tool_cache", saved_tool_cache),
         context_policy=overrides.get("context_policy", saved_context_policy),
         completion_policy=overrides.get(
             "completion_policy",
@@ -785,6 +856,9 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     # provider a second time.
     if load_llm_error and not getattr(agent_instance, "_llm_init_error", None):
         agent_instance._llm_init_error = load_llm_error
+
+    titles = getattr(saved_memagent, "thread_titles", None)
+    agent_instance.thread_titles = dict(titles) if isinstance(titles, dict) else {}
 
     logger.info(f"MemAgent loaded successfully with agent_id: {agent_id}")
     return agent_instance

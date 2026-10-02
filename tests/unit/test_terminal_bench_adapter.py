@@ -4,46 +4,46 @@ import pytest
 
 pytest.importorskip("harbor")
 
+from memorizz.benchmarks.measurement import bounded_text  # noqa: E402
 from memorizz.benchmarks.pricing import (  # noqa: E402
     estimate_openai_text_cost,
     resolve_openai_text_pricing,
 )
-from memorizz.benchmarks.terminal_bench import (  # noqa: E402
-    _bounded_text,
-    _TrackedOpenAI,
-    estimate_terra_cost,
-)
+from memorizz.benchmarks.terminal_bench import _TrackedOpenAI  # noqa: E402
 
 
 def test_bounded_text_preserves_both_ends():
     value = "abcdefghijklmnopqrstuvwxyz"
 
-    result = _bounded_text(value, 12)
+    result, truncated = bounded_text(value, 12)
 
     assert result.startswith("abcdef")
     assert result.endswith("uvwxyz")
     assert "14 characters omitted" in result
+    assert truncated is True
 
 
 def test_terra_cost_accounts_for_cached_input():
-    cost = estimate_terra_cost(
+    cost = estimate_openai_text_cost(
+        "gpt-5.6-terra",
         {
             "prompt_tokens": 1_000,
             "cached_tokens": 500,
             "completion_tokens": 100,
-        }
+        },
     )
 
     assert cost == pytest.approx(0.0023)
 
 
 def test_terra_cost_applies_long_context_multiplier():
-    cost = estimate_terra_cost(
+    cost = estimate_openai_text_cost(
+        "gpt-5.6-terra",
         {
             "prompt_tokens": 300_000,
             "cached_tokens": 0,
             "completion_tokens": 10_000,
-        }
+        },
     )
 
     assert cost == pytest.approx(1.38)

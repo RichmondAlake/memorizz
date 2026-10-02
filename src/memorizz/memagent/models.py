@@ -4,7 +4,7 @@
 
 """Data models for MemAgent configuration and state."""
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -37,6 +37,8 @@ class MemAgentModel(BaseModel):
         Union[Any, Dict[str, Any]]
     ] = None  # Semantic cache configuration
     tool_result_policy: Optional[Dict[str, Any]] = None
+    # Tool-call cache settings (``ToolCacheConfig.to_dict()``); None = off.
+    tool_cache_config: Optional[Dict[str, Any]] = None
     context_policy: Optional[Dict[str, Any]] = None
     completion_policy: Optional[Dict[str, Any]] = None
     retrieval_policy: Optional[Dict[str, Any]] = None
@@ -45,6 +47,11 @@ class MemAgentModel(BaseModel):
     skill_retrieval_config: Optional[Dict[str, Any]] = None
     semantic_layer_config: Optional[Dict[str, Any]] = None
     context_window_tokens: Optional[int] = None
+    # "explicit" when context_window_tokens is a cap someone set. Records
+    # without it come from releases that saved the effective budget instead.
+    context_window_source: Optional[str] = None
+    # Custom conversation names shown in the playground, by memory_id.
+    thread_titles: Optional[Dict[str, str]] = None
     is_favorite: bool = False
     internet_access_provider: Optional[str] = None
     internet_access_config: Optional[Dict[str, Any]] = None
@@ -72,6 +79,37 @@ class MemAgentModel(BaseModel):
     model_config = {
         "arbitrary_types_allowed": True  # Allow arbitrary types like Toolbox
     }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> "MemAgentModel":
+        """Rebuild an agent from its stored document.
+
+        Every model field the document holds is restored, so a field added to
+        the model round-trips on every backend without another copy to update.
+        A missing or null value keeps the model default.
+        """
+        values: Dict[str, Any] = {
+            name: document[name]
+            for name in cls.model_fields
+            if name not in {"model", "persona"} and document.get(name) is not None
+        }
+        for name, field in cls.model_fields.items():
+            if field.annotation is bool and name in values:
+                values[name] = bool(values[name])
+        stored_id = document.get("_id")
+        values["agent_id"] = document.get("agent_id") or (
+            str(stored_id) if stored_id is not None else None
+        )
+        values["memory_ids"] = document.get("memory_ids") or []
+        agent = cls(**values)
+        persona = document.get("persona")
+        if persona:
+            from ..long_term.semantic.persona.persona import Persona
+
+            # from_dict keeps stored goals and background from being merged
+            # with role defaults a second time, and round-trips the version.
+            agent.persona = Persona.from_dict(persona)
+        return agent
 
 
 class MemAgentConfig:

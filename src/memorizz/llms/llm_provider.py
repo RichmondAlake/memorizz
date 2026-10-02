@@ -112,10 +112,12 @@ class LLMProvider(Protocol):
         ...
 
 
-@runtime_checkable
-class ResponseMetadataProvider(Protocol):
-    """Optional extension; existing LLMProvider implementations remain valid."""
+class ResponseMetadataMixin:
+    """``get_last_response_metadata`` for providers that record their last
+    response (cache, usage and stop details); unknown values are omitted.
+    Optional: providers without it remain valid."""
 
-    def get_last_response_metadata(self) -> Optional[Dict[str, Any]]:
-        """Return bounded response metadata; omit unknown values."""
-        ...
+    def get_last_response_metadata(self) -> Dict[str, Any]:
+        from .response_metadata import last_response_metadata
+
+        return last_response_metadata(self)

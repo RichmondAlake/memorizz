@@ -46,6 +46,7 @@ from .helpers import (
 from .integrations_view import settings_summary
 from .routers.agents_api import router as agents_api_router
 from .routers.agents_crud import router as agents_crud_router
+from .routers.capabilities import router as capabilities_router
 from .routers.comparisons import router as comparisons_router
 from .routers.comparisons import stop_comparison_workers
 from .routers.continual_learning import router as continual_learning_router
@@ -64,17 +65,10 @@ from .routers.traces import router as traces_router
 from .routers.vercel_skills import router as vercel_skills_router
 from .routers.whatsapp import router as whatsapp_router
 from .security import ReadOnlyProviderProxy, UIAccessController, ui_read_only
-from .state import STATIC_DIR, UI_DIR, _state, close_meta_harness, templates
+from .state import STATIC_DIR, _state, close_meta_harness, templates
 
 logger = logging.getLogger(__name__)
 
-# Paths (UI_DIR / TEMPLATES_DIR / STATIC_DIR now live in ui.state)
-ROOT_DIR = UI_DIR.parent.parent.parent
-# Canonical env file is resolved centrally (~/.memorizz/.env by default) so the
-# CLI, `memorizz ui`, and this Settings page all read/write the SAME file. The
-# old `ROOT_DIR/.env` landed inside site-packages under a pip/uv install where
-# nothing ever read it.
-ENV_FILE_PATH = _resolve_env_file()
 
 DEFAULT_GRAALPY_INTERNET_ACCESS = "0"
 
@@ -856,6 +850,7 @@ def create_app(
     app.include_router(continual_learning_router)
     app.include_router(learning_control_plane_router)
     app.include_router(harnesses_router)
+    app.include_router(capabilities_router)
     app.include_router(memory_pages_router)
     app.include_router(mcp_router)
     app.include_router(vercel_skills_router)
@@ -868,7 +863,6 @@ def create_app(
 
     # Configure the shared template engine (imported from ui.state)
     templates.env.globals["llm_model_catalog"] = LLM_MODEL_CATALOG
-    templates.env.globals["default_llm_provider"] = DEFAULT_LLM_PROVIDER
     templates.env.globals[
         "default_llm_model_by_provider"
     ] = DEFAULT_LLM_MODEL_BY_PROVIDER
@@ -1318,6 +1312,145 @@ def create_app(
             recipients.append(normalized)
         return recipients
 
+    def _automation_agent_options() -> List[Dict[str, str]]:
+        """Saved agents an automation can run, for the form's picker."""
+        try:
+            agents = _list_agents()
+        except Exception:
+            agents = []
+        options = []
+        for agent in agents:
+            aid = _extract_agent_identifier(agent)
+            if aid:
+                options.append(
+                    {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
+                )
+        return options
+
+    def _parse_automation_form(form: Any, *, require_agent: bool) -> Dict[str, Any]:
+        """The automation form's values, the next run time, and the first
+        validation error (None when valid)."""
+        from ..automation.schedule import (
+            compute_next_run_at,
+            utcnow,
+            validate_timezone_name,
+        )
+
+        values: Dict[str, Any] = {
+            "agent_id": _to_text(form.get("agent_id")).strip(),
+            "name": _to_text(form.get("name")).strip(),
+            "enabled": _parse_bool(form.get("enabled")),
+            "schedule_type": _to_text(form.get("schedule_type")).strip().lower(),
+            "cron_expr": _to_text(form.get("cron_expr")).strip(),
+            "interval_seconds_raw": _to_text(form.get("interval_seconds")).strip(),
+            "interval_seconds": None,
+            "timezone": _to_text(form.get("timezone")).strip(),
+            "query_template": _to_text(form.get("query_template")),
+            "memory_id": _to_text(form.get("memory_id")).strip(),
+            "whatsapp_to": _parse_whatsapp_recipients(form.get("whatsapp_to")),
+            "delivery_channel": _to_text(form.get("delivery_channel")).strip()
+            or "in_chat",
+            "now_utc": utcnow(),
+            "next_run_at": None,
+        }
+        error: Optional[str] = None
+        if require_agent and not values["agent_id"]:
+            error = "agent_id is required."
+        elif not values["name"]:
+            error = "name is required."
+        elif not values["timezone"]:
+            error = "timezone is required."
+        else:
+            try:
+                validate_timezone_name(values["timezone"])
+            except Exception as exc:
+                error = str(exc)
+
+        if not error and values["schedule_type"] == "interval":
+            try:
+                values["interval_seconds"] = int(values["interval_seconds_raw"] or "0")
+            except Exception:
+                values["interval_seconds"] = 0
+            if not values["interval_seconds"] or values["interval_seconds"] <= 0:
+                error = "interval_seconds must be a positive integer."
+
+        if not error and values["schedule_type"] == "cron" and not values["cron_expr"]:
+            error = "cron_expr is required for cron schedules."
+
+        if not error and not values["query_template"].strip():
+            error = "query_template is required."
+
+        if not error:
+            try:
+                values["next_run_at"] = compute_next_run_at(
+                    schedule_type=values["schedule_type"],
+                    cron_expr=values["cron_expr"] or None,
+                    interval_seconds=values["interval_seconds"],
+                    tz_name=values["timezone"],
+                    after_utc=values["now_utc"],
+                )
+            except Exception as exc:
+                error = str(exc)
+
+        if not values["memory_id"]:
+            values["memory_id"] = str(uuid.uuid4())
+        values["error"] = error
+        # Delivery goes to WhatsApp only with recipients; in-chat otherwise.
+        whatsapp = (
+            values["delivery_channel"] == "whatsapp_twilio" and values["whatsapp_to"]
+        )
+        values["delivery_type"] = (
+            "whatsapp_twilio"
+            if whatsapp
+            else "in_chat"
+            if values["delivery_channel"] == "in_chat"
+            else None
+        )
+        values["delivery_config"] = (
+            {"whatsapp_to": values["whatsapp_to"]} if whatsapp else {}
+        )
+        return values
+
+    def _automation_form_error(
+        request: Request,
+        values: Dict[str, Any],
+        *,
+        agent_id: str,
+        active_agent_id: Optional[str],
+        job_id: str = "",
+    ):
+        """Show the automation form again with what was entered and why it
+        was refused."""
+        return templates.TemplateResponse(
+            "automation_form.html",
+            {
+                "request": request,
+                "provider_type": _state["provider_type"],
+                "connection_info": _state["connection_info"],
+                "agents_nav": _build_agent_nav_items(active_agent_id=active_agent_id),
+                "active_agent_id": active_agent_id,
+                "active_page": "automations",
+                "form_title": "Edit Automation" if job_id else "Create Automation",
+                "form_action": f"/automations/{job_id}/edit"
+                if job_id
+                else "/automations",
+                "is_edit": bool(job_id),
+                "error": values["error"],
+                "job_id": job_id,
+                "agent_options": _automation_agent_options(),
+                "agent_id": agent_id,
+                "name": values["name"],
+                "enabled": values["enabled"],
+                "schedule_type": values["schedule_type"],
+                "cron_expr": values["cron_expr"],
+                "interval_seconds": values["interval_seconds_raw"],
+                "timezone": values["timezone"],
+                "query_template": values["query_template"],
+                "memory_id": values["memory_id"],
+                "whatsapp_to": "\n".join(values["whatsapp_to"]),
+            },
+        )
+
     @app.get("/automations", response_class=HTMLResponse)
     async def automations_page(request: Request, agent_id: Optional[str] = None):
         """List automation jobs for the connected provider."""
@@ -1394,20 +1527,7 @@ def create_app(
                     )
                 error = message
 
-        agents: List[Any] = []
-        try:
-            agents = _list_agents()
-        except Exception:
-            agents = []
-
-        agent_options = []
-        for agent in agents:
-            aid = _extract_agent_identifier(agent)
-            if not aid:
-                continue
-            agent_options.append(
-                {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
-            )
+        agent_options = _automation_agent_options()
 
         now = datetime.now(timezone.utc)
         return templates.TemplateResponse(
@@ -1444,20 +1564,7 @@ def create_app(
         if store is None:
             return RedirectResponse(url="/automations", status_code=302)
 
-        agents: List[Any] = []
-        try:
-            agents = _list_agents()
-        except Exception:
-            agents = []
-
-        agent_options = []
-        for agent in agents:
-            aid = _extract_agent_identifier(agent)
-            if not aid:
-                continue
-            agent_options.append(
-                {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
-            )
+        agent_options = _automation_agent_options()
 
         default_agent_id = _to_text(agent_id).strip() if agent_id else ""
         if default_agent_id and not any(
@@ -1511,143 +1618,34 @@ def create_app(
             return RedirectResponse(url="/automations", status_code=302)
 
         from ..automation.models import AutomationJob
-        from ..automation.schedule import (
-            compute_next_run_at,
-            utcnow,
-            validate_timezone_name,
-        )
 
-        form = await request.form()
-        agent_id_value = _to_text(form.get("agent_id")).strip()
-        name_value = _to_text(form.get("name")).strip()
-        enabled_value = _parse_bool(form.get("enabled"))
-        schedule_type_value = _to_text(form.get("schedule_type")).strip().lower()
-        cron_expr_value = _to_text(form.get("cron_expr")).strip()
-        interval_seconds_raw = _to_text(form.get("interval_seconds")).strip()
-        timezone_value = _to_text(form.get("timezone")).strip()
-        query_template_value = _to_text(form.get("query_template"))
-        memory_id_value = _to_text(form.get("memory_id")).strip()
-        whatsapp_to_value = _parse_whatsapp_recipients(form.get("whatsapp_to"))
-        delivery_channel_value = (
-            _to_text(form.get("delivery_channel")).strip() or "in_chat"
-        )
-
-        error: Optional[str] = None
-        if not agent_id_value:
-            error = "agent_id is required."
-        elif not name_value:
-            error = "name is required."
-        elif not timezone_value:
-            error = "timezone is required."
-        else:
-            try:
-                validate_timezone_name(timezone_value)
-            except Exception as exc:
-                error = str(exc)
-
-        interval_seconds_value: Optional[int] = None
-        if not error and schedule_type_value == "interval":
-            try:
-                interval_seconds_value = int(interval_seconds_raw or "0")
-            except Exception:
-                interval_seconds_value = 0
-            if not interval_seconds_value or interval_seconds_value <= 0:
-                error = "interval_seconds must be a positive integer."
-
-        if not error and schedule_type_value == "cron" and not cron_expr_value:
-            error = "cron_expr is required for cron schedules."
-
-        if not error and not _to_text(query_template_value).strip():
-            error = "query_template is required."
-
-        now_utc = utcnow()
-        next_run_at = None
-        if not error:
-            try:
-                next_run_at = compute_next_run_at(
-                    schedule_type=schedule_type_value,
-                    cron_expr=cron_expr_value or None,
-                    interval_seconds=interval_seconds_value,
-                    tz_name=timezone_value,
-                    after_utc=now_utc,
-                )
-            except Exception as exc:
-                error = str(exc)
-
-        if not memory_id_value:
-            memory_id_value = str(uuid.uuid4())
-
-        if error:
-            # Re-render form with error.
-            agents: List[Any] = []
-            try:
-                agents = _list_agents()
-            except Exception:
-                agents = []
-            agent_options = []
-            for agent in agents:
-                aid = _extract_agent_identifier(agent)
-                if not aid:
-                    continue
-                agent_options.append(
-                    {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
-                )
-            return templates.TemplateResponse(
-                "automation_form.html",
-                {
-                    "request": request,
-                    "provider_type": _state["provider_type"],
-                    "connection_info": _state["connection_info"],
-                    "agents_nav": _build_agent_nav_items(
-                        active_agent_id=agent_id_value or None
-                    ),
-                    "active_agent_id": agent_id_value or None,
-                    "active_page": "automations",
-                    "form_title": "Create Automation",
-                    "form_action": "/automations",
-                    "is_edit": False,
-                    "error": error,
-                    "job_id": "",
-                    "agent_options": agent_options,
-                    "agent_id": agent_id_value,
-                    "name": name_value,
-                    "enabled": enabled_value,
-                    "schedule_type": schedule_type_value,
-                    "cron_expr": cron_expr_value,
-                    "interval_seconds": interval_seconds_raw,
-                    "timezone": timezone_value,
-                    "query_template": query_template_value,
-                    "memory_id": memory_id_value,
-                    "whatsapp_to": "\n".join(whatsapp_to_value),
-                },
+        values = _parse_automation_form(await request.form(), require_agent=True)
+        if values["error"]:
+            return _automation_form_error(
+                request,
+                values,
+                agent_id=values["agent_id"],
+                active_agent_id=values["agent_id"] or None,
             )
 
         job = AutomationJob(
             job_id=str(uuid.uuid4()),
-            agent_id=agent_id_value,
-            name=name_value,
-            enabled=enabled_value,
-            schedule_type=schedule_type_value,  # type: ignore[arg-type]
-            cron_expr=cron_expr_value or None,
-            interval_seconds=interval_seconds_value,
-            timezone=timezone_value,
-            start_at=now_utc,
-            next_run_at=next_run_at,  # type: ignore[arg-type]
+            agent_id=values["agent_id"],
+            name=values["name"],
+            enabled=values["enabled"],
+            schedule_type=values["schedule_type"],  # type: ignore[arg-type]
+            cron_expr=values["cron_expr"] or None,
+            interval_seconds=values["interval_seconds"],
+            timezone=values["timezone"],
+            start_at=values["now_utc"],
+            next_run_at=values["next_run_at"],  # type: ignore[arg-type]
             action_type="agent_query",
             action_config={
-                "query_template": _to_text(query_template_value),
-                "memory_id": memory_id_value,
+                "query_template": values["query_template"],
+                "memory_id": values["memory_id"],
             },
-            delivery_type=(
-                "whatsapp_twilio"
-                if delivery_channel_value == "whatsapp_twilio" and whatsapp_to_value
-                else "in_chat"
-                if delivery_channel_value == "in_chat"
-                else None
-            ),
-            delivery_config={"whatsapp_to": whatsapp_to_value}
-            if delivery_channel_value == "whatsapp_twilio" and whatsapp_to_value
-            else {},
+            delivery_type=values["delivery_type"],
+            delivery_config=values["delivery_config"],
         )
 
         created = store.create_job(job)
@@ -1667,20 +1665,7 @@ def create_app(
         if not job:
             raise HTTPException(status_code=404, detail="Automation job not found")
 
-        agents: List[Any] = []
-        try:
-            agents = _list_agents()
-        except Exception:
-            agents = []
-
-        agent_options = []
-        for agent in agents:
-            aid = _extract_agent_identifier(agent)
-            if not aid:
-                continue
-            agent_options.append(
-                {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
-            )
+        agent_options = _automation_agent_options()
 
         query_template_value = _to_text(job.action_config.get("query_template"))
         memory_id_value = _to_text(job.action_config.get("memory_id")).strip()
@@ -1741,138 +1726,31 @@ def create_app(
         if not existing:
             raise HTTPException(status_code=404, detail="Automation job not found")
 
-        from ..automation.schedule import (
-            compute_next_run_at,
-            utcnow,
-            validate_timezone_name,
-        )
-
-        form = await request.form()
-        name_value = _to_text(form.get("name")).strip()
-        enabled_value = _parse_bool(form.get("enabled"))
-        schedule_type_value = _to_text(form.get("schedule_type")).strip().lower()
-        cron_expr_value = _to_text(form.get("cron_expr")).strip()
-        interval_seconds_raw = _to_text(form.get("interval_seconds")).strip()
-        timezone_value = _to_text(form.get("timezone")).strip()
-        query_template_value = _to_text(form.get("query_template"))
-        memory_id_value = _to_text(form.get("memory_id")).strip()
-        whatsapp_to_value = _parse_whatsapp_recipients(form.get("whatsapp_to"))
-        delivery_channel_value = (
-            _to_text(form.get("delivery_channel")).strip() or "in_chat"
-        )
-
-        error: Optional[str] = None
-        if not name_value:
-            error = "name is required."
-        elif not timezone_value:
-            error = "timezone is required."
-        else:
-            try:
-                validate_timezone_name(timezone_value)
-            except Exception as exc:
-                error = str(exc)
-
-        interval_seconds_value: Optional[int] = None
-        if not error and schedule_type_value == "interval":
-            try:
-                interval_seconds_value = int(interval_seconds_raw or "0")
-            except Exception:
-                interval_seconds_value = 0
-            if not interval_seconds_value or interval_seconds_value <= 0:
-                error = "interval_seconds must be a positive integer."
-
-        if not error and schedule_type_value == "cron" and not cron_expr_value:
-            error = "cron_expr is required for cron schedules."
-
-        if not error and not _to_text(query_template_value).strip():
-            error = "query_template is required."
-
-        if not memory_id_value:
-            memory_id_value = str(uuid.uuid4())
-
-        now_utc = utcnow()
-        next_run_at = None
-        if not error:
-            try:
-                next_run_at = compute_next_run_at(
-                    schedule_type=schedule_type_value,
-                    cron_expr=cron_expr_value or None,
-                    interval_seconds=interval_seconds_value,
-                    tz_name=timezone_value,
-                    after_utc=now_utc,
-                )
-            except Exception as exc:
-                error = str(exc)
-
-        if error:
-            agents: List[Any] = []
-            try:
-                agents = _list_agents()
-            except Exception:
-                agents = []
-
-            agent_options = []
-            for agent in agents:
-                aid = _extract_agent_identifier(agent)
-                if not aid:
-                    continue
-                agent_options.append(
-                    {"agent_id": aid, "label": _extract_agent_persona_name(agent)}
-                )
-
-            return templates.TemplateResponse(
-                "automation_form.html",
-                {
-                    "request": request,
-                    "provider_type": _state["provider_type"],
-                    "connection_info": _state["connection_info"],
-                    "agents_nav": _build_agent_nav_items(
-                        active_agent_id=existing.agent_id
-                    ),
-                    "active_agent_id": existing.agent_id,
-                    "active_page": "automations",
-                    "form_title": "Edit Automation",
-                    "form_action": f"/automations/{existing.job_id}/edit",
-                    "is_edit": True,
-                    "error": error,
-                    "job_id": existing.job_id,
-                    "agent_options": agent_options,
-                    "agent_id": existing.agent_id,
-                    "name": name_value,
-                    "enabled": enabled_value,
-                    "schedule_type": schedule_type_value,
-                    "cron_expr": cron_expr_value,
-                    "interval_seconds": interval_seconds_raw,
-                    "timezone": timezone_value,
-                    "query_template": query_template_value,
-                    "memory_id": memory_id_value,
-                    "whatsapp_to": "\n".join(whatsapp_to_value),
-                },
+        values = _parse_automation_form(await request.form(), require_agent=False)
+        if values["error"]:
+            return _automation_form_error(
+                request,
+                values,
+                agent_id=existing.agent_id,
+                active_agent_id=existing.agent_id,
+                job_id=existing.job_id,
             )
 
         patch = {
-            "name": name_value,
-            "enabled": enabled_value,
-            "schedule_type": schedule_type_value,
-            "cron_expr": cron_expr_value or None,
-            "interval_seconds": interval_seconds_value,
-            "timezone": timezone_value,
-            "next_run_at": next_run_at,
+            "name": values["name"],
+            "enabled": values["enabled"],
+            "schedule_type": values["schedule_type"],
+            "cron_expr": values["cron_expr"] or None,
+            "interval_seconds": values["interval_seconds"],
+            "timezone": values["timezone"],
+            "next_run_at": values["next_run_at"],
             "action_type": "agent_query",
             "action_config": {
-                "query_template": _to_text(query_template_value),
-                "memory_id": memory_id_value,
+                "query_template": values["query_template"],
+                "memory_id": values["memory_id"],
             },
-            "delivery_type": (
-                "whatsapp_twilio"
-                if delivery_channel_value == "whatsapp_twilio" and whatsapp_to_value
-                else "in_chat"
-                if delivery_channel_value == "in_chat"
-                else None
-            ),
-            "delivery_config": {"whatsapp_to": whatsapp_to_value}
-            if delivery_channel_value == "whatsapp_twilio" and whatsapp_to_value
-            else {},
+            "delivery_type": values["delivery_type"],
+            "delivery_config": values["delivery_config"],
             "locked_by": None,
             "lock_expires_at": None,
         }
@@ -1952,8 +1830,8 @@ def create_app(
         store = _get_automation_store_for_ui()
         if store is None:
             return RedirectResponse(url="/automations", status_code=302)
-        from ..automation.runner import run_job_once
-        from ..automation.schedule import compute_next_run_at, utcnow
+        from ..automation.schedule import utcnow
+        from ..automation.worker import execute_claimed_job
 
         safe_job_id = _to_text(job_id).strip()
         now_utc = utcnow()
@@ -1990,103 +1868,13 @@ def create_app(
         run = store.start_run(job, now_utc, worker_id)
 
         def _run_in_background() -> None:
-            import time
-
-            attempt = 1
-            last_error = None
-            result_payload = None
-            status = "failed"
-
-            try:
-                for attempt in range(1, int(job.retry_max_attempts or 1) + 1):
-                    try:
-                        result_payload = run_job_once(
-                            job,
-                            run_id=run.run_id,
-                            scheduled_for_utc=now_utc,
-                            memory_provider=_state["provider"],
-                            store=store,
-                        )
-                        delivery_summary = (
-                            result_payload.get("delivery_summary")
-                            if isinstance(result_payload, dict)
-                            else None
-                        )
-                        if (
-                            isinstance(delivery_summary, dict)
-                            and int(delivery_summary.get("total") or 0) > 0
-                            and int(delivery_summary.get("sent") or 0) == 0
-                            and int(delivery_summary.get("failed") or 0) > 0
-                        ):
-                            status = "failed"
-                            last_error = str(
-                                result_payload.get("delivery_error")
-                                or "All deliveries failed."
-                            )
-                        else:
-                            status = "succeeded"
-                            last_error = None
-                        break
-                    except Exception as exc:
-                        last_error = str(exc)
-                        status = "failed"
-                        if attempt < int(job.retry_max_attempts or 1):
-                            time.sleep(max(1, int(job.retry_backoff_seconds or 60)))
-
-                # Reschedule / disable, always unlock.
-                finished_at = utcnow()
-                patch = {
-                    "last_run_at": finished_at,
-                    "locked_by": None,
-                    "lock_expires_at": None,
-                }
-
-                try:
-                    if str(job.schedule_type) == "one_shot":
-                        patch["enabled"] = False
-                        patch["next_run_at"] = finished_at
-                    else:
-                        patch["enabled"] = True
-                        patch["next_run_at"] = compute_next_run_at(
-                            schedule_type=job.schedule_type,
-                            cron_expr=job.cron_expr,
-                            interval_seconds=job.interval_seconds,
-                            tz_name=job.timezone,
-                            after_utc=finished_at,
-                        )
-                except Exception as exc:
-                    # Avoid a tight retry loop if the schedule config is invalid.
-                    patch["enabled"] = False
-                    patch["next_run_at"] = finished_at
-                    last_error = last_error or f"Reschedule failed: {exc}"
-                    status = "failed"
-
-                try:
-                    store.update_job(job.job_id, patch)
-                except Exception:
-                    # Best-effort unlock.
-                    try:
-                        store.update_job(
-                            job.job_id, {"locked_by": None, "lock_expires_at": None}
-                        )
-                    except Exception:
-                        pass
-            finally:
-                try:
-                    _payload = (
-                        result_payload if isinstance(result_payload, dict) else {}
-                    )
-                    _summary = str(_payload.get("response") or "")[:2000] or None
-                    store.finish_run(
-                        run.run_id,
-                        status=status,
-                        error=last_error,
-                        result_summary=_summary,
-                        result_payload=_payload,
-                        attempt=attempt,
-                    )
-                except Exception:
-                    pass
+            execute_claimed_job(
+                job,
+                run,
+                scheduled_for=now_utc,
+                memory_provider=_state["provider"],
+                store=store,
+            )
 
         threading.Thread(
             target=_run_in_background,

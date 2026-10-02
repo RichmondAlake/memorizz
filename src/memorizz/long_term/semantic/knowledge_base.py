@@ -230,6 +230,7 @@ class KnowledgeBase:
             If not provided, a default MemoryProvider will be used.
         """
         self.memory_provider = memory_provider or MemoryProvider()
+        self.last_ingest: Dict[str, Any] = {}
 
     def ingest_knowledge(
         self,
@@ -240,6 +241,8 @@ class KnowledgeBase:
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         breakpoint_percentile: float = DEFAULT_SEMANTIC_BREAKPOINT_PERCENTILE,
         user_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        embeddings: str = "required",
     ) -> str:
         """
         Embed and save text content to the memory provider under the given namespace.
@@ -279,13 +282,30 @@ class KnowledgeBase:
             Oracle with KNOWLEDGE_BASE in their user-scoped set) only return
             chunks belonging to ``user_id``. ``None`` preserves the legacy
             anonymous-bucket behaviour, so existing callers are unaffected.
+        metadata : Optional[Dict[str, Any]], default None
+            Extra fields stored on every chunk, such as ``memory_id`` or the
+            source path. They never replace the fields this method sets.
+        embeddings : str, default "required"
+            ``"required"`` embeds every chunk and raises when that fails.
+            ``"optional"`` stores the chunks without embeddings when the
+            embedding model fails (none configured, say), and ``"off"`` never
+            embeds; keyword search still finds those chunks.
 
         Returns:
         --------
         str
             A unique knowledge_base_id that can be attached to an agent to scope its knowledge base.
+            ``self.last_ingest`` then reports the chunk count and how many
+            chunks were embedded.
         """
+        if embeddings not in {"required", "optional", "off"}:
+            raise ValueError('embeddings must be "required", "optional" or "off"')
         knowledge_base_id = str(uuid.uuid4())
+        self.last_ingest = {
+            "knowledge_base_id": knowledge_base_id,
+            "chunks": 0,
+            "embedded": 0,
+        }
 
         from ...memory_provider.base import provider_manages_embeddings
 
@@ -317,9 +337,24 @@ class KnowledgeBase:
         )
         now = datetime.now().isoformat()
 
+        embedder_failed = embeddings == "off"
         for index, chunk_text in enumerate(chunks):
-            embedding = None if managed else get_embedding(chunk_text)
+            embedding = None
+            if not managed and not embedder_failed:
+                try:
+                    embedding = get_embedding(chunk_text)
+                except Exception as exc:
+                    if embeddings == "required":
+                        raise
+                    # Don't retry an embedder that is down for every chunk.
+                    embedder_failed = True
+                    logger.warning(
+                        "Storing knowledge without embeddings (%s); keyword search "
+                        "still finds it",
+                        type(exc).__name__,
+                    )
             entry = {
+                **dict(metadata or {}),
                 "content": chunk_text,
                 "embedding": embedding,
                 "namespace": namespace,
@@ -334,6 +369,8 @@ class KnowledgeBase:
             self.memory_provider.store(
                 entry, memory_store_type=MemoryType.KNOWLEDGE_BASE
             )
+            self.last_ingest["chunks"] += 1
+            self.last_ingest["embedded"] += int(embedding is not None or managed)
 
         return knowledge_base_id
 
@@ -470,6 +507,8 @@ class KnowledgeBase:
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         breakpoint_percentile: float = DEFAULT_SEMANTIC_BREAKPOINT_PERCENTILE,
         user_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        embeddings: str = "required",
     ) -> str:
         """Ingest a single file from disk, raw bytes, or a file-like object.
 
@@ -496,6 +535,8 @@ class KnowledgeBase:
         user_id:
             Tenant identifier forwarded to :meth:`ingest_knowledge`; see its
             docstring for behaviour. ``None`` preserves legacy semantics.
+        metadata, embeddings:
+            Forwarded to :meth:`ingest_knowledge`.
 
         Returns
         -------
@@ -527,6 +568,8 @@ class KnowledgeBase:
             chunk_overlap=chunk_overlap,
             breakpoint_percentile=breakpoint_percentile,
             user_id=user_id,
+            metadata=metadata,
+            embeddings=embeddings,
         )
 
     def ingest_directory(

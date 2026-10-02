@@ -1,27 +1,21 @@
 {% extends "base.html" %}
 
-{% block title %}Vercel skills - Memorizz{% endblock %}
+{% block title %}Agent skills - Memorizz{% endblock %}
 
-{% block head %}<link rel="stylesheet" href="/static/css/pages/vercel_skills.css?v=5">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/vercel_skills.css?v=7">
+<script src="/static/js/catalog.js?v=2" defer></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state %}
-{{ page_header('Vercel agent skills', 'Search the open Vercel skills ecosystem, or fetch a skill from a GitHub repository, and read the instructions it gives an agent.', 'Integrations') }}
+{{ page_header('Agent skills', 'Search the open skills directory (skills.sh) or fetch a skill from a GitHub repository, read its instructions, and attach it to an agent.', 'Integrations') }}
 
-{% if not github_token_present %}
-<div class="warning-message skills-token-alert" role="status">
-    <p><strong>Skill search needs a GitHub token.</strong> Search uses GitHub's code search API, which rejects unauthenticated requests (HTTP 401). Fetching a skill by <code>owner/repo</code> works without one.</p>
-    <p>Add <code>GITHUB_TOKEN</code> on the <a href="/settings#GITHUB_TOKEN">Settings page</a>, or create a token at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>. MemoRizz reads only public skills data, so the token needs no scopes: leave every checkbox unchecked. See the <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noopener noreferrer">GitHub docs</a> for step-by-step instructions.</p>
-</div>
-{% endif %}
-
-<div class="fleet-tape skills-tape" role="list" aria-label="Vercel skills summary">
-    <div role="listitem"><span>GitHub token</span><strong class="{{ 'is-good' if github_token_present else 'is-warn' }}">{{ 'Set' if github_token_present else 'Not set' }}</strong></div>
-    <div role="listitem"><span>Search</span><strong class="{{ '' if github_token_present else 'is-warn' }}">{{ 'Ready' if github_token_present else 'Needs token' }}</strong></div>
-    <div role="listitem"><span>Agents using skills</span><strong>{{ skill_agents|length }}<small>of {{ agent_total }}</small></strong></div>
+<div class="fleet-tape skills-tape" role="list" aria-label="Agent skills summary">
+    <div role="listitem"><span>Agents with skills</span><strong>{{ agents|selectattr('skills')|list|length }}<small>of {{ agent_total }}</small></strong></div>
+    <div role="listitem"><span>Marketplace on</span><strong>{{ skill_agents|length }}<small>of {{ agent_total }}</small></strong></div>
+    <div role="listitem"><span>GitHub token</span><strong>{{ 'Set' if github_token_present else 'Optional' }}</strong></div>
     <div role="listitem"><span>Results</span><strong id="skills-tape-results">—</strong></div>
     <div role="listitem"><span>Repositories</span><strong id="skills-tape-repos">—</strong></div>
-    <div role="listitem"><span>Most stars</span><strong id="skills-tape-stars">—</strong></div>
+    <div role="listitem"><span>Most installs</span><strong id="skills-tape-stars">—</strong></div>
     <div role="listitem" class="fleet-tape-meta"><span>Last query</span><strong id="skills-tape-query">—</strong></div>
 </div>
 
@@ -30,7 +24,7 @@
     <div class="skills-find-grid">
         <div class="filter-bar">
             <label class="is-wide">Search skills
-                <input type="text" id="search-input" placeholder="React, Next.js, deployment, AI SDK…" />
+                <input type="text" id="search-input" placeholder="Notion, Gmail, calendar, React, deployment…" />
             </label>
             <button type="button" class="btn btn-primary" id="search-btn" onclick="searchSkills()">Search</button>
         </div>
@@ -45,7 +39,7 @@
         </div>
     </div>
     <p class="skills-suggest">Try
-        {% for term in ['react', 'next.js', 'deployment', 'ai sdk', 'design', 'testing'] %}<button type="button" class="skills-suggest-item" data-skill-query="{{ term }}">{{ term }}</button>{% endfor %}
+        {% for term in ['notion', 'gmail', 'calendar', 'react', 'deployment', 'testing'] %}<button type="button" class="skills-suggest-item" data-skill-query="{{ term }}">{{ term }}</button>{% endfor %}
     </p>
 </section>
 
@@ -59,8 +53,7 @@
     <div class="segmented" role="group" aria-label="Show skills">
         <button type="button" class="segmented-item" data-monitor-tag="" aria-pressed="true">All <span data-skill-count="">0</span></button>
         <button type="button" class="segmented-item" data-monitor-tag="vercel" aria-pressed="false">From Vercel <span data-skill-count="vercel">0</span></button>
-        <button type="button" class="segmented-item" data-monitor-tag="popular" aria-pressed="false">100+ stars <span data-skill-count="popular">0</span></button>
-        <button type="button" class="segmented-item" data-monitor-tag="described" aria-pressed="false">Described <span data-skill-count="described">0</span></button>
+        <button type="button" class="segmented-item" data-monitor-tag="popular" aria-pressed="false">Popular <span data-skill-count="popular">0</span></button>
     </div>
     <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>↵</kbd> instructions</span><span><kbd>o</kbd> open on GitHub</span></p>
 </div>
@@ -68,18 +61,17 @@
 <div class="fleet skills" id="skills">
     <div class="fleet-main">
         <div class="skills-grid" id="skills-grid">
-            {{ empty_state('Find a skill to get started', 'Search by keyword, such as react, deployment, AI SDK or design, or fetch a skill directly from a GitHub repository.') }}
+            {{ empty_state('Find a skill to get started', 'Search by keyword, such as notion, gmail, react or deployment, or fetch a skill directly from a GitHub repository.') }}
         </div>
         <div class="fleet-table-wrap" id="skills-table-wrap" hidden>
             <table class="fleet-table" id="skills-table">
-                <caption class="visually-hidden">Skills found on GitHub. Select a row to see its source and read its instructions.</caption>
+                <caption class="visually-hidden">Skills found. Select a row to see its source, read its instructions and attach it to an agent.</caption>
                 <thead>
                     <tr>
                         <th scope="col" aria-sort="none"><button type="button" data-sort="name" data-sort-type="text">Skill</button></th>
                         <th scope="col" class="skills-col-repo" aria-sort="none"><button type="button" data-sort="repo" data-sort-type="text">Repository</button></th>
-                        <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="stars">Stars</button></th>
-                        <th scope="col" class="skills-col-desc">Description</th>
-                        <th scope="col" class="skills-col-path">Path</th>
+                        <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="stars">Installs</button></th>
+                        <th scope="col" class="skills-col-desc">Source</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
@@ -91,7 +83,8 @@
     <aside class="fleet-pane" aria-label="Selected skill" id="skills-pane">
         <section class="skills-intro" id="skills-intro">
             <h2>How agents use these skills</h2>
-            <p>An agent with the Vercel skills marketplace enabled gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code>, and loads a skill's instructions when a task needs them. Nothing is installed here: this page reads the same public skills the agent can fetch.</p>
+            <p><strong>Attach</strong> a skill to pin it to an agent: MemoRizz saves its <code>SKILL.md</code> under <code>~/.memorizz/skills</code> and adds it to the agent's skills. The agent sees it in <code>list_skills</code> and reads it with <code>read_skill</code> when a task needs it. Code in a skill runs only in a sandbox.</p>
+            <p>An agent with the skills marketplace enabled can also search and fetch skills itself with <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code>.</p>
             <h3 class="fleet-detail-title">Agents with the marketplace enabled</h3>
             {% if skill_agents %}
             <ul class="skills-agents">
@@ -121,6 +114,7 @@
                 <button type="button" class="btn btn-sm" data-copy-target="detail-skill-instructions">Copy</button>
             </div>
             <div class="skill-instructions" id="detail-skill-instructions">-</div>
+            <div class="skills-attach" id="detail-skill-attach" hidden></div>
         </section>
     </aside>
 </div>
@@ -136,6 +130,8 @@
     });
     var skillsMonitor = null;
     var currentSkills = [];
+    var SKILL_AGENTS = {{ agents|tojson }};
+    var AGENT_KEY = 'memorizz.skills.agent';
 
     document.querySelectorAll('[data-skill-query]').forEach(function(button) {
         button.addEventListener('click', function() {
@@ -189,7 +185,7 @@
                     return;
                 }
                 var skills = data.skills || [];
-                status.textContent = 'Found ' + data.count + ' skill' + (data.count !== 1 ? 's' : '') + ' for "' + query + '"' + (data.total_count > data.count ? ', ' + data.total_count + ' matches on GitHub' : '');
+                status.textContent = 'Found ' + data.count + ' skill' + (data.count !== 1 ? 's' : '') + ' for "' + query + '"' + (data.source === 'github' ? ' on GitHub' : ' on skills.sh, most installed first') + (data.total_count > data.count ? ', ' + data.total_count + ' matches in all' : '') + '.';
                 clearResults();
                 if (skills.length === 0) {
                     showEmpty('No skills found', 'Nothing matched "' + query + '". Try different keywords, or fetch the skill by repository.');
@@ -206,6 +202,7 @@
 
     // A skill's own name is its folder; SKILL.md at the repository root takes the repo name.
     function skillLabel(skill) {
+        if (skill.skill_name) return skill.skill_name;
         var parts = String(skill.path || '').split('/').filter(Boolean);
         if (parts.length > 1) return parts[parts.length - 2];
         var repo = String(skill.repo || '');
@@ -214,6 +211,7 @@
 
     // Pass a skill name only where fetch looks for it (skills/<name>/SKILL.md and friends).
     function skillNameFor(skill) {
+        if (skill.skill_name) return skill.skill_name;
         var match = /^(?:skills\/(?:\.curated\/|\.experimental\/)?)?([^/]+)\/SKILL\.md$/.exec(String(skill.path || ''));
         return match ? match[1] : '';
     }
@@ -222,8 +220,7 @@
         var tags = [];
         var owner = String(skill.repo || '').split('/')[0].toLowerCase();
         if (owner === 'vercel' || owner === 'vercel-labs') tags.push('vercel');
-        if ((skill.stars || 0) >= 100) tags.push('popular');
-        if (skill.description) tags.push('described');
+        if ((skill.installs || 0) >= 1000 || (skill.stars || 0) >= 100) tags.push('popular');
         return tags;
     }
 
@@ -239,7 +236,7 @@
         currentSkills = skills;
         var tbody = document.querySelector('#skills-table tbody');
         var pane = document.getElementById('skills-pane');
-        var counts = { '': skills.length, vercel: 0, popular: 0, described: 0 };
+        var counts = { '': skills.length, vercel: 0, popular: 0 };
         var repos = {};
         var topStars = 0;
         skills.forEach(function(skill, index) {
@@ -248,14 +245,15 @@
             var tags = tagsFor(skill);
             tags.forEach(function(tag) { counts[tag] += 1; });
             repos[skill.repo] = true;
-            topStars = Math.max(topStars, skill.stars || 0);
+            var score = skill.installs || skill.stars || 0;
+            topStars = Math.max(topStars, score);
 
             var row = document.createElement('tr');
             row.dataset.key = key;
             row.dataset.tags = tags.join(' ');
             row.dataset.name = label.toLowerCase();
             row.dataset.repo = String(skill.repo || '').toLowerCase();
-            row.dataset.stars = String(skill.stars || 0);
+            row.dataset.stars = String(score);
             row.dataset.search = [label, skill.repo, skill.path, skill.description].join(' ').toLowerCase();
             row.tabIndex = -1;
             var name = cell('th', 'fleet-name skills-name', label);
@@ -263,9 +261,8 @@
             row.append(
                 name,
                 cell('td', 'skills-col-repo mono', skill.repo || '-', skill.repo),
-                cell('td', 'num', (skill.stars || 0).toLocaleString()),
-                cell('td', 'skills-col-desc', skill.description || '—', skill.description),
-                cell('td', 'skills-col-path mono', skill.path || '-', skill.path)
+                cell('td', 'num', score ? score.toLocaleString() : '—'),
+                cell('td', 'skills-col-desc', skill.source === 'github' ? (skill.description || 'GitHub') : 'skills.sh', skill.description)
             );
             tbody.appendChild(row);
             pane.insertBefore(renderDetail(skill, key, label), document.getElementById('skill-detail-panel'));
@@ -302,7 +299,8 @@
         var sub = document.createElement('p'); sub.className = 'fleet-detail-sub';
         sub.append(cell('span', 'mono', skill.repo || '-'));
         title.append(h2, sub);
-        head.append(title, cell('span', 'pill' + ((skill.stars || 0) >= 100 ? ' pill--info' : ''), (skill.stars || 0).toLocaleString() + ' stars'));
+        var score = skill.installs ? skill.installs.toLocaleString() + ' installs' : (skill.stars || 0).toLocaleString() + ' stars';
+        head.append(title, cell('span', 'pill' + (tagsFor(skill).indexOf('popular') >= 0 ? ' pill--info' : ''), score));
 
         var actions = document.createElement('div'); actions.className = 'fleet-detail-actions';
         var view = cell('button', 'btn btn-primary btn-sm', 'View instructions');
@@ -318,21 +316,59 @@
         repoLink.href = skill.repo_url || ('https://github.com/' + skill.repo); repoLink.target = '_blank'; repoLink.rel = 'noopener';
         actions.appendChild(repoLink);
 
-        var desc = cell('p', 'skills-desc', skill.description || 'The repository has no description.');
+        var desc = cell('p', 'skills-desc', skill.description || 'Select View instructions to read what this skill tells an agent.');
 
         var config = document.createElement('dl'); config.className = 'fleet-config';
-        [['Source', 'GitHub code search'], ['Stars', (skill.stars || 0).toLocaleString()], ['Repository', skill.repo || '-'], ['Path', skill.path || '-']].forEach(function(pair) {
+        [['Source', skill.source === 'github' ? 'GitHub code search' : 'skills.sh'], ['Popularity', score], ['Repository', skill.repo || '-'], ['Path', skill.path || 'Found when attached']].forEach(function(pair) {
             var item = document.createElement('div');
             item.append(cell('dt', '', pair[0]), cell('dd', pair[0] === 'Repository' || pair[0] === 'Path' ? 'mono' : '', pair[1]));
             config.appendChild(item);
         });
 
-        var access = cell('p', 'skills-access', {{ skill_agents|length|tojson }}
-            ? 'Available to {{ skill_agents|length }} agent{{ "" if skill_agents|length == 1 else "s" }} through vercel_skill_fetch. Nothing to install.'
-            : 'Not installed anywhere: agents load skills on demand. Enable the Vercel marketplace on an agent to let it fetch this one.');
-
-        section.append(head, actions, desc, config, access);
+        section.append(head, actions, desc, config, attachControl(skill.repo || '', skillNameFor(skill)));
         return section;
+    }
+
+    // Attach saves the SKILL.md locally and adds it to the chosen agent's skills.
+    function attachControl(repo, skillName) {
+        var wrap = document.createElement('div');
+        wrap.className = 'skills-attach';
+        if (!SKILL_AGENTS.length) {
+            wrap.appendChild(cell('p', 'form-hint', 'Create an agent to attach skills to it.'));
+            return wrap;
+        }
+        var label = cell('label', 'skills-attach-label', 'Attach to');
+        var select = document.createElement('select');
+        var remembered = null;
+        try { remembered = localStorage.getItem(AGENT_KEY); } catch (_) { /* storage blocked */ }
+        SKILL_AGENTS.forEach(function(agent) {
+            var option = cell('option', '', agent.name + ' · ' + agent.agent_id.slice(0, 8));
+            option.value = agent.agent_id;
+            if (agent.agent_id === remembered) option.selected = true;
+            select.appendChild(option);
+        });
+        label.appendChild(select);
+        var button = cell('button', 'btn btn-primary btn-sm', 'Attach skill');
+        button.type = 'button';
+        var status = cell('p', 'form-hint', '');
+        status.setAttribute('role', 'status');
+        button.addEventListener('click', function() {
+            var agent = SKILL_AGENTS.find(function(item) { return item.agent_id === select.value; }) || {};
+            try { localStorage.setItem(AGENT_KEY, select.value); } catch (_) { /* storage blocked */ }
+            button.disabled = true;
+            status.textContent = 'Saving the skill…';
+            MemorizzCatalog.skills.attach(select.value, { repo: repo, skill_name: skillName })
+                .then(function(body) {
+                    status.textContent = 'Attached ' + body.skill.name + ' to ' + agent.name + '. It now has ' + body.skills.length + ' skill' + (body.skills.length === 1 ? '' : 's') + '.';
+                })
+                .catch(function(error) {
+                    var choices = (error.body && error.body.available_skills) || [];
+                    status.textContent = error.message + (choices.length ? ' Try: ' + choices.slice(0, 6).map(function(c) { return c.name; }).join(', ') + '.' : '');
+                })
+                .finally(function() { button.disabled = false; });
+        });
+        wrap.append(label, button, status);
+        return wrap;
     }
 
     function fetchSkillFromRepo() {
@@ -392,10 +428,15 @@
                     document.getElementById('detail-skill-repo').textContent = data.repo;
                     document.getElementById('detail-skill-path').textContent = 'skills/';
                     document.getElementById('detail-skill-desc-row').style.display = 'none';
+                    document.getElementById('detail-skill-attach').hidden = true;
                     showPanel(panel);
                     return;
                 }
 
+                var attachBox = document.getElementById('detail-skill-attach');
+                attachBox.textContent = '';
+                attachBox.appendChild(attachControl(data.repo || repo, skillName || ''));
+                attachBox.hidden = false;
                 document.getElementById('detail-skill-name').textContent = data.name || repo;
                 document.getElementById('detail-skill-repo').textContent = data.repo || repo;
                 document.getElementById('detail-skill-path').textContent = data.path || '-';
@@ -420,11 +461,6 @@
     function closeDetailPanel() {
         document.getElementById('skill-detail-panel').classList.remove('active');
         if (!currentSkills.length) document.getElementById('skills-intro').hidden = false;
-    }
-
-    function escapeHtml(str) {
-        if (!str) return '';
-        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     function selectedSkill(row) {

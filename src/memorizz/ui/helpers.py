@@ -13,7 +13,7 @@ from the shared ``ui.state._state`` and never import from ``ui.app``.
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 from .state import _state
 
@@ -31,6 +31,51 @@ def _read_lob_value(value: Any) -> Any:
         except Exception:
             return value
     return value
+
+
+def _agent_field(record: Any, key: str, default: Any = None) -> Any:
+    """A field of an agent or record given as a dict or an object; ``default``
+    when it is missing or None."""
+    if isinstance(record, Mapping):
+        value = record.get(key)
+    else:
+        value = getattr(record, key, None)
+    return default if value is None else value
+
+
+async def _json_object(request: Any, *, required: bool = True) -> Dict[str, Any]:
+    """A request's JSON body, which must be an object: 400 otherwise, or an
+    empty dict when ``required`` is False."""
+    from fastapi import HTTPException
+
+    try:
+        value = await request.json()
+    except Exception as exc:
+        if not required:
+            return {}
+        raise HTTPException(
+            status_code=400, detail="Request body must be JSON"
+        ) from exc
+    if not isinstance(value, dict):
+        if not required:
+            return {}
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    return value
+
+
+async def _approval_payload(request: Any) -> Dict[str, Any]:
+    """An approve or reject request's ``approver_id`` (required) and
+    ``reason``, as keyword arguments for the decision."""
+    from fastapi import HTTPException
+
+    payload = await _json_object(request)
+    approver_id = str(payload.get("approver_id") or "").strip()
+    if not approver_id:
+        raise HTTPException(status_code=400, detail="approver_id is required")
+    return {
+        "approver_id": approver_id,
+        "reason": str(payload.get("reason") or "").strip() or None,
+    }
 
 
 def _to_text(value: Any) -> str:
@@ -77,28 +122,12 @@ def _extract_agent_memory_ids(agent: Any) -> List[str]:
     return memory_ids
 
 
-def _extract_agent_persona_name(agent: Any) -> str:
-    """Extract display name for an agent."""
-    if isinstance(agent, dict):
-        explicit_name = _to_text(agent.get("name")).strip()
-    else:
-        explicit_name = _to_text(getattr(agent, "name", None)).strip()
-    if explicit_name:
-        return explicit_name
-
-    if isinstance(agent, dict):
-        persona = agent.get("persona")
-    else:
-        persona = getattr(agent, "persona", None)
-
-    if persona:
-        if isinstance(persona, dict):
-            name = _to_text(persona.get("name")).strip()
-        else:
-            name = _to_text(getattr(persona, "name", None)).strip()
-        if name:
-            return name
-    return "Agent"
+def _extract_agent_persona_name(agent: Any, fallback: str = "Agent") -> str:
+    """Extract display name for an agent: its name, else its persona's."""
+    name = _to_text(_agent_field(agent, "name")).strip()
+    if not name:
+        name = _to_text(_agent_field(_agent_field(agent, "persona"), "name")).strip()
+    return name or fallback
 
 
 def _parse_object_id_timestamp(value: Any) -> Optional[float]:
@@ -455,10 +484,14 @@ def _count_runtime_tools_for_agent(agent_id: str) -> int:
 
 
 def _normalize_internet_provider_name(value: Any) -> str:
-    """Normalize internet provider values to a stable lowercase name."""
+    """Normalize an internet or skills marketplace provider (a name or a
+    config dict) to a stable lowercase name."""
     if isinstance(value, dict):
         value = value.get("provider") or value.get("name")
     return _to_text(value).strip().lower()
+
+
+_normalize_skills_marketplace_provider_name = _normalize_internet_provider_name
 
 
 def _normalize_browser_control_provider_name(value: Any) -> str:
@@ -466,13 +499,6 @@ def _normalize_browser_control_provider_name(value: Any) -> str:
     if isinstance(value, dict):
         value = value.get("provider") or value.get("name")
     return _to_text(value).strip().lower().replace("-", "")
-
-
-def _normalize_skills_marketplace_provider_name(value: Any) -> str:
-    """Normalize skills marketplace provider values to a stable lowercase name."""
-    if isinstance(value, dict):
-        value = value.get("provider") or value.get("name")
-    return _to_text(value).strip().lower()
 
 
 def _normalize_memory_type_values(
@@ -844,6 +870,45 @@ def _duplicate_agent_notes(copies: Dict[str, int]) -> List[Dict[str, str]]:
         for agent_id, count in sorted(copies.items())
         if count > 1
     ]
+
+
+def _load_agent(agent_id: str):
+    """The stored agent record, or an HTTP error the JSON APIs can return."""
+    from fastapi import HTTPException
+
+    provider = _state.get("provider")
+    if not provider:
+        raise HTTPException(status_code=400, detail="Memory provider is not connected")
+    try:
+        agent = provider.retrieve_memagent(agent_id)
+    except Exception as exc:
+        logger.error("Failed to retrieve agent %s: %s", agent_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to load agent") from exc
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
+
+
+def _save_agent_fields(agent: Any, **fields: Any) -> None:
+    """Set fields on a stored agent record and persist it."""
+    from fastapi import HTTPException
+
+    provider = _state.get("provider")
+    if not provider:
+        raise HTTPException(status_code=400, detail="Memory provider is not connected")
+    for key, value in fields.items():
+        if isinstance(agent, dict):
+            agent[key] = value
+        else:
+            setattr(agent, key, value)
+    try:
+        if hasattr(provider, "update_memagent"):
+            provider.update_memagent(agent)
+        else:
+            provider.store_memagent(agent)
+    except Exception as exc:
+        logger.error("Failed to save agent fields %s: %s", sorted(fields), exc)
+        raise HTTPException(status_code=500, detail="Failed to save the agent") from exc
 
 
 def _list_agents():
@@ -1548,36 +1613,14 @@ def _validate_internet_provider_choice(
 def _build_skills_marketplace_provider_config(
     provider_name: Optional[str], base_config: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
-    """Build skills marketplace config with API key fallback from Settings env."""
+    """Build skills marketplace config with API key fallback from Settings env;
+    None when there is no provider or nothing to configure."""
+    from ..memagent.core import skills_marketplace_config
+
     normalized_provider = _normalize_skills_marketplace_provider_name(provider_name)
     if not normalized_provider:
         return None
-
-    config: Dict[str, Any] = {}
-    if isinstance(base_config, dict):
-        for key, value in base_config.items():
-            if key == "provider":
-                continue
-            if value is None:
-                continue
-            if isinstance(value, str) and not value.strip():
-                continue
-            config[key] = value
-
-    if normalized_provider == "skillsmp":
-        if "api_key" not in config:
-            default_key = _to_text(os.environ.get("SKILLSMP_API_KEY", "")).strip()
-            if default_key:
-                config["api_key"] = default_key
-        if "base_url" not in config:
-            config["base_url"] = "https://skillsmp.com"
-    elif normalized_provider == "vercel":
-        if "github_token" not in config:
-            default_token = _to_text(os.environ.get("GITHUB_TOKEN", "")).strip()
-            if default_token:
-                config["github_token"] = default_token
-
-    return config or None
+    return skills_marketplace_config(normalized_provider, base_config) or None
 
 
 def _validate_skills_marketplace_provider_choice(
@@ -1776,7 +1819,9 @@ def _build_agent_threads(agent: Any) -> List[Dict[str, Any]]:
 
         history = _load_thread_messages(memory_id, limit=200)
 
-        message_count = len(history)
+        from ..conversation_history import is_trace_bundle_entry
+
+        message_count = sum(1 for row in history if not is_trace_bundle_entry(row))
         # Conversation lists are titled by their opening question, as chat UIs do.
         first_user = next(
             (
@@ -1797,6 +1842,9 @@ def _build_agent_threads(agent: Any) -> List[Dict[str, Any]]:
         )
         if len(title) > 60:
             title = f"{title[:57].rstrip()}…"
+        custom_titles = getattr(agent, "thread_titles", None) or {}
+        if isinstance(custom_titles, dict) and custom_titles.get(memory_id):
+            title = str(custom_titles[memory_id])
         last_msg = history[-1] if history else {}
         last_role = _to_text(last_msg.get("role")).strip().lower() if last_msg else ""
         last_content = _to_text(last_msg.get("content") or last_msg.get("text", ""))

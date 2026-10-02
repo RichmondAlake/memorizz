@@ -1,6 +1,680 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 — 2026-10-02
+
+### Added
+
+- Tool call cache: a MemAgent with `tool_cache=True` (or `.with_tool_cache()`,
+  `memorizz agents create --tool-cache`, or **Enable tool call cache** in the
+  UI) reuses the result of a repeated tool call while it is fresh.
+  - **What it caches:** Python tools that opt in with
+    `@governed_tool(cacheable=True, cache_ttl_seconds=...)` (only
+    deterministic tools without side effects or approval can), and MCP tools
+    their server marks read-only and idempotent. Failures are never stored.
+  - **Keys and freshness:** the tool, its arguments, a fingerprint of the tool
+    (code and schema, or MCP server), the user and, by default, the agent;
+    300 s by default, capped by domain freshness (MCP 300 s).
+  - **Visibility:** hits appear on tool trace events, in
+    `agent.tool_cache_stats()`, in UI trajectories ("from cache") and in the
+    harness Compare view, which also names each MemAgent lane by agent.
+  - **Measured:** on eight support tickets with local `qwen2.5:7b`, real API
+    calls fell from 8 to 4 and the queue from 36.6 s to 28.6 s, with 8 of 8
+    correct answers either way (`examples/tool_cache/benchmark.py`).
+
+- MemoRizz plugins for Codex and Claude Code (`plugins/codex/memorizz`,
+  `plugins/claude-code/memorizz`):
+  - **What they add:** MemoRizz's MCP server (memory writes allowed) and
+    skills for recalling, saving, correcting and curating memory and for
+    using saved MemoRizz agents.
+  - **Episodic memory:**
+    - SessionStart gives the agent the project's memory ID, the last
+      session's summary and its newest facts.
+    - UserPromptSubmit keeps each prompt and, with `MEMORIZZ_PROMPT_RECALL`,
+      adds related memories.
+    - Stop saves each turn (request and final answer, secrets removed) to
+      conversation memory. The save runs detached, so `claude -p` and
+      `codex exec` exiting don't cancel it.
+    - PreCompact and SessionEnd summarize the session with MemoRizz's default
+      model, after any turn saves still running.
+    - Turns go in thread `codex-<session>` / `claude-code-<session>`.
+    - Off with `MEMORIZZ_SESSION_CAPTURE=off`; summaries alone with
+      `MEMORIZZ_SESSION_SUMMARY=false`.
+  - **Claude Code extras:** `/memorizz:remember`, `/memorizz:recall`,
+    `/memorizz:forget` and `/memorizz:memory-status`, and a
+    `memory-curator` subagent (also a skill in both plugins).
+  - **Shared memory:** both agents use the same memory ID for a project
+    (`project-<folder>-<hash>`), so what one learns the other recalls.
+  - **Hosted server:** `memorizz plugin install <agent> --remote URL
+    [--token-env NAME]` points the plugin's tools and hooks at a hosted
+    MemoRizz MCP server, with a per-person API key; `--local` switches back.
+    `deploy/mcp-server/` has a Dockerfile, a Compose file with Caddy for
+    automatic HTTPS, and a guide.
+  - **Repository marketplaces:** the repository is a marketplace for both
+    agents (`.agents/plugins/marketplace.json`,
+    `.claude-plugin/marketplace.json`).
+  - **Install commands:** `memorizz plugin install|uninstall codex|claude-code`
+    with `--user`, `--no-capture`, `--no-summaries`, `--prompt-recall`,
+    `--allow-agents`, `--allow-harness --harness-root`, `--allow-traces`,
+    `--remote`/`--local` (saved as settings `memorizz config` also sets);
+    `memorizz plugin memory-id`; and `memorizz plugin hook
+    session-start|prompt|stop|summarize`.
+  - **Packaging:** the wheel ships both plugins.
+- `memorizz.episodic_capture`: `record_turn()` and `summarize_thread()`, used
+  by the plugin hooks and the MCP server.
+- MCP server: `memorizz_ingest` chunks local files and folders into the
+  knowledge base.
+  - **Where it reads:** only inside `MEMORIZZ_MCP_SERVER_INGEST_ROOTS` /
+    `--ingest-root` (default: home for stdio, none for HTTP).
+  - **What it skips:** hidden, dependency and VCS folders, and files that look
+    like secrets.
+  - **Cap:** 500 files / 20 MB per call.
+  - **Ingesting again:** unchanged files are skipped, and a changed file's old
+    chunks are superseded.
+- MCP server: `memorizz_lookup_entities` and `memorizz_upsert_entity` for entity memory.
+- MCP server: `memorizz_update_memory` replaces a memory without deleting it.
+  - **Records:** the new record gets `supersedes` and `supersede_reason`; the
+    old one gets `status="superseded"`, `superseded_by` and `superseded_at`.
+  - **Duplicates:** `duplicate_of` retires a duplicate in favour of an
+    existing memory.
+  - **Defaults:** list and search hide superseded records unless
+    `include_superseded=true`.
+- MCP server: `memorizz_memory_status` reports backend, policy, embedding
+  readiness (one short embed call) and per-type record counts.
+- MCP server: `memorizz_record_turn` and `memorizz_summarize_session` save a
+  client's turns and summarize a session (with the server's model) for the
+  calling principal.
+
+- Harness delegates, finished: **Cancel** now stops a memagent run between its
+  model and tool calls and cancels every delegate harness run it started (one
+  still being prepared starts already canceled; `MetaHarness.cancel(...,
+  before_start=True)`). Delegates of a run approved for edits may edit too,
+  taking turns in the workspace under the run's lease, unless their own
+  harness permissions are narrower; the service waives a delegate's approval
+  only when its parent run is still running and was approved for that access
+  in the same folder (`SQLiteHarnessRunStore.workspace_holder()`). A
+  coordinator's ledger row, details and workflow node show its own model
+  calls (planning and combining included, priced at list rates;
+  `MemAgent.count_model_call()`) plus its delegates' runs.
+- Harness delegates in the playground: a coordinator whose delegates run on
+  harnesses shows a **Harness delegates** card in the inspector and a chip by
+  the message box. Each conversation's delegates get their own fresh folder
+  instead of the folder the UI runs in. **Allow** gives them a folder of yours,
+  web access or edits. Web access and edits need an approver's name, and the
+  grant is recorded as an approved `metaharness.delegate_access` approval
+  that lasts eight hours, so their harness runs start without asking again.
+  An expired grant is reported in the reply.
+  `MetaHarness.grant_delegate_access()`, `delegate_access()`;
+  `POST /api/agents/{id}/harness-access`,
+  `GET /api/agents/{id}/harness-access/{grant_id}`,
+  `POST /api/agents/{id}/harness-workspace`; the playground stream takes
+  `harness_grant` and `harness_workspace`.
+- Deleting removes the scratch folder MemoRizz made for a blank workspace once
+  no remaining run, workflow or delegate grant uses it (`keep_scratch` /
+  `remove_scratch=False` keeps it). A conversation page has **Delete
+  conversation** (`MetaHarness.delete_conversation()`,
+  `DELETE /api/harness-conversations/{id}`).
+- CLI parity with the Agent Harnesses page:
+  - `memorizz harness`: `models`, `continue`, `conversation`,
+    `delete-conversation`, `delete`, `delete-workflow`, `rerun-workflow`,
+    `delegate options|create`, `events --follow/--limit`, and
+    `--allow-subagents`.
+  - `compare --harness-model HARNESS=MODEL`, `plan --stage-model` and
+    `--stage-agent`, plus the user, thread, tool, cost, token and
+    execution-backend options on `plan` and `compare`.
+  - `--harness memagent` without `--agent-id` runs the agent last used with a
+    harness, as the UI does. Unknown IDs end with a message and exit code 1
+    instead of a traceback. Every command has help text.
+  - `memorizz agents`: `update` and `delete`; `create --harness-model`,
+    `--delegate`, `--delegation/--no-delegation`, `--delegation-max-workers`,
+    `--delegation-consolidation` and `--root-fallback`. `show` includes the
+    harness model, delegates and delegation settings.
+  - `memorizz eval terminal-bench tasks|status|run` (Terminal-Bench 4.0 from
+    the CLI), `memorizz eval compare CONFIG.json` (Evalground comparisons), and
+    `eval run --agent-id` (evaluate a saved agent) and `--ollama-host`.
+- MCP server: `memorizz_rerun_harness_workflow`,
+  `memorizz_delete_harness_runs`, `memorizz_delete_harness_workflow`,
+  `memorizz_get_harness_conversation`,
+  `memorizz_continue_harness_conversation`; `allow_subagents` on runs, plans
+  and comparisons, and `harness_models` on comparisons. Deleting needs the
+  write scope and touches only the caller's runs.
+- Shared homes for what the UI, CLI and MCP server all need:
+  `memorizz.metaharness.catalog` (model choices, saved agents and their
+  harness delegates, the default memagent agent, conversation setup, creating
+  a harness delegate) and `memorizz.memagent.delegation_settings` (validated
+  delegate choices, refusing loops).
+- Rate cards for Claude Sonnet 5.5 and Claude Mythos 5 / 5.1.
+
+- Delete harness runs and workflows from the Agent Harnesses page: **Delete**
+  in a run's details, **Delete** on a finished workflow card (with all its
+  runs), and **Delete selected** for the runs ticked in the ledger, whose
+  header box ticks every run the filter shows. A run goes with its events and
+  the runs its MemAgent delegates made. Runs still working, and workflow steps
+  (delete the workflow instead), are kept, and the page says why. Files and
+  saved memory answers stay. `MetaHarness.delete_run()`, `delete_runs()`,
+  `delete_orchestration()`; `SQLiteHarnessRunStore.delete()` and
+  `delete_orchestration()`; `DELETE /api/harness-runs/{id}`,
+  `POST /api/harness-runs/delete`, `DELETE /api/harness-orchestrations/{id}`.
+  Compare still takes two to four ticked runs.
+- Harness workflows run again from the page: **Run again** repeats a finished
+  plan or comparison with its settings (a fresh scratch folder if it had one,
+  and a saved agent filled in for memagent), and **Edit and run** loads them
+  into the launch form first. `MetaHarness.rerun_orchestration()`,
+  `MetaHarness.is_scratch_workspace()`,
+  `POST /api/harness-orchestrations/{id}/rerun`.
+- Live trace in each workflow node: its reasoning, model calls, tool calls and
+  subagents as they happen, with a subagent's steps nested under the call that
+  started it. New `HarnessEventType.REASONING`. Codex reports reasoning items
+  and `collab_tool_call` subagents; Claude Code reports thinking blocks (marked
+  hidden when it withholds the text) and which subagent an event came from;
+  a MemAgent run reports model calls, tool calls, reasoning and delegate tasks
+  (`MemAgent.set_delegation_event_callback()`).
+- Each workflow node, ledger row and run's details name the model the harness
+  ran on, from its events while it runs (`SQLiteHarnessRunStore.event_models()`).
+- Workflow cards fold: the chevron or header folds a card to one line with a
+  status dot per harness, and **Collapse all** folds them all. Choices are
+  remembered per workflow.
+- **Subagents** on the harness launch form (`HarnessPermissions.allow_subagents`,
+  `harness_task(allow_subagents=True)`): Claude Code gets its `Task` tool
+  alongside its usual tools, and Codex may start sub-agents. It is not a tool
+  list, so it works in comparisons too. Codex sub-agents are followed from
+  their session files under `$CODEX_HOME/sessions` while the run goes, so each
+  appears in the node's trace with its own searches, reasoning and answer.
+- Compare runs side by side: **Compare traces** on a plan or comparison, or
+  tick two to four runs in the ledger and press **Compare selected**. A table
+  sets out status, model, time, cost, tokens, actions, reasoning and
+  verification (highlighting the fastest, cheapest and leanest run that
+  succeeded, never judging answers); a timeline puts each run in a lane from
+  its own start, with model calls, tool calls, commands and subagents as bars;
+  and each run's answer and trajectory sit in columns. It updates while runs
+  are active. `window.MemorizzCompare.open(runIds)`.
+- Comparisons take a model per harness (`start_compare(..., models=...)`,
+  `harness_models` on `POST /api/harness-orchestrations`); the launch form
+  shows a picker per compared harness with that harness's own models and
+  default. **Run again** and **Edit and run** keep them.
+- pi works with no setup beyond an API key: with no provider or model
+  configured, MemoRizz runs it on the first provider you have a key for
+  (`anthropic/claude-sonnet-5-5`, then `openai/gpt-5.5`), and the form suggests
+  pi's own model list.
+- Model pickers on the harness page are dropdowns: each harness lists up to
+  ten of the newest models from each provider it runs (read from the
+  providers' own model lists, newest first, cached for six hours; local
+  Ollama models too), its default, and **Other model…** to type any name. It
+  applies to the quick bar, single runs, plan stages and comparisons.
+  `memorizz.llms.model_lists`.
+- memagent can run on another model from the harness page. The saved agent
+  loads with that model for the run only (`provider/model` switches provider
+  too); a save during the run keeps the agent's own model.
+- OpenHands and Hermes work as harnesses. OpenHands reads the CLI 1.x event
+  format, takes the run's model through `LLM_MODEL`, runs only with Network
+  Full behind its isolation wrapper (which mounts the workspace read-only
+  unless edits were approved, via `MEMORIZZ_WORKSPACE_WRITABLE`), and the form
+  sets the Docker wrapper backend when OpenHands is chosen. Hermes run homes
+  live under `~/.hermes/profiles`, which Hermes 0.21.5+ needs to keep its
+  install intact.
+- Harnesses as delegates: a MemAgent's delegates can be agents that run their
+  turns on a harness (meta-harness runtime mode), so a coordinator splits a
+  request and Codex, Claude Code, pi, Hermes or OpenHands work on the parts in
+  parallel. In a MemAgent harness run each such delegate works in the run's
+  workspace and may use what the run was approved for (network, MemoRizz MCP,
+  subagents, edits) without another approval; its harness run is tagged
+  **Delegate** in the ledger and linked from the subagent step
+  (**Open its codex run**). `MemAgent.run_on_harness(parent_run=...,
+  on_start=...)`; delegation events include `task_progress` with
+  `harness_run_id`. The playground lists each delegate as it starts and
+  finishes (**Delegate · Codex reviewer (codex)**). On the agent form,
+  **Add a harness as a delegate** creates a harness-backed delegate with its
+  model (`POST /api/harness-delegates`), harness-backed delegates are marked
+  "runs on …", and the harness section has a **Harness model** picker.
+  On the harness launch form, choosing such a coordinator for a memagent run
+  lists the delegates it hands work to and the harness each runs on.
+  The coordinator's final answer can say which delegate found what: results
+  reach it labelled with each delegate's name and harness, not only its ID.
+  Two worked examples, a code review crew and a research desk, are in
+  `examples/metaharness/multi_harness_delegates/`.
+- A **Delegates** section on the agent form: pick other saved agents as
+  delegates, turn delegation on or off, and choose how results are combined
+  and how many delegates work at once. A memagent harness run of such an agent
+  shows each delegate as a subagent, by name. Choices that would loop are
+  refused, and loading a saved loop skips the repeated agent.
+
+- Terminal-Bench 4.0 in Evalground: **Test a harness** runs Codex or Claude
+  Code (installed in each task container by Harbor), a MemAgent (driving the
+  container from the host) or the free reference solutions on chosen tasks,
+  with an optional MemoRizz memory in front of each task and a lesson saved
+  per finished trial (never shown to the same task). Results show pass rate,
+  categories, per-trial time, tokens and cost, and join the run library.
+  New: `MemorizzCodexAgent`, `MemorizzClaudeCodeAgent`,
+  `python -m memorizz.benchmarks.terminal_bench_runner`, and
+  `GET /evalground/terminal-bench/status`,
+  `POST /evalground/terminal-bench/runs`. The `terminal-bench` extra now
+  needs Harbor 0.23. `HarnessContextBuilder.build()` takes `exclude`.
+- Harness conversations: **Continue** on any run opens `/harnesses/chat`, where
+  each message is a new run with the run's setup (harness, model, folder,
+  permissions, agent, memory, limits) and earlier turns as prompt context, on
+  every harness. SDK: `MetaHarness.continue_conversation()`,
+  `MetaHarness.conversation()`; API: `GET/POST /api/harness-conversations/…`.
+- Harness trajectories and execution graph: a selected run shows its steps
+  live, a **Steps** column counts actions per run, and plans and comparisons
+  are drawn as connected nodes. `SQLiteHarnessRunStore.event_counts()`.
+- Model suggestions per harness on the quick bar and launch form.
+- Playground conversations can be renamed and deleted from the left pane
+  (`POST`/`DELETE /api/agents/{id}/threads/{memory_id}`). Names are saved on
+  the agent as `thread_titles`; deleting removes the conversation's messages,
+  summaries and tool logs for that agent only.
+- Playground **Settings → Context window** for Ollama agents, listing sizes up
+  to the model's own maximum (`GET /api/ollama/context-length`). Choosing one
+  replaces any agent-level cap, so it is the window the agent runs with. The
+  context panel names the model and its longest window, and reply footnotes
+  name the model that answered (`run.started` capabilities include `model`).
+- Auto-compaction that actually runs: before a request would pass
+  `context_policy.compact_at` percent of the window (default 80, 30–80, 0 for
+  off), older messages are summarized into summary memory, the newest
+  `keep_recent_messages` stay word for word, and the summary text goes into
+  the prompt. The playground's **Auto-compact at** selector changes the
+  threshold per agent, a note in the chat reports each compaction, and
+  `context.compacted` stream events carry the counts.
+- The playground offers to enable what an agent can't do yet. When a request
+  needs web search, email, calendar, notes, code execution or a browser that
+  the agent lacks, a card under the reply lists the ways to enable it, built
+  from the agent's live configuration: Tavily or Firecrawl (with an inline key
+  field when needed), a Gmail, Calendar or Notion connection, sign-in for a
+  connected server, or a registry search. The agent lists missing capabilities
+  in its instructions and calls the new `request_capability` tool
+  (`capability.requested` event); a keyword check also emits
+  `capability.suggested` so small models still surface the card. Sign-in
+  started from the card returns to the playground.
+- Harnesses reach an agent's own MCP servers through MemoRizz:
+  `memorizz_list_connected_tools`, `memorizz_read_connected_tool`,
+  `memorizz_call_connected_tool` and `memorizz_resume_connected_tool_call`.
+  Credentials stay in MemoRizz, calls are audited under the agent, reads are
+  marked read-only so hosts that never prompt (Codex runs) allow them, and
+  changes need write access and a person's approval.
+- Each MCP tool is exposed to the agent as its own tool (`server__tool`) with
+  the server's schema, from a per-agent cache of the last tool listing. The
+  tool router lets clear keyword matches among them share the per-turn slots.
+  `mcp_list_tools` registers a server's tools at once.
+- MCP connections shows **Add OAuth client** and setup steps for Gmail and
+  Google Calendar before sign-in, and opens the client fields when a provider
+  needs one.
+- Find and attach MCP servers from the UI: **MCP Connections → Find a server**
+  and the playground's settings list the official connectors and search the
+  official MCP Registry, then attach a hosted or local (npm, PyPI, Docker)
+  server after asking only for the values it needs. Hosted servers are checked
+  for OAuth, token or no sign-in. `memorizz mcp search` does the same from the
+  CLI, and `memorizz.mcp.catalog` from code.
+- Gmail preset (`--preset gmail`, UI and catalog): Google's Gmail MCP server
+  with `gmail.readonly` and `gmail.compose` scopes only.
+- Attach marketplace skills to an agent from the Skills page or the
+  playground. The `SKILL.md` is saved under `~/.memorizz/skills` with its source
+  and hash, and added to the agent's `skill_paths`.
+- Personal productivity assistant template (`memorizz.memagent.templates`,
+  **Create agent → Start from a template**): instructions, persona and entity
+  memory, with Gmail, Google Calendar and Notion attached and changes gated by
+  approval.
+
+- Orchestrate harnesses from the UI, the JSON API or the SDK:
+  `MetaHarness.start_plan()` runs stages in order, each on its own harness
+  (for example plan, implement, review), and `start_compare()` runs one
+  read-only task on several harnesses at once. Workflows are durable,
+  cancellable and wait for host approval of their edit stage. The harnesses
+  page gains a launch mode switch, a stage editor with presets, a Workflows
+  panel, workflow tags in the run ledger and live refresh.
+- Stage handoffs: each finished stage is reduced to its answer, changed files,
+  commands and verification result. The next stage receives all earlier
+  handoffs fitted to its context budget, instead of raw text truncated at
+  20,000 characters. With a `memory_id`, handoffs are saved to conversation
+  memory, where later runs retrieve them and the Memory explorer lists them.
+- `deepseek` harness: Claude Code's agent loop on DeepSeek models
+  (`deepseek-flash`, `deepseek-v4-pro`) through DeepSeek's Anthropic-compatible
+  API. Only `DEEPSEEK_API_KEY` reaches the process, and cost is estimated from
+  DeepSeek's peak and off-peak prices.
+- Quick launch on the harnesses page: a task, an optional harness and project
+  folder, Web access and Allow edits, and Run, with approval asked inline.
+  Tasks without a project folder run in a fresh scratch folder
+  (`MetaHarness.scratch_workspace()`).
+- Harness parity across surfaces. CLI: `memorizz harness plan`, `compare`,
+  `workflows`, `show-workflow` and `cancel-workflow`, and `run --scratch`,
+  `--allow-tool`, `--deny-tool` and `--output-schema`. MCP: tools to start
+  plans and comparisons, list, read and cancel them, and retry runs; a start
+  without a workspace uses a scratch folder. UI: Retry, and thread, delegated
+  environment, tool and output-schema fields. SDK: `MetaHarness.retry_start()`.
+- A standalone run with a `memory_id` saves its answer to conversation memory,
+  like plan and comparison steps.
+- `hermes` harness for Nous Research's Hermes Agent (0.21.4 or newer), using
+  `hermes chat --format stream-json` with a generated per-run home. Only the
+  `file` toolset (plus `web` with web access, and the MemoRizz MCP server) is
+  enabled; read-only runs cannot write, and `hermes -z` is never used.
+- `pi` harness for the pi coding agent (`@earendil-works/pi-coding-agent`),
+  with any provider it supports. MemoRizz enables only its file tools, never
+  `bash`; edit runs require an attested isolation wrapper.
+
+### Deprecated
+
+- `MemAgent.run_stream()` called directly. Use `run_stream_events()`; the
+  string API will be removed in 0.14.
+
+### Removed
+
+- Redundant code, about 900 lines net:
+  - **Dead code:** shadowed and unused CSS, an unused LongMemEval loader, the dead
+    `MemAgent._compress_memories_with_llm` and `_tool_result_failed`,
+    `Toolbox._load_import_reference`, unused CLI REPL labels, write-only attributes,
+    `estimate_terra_cost`, the unused Oracle `requirements.txt` and the unused
+    `supports_output_schema` adapter flag (probes report schema support).
+  - **Now shared, UI:** the automation create/edit forms, playground
+    thread-memory loading, field reading, request-body and approval parsing,
+    and the JS money and HTML-escape helpers.
+  - **Now shared, models and providers:** skills-marketplace config,
+    local-model prompt building (`llms/local_chat.py`), provider response
+    metadata (`ResponseMetadataMixin`), MongoDB/Oracle embedding fallbacks and
+    skill search, and toolbox syncing (`MemoryProvider`).
+  - **Now shared, utilities:** benchmark JSON and output bounding
+    (`benchmarks/measurement.py`), stored-JSON reading (`memorizz/_json.py`),
+    ISO/UTC timestamp parsing (`memorizz/_time.py`), environment flags
+    (`env_bool`, `env_text`), and the optional-provider slot of the sandbox and
+    internet managers.
+  - **Moved out of the UI routers** for the CLI and MCP server to share:
+    `memorizz.metaharness.catalog`, `memorizz.memagent.delegation_settings`,
+    `memorizz.benchmarks.agent_template.secret_free_agent_template`, and
+    `terminal_bench_runner.environment_status`.
+  - **Behaviour changes:** MCP approve/reject answer 400 to malformed JSON,
+    and the HuggingFace prompt fallback accepts a message without a role.
+- `SETUP.md`: its local and hosted setup, `MEMORIZZ_ORACLE_CONTAINER` and the
+  production checklist are now in the Oracle provider guide, which also lists
+  migration 008.
+Unused code was pruned: nothing in the package, its tests, docs, examples,
+eval scripts or the OpenSpeech backend called it. Public API that went:
+
+- `create_assistant`, `create_chatbot` and `create_task_agent` (the last two
+  set application modes that do not exist); use `MemAgentBuilder`.
+- `SummaryComponent` and `StandaloneSemanticCache`.
+- `MemAgent.has_meta_harness()`, `MetaHarness.arun()` / `astart()`,
+  `MemAgentBuilder.with_auto_registration()`.
+- `Toolbox.bind_callable()`, `delete_tool_by_id()`, `delete_tool_by_name()`,
+  `update_tool_by_id()`; `EntityMemory.search_entities()`;
+  `EntityMemoryManager.lookup_entities()` / `build_context()` (use the
+  `*_with_diagnostics` methods); `PersonaManager.load_persona()` /
+  `export_persona()`; `MemoryManager.update_memory_ids()` /
+  `get_unsummarized_messages()`; `MongoDBProvider.get_summaries_by_memory_id()`
+  / `get_summaries_by_time_range()`.
+- UI endpoints nothing called: `POST /traces/feedback`, `POST /traces/outcomes`,
+  `GET /api/capabilities`, `GET /api/agents/{id}/capabilities` and
+  `POST /agents/{id}/delete` (use `memorizz agents delete`).
+- About 22 KB of CSS rules that matched no page, an unused template, dead
+  page scripts, the shadowed `memorizz/memagent.py`, the stub `memorizz.ui.api`
+  package, the unused desktop app shell, stale example notebooks, one-off
+  scripts, and duplicate root `install_oracle.sh`, `deploy.sh` and
+  `setup_dev.sh`.
+
+### Changed
+
+- Internal cleanup, no behaviour change: the Tavily and Firecrawl providers
+  share their setting and truncation helpers through `InternetAccessProvider`;
+  entity attributes and relations use one validation helper; local model
+  providers are listed once (`memorizz.llms.llm_factory.LOCAL_LLM_PROVIDERS`,
+  used by the harness cost checks and the benchmarks); the semantic cache and
+  the tool cache share their domain freshness defaults; the playground uses the
+  UI's shared `escapeHtml`.
+
+- `memorizz_search_memories` returns `search_mode` (`semantic`, `keyword` or
+  `hybrid`) and falls back to keyword matching, with a setup note, when no
+  embedding model works.
+- `memorizz_store_memory` now embeds what it stores when an embedding model is
+  available, so memories saved over MCP are found by semantic search.
+- `KnowledgeBase.ingest_knowledge`/`ingest_file` accept `metadata=` and
+  `embeddings="required"|"optional"|"off"`; entity upserts no longer fail when
+  embedding fails.
+
+- Harness confirmations and error notices are in the page
+  (`static/js/page-dialogs.js`), not the browser's blocking `confirm()` and
+  `alert()` dialogs.
+- Codex sub-agent tracking tolerates other session-file layouts and record
+  casing, and when Codex reported starting sub-agents whose session files it
+  couldn't read, the trace says so instead of showing them as if they did
+  nothing.
+- `memagent` harness runs report cancellation as `cooperative` and their cost
+  (`cost_reporting`).
+- Network **Full** now gives Codex live web search (and network access for
+  commands in editing runs), and a memagent run gets web access only then: its
+  agent's own internet provider, or MemoRizz's Tavily/Firecrawl key for the
+  run. With Network off, a memagent's web tools are hidden for the run.
+- The harness launch form greys out harnesses that can't honour the chosen
+  Network or tool lists, says why, and explains what each setting gives each
+  harness. The stage editor's fields use the app's field style.
+- Codex runs keep sub-agents off unless **Subagents** is on
+  (`features.multi_agent`). With it on, the run is not `--ephemeral`, because
+  Codex sub-agents need a saved parent session; the session lands in the
+  usual `~/.codex/sessions`.
+- The launch form warns when **Model override** names a model that only
+  another harness lists (for example a Codex model on Claude Code).
+- The harness launch form shows only the options that apply to the chosen
+  harness(es): the saved agent only for memagent, tool lists only for
+  harnesses that take them, cost and token limits only where they are
+  reported, the isolation backend only when a harness needs a wrapper, and so
+  on. Hidden options are left out of the launch.
+- Each run's model is the one its harness reported running; memagent shows its
+  agent's model instead of a requested one it ignores.
+
+- Ollama's default context window is the model's full length when its
+  attention cache, estimated from the daemon's model metadata, fits in a
+  quarter of this machine's RAM; otherwise the largest standard size that
+  fits, at least 16,384 tokens (8,192 when the length is unknown; 16,384 for a
+  daemon on another machine). On a 16 GB Mac, gemma4 gets 131,072 and
+  qwen2.5:7b 32,768, so switching models changes the window. Only windows you set are saved with an agent or
+  its model settings, and a window in `llm_config` takes precedence over a cap
+  saved by earlier releases. `context_window_exceeded` now logs the tokens
+  needed and the budget.
+- Skill search uses the skills.sh directory, ranked by installs, and needs no
+  `GITHUB_TOKEN`; GitHub code search is the fallback. The page is now called
+  **Skills**.
+- The playground no longer writes MCP servers: its settings list the agent's
+  servers and attach new ones through MCP Connections, which keeps credentials
+  encrypted. The unused inline server editor is gone.
+- Duplicated code now lives in one place: agents are rebuilt from storage by
+  `MemAgentModel.from_document()`, the LLM classes share tool-metadata helpers
+  (`memorizz.llms.tool_metadata`), the worker and the UI's Run now share one
+  automation job runner, trace metadata fields are defined once
+  (`TRACE_METADATA_FIELDS`), and UI pages share `escapeHtml` and their icons.
+- The LongMemEval script and the accuracy probes require an Oracle password
+  instead of defaulting to a published one.
+
+### Fixed
+
+- A cost or token limit made every saved-MemAgent harness run (alone, in a
+  plan or in a comparison) fail as "not ready:
+  cost_budget_telemetry_unsupported", with the wrong fix ("Create and save a
+  MemAgent"). The harness reports whole-run tokens, and cost whenever the model
+  can be priced, so limits now apply:
+  - a local model (Ollama, MLX, Hugging Face) has no API charges, so a cost
+    limit always holds;
+  - a cloud model MemoRizz has no price for is refused when the run starts
+    (`cost_budget_unpriced_model`), with what to change.
+- "Not ready" errors say why in words, with the code in brackets, and give the
+  fix for that reason. A harness's own setup advice appears only when setup is
+  what's missing.
+- Agent harnesses: searching runs by a MemAgent's name found nothing. Runs are
+  now searchable by it, the Harness column shows it, and the run details and
+  Compare view show it only on MemAgent runs (a comparison copies `agent_id`
+  onto every lane).
+
+- Ollama embeddings ignored `OLLAMA_HOST` and always used
+  `http://localhost:11434`; they now read it, like the Ollama LLM provider
+  (an explicit `base_url` still wins).
+
+- The playground rendered model output as raw HTML, so a reply could run
+  script in the page. The playground and harness chat now share one safe
+  Markdown renderer: raw HTML shows as text, only web, mail and in-app links
+  stay links, and remote images become links instead of loading.
+- The MemoRizz MCP server's `memorizz_list_agents` failed with an internal
+  error when an agent had a persona; `memorizz_list_connected_tools` with no
+  agent attached now returns an empty list and says how to pick one; a harness
+  run's MCP server opens the memory store the UI is connected to.
+- Workflow graph arrowheads take their edge's colour instead of white.
+- A comparison's single model override went to every harness, so a Codex
+  model failed on Claude Code; models are now chosen per harness.
+- Claude Code runs record whole-run token usage across the models it used
+  (`usage.models`), not only its last model call, so token budgets and
+  comparisons see the real totals.
+- A MemAgent harness run recorded each long tool result dozens of times (once
+  per streamed piece); it records it once, whole.
+- A subagent's trace step lasts until its last nested step, not until its
+  launching call returned (Claude Code's showed about 15 ms).
+- Token counts such as `thinking_tokens` and `cache_write_tokens` were
+  redacted as if they were secrets.
+- The Oracle provider failed with ORA-00600 [unable to load XDB library] when
+  starting on an existing schema on the Oracle AI Database Free lite image: it
+  read VECTOR dimensions through `DBMS_METADATA`, which needs XDB. It now reads
+  them from the driver's column metadata, then `VECTOR_INFO`, and uses
+  `DBMS_METADATA` only as a last resort.
+- A Hermes run from the UI could break the Hermes install: its per-run home
+  outside `~/.hermes` made Hermes re-point its launcher there before the home
+  was deleted.
+
+- The harnesses page reloaded itself every few seconds while work ran, which
+  flickered and reset scrolling. It now updates in place; running items show a
+  spinner and a live elapsed time.
+- Codex runs had no cost and showed "Adapter default" as the model: Codex was
+  run on an unnamed default model. MemoRizz now passes the first model in
+  Codex's local catalog and estimates cost at OpenAI list rates (≈).
+- Comparisons and plans including `memagent` failed with `agent_id_required`
+  when no agent was chosen. The agent last used with a harness (else the newest)
+  is filled in, and with none saved the request is refused before it starts.
+- Prompt caching held less than the layout promised. Measured over six turns
+  it rose from 73% to 93% of input tokens read from cache on Claude Sonnet 5
+  (writes 24.9k → 9.9k tokens) and from 71% to 84% on `gpt-4.1-mini`:
+  - the streamed answer call dropped the tool list, which starts the prompt,
+    so it could not reuse the turn's cache and re-wrote the whole history
+    every turn. It now sends the same tools; tool calls made while answering
+    are never run;
+  - on Anthropic, notes added mid-turn (host notes and completion-policy
+    retries) were merged into the system prompt, changing it and
+    invalidating the cached conversation. They are now appended to the user
+    turn they follow; reviewed skills placed before the turn keep their
+    system block;
+  - each newly relevant tool changed the tool list and re-wrote the whole
+    prompt. Agents whose tool schemas fit in
+    `ContextPolicy.stable_tool_list_tokens` (default 6,000) now send every
+    tool every turn.
+
+  These apply to every SDK entry point (`run()`, `run_stream_events()`,
+  `arun_stream_events()`, the deprecated `run_stream()`) and the CLI and UI;
+  `agent.run()` measured 88% (Claude) and 85% (OpenAI) over the same six turns.
+- An agent asked to create a Notion page never saw `notion-create-pages`: tool
+  matching counted substrings, so filler like "it", "me" and "can" matched
+  inside long descriptions and outranked the tool the request named. Matching
+  now uses whole words (plurals folded), ignores chat filler, and weighs words
+  in a tool's name three times those in its description.
+- Calling an undisclosed or misnamed tool now returns something the model can
+  act on: an exact name is disclosed with its schema, and a near miss
+  (`notion-create-page`) gets the real name (`unknown_tool`).
+- MCP tools called by name (`server__tool`) did not ask for approval before
+  changing data; only `mcp_call_tool` did. The MCP layer then filed a proposal
+  the playground never showed. They now pause the run for approval like the
+  facade, and read-only annotations are read from the cached tool list.
+- MCP arguments are checked against the tool's input schema before a call or
+  an approval request, with two certain repairs (a documented field moved into
+  its sibling object, wrapped text unwrapped) and otherwise a precise error.
+- The playground never drew the approval card for streamed replies (it was
+  handed the proposal instead of the event), so a paused write had no way to
+  be approved from the chat. The card now appears, loads and shows the exact
+  arguments that will be sent, and the paused tool reads "Waiting for
+  approval" rather than "Failed".
+- After an approval, the resumed reply no longer receives the streamed run's
+  instruction to call `memorizz_finalize_answer`, a tool the continuation does
+  not offer; models wrote about the missing tool instead of answering.
+- A turn failed with "Missing credentials" when no OpenAI key was set,
+  because recording the turn's workflow embedded it with the default OpenAI
+  provider. The global embedding default now honours
+  `MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER`, `_MODEL` and `_DIMENSIONS` (as the
+  Oracle provider already did, e.g. `ollama` with `nomic-embed-text`), and a
+  workflow is stored without an embedding when none is available.
+- The playground's stop button is red with a stop icon, and the Settings
+  tab's Save button stays in view with an unsaved-changes note instead of
+  sitting below the whole form. The Memory tab's cards inset their contents
+  and empty-state text to line up with the card titles.
+- `FileSystemProvider.list_tool_logs()` and `OracleProvider.list_tool_logs()`
+  returned nothing when no `user_id` was given: their own "not supplied"
+  marker reached the shared filter, which treated it as a user to match.
+- The context panel read a stored agent's legacy, unmarked window cap even
+  where loading the agent would use the window in its LLM configuration.
+- A playground reply could vanish while streaming: a conversation load still
+  in flight (for example right after **New chat**) redrew the chat over it.
+- Streamed replies no longer fail when a model calls a tool after tools are
+  disabled for the answer (seen with gemma4 on Ollama). The call is never run;
+  text already streamed stands, otherwise the model is asked again (up to
+  twice). A reply with no text and no tool call is re-requested once before
+  failing with `empty_response`.
+- Playground Toolbox, Workflow, Entity and Summary cards used fixed dark
+  colours that turned grey in the light theme; they use the theme's surfaces.
+- A conversation's message count changed with the conversation open, because
+  the open view counted per-turn trace rows and the list did not.
+- "Auto-compacts at 80%" never triggered: the background summarizer watched
+  the measured request size, which history trimming keeps under 80%, and when
+  it ran it summarized every message including the latest. It is replaced by
+  auto-compaction (see Added).
+- The playground's context panel counted per-turn trace records as
+  conversation history, counted the tools twice (as "Toolbox memory"), and
+  used word counts. It now estimates the next request the way the agent
+  builds it and shows the last request's measured size.
+- A summary was lost when no embedding provider was available (for example no
+  OpenAI key with a local model); it is now stored without an embedding.
+- The playground's context panel showed a 128,000-token window for every
+  agent; it now shows the budget the agent really uses. Run stages read in
+  plain words ("Thinking…") instead of codes such as "provider first delta".
+- `entity_memory_upsert` failed with `unexpected keyword argument
+  'identity_key'` when a host added a canonical identity (OpenSpeech's
+  "remember this about me"). The manager now forwards it, and a stale
+  model-supplied `entity_id` defers to the canonical record.
+- `retrieve_tool_log_entry` said "not found" for logs from earlier turns: the
+  MongoDB and filesystem providers matched only their record ID, not the
+  `tool_log_id` the model is shown. New filesystem logs use one ID for both.
+- **Agents → Last created** did nothing on the filesystem backend: agents had
+  no creation time. They now record one and keep it across saves; older agents
+  use their file's creation time.
+- A streaming test could fail under parallel runs by checking for a progress
+  update before the client had read it.
+- **Authorize** on MCP Connections and `memorizz mcp login` could never start
+  OAuth sign-in: the 401 check ran before the OAuth provider saw the response.
+  Notion sign-in now starts. Servers that list tools anonymously and ask for
+  sign-in only on a call (Gmail, Google Calendar) start it with a read-only
+  call instead of reporting "already authenticated".
+- OAuth sign-in requests exactly the scopes configured on a connection. The MCP
+  SDK used to widen them to every scope the server advertises, which for Gmail
+  included full mailbox access.
+- Google's OAuth issuer (`https://accounts.google.com` against the
+  `https://accounts.google.com/` in its resource metadata) no longer fails the
+  SDK's exact-match check; only this bare-origin slash difference is accepted.
+- A provider that cannot register clients automatically now says to add an
+  OAuth client ID and secret, instead of returning its raw 404 page.
+- Creating an agent with a persona on the filesystem backend failed when the
+  persona could not be stored separately (`'dict' object has no attribute
+  'to_dict'`).
+- `SKILL.md` files take their name and description from YAML frontmatter;
+  before, the description was the frontmatter's `---` line.
+- Loading an agent from MongoDB dropped its tool-result, context, completion,
+  delegation, skill-retrieval and semantic-layer settings; the filesystem
+  backend dropped its completion policy. Every stored field now round-trips.
+- Starring an agent in the UI erased its meta-harness mode, default harness,
+  harness configuration, completion policy and application ID; saving agent
+  settings from the edit form or the playground dropped fields too. The UI now
+  updates only the fields a form changes.
+- An automation attempt's time limit never took effect: the worker waited for
+  the hung call anyway. The worker also now records the run's answer and
+  disables a job whose schedule can no longer be computed, as Run now did.
+- The playground's HTML escaping left quotes unescaped.
+- Claude Code runs could never search the web or use Glob and Grep: `--bare`
+  loads only Bash, Edit and Read. Builds with `--restricted` now load exactly
+  the policy's tools (including WebSearch and WebFetch with web access), with a
+  private per-run config directory; older builds keep `--bare`.
+- A missing or disallowed workspace reports the path problem and the allowed
+  workspace roots instead of a raw `[Errno 2]`.
+- `MetaHarness.close()` no longer closes the run store under a run that has
+  started but not yet written its final status, or that registered after
+  shutdown began.
+- Read-only stages of `run_plan()` no longer inherit an approval requirement
+  from an edit-mode base task.
+- Redaction keeps camelCase token counts such as `totalTokens` and numeric
+  `tokens` blocks.
 
 ## 0.12.0 — 2026-09-28
 

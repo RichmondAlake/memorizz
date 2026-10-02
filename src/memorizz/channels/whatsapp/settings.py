@@ -4,11 +4,9 @@
 
 """Manages global WhatsApp settings (active agent selection)."""
 
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ...enums import MemoryType
-from ...long_term.episodic.conversational_memory_unit import ConversationMemoryUnit
 
 
 class WhatsAppSettings:
@@ -39,30 +37,3 @@ class WhatsAppSettings:
 
         except Exception:
             return None
-
-    def set_active_agent_id(self, agent_id: str) -> None:
-        """Set the active WhatsApp agent."""
-        # Create a ConversationMemoryUnit to store the setting
-        setting_unit = ConversationMemoryUnit(
-            role="system",
-            content=agent_id,  # Store agent_id as content
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            memory_id=self.settings_memory_id,
-            thread_id="whatsapp_settings",
-        )
-
-        # Store the setting
-        self.provider.store(setting_unit.model_dump())
-
-    def clear_active_agent(self) -> None:
-        """Disable WhatsApp chat by clearing active agent."""
-        # Store empty string to indicate no active agent
-        setting_unit = ConversationMemoryUnit(
-            role="system",
-            content="",  # Empty content means no active agent
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            memory_id=self.settings_memory_id,
-            thread_id="whatsapp_settings",
-        )
-
-        self.provider.store(setting_unit.model_dump())

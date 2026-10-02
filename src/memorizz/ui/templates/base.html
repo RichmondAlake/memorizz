@@ -5,7 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="dark light">
     <title>{% block title %}Memorizz{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=32">
+    <script>
+        // Shared by page scripts: text made safe for HTML content and attributes.
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+            });
+        }
+        // Local-model rows (Settings and the playground) share these icons.
+        const ICON_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+        function trashIconSvg() {
+            return ICON_SVG + '<polyline points="3 6 5 6 21 6"></polyline>'
+                + '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>'
+                + '<path d="M10 11v6"></path><path d="M14 11v6"></path>'
+                + '<path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path></svg>';
+        }
+        function downloadIconSvg() {
+            return ICON_SVG + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>'
+                + '<polyline points="7 10 12 15 17 10"></polyline>'
+                + '<line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+        }
+    </script>
+    <link rel="stylesheet" href="/static/css/styles.css?v=38">
     {% block head %}{% endblock %}
     <link rel="stylesheet" href="/static/css/console.css?v=27">
 </head>
@@ -290,7 +311,7 @@
                             <path d="M12 2L2 19.5h20L12 2z"/>
                         </svg>
                     </span>
-                    <span>Vercel skills</span>
+                    <span>Skills</span>
                 </a>
 
                 <a href="/automations" class="nav-item {% if active_page == 'automations' %}active{% endif %}">
@@ -424,7 +445,7 @@
     {% endif %}
     {% endblock %}
 
-    <script src="/static/js/app.js?v=20" defer></script>
+    <script src="/static/js/app.js?v=21" defer></script>
     <script src="/static/js/monitor.js?v=1" defer></script>
     {% block scripts %}{% endblock %}
 </body>

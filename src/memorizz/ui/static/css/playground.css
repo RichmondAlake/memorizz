@@ -207,6 +207,109 @@ body.page-playground .main-content > * {
     display: none;
 }
 
+/* A conversation row: the tab plus rename/delete, shown on hover or focus. */
+.pg-rail .pg-thread-row {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+    border-radius: 8px;
+}
+
+.pg-rail .pg-thread-row:hover,
+.pg-rail .pg-thread-row:focus-within {
+    background: var(--bg-hover);
+}
+
+.pg-rail .pg-thread-row .playground-thread-tab {
+    flex: 1 1 auto;
+    padding-right: 58px;
+}
+
+.pg-rail .pg-thread-row .playground-thread-tab:hover {
+    background: transparent;
+}
+
+.pg-thread-actions {
+    position: absolute;
+    top: 50%;
+    right: 6px;
+    display: flex;
+    gap: 2px;
+    transform: translateY(-50%);
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+
+.pg-thread-row:hover .pg-thread-actions,
+.pg-thread-row:focus-within .pg-thread-actions,
+.pg-thread-row .playground-thread-tab.is-active ~ .pg-thread-actions {
+    opacity: 1;
+}
+
+.pg-thread-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.pg-thread-action:hover,
+.pg-thread-action:focus-visible {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.pg-thread-action.is-danger:hover,
+.pg-thread-action.is-danger:focus-visible {
+    color: var(--accent-danger);
+}
+
+.pg-thread-row.is-renaming .pg-thread-actions {
+    display: none;
+}
+
+.pg-thread-rename {
+    width: 100%;
+    min-width: 0;
+    margin: 4px 6px;
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent-primary);
+    border-radius: 6px;
+}
+
+.pg-thread-confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.pg-thread-confirm .btn {
+    padding: 2px 8px;
+    font-size: 12px;
+}
+
+.pg-thread-confirm .btn-danger {
+    color: #fff;
+    background: var(--pg-solid-red);
+    border-color: var(--pg-solid-red);
+}
+
 /* ---------- Chat column ---------- */
 
 .pg-main {
@@ -732,11 +835,22 @@ body.theme-light .pg-composer {
     opacity: 0.4;
 }
 
+/* Red while a reply streams, so it reads as "stop", not "send". The theme's
+   --accent-danger is a text colour, too light to fill behind a white icon. */
+.pg-app {
+    --pg-solid-red: #dc2626;
+}
+
 .pg-send.pg-stop {
-    color: var(--text-primary);
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    font-size: 11px;
+    color: #fff;
+    background: var(--pg-solid-red);
+    border: 0;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--pg-solid-red) 30%, transparent);
+}
+
+.pg-send.pg-stop:hover,
+.pg-send.pg-stop:focus-visible {
+    background: #b91c1c;
 }
 
 .pg-composer-hint {
@@ -810,6 +924,45 @@ body.theme-light .pg-composer {
 
 .pg-tab-panel[hidden] {
     display: none;
+}
+
+/* The settings form is long; its save bar stays in view. */
+#pg-panel-settings .playground-config-form .config-actions {
+    position: sticky;
+    bottom: -16px;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 16px -16px -16px;
+    padding: 12px 16px;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border-color);
+}
+
+.config-dirty {
+    color: var(--accent-warning);
+    font-size: 12px;
+}
+
+.config-dirty[hidden] {
+    display: none;
+}
+
+.token-model-note {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 11.5px;
+}
+
+.token-model-note button {
+    padding: 0;
+    color: var(--accent-primary);
+    background: none;
+    border: 0;
+    font: inherit;
+    cursor: pointer;
 }
 
 .pg-panel-intro {
@@ -916,7 +1069,26 @@ body.theme-light .pg-composer {
 }
 
 .pg-inspector .context-block {
-    margin-bottom: 8px;
+    margin-bottom: 12px;
+}
+
+.pg-inspector .context-block:last-child {
+    margin-bottom: 0;
+}
+
+/* Collapsible cards: content lines up with the title, not the card edge. */
+.pg-inspector .context-block-collapsible[open] > .context-block-title {
+    padding-bottom: 10px;
+}
+
+.pg-inspector .context-block-collapsible > .context-block-body,
+.pg-inspector .context-block-collapsible > [id^="context-"][id$="-container"] {
+    padding: 0 16px 16px;
+}
+
+.pg-inspector .context-block-collapsible .context-log-empty {
+    padding: 0;
+    line-height: 1.5;
 }
 
 .pg-inspector .playground-config-form {
@@ -1042,12 +1214,63 @@ body.theme-light .pg-composer {
         padding: 0 8px;
     }
 
-    .pg-topbar-title .pg-model-chip,
-    .pg-topbar-actions .favorite-form {
+    .pg-topbar-title .pg-model-chip {
         display: none;
     }
 
     .pg-composer-hint {
         display: none;
     }
+}
+
+.pg-rail .playground-thread-tab[hidden] {
+    display: none;
+}
+
+/* Harness delegates: folder and access for this conversation */
+.pg-hx-note {
+    margin: 0 0 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.pg-hx-active {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+}
+
+.pg-hx-active .btn {
+    margin-top: 10px;
+}
+
+.pg-hx-form {
+    display: grid;
+    gap: 8px;
+}
+
+.pg-hx-form .config-field {
+    margin: 0;
+}
+
+.pg-hx-form .btn {
+    justify-self: start;
+}
+
+.pg-hx-message {
+    margin: 0;
+    min-height: 1em;
+}
+
+.pg-hx-message.is-bad {
+    color: var(--accent-danger, #f87171);
+}
+
+.pg-hx-chip {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }

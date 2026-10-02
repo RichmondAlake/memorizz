@@ -5,11 +5,12 @@
 {% block head %}<link rel="stylesheet" href="/static/css/pages/learning.css?v=11">{% endblock %}
 
 {% block content %}
-{% from '_ui.html' import page_header, page_tabs, empty_state, id_chip %}
+{% from '_ui.html' import page_header, empty_state, id_chip %}
+{% from '_learning_tabs.html' import learning_tabs %}
 {% set s = view.summary %}
 {% set short_status = {'ready': 'Ready', 'failing': 'Failing', 'evidence': 'Needs evidence', 'promoted': 'Promoted'} %}
 {% set status_pill = {'ready': 'pill--success', 'failing': 'pill--danger', 'evidence': '', 'promoted': 'pill--info'} %}
-{% call page_header('Workflow trajectories', 'Tool runs grouped into trajectory classes, one tool path per agent. A class that meets all four promotion criteria can be distilled into a learned skill.', 'Continual learning', nav=page_tabs(learning_tabs, 'workflows', 'Continual learning views')) %}
+{% call page_header('Workflow trajectories', 'Tool runs grouped into trajectory classes, one tool path per agent. A class that meets all four promotion criteria can be distilled into a learned skill.', 'Continual learning', nav=learning_tabs('workflows')) %}
     <a class="btn" href="/memory/skills">View learned skills</a>
 {% endcall %}
 

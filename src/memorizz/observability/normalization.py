@@ -18,15 +18,15 @@ from .references import source_ids
 
 _USER_UNSET = object()
 
-# Retain the bounded metadata already captured by legacy MemAgent bundles.
-LEGACY_FIELDS = frozenset(
-    [
+# The structured attributes a MemAgent keeps on each trace event. Arbitrary
+# callback payloads must not become an accidental persistence channel.
+TRACE_METADATA_FIELDS = (
+    (
         "schema_version",
         "application_id",
         "agent_id",
         "run_id",
         "turn_id",
-        "task_id",
         "root_trace_id",
         "span_id",
         "parent_span_id",
@@ -58,6 +58,8 @@ LEGACY_FIELDS = frozenset(
         "prompt_cache_key",
         "prompt_cache_warning",
         "provider",
+        "persona_id",
+        "persona_version",
         "input_tokens",
         "output_tokens",
         "cached_tokens",
@@ -87,8 +89,6 @@ LEGACY_FIELDS = frozenset(
         "request_context_fingerprint",
         "request_context_key_count",
         "content_version",
-        "persona_id",
-        "persona_version",
         "grounding_status",
         "grounding_source",
         "grounding_excerpt_count",
@@ -107,6 +107,16 @@ LEGACY_FIELDS = frozenset(
         "writing_sample_count",
         "cache_enabled",
         "cache_bypass_reason",
+    )
+    + PRICING_FIELDS
+    + MEMORY_FIELDS
+)
+
+# Retain the bounded metadata already captured by legacy MemAgent bundles,
+# plus event identity and content fields older bundles stored inline.
+LEGACY_FIELDS = frozenset(TRACE_METADATA_FIELDS) | frozenset(
+    [
+        "task_id",
         "event_id",
         "trace_id",
         "trace_kind",
@@ -114,14 +124,13 @@ LEGACY_FIELDS = frozenset(
         "role",
         "title",
         "content",
-        "timestamp",
         "phase",
         "operation",
         "selection_ledger",
         "input_refs",
         "output_refs",
     ]
-) | frozenset(PRICING_FIELDS + MEMORY_FIELDS)
+)
 
 
 def timestamp(value: Any) -> str:

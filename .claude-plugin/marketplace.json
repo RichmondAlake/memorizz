@@ -1,0 +1,18 @@
+{
+  "name": "memorizz",
+  "owner": {
+    "name": "Richmond Alake",
+    "url": "https://github.com/RichmondAlake"
+  },
+  "metadata": {
+    "description": "MemoRizz plugins: durable project memory for coding agents."
+  },
+  "plugins": [
+    {
+      "name": "memorizz",
+      "source": "./plugins/claude-code/memorizz",
+      "description": "Durable, searchable project memory for Claude Code, shared with Codex and your MemoRizz agents.",
+      "category": "productivity"
+    }
+  ]
+}

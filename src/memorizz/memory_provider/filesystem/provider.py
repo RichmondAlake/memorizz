@@ -13,7 +13,7 @@ import time
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover - optional dependency
     np = None
 
 from ...enums.memory_type import MemoryType
+from ..base import _UNSET as _ANY_USER
 from ..base import MemoryProvider, MemoryProviderCapabilities, filter_tool_log_rows
 
 logger = logging.getLogger(__name__)
@@ -245,7 +246,14 @@ class FileSystemProvider(MemoryProvider):
         if memory_id:
             document.setdefault("memory_id", memory_id)
 
-        record_id = str(document.get("_id") or document.get("id") or uuid.uuid4())
+        # A tool log's own tool_log_id doubles as its record ID, so either ID
+        # the model has seen finds it.
+        natural_id = (
+            document.get("tool_log_id") if memory_type == MemoryType.TOOL_LOG else None
+        )
+        record_id = str(
+            document.get("_id") or document.get("id") or natural_id or uuid.uuid4()
+        )
         document["_id"] = record_id
         document["id"] = record_id
 
@@ -417,6 +425,12 @@ class FileSystemProvider(MemoryProvider):
                 metadata = self._indexes.get(memory_type, {})
                 if id in metadata:
                     return self._read_document(memory_type, id)
+                if memory_type == MemoryType.TOOL_LOG:
+                    # Logs written before tool_log_id became the record ID.
+                    for doc_id in list(metadata):
+                        document = self._read_document(memory_type, doc_id)
+                        if document and document.get("tool_log_id") == id:
+                            return document
         return None
 
     def retrieve_by_name(
@@ -531,7 +545,8 @@ class FileSystemProvider(MemoryProvider):
         return filter_tool_log_rows(
             rows,
             memory_id=memory_id,
-            user_id=user_id,
+            # The shared filter only knows its own "not supplied" marker.
+            user_id=_ANY_USER if user_id is _FS_UNSET else user_id,
             thread_id=thread_id,
             limit=limit,
         )
@@ -636,8 +651,15 @@ class FileSystemProvider(MemoryProvider):
         memagent_dict["agent_id"] = agent_id
         memagent_dict["_id"] = agent_id
         memagent_dict["id"] = agent_id
+        # Saves replace the whole document, so carry the creation time over;
+        # the agents list sorts by it.
+        existing = self._read_document(MemoryType.MEMAGENT, agent_id) or {}
+        now = datetime.now(timezone.utc).isoformat()
+        memagent_dict["created_at"] = existing.get("created_at") or now
+        memagent_dict["updated_at"] = now
 
-        if memagent.persona:
+        # The UI passes the persona as a dict; the SDK passes a Persona.
+        if memagent.persona and hasattr(memagent.persona, "to_dict"):
             memagent_dict["persona"] = memagent.persona.to_dict()
 
         tools = memagent_dict.get("tools")
@@ -653,67 +675,6 @@ class FileSystemProvider(MemoryProvider):
         self._write_document(MemoryType.MEMAGENT, agent_id, memagent_dict)
         self._sync_agent_tools_to_toolbox(agent_id, tools)
         return agent_id
-
-    def _sync_agent_tools_to_toolbox(
-        self, agent_id: str, tools: Optional[List[Dict[str, Any]]]
-    ) -> None:
-        """Mirror an agent's tool list into the TOOLBOX store.
-
-        Deletes any existing TOOLBOX rows for this ``agent_id`` before
-        re-inserting the current set so tools removed from the agent
-        don't linger in the playground's toolbox-memory pane.
-        ``tools=None`` is treated as "caller didn't include tools in this
-        save" and is a no-op — only an explicit empty list clears rows.
-        """
-        if not agent_id or tools is None:
-            return
-
-        try:
-            for doc in list(self.list_all(MemoryType.TOOLBOX) or []):
-                if not isinstance(doc, dict):
-                    continue
-                if doc.get("agent_id") != agent_id:
-                    continue
-                doc_id = doc.get("_id") or doc.get("id")
-                if doc_id:
-                    self.delete_by_id(str(doc_id), MemoryType.TOOLBOX)
-        except Exception as exc:
-            logger.warning(
-                "Failed to clear toolbox rows for agent %s: %s", agent_id, exc
-            )
-            return
-
-        if not tools:
-            return
-
-        for tool_meta in tools:
-            if not isinstance(tool_meta, dict):
-                continue
-            raw_id = tool_meta.get("_id") or tool_meta.get("name")
-            if not raw_id:
-                continue
-            tool_doc = {
-                "_id": f"{agent_id}:{raw_id}",
-                "tool_id": f"{agent_id}:{raw_id}",
-                "name": tool_meta.get("name"),
-                "description": tool_meta.get("description", ""),
-                "signature": tool_meta.get("signature", ""),
-                "docstring": tool_meta.get(
-                    "docstring", tool_meta.get("description", "")
-                ),
-                "tool_type": tool_meta.get("type", "function"),
-                "parameters": tool_meta.get("parameters", {}),
-                "agent_id": agent_id,
-            }
-            try:
-                self.store(tool_doc, memory_store_type=MemoryType.TOOLBOX)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to sync tool %s for agent %s to TOOLBOX: %s",
-                    tool_doc.get("name"),
-                    agent_id,
-                    exc,
-                )
 
     def delete_memagent(self, agent_id: str, cascade: bool = False) -> bool:
         if cascade:
@@ -735,135 +696,19 @@ class FileSystemProvider(MemoryProvider):
         return self.update_by_id(agent_id, {"memory_ids": []}, MemoryType.MEMAGENT)
 
     def list_memagents(self) -> List["MemAgentModel"]:
-        documents = self.list_all(MemoryType.MEMAGENT)
-        agents: List["MemAgentModel"] = []
-        if not documents:
-            return agents
-
-        from ...long_term.semantic.persona.persona import Persona
         from ...memagent import MemAgentModel
 
-        for doc in documents:
-            agent = MemAgentModel(
-                name=doc.get("name"),
-                application_id=doc.get("application_id"),
-                instruction=doc.get("instruction"),
-                application_mode=doc.get("application_mode", "assistant"),
-                memory_types=doc.get("memory_types"),
-                max_steps=doc.get("max_steps"),
-                memory_ids=doc.get("memory_ids") or [],
-                agent_id=doc.get("agent_id") or doc.get("_id"),
-                is_favorite=bool(doc.get("is_favorite", False)),
-                tools=doc.get("tools"),
-                tool_access=doc.get("tool_access"),
-                knowledge_base_ids=doc.get("knowledge_base_ids"),
-                delegates=doc.get("delegates"),
-                llm_config=doc.get("llm_config"),
-                embedding_config=doc.get("embedding_config"),
-                semantic_cache=bool(doc.get("semantic_cache", False)),
-                semantic_cache_config=doc.get("semantic_cache_config"),
-                tool_result_policy=doc.get("tool_result_policy"),
-                context_policy=doc.get("context_policy"),
-                retrieval_policy=doc.get("retrieval_policy"),
-                delegation_config=doc.get("delegation_config"),
-                skill_retrieval=bool(doc.get("skill_retrieval", False)),
-                skill_retrieval_config=doc.get("skill_retrieval_config"),
-                semantic_layer_config=doc.get("semantic_layer_config"),
-                context_window_tokens=doc.get("context_window_tokens"),
-                sandbox_provider=doc.get("sandbox_provider"),
-                browser_control=doc.get("browser_control"),
-                meta_harness=bool(doc.get("meta_harness", False)),
-                meta_harness_mode=doc.get("meta_harness_mode"),
-                default_harness=doc.get("default_harness", "auto"),
-                harness_config=doc.get("harness_config"),
-                internet_access_provider=doc.get("internet_access_provider"),
-                internet_access_config=doc.get("internet_access_config"),
-                skills_marketplace_provider=doc.get("skills_marketplace_provider"),
-                skills_marketplace_config=doc.get("skills_marketplace_config"),
-                skill_paths=doc.get("skill_paths"),
-                mcp_servers=doc.get("mcp_servers"),
-                self_aware=bool(doc.get("self_aware", False)),
-                continual_learning=bool(doc.get("continual_learning", False)),
-                continual_learning_config=doc.get("continual_learning_config"),
-                learning_control_plane=bool(doc.get("learning_control_plane", False)),
-                learning_control_plane_config=doc.get("learning_control_plane_config"),
-                self_aware_config=doc.get("self_aware_config"),
-                automations_enabled=bool(doc.get("automations_enabled", True)),
-                default_timezone=doc.get("default_timezone"),
-                whatsapp_enabled=bool(doc.get("whatsapp_enabled", False)),
-                whatsapp_config=doc.get("whatsapp_config"),
-                memory_provider=self,
-            )
-
-            persona_data = doc.get("persona")
-            if persona_data:
-                agent.persona = Persona.from_dict(persona_data)
-            agents.append(agent)
-        return agents
+        documents = self.list_all(MemoryType.MEMAGENT) or []
+        return [MemAgentModel.from_document(doc) for doc in documents]
 
     def retrieve_memagent(self, agent_id: str) -> Optional["MemAgentModel"]:
         document = self.retrieve_by_id(agent_id, MemoryType.MEMAGENT)
         if not document:
             return None
 
-        from ...long_term.semantic.persona.persona import Persona
         from ...memagent import MemAgentModel
 
-        memagent = MemAgentModel(
-            name=document.get("name"),
-            application_id=document.get("application_id"),
-            instruction=document.get("instruction"),
-            application_mode=document.get("application_mode", "assistant"),
-            memory_types=document.get("memory_types"),
-            max_steps=document.get("max_steps"),
-            memory_ids=document.get("memory_ids") or [],
-            agent_id=document.get("agent_id") or document.get("_id"),
-            is_favorite=bool(document.get("is_favorite", False)),
-            tools=document.get("tools"),
-            tool_access=document.get("tool_access"),
-            knowledge_base_ids=document.get("knowledge_base_ids"),
-            delegates=document.get("delegates"),
-            llm_config=document.get("llm_config"),
-            embedding_config=document.get("embedding_config"),
-            semantic_cache=bool(document.get("semantic_cache", False)),
-            semantic_cache_config=document.get("semantic_cache_config"),
-            tool_result_policy=document.get("tool_result_policy"),
-            context_policy=document.get("context_policy"),
-            retrieval_policy=document.get("retrieval_policy"),
-            delegation_config=document.get("delegation_config"),
-            skill_retrieval=bool(document.get("skill_retrieval", False)),
-            skill_retrieval_config=document.get("skill_retrieval_config"),
-            semantic_layer_config=document.get("semantic_layer_config"),
-            context_window_tokens=document.get("context_window_tokens"),
-            sandbox_provider=document.get("sandbox_provider"),
-            browser_control=document.get("browser_control"),
-            meta_harness=bool(document.get("meta_harness", False)),
-            meta_harness_mode=document.get("meta_harness_mode"),
-            default_harness=document.get("default_harness", "auto"),
-            harness_config=document.get("harness_config"),
-            internet_access_provider=document.get("internet_access_provider"),
-            internet_access_config=document.get("internet_access_config"),
-            skills_marketplace_provider=document.get("skills_marketplace_provider"),
-            skills_marketplace_config=document.get("skills_marketplace_config"),
-            skill_paths=document.get("skill_paths"),
-            mcp_servers=document.get("mcp_servers"),
-            self_aware=bool(document.get("self_aware", False)),
-            continual_learning=bool(document.get("continual_learning", False)),
-            continual_learning_config=document.get("continual_learning_config"),
-            learning_control_plane=bool(document.get("learning_control_plane", False)),
-            learning_control_plane_config=document.get("learning_control_plane_config"),
-            self_aware_config=document.get("self_aware_config"),
-            automations_enabled=bool(document.get("automations_enabled", True)),
-            default_timezone=document.get("default_timezone"),
-            whatsapp_enabled=bool(document.get("whatsapp_enabled", False)),
-            whatsapp_config=document.get("whatsapp_config"),
-            memory_provider=self,
-        )
-
-        persona_data = document.get("persona")
-        if persona_data:
-            memagent.persona = Persona.from_dict(persona_data)
-        return memagent
+        return MemAgentModel.from_document(document)
 
     def supports_entity_memory(self) -> bool:
         return True
@@ -1036,6 +881,18 @@ class FileSystemProvider(MemoryProvider):
         try:
             with file_path.open("r", encoding="utf-8") as handle:
                 doc = json.load(handle)
+            if (
+                memory_type == MemoryType.MEMAGENT
+                and isinstance(doc, dict)
+                and not doc.get("created_at")
+            ):
+                # Agents saved before created_at was recorded: use the file's
+                # creation time (macOS/BSD), else its last write.
+                stat = file_path.stat()
+                created = getattr(stat, "st_birthtime", None) or stat.st_mtime
+                doc["created_at"] = datetime.fromtimestamp(
+                    created, timezone.utc
+                ).isoformat()
             # Backward compat: migrate old conversation_id → thread_id on read
             if "conversation_id" in doc and "thread_id" not in doc:
                 doc["thread_id"] = doc.pop("conversation_id")

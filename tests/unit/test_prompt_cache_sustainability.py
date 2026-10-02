@@ -332,6 +332,9 @@ def test_native_harness_reports_whole_run_usage_so_budgets_apply():
         thread_id=None,
         user_id=None,
         context={},
+        permissions=SimpleNamespace(
+            network="none", to_dict=lambda: {"network": "none"}
+        ),
         budget=SimpleNamespace(
             max_input_tokens=5000, max_output_tokens=None, max_cost_usd=None
         ),

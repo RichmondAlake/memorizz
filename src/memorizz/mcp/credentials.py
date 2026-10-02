@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import threading
@@ -250,8 +249,3 @@ class MCPOAuthTokenStorage:
                 )
             },
         )
-
-
-def environment_fernet_key() -> str:
-    """Generate a valid key for operators configuring hosted deployments."""
-    return base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")

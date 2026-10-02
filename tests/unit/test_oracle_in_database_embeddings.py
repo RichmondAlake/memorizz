@@ -287,3 +287,107 @@ def test_oracle_provider_uses_in_database_adapter_by_default(monkeypatch):
     )
     adapter.ensure_model.assert_called_once_with()
     set_global.assert_called_once_with(adapter)
+
+
+class _DimensionCursor:
+    """Answers the dimension queries the way a given database and driver would."""
+
+    def __init__(self, *, driver_dims="missing", vector_info="missing", ddl=None):
+        self.driver_dims = driver_dims
+        self.vector_info = vector_info
+        self.ddl = ddl
+        self.sql = []
+        self.description = None
+        self._rows = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(" ".join(sql.split()))
+        text = " ".join(sql.split())
+        if text.startswith("SELECT table_name, column_name FROM all_tab_columns"):
+            self._rows = [("TOOLBOX", "EMBEDDING"), ("FLEX", "EMBEDDING")]
+        elif "WHERE 1 = 0" in text:
+            table = text.split(".")[1].split('"')[1]
+            dims = 384 if table == "TOOLBOX" else None
+            info = (
+                SimpleNamespace()
+                if self.driver_dims == "missing"
+                else SimpleNamespace(vector_dimensions=dims)
+            )
+            self.description = [info]
+            self._rows = []
+        elif "vector_info" in text:
+            if self.vector_info == "missing":
+                raise RuntimeError("ORA-00904: VECTOR_INFO: invalid identifier")
+            info = (
+                "VECTOR(384,FLOAT32,DENSE)"
+                if params["table_name"] == "TOOLBOX"
+                else "VECTOR(*,*,DENSE)"
+            )
+            self._rows = [(info,)]
+        elif "DBMS_METADATA" in text:
+            if self.ddl is None:
+                raise RuntimeError(
+                    "ORA-00600: internal error code, arguments: [unable to load XDB library]"
+                )
+            dims = "384" if params["table_name"] == "TOOLBOX" else "*"
+            self._rows = [
+                (
+                    f'CREATE TABLE "M"."{params["table_name"]}" ("EMBEDDING" VECTOR({dims}, FLOAT32))',
+                )
+            ]
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def close(self):
+        pass
+
+
+def _provider_with(cursor):
+    provider = OracleProvider.__new__(OracleProvider)
+    provider.config = SimpleNamespace(schema="m", user="m")
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def cursor(self):
+            return cursor
+
+    provider._get_connection = lambda: _Conn()
+    return provider
+
+
+@pytest.mark.unit
+def test_vector_dimensions_come_from_the_driver_without_dbms_metadata():
+    # The Free lite image: DBMS_METADATA would fail with ORA-00600 (no XDB library).
+    cursor = _DimensionCursor(driver_dims="present", vector_info="missing", ddl=None)
+    assert _provider_with(cursor).get_vector_schema_dimensions() == {
+        "TOOLBOX.EMBEDDING": 384
+    }
+    assert not any("DBMS_METADATA" in sql for sql in cursor.sql)
+    assert any(
+        'SELECT "EMBEDDING" FROM "M"."TOOLBOX" WHERE 1 = 0' in sql for sql in cursor.sql
+    )
+
+
+@pytest.mark.unit
+def test_vector_dimensions_fall_back_to_vector_info_then_ddl():
+    # An older driver without column vector metadata reads VECTOR_INFO.
+    cursor = _DimensionCursor(driver_dims="missing", vector_info="present", ddl=None)
+    assert _provider_with(cursor).get_vector_schema_dimensions() == {
+        "TOOLBOX.EMBEDDING": 384
+    }
+    assert not any("DBMS_METADATA" in sql for sql in cursor.sql)
+    # A release without VECTOR_INFO still has the DDL route.
+    cursor = _DimensionCursor(driver_dims="missing", vector_info="missing", ddl="yes")
+    assert _provider_with(cursor).get_vector_schema_dimensions() == {
+        "TOOLBOX.EMBEDDING": 384
+    }
+    assert OracleProvider._dimension_from_vector_info("VECTOR(*,*,DENSE)") is None

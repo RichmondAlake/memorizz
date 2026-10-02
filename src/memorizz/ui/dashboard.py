@@ -25,6 +25,7 @@ from .helpers import (
     _list_agents,
     _unique_agents,
 )
+from .observability_view import format_age
 from .security import audit_trace_view
 from .state import _state
 from .trace_access import require_trace_permission, scoped_trace_filters
@@ -301,14 +302,7 @@ def format_usd(value: Any) -> str:
 def relative_time(value: Optional[datetime], now: datetime) -> str:
     if value is None:
         return "—"
-    delta = (now - value).total_seconds()
-    future = delta < 0
-    delta = abs(delta)
-    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
-        if delta >= size:
-            amount = f"{int(delta // size)}{unit}"
-            return f"in {amount}" if future else f"{amount} ago"
-    return "soon" if future else "just now"
+    return format_age((now - value).total_seconds())
 
 
 def sparkline_points(values: List[float], width: int = 120, height: int = 28) -> str:

@@ -11,6 +11,15 @@ better decisions across sessions.
 [Examples](examples/zero_to_hero/README.md) ·
 [Changelog](CHANGELOG.md)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/RichmondAlake/memorizz/main/docs/assets/screenshots/dashboard-dark.png">
+  <img alt="The MemoRizz agent dashboard: runs, success rate, run time, model calls, tokens and spend across every agent, a runs-over-time chart, and what needs attention." src="https://raw.githubusercontent.com/RichmondAlake/memorizz/main/docs/assets/screenshots/dashboard-light.png">
+</picture>
+
+*The agent dashboard in the local UI (`memorizz ui`): runs, success rate, run
+time, model calls, tokens and spend across every agent, and what needs
+attention.*
+
 ## Memory management
 
 Memory is the foundation: retain information, retrieve relevant context, and
@@ -44,7 +53,9 @@ Build persistent agents with `MemAgent` and `MemAgentBuilder`. Choose
 [model providers](docs/getting-started/model-providers.md).
 
 - **Tools and integrations:** Python functions, MCP servers, internet search,
-  governed browser control, sandboxes, and external skills.
+  governed browser control, sandboxes, and external skills. A
+  [tool call cache](docs/guides/context-efficiency.md#tool-call-cache) reuses
+  the results of repeated calls to tools that are safe to reuse.
 - **Coordination:** delegate work to specialist agents, share memory, and run
   scheduled automations.
 - **Interfaces:** use the Python SDK, interactive CLI, local web UI, or expose
@@ -55,8 +66,9 @@ or the [CLI guide](docs/getting-started/cli.md).
 
 ## Harness
 
-`MetaHarness` runs tasks through Codex, Claude Code, OpenHands, or native
-MemAgent workers. It carries memory scope and learning evidence across
+`MetaHarness` runs tasks through Codex, Claude Code, OpenHands, DeepSeek, pi,
+Hermes, or native MemAgent workers, and a MemAgent can hand parts of a request
+to delegates that run on those harnesses. It carries memory scope and learning evidence across
 harnesses while managing permissions, approvals, workspace isolation, budgets,
 cancellation, and host-side verification.
 
@@ -65,6 +77,32 @@ specialist tool. Inspect installed adapters with `memorizz harness doctor`.
 
 See the [MetaHarness guide](docs/guides/meta-harness.md) and
 [hands-on examples](examples/metaharness/README.md).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/RichmondAlake/memorizz/main/docs/assets/screenshots/harnesses-dark.png">
+  <img alt="The MemoRizz harness dashboard: launch a task on a harness, see which harnesses are ready on this machine, and follow plans and comparisons across Codex, Claude Code and MemAgents." src="https://raw.githubusercontent.com/RichmondAlake/memorizz/main/docs/assets/screenshots/harnesses-light.png">
+</picture>
+
+*The harness dashboard: run a memory-grounded task on one harness, chain
+harnesses into a plan, or compare them side by side, with approvals and
+verification.*
+
+### Memory for Codex and Claude Code
+
+MemoRizz is also a plugin for Codex and Claude Code. The agent starts each
+session with the project's facts and the last session's summary; each turn and
+a summary of each session are saved as episodic memory; and the agent can
+search past sessions, save and correct facts, record entities and load project
+documents. Both agents share the memory, locally or on a hosted MemoRizz MCP
+server for a team ([deploy/mcp-server](deploy/mcp-server/README.md)).
+
+```bash
+memorizz plugin install codex          # or: memorizz plugin install claude-code
+```
+
+Or `codex plugin marketplace add RichmondAlake/memorizz` /
+`claude plugin marketplace add RichmondAlake/memorizz`, then install
+`memorizz@memorizz`. See [MemoRizz in Codex and Claude Code](docs/guides/coding-agent-plugins.md).
 
 ## Continual learning and the intelligence plane
 

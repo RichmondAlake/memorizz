@@ -8,13 +8,13 @@ processes conversations, and measures performance across five core memory abilit
 
 Prerequisites:
 - Oracle Database 23ai or higher with AI Vector Search
-- Oracle user and schema set up (use examples/setup_oracle_user.py)
+- Oracle user and schema set up (run `memorizz oracle setup`)
 - OpenAI API key for LLM and embeddings
 
 Environment Variables:
 - OPENAI_API_KEY: Required for LLM and embeddings
 - ORACLE_USER: Oracle database user (default: memorizz_user)
-- ORACLE_PASSWORD: Oracle database password (default: SecurePass123!)
+- ORACLE_PASSWORD: Oracle database password (required)
 - ORACLE_DSN: Oracle connection string (default: localhost:1521/FREEPDB1)
 """
 
@@ -191,11 +191,13 @@ class LongMemEvalEvaluator:
         """Initialize Oracle memory provider."""
         # Get Oracle connection details from environment variables
         oracle_user = os.environ.get("ORACLE_USER", "memorizz_user")
-        oracle_password = os.environ.get("ORACLE_PASSWORD", "SecurePass123!")
+        oracle_password = os.environ.get("ORACLE_PASSWORD")
         oracle_dsn = os.environ.get("ORACLE_DSN", "localhost:1521/FREEPDB1")
         oracle_schema = os.environ.get("ORACLE_SCHEMA", oracle_user)
         openai_api_key = os.environ.get("OPENAI_API_KEY")
 
+        if not oracle_password:
+            raise ValueError("ORACLE_PASSWORD environment variable is required")
         if not openai_api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
 
@@ -858,7 +860,7 @@ def main():
 Environment Variables:
   OPENAI_API_KEY     Required: OpenAI API key for LLM and embeddings
   ORACLE_USER        Optional: Oracle database user (default: memorizz_user)
-  ORACLE_PASSWORD    Optional: Oracle database password (default: SecurePass123!)
+  ORACLE_PASSWORD    Required: Oracle database password
   ORACLE_DSN         Optional: Oracle connection string (default: localhost:1521/FREEPDB1)
         """,
     )

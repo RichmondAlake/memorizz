@@ -23,8 +23,7 @@ src/memorizz/
 │   │   ├── workflow/
 │   │   └── skillbox/
 │   └── episodic/
-│       ├── conversational_memory_unit.py
-│       └── summary_component.py
+│       └── conversational_memory_unit.py
 ├── short_term_memory/
 │   └── semantic_cache.py
 ├── coordination/

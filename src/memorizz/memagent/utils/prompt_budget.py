@@ -1,9 +1,12 @@
 """Conservative text budgeting at the complete model-request boundary."""
 
 import json
+import logging
 import math
 
 from ...llms.streaming import ProviderStreamError
+
+logger = logging.getLogger(__name__)
 
 
 def estimate_tokens(value):
@@ -57,4 +60,20 @@ def fit_prompt(messages, tools, context_window_tokens):
         if total <= budget:
             return [message for i, message in enumerate(messages) if i not in removed]
 
-    raise ProviderStreamError("context_window_exceeded")
+    # Instructions, tools and the current query alone do not fit. Say by how
+    # much, so the fix (a larger window) is obvious from the log or trace.
+    logger.warning(
+        "Request needs about %d tokens but the budget is %d (80%% of a %d-token "
+        "context window); raise context_window_tokens (num_ctx for Ollama)",
+        total,
+        budget,
+        context_window_tokens,
+    )
+    raise ProviderStreamError(
+        "context_window_exceeded",
+        {
+            "required_tokens": total,
+            "budget_tokens": budget,
+            "context_window_tokens": context_window_tokens,
+        },
+    )

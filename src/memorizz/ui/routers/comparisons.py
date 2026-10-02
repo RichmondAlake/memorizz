@@ -222,6 +222,27 @@ def run_library():
             created = 0
         accuracy = row.get("overall_accuracy")
         quality = accuracy / 100 if accuracy is not None else None
+        if row.get("benchmark") == "terminal-bench":
+            rows.append(
+                {
+                    "id": row["run_id"],
+                    "name": f"{row.get('harness') or 'Harness'} · Terminal-Bench 4.0",
+                    "kind": "harness",
+                    "status": row["status"],
+                    "created_at": created,
+                    "models": [row.get("model") or row.get("harness") or "Harness"],
+                    "completed": row.get("evaluated_samples"),
+                    "planned": row.get("num_samples"),
+                    "progress_unit": "tasks",
+                    "cost_usd": row.get("cost_usd"),
+                    "quality_label": "Tasks passed",
+                    "quality_min": quality,
+                    "quality_max": quality,
+                    "url": f"/evalground?run_id={row['run_id']}",
+                    "scope": "terminal-bench@4.0.0",
+                }
+            )
+            continue
         rows.append(
             {
                 "id": row["run_id"],

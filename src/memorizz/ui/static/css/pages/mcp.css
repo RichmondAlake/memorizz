@@ -254,7 +254,8 @@
 
 /* ---------- Add / edit panel ---------- */
 
-details.mcp-editor > summary {
+details.mcp-editor > summary,
+details.mcp-catalog > summary {
     flex-wrap: wrap;
     font-size: 15px;
 }
@@ -355,11 +356,8 @@ details.mcp-editor > summary {
 }
 
 .mcp-actions,
-.mcp-empty-actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
+details.mcp-catalog > .catalog {
+    margin-top: 12px;
 }
 
 @media (max-width: 640px) {

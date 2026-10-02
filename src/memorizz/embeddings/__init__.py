@@ -307,11 +307,37 @@ def get_embedding_manager() -> EmbeddingManager:
     """
     global _global_embedding_manager
     if _global_embedding_manager is None:
-        logger.info(
-            "No global embedding manager configured, using default OpenAI provider"
-        )
-        _global_embedding_manager = EmbeddingManager()
+        _global_embedding_manager = _default_embedding_manager()
     return _global_embedding_manager
+
+
+def _default_embedding_manager() -> EmbeddingManager:
+    """The provider named by MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER, else OpenAI.
+
+    Uses the same variables as the Oracle provider: _PROVIDER, _MODEL and
+    _DIMENSIONS, so a local setup (``ollama`` with ``nomic-embed-text``) needs
+    no OpenAI key.
+    """
+    import os
+
+    name = os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", "").strip().lower()
+    if name:
+        config: Dict[str, Any] = {}
+        model = os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_MODEL", "").strip()
+        if model:
+            config["model"] = model
+        dimensions = os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS", "").strip()
+        if dimensions.isdigit():
+            key = "output_dimension" if name == "voyageai" else "dimensions"
+            config[key] = int(dimensions)
+        try:
+            manager = EmbeddingManager(name, config)
+            logger.info("Using the default embedding provider: %s", name)
+            return manager
+        except ValueError as exc:
+            logger.warning("Ignoring MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER: %s", exc)
+    logger.info("No global embedding manager configured, using default OpenAI provider")
+    return EmbeddingManager()
 
 
 # Convenience functions for backward compatibility

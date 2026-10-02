@@ -3,7 +3,6 @@
 # See LICENSE file in the project root for full license information.
 
 from .episodic.conversational_memory_unit import ConversationMemoryUnit
-from .episodic.summary_component import SummaryComponent
 from .procedural.toolbox import Toolbox
 from .procedural.workflow import Workflow
 from .semantic.entity_memory import (
@@ -25,5 +24,4 @@ __all__ = [
     "Toolbox",
     "Workflow",
     "ConversationMemoryUnit",
-    "SummaryComponent",
 ]

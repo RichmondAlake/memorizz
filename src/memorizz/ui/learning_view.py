@@ -19,14 +19,6 @@ from ..long_term.procedural.skillbox import (
     calculate_shadow_readiness,
 )
 
-# Sibling views of the continual-learning area, as page_tabs() rows.
-LEARNING_TABS = [
-    ("/memory/workflows", "Workflow trajectories", "workflows"),
-    ("/memory/skills", "Learned skills", "skills"),
-    ("/learning-control-plane", "Control plane", "learning-control-plane"),
-    ("/persona-evolution", "Persona evolution", "persona-evolution"),
-]
-
 # Below this success rate a class or skill is shown as failing (red).
 LOW_SUCCESS = 0.5
 

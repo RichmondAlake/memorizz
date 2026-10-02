@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Model comparison · Evalground{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/comparisons.css"><link rel="stylesheet" href="/static/css/pages/evalground.css?v=1">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/comparisons.css?v=2"><link rel="stylesheet" href="/static/css/pages/evalground.css?v=1">{% endblock %}
 {% block content %}
 <div class="compare-page">
 {% from '_ui.html' import page_header, evalground_tabs %}
@@ -93,13 +93,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const results = document.getElementById("experiment-results");
   if (!tape || !results) return;
   const $ = (id) => document.getElementById(id);
-  const usd = (value) => {
-    if (value == null) return "Unknown";
-    if (value === 0) return "$0.00";
-    const size = Math.abs(value);
-    if (size >= 1) return "$" + value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    return "$" + value.toFixed(size >= 0.01 ? 4 : 6);
-  };
+  const usd = window.MemorizzFormat.usd; // app.js
   const group = (status) => ["queued", "running", "cancelling", "canceling"].includes(status) ? "active" : status === "completed" ? "good" : ["failed", "interrupted"].includes(status) ? "bad" : "warn";
   function paint(items) {
     tape.replaceChildren(...items.map(([label, value, tone, title, text]) => {

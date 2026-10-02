@@ -334,6 +334,31 @@ class TestMemAgentCore:
         assert "run_skill_script" in tool_names
 
     @pytest.mark.unit
+    def test_agent_skill_files_use_frontmatter_name_and_description(self, tmp_path):
+        """Agent Skills keep name and description in frontmatter, not a heading."""
+        skill_file = tmp_path / "gmail-triage" / "SKILL.md"
+        skill_file.parent.mkdir()
+        skill_file.write_text(
+            "---\nname: gmail-triage\ndescription: Summarise unread mail\n---\n"
+            "Steps for triage.\n",
+            encoding="utf-8",
+        )
+        untitled = tmp_path / "weekly-review" / "SKILL.md"
+        untitled.parent.mkdir()
+        untitled.write_text("Review the week.\n", encoding="utf-8")
+
+        agent = MemAgent(
+            instruction="Skill test", skill_paths=[str(skill_file), str(untitled)]
+        )
+
+        assert [skill["name"] for skill in agent.skills] == [
+            "gmail-triage",
+            "weekly-review",
+        ]
+        assert agent.skills[0]["description"] == "Summarise unread mail"
+        assert agent.skills[1]["description"] == "Review the week."
+
+    @pytest.mark.unit
     def test_run_skill_code_requires_sandbox(self, tmp_path):
         """Skill code execution should fail when sandbox is not configured."""
         skill_file = tmp_path / "math.skills.md"

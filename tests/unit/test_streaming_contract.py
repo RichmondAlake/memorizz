@@ -287,6 +287,15 @@ def test_policy_roundtrip_preserves_mode_and_cache_fingerprint():
     assert CompletionPolicy.from_value({"enabled": True}).delivery_mode == "buffered"
 
 
+def answer_phase(messages):
+    """The host accepted finalization: the next call writes the public answer."""
+    return any(
+        "Finalization accepted" in str(m.get("content"))
+        or "Tool evidence collection is complete" in str(m.get("content"))
+        for m in messages
+    )
+
+
 def test_tool_phase_never_becomes_public_answer(streaming_agent, monkeypatch):
     monkeypatch.setattr(
         streaming_agent,
@@ -302,7 +311,7 @@ def test_tool_phase_never_becomes_public_answer(streaming_agent, monkeypatch):
 
     def provider(messages, tools=None, **k):
         calls.append(tools)
-        if tools:
+        if not answer_phase(messages):
             yield {"type": "content", "content": "PRIVATE TOOL PHASE"}
             yield {
                 "type": "tool_calls",
@@ -324,8 +333,145 @@ def test_tool_phase_never_becomes_public_answer(streaming_agent, monkeypatch):
     events = list(streaming_agent.run_stream_events("hello"))
     assert_contract(events)
     assert events[-1]["status"] == "completed"
-    assert len(calls) == 2 and calls[-1] is None
+    # The answer call keeps the tool list, so the provider cache prefix holds.
+    assert len(calls) == 2 and calls[-1] == calls[0]
     assert "PRIVATE TOOL PHASE" not in json.dumps(events)
+
+
+def _stray_call(name="calendar__list_events"):
+    return {
+        "type": "tool_calls",
+        "response": tool_response(
+            [{"id": "stray", "name": name, "arguments": "{}"}], ""
+        ),
+    }
+
+
+def _finalizing_provider(final_attempts):
+    """Tool phase finalizes; each final attempt comes from ``final_attempts``."""
+    calls = []
+
+    def provider(messages, tools=None, **kwargs):
+        calls.append((tools, [m.get("content") for m in messages]))
+        if not answer_phase(messages):
+            yield {
+                "type": "tool_calls",
+                "response": tool_response(
+                    [
+                        {
+                            "id": "f",
+                            "name": "memorizz_finalize_answer",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "",
+                ),
+            }
+        else:
+            yield from final_attempts.pop(0)
+
+    return provider, calls
+
+
+def _with_a_tool(agent, monkeypatch):
+    monkeypatch.setattr(
+        agent,
+        "_build_llm_tools",
+        lambda *a, **k: [{"type": "function", "function": {"name": "lookup"}}],
+    )
+
+
+def test_final_answer_retries_when_the_model_calls_a_disabled_tool(
+    streaming_agent, monkeypatch
+):
+    _with_a_tool(streaming_agent, monkeypatch)
+    executed = []
+    monkeypatch.setattr(
+        streaming_agent,
+        "_execute_and_record_tool_call",
+        lambda *a, **k: executed.append(a),
+    )
+    provider, calls = _finalizing_provider(
+        [iter([_stray_call()]), text_provider("Here is your answer.")]
+    )
+    streaming_agent.model.generate_stream = provider
+    events = list(streaming_agent.run_stream_events("what's on today?"))
+
+    assert_contract(events)
+    assert events[-1]["status"] == "completed"
+    assert [e["delta"] for e in events if e["type"] == "answer.delta"] == [
+        "Here is your answer."
+    ]
+    assert executed == []  # the stray call never runs
+    retry_tools, retry_messages = calls[-1]
+    assert retry_tools == calls[0][0]
+    assert "Tools are disabled for this reply" in retry_messages[-1]
+
+
+def test_text_already_streamed_stands_when_a_tool_call_follows(
+    streaming_agent, monkeypatch
+):
+    _with_a_tool(streaming_agent, monkeypatch)
+    provider, calls = _finalizing_provider(
+        [iter([{"type": "content", "content": "Partly answered."}, _stray_call()])]
+    )
+    streaming_agent.model.generate_stream = provider
+    events = list(streaming_agent.run_stream_events("what's on today?"))
+
+    assert_contract(events)
+    assert events[-1]["status"] == "completed"
+    assert [e["delta"] for e in events if e["type"] == "answer.delta"] == [
+        "Partly answered."
+    ]
+    assert len(calls) == 2
+
+
+def test_repeated_disabled_tool_calls_still_fail(streaming_agent, monkeypatch):
+    _with_a_tool(streaming_agent, monkeypatch)
+    provider, calls = _finalizing_provider([iter([_stray_call()]) for _ in range(3)])
+    streaming_agent.model.generate_stream = provider
+    events = list(streaming_agent.run_stream_events("what's on today?"))
+
+    assert_contract(events)
+    assert events[-1]["status"] == "error"
+    assert "unexpected_tool_call_in_final_answer" in json.dumps(events[-1])
+    assert len(calls) == 4  # the tool phase, then three final attempts
+
+
+def test_an_empty_reply_is_requested_once_more(streaming_agent, monkeypatch):
+    monkeypatch.setattr("memorizz.memagent.core.time.sleep", lambda s: None)
+    replies = [iter([{"type": "done", "content": ""}]), text_provider("Answer.")]
+    calls = []
+
+    def provider(messages, tools=None, **kwargs):
+        calls.append(tools)
+        yield from replies.pop(0)
+
+    streaming_agent.model.generate_stream = provider
+    events = list(streaming_agent.run_stream_events("hello"))
+
+    assert_contract(events)
+    assert events[-1]["status"] == "completed"
+    assert [e["delta"] for e in events if e["type"] == "answer.delta"] == ["Answer."]
+    assert len(calls) == 2
+    assert any(e.get("stage") == "provider_retry" for e in events)
+
+
+def test_a_second_empty_reply_is_an_error(streaming_agent, monkeypatch):
+    monkeypatch.setattr("memorizz.memagent.core.time.sleep", lambda s: None)
+    calls = []
+
+    def provider(messages, tools=None, **kwargs):
+        calls.append(tools)
+        yield {"type": "done", "content": ""}
+
+    streaming_agent.model.generate_stream = provider
+    events = list(streaming_agent.run_stream_events("hello"))
+
+    assert_contract(events)
+    assert events[-1]["status"] == "error"
+    assert "empty_response" in json.dumps(events[-1])
+    assert len(calls) == 2
 
 
 def test_plain_tool_phase_answer_can_finish_without_a_finalizer_call(
@@ -345,14 +491,14 @@ def test_plain_tool_phase_answer_can_finish_without_a_finalizer_call(
         assert any(
             m.get("role") == "user" and query in m.get("content", "") for m in messages
         )
-        yield from text_provider("PRIVATE DRAFT" if tools else "323")
+        yield from text_provider("323" if answer_phase(messages) else "PRIVATE DRAFT")
 
     streaming_agent.model.generate_stream = provider
     events = list(streaming_agent.run_stream_events(query))
 
     assert_contract(events)
     assert events[-1]["status"] == "completed"
-    assert len(calls) == 2 and calls[-1] is None
+    assert len(calls) == 2 and calls[-1] == calls[0]
     assert "PRIVATE DRAFT" not in json.dumps(events)
     assert [e["delta"] for e in events if e["type"] == "answer.delta"] == ["323"]
 

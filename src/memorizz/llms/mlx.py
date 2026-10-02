@@ -22,17 +22,19 @@ Constraints:
   tools are passed.
 """
 
-import inspect
-import json
 import logging
 from typing import Any, Dict, Generator, List, Optional
 
-from .llm_provider import LLMProvider
+from .llm_provider import LLMProvider, ResponseMetadataMixin
+from .local_chat import LocalChatMixin, chat_prompt
+from .tool_metadata import SchemaPromptToolMetadataMixin
 
 logger = logging.getLogger(__name__)
 
 
-class MLXLLM(LLMProvider):
+class MLXLLM(
+    SchemaPromptToolMetadataMixin, LocalChatMixin, ResponseMetadataMixin, LLMProvider
+):
     """Run Apple-MLX-quantized causal LMs through ``mlx_lm``.
 
     Pre-quantized weights live under the ``mlx-community`` namespace on
@@ -111,7 +113,7 @@ class MLXLLM(LLMProvider):
 
         from mlx_lm import generate
 
-        prompt = self._build_prompt(messages)
+        prompt = chat_prompt(self._tokenizer, messages)
         sampler = self._build_sampler()
         self._last_usage = None
         self._last_response_metadata = {}
@@ -153,7 +155,7 @@ class MLXLLM(LLMProvider):
 
         from mlx_lm import stream_generate
 
-        prompt = self._build_prompt(messages)
+        prompt = chat_prompt(self._tokenizer, messages)
         sampler = self._build_sampler()
 
         self._last_usage = None
@@ -208,140 +210,9 @@ class MLXLLM(LLMProvider):
         yield {"type": "usage", "usage": self._last_usage}
         yield {"type": "done", "content": full}
 
-    def generate_text(self, prompt: str, instructions: Optional[str] = None) -> str:
-        messages: List[Dict[str, str]] = []
-        if instructions:
-            messages.append({"role": "system", "content": instructions})
-        messages.append({"role": "user", "content": prompt})
-        return self.generate(messages)
-
-    def get_last_response_metadata(self) -> Dict[str, Any]:
-        from .response_metadata import last_response_metadata
-
-        return last_response_metadata(self)
-
-    def get_last_usage(self) -> Optional[Dict[str, int]]:
-        return self._last_usage
-
-    def get_context_window_tokens(self) -> Optional[int]:
-        return self.context_window_tokens
-
-    # ------------------------------------------------------------------
-    # Tool/metadata helpers — mirror HuggingFaceLLM (text-only fallback)
-    # ------------------------------------------------------------------
-
-    def augment_docstring(self, docstring: str) -> str:
-        instructions = (
-            "You improve terse docstrings. Expand with helpful detail and examples."
-        )
-        return self.generate_text(docstring, instructions=instructions)
-
-    def generate_queries(self, docstring: str) -> List[str]:
-        prompt = (
-            "Generate three short example queries or tasks that would use the "
-            "following tool:\n\n"
-            f"{docstring}"
-        )
-        raw_output = self.generate_text(prompt)
-        lines = [line.strip(" -•") for line in raw_output.splitlines() if line.strip()]
-        return [line for line in lines if line]
-
-    def get_tool_metadata(self, func: Any) -> Dict[str, Any]:
-        from ..long_term.procedural.toolbox.tool_schema import ToolSchemaType
-
-        docstring = func.__doc__ or ""
-        signature = str(inspect.signature(func))
-        func_name = func.__name__
-
-        prompt = (
-            "You produce JSON metadata for Python functions.\n"
-            "The JSON must strictly follow this schema:\n"
-            "{"
-            '"type": "function", '
-            '"function": {'
-            '"name": str, '
-            '"description": str, '
-            '"parameters": [{"name": str, "description": str, "type": str, "required": bool}], '
-            '"required": [str], '
-            '"queries": [str]'
-            "}"
-            "}\n\n"
-            f"Function name: {func_name}\n"
-            f"Signature: {signature}\n"
-            f"Docstring: {docstring}\n"
-            "Return a JSON object only."
-        )
-
-        raw_output = self.generate_text(prompt)
-        metadata_dict = self._safe_json_parse(raw_output)
-        tool_schema = ToolSchemaType.model_validate(metadata_dict)
-        return tool_schema.model_dump()
-
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
-
-    def _build_prompt(self, messages: List[Dict[str, str]]) -> str:
-        """Format messages with the model's chat template when available.
-
-        Same logic as HuggingFaceLLM: prefer the tokenizer's Jinja
-        ``chat_template`` so the model sees the special tokens it was
-        trained on (and stops cleanly at the right EOS), and fold any
-        leading ``system`` message into the first user turn for
-        templates that reject the system role (Gemma).
-        """
-        tokenizer = self._tokenizer
-        chat_template = getattr(tokenizer, "chat_template", None)
-        if chat_template:
-            normalized = self._normalize_messages(messages)
-            try:
-                return tokenizer.apply_chat_template(
-                    normalized, tokenize=False, add_generation_prompt=True
-                )
-            except Exception as exc:
-                logger.debug(
-                    "apply_chat_template failed (%s); falling back to bracket prompt.",
-                    exc,
-                )
-
-        prompt_lines: List[str] = []
-        for message in messages:
-            role = (message.get("role") or "user").lower()
-            content = message.get("content", "")
-            if role in ("system", "developer"):
-                prompt_lines.append(f"[system]\n{content}\n")
-            elif role == "assistant":
-                prompt_lines.append(f"[assistant]\n{content}\n")
-            else:
-                prompt_lines.append(f"[user]\n{content}\n")
-        prompt_lines.append("[assistant]\n")
-        return "\n".join(prompt_lines)
-
-    @staticmethod
-    def _normalize_messages(
-        messages: List[Dict[str, str]],
-    ) -> List[Dict[str, str]]:
-        cleaned: List[Dict[str, str]] = []
-        pending_system: Optional[str] = None
-        for message in messages:
-            role = (message.get("role") or "user").lower()
-            content = message.get("content") or ""
-            if not content:
-                continue
-            if role in ("system", "developer"):
-                pending_system = (
-                    f"{pending_system}\n\n{content}" if pending_system else content
-                )
-                continue
-            if role not in ("user", "assistant", "tool"):
-                role = "user"
-            if pending_system and role == "user":
-                content = f"{pending_system}\n\n{content}"
-                pending_system = None
-            cleaned.append({"role": role, "content": content})
-        if pending_system and not cleaned:
-            cleaned.append({"role": "user", "content": pending_system})
-        return cleaned
 
     def _build_sampler(self):
         """Return an mlx-lm sampler matching configured temperature/top_p."""
@@ -367,15 +238,3 @@ class MLXLLM(LLMProvider):
             except Exception:
                 logger.debug("Falling back to whitespace token counting for MLXLLM")
         return max(1, len(text.split())) if text else 0
-
-    def _safe_json_parse(self, text: str) -> Dict[str, Any]:
-        snippet = text.strip()
-        start = snippet.find("{")
-        end = snippet.rfind("}")
-        if start != -1 and end != -1:
-            snippet = snippet[start : end + 1]
-        try:
-            return json.loads(snippet)
-        except json.JSONDecodeError as exc:
-            logger.error("Failed to parse JSON output: %s", snippet)
-            raise ValueError("LLM response was not valid JSON") from exc

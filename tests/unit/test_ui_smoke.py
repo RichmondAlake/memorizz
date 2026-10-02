@@ -28,7 +28,6 @@ from memorizz.ui import state  # noqa: E402
 from memorizz.ui.app import create_app  # noqa: E402
 from memorizz.ui.routers.traces import (  # noqa: E402
     _RUNTIME_TRACE_AGENT_ID,
-    _expand_trace_bundle,
     _thread_row_key,
 )
 
@@ -214,87 +213,6 @@ def test_unknown_memory_type_is_404(client, fs_provider):
     ):
         resp = client.get("/memory/nonexistent")
     assert resp.status_code == 404
-
-
-@pytest.mark.unit
-def test_trace_bundle_expands_into_timeline_events():
-    events = _expand_trace_bundle(
-        {
-            "role": "tool",
-            "timestamp": "2026-08-12T10:30:00+00:00",
-            "content": (
-                '{"type":"trace_bundle","version":1,"events":['
-                '{"trace_kind":"tool_call","title":"Tool Call · inventory_status",'
-                '"content":"{\\"region\\":\\"London\\"}","trace_id":"call-1",'
-                '"logical_tool_name":"inventory_status"},'
-                '{"trace_kind":"tool_result","title":"Tool Result · inventory_status",'
-                '"content":"{\\"units\\":21}","trace_id":"result:call-1",'
-                '"logical_tool_name":"inventory_status","success":true,'
-                '"outcome":"fallback","outcome_reason_code":"primary_timeout",'
-                '"fallback_provider":"replica","duration_ms":18.5}'
-                "]}"
-            ),
-        },
-        memory_id="erpa-course",
-        thread_id="thread-1",
-    )
-
-    assert events is not None
-    assert [event["kind"] for event in events] == ["tool_call", "tool_result"]
-    assert events[0]["title"] == "Tool Call · inventory_status"
-    assert events[1]["trace_id"] == "result:call-1"
-    assert events[1]["logical_tool_name"] == "inventory_status"
-    assert events[1]["success"] is True
-    assert events[1]["outcome"] == "fallback"
-    assert events[1]["outcome_reason_code"] == "primary_timeout"
-    assert events[1]["fallback_provider"] == "replica"
-    assert events[1]["duration_ms"] == 18.5
-    assert all(event["thread_id"] == "thread-1" for event in events)
-
-
-@pytest.mark.unit
-def test_trace_bundle_expands_context_and_cache_provenance_metadata():
-    events = _expand_trace_bundle(
-        {
-            "role": "tool",
-            "timestamp": "2026-08-20T10:30:00+00:00",
-            "content": json.dumps(
-                {
-                    "type": "trace_bundle",
-                    "version": 2,
-                    "events": [
-                        {
-                            "trace_kind": "context_provenance",
-                            "title": "Request context provenance",
-                            "content": '{"grounding_status":"ready"}',
-                            "canonical_page_type": "analysis",
-                            "canonical_page_id": "analysis-1",
-                            "canonical_title_fingerprint": "sha256:abc123",
-                            "thread_binding_status": "matched",
-                            "ownership_verified": True,
-                            "grounding_status": "ready",
-                            "grounding_source": "stored_text",
-                        },
-                        {
-                            "trace_kind": "cache_decision",
-                            "title": "Semantic cache · miss",
-                            "content": '{"cache_decision":"miss"}',
-                            "cache_decision": "miss",
-                            "cache_enabled": True,
-                        },
-                    ],
-                }
-            ),
-        },
-        memory_id="primary-user-1",
-        thread_id="analysis_analysis-1",
-    )
-
-    assert events is not None
-    assert events[0]["canonical_page_id"] == "analysis-1"
-    assert events[0]["canonical_title_fingerprint"] == "sha256:abc123"
-    assert events[0]["grounding_source"] == "stored_text"
-    assert events[1]["cache_decision"] == "miss"
 
 
 @pytest.mark.unit

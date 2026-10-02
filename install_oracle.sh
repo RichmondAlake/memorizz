@@ -1,1 +1,0 @@
-src/memorizz/scripts/install_oracle.sh

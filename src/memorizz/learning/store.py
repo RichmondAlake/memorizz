@@ -6,6 +6,7 @@ import json
 from collections import Counter
 from typing import Any, Dict, List, Mapping, Optional, Set
 
+from .._json import read_json_object
 from ..enums.memory_type import MemoryType
 from .models import LearningEvent, canonical_json, content_digest, utc_now
 
@@ -13,25 +14,6 @@ LEARNING_EVENT_RECORD = "learning_event"
 LEARNING_ARTIFACT_RECORD = "learning_artifact"
 LEARNING_CHECKPOINT_RECORD = "learning_checkpoint"
 LEARNING_TOMBSTONE_RECORD = "learning_tombstone"
-
-
-def _read_json(value: Any) -> Optional[Dict[str, Any]]:
-    if hasattr(value, "read"):
-        try:
-            value = value.read()
-        except Exception:
-            return None
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="replace")
-    if isinstance(value, Mapping):
-        return dict(value)
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 class LearningRecordConflictError(RuntimeError):
@@ -58,7 +40,7 @@ class LearningControlPlaneStore:
 
     @staticmethod
     def _payload(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-        payload = _read_json(row.get("content"))
+        payload = read_json_object(row.get("content"))
         if payload is None:
             return None
         payload.setdefault(
@@ -253,10 +235,6 @@ class LearningControlPlaneStore:
             )
             if item.get("target_id")
         }
-
-    def latest_checkpoint(self, *, stream_id: str) -> Optional[Dict[str, Any]]:
-        checkpoints = self.list_checkpoints(stream_id=stream_id, limit=100)
-        return checkpoints[-1] if checkpoints else None
 
     def statistics(
         self,

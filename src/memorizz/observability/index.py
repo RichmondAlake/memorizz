@@ -14,6 +14,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+from .._env_io import env_bool
 from .models import ATTRIBUTE_FIELDS, IDENTITY_FIELDS, ResourceRef, SelectionDecision
 from .normalization import (
     LEGACY_FIELDS,
@@ -44,7 +45,7 @@ def resource_hash(value):
 
 
 def enabled(name):
-    return os.getenv(name, "").lower() in {"1", "true", "yes", "on"}
+    return env_bool(name)
 
 
 def read_path():
@@ -375,6 +376,12 @@ class SpanIndex:
     """Additive private index, separate from semantic/conversation recall."""
 
     provider_name = "unknown"
+
+    def _require_ready(self):
+        if not self.ready():
+            raise RuntimeError(
+                "Observability index is not initialized; run the explicit migration"
+            )
 
     def capabilities(self):
         return {

@@ -19,7 +19,7 @@
 #   ORACLE_USER            - User to drop (default: memorizz_user)
 #   ORACLE_DSN             - Database DSN (default: localhost:1521/FREEPDB1)
 #
-# See SETUP.md for complete setup instructions.
+# Setup guide: https://richmondalake.github.io/memorizz/memory-providers/oracle/
 
 set -e  # Exit immediately on error
 

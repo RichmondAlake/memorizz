@@ -1,9 +1,12 @@
-"""Harbor adapter for evaluating MemoRizz on Terminal-Bench.
+"""Harbor agents for evaluating MemoRizz harnesses on Terminal-Bench.
 
-The MemoRizz process and model provider run on the host. Commands execute only
+``MemorizzHarborAgent`` runs a MemAgent on the host; its commands execute only
 inside Harbor's isolated task environment through the ``terminal_exec`` tool.
-Harbor is an optional dependency; install ``memorizz[terminal-bench]`` before
-importing this module.
+``MemorizzCodexAgent`` and ``MemorizzClaudeCodeAgent`` are Harbor's own Codex
+and Claude Code agents, installed in the task container, with MemoRizz memory
+put in front of the task. All three take ``memory_root``: without it they run
+as the plain baseline. Harbor is an optional dependency; install
+``memorizz[terminal-bench]`` before importing this module.
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ from typing import Any, Optional
 
 from harbor.agents.base import BaseAgent
 from harbor.agents.installed.base import AgentAuthenticationError
+from harbor.agents.installed.claude_code import ClaudeCode, ClaudeCodeOptions
+from harbor.agents.installed.codex import Codex, CodexOptions
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 from harbor.models.trajectories import (
@@ -31,8 +36,11 @@ from harbor.models.trajectories import (
     ToolCall,
     Trajectory,
 )
+from harbor.models.trial.result import AgentInfo
+from pydantic import Field
 
 from memorizz._env_io import load_layered_env
+from memorizz.benchmarks.measurement import bounded_text, json_safe
 from memorizz.benchmarks.pricing import (
     estimate_openai_text_cost,
     resolve_openai_text_pricing,
@@ -47,47 +55,6 @@ class BenchmarkSpendLimitExceeded(RuntimeError):
 
 class BenchmarkRunCancelled(RuntimeError):
     """Raised in the worker thread after Harbor cancels an agent run."""
-
-
-def _bounded_text(value: str | None, limit: int) -> str:
-    """Keep both ends of command output while bounding model context growth."""
-
-    raw = value or ""
-    if len(raw) <= limit:
-        return raw
-    head = max(1, limit // 2)
-    tail = max(1, limit - head)
-    omitted = len(raw) - head - tail
-    return f"{raw[:head]}\n...[{omitted} characters omitted]...\n{raw[-tail:]}"
-
-
-def estimate_terra_cost(usage: dict[str, Any]) -> float:
-    """Estimate GPT-5.6 Terra token cost for one API response.
-
-    Reasoning tokens are already included in completion tokens. OpenAI applies
-    long-context multipliers to the complete request once prompt input exceeds
-    272K tokens, so the estimate applies those multipliers per call.
-    """
-
-    return estimate_openai_text_cost("gpt-5.6-terra", usage)
-
-
-def _safe_json(value: Any) -> Any:
-    """Convert provider objects into deterministic JSON-compatible values."""
-
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(key): _safe_json(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_safe_json(item) for item in value]
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            return _safe_json(model_dump(exclude_none=True))
-        except Exception:
-            pass
-    return str(value)
 
 
 class _TrackedOpenAI(OpenAI):
@@ -196,7 +163,7 @@ class _TrackedOpenAI(OpenAI):
                 {
                     "id": str(getattr(call, "id", "") or ""),
                     "name": str(getattr(call.function, "name", "") or "unknown"),
-                    "arguments": _safe_json(arguments),
+                    "arguments": json_safe(arguments),
                 }
             )
         content = getattr(message, "content", None) or ""
@@ -279,7 +246,7 @@ class _TrackedOpenAI(OpenAI):
         )
         for record in reversed(self.call_records):
             if any(call.get("id") == call_id for call in record.get("tool_calls", [])):
-                record.setdefault("tool_results", {})[call_id] = _safe_json(result)
+                record.setdefault("tool_results", {})[call_id] = json_safe(result)
                 return
 
 
@@ -364,8 +331,8 @@ class HarborTerminalBridge:
             self._loop,
         )
         result: ExecResult = future.result(timeout=timeout + 15)
-        stdout = _bounded_text(result.stdout, self._max_output_chars)
-        stderr = _bounded_text(result.stderr, self._max_output_chars)
+        stdout = bounded_text(result.stdout, self._max_output_chars)[0]
+        stderr = bounded_text(result.stderr, self._max_output_chars)[0]
         public_result = {
             "return_code": result.return_code,
             "stdout": stdout,
@@ -438,10 +405,195 @@ class HarborTerminalBridge:
         return result
 
 
-class MemorizzHarborAgent(BaseAgent):
+# ------------------------------------------------------ MemoRizz memory context
+
+MEMORY_CONTEXT_FILENAME = "memorizz-context.json"
+DEFAULT_MEMORY_ID = "terminal-bench"
+DEFAULT_MEMORY_USER = "terminal-bench"
+
+
+def _row_task_name(row: dict[str, Any]) -> str:
+    value = row.get("task_name")
+    content = row.get("content")
+    if value is None and isinstance(content, dict):
+        value = content.get("task_name")
+    return str(value or "")
+
+
+def build_memory_context(
+    instruction: str,
+    *,
+    memory_root: str | Path | None,
+    memory_id: str = DEFAULT_MEMORY_ID,
+    user_id: str = DEFAULT_MEMORY_USER,
+    task_name: str = "",
+) -> tuple[str, dict[str, Any]]:
+    """Return the instruction with MemoRizz memory in front, and what was added.
+
+    Memory comes from a local FileSystem store. Lessons recorded for this very
+    task are left out, so a repeated attempt cannot read its own answer. A
+    memory failure never fails the trial: the plain instruction is returned
+    and the report names the error.
+    """
+    report: dict[str, Any] = {
+        "memory_root": str(memory_root) if memory_root else None,
+        "memory_id": memory_id,
+        "user_id": user_id,
+        "task_name": task_name or None,
+        "source_ids": [],
+        "token_estimate": 0,
+        "excluded_count": 0,
+        "truncated": False,
+        "error": None,
+    }
+    if not memory_root:
+        return instruction, report
+
+    from memorizz.memory_provider.filesystem import FileSystemConfig, FileSystemProvider
+    from memorizz.metaharness.context import HarnessContextBuilder
+
+    provider = None
+    try:
+        provider = FileSystemProvider(
+            FileSystemConfig(
+                root_path=Path(memory_root).expanduser(),
+                lazy_vector_indexes=True,
+            )
+        )
+        pack = HarnessContextBuilder(provider, max_chars=12_000).build(
+            instruction,
+            memory_id=memory_id,
+            user_id=user_id,
+            thread_id=None,
+            exclude=(
+                (lambda row: _row_task_name(row) == task_name) if task_name else None
+            ),
+        )
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        return instruction, report
+    finally:
+        if provider is not None:
+            try:
+                provider.close()
+            except Exception:
+                pass
+    report.update(
+        source_ids=list(pack.source_ids),
+        token_estimate=pack.token_estimate,
+        excluded_count=int((pack.metadata or {}).get("excluded_count", 0)),
+        truncated=pack.truncated,
+    )
+    if not pack.rendered:
+        return instruction, report
+    return f"{pack.rendered}\n\n--- Task ---\n{instruction}", report
+
+
+class _MemoryContextMixin:
+    """Put MemoRizz memory in front of a Harbor agent's instruction."""
+
+    harness_name = "harness"
+
+    def _init_memory(
+        self,
+        memory_root: str | Path | None,
+        memory_id: str | None,
+        user_id: str | None,
+    ) -> None:
+        self._memory_root = str(memory_root) if memory_root else None
+        self._memory_id = str(memory_id or DEFAULT_MEMORY_ID)
+        self._memory_user_id = str(user_id or DEFAULT_MEMORY_USER)
+
+    def _with_memory(self, instruction: str, environment: BaseEnvironment) -> str:
+        text, report = build_memory_context(
+            instruction,
+            memory_root=self._memory_root,
+            memory_id=self._memory_id,
+            user_id=self._memory_user_id,
+            task_name=str(getattr(environment, "environment_name", "") or ""),
+        )
+        report["harness"] = self.harness_name
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        (self.logs_dir / MEMORY_CONTEXT_FILENAME).write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
+        return text
+
+    def to_agent_info(self) -> AgentInfo:
+        # Results name the MemoRizz variant; name() stays Harbor's own so the
+        # installed agent keeps its install and trajectory behaviour.
+        info = super().to_agent_info()
+        return info.model_copy(update={"name": f"memorizz-{self.harness_name}"})
+
+
+class _MemoryOptions:
+    memory_root: str | None = Field(
+        default=None,
+        description="MemoRizz FileSystem store to read memory from; none runs the plain baseline.",
+    )
+    memory_id: str = Field(
+        default=DEFAULT_MEMORY_ID, description="MemoRizz memory to read."
+    )
+    user_id: str = Field(
+        default=DEFAULT_MEMORY_USER, description="MemoRizz user the memory belongs to."
+    )
+
+
+class MemorizzCodexOptions(CodexOptions):
+    memory_root: str | None = _MemoryOptions.memory_root
+    memory_id: str = _MemoryOptions.memory_id
+    user_id: str = _MemoryOptions.user_id
+
+
+class MemorizzClaudeCodeOptions(ClaudeCodeOptions):
+    memory_root: str | None = _MemoryOptions.memory_root
+    memory_id: str = _MemoryOptions.memory_id
+    user_id: str = _MemoryOptions.user_id
+
+
+class MemorizzCodexAgent(_MemoryContextMixin, Codex):
+    """Harbor's Codex agent in the task container, with MemoRizz memory."""
+
+    harness_name = "codex"
+    options_model = MemorizzCodexOptions
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        options = self.options
+        self._init_memory(options.memory_root, options.memory_id, options.user_id)
+
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        await super().run(
+            self._with_memory(instruction, environment), environment, context
+        )
+
+
+class MemorizzClaudeCodeAgent(_MemoryContextMixin, ClaudeCode):
+    """Harbor's Claude Code agent in the task container, with MemoRizz memory."""
+
+    harness_name = "claude-code"
+    options_model = MemorizzClaudeCodeOptions
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        options = self.options
+        self._init_memory(options.memory_root, options.memory_id, options.user_id)
+
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        await super().run(
+            self._with_memory(instruction, environment), environment, context
+        )
+
+
+class MemorizzHarborAgent(_MemoryContextMixin, BaseAgent):
     """Run MemoRizz host-side with an allowlisted Harbor terminal tool."""
 
     SUPPORTS_ATIF = True
+    harness_name = "memagent"
 
     def __init__(
         self,
@@ -454,9 +606,13 @@ class MemorizzHarborAgent(BaseAgent):
         finalization_reserve_seconds: float = 120.0,
         tool_timeout_sec: int = 120,
         max_output_chars: int = 12_000,
+        memory_root: str | None = None,
+        memory_id: str | None = None,
+        user_id: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
+        self._init_memory(memory_root, memory_id, user_id)
         self.reasoning_effort = str(reasoning_effort)
         self._max_steps = max(1, int(max_steps))
         self._max_cost_usd = max(0.01, float(max_cost_usd))
@@ -645,6 +801,7 @@ class MemorizzHarborAgent(BaseAgent):
             FileSystemProvider,
         )
 
+        instruction = self._with_memory(instruction, environment)
         started_at = time.monotonic()
         stop_event = threading.Event()
         deadline_monotonic = (
@@ -807,7 +964,7 @@ Terminal-Bench websites, repositories, task solutions, or grader internals."""
                 thread_id=benchmark_thread_id,
                 user_id="terminal-bench",
                 context={
-                    "benchmark": "terminal-bench-2.1",
+                    "benchmark": "terminal-bench",
                     "environment": environment.environment_name,
                 },
                 tool_context={"benchmark_container": True},

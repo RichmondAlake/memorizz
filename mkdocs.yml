@@ -6,9 +6,7 @@ repo_url: https://github.com/RichmondAlake/memorizz
 edit_uri: edit/main/docs/
 exclude_docs: |
   README.md
-  issues/*
   reports/**
-  observability-roadmap.md
 
 nav:
   - Home: index.md
@@ -32,6 +30,7 @@ nav:
       - MCP Integrations:
           - Connect to MCP Servers: guides/mcp-connectivity.md
           - Expose MemoRizz as an MCP Server: guides/mcp-server.md
+          - MemoRizz in Codex and Claude Code: guides/coding-agent-plugins.md
       - Internet Access: internet-access/providers.md
       - Browser Control: browser-control/index.md
       - Code Execution:

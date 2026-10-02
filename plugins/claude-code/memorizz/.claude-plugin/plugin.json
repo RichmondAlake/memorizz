@@ -1,0 +1,14 @@
+{
+  "name": "memorizz",
+  "displayName": "MemoRizz",
+  "version": "0.13.0",
+  "description": "Durable, searchable project memory for Claude Code, shared with Codex and your MemoRizz agents, through MemoRizz's MCP server.",
+  "author": {
+    "name": "Richmond Alake",
+    "url": "https://github.com/RichmondAlake"
+  },
+  "homepage": "https://richmondalake.github.io/memorizz",
+  "repository": "https://github.com/RichmondAlake/memorizz",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "keywords": ["memory", "mcp", "agents", "knowledge-base", "harness"]
+}

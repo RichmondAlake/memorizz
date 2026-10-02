@@ -465,6 +465,8 @@ def agent_event_stream(
         session = _Session(agent, stream, mode, identity)
         current = current_stream.set(session)
         iterator = None
+        active_agent = None
+        previous_delegation = None
         with ExitStack() as stack:
             session.stack = stack
             try:
@@ -502,6 +504,65 @@ def agent_event_stream(
                     if callback:
                         callback(event)
 
+                # Delegates work on their own threads; show each one's task as
+                # it starts and finishes, as a trace step of this reply.
+                delegate_labels = {}
+                for delegate in getattr(active_agent, "delegates", None) or []:
+                    label = str(
+                        getattr(delegate, "name", None)
+                        or getattr(delegate, "agent_id", "")
+                    )
+                    if getattr(delegate, "meta_harness_mode", None) == "runtime":
+                        label += f" ({getattr(delegate, 'default_harness', None) or 'harness'})"
+                    delegate_labels[str(getattr(delegate, "agent_id", ""))] = label
+
+                def delegation_callback(event):
+                    kind = str(event.get("type") or "")
+                    task_id = event.get("task_id")
+                    if not task_id or kind not in {"task_started", "task_finished"}:
+                        return
+                    label = delegate_labels.get(
+                        str(event.get("agent_id") or ""), "delegate"
+                    )
+                    if kind == "task_started":
+                        trace = {
+                            "trace_kind": "tool_call",
+                            "title": f"Delegate: {label}",
+                            "status": "started",
+                        }
+                    else:
+                        status = str(
+                            getattr(event.get("status"), "value", event.get("status"))
+                        )
+                        result = event.get("result")
+                        text = (
+                            getattr(result, "final_response", None) or result or status
+                        )
+                        trace = {
+                            "trace_kind": "tool_result",
+                            "title": f"Delegate result: {label}",
+                            "status": "success"
+                            if status in {"completed", "succeeded"}
+                            else "error",
+                            "success": status in {"completed", "succeeded"},
+                            "content": str(text)[:4000],
+                        }
+                    event_callback(
+                        {
+                            "type": "trace",
+                            "tool_name": f"Delegate · {label}",
+                            "tool_call_id": f"delegate:{task_id}",
+                            "span_id": f"delegate:{task_id}",
+                            "trace_id": f"delegate:{task_id}:{kind}",
+                            **trace,
+                        }
+                    )
+
+                previous_delegation = getattr(
+                    active_agent, "_delegation_event_callback", None
+                )
+                if hasattr(active_agent, "set_delegation_event_callback"):
+                    active_agent.set_delegation_event_callback(delegation_callback)
                 iterator = active_agent.run_stream(
                     query, event_callback=event_callback, **run_kwargs
                 )
@@ -522,6 +583,13 @@ def agent_event_stream(
                     else getattr(exc, "code", "stream_error")
                 )
             finally:
+                if active_agent is not None and hasattr(
+                    active_agent, "set_delegation_event_callback"
+                ):
+                    try:
+                        active_agent.set_delegation_event_callback(previous_delegation)
+                    except Exception:
+                        pass
                 if iterator is not None:
                     try:
                         iterator.close()

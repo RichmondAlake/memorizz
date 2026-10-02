@@ -218,15 +218,6 @@
             scheduleLocalCheck();
         }
 
-        function escapeHtml(s) {
-            return String(s).replace(/[&<>"']/g, function(c) {
-                return ({
-                    '&': '&amp;', '<': '&lt;', '>': '&gt;',
-                    '"': '&quot;', "'": '&#39;'
-                })[c];
-            });
-        }
-
         // Debounced wrapper because the custom-model text input fires `input`
         // on every keystroke; we don't want to spam the API per char typed.
         let _localCheckDebounce = null;
@@ -476,23 +467,6 @@
                 showCustomInput(true);
             }
             setHiddenModelValue(value);
-        }
-
-        function trashIconSvg() {
-            return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-                + '<polyline points="3 6 5 6 21 6"></polyline>'
-                + '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>'
-                + '<path d="M10 11v6"></path><path d="M14 11v6"></path>'
-                + '<path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>'
-                + '</svg>';
-        }
-
-        function downloadIconSvg() {
-            return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-                + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>'
-                + '<polyline points="7 10 12 15 17 10"></polyline>'
-                + '<line x1="12" y1="15" x2="12" y2="3"></line>'
-                + '</svg>';
         }
 
         // Single click handler delegated from document, so freshly-rendered

@@ -3,6 +3,7 @@
 # See LICENSE file in the project root for full license information.
 
 import logging
+import os
 from typing import Any, Dict, List
 
 from .. import BaseEmbeddingProvider
@@ -30,14 +31,19 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
         config : Dict[str, Any]
             Configuration dictionary with keys:
             - model: str (default: "nomic-embed-text")
-            - base_url: str (default: "http://localhost:11434")
+            - base_url: str (default: the OLLAMA_HOST environment variable,
+              then "http://localhost:11434", as for the Ollama LLM provider)
             - timeout: int (default: 30)
         """
         super().__init__(config)
 
         # Set default configuration
         self.model = self.config.get("model", "nomic-embed-text")
-        self.base_url = self.config.get("base_url", "http://localhost:11434")
+        self.base_url = (
+            self.config.get("base_url")
+            or os.getenv("OLLAMA_HOST")
+            or "http://localhost:11434"
+        )
         self.timeout = self.config.get("timeout", 30)
 
         # Determine dimensions - use known value or probe the model

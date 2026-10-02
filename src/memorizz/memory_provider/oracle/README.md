@@ -2,8 +2,8 @@
 
 This package contains MemoRizz's relational Oracle AI Database provider,
 schema, migrations, and local-runtime helper. The user guide is
-[`docs/memory-providers/oracle.md`](../../../../docs/memory-providers/oracle.md)
-and the complete local setup is [`SETUP.md`](../../../../SETUP.md).
+[`docs/memory-providers/oracle.md`](../../../../docs/memory-providers/oracle.md),
+including local and hosted setup.
 
 ## Contents
 

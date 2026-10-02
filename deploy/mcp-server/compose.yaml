@@ -1,0 +1,46 @@
+# MemoRizz MCP server with automatic HTTPS (Caddy + Let's Encrypt).
+#   1. Point a DNS name (MEMORIZZ_MCP_DOMAIN) at this host; open ports 80 and 443.
+#   2. Put the settings below in deploy/mcp-server/.env (never commit it).
+#   3. docker compose -f deploy/mcp-server/compose.yaml up -d --build
+services:
+  memorizz-mcp:
+    build:
+      context: ../..
+      dockerfile: deploy/mcp-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      MEMORIZZ_MCP_SERVER_PUBLIC_URL: https://${MEMORIZZ_MCP_DOMAIN}
+      MEMORIZZ_MCP_SERVER_API_KEYS: ${MEMORIZZ_MCP_SERVER_API_KEYS}
+      # Optional: a shared database instead of files on the volume.
+      MEMORIZZ_BACKEND: ${MEMORIZZ_BACKEND:-filesystem}
+      MONGODB_URI: ${MONGODB_URI:-}
+      # Embeddings for semantic search, and a model for session summaries.
+      MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER: ${MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER:-openai}
+      MEMORIZZ_DEFAULT_EMBEDDING_MODEL: ${MEMORIZZ_DEFAULT_EMBEDDING_MODEL:-}
+      MEMORIZZ_DEFAULT_LLM_PROVIDER: ${MEMORIZZ_DEFAULT_LLM_PROVIDER:-openai}
+      MEMORIZZ_DEFAULT_LLM_MODEL: ${MEMORIZZ_DEFAULT_LLM_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OLLAMA_HOST: ${OLLAMA_HOST:-}
+    volumes:
+      - memorizz-data:/data
+    expose:
+      - "8766"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MEMORIZZ_MCP_DOMAIN: ${MEMORIZZ_MCP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - memorizz-mcp
+
+volumes:
+  memorizz-data:
+  caddy-data:

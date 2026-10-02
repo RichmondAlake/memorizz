@@ -96,7 +96,9 @@ apps/**/node_modules/
 apps/**/dist/
 apps/**/src-tauri/target/
 
-# Local Claude Code settings (per-user overrides only; team settings.json may be committed)
+# Claude Code settings are per-user: permission rules hold local paths and
+# must not be applied to every contributor who clones the repo.
+.claude/settings.json
 .claude/settings.local.json
 .claude/.cache/
 .claude/scheduled_tasks.lock

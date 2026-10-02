@@ -143,6 +143,9 @@ memorizz agents list
 memorizz agents show AGENT_ID --json
 ```
 
+Add `--tool-cache` to reuse results of repeated calls to cacheable tools (see
+[Tool call cache](../guides/context-efficiency.md#tool-call-cache)).
+
 The command uses the configured memory provider and therefore defaults to the
 filesystem store under `~/.memorizz/memory`. LLM settings are auto-detected;
 pass `--llm-provider openai --model gpt-4o-mini` to select one explicitly, or
@@ -165,11 +168,13 @@ memorizz mcp serve --transport stdio
 Use `memory_provider=False` only for an intentionally stateless SDK agent;
 otherwise headless agents use the normal filesystem default.
 
-## Run Codex, Claude Code, OpenHands, or MemAgent
+## Run Codex, Claude Code, OpenHands, DeepSeek, pi, Hermes, or MemAgent
 
 The `harness` command group places installed agent CLIs behind MemoRizz's
 durable memory, policy, approval, cancellation, verification, and learning
-contract:
+contract. It covers what the **Agent Harnesses** page does: single runs,
+staged plans, comparisons (each harness on its own model), conversations,
+reruns, deletion, model choices and harness delegates.
 
 ```bash
 memorizz harness doctor
@@ -202,9 +207,27 @@ policies, budgets, runtime/delegate modes, and deployment limits.
 key/login therefore fails before launch with an actionable, secret-free
 message; `harness run` preserves the same fields in its durable failed result.
 
-To select a saved native agent, use
-`--harness native --agent-id AGENT_ID`. Native execution is explicit-only so
-`auto` cannot accidentally recurse into the coordinating MemAgent.
+To run a saved MemAgent, use `--harness memagent --agent-id AGENT_ID`
+(`native` is an alias). Without `--agent-id` it runs the agent last used with
+a harness, else the newest saved one. MemAgent execution is explicit-only so
+`auto` cannot accidentally recurse into the coordinating MemAgent. If that
+agent has harness delegates, they work in the run's folder with what the run
+was approved for, and `memorizz harness cancel` stops them too.
+
+```bash
+memorizz harness plan "Fix the rounding bug" --stage plan:pi \
+  --stage implement:codex:edit --stage review:claude-code \
+  --stage-model review=claude-sonnet-5-5
+memorizz harness compare "Where can totals lose precision?" \
+  --harness codex --harness claude-code --harness-model claude-code=claude-sonnet-5-5
+memorizz harness continue RUN_ID "Now add tests for that"
+memorizz harness rerun-workflow WORKFLOW_ID
+memorizz harness delete RUN_ID            # also: delete-workflow, delete-conversation
+memorizz harness models                   # the models each harness can run
+memorizz harness delegate create --harness codex --coordinator AGENT_ID --attach
+```
+
+Unknown IDs and refused requests end with a message and exit code 1.
 
 ## Run memory evaluations
 
@@ -561,6 +584,26 @@ memorizz learning events --agent-id AGENT [--limit 50]
 memorizz learning compile --agent-id AGENT --memory-id ID --user-id USER
 memorizz learning forget-plan --agent-id AGENT --memory-id ID --user-id USER
 memorizz learning forget-apply PLAN_ID --agent-id AGENT --approved-by OPERATOR
+memorizz capabilities [--json]
+memorizz config path|keys|set|get
+memorizz memory configure
+memorizz notion connect|init|status|sync|repair
+memorizz agents create|list|show|update|delete
+memorizz harness list|doctor|init|config|models
+memorizz harness run|plan|compare|continue|conversation
+memorizz harness runs|show|events [--follow]|cancel|retry|delete
+memorizz harness workflows|show-workflow|cancel-workflow|rerun-workflow|delete-workflow
+memorizz harness delete-conversation
+memorizz harness approvals|approve|reject|resume
+memorizz harness delegate options|create
+memorizz eval list|run|protocol show|dataset verify|dataset sync
+memorizz eval terminal-bench tasks|status|run|forecast
+memorizz plugin install codex|claude-code [--user NAME] [--no-capture] [--no-summaries]
+  [--prompt-recall] [--allow-agents] [--allow-harness --harness-root PATH] [--allow-traces]
+  [--remote URL [--token-env NAME] | --local]
+memorizz plugin uninstall codex|claude-code
+memorizz plugin memory-id [PATH]
+memorizz plugin hook session-start|prompt|stop|summarize   # run by the plugins' hooks
 # Uses MEMORIZZ_BACKEND=filesystem|mongodb|oracle (filesystem by default)
 ```
 

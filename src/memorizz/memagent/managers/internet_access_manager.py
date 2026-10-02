@@ -6,47 +6,20 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from ...internet_access import InternetAccessProvider
 from ...internet_access.models import InternetPageContent, InternetSearchResult
+from ._provider_slot import ProviderSlot
 
-logger = logging.getLogger(__name__)
 
-
-class InternetAccessManager:
+class InternetAccessManager(ProviderSlot):
     """Wrapper over InternetAccessProvider implementations."""
+
+    provider_kind = "internet"
 
     def __init__(self, provider: Optional[InternetAccessProvider] = None):
         self.provider = provider
-
-    def set_provider(
-        self, provider: Optional[InternetAccessProvider]
-    ) -> Optional[InternetAccessProvider]:
-        """Attach or detach an internet provider."""
-        previous = self.provider
-        if previous and previous is not provider:
-            try:
-                previous.close()
-            except Exception as exc:
-                logger.debug("Failed to close previous internet provider: %s", exc)
-        self.provider = provider
-        return previous
-
-    def is_enabled(self) -> bool:
-        """Return True if provider is available."""
-        return self.provider is not None
-
-    def get_provider_name(self) -> Optional[str]:
-        if not self.provider:
-            return None
-        return self.provider.get_provider_name()
-
-    def get_provider_config(self) -> Optional[Dict[str, Any]]:
-        if not self.provider:
-            return None
-        return self.provider.get_config()
 
     def search(
         self, query: str, max_results: int = 5, **kwargs

@@ -47,19 +47,23 @@ def _int(value: Any) -> int:
     return int(number) if number is not None else 0
 
 
+def format_age(seconds: float) -> str:
+    """Seconds elapsed as ``3h ago``, ``just now``, or ``in 2d`` when negative."""
+    future = seconds < 0
+    seconds = abs(seconds)
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            amount = f"{int(seconds // size)}{unit}"
+            return f"in {amount}" if future else f"{amount} ago"
+    return "soon" if future else "just now"
+
+
 def relative_age(timestamp: Any, now: float) -> str:
     """Seconds-since-epoch to a short age such as ``3h ago``; ``—`` when unknown."""
     stamp = _number(timestamp)
     if not stamp or stamp <= 0:
         return "—"
-    delta = now - stamp
-    future = delta < 0
-    delta = abs(delta)
-    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
-        if delta >= size:
-            amount = f"{int(delta // size)}{unit}"
-            return f"in {amount}" if future else f"{amount} ago"
-    return "soon" if future else "just now"
+    return format_age(now - stamp)
 
 
 def iso_timestamp(value: Any) -> Optional[float]:

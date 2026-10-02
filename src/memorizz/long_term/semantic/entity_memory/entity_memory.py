@@ -9,7 +9,7 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, Union
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -206,7 +206,16 @@ class EntityMemory:
         from ....memory_provider.base import provider_manages_embeddings
 
         if embedding_payload and not provider_manages_embeddings(self.memory_provider):
-            record["embedding"] = get_embedding(embedding_payload)
+            try:
+                record["embedding"] = get_embedding(embedding_payload)
+            except Exception as exc:
+                # Without an embedder the fact is still worth keeping: lookups
+                # by name and the exact scoped fallback still find it.
+                logger.warning(
+                    "Storing entity %s without an embedding (%s)",
+                    record["entity_id"],
+                    type(exc).__name__,
+                )
 
         if existing and existing.get("_id") is not None:
             record["_id"] = existing["_id"]
@@ -466,29 +475,6 @@ class EntityMemory:
                 "This memory provider does not support managed legacy entity migration"
             )
         return int(migrate(memory_id=str(memory_id), user_id=str(user_id)) or 0)
-
-    def search_entities(
-        self,
-        query: str,
-        *,
-        limit: int = 5,
-        memory_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """Search entity attributes with an exact scoped fallback.
-
-        Vector search is an optimization, not a correctness requirement. On
-        lower-tier MongoDB deployments without Atlas Search, or whenever the
-        semantic path yields no scoped result, a bounded lexical/profile
-        fallback searches only entities inside the same tenant scope.
-        """
-        records, _diagnostics = self.search_entities_with_diagnostics(
-            query,
-            limit=limit,
-            memory_id=memory_id,
-            user_id=user_id,
-        )
-        return records
 
     def search_entities_with_diagnostics(
         self,
@@ -1110,7 +1096,7 @@ class EntityMemory:
     ) -> List[Dict[str, Any]]:
         attributes = {attr["name"].lower(): attr for attr in existing if "name" in attr}
         for attr in updates or []:
-            normalized = self._to_attribute(attr, timestamp)
+            normalized = self._stamped(EntityAttribute, attr, timestamp)
             key = normalized["name"].lower()
             attributes[key] = normalized
         return list(attributes.values())
@@ -1129,7 +1115,7 @@ class EntityMemory:
                 continue
             relations[(entity_id, relation_type.casefold())] = dict(relation)
         for relation in updates or []:
-            normalized = self._to_relation(relation, timestamp)
+            normalized = self._stamped(EntityRelation, relation, timestamp)
             key = (
                 str(normalized["entity_id"]).strip(),
                 str(normalized["relation_type"]).strip().casefold(),
@@ -1140,28 +1126,14 @@ class EntityMemory:
             relations[key] = normalized
         return list(relations.values())
 
-    def _to_attribute(
-        self,
-        attribute: Union[EntityAttribute, Dict[str, Any]],
+    @staticmethod
+    def _stamped(
+        model: Union[Type[EntityAttribute], Type[EntityRelation]],
+        value: Union[EntityAttribute, EntityRelation, Dict[str, Any]],
         timestamp: str,
     ) -> Dict[str, Any]:
-        if isinstance(attribute, EntityAttribute):
-            payload = attribute.model_dump()
-        else:
-            payload = EntityAttribute(**attribute).model_dump()
-        payload["created_at"] = payload.get("created_at") or timestamp
-        payload["updated_at"] = timestamp
-        return payload
-
-    def _to_relation(
-        self,
-        relation: Union[EntityRelation, Dict[str, Any]],
-        timestamp: str,
-    ) -> Dict[str, Any]:
-        if isinstance(relation, EntityRelation):
-            payload = relation.model_dump()
-        else:
-            payload = EntityRelation(**relation).model_dump()
+        """An attribute or relation as a validated dict with its timestamps."""
+        payload = (value if isinstance(value, model) else model(**value)).model_dump()
         payload["created_at"] = payload.get("created_at") or timestamp
         payload["updated_at"] = timestamp
         return payload

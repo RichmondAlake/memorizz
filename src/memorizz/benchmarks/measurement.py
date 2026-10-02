@@ -8,10 +8,41 @@ import time
 from decimal import Decimal
 from typing import Any, Callable
 
+from ..llms.llm_factory import LOCAL_LLM_PROVIDERS
 from .pricing import resolve_openai_text_pricing
 
-LOCAL_PROVIDERS = {"ollama", "mlx", "huggingface", "cross_encoder", "none", "heuristic"}
+# Local models plus scoring methods that make no API call.
+LOCAL_PROVIDERS = set(LOCAL_LLM_PROVIDERS) | {"cross_encoder", "none", "heuristic"}
 READER_PROVIDERS = {"openai", "anthropic", "ollama", "mlx", "huggingface", "azure"}
+
+
+def json_safe(value: Any) -> Any:
+    """Convert provider objects into deterministic JSON-compatible values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return json_safe(model_dump(exclude_none=True))
+        except Exception:
+            pass
+    return str(value)
+
+
+def bounded_text(value: Any, limit: int) -> tuple[str, bool]:
+    """Keep both ends of long command output while bounding model context
+    growth; also says whether anything was cut."""
+    text = str(value or "")
+    if len(text) <= limit:
+        return text, False
+    head = max(1, limit // 2)
+    tail = max(1, limit - head)
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n...[{omitted} characters omitted]...\n{text[-tail:]}", True
 
 
 def accepts_temperature(provider: str, model: str) -> bool:

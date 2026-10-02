@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import copy
 import hashlib
 import inspect
 import json
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -60,9 +62,9 @@ from ..llms.llm_factory import create_llm_provider
 from ..llms.response_metadata import validate_response_completion
 from ..llms.streaming import ProviderStreamError
 from ..long_term.semantic.entity_memory import EntityAttributeInput, EntityRelationInput
-from ..observability.analytics import MEMORY_FIELDS
 from ..observability.analytics import memory_type as usage_memory_type
-from ..observability.pricing import DEFAULT_PRICING, PRICING_FIELDS
+from ..observability.normalization import TRACE_METADATA_FIELDS
+from ..observability.pricing import DEFAULT_PRICING
 from ..observability.prompt_cache import add_call_usage
 from ..streaming import (
     StreamCancelled,
@@ -71,6 +73,12 @@ from ..streaming import (
     session_for,
 )
 from ..task_decomposition import normalize_delegation_config
+from ..tool_cache import (
+    ToolCache,
+    ToolCacheConfig,
+    callable_fingerprint,
+    mcp_tool_is_cacheable,
+)
 from ..tooling import (
     ContextPolicy,
     SemanticToolRouter,
@@ -84,6 +92,7 @@ from ..tooling import (
     serialize_tool_result,
     tool_metadata_to_openai,
 )
+from ..vercel_skills.skill_md import parse_skill_md
 from . import persistence
 from .constants import (
     BASE_SYSTEM_PROMPT,
@@ -107,9 +116,8 @@ from .managers import (
     ToolManager,
 )
 from .utils.context_dedup import dedupe_and_select, filter_skill_covered_workflows
-from .utils.prompt_budget import fit_prompt
+from .utils.prompt_budget import estimate_tokens, fit_prompt
 from .utils.tool_log import (  # noqa: F401  — re-exported for compatibility
-    _TOOL_LOG_PLACEHOLDER_PREFIX,
     _build_tool_log_placeholder,
     _extract_identifiers,
     _is_tool_placeholder_content,
@@ -210,6 +218,45 @@ class _ContextLocal:
         self._var(instance).set(value)
 
 
+SKILLS_MARKETPLACE_PROVIDERS = ("skillsmp", "vercel")
+
+
+def skills_marketplace_config(
+    provider_name: str, base_config: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """A skills marketplace provider's config: ``base_config`` without the
+    provider name or blank values, plus credentials from the environment
+    (SKILLSMP_API_KEY, GITHUB_TOKEN) and SkillsMP's default URL when unset.
+    Shared by MemAgent and the UI's agent settings."""
+    config: Dict[str, Any] = {}
+    for key, value in (
+        (base_config or {}).items() if isinstance(base_config, dict) else ()
+    ):
+        if key == "provider" or value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        config[key] = value
+    if provider_name == "skillsmp":
+        if "api_key" not in config:
+            default_key = os.getenv("SKILLSMP_API_KEY", "").strip()
+            if default_key:
+                config["api_key"] = default_key
+        config.setdefault("base_url", "https://skillsmp.com")
+    elif provider_name == "vercel" and "github_token" not in config:
+        default_token = os.getenv("GITHUB_TOKEN", "").strip()
+        if default_token:
+            config["github_token"] = default_token
+    return config
+
+
+def _provider_name(value: Any) -> str:
+    """A provider given by name or as a config dict, as a lowercase name."""
+    if isinstance(value, dict):
+        value = value.get("provider") or value.get("name")
+    return str(value or "").strip().lower()
+
+
 def _provider_error_details(exc: Exception) -> Tuple[bool, bool, Optional[int]]:
     """Return ``(is_provider_error, is_auth_error, status_code)`` safely."""
     current: Optional[BaseException] = exc
@@ -268,6 +315,8 @@ class MemAgent:
     _last_memory_attribution_context = _ContextLocal()
     _thread_ids_by_memory = _ContextLocal(dict)
     _stream_event_callback = _ContextLocal()
+    # Delegate task events for the current run (a harness showing subagents).
+    _delegation_event_callback = _ContextLocal()
     _stream_trace_events = _ContextLocal()
     _turn_had_side_effects = _ContextLocal(lambda: False)
     _turn_had_nondeterministic_tools = _ContextLocal(lambda: False)
@@ -328,6 +377,7 @@ class MemAgent:
         skill_retrieval: bool = False,
         skill_retrieval_config: Optional[Dict[str, Any]] = None,
         tool_result_policy: Optional[Union[ToolResultPolicy, Dict[str, Any]]] = None,
+        tool_cache: Optional[Union[bool, Dict[str, Any], "ToolCacheConfig"]] = None,
         context_policy: Optional[Union[ContextPolicy, Dict[str, Any]]] = None,
         completion_policy: Optional[
             Union[CompletionPolicy, Dict[str, Any], bool]
@@ -426,6 +476,13 @@ class MemAgent:
 
         self.retrieval_policy = RetrievalPolicy.from_value(retrieval_policy)
         self.tool_result_policy = ToolResultPolicy.from_value(tool_result_policy)
+        # Reuse results of repeated calls to tools that are safe to reuse.
+        self.tool_cache_config = ToolCacheConfig.from_value(tool_cache)
+        self.tool_cache: Optional[ToolCache] = (
+            ToolCache(self.tool_cache_config, agent_id=self.agent_id)
+            if self.tool_cache_config
+            else None
+        )
         self.approval_store = approval_store
         self.delegation_config = normalize_delegation_config(delegation)
         self.delegates = list(delegates or [])
@@ -564,6 +621,13 @@ class MemAgent:
         self._context_window_tokens = self._initialize_context_window_tokens(
             context_window_tokens, llm_config
         )
+        # Saved with the agent. The effective budget above also reflects the
+        # model's limit, which must not become a pinned cap on reload.
+        self._context_window_cap = (
+            int(context_window_tokens)
+            if type(context_window_tokens) is int and context_window_tokens > 0
+            else None
+        )
         self._last_context_window_stats: Optional[Dict[str, Any]] = None
 
         # Track entity memory state before manager initialization
@@ -587,13 +651,10 @@ class MemAgent:
         self._context_tools_registered = False
         self._summary_registry: List[Dict[str, Any]] = []
         self._known_summary_ids: Set[str] = set()
-        self._context_summary_trigger = 80.0
-        self._context_summary_cooldown = 90.0
-        self._last_summary_timestamp = 0.0
-        # Context-summary generation runs off the hot path (daemon thread);
-        # the flag prevents overlapping runs across turns.
-        self._summary_thread_lock = threading.Lock()
-        self._summary_generation_in_flight = False
+        # Tool-schema size of the last request, for compaction estimates.
+        self._last_tools_tokens = 0
+        # Custom conversation names (memory_id -> title), saved with the agent.
+        self.thread_titles: Dict[str, str] = {}
         # Conversation rows are written with embedding=None and backfilled by
         # a single background worker so the hot path never blocks on the
         # embedding API. Disable via MEMORIZZ_DISABLE_CONVERSATION_EMBEDDINGS.
@@ -624,6 +685,10 @@ class MemAgent:
         self._browser_control_init_error: Optional[str] = None
         self._skill_tools_registered = False
         self._mcp_tools_registered = False
+        # First-class MCP tools per server, as registered in the tool manager.
+        self._mcp_server_tools: Dict[str, List[str]] = {}
+        # Public tool name -> (server, MCP tool name) for first-class MCP tools.
+        self._mcp_tool_targets: Dict[str, Tuple[str, str]] = {}
         self._self_aware_tools_registered = False
         self._self_aware_tool_names = (
             "self_aware_list_roots",
@@ -672,10 +737,12 @@ class MemAgent:
                 "list_agent_harnesses",
                 "run_harness_task",
                 "get_harness_run",
+                "request_capability",
             },
             max_invocations_per_turn=self.context_policy.max_tool_invocations_per_turn,
             max_attempts_per_call=self.context_policy.max_tool_attempts_per_call,
             sticky_limit=self.context_policy.sticky_tool_limit,
+            stable_under_tokens=self.context_policy.stable_tool_list_tokens,
         )
         self._register_context_monitor_tools()
         self._register_knowledge_base_tools()
@@ -799,6 +866,11 @@ class MemAgent:
                 logger.warning("Meta-harness initialization failed: %s", exc)
                 raise
 
+        try:
+            self._register_capability_tools()
+        except Exception as exc:
+            logger.warning("Capability request tool registration failed: %s", exc)
+
         logger.info(
             f"MemAgent {self.agent_id} initialized with memory types: {self.active_memory_types}"
         )
@@ -893,6 +965,7 @@ class MemAgent:
             "browser_control_error": self._browser_control_init_error,
             "mcp_servers": self.mcp_manager.connection_status(),
             "semantic_cache": self.semantic_cache_stats(),
+            "tool_cache": self.tool_cache_stats(),
             "progressive_tool_disclosure": self.semantic_tool_router.enabled,
             "visible_tool_limit": (
                 self.semantic_tool_router.top_k
@@ -1139,6 +1212,7 @@ class MemAgent:
                 "statuses": approval_counts,
             },
             "semantic_cache": self.semantic_cache_stats(),
+            "tool_cache": self.tool_cache_stats(),
             "context_window": self.get_context_window_stats(),
             "truncated": any(
                 len(rows) >= bounded_limit
@@ -1585,7 +1659,6 @@ class MemAgent:
         }
 
         self._last_context_window_stats = stats
-        self._maybe_generate_context_summary()
 
         if context_window and percentage_used is not None:
             logger.info(
@@ -1770,7 +1843,9 @@ class MemAgent:
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
         self._memory_usage_chars = {}
-        history = context.get("conversation_history", [])
+        history = self._auto_compact_history(
+            context.get("conversation_history", []), system_prompt, query, context
+        )
         if getattr(self, "_rendered_persona_chars", 0):
             self._memory_usage_chars["persona"] = self._rendered_persona_chars
         prepared_history = self._prepare_history_messages(history, system_prompt, query)
@@ -1819,6 +1894,8 @@ class MemAgent:
 
     def _fit_prompt(self, messages, tools):
         """Use the smaller agent/provider limit for the complete request."""
+        if tools:
+            self._last_tools_tokens = estimate_tokens(tools)
         limits = [
             value
             for value in (self._context_window_tokens, self._get_model_context_window())
@@ -2004,6 +2081,23 @@ class MemAgent:
                 self._record_memory_chars("personalization", sections[-1])
 
         summaries = context.get("summaries") or []
+        # Summaries load by conversation or by agent; only this conversation's
+        # compactions belong under "Earlier in this conversation".
+        current_memory_id = getattr(self, "_current_memory_id", None)
+        compacted_text = [
+            str(entry.get("content") or "").strip()
+            for entry in summaries
+            if entry.get("summary_type") == "compaction"
+            and entry.get("content")
+            and (not current_memory_id or entry.get("memory_id") == current_memory_id)
+        ][:3]
+        if compacted_text:
+            # Newest first from the loader; show them oldest first.
+            sections.append(
+                "Earlier in this conversation (compacted summary):\n"
+                + "\n\n".join(reversed(compacted_text))
+            )
+            self._record_memory_chars("summaries", sections[-1])
         if summaries:
             summary_lines = []
             for entry in summaries[:10]:
@@ -2301,6 +2395,138 @@ class MemAgent:
         self.tool_manager.add_tool(list_recent_tool_logs)
         self._context_tools_registered = True
 
+    def _estimated_tool_tokens(self) -> int:
+        """Tool-schema tokens per request: measured, else the always-sent set."""
+        if self._last_tools_tokens:
+            return int(self._last_tools_tokens)
+        if not self.tool_manager:
+            return 0
+        metadata = self.tool_manager.get_tool_metadata() or []
+        router = getattr(self, "semantic_tool_router", None)
+        if router is not None and router.enabled:
+            schemas = router._meta_schemas() + [
+                schema
+                for item in metadata
+                if router._name(item) in router.always_visible
+                and (schema := tool_metadata_to_openai(item)) is not None
+            ]
+        else:
+            schemas = [
+                schema
+                for item in metadata
+                if (schema := tool_metadata_to_openai(item)) is not None
+            ]
+        return estimate_tokens(schemas)
+
+    def _compaction_estimate(
+        self, history: List[Any], system_prompt: str, query: str
+    ) -> int:
+        """Tokens the next request would need with the full, untrimmed history."""
+        messages = [
+            item
+            for item in history or []
+            if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
+        ]
+        return (
+            estimate_tokens(system_prompt)
+            + estimate_tokens(query)
+            + sum(
+                estimate_tokens(str(item.get("content") or "")) + 6 for item in messages
+            )
+            + self._estimated_tool_tokens()
+        )
+
+    def _auto_compact_history(
+        self,
+        history: List[Any],
+        system_prompt: str,
+        query: str,
+        context: Dict[str, Any],
+    ) -> List[Any]:
+        """Summarize older messages before the request would pass compact_at.
+
+        The newest ``keep_recent_messages`` stay word for word; the summary
+        text goes into the prompt, so the model keeps the gist of what was
+        compacted instead of losing it to trimming.
+        """
+        threshold = int(getattr(self.context_policy, "compact_at", 0) or 0)
+        window = self._context_window_tokens
+        if (
+            not threshold
+            or not window
+            or not history
+            or not self.memory_manager
+            or MemoryType.SUMMARIES not in self.active_memory_types
+        ):
+            return history
+        estimate = self._compaction_estimate(history, system_prompt, query)
+        if estimate * 100 < threshold * window:
+            return history
+        keep = int(self.context_policy.keep_recent_messages)
+        messages = [
+            item
+            for item in history
+            if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
+        ]
+        # Compact in batches (at least as many messages as are kept) so a
+        # threshold below the fixed prompt size cannot trigger every turn.
+        if len(messages) < 2 * keep:
+            return history
+
+        session = session_for(self)
+        if session is not None:
+            session.emit("status", stage="compacting_context")
+        try:
+            summary_ids = self.generate_summaries(
+                days_back=36500,
+                max_memories_per_summary=max(len(messages) - keep, 1),
+                memory_id=self._current_memory_id,
+                user_id=self._current_user_id,
+                thread_id=self._current_thread_id,
+                keep_recent=keep,
+                summary_type="compaction",
+            )
+        except Exception as exc:
+            logger.warning("Auto-compaction failed; trimming instead: %s", exc)
+            return history
+        if not summary_ids:
+            return history
+
+        # The older messages are now summarized; keep the newest ones.
+        kept = messages[-keep:]
+        compacted = len(messages) - len(kept)
+        try:
+            summaries = self.memory_manager.load_summaries_for_thread(
+                memory_id=self._current_memory_id,
+                agent_id=self.agent_id,
+                limit=20,
+                user_id=self._current_user_id,
+                thread_id=self._current_thread_id,
+            )
+            if summaries:
+                context["summaries"] = list(summaries)
+        except Exception as exc:
+            logger.debug("Reloading summaries after compaction failed: %s", exc)
+        after = self._compaction_estimate(kept, system_prompt, query)
+        logger.info(
+            "Compacted %d messages into %d summaries (%d -> %d tokens, window %d)",
+            compacted,
+            len(summary_ids),
+            estimate,
+            after,
+            window,
+        )
+        if session is not None:
+            session.emit(
+                "context.compacted",
+                messages=compacted,
+                summaries=len(summary_ids),
+                tokens_before=estimate,
+                tokens_after=after,
+                threshold=threshold,
+            )
+        return kept
+
     def _track_summary_ids(
         self, summary_ids: List[str], token_estimate: Optional[int] = None
     ) -> None:
@@ -2336,71 +2562,6 @@ class MemAgent:
 
             self._summary_registry.append(meta)
             self._known_summary_ids.add(summary_id)
-
-    def _maybe_generate_context_summary(self):
-        """Automatically summarize when context window nears limits.
-
-        Summarization is LLM- and DB-heavy, so it runs on a daemon thread
-        ("sleep-time" consolidation) instead of blocking the user-facing
-        turn; the in-flight flag prevents overlapping runs.
-        """
-        if not self.memory_provider or not hasattr(
-            self.memory_provider, "retrieve_by_id"
-        ):
-            return
-        if MemoryType.SUMMARIES not in self.active_memory_types:
-            return
-        stats = self._last_context_window_stats or {}
-        percentage_used = stats.get("percentage_used")
-        if percentage_used is None or percentage_used < self._context_summary_trigger:
-            return
-
-        import time
-
-        current_time = time.time()
-        if current_time - self._last_summary_timestamp < self._context_summary_cooldown:
-            return
-
-        with self._summary_thread_lock:
-            if self._summary_generation_in_flight:
-                return
-            self._summary_generation_in_flight = True
-            # Stamp inside the lock so a burst of turns can't all pass the
-            # cooldown check before the worker finishes.
-            self._last_summary_timestamp = current_time
-
-        token_estimate = stats.get("total_tokens")
-        # Capture the complete request scope before starting the worker. A
-        # later concurrent turn may update ``_current_*`` while this thread is
-        # waiting to run.
-        summary_memory_id = self._current_memory_id
-        summary_user_id = self._current_user_id
-        summary_thread_id = self._current_thread_id
-
-        def _summarize() -> None:
-            try:
-                summary_ids = self.generate_summaries(
-                    memory_id=summary_memory_id,
-                    user_id=summary_user_id,
-                    thread_id=summary_thread_id,
-                    days_back=1,
-                    max_memories_per_summary=20,
-                )
-                if summary_ids:
-                    self._track_summary_ids(summary_ids, token_estimate=token_estimate)
-            except Exception as exc:
-                logger.warning("Background context summarization failed: %s", exc)
-            finally:
-                with self._summary_thread_lock:
-                    self._summary_generation_in_flight = False
-
-        threading.Thread(
-            target=_summarize, daemon=True, name="memorizz-context-summary"
-        ).start()
-
-    def list_context_summaries(self) -> List[Dict[str, Any]]:
-        """Return summary registry entries."""
-        return list(self._summary_registry)
 
     def fetch_context_summary(
         self,
@@ -2532,65 +2693,16 @@ class MemAgent:
             )
         return persisted
 
-    def _normalize_mcp_servers(
-        self, mcp_servers: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]
-    ) -> List[Dict[str, Any]]:
-        """Normalize MCP entries through the first-class manager."""
-        from ..mcp import MCPClientManager
-
-        manager = MCPClientManager(
-            owner_id=getattr(self, "agent_id", "default"),
-            servers=mcp_servers or [],
-        )
-        return manager.server_dicts()
-
-    def _normalize_skills_marketplace_provider_name(self, value: Any) -> str:
-        """Normalize skills marketplace provider values to a stable lowercase name."""
-        if isinstance(value, dict):
-            value = value.get("provider") or value.get("name")
-        return str(value or "").strip().lower()
-
     def _build_skills_marketplace_config(
         self,
         provider_name: Optional[str],
         base_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build provider config with API key fallback from environment."""
-        normalized_provider = self._normalize_skills_marketplace_provider_name(
-            provider_name
-        )
-        if normalized_provider not in ("skillsmp", "vercel"):
+        normalized_provider = _provider_name(provider_name)
+        if normalized_provider not in SKILLS_MARKETPLACE_PROVIDERS:
             return {}
-
-        config: Dict[str, Any] = {}
-        if isinstance(base_config, dict):
-            for key, value in base_config.items():
-                if key == "provider":
-                    continue
-                if value is None:
-                    continue
-                if isinstance(value, str) and not value.strip():
-                    continue
-                config[key] = value
-
-        if normalized_provider == "skillsmp":
-            if "api_key" not in config:
-                default_key = os.getenv("SKILLSMP_API_KEY", "").strip()
-                if default_key:
-                    config["api_key"] = default_key
-            if "base_url" not in config:
-                config["base_url"] = "https://skillsmp.com"
-        elif normalized_provider == "vercel":
-            if "github_token" not in config:
-                default_token = os.getenv("GITHUB_TOKEN", "").strip()
-                if default_token:
-                    config["github_token"] = default_token
-            if not config.get("github_token"):
-                from ..vercel_skills.provider import MISSING_GITHUB_TOKEN_MESSAGE
-
-                logger.warning(MISSING_GITHUB_TOKEN_MESSAGE)
-
-        return config
+        return skills_marketplace_config(normalized_provider, base_config)
 
     def _resolve_skill_path(self, raw_path: str) -> Path:
         """Resolve skill file paths relative to current working directory."""
@@ -2639,15 +2751,6 @@ class MemAgent:
             script_paths.append(raw_script_path)
         return script_paths
 
-    def _extract_skill_description(self, content: str) -> str:
-        """Extract a short description from skill markdown content."""
-        lines = [line.strip() for line in content.splitlines() if line.strip()]
-        for line in lines:
-            if line.startswith("#"):
-                continue
-            return line[:240]
-        return "Skill file"
-
     def _load_skills(self) -> List[Dict[str, Any]]:
         """Load configured skill markdown files from disk."""
         loaded_skills: List[Dict[str, Any]] = []
@@ -2659,17 +2762,19 @@ class MemAgent:
                     continue
 
                 content = resolved_path.read_text(encoding="utf-8")
-                heading = re.search(r"^\s*#\s+(.+)$", content, re.MULTILINE)
-                default_name = resolved_path.stem.replace(".skills", "").strip()
-                skill_name = (
-                    heading.group(1).strip() if heading else default_name or raw_path
+                parsed = parse_skill_md(content)
+                # SKILL.md is named by its folder; name.skills.md by its stem.
+                default_name = (
+                    resolved_path.parent.name
+                    if resolved_path.name == "SKILL.md"
+                    else resolved_path.stem.replace(".skills", "").strip()
                 )
                 code_blocks = self._extract_skill_code_blocks(content)
                 skill_doc = {
-                    "name": skill_name,
+                    "name": parsed["name"] or default_name or raw_path,
                     "path": str(resolved_path),
                     "base_dir": str(resolved_path.parent),
-                    "description": self._extract_skill_description(content),
+                    "description": parsed["description"] or "Skill file",
                     "content": content,
                     "code_blocks": code_blocks,
                     "script_paths": self._extract_skill_script_paths(
@@ -2897,32 +3002,6 @@ class MemAgent:
         self.tool_manager.add_tool(run_skill_script)
         self._skill_tools_registered = True
 
-    def _get_mcp_server(self, server_name: str) -> Optional[Dict[str, Any]]:
-        """Find an MCP server by configured name."""
-        for server in self.mcp_servers:
-            if server.get("name") == server_name:
-                return server
-        return None
-
-    def _run_mcp_request_in_sandbox(
-        self, server_name: str, method: str, params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Compatibility dispatcher retained for callers of the old private helper."""
-        params = params or {}
-        if method == "tools/list":
-            return self.mcp_manager.list_tools(server_name)
-        if method == "tools/call":
-            return self.mcp_manager.call_tool(
-                server_name=server_name,
-                tool_name=str(params.get("name") or ""),
-                arguments=params.get("arguments") or {},
-            )
-        return {
-            "ok": False,
-            "error": f"Unsupported MCP compatibility method '{method}'.",
-            "error_code": "unsupported_method",
-        }
-
     def _register_mcp_tools(self):
         """Register production MCP discovery and invocation tools."""
         if self._mcp_tools_registered or not self.tool_manager:
@@ -2934,7 +3013,16 @@ class MemAgent:
 
         def mcp_list_tools(server_name: str) -> Dict[str, Any]:
             """List tools available from a configured MCP server."""
-            return self.mcp_manager.list_tools(server_name)
+            result = self.mcp_manager.list_tools(server_name)
+            if isinstance(result, dict) and result.get("ok"):
+                # The listed tools become callable by name from the next step.
+                names = self._register_mcp_server_tools(
+                    server_name, self.mcp_manager.cached_tools(server_name)
+                )
+                router = getattr(self, "semantic_tool_router", None)
+                if router is not None and names:
+                    router.disclose(names)
+            return result
 
         @governed_tool(deterministic=False, side_effects=False, domains=("mcp",))
         def mcp_call_tool(
@@ -2943,16 +3031,7 @@ class MemAgent:
             arguments: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
             """Call an MCP tool through the agent's durable approval policy."""
-            method = (
-                self.mcp_manager._call_tool_authorized
-                if self._approval_execution_active
-                else self.mcp_manager.call_tool
-            )
-            return method(
-                server_name=server_name,
-                tool_name=tool_name,
-                arguments=arguments or {},
-            )
+            return self._invoke_mcp_tool(server_name, tool_name, arguments or {})
 
         def mcp_list_resources(server_name: str) -> Dict[str, Any]:
             """List resources exposed by a configured MCP server."""
@@ -2998,6 +3077,191 @@ class MemAgent:
         self.tool_manager.add_tool(mcp_list_prompts)
         self.tool_manager.add_tool(mcp_get_prompt)
         self._mcp_tools_registered = True
+        # Each tool a server listed before becomes its own tool, with the
+        # server's schema, so a model need not pair mcp_list_tools with
+        # mcp_call_tool (small models often confuse the two steps).
+        for server in self.mcp_manager.server_dicts():
+            name = str(server.get("name") or "")
+            if name and server.get("enabled", True):
+                try:
+                    self._register_mcp_server_tools(
+                        name, self.mcp_manager.cached_tools(name)
+                    )
+                except Exception as exc:
+                    logger.debug("Skipping cached MCP tools for %s: %s", name, exc)
+
+    def _capability_state(self) -> List[Dict[str, Any]]:
+        """What this agent can and can't do right now (see capability_gaps)."""
+        from .. import capability_gaps
+
+        try:
+            return capability_gaps.state_for_agent(self)
+        except Exception as exc:
+            logger.debug("Capability state unavailable: %s", exc)
+            return []
+
+    def _suggest_capabilities(self, session: Any, query: str) -> None:
+        """Tell the host when a request needs a capability the agent lacks.
+
+        A keyword check, independent of the model, so small models that never
+        call request_capability still surface the enable card.
+        """
+        from .. import capability_gaps
+
+        try:
+            state = self._capability_state()
+            ids = capability_gaps.suggest(query, state)
+        except Exception as exc:
+            logger.debug("Capability suggestion skipped: %s", exc)
+            return
+        if ids:
+            session.emit("capability.suggested", capabilities=ids)
+
+    def _register_capability_tools(self) -> None:
+        """Let the model ask for a missing capability instead of improvising."""
+        if not self.tool_manager or "request_capability" in (
+            self.tool_manager.list_tools() or []
+        ):
+            return
+        from .. import capability_gaps
+
+        if not capability_gaps.missing(self._capability_state()):
+            return
+
+        @governed_tool(deterministic=True, side_effects=False, domains=("app",))
+        def request_capability(capability: str, reason: str = "") -> Dict[str, Any]:
+            """Ask the user to enable a capability this agent lacks, such as
+            web_search, email, calendar, notes, code_execution or browser. Call
+            this instead of saying you can or cannot do something that needs it.
+            """
+            wanted = str(capability or "").strip().lower().replace(" ", "_")
+            state = {row["id"]: row for row in self._capability_state()}
+            row = state.get(wanted) or next(
+                (item for item in state.values() if item["title"].lower() == wanted),
+                None,
+            )
+            if row is None:
+                return {
+                    "ok": False,
+                    "error": "Unknown capability. Use one of: "
+                    + ", ".join(sorted(state)),
+                }
+            if row["status"] == "enabled":
+                return {
+                    "ok": False,
+                    "status": "enabled",
+                    "message": f"{row['title']} is already enabled; use its tools.",
+                }
+            session = session_for(self)
+            if session is not None:
+                session.emit(
+                    "capability.requested",
+                    capability=row["id"],
+                    title=row["title"],
+                    status=row["status"],
+                    reason=str(reason or "")[:300],
+                )
+            needs = (
+                "needs signing in"
+                if row["status"] == "needs_sign_in"
+                else "isn't set up"
+            )
+            return {
+                "ok": True,
+                "capability": row["id"],
+                "status": row["status"],
+                "message": (
+                    f"Tell the user in one short sentence that {row['title'].lower()} "
+                    f"{needs} for this agent yet, and that they can enable it from "
+                    "the app. Do not offer workarounds or pretend to have done it."
+                ),
+            }
+
+        self.tool_manager.add_tool(request_capability)
+
+    def _invoke_mcp_tool(
+        self, server_name: str, tool_name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Call an MCP tool through the agent's durable approval policy."""
+        method = (
+            self.mcp_manager._call_tool_authorized
+            if self._approval_execution_active
+            else self.mcp_manager.call_tool
+        )
+        return method(server_name=server_name, tool_name=tool_name, arguments=arguments)
+
+    @staticmethod
+    def _mcp_tool_name(server_name: str, tool_name: str) -> str:
+        """``server__tool`` within the 64-character tool-name limit."""
+        name = re.sub(r"[^A-Za-z0-9_-]", "_", f"{server_name}__{tool_name}")
+        if len(name) > 64:
+            digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+            name = f"{name[:55]}_{digest}"
+        return name
+
+    def _register_mcp_server_tools(
+        self, server_name: str, tools: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Register one tool per MCP tool; replaces the server's previous set."""
+        if not self.tool_manager:
+            return []
+        for old_name in self._mcp_server_tools.pop(server_name, []):
+            self.tool_manager.remove_tool(old_name)
+            self._mcp_tool_targets.pop(old_name, None)
+        names: List[str] = []
+        for tool in tools:
+            mcp_name = str(tool.get("name") or "")
+            if not mcp_name:
+                continue
+            public_name = self._mcp_tool_name(server_name, mcp_name)
+            schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+            schema = {
+                key: value
+                for key, value in (schema if isinstance(schema, dict) else {}).items()
+                if key != "$schema"
+            }
+            schema.setdefault("type", "object")
+            schema.setdefault("properties", {})
+
+            def make_call(server: str, name: str):
+                @governed_tool(
+                    deterministic=False, side_effects=False, domains=("mcp",)
+                )
+                def call(**arguments: Any) -> Dict[str, Any]:
+                    return self._invoke_mcp_tool(server, name, arguments)
+
+                call.__name__ = public_name
+                return call
+
+            description = str(tool.get("description") or "").strip()
+            metadata = {
+                "_id": public_name,
+                "name": public_name,
+                "description": (
+                    f"{description} (MCP server '{server_name}', tool '{mcp_name}')"
+                    if description
+                    else f"MCP tool '{mcp_name}' on server '{server_name}'"
+                ),
+                "parameters": schema.get("properties") or {},
+                "required": list(schema.get("required") or []),
+                "input_schema": schema,
+                "type": "function",
+                "source": "mcp",
+                "mcp_server": server_name,
+                "mcp_tool": mcp_name,
+            }
+            if self.tool_manager.add_tool(
+                {
+                    "name": public_name,
+                    "metadata": metadata,
+                    "function": make_call(server_name, mcp_name),
+                    "type": "function",
+                }
+            ):
+                names.append(public_name)
+                self._mcp_tool_targets[public_name] = (server_name, mcp_name)
+        self._mcp_server_tools[server_name] = names
+        return names
 
     def _unregister_mcp_tools(self) -> None:
         """Remove the MCP facade tools when no connection remains configured."""
@@ -3017,6 +3281,11 @@ class MemAgent:
                 self.tool_manager.remove_tool(tool_name)
             except Exception:
                 pass
+        for names in self._mcp_server_tools.values():
+            for tool_name in names:
+                self.tool_manager.remove_tool(tool_name)
+        self._mcp_server_tools = {}
+        self._mcp_tool_targets = {}
         self._mcp_tools_registered = False
 
     def with_mcp_servers(
@@ -3111,12 +3380,12 @@ class MemAgent:
         provider_config: Dict[str, Any] = {}
 
         if isinstance(provider, dict):
-            provider_name = self._normalize_skills_marketplace_provider_name(provider)
+            provider_name = _provider_name(provider)
             provider_config = {k: v for k, v in provider.items() if k != "provider"}
             if isinstance(config, dict):
                 provider_config.update(config)
         else:
-            provider_name = self._normalize_skills_marketplace_provider_name(provider)
+            provider_name = _provider_name(provider)
             if isinstance(config, dict):
                 provider_config = dict(config)
 
@@ -3126,7 +3395,7 @@ class MemAgent:
             self._unregister_skills_marketplace_tools()
             return self
 
-        if provider_name not in ("skillsmp", "vercel"):
+        if provider_name not in SKILLS_MARKETPLACE_PROVIDERS:
             raise ValueError(
                 f"Unknown skills marketplace provider '{provider_name}'. "
                 "Supported providers: skillsmp, vercel."
@@ -3483,9 +3752,6 @@ class MemAgent:
             self._register_meta_harness_tools()
         return self
 
-    def has_meta_harness(self) -> bool:
-        return self.meta_harness is not None
-
     def run_on_harness(
         self,
         query: str,
@@ -3500,8 +3766,20 @@ class MemAgent:
         verification_command: Optional[str] = None,
         execution_backend: Optional[str] = None,
         model_initiated: bool = False,
+        parent_run: Optional[Dict[str, Any]] = None,
+        on_start: Optional[Callable[[str], None]] = None,
     ):
-        """Execute a complete turn through a configured harness."""
+        """Execute a complete turn through a configured harness.
+
+        ``parent_run`` is what this turn may use without another approval: an
+        approved MemAgent harness run it is a delegate's share of (``run_id``)
+        or an access grant from the playground (``grant_id``). Its workspace
+        is used when none is configured, and the run may use what was
+        approved (network, MemoRizz MCP, subagents, edits) unless the
+        delegate's own harness permissions are narrower. ``on_start``
+        receives the new run's ID before it starts. When the current turn is
+        canceled, the harness run is canceled too.
+        """
         if self.meta_harness is None:
             raise ValueError("No meta-harness is configured")
         from ..metaharness import (
@@ -3513,15 +3791,36 @@ class MemAgent:
 
         memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
         configured = dict(self.harness_config or {})
+        parent = dict(parent_run or {})
         resolved_workspace = str(
             workspace
             or (context or {}).get("workspace")
             or configured.get("workspace")
+            or parent.get("workspace")
             or os.getcwd()
         )
         permission_config = dict(configured.get("permissions") or {})
         if write is not None:
             permission_config["workspace_mode"] = "direct" if write else "read_only"
+        granted = dict(parent.get("permissions") or {})
+        covered = bool((parent.get("run_id") or parent.get("grant_id")) and granted)
+        if covered:
+            # Covered by the parent run's approval (or the playground grant):
+            # the same network, MCP, subagent and edit access, unless this
+            # delegate's own harness permissions ask for less.
+            for key in ("network", "mcp_access", "allow_subagents", "workspace_mode"):
+                permission_config.setdefault(key, granted.get(key))
+            permission_config = {
+                k: v for k, v in permission_config.items() if v is not None
+            }
+            if granted.get("workspace_mode") != "direct":
+                permission_config["workspace_mode"] = "read_only"
+            if (
+                granted.get("network") != "full"
+                and permission_config.get("network") == "full"
+            ):
+                permission_config["network"] = granted.get("network") or "none"
+            permission_config["require_approval"] = False
         permissions = HarnessPermissions.from_value(permission_config)
         budget = HarnessBudget.from_value(configured.get("budget"))
         verification = VerificationSpec.from_value(
@@ -3540,6 +3839,10 @@ class MemAgent:
         # native agent while still allowing an explicitly different MemAgent.
         metadata["origin_agent_id"] = self.agent_id
         metadata["model_initiated"] = bool(model_initiated)
+        if parent.get("run_id"):
+            metadata["parent_run_id"] = str(parent["run_id"])
+        if covered and parent.get("grant_id"):
+            metadata["access_grant_id"] = str(parent["grant_id"])
         if execution_backend:
             metadata["execution_backend"] = execution_backend
         task = HarnessTask(
@@ -3559,7 +3862,29 @@ class MemAgent:
             context=dict(context or {}),
             metadata=metadata,
         )
-        result = self.meta_harness.run(task)
+        if on_start is not None:
+            try:
+                on_start(task.run_id)
+            except Exception:
+                logger.debug("Harness run start callback failed", exc_info=True)
+        check_cancelled()
+        token = current_cancellation.get()
+        meta_harness = self.meta_harness
+
+        def stop_run() -> None:
+            try:
+                meta_harness.cancel(task.run_id, before_start=True)
+            except Exception:
+                logger.debug(
+                    "Could not cancel harness run %s", task.run_id, exc_info=True
+                )
+
+        unregister = token.register(stop_run) if token is not None else None
+        try:
+            result = meta_harness.run(task)
+        finally:
+            if unregister is not None:
+                unregister()
         if result.status.value == "succeeded" and result.final_response:
             self._record_interaction(
                 query,
@@ -4890,6 +5215,31 @@ class MemAgent:
                         metadata[target] = value
         return metadata
 
+    def _add_call_cost(self, call: Dict[str, Any]) -> None:
+        """Add a priced model call to the run's cost; count calls that could
+        not be priced, so a partial total is never shown as the whole."""
+        cost = call.get("cost_usd")
+        if call.get("cost_status") == "calculated" and cost is not None:
+            self._run_usage["cost_usd"] = round(
+                float(self._run_usage.get("cost_usd") or 0) + float(cost), 8
+            )
+        else:
+            self._run_usage["unpriced_calls"] = (
+                int(self._run_usage.get("unpriced_calls") or 0) + 1
+            )
+
+    def count_model_call(self) -> None:
+        """Add the model's last call to this run's usage and cost, for calls
+        made outside the tool loop (planning and combining delegates' work)."""
+        metadata = self._model_trace_metadata()
+        pricing = getattr(self, "usage_pricing", DEFAULT_PRICING)
+        try:
+            metadata.update(pricing.quote(metadata))
+        except Exception:
+            logger.debug("Usage pricing unavailable", exc_info=True)
+        add_call_usage(self._run_usage, metadata)
+        self._add_call_cost(metadata)
+
     def _start_model_trace(self, *, iteration: int, stage: str) -> tuple[str, float]:
         span_id = str(uuid.uuid4())
         self._current_parent_span_id = span_id
@@ -4960,6 +5310,7 @@ class MemAgent:
             logger.debug("Usage pricing unavailable", exc_info=True)
         if error is None:
             add_call_usage(self._run_usage, model_metadata)
+            self._add_call_cost(model_metadata)
         self._emit_stream_event(
             "trace",
             {
@@ -5030,11 +5381,12 @@ class MemAgent:
 
         Events pass through as they arrive, so streaming latency and progress
         are unchanged. A retry happens only before any public answer text and
-        before a terminal event (so no tool runs twice). A ``stream_reset``
+        before a terminal event (so no tool runs twice); an empty reply is
+        re-sent once. A ``stream_reset``
         event tells the caller to discard what it buffered from the failed
         attempt. Each attempt is traced as its own model call.
         """
-        from ..llms.streaming import is_transient_stream_error
+        from ..llms.streaming import ProviderStreamError, is_transient_stream_error
 
         for attempt in range(self.TRANSIENT_STREAM_RETRIES + 1):
             delivered = terminal = False
@@ -5046,11 +5398,18 @@ class MemAgent:
                     terminal = terminal or kind in {"done", "tool_calls"}
                     yield event
             except Exception as exc:
+                # Local models occasionally end a reply with no text and no
+                # tool call; one fresh request usually answers.
+                empty_once = (
+                    isinstance(exc, ProviderStreamError)
+                    and exc.code == "empty_response"
+                    and attempt == 0
+                )
                 if (
                     delivered
                     or terminal
                     or attempt == self.TRANSIENT_STREAM_RETRIES
-                    or not is_transient_stream_error(exc)
+                    or not (is_transient_stream_error(exc) or empty_once)
                 ):
                     raise
                 session = session_for(self)
@@ -5679,7 +6038,7 @@ class MemAgent:
             if timeout is not None
             else self.delegation_config.get("timeout"),
             cancellation=cancellation,
-            on_task_event=on_task_event,
+            on_task_event=on_task_event or self._delegation_event_callback,
             on_task_result=on_task_result,
             task_completion_policy=task_completion_policy,
         )
@@ -6028,6 +6387,18 @@ class MemAgent:
                 consumed=True,
             )
 
+        # A streamed run told the model to finish with memorizz_finalize_answer,
+        # which this continuation does not offer; without this the model
+        # writes about the missing tool instead of answering.
+        messages = [
+            message
+            for message in messages
+            if not (
+                isinstance(message, dict)
+                and message.get("role") == "system"
+                and "memorizz_finalize_answer" in str(message.get("content") or "")
+            )
+        ]
         tools = self._build_llm_tools(query, user_id=user_id)
         self._set_provider_cache_scope()
         try:
@@ -6154,8 +6525,20 @@ class MemAgent:
 
         Yields:
             str: Partial text chunks of the agent's response
+
+        .. deprecated:: 0.13
+            Use :meth:`run_stream_events`. This method will be removed in 0.14.
         """
         logger.info(f"MemAgent {self.agent_id} streaming query: {query[:50]}...")
+        if session_for(self) is None:
+            # Called directly rather than driven by the event engine.
+            warnings.warn(
+                "MemAgent.run_stream() is deprecated and will be removed in "
+                "0.14; use run_stream_events() for answer deltas, tool status "
+                "and a typed terminal result.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         if (
             self.meta_harness is not None
@@ -6459,6 +6842,14 @@ class MemAgent:
             # M4: always release the per-call tool_context scope.
             reset_tool_context(_tc_token)
 
+    def set_delegation_event_callback(
+        self, callback: Optional[Callable[[Dict[str, Any]], None]]
+    ):
+        """Receive delegate task events (started, finished) for runs in the
+        current context, as ``delegate(on_task_event=...)`` would."""
+        self._delegation_event_callback = callback
+        return self
+
     def set_stream_event_callback(
         self, callback: Optional[Callable[[Dict[str, Any]], None]]
     ):
@@ -6592,97 +6983,7 @@ class MemAgent:
         # Keep a deliberately bounded set of structured attributes. These are
         # needed for reliable analysis in the UI, while arbitrary callback
         # payloads must not become an accidental persistence channel.
-        metadata_fields = (
-            (
-                "schema_version",
-                "application_id",
-                "agent_id",
-                "run_id",
-                "turn_id",
-                "root_trace_id",
-                "span_id",
-                "parent_span_id",
-                "memory_id",
-                "thread_id",
-                "user_id",
-                "timestamp",
-                "tool_name",
-                "logical_tool_name",
-                "model_tool_name",
-                "tool_call_id",
-                "success",
-                "status",
-                "outcome",
-                "outcome_reason_code",
-                "tool_provider",
-                "primary_provider",
-                "fallback_provider",
-                "outcome_retryable",
-                "result_count",
-                "fallback_used",
-                "degraded",
-                "error_code",
-                "duration_ms",
-                "model",
-                "response_model",
-                "prompt_cache_enabled",
-                "prompt_cache_prefix",
-                "prompt_cache_key",
-                "prompt_cache_warning",
-                "provider",
-                "persona_id",
-                "persona_version",
-                "input_tokens",
-                "output_tokens",
-                "cached_tokens",
-                "cost_usd",
-                "finish_reason",
-                "max_output_tokens",
-                "response_chars",
-                "response_bytes",
-                "ttft_ms",
-                "stream_duration_ms",
-                "retry_count",
-                "fallback_count",
-                "iteration",
-                "stage",
-                "total_tokens",
-                "request_id",
-                "client_page_type",
-                "client_page_id",
-                "client_title_fingerprint",
-                "canonical_page_type",
-                "canonical_page_id",
-                "canonical_title_fingerprint",
-                "thread_binding_status",
-                "expected_thread_id",
-                "ownership_verified",
-                "request_context_present",
-                "request_context_fingerprint",
-                "request_context_key_count",
-                "content_version",
-                "grounding_status",
-                "grounding_source",
-                "grounding_excerpt_count",
-                "grounding_source_ids",
-                "cache_decision",
-                "memory_history_count",
-                "memory_candidate_count",
-                "memory_supplied_count",
-                "memory_referenced_count",
-                "memory_injected_chars",
-                "memory_degraded",
-                "memory_fallback_used",
-                "entity_profile_count",
-                "preference_count",
-                "conversation_memory_count",
-                "writing_sample_count",
-                "cache_enabled",
-                "cache_bypass_reason",
-            )
-            + PRICING_FIELDS
-            + MEMORY_FIELDS
-        )
+        metadata_fields = TRACE_METADATA_FIELDS
 
         for event in events:
             if not isinstance(event, dict):
@@ -7131,18 +7432,22 @@ class MemAgent:
             self.tool_manager.get_tool_policy(tool_name) if self.tool_manager else {}
         )
         value = dict(policy or {})
-        if tool_name == "mcp_call_tool":
+        target = self._mcp_call_target(tool_name, arguments)
+        if target is not None:
             try:
-                server = self.mcp_manager.get_server(
-                    str(arguments.get("server_name") or "")
-                )
-                remote_name = str(arguments.get("tool_name") or "")
+                server = self.mcp_manager.get_server(target[0])
+                remote_name = target[1]
                 mutating = self.mcp_manager.tool_requires_approval(
                     server.name, remote_name
                 )
+                known = self.mcp_manager._known_tool(server.name, remote_name) or {}
                 value.update(
                     {
                         "deterministic": False,
+                        # The server's own hints: read-only and idempotent
+                        # results may be reused for a short while.
+                        "cacheable": (not mutating)
+                        and mcp_tool_is_cacheable(known.get("annotations")),
                         "side_effects": mutating,
                         "requires_approval": mutating,
                         "approval_reason": (
@@ -7156,6 +7461,123 @@ class MemAgent:
             except Exception:
                 pass
         return value
+
+    def _tool_cache_key(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        policy: Dict[str, Any],
+        user_id: Optional[str],
+    ) -> Tuple[Optional[str], Any]:
+        """The cache key for one call, or None when it must run (with the reason)."""
+        cache = getattr(self, "tool_cache", None)
+        if cache is None:
+            return None, None
+        target = self._mcp_call_target(tool_name, arguments)
+        decision = cache.decide(policy, is_mcp=target is not None)
+        if not decision.cacheable:
+            cache.bypass(decision.reason)
+            return None, decision
+        fingerprint = self._tool_cache_fingerprint(tool_name, target)
+        if fingerprint is None:
+            cache.bypass("unknown_tool")
+            return None, decision
+        cache.agent_id = self.agent_id
+        return (
+            cache.key(tool_name, arguments, user_id=user_id, fingerprint=fingerprint),
+            decision,
+        )
+
+    def _tool_cache_fingerprint(
+        self, tool_name: str, target: Optional[Tuple[str, str, Dict[str, Any]]]
+    ) -> Optional[str]:
+        """What the tool is: its code and schema, or its MCP server and tool."""
+        if target is not None:
+            try:
+                server = self.mcp_manager.get_server(target[0])
+                known = self.mcp_manager._known_tool(server.name, target[1]) or {}
+                return callable_fingerprint(
+                    None,
+                    {
+                        "input_schema": [
+                            server.name,
+                            self.mcp_manager._server_fingerprint(server),
+                            target[1],
+                            known.get("inputSchema") or known.get("input_schema"),
+                        ]
+                    },
+                )
+            except Exception:
+                return None
+        tool_data = (self.tool_manager.tools if self.tool_manager else {}).get(
+            tool_name
+        )
+        if (
+            not isinstance(tool_data, dict)
+            or tool_data.get("type", "function") != "function"
+        ):
+            return None
+        function = tool_data.get("function")
+        if function is None:
+            return None
+        return callable_fingerprint(function, tool_data.get("metadata"))
+
+    def _mcp_call_target(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+        """(server, MCP tool, arguments) when ``tool_name`` calls an MCP tool."""
+        if getattr(self, "mcp_manager", None) is None:
+            return None
+        if tool_name == "mcp_call_tool":
+            values = arguments.get("arguments")
+            return (
+                str(arguments.get("server_name") or ""),
+                str(arguments.get("tool_name") or ""),
+                values if isinstance(values, dict) else {},
+            )
+        target = getattr(self, "_mcp_tool_targets", {}).get(tool_name)
+        return (target[0], target[1], dict(arguments)) if target else None
+
+    def _prepare_mcp_call(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], List[str]]:
+        """Repair and check MCP arguments before any approval or call.
+
+        Returns the arguments to use, an error result when they still do not
+        fit the tool's schema, and a note per repair.
+        """
+        target = self._mcp_call_target(tool_name, arguments)
+        if target is None:
+            return arguments, None, []
+        server_name, remote_name, values = target
+        try:
+            values, notes = self.mcp_manager.repair_arguments(
+                server_name, remote_name, values
+            )
+            problems = self.mcp_manager._argument_problems(
+                server_name, remote_name, values
+            )
+        except Exception:
+            return arguments, None, []
+        if tool_name == "mcp_call_tool":
+            prepared = {**arguments, "arguments": values}
+        else:
+            prepared = values
+        if not problems:
+            return prepared, None, notes
+        return (
+            arguments,
+            {
+                "ok": False,
+                "error_code": "invalid_arguments",
+                "error": (
+                    f"The arguments do not match {remote_name}'s input schema: "
+                    + "; ".join(problems)
+                    + ". Fix them and call the tool again."
+                ),
+            },
+            notes,
+        )
 
     @staticmethod
     def _approval_required_payload(proposal: Any) -> str:
@@ -7173,11 +7595,6 @@ class MemAgent:
             ensure_ascii=False,
             sort_keys=True,
         )
-
-    @staticmethod
-    def _tool_result_failed(value: Any) -> bool:
-        _payload, outcome = normalize_tool_result(value)
-        return not outcome.ok
 
     def _execute_and_record_tool_call(
         self,
@@ -7225,6 +7642,14 @@ class MemAgent:
         result: Any = None
         tool_outcome: Optional[ToolOutcome] = None
         router = getattr(self, "semantic_tool_router", None)
+        # Tool cache: the call's key (None when it must run), a hit, and what
+        # happened, reported on the tool-result event.
+        cache_key: Optional[str] = None
+        cache_decision: Any = None
+        cache_hit: Any = None
+        cache_info: Optional[Dict[str, Any]] = None
+        raw_result: Any = None
+        execute_ms = 0.0
 
         # A routed model call is named ``invoke_tool``, but that transport name
         # is not useful to application traces. Resolve the requested logical
@@ -7321,8 +7746,24 @@ class MemAgent:
                 self._turn_cache_domains.update(
                     str(item) for item in (policy.get("domains") or []) if item
                 )
+                # MCP arguments are fitted to the tool's schema, or fail, here:
+                # approval shows exactly what will be sent, and nobody is asked
+                # to approve a call that would be rejected.
+                if not self._approval_execution_active:
+                    logical_arguments, invalid, repairs = self._prepare_mcp_call(
+                        logical_tool_name, logical_arguments
+                    )
+                    if repairs:
+                        routed_warnings = list(routed_warnings or []) + [
+                            "Arguments adjusted to the tool's schema: "
+                            + "; ".join(repairs)
+                        ]
+                    if invalid is not None:
+                        result = invalid
+                        error_message = invalid["error"]
                 if (
-                    policy.get("requires_approval")
+                    result is None
+                    and policy.get("requires_approval")
                     and not self._approval_execution_active
                 ):
                     checkpoint = {
@@ -7391,17 +7832,65 @@ class MemAgent:
 
                 if result is None:
                     check_cancelled()
-                    logger.info("Executing tool: %s", logical_tool_name)
-                    if self.tool_manager:
-                        result, _ = self.tool_manager.execute_tool(
-                            logical_tool_name, logical_arguments
-                        )
+                    cache_key, cache_decision = self._tool_cache_key(
+                        logical_tool_name, logical_arguments, policy, user_id
+                    )
+                    cache_hit = self.tool_cache.lookup(cache_key) if cache_key else None
+                    if cache_hit is not None:
+                        logger.info("Tool cache hit: %s", logical_tool_name)
+                        result = cache_hit.result
+                        cache_info = {
+                            "status": "hit",
+                            "age_seconds": round(cache_hit.age_seconds, 3),
+                            "saved_ms": round(cache_hit.saved_ms, 3),
+                            "expires_in_seconds": round(
+                                cache_hit.expires_in_seconds, 3
+                            ),
+                        }
                     else:
-                        result = "Error: No tool manager available"
-                        error_message = "No tool manager available"
+                        logger.info("Executing tool: %s", logical_tool_name)
+                        execute_started = time.perf_counter()
+                        if self.tool_manager:
+                            result, _ = self.tool_manager.execute_tool(
+                                logical_tool_name, logical_arguments
+                            )
+                        else:
+                            result = "Error: No tool manager available"
+                            error_message = "No tool manager available"
+                        execute_ms = (time.perf_counter() - execute_started) * 1000
+                        if cache_key:
+                            # Snapshot before normalizing, which may edit a
+                            # returned mapping in place.
+                            try:
+                                raw_result = copy.deepcopy(result)
+                            except Exception:
+                                self.tool_cache.bypass("result_not_copyable")
+                                cache_key = None
 
                 result, tool_outcome = normalize_tool_result(result)
                 failed = not tool_outcome.ok
+                if cache_key and cache_hit is None:
+                    # Keep only clean successes; a failure or a degraded
+                    # fallback answer must run again next time.
+                    if (
+                        not failed
+                        and error_message is None
+                        and tool_outcome.status is ToolOutcomeStatus.SUCCESS
+                    ):
+                        stored = self.tool_cache.store_result(
+                            cache_key,
+                            raw_result,
+                            tool_name=logical_tool_name,
+                            user_id=user_id,
+                            ttl_seconds=cache_decision.ttl_seconds,
+                            duration_ms=execute_ms,
+                        )
+                        cache_info = {
+                            "status": "stored" if stored else "miss",
+                            "ttl_seconds": cache_decision.ttl_seconds,
+                        }
+                    else:
+                        cache_info = {"status": "miss", "reason": "not_successful"}
                 if failed and error_message is None:
                     error_message = (
                         str(
@@ -7447,6 +7936,8 @@ class MemAgent:
             "duration_ms": duration_ms,
             **outcome_payload,
         }
+        if cache_info is not None:
+            outcome_record["cache"] = dict(cache_info)
         self._last_tool_outcomes = [
             *list(self._last_tool_outcomes or []),
             outcome_record,
@@ -7478,6 +7969,7 @@ class MemAgent:
                 "success": not tool_failed,
                 "error_code": error_code,
                 "duration_ms": duration_ms,
+                "cache": cache_info,
             },
         )
 
@@ -7619,6 +8111,7 @@ class MemAgent:
             return
         from ..llms.streaming import streaming_capabilities
 
+        self._suggest_capabilities(session, query)
         workflow = self._init_workflow_capture(query, user_id)
         messages = self._build_prompt_messages(
             system_prompt, query, context, request_context=request_context
@@ -7654,7 +8147,7 @@ class MemAgent:
                     "content": "Use tools to collect evidence, then call memorizz_finalize_answer alone. Do not draft the public answer until the host accepts finalization.",
                 }
             )
-        tool_count = rejections = 0
+        tool_count = rejections = stray_calls = 0
         try:
             for iteration in range(self._get_tool_iteration_limit()):
                 check_cancelled()
@@ -7677,7 +8170,12 @@ class MemAgent:
                     attempt=iteration + 1,
                 )
                 request_messages = _to_jsonable(messages)
-                phase_tools = None if final_phase else tools
+                # The answer phase offers the same tools as the tool phase: tools
+                # render first in the prompt, so dropping them would start a
+                # separate provider cache chain and re-bill the whole history
+                # every turn. The host, not the tool list, keeps the public
+                # answer tool-free: calls made in it are never run (below).
+                phase_tools = tools
                 provider = self._stream_with_transient_retry(
                     lambda: self._generate_stream_with_trace(
                         request_messages,
@@ -7720,9 +8218,32 @@ class MemAgent:
                             )
                             terminal, had_tools = True, True
                             if final_phase:
-                                raise ProviderStreamError(
-                                    "unexpected_tool_call_in_final_answer"
+                                # A tool call in the answer phase is never
+                                # run. Text already shown stands as the
+                                # answer; otherwise ask again.
+                                if (
+                                    session.mode == "final_stream"
+                                    and "".join(pending).strip()
+                                ):
+                                    session.answer_done()
+                                    return
+                                stray_calls += 1
+                                logger.info(
+                                    "Ignored a tool call after tools were disabled "
+                                    "(attempt %d); asking for a plain answer",
+                                    stray_calls,
                                 )
+                                if stray_calls > 2:
+                                    raise ProviderStreamError(
+                                        "unexpected_tool_call_in_final_answer"
+                                    )
+                                messages.append(
+                                    {
+                                        "role": "system",
+                                        "content": "Tools are disabled for this reply and tool calls are ignored. Answer the user's current request in plain text now, using the evidence above.",
+                                    }
+                                )
+                                break
                             message = event["response"].choices[0].message
                             self._append_assistant_tool_calls(messages, message)
                             for call in message.tool_calls:
@@ -8606,6 +9127,16 @@ class MemAgent:
                 "those capabilities. Mutating calls are paused automatically and "
                 "can only be resumed through a host-approved durable proposal."
             )
+
+        # 14. Capabilities the agent lacks, so it asks instead of improvising.
+        if self.tool_manager and "request_capability" in (
+            self.tool_manager.list_tools() or []
+        ):
+            from .. import capability_gaps
+
+            note = capability_gaps.manifest(self._capability_state())
+            if note:
+                prompt_parts.append(note)
 
         return "\n\n".join(prompt_parts)
 
@@ -9650,12 +10181,10 @@ class MemAgent:
     def _register_vercel_skills_tools(self):
         """Register Vercel Agent Skills tools (search + fetch)."""
         from ..vercel_skills import VercelSkillsProvider
-        from ..vercel_skills.provider import MISSING_GITHUB_TOKEN_MESSAGE
 
-        config = self.get_skills_marketplace_config() or {}
-        if not str(config.get("github_token") or "").strip():
-            logger.warning(MISSING_GITHUB_TOKEN_MESSAGE)
-        provider = VercelSkillsProvider(config=config)
+        provider = VercelSkillsProvider(
+            config=self.get_skills_marketplace_config() or {}
+        )
 
         def vercel_skills_search(
             q: str,
@@ -9698,11 +10227,14 @@ class MemAgent:
                 Dict with ``ok``, ``name``, ``description``, ``instructions``
                 (the full skill content), and ``metadata``.
             """
-            return provider.fetch_skill(
+            result = provider.fetch_skill(
                 repo=repo,
                 skill_name=skill_name or None,
                 branch=branch,
             )
+            # ``instructions`` already carries the body; skip the raw copy.
+            result.pop("content", None)
+            return result
 
         vercel_skills_search.__name__ = "vercel_skills_search"
         vercel_skill_fetch.__name__ = "vercel_skill_fetch"
@@ -10123,6 +10655,38 @@ class MemAgent:
         Empty when no model call has completed.
         """
         return dict(self._run_usage)
+
+    def tool_cache_stats(self) -> Dict[str, Any]:
+        """Hits, misses, stored results, bypasses and the tool time saved."""
+        cache = getattr(self, "tool_cache", None)
+        if cache is None:
+            return {
+                "enabled": False,
+                "hits": 0,
+                "misses": 0,
+                "stored": 0,
+                "bypasses": 0,
+                "saved_ms": 0.0,
+            }
+        return {"enabled": True, **cache.statistics()}
+
+    def enable_tool_cache(self, **config: Any) -> "ToolCache":
+        """Turn the tool-call cache on (``ToolCacheConfig`` fields as keywords)."""
+        self.tool_cache_config = ToolCacheConfig(**{"enabled": True, **config})
+        self.tool_cache = ToolCache(self.tool_cache_config, agent_id=self.agent_id)
+        return self.tool_cache
+
+    def disable_tool_cache(self) -> None:
+        """Turn the tool-call cache off; stored results expire on their own."""
+        self.tool_cache_config = None
+        self.tool_cache = None
+
+    def invalidate_tool_cache(
+        self, tool_name: Optional[str] = None, *, user_id: Optional[str] = None
+    ) -> int:
+        """Drop cached tool results (all, one tool's, and/or one user's)."""
+        cache = getattr(self, "tool_cache", None)
+        return cache.invalidate(tool_name, user_id=user_id) if cache else 0
 
     def semantic_cache_stats(self) -> Dict[str, Any]:
         """Return real hit/miss/bypass/write/eviction counters and provenance."""
@@ -10705,6 +11269,8 @@ class MemAgent:
         memory_id: Optional[str] = None,
         user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
+        keep_recent: int = 0,
+        summary_type: str = "automatic",
     ) -> List[str]:
         """
         Generate summaries by compressing memory units from a specified time period.
@@ -10747,25 +11313,6 @@ class MemAgent:
             days_back=days_back,
             max_memories_per_summary=max_memories_per_summary,
             record_context_usage=self._record_context_window_usage,
-        )
-
-    def _compress_memories_with_llm(self, memories: List[Dict]) -> str:
-        """
-        Use LLM to compress memory units into an emotionally and situationally relevant summary.
-
-        Parameters:
-        -----------
-        memories : List[Dict]
-            List of memory units to compress
-
-        Returns:
-        --------
-        str
-            Compressed summary content
-        """
-        manager = self.memory_manager or MemoryManager(self.memory_provider)
-        return manager.compress_memories_with_llm(
-            memories,
-            model=self.model,
-            record_context_usage=self._record_context_window_usage,
+            keep_recent=keep_recent,
+            summary_type=summary_type,
         )

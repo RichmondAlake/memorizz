@@ -40,6 +40,96 @@ branches can use empty dependency lists. Configure each worker's memory policy
 and tool allowlist for the intended source boundary; thread separation is not
 authorization and does not disable authorized knowledge-base retrieval.
 
+## Choose delegates in the local UI
+
+On an agent's create or edit page, **Delegates** lists your other saved agents.
+Tick the ones this agent may hand work to. Each request is then split among them
+by the agent's model (`mode="auto"`), each delegate works on its part as a
+subagent, and the agent combines their results. The section also sets:
+
+- **Delegate requests**: off keeps the delegates saved but answers every request
+  directly (`enabled`).
+- **Answer itself when a request can't be split** (`allow_root_fallback`, on by
+  default here; the SDK default is off).
+- **Combine results**: the agent's model writes one answer (`model`), or each
+  delegate's result is listed in order without an extra model call
+  (`deterministic`).
+- **Delegates working at once**: 1–8 (`max_workers`); blank means all of them.
+
+The form saves `delegates` (agent IDs) and `delegation_config`, and keeps other
+configuration set in code, such as a fixed `plan`. It refuses an agent as its own
+delegate and any delegate whose own delegates lead back to this agent. Loading
+an agent also skips a delegate already in the chain being loaded, so a loop
+saved by other means cannot hang it. Every delegate makes its own model calls,
+so delegated requests cost more. In a `memagent` harness run each delegate shows
+as a subagent in the run's trace.
+
+## Harnesses as delegates
+
+A delegate can be a coding harness instead of another model. An agent whose
+meta-harness mode is `runtime` runs every task it is given on its default
+harness, so a coordinator hands it parts of a request like any other delegate:
+
+```python
+from memorizz import MemAgent
+
+reviewer = MemAgent(
+    name="Codex reviewer",
+    llm_config=llm_config,
+    memory_provider=provider,
+    meta_harness=True,
+    meta_harness_mode="runtime",
+    default_harness="codex",
+    harness_config={"model": "gpt-6-luna"},  # optional: the harness default otherwise
+)
+coordinator = MemAgent(
+    llm_config=llm_config,
+    memory_provider=provider,
+    delegates=[reviewer, writer],  # mix harness-backed and model-backed agents
+    delegation={"enabled": True, "mode": "auto"},
+)
+```
+
+In the local UI, open the coordinator's **Delegates** section and use **Add a
+harness as a delegate**: pick a harness (Codex, Claude Code, pi, Hermes,
+OpenHands, DeepSeek), optionally its model from the same dropdown the harness
+page uses (the newest models of each provider it runs, or **Other model…**),
+and a name. MemoRizz saves a new agent that runs on that harness and ticks it in
+the list; save the form to keep it as a delegate. Harness-backed delegates are
+marked "runs on Codex · gpt-6-luna" in the list. The **Agent harness runtime**
+section's **Harness model** sets the same thing for any agent (saved as
+`harness_config["model"]`; blank uses the harness default).
+
+When to use which: a harness delegate brings its own agent loop, tools and
+sandbox (shell, file edits, web search), so it suits code and file work in a
+workspace. A model delegate runs on its own model with MemoRizz's tools and
+memory, so it suits research, analysis and writing, and costs less per task.
+Mixing both works well. A harness delegate created in the UI has no workspace of
+its own: in a harness run (Agent Harnesses) it works in that run's workspace and
+may use what that run was approved for.
+
+In the playground, a coordinator with harness delegates shows a **Harness
+delegates** card in the inspector's Overview tab, and a chip by the message box
+says what they may use. By default each conversation gets its own fresh folder
+and no web access (a delegate with its own workspace setting keeps using that).
+To give them a folder of yours, web access or edits, fill in the card and press
+**Allow**: web access and edits need your name, the folder must sit inside the
+allowed workspace roots, and the grant is recorded as an approved
+`metaharness.delegate_access` approval that lasts eight hours. Every message in
+that conversation then passes it to the delegates, so their harness runs start
+without asking again; **Stop using this access** goes back to the conversation's
+own folder. When a grant has expired, the reply says so and the card asks you to
+allow it again. The playground lists each delegate as it starts and finishes,
+and each delegate's harness run appears on Agent Harnesses.
+
+The same works over HTTP: `POST /api/agents/{agent_id}/harness-access`
+(`{"workspace", "network": "none"|"full", "write", "approver_id"}`) returns the
+grant, `GET /api/agents/{agent_id}/harness-access/{grant_id}` checks it (404 once
+expired), `POST /api/agents/{agent_id}/harness-workspace` makes a fresh folder,
+and the playground stream takes `harness_grant` or `harness_workspace` form
+fields. In Python, `MetaHarness.grant_delegate_access()` creates a grant and
+`MemAgent.run(..., tool_context={"harness_parent": grant})` passes it on.
+
 ## Admission and completion
 
 The entire plan is checked before executing children: nonempty IDs/descriptions,

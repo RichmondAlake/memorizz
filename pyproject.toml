@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.12.0"
+version = "0.13.0"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -118,7 +118,7 @@ sandbox = [
     "e2b>=2.26.0,<2.38.0",
     "e2b-code-interpreter>=2.9.0,<2.10.0",
 ]
-terminal-bench = ["harbor>=0.21.0,<0.22.0"]
+terminal-bench = ["harbor>=0.23.0,<0.24.0"]
 # Benchmark adapters remain optional so production installs do not pull Docker,
 # dataset, tokenizer, or deep-learning stacks unnecessarily.
 swe-bench = [
@@ -209,7 +209,7 @@ core-metadata-version = "2.4"
 [tool.hatch.build.targets.wheel.force-include]
 # Ship the evalground scripts INSIDE the memorizz namespace — a top-level
 # eval/ dir in site-packages is unowned and collides with other packages.
-# The UI's candidate-root walk (ui/app.py:_iter_candidate_roots) already
+# The UI's candidate-root walk (ui/routers/evalground.py:_iter_candidate_roots) already
 # searches the package dir, so discovery works unchanged.
 "eval/longmemeval/evaluate_memorizz.py" = "memorizz/eval/longmemeval/evaluate_memorizz.py"
 "eval/longmemeval/download_dataset.py" = "memorizz/eval/longmemeval/download_dataset.py"
@@ -222,6 +222,9 @@ core-metadata-version = "2.4"
 "eval/memory_suite/evaluate_memorizz.py" = "memorizz/eval/memory_suite/evaluate_memorizz.py"
 "eval/memory_suite/README.md" = "memorizz/eval/memory_suite/README.md"
 "src/memorizz/py.typed" = "memorizz/py.typed"
+# The Codex and Claude Code plugins, for `memorizz plugin install`.
+"plugins/codex/memorizz" = "memorizz/agent_plugins/codex/memorizz"
+"plugins/claude-code/memorizz" = "memorizz/agent_plugins/claude-code/memorizz"
 "src/memorizz/sandbox/MemorizzGraalSandbox.java" = "memorizz/sandbox/MemorizzGraalSandbox.java"
 
 [tool.hatch.build.targets.sdist]

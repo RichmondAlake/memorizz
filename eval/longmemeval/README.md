@@ -6,44 +6,25 @@ This directory contains the evaluation script for testing Memorizz's long-term m
 
 ### 1. Download the Dataset
 
-The LongMemEval dataset needs to be downloaded manually from the official repository:
-
 ```bash
-# Run the download helper script
 python download_dataset.py
 ```
 
-This will provide instructions for downloading the dataset files. You need to:
+This fetches `longmemeval_oracle.json`, `longmemeval_s.json` and
+`longmemeval_m.json` from the cleaned Hugging Face copy
+(`xiaowu0162/longmemeval-cleaned`) into `data/`.
 
-1. Visit https://github.com/xiaowu0162/LongMemEval
-2. Follow their setup instructions
-3. Download the dataset files:
-   - `longmemeval_oracle.json`
-   - `longmemeval_s.json`
-   - `longmemeval_m.json`
-4. Place these files in the `data/` directory
+### 2. Configure Environment Variables
 
-### 2. Install Dependencies
-
-Make sure you have the required packages installed:
-
-```bash
-pip install datasets transformers
-```
-
-### 3. Configure Environment Variables
-
-The script requires OpenAI API access for evaluation. Set your API key:
+The script stores memory in Oracle and uses OpenAI for answers and judging:
 
 ```bash
 export OPENAI_API_KEY="your-openai-api-key"
+export ORACLE_PASSWORD="your-oracle-password"   # required
+# Optional: ORACLE_USER, ORACLE_DSN, ORACLE_SCHEMA
 ```
 
-Optionally, configure MongoDB for memory storage:
-
-```bash
-export MONGODB_URI="your-mongodb-connection-string"
-```
+Set up the Oracle user and schema once with `memorizz oracle setup`.
 
 ## Usage
 
@@ -61,7 +42,7 @@ python evaluate_memorizz.py
 python evaluate_memorizz.py \
     --dataset_variant oracle \
     --num_samples 100 \
-    --application_mode general \
+    --application_mode assistant \
     --output_dir ./results \
     --verbose
 ```
@@ -70,7 +51,7 @@ python evaluate_memorizz.py \
 
 - `--dataset_variant`: Choose from "oracle", "s", or "m" (default: "oracle")
 - `--num_samples`: Number of samples to evaluate (default: 50)
-- `--application_mode`: Memorizz application mode to use (default: "general")
+- `--application_mode`: Memorizz application mode: `assistant` (default), `workflow` or `deep_research`
 - `--output_dir`: Directory to save results (default: "./results")
 - `--verbose`: Enable verbose logging
 
@@ -103,7 +84,7 @@ Results include:
 EVALUATION SUMMARY
 ==================================================
 Dataset Variant: oracle
-Application Mode: general
+Application Mode: assistant
 Samples Evaluated: 50
 Overall Accuracy: 0.720
 Overall Score: 0.756
@@ -116,7 +97,7 @@ Category Performance:
   temporal_reasoning: 0.600 (8 samples)
   abstention: 0.800 (5 samples)
 
-Detailed results saved to: ./results/longmemeval_oracle_general_20241201_143022.json
+Detailed results saved to: ./results/longmemeval_oracle_assistant_20241201_143022.json
 ```
 
 ## Troubleshooting

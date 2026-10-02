@@ -504,13 +504,6 @@ class ObservedSpan:
     async def __aexit__(self, exc_type, exc, tb):
         return self.__exit__(exc_type, exc, tb)
 
-    def add_output_ref(self, ref):
-        self.outputs.append(ResourceRef.model_validate(ref))
-
-    def set_attribute(self, name, value):
-        validate_attributes({**self.attributes, name: value})
-        self.attributes[name] = value
-
     def succeed(self):
         self.status = "success"
 

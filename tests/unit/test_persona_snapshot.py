@@ -18,9 +18,9 @@ def test_snapshot_isolated_between_concurrent_accounts_and_stream_workers():
             barrier.wait(timeout=5)
             with ThreadPoolExecutor(1) as workers:
                 copied = workers.submit(
-                    copy_context().run, manager.export_persona
+                    copy_context().run, lambda: manager.current_persona.name
                 ).result()
-            assert copied["name"] == name
+            assert copied == name
             return manager.current_persona.name
 
     with ThreadPoolExecutor(2) as workers:

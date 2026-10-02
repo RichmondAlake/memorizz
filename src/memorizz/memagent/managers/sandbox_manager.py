@@ -12,16 +12,19 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from ...sandbox.base import SandboxProvider, create_sandbox_provider
 from ...sandbox.models import ExecutionResult
+from ._provider_slot import ProviderSlot
 
 logger = logging.getLogger(__name__)
 
 
-class SandboxManager:
+class SandboxManager(ProviderSlot):
     """Wrapper over SandboxProvider implementations.
 
     Follows the same manager pattern as InternetAccessManager — thin routing
     layer that delegates to whichever provider is configured.
     """
+
+    provider_kind = "sandbox"
 
     def __init__(self, provider: Optional[SandboxProvider] = None):
         self.provider = provider
@@ -68,33 +71,6 @@ class SandboxManager:
             f"Invalid sandbox config type: {type(config)}. "
             "Expected str, dict, or SandboxProvider instance."
         )
-
-    def set_provider(
-        self, provider: Optional[SandboxProvider]
-    ) -> Optional[SandboxProvider]:
-        """Attach or detach a sandbox provider."""
-        previous = self.provider
-        if previous and previous is not provider:
-            try:
-                previous.close()
-            except Exception as exc:
-                logger.debug("Failed to close previous sandbox provider: %s", exc)
-        self.provider = provider
-        return previous
-
-    def is_enabled(self) -> bool:
-        """Return True if a provider is available."""
-        return self.provider is not None
-
-    def get_provider_name(self) -> Optional[str]:
-        if not self.provider:
-            return None
-        return self.provider.get_provider_name()
-
-    def get_provider_config(self) -> Optional[Dict[str, Any]]:
-        if not self.provider:
-            return None
-        return self.provider.get_config()
 
     # --- Execution ---
 

@@ -22,9 +22,54 @@ ORACLE_PASSWORD=<application-password>
 ORACLE_DSN=localhost:1521/FREEPDB1
 ```
 
-For local bootstrap and schema creation, also set
-`ORACLE_ADMIN_PASSWORD=<admin-password>` and follow the root
-[`SETUP.md`](https://github.com/RichmondAlake/memorizz/blob/main/SETUP.md).
+`ORACLE_ADMIN_PASSWORD=<admin-password>` is needed only when MemoRizz must
+create or grant the application schema. Normal application processes should
+receive only `ORACLE_USER`, `ORACLE_PASSWORD` and `ORACLE_DSN`.
+
+### Start Oracle locally
+
+With Docker (or OrbStack) running, set the admin password in the environment
+or enter it at the hidden prompt:
+
+```bash
+memorizz oracle install --image lite
+memorizz oracle setup
+```
+
+Neither command echoes a password. `oracle setup` works in two modes:
+
+- **admin mode** creates the configured application user, grants the required
+  privileges and initializes the schema;
+- **user-only mode** connects to an already-provisioned schema and initializes
+  objects without administrator access.
+
+For an existing schema, use the non-destructive update instead:
+
+```bash
+memorizz oracle setup-schema
+```
+
+Applications and notebooks can use the same bootstrap from the SDK:
+
+```python
+from memorizz.memory_provider.oracle import LocalOracleRuntime, OracleProvider
+
+runtime = LocalOracleRuntime.from_env(provision_if_missing=True)
+runtime.ensure_ready()
+provider = OracleProvider.from_env(provision_if_missing=False, index_policy="lazy")
+assert provider.preflight()["ok"]
+```
+
+`LocalOracleRuntime` uses explicit Docker argument arrays, the requested host
+port and container name, and a bounded readiness wait. Set
+`MEMORIZZ_ORACLE_CONTAINER` when reusing a non-default container.
+
+### Hosted Oracle
+
+Set the application credentials and DSN, leave out `ORACLE_ADMIN_PASSWORD`, and
+run `memorizz oracle setup-schema`. Ask the DBA for the privileges reported by
+`preflight()`, and for permission to install an ONNX model if in-database
+embedding is required.
 
 ## Recommended construction
 
@@ -210,15 +255,18 @@ src/memorizz/memory_provider/oracle/migrations/004_production_governance_050.sql
 src/memorizz/memory_provider/oracle/migrations/005_scoped_retrieval_052.sql
 src/memorizz/memory_provider/oracle/migrations/006_knowledge_base_provenance.sql
 src/memorizz/memory_provider/oracle/migrations/007_structured_tool_outcomes.sql
+src/memorizz/memory_provider/oracle/migrations/008_observability.sql
 ```
 
 Migration 005 adds/backfills exact summary thread scope and restores indexed
 knowledge-base namespace metadata on older schemas. Migration 006 preserves
 source provenance for grounded knowledge records. Migration 007 adds structured
 `outcome` and `outcome_details` fields to tool logs and backfills legacy rows;
-it is idempotent and can be rerun safely. The provider performs additive startup
-checks for availability, but the SQL files are the recommended review and
-change-control artifacts.
+it is idempotent and can be rerun safely. Migration 008 adds the private
+observability index behind traces and usage; `OracleSpanIndex.initialize()`
+applies it too. The provider performs additive startup checks for
+availability, but the SQL files are the recommended review and change-control
+artifacts.
 
 ## Scoped cleanup
 
@@ -252,6 +300,17 @@ with agent:
     agent.run("Remember this", user_id="tenant-a")
 ```
 
+## Production checklist
+
+- use a secret manager and separate admin and application credentials;
+- keep `MEMORIZZ_HOME` and database storage durable;
+- apply migrations under change control and back up before upgrades;
+- choose an explicit index policy and monitor vector memory;
+- pass `user_id` and enforce tenant identity at the application edge;
+- call `agent.capability_report(preflight=True)` in deployment health checks;
+- run `scripts/verify_production_050.py` against a staging database before
+  promotion.
+
 ## Troubleshooting
 
 **Connection fails:** confirm the mapped Docker port, service name, PDB state,
@@ -259,6 +318,16 @@ and application credentials. MemoRizz does not guess a default password.
 
 **Dimension mismatch:** compare `preflight()["vector_dimensions"]` with the
 embedding report. Align the model and schema before writing more vectors.
+
+**ORA-00600 [unable to load XDB library] on the Free lite image:** the lite
+image registers XDB but doesn't ship its library, so `DBMS_METADATA` fails and
+ends the session. MemoRizz reads each `EMBEDDING` column's declared dimension
+from the driver's column metadata (python-oracledb reports it on a zero-row
+query), then `ALL_TAB_COLS.VECTOR_INFO`, and uses `DBMS_METADATA` only when
+neither is available, so restarting on an existing schema works on the lite
+image. The lite image also has no `USERS` tablespace: give the schema an
+automatic-segment-space tablespace, because VECTOR columns can't live in
+`SYSTEM` (ORA-43853).
 
 **ORA-51962:** inspect `VECTOR_MEMORY_SIZE`, switch to `none`/`lazy`, or have an
 authorized DBA increase vector memory and restart the database.

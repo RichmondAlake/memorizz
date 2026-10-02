@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ..enums.memory_type import MemoryType
 from .models import HarnessContextPack
@@ -136,9 +136,16 @@ class HarnessContextBuilder:
         user_id: Optional[str],
         thread_id: Optional[str],
         memory_types: Iterable[MemoryType] = _CONTEXT_TYPES,
+        exclude: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> HarnessContextPack:
+        """Retrieve, bound and render memory for ``query``.
+
+        ``exclude`` drops rows before they count, e.g. a benchmark task's own
+        earlier lessons, so a later attempt cannot read its answer.
+        """
         records: List[Dict[str, Any]] = []
         seen = set()
+        excluded = 0
         for memory_type in memory_types:
             for row in self._retrieve(
                 query,
@@ -149,6 +156,10 @@ class HarnessContextBuilder:
             ):
                 key = (memory_type.value, _source_id(row))
                 if key in seen:
+                    continue
+                if exclude is not None and exclude(row):
+                    seen.add(key)
+                    excluded += 1
                     continue
                 seen.add(key)
                 records.append(_safe_record(row, memory_type))
@@ -183,6 +194,7 @@ class HarnessContextBuilder:
             source_ids=source_ids,
             token_estimate=(len(body) + 3) // 4,
             truncated=truncated,
+            metadata={"excluded_count": excluded} if excluded else {},
         )
 
 

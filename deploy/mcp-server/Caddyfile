@@ -1,0 +1,4 @@
+{$MEMORIZZ_MCP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy memorizz-mcp:8766
+}

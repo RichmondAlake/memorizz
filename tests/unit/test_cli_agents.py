@@ -164,3 +164,90 @@ def test_cli_persists_meta_harness_agent_configuration(tmp_path):
     assert persisted.harness_config["permissions"]["allowed_roots"] == [
         str(workspace.resolve())
     ]
+
+
+@pytest.mark.unit
+def test_cli_agents_get_delegates_harness_models_updates_and_deletes(tmp_path):
+    env = _isolated_env(tmp_path)
+
+    def create(*extra):
+        result = runner.invoke(
+            app, ["agents", "create", "--no-llm", "--json", *extra], env=env
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.output)["agent"]
+
+    codex = create(
+        "--name",
+        "Codex part",
+        "--harness-mode",
+        "runtime",
+        "--default-harness",
+        "codex",
+        "--harness-model",
+        "gpt-6-luna",
+    )
+    assert (
+        codex["harness_model"] == "gpt-6-luna" and codex["default_harness"] == "codex"
+    )
+    helper = create("--name", "Helper")
+    lead = create(
+        "--name",
+        "Lead",
+        "--delegate",
+        codex["agent_id"],
+        "--delegate",
+        helper["agent_id"],
+        "--delegation-max-workers",
+        "2",
+        "--delegation-consolidation",
+        "deterministic",
+    )
+    assert lead["delegates"] == [codex["agent_id"], helper["agent_id"]]
+    assert lead["delegation"]["max_workers"] == 2
+    assert lead["delegation"]["consolidation_strategy"] == "deterministic"
+
+    # Harness options without a harness mode are an error, not ignored.
+    lonely = runner.invoke(
+        app,
+        ["agents", "create", "--name", "X", "--no-llm", "--default-harness", "codex"],
+        env=env,
+    )
+    assert lonely.exit_code != 0 and "needs --harness-mode" in lonely.output
+
+    def update(agent_id, *extra):
+        return runner.invoke(
+            app, ["agents", "update", agent_id, "--json", *extra], env=env
+        )
+
+    changed = update(
+        lead["agent_id"],
+        "--remove-delegate",
+        helper["agent_id"],
+        "--no-delegation",
+        "--name",
+        "Lead 2",
+    )
+    assert changed.exit_code == 0, changed.output
+    agent = json.loads(changed.output)["agent"]
+    assert agent["name"] == "Lead 2" and agent["delegates"] == [codex["agent_id"]]
+    assert agent["delegation"]["enabled"] is False
+    # A loop is refused: the codex part can't delegate back to its lead.
+    looped = update(codex["agent_id"], "--add-delegate", lead["agent_id"])
+    assert looped.exit_code != 0 and "would loop" in looped.output
+    off = update(codex["agent_id"], "--harness-mode", "off")
+    assert json.loads(off.output)["agent"]["meta_harness"] is False
+    assert update("missing").exit_code == 1
+
+    # Deleting an agent takes it out of its coordinators' delegates.
+    removed = runner.invoke(
+        app, ["agents", "delete", codex["agent_id"], "--yes", "--json"], env=env
+    )
+    assert removed.exit_code == 0, removed.output
+    assert json.loads(removed.output)["removed_as_delegate_from"] == [lead["agent_id"]]
+    shown = runner.invoke(app, ["agents", "show", lead["agent_id"], "--json"], env=env)
+    assert json.loads(shown.output)["agent"]["delegates"] == []
+    asked = runner.invoke(
+        app, ["agents", "delete", helper["agent_id"]], env=env, input="n\n"
+    )
+    assert asked.exit_code == 1

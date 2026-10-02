@@ -16,6 +16,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import StaticAPIKeyVerifier, current_identity
 from .config import MemorizzMCPServerConfig
@@ -23,6 +24,17 @@ from .runtime import MemorizzRuntime, MemorizzServerError
 
 logger = logging.getLogger(__name__)
 DOCUMENTATION_URL = "https://richmondalake.github.io/memorizz/guides/mcp-server/"
+
+
+class EntityRelationArgument(BaseModel):
+    """One relation from the entity being written to another entity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: str = Field(description="The related entity's name or entity ID.")
+    relation_type: str = Field(
+        description="How they relate, for example works_on, owns or depends_on."
+    )
 
 
 async def _tool_call(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -391,13 +403,14 @@ def create_memorizz_mcp_server(
 
     @server.tool(annotations=read_only)
     async def memorizz_list_harnesses() -> Dict[str, Any]:
-        """List Codex, Claude Code, OpenHands, and native harness capabilities."""
+        """List harness adapters (Codex, Claude Code, OpenHands, DeepSeek, pi,
+        Hermes, native MemAgent) with readiness and setup guidance."""
         return await _tool_call(service.list_harnesses, current_identity())
 
     @server.tool(annotations=execute)
     async def memorizz_start_harness_run(
         task: str,
-        workspace: str,
+        workspace: Optional[str] = None,
         harness: str = "auto",
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -408,6 +421,9 @@ def create_memorizz_mcp_server(
         network: str = "none",
         mcp_access: str = "read_only",
         allowed_env: Optional[list[str]] = None,
+        allowed_tools: Optional[list[str]] = None,
+        denied_tools: Optional[list[str]] = None,
+        output_schema: Optional[Dict[str, Any]] = None,
         execution_backend: str = "local",
         verification_command: Optional[str] = None,
         timeout_seconds: int = 900,
@@ -415,8 +431,12 @@ def create_memorizz_mcp_server(
         max_cost_usd: Optional[float] = None,
         max_input_tokens: Optional[int] = None,
         max_output_tokens: Optional[int] = None,
+        allow_subagents: bool = False,
     ) -> Dict[str, Any]:
-        """Start a bounded harness run; risky envelopes pause for host approval."""
+        """Start a bounded harness run; risky envelopes pause for host approval.
+        Omit workspace for a task that needs no project (a fresh empty folder).
+        allow_subagents lets Claude Code use its Task tool and Codex start
+        sub-agents."""
         return await _tool_call(
             service.start_harness_run,
             task,
@@ -432,6 +452,9 @@ def create_memorizz_mcp_server(
             network=network,
             mcp_access=mcp_access,
             allowed_env=allowed_env,
+            allowed_tools=allowed_tools,
+            denied_tools=denied_tools,
+            output_schema=output_schema,
             execution_backend=execution_backend,
             verification_command=verification_command,
             timeout_seconds=timeout_seconds,
@@ -439,6 +462,171 @@ def create_memorizz_mcp_server(
             max_cost_usd=max_cost_usd,
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
+            allow_subagents=allow_subagents,
+        )
+
+    @server.tool(annotations=execute)
+    async def memorizz_retry_harness_run(run_id: str) -> Dict[str, Any]:
+        """Start a finished run's exact task again; risky runs ask for approval again."""
+        return await _tool_call(service.retry_harness_run, run_id, current_identity())
+
+    @server.tool(annotations=execute)
+    async def memorizz_start_harness_plan(
+        task: str,
+        stages: list[Dict[str, Any]],
+        workspace: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        network: str = "none",
+        mcp_access: str = "read_only",
+        allow_dirty_workspace: bool = False,
+        allow_subagents: bool = False,
+        timeout_seconds: int = 900,
+        max_steps: int = 80,
+    ) -> Dict[str, Any]:
+        """Run stages in order, each on its own harness, with earlier stages'
+        results passed on. Each stage: {name, harness, instruction?, write?,
+        model?, agent_id?, verification_command?}. At most one stage may write;
+        it waits for host approval. Poll memorizz_get_harness_workflow."""
+        return await _tool_call(
+            service.start_harness_plan,
+            task,
+            stages,
+            workspace,
+            current_identity(),
+            memory_id=memory_id,
+            network=network,
+            mcp_access=mcp_access,
+            allow_dirty_workspace=allow_dirty_workspace,
+            allow_subagents=allow_subagents,
+            timeout_seconds=timeout_seconds,
+            max_steps=max_steps,
+        )
+
+    @server.tool(annotations=execute)
+    async def memorizz_start_harness_comparison(
+        task: str,
+        harnesses: list[str],
+        workspace: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        model: Optional[str] = None,
+        harness_models: Optional[Dict[str, str]] = None,
+        network: str = "none",
+        mcp_access: str = "read_only",
+        allow_subagents: bool = False,
+        verification_command: Optional[str] = None,
+        timeout_seconds: int = 900,
+        max_steps: int = 80,
+    ) -> Dict[str, Any]:
+        """Run one read-only task on two or more harnesses at once, with the
+        same limits and memory. harness_models gives a harness its own model
+        ({"claude-code": "claude-sonnet-5-5"}); model is the rest's. Poll
+        memorizz_get_harness_workflow."""
+        return await _tool_call(
+            service.start_harness_comparison,
+            task,
+            harnesses,
+            workspace,
+            current_identity(),
+            memory_id=memory_id,
+            model=model,
+            harness_models=harness_models,
+            network=network,
+            mcp_access=mcp_access,
+            allow_subagents=allow_subagents,
+            verification_command=verification_command,
+            timeout_seconds=timeout_seconds,
+            max_steps=max_steps,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_list_harness_workflows(
+        status: Optional[str] = None, limit: int = 20
+    ) -> Dict[str, Any]:
+        """List this tenant's recent staged plans and comparisons."""
+        return await _tool_call(
+            service.list_harness_workflows,
+            current_identity(),
+            status=status,
+            limit=limit,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_get_harness_workflow(workflow_id: str) -> Dict[str, Any]:
+        """One plan or comparison with each step's run and result."""
+        return await _tool_call(
+            service.get_harness_workflow, workflow_id, current_identity()
+        )
+
+    @server.tool(annotations=execute)
+    async def memorizz_cancel_harness_workflow(workflow_id: str) -> Dict[str, Any]:
+        """Cancel a plan or comparison: stop its active runs, start no more."""
+        return await _tool_call(
+            service.cancel_harness_workflow, workflow_id, current_identity()
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_list_connected_tools(
+        agent_id: Optional[str] = None, refresh: bool = False
+    ) -> Dict[str, Any]:
+        """List the tools on an agent's own MCP servers (Notion, Gmail and so
+        on), whether each server is signed in, and which tools change data.
+        agent_id may be omitted when this server serves a single agent."""
+        return await _tool_call(
+            service.list_connected_tools,
+            agent_id,
+            current_identity(),
+            refresh=refresh,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_read_connected_tool(
+        server_name: str,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Call a read-only tool on one of the agent's MCP servers (search,
+        list, get). Credentials stay in MemoRizz. Tools that change data are
+        refused; use memorizz_call_connected_tool for those."""
+        return await _tool_call(
+            service.call_connected_tool,
+            agent_id,
+            server_name,
+            tool_name,
+            arguments,
+            current_identity(),
+            read_only=True,
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_call_connected_tool(
+        server_name: str,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Call any tool on one of the agent's MCP servers, including ones that
+        change data. Needs write access; changes return approval_required until
+        a person approves them. Prefer memorizz_read_connected_tool for reads."""
+        return await _tool_call(
+            service.call_connected_tool,
+            agent_id,
+            server_name,
+            tool_name,
+            arguments,
+            current_identity(),
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_resume_connected_tool_call(
+        proposal_id: str, agent_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Run a connected-tool call after a person approved its proposal."""
+        return await _tool_call(
+            service.resume_connected_tool_call,
+            agent_id,
+            proposal_id,
+            current_identity(),
         )
 
     @server.tool(annotations=read_only)
@@ -480,22 +668,96 @@ def create_memorizz_mcp_server(
 
     @server.tool(annotations=execute)
     async def memorizz_cancel_harness_run(run_id: str) -> Dict[str, Any]:
-        """Request durable cancellation of one tenant-scoped harness run."""
+        """Request durable cancellation of one tenant-scoped harness run. A
+        memagent run also stops the runs its delegates started."""
         return await _tool_call(service.cancel_harness_run, run_id, current_identity())
+
+    @server.tool(annotations=execute)
+    async def memorizz_rerun_harness_workflow(workflow_id: str) -> Dict[str, Any]:
+        """Run a finished plan or comparison again with the same settings (a
+        fresh scratch folder if it had one). Poll memorizz_get_harness_workflow."""
+        return await _tool_call(
+            service.rerun_harness_workflow, workflow_id, current_identity()
+        )
+
+    @server.tool(annotations=destructive)
+    async def memorizz_delete_harness_runs(
+        run_ids: list[str], keep_scratch: bool = False
+    ) -> Dict[str, Any]:
+        """Permanently delete finished harness runs with their traces and the
+        runs their MemAgent delegates made. Runs still working and workflow
+        steps are kept and listed with the reason. Files in project folders
+        and answers saved to memory stay."""
+        return await _tool_call(
+            service.delete_harness_runs,
+            run_ids,
+            current_identity(),
+            keep_scratch=keep_scratch,
+        )
+
+    @server.tool(annotations=destructive)
+    async def memorizz_delete_harness_workflow(
+        workflow_id: str, keep_scratch: bool = False
+    ) -> Dict[str, Any]:
+        """Permanently delete a finished plan or comparison with all its runs."""
+        return await _tool_call(
+            service.delete_harness_workflow,
+            workflow_id,
+            current_identity(),
+            keep_scratch=keep_scratch,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_get_harness_conversation(conversation: str) -> Dict[str, Any]:
+        """A harness conversation's turns, oldest first. Pass its ID (hxc-…)
+        or any of its runs."""
+        return await _tool_call(
+            service.get_harness_conversation, conversation, current_identity()
+        )
+
+    @server.tool(annotations=execute)
+    async def memorizz_continue_harness_conversation(
+        conversation: str,
+        message: str,
+        harness: Optional[str] = None,
+        model: Optional[str] = None,
+        write: Optional[bool] = None,
+        network: Optional[str] = None,
+        allow_subagents: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Send the next message in a harness conversation. The latest turn's
+        setup carries over unless overridden; earlier turns go with it as
+        context. Risky runs pause for host approval."""
+        return await _tool_call(
+            service.continue_harness_conversation,
+            conversation,
+            message,
+            current_identity(),
+            harness=harness,
+            model=model,
+            write=write,
+            network=network,
+            allow_subagents=allow_subagents,
+        )
 
     @server.tool(annotations=read_only)
     async def memorizz_list_memories(
         memory_type: str = "knowledge_base",
         memory_id: Optional[str] = None,
         limit: int = 20,
+        include_superseded: bool = False,
     ) -> Dict[str, Any]:
-        """List tenant-scoped records from one Memorizz memory store."""
+        """List tenant-scoped records from one Memorizz memory store.
+
+        Superseded records are hidden unless include_superseded is true.
+        """
         return await _tool_call(
             service.list_memories,
             memory_type,
             current_identity(),
             memory_id=memory_id,
             limit=limit,
+            include_superseded=include_superseded,
         )
 
     @server.tool(annotations=read_only)
@@ -504,8 +766,14 @@ def create_memorizz_mcp_server(
         memory_type: str = "knowledge_base",
         memory_id: Optional[str] = None,
         limit: int = 10,
+        include_superseded: bool = False,
     ) -> Dict[str, Any]:
-        """Semantically search one tenant-scoped Memorizz memory store."""
+        """Search one tenant-scoped Memorizz memory store by meaning.
+
+        Without a working embedding model it falls back to keyword matches;
+        search_mode says which (semantic, keyword or hybrid). Superseded
+        records are hidden unless include_superseded is true.
+        """
         return await _tool_call(
             service.search_memories,
             query,
@@ -513,6 +781,7 @@ def create_memorizz_mcp_server(
             current_identity(),
             memory_id=memory_id,
             limit=limit,
+            include_superseded=include_superseded,
         )
 
     @server.tool(annotations=read_only)
@@ -552,6 +821,154 @@ def create_memorizz_mcp_server(
             record_id,
             memory_type,
             current_identity(),
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_record_turn(
+        memory_id: str,
+        thread_id: str,
+        user_message: str,
+        assistant_message: str,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Save one turn of a session (the request and the final answer) to
+        conversation memory; secrets are removed first. For coding-agent
+        plugins and other clients that keep episodic memory."""
+        return await _tool_call(
+            service.record_turn,
+            memory_id,
+            thread_id,
+            user_message,
+            assistant_message,
+            current_identity(),
+            agent_id=agent_id,
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_summarize_session(
+        memory_id: str, thread_id: str, agent_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Summarize a session's recorded turns into the summaries store with
+        the server's default model (what was asked, what changed, decisions,
+        next steps)."""
+        return await _tool_call(
+            service.summarize_session,
+            memory_id,
+            thread_id,
+            current_identity(),
+            agent_id=agent_id,
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_update_memory(
+        record_id: str,
+        content: str = "",
+        memory_type: str = "knowledge_base",
+        reason: Optional[str] = None,
+        duplicate_of: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Replace a memory's content without deleting anything.
+
+        Stores a new record (supersedes=<old id>, supersede_reason) and marks
+        the old one status=superseded with superseded_by=<new id>. To retire a
+        duplicate, pass duplicate_of=<the memory to keep> instead of content:
+        the duplicate is marked superseded by it and nothing new is stored.
+        List and search hide superseded records unless include_superseded is true.
+        """
+        return await _tool_call(
+            service.update_memory,
+            record_id,
+            content,
+            current_identity(),
+            memory_type=memory_type,
+            reason=reason,
+            duplicate_of=duplicate_of,
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_ingest(
+        paths: list[str],
+        memory_id: str,
+        recursive: bool = True,
+        include: Optional[list[str]] = None,
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Chunk local files and folders into the knowledge base under memory_id.
+
+        Absolute paths inside the server's ingest folders only. Skips hidden,
+        dependency and version-control folders and secret-looking files
+        (.env, keys, credentials); include takes glob patterns such as
+        "*.md". At most 500 files and 20 MB per call; unchanged files are
+        skipped and a changed file's old chunks are marked superseded.
+        """
+        return await _tool_call(
+            service.ingest,
+            paths,
+            memory_id,
+            current_identity(),
+            recursive=recursive,
+            include=include,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_lookup_entities(
+        query: Optional[str] = None,
+        name: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        limit: int = 10,
+        include_superseded: bool = False,
+    ) -> Dict[str, Any]:
+        """Find entities (people, projects, services) by exact name or query.
+
+        Give name for an exact match, query to search their facts, or both.
+        """
+        return await _tool_call(
+            service.lookup_entities,
+            current_identity(),
+            query=query,
+            name=name,
+            memory_id=memory_id,
+            limit=limit,
+            include_superseded=include_superseded,
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_upsert_entity(
+        name: str,
+        entity_type: Optional[str] = None,
+        attributes: Optional[Dict[str, Any]] = None,
+        relations: Optional[list[EntityRelationArgument]] = None,
+        memory_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create an entity or merge facts into the one with this name.
+
+        attributes maps fact names to values, e.g. {"role": "tech lead"}.
+        A relation target that doesn't exist yet is created by name.
+        """
+        return await _tool_call(
+            service.upsert_entity,
+            name,
+            current_identity(),
+            entity_type=entity_type,
+            attributes=attributes,
+            relations=[item.model_dump() for item in relations or []],
+            memory_id=memory_id,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_memory_status(
+        memory_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Report the backend, policy, embedding readiness and record counts.
+
+        Embedding readiness comes from one short embedding call. Counts are
+        for memory_id when given.
+        """
+        return await _tool_call(
+            service.memory_status, current_identity(), memory_id=memory_id
         )
 
     @server.tool(annotations=read_only)

@@ -1,0 +1,33 @@
+{
+  "name": "memorizz",
+  "version": "0.13.0",
+  "description": "Durable, searchable project memory for Codex, plus your saved MemoRizz agents, through MemoRizz's MCP server.",
+  "author": {
+    "name": "Richmond Alake",
+    "url": "https://github.com/RichmondAlake"
+  },
+  "homepage": "https://richmondalake.github.io/memorizz",
+  "repository": "https://github.com/RichmondAlake/memorizz",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "keywords": ["memory", "mcp", "agents", "knowledge-base", "harness"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "MemoRizz",
+    "shortDescription": "Long-term project memory for Codex",
+    "longDescription": "MemoRizz gives Codex a durable memory that outlasts sessions: it recalls this project's facts, decisions and preferences when a session starts, searches them on request, and saves new ones you or Codex decide to keep. Memories live in your MemoRizz store (files by default, or MongoDB/Oracle), where the MemoRizz UI, CLI and your other agents can see them too. It can also consult your saved MemoRizz agents.",
+    "developerName": "Richmond Alake",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://richmondalake.github.io/memorizz",
+    "defaultPrompt": [
+      "What do you remember about this project?",
+      "Remember that we run tests with pytest -n 8.",
+      "Search memory for how we deploy this service."
+    ],
+    "brandColor": "#111827",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png",
+    "screenshots": []
+  }
+}

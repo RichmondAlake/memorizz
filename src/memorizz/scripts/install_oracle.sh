@@ -37,7 +37,7 @@
 #   - Waits for database readiness before completing
 #   - Cross-platform support (Intel, AMD, Apple Silicon)
 #
-# See SETUP.md for complete setup instructions.
+# Setup guide: https://richmondalake.github.io/memorizz/memory-providers/oracle/
 
 set -e  # Exit immediately on error
 

@@ -2,20 +2,144 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-import inspect
 import json
 import logging
 import os
 from copy import deepcopy
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
-from .llm_provider import LLMProvider
+from .llm_provider import LLMProvider, ResponseMetadataMixin
 from .message_roles import developer_messages_to_system
+from .tool_metadata import JsonPromptToolMetadataMixin
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONTEXT_WINDOW_TOKENS = 8192
+# With nothing configured, a local model gets its full context length when the
+# attention cache for it fits in AUTO_KV_MEMORY_SHARE of this machine's RAM,
+# otherwise the largest standard size that fits, and never less than
+# AUTO_CONTEXT_WINDOW_TOKENS (or the model's length, if shorter). A MemAgent's
+# instructions and tool schemas alone take about 6-7k tokens.
+AUTO_CONTEXT_WINDOW_TOKENS = 16384
+AUTO_KV_MEMORY_SHARE = 0.25
+_STANDARD_WINDOWS = (262144, 131072, 65536, 32768)
+_MODEL_PROFILES: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _kv_cache_bytes(info: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """Estimated f16 attention-cache bytes: (per context token, fixed).
+
+    Read from the daemon's model metadata. Sliding-window layers cost a fixed
+    amount, layers without attention (state-space) and layers that reuse an
+    earlier layer's cache cost nothing. Unknown layouts return ``None``.
+    """
+    arch = info.get("general.architecture")
+    if not arch:
+        arch = next(
+            (k[: -len(".block_count")] for k in info if k.endswith(".block_count")),
+            None,
+        )
+
+    def get(name: str) -> Any:
+        return info.get(f"{arch}.{name}")
+
+    layers, heads = get("block_count"), get("attention.head_count")
+    kv_heads = get("attention.head_count_kv")
+    if type(layers) is not int or layers <= 0:
+        return None
+    if kv_heads is None:
+        kv_heads = heads
+    key = get("attention.key_length")
+    if key is None and type(heads) is int and heads and get("embedding_length"):
+        key = int(get("embedding_length")) // heads
+    value = get("attention.value_length") or key
+    if not isinstance(key, int) or not isinstance(value, int):
+        return None
+    key_swa = get("attention.key_length_swa") or key
+    value_swa = get("attention.value_length_swa") or value
+    window = get("attention.sliding_window")
+    pattern = get("attention.sliding_window_pattern")
+    shared = get("attention.shared_kv_layers") or 0
+    per_token = fixed = 0
+    for layer in range(max(layers - int(shared), 0)):
+        count = kv_heads[layer] if isinstance(kv_heads, list) else kv_heads
+        if not isinstance(count, int) or count <= 0:
+            continue
+        sliding = (
+            isinstance(window, int)
+            and isinstance(pattern, list)
+            and layer < len(pattern)
+            and bool(pattern[layer])
+        )
+        if sliding:
+            fixed += count * (key_swa + value_swa) * 2 * window
+        else:
+            per_token += count * (key + value) * 2
+    return (per_token, fixed) if per_token else None
+
+
+def _model_profile(client: Any, host: str, model: str) -> Dict[str, Any]:
+    """Context length and cache cost the daemon reports for ``model``."""
+    key = (str(host), str(model))
+    if key not in _MODEL_PROFILES:
+        profile: Dict[str, Any] = {"context_length": None, "kv": None}
+        try:
+            info = client.show(model)
+            model_info = getattr(info, "modelinfo", None)
+            if model_info is None and isinstance(info, dict):
+                model_info = info.get("model_info") or info.get("modelinfo")
+            model_info = dict(model_info or {})
+            for name, value in model_info.items():
+                if str(name).endswith(".context_length") and type(value) is int:
+                    profile["context_length"] = value
+                    break
+            profile["kv"] = _kv_cache_bytes(model_info)
+        except Exception as exc:
+            logger.debug("Could not read the context length of %s: %s", model, exc)
+        _MODEL_PROFILES[key] = profile
+    return _MODEL_PROFILES[key]
+
+
+def _model_context_length(client: Any, host: str, model: str) -> Optional[int]:
+    """The context length the daemon reports for ``model`` (cached per host)."""
+    return _model_profile(client, host, model)["context_length"]
+
+
+def _local_memory_bytes(host: str) -> Optional[int]:
+    """This machine's RAM, when the daemon runs on it."""
+    from urllib.parse import urlparse
+
+    text = str(host or "")
+    name = urlparse(text if "://" in text else f"http://{text}").hostname or ""
+    if name not in _LOCAL_HOSTS and not name.endswith(".localhost"):
+        return None
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def _auto_context_window(client: Any, host: str, model: str) -> Optional[int]:
+    """The window used when none is configured (see AUTO_KV_MEMORY_SHARE)."""
+    profile = _model_profile(client, host, model)
+    length = profile["context_length"]
+    if not length:
+        return None
+    floor = min(length, AUTO_CONTEXT_WINDOW_TOKENS)
+    memory = _local_memory_bytes(host)
+    if not memory or not profile["kv"]:
+        return floor
+    per_token, fixed = profile["kv"]
+    budget = memory * AUTO_KV_MEMORY_SHARE - fixed
+    for size in (length, *(s for s in _STANDARD_WINDOWS if s < length)):
+        if size <= floor:
+            break
+        if size * per_token <= budget:
+            return size
+    return floor
+
 
 # Only daemon options belong in persisted configuration, never credentials or
 # arbitrary client kwargs that a caller put in additional_config.
@@ -27,7 +151,7 @@ _PERSISTED_OPTIONS = frozenset(
 )
 
 
-class OllamaLLM(LLMProvider):
+class OllamaLLM(JsonPromptToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
     """LLM provider for locally-hosted models via Ollama.
 
     Uses the ``ollama`` Python SDK to communicate with a running Ollama
@@ -54,7 +178,10 @@ class OllamaLLM(LLMProvider):
     context_window_tokens : int, optional
         Context window sent to Ollama as ``options.num_ctx``. Defaults to
         ``additional_config['num_ctx']``, then ``OLLAMA_CONTEXT_LENGTH``, then
-        8192. The same value is used for MemAgent's history budget.
+        the model's own context length when its attention cache fits in a
+        quarter of this machine's RAM (otherwise the largest standard size that
+        fits, at least 16,384), then 8,192. The same value is used for
+        MemAgent's history budget.
     timeout : float, optional
         Request timeout in seconds.
     think : bool, optional
@@ -107,9 +234,15 @@ class OllamaLLM(LLMProvider):
         context_window = context_window_tokens
         if context_window is None:
             context_window = (additional_config or {}).get("num_ctx")
+        # Only a configured window is saved with the agent, so a default
+        # never turns into a pinned setting.
+        self._configured_context_window = context_window
+        if context_window is None:
+            context_window = os.getenv("OLLAMA_CONTEXT_LENGTH")
         if context_window is None:
             context_window = (
-                os.getenv("OLLAMA_CONTEXT_LENGTH") or DEFAULT_CONTEXT_WINDOW_TOKENS
+                _auto_context_window(self.client, host, model)
+                or DEFAULT_CONTEXT_WINDOW_TOKENS
             )
         try:
             if isinstance(context_window, bool) or not isinstance(
@@ -251,11 +384,16 @@ class OllamaLLM(LLMProvider):
             "provider": "ollama",
             "model": self.model,
             "host": self._host,
-            "context_window_tokens": self.context_window_tokens,
             "additional_config": deepcopy(
-                {k: v for k, v in self._options.items() if k in _PERSISTED_OPTIONS}
+                {
+                    k: v
+                    for k, v in self._options.items()
+                    if k in _PERSISTED_OPTIONS and k != "num_ctx"
+                }
             ),
         }
+        if self._configured_context_window is not None:
+            cfg["context_window_tokens"] = self.context_window_tokens
         if self._timeout is not None:
             cfg["timeout"] = self._timeout
         if self.think is not None:
@@ -265,39 +403,6 @@ class OllamaLLM(LLMProvider):
     # ------------------------------------------------------------------
     # Tool metadata helpers
     # ------------------------------------------------------------------
-
-    def get_tool_metadata(self, func: Callable) -> Dict[str, Any]:
-        """Generate tool metadata by introspecting the function signature."""
-        sig = inspect.signature(func)
-        docstring = func.__doc__ or ""
-        func_name = func.__name__
-
-        prompt = (
-            f"Generate enriched metadata for the function `{func_name}`.\n\n"
-            f"- Docstring: {docstring}\n"
-            f"- Signature: {sig}\n\n"
-            "Produce a JSON object with keys: name (string, must be '{func_name}'), "
-            "description (string), parameters (object with properties, each having "
-            "type and description), and required (list of required param names).\n"
-            "Return ONLY the JSON."
-        )
-        raw = self.generate_text(prompt, instructions="Return valid JSON only.")
-        return self._safe_json_parse(raw)
-
-    def augment_docstring(self, docstring: str) -> str:
-        return self.generate_text(
-            f"Augment the docstring by adding more details and examples:\n\n{docstring}",
-        )
-
-    def generate_queries(self, docstring: str) -> List[str]:
-        raw = self.generate_text(
-            f"Generate example user queries for a tool with this docstring:\n\n{docstring}\n\n"
-            "Return a JSON array of strings."
-        )
-        parsed = self._safe_json_parse(raw)
-        if isinstance(parsed, list):
-            return parsed
-        return [raw]
 
     # ------------------------------------------------------------------
     # Simple text generation
@@ -513,11 +618,6 @@ class OllamaLLM(LLMProvider):
             "total_tokens": (prompt_tokens or 0) + (completion_tokens or 0),
         }
 
-    def get_last_response_metadata(self) -> Dict[str, Any]:
-        from .response_metadata import last_response_metadata
-
-        return last_response_metadata(self)
-
     def get_last_usage(self) -> Optional[Dict[str, int]]:
         return self._last_usage
 
@@ -581,16 +681,3 @@ class OllamaLLM(LLMProvider):
             tool_calls=tool_calls if tool_calls else None,
         )
         return SimpleNamespace(choices=[SimpleNamespace(message=message_ns)])
-
-    @staticmethod
-    def _safe_json_parse(text: str) -> Any:
-        """Try to parse JSON from text, handling markdown code fences."""
-        text = text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [line for line in lines if not line.strip().startswith("```")]
-            text = "\n".join(lines).strip()
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text

@@ -120,6 +120,11 @@ def entity_store(provider: InMemoryEntityProvider) -> EntityMemory:
     return EntityMemory(provider)
 
 
+def _lookup(manager, **options):
+    """The matches the agent's entity lookup tool returns."""
+    return manager.lookup_entities_with_diagnostics(**options)["matches"]
+
+
 def test_upsert_merges_attributes(
     provider: InMemoryEntityProvider, entity_store: EntityMemory
 ):
@@ -413,7 +418,9 @@ def test_manager_build_context_returns_profiles(
     )
 
     manager = EntityMemoryManager(provider)
-    profiles = manager.build_context("analyst", memory_id="team-7")
+    profiles = manager.build_context_with_diagnostics("analyst", memory_id="team-7")[
+        "profiles"
+    ]
 
     assert profiles and profiles[0]["attributes"]["role"] == "Analyst"
     summary = manager.summarize_for_prompt(profiles)
@@ -443,7 +450,7 @@ def test_manager_lookup_filters_by_memory_id(
         "user", memory_type=MemoryType.ENTITY_MEMORY, memory_id="org-a"
     )
     assert len(raw_matches) == 1
-    matches = manager.lookup_entities(query="user", memory_id="org-a")
+    matches = _lookup(manager, query="user", memory_id="org-a")
 
     assert len(matches) == 1
     assert matches[0]["name"] == "Jordan"
@@ -470,12 +477,8 @@ def test_same_generic_entity_name_is_isolated_by_user_with_shared_memory_id(
     assert first_id != second_id
     assert len(provider.records) == 2
     manager = EntityMemoryManager(provider)
-    first = manager.lookup_entities(
-        name="user", memory_id="shared-memory", user_id="user-a"
-    )
-    second = manager.lookup_entities(
-        name="user", memory_id="shared-memory", user_id="user-b"
-    )
+    first = _lookup(manager, name="user", memory_id="shared-memory", user_id="user-a")
+    second = _lookup(manager, name="user", memory_id="shared-memory", user_id="user-b")
 
     assert first[0]["attributes"]["tier"] == "gold"
     assert second[0]["attributes"]["tier"] == "silver"
@@ -493,8 +496,8 @@ def test_name_lookup_cannot_cross_memory_scope(
     )
 
     manager = EntityMemoryManager(provider)
-    matches = manager.lookup_entities(
-        name="user", memory_id="primary-user-b", user_id="user-b"
+    matches = _lookup(
+        manager, name="user", memory_id="primary-user-b", user_id="user-b"
     )
 
     assert matches == []
@@ -512,20 +515,20 @@ def test_legacy_null_user_record_requires_explicit_operator_migration(
     )
     manager = EntityMemoryManager(provider)
 
-    authenticated_before = manager.lookup_entities(
-        name="user", memory_id="primary-user-a", user_id="user-a"
+    authenticated_before = _lookup(
+        manager, name="user", memory_id="primary-user-a", user_id="user-a"
     )
-    anonymous_before = manager.lookup_entities(
-        name="user", memory_id="primary-user-a", user_id=None
+    anonymous_before = _lookup(
+        manager, name="user", memory_id="primary-user-a", user_id=None
     )
     migrated = entity_store.migrate_legacy_scope(
         memory_id="primary-user-a", user_id="user-a"
     )
-    authenticated_after = manager.lookup_entities(
-        name="user", memory_id="primary-user-a", user_id="user-a"
+    authenticated_after = _lookup(
+        manager, name="user", memory_id="primary-user-a", user_id="user-a"
     )
-    anonymous_after = manager.lookup_entities(
-        name="user", memory_id="primary-user-a", user_id=None
+    anonymous_after = _lookup(
+        manager, name="user", memory_id="primary-user-a", user_id=None
     )
 
     assert authenticated_before == []
@@ -685,3 +688,39 @@ def test_tool_update_rejects_entity_id_outside_active_scope(
         )
 
     assert provider.records[entity_id]["attributes"][0]["value"] == "tenant-a-only"
+
+
+def test_tool_update_forwards_host_identity_key(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    """Hosts wrap the tool and add identity_key; it must reach the store."""
+    manager = EntityMemoryManager(provider)
+    scope = {"memory_id": "primary-user-a", "user_id": "user-a"}
+
+    first = manager.upsert_entity_from_tool(
+        entity_id=None,
+        name="Ada",
+        entity_type="person",
+        attributes=[{"name": "city", "value": "London"}],
+        relations=None,
+        metadata=None,
+        identity_key="authenticated_user",
+        **scope,
+    )
+    # A stale or invented entity_id defers to the canonical identity instead
+    # of failing, and never creates a second record for the same user.
+    second = manager.upsert_entity_from_tool(
+        entity_id="entity-the-model-made-up",
+        name="Ada Lovelace",
+        entity_type="person",
+        attributes=[{"name": "role", "value": "engineer"}],
+        relations=None,
+        metadata=None,
+        identity_key="authenticated_user",
+        **scope,
+    )
+
+    assert second == first
+    record = provider.records[first]
+    assert record["metadata"]["identity_key"] == "authenticated_user"
+    assert {item["name"] for item in record["attributes"]} == {"city", "role"}

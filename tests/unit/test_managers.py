@@ -487,19 +487,6 @@ class TestPersonaManager:
         assert "agent_123" in manager._persona_cache
 
     @pytest.mark.unit
-    def test_export_persona(self, mock_memory_provider, sample_persona):
-        """Test exporting persona."""
-        manager = PersonaManager(mock_memory_provider)
-        manager.set_persona(sample_persona, "agent_123", save=False)
-
-        exported = manager.export_persona()
-
-        assert isinstance(exported, dict)
-        assert "name" in exported
-        assert "role" in exported
-        assert exported["name"] == sample_persona.name
-
-    @pytest.mark.unit
     def test_delete_persona(self, mock_memory_provider, sample_persona):
         """Test deleting persona."""
         manager = PersonaManager(mock_memory_provider)

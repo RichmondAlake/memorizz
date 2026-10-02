@@ -1,0 +1,20 @@
+{
+  "name": "memorizz",
+  "interface": {
+    "displayName": "MemoRizz"
+  },
+  "plugins": [
+    {
+      "name": "memorizz",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex/memorizz"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

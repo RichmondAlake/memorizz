@@ -12,10 +12,10 @@ All heavy imports (``memorizz`` core, providers) are deferred into functions so
 the CLI's ``--help`` / ``init`` / ``--version`` paths never pay for them.
 """
 
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from .._env_io import env_text as _env
 from .._env_io import resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
 from . import ollama_probe
@@ -74,11 +74,6 @@ class Session:
 # --------------------------------------------------------------------------- #
 # LLM detection
 # --------------------------------------------------------------------------- #
-
-
-def _env(name: str) -> Optional[str]:
-    value = os.environ.get(name)
-    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _default_model(provider: str) -> str:

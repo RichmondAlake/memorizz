@@ -5,6 +5,7 @@
 import base64
 import hashlib
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
@@ -13,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 # Use TYPE_CHECKING for forward references to avoid circular imports
 if TYPE_CHECKING:
     from memorizz.memagent import MemAgent
+
+logger = logging.getLogger(__name__)
 
 
 # Sentinel so "user_id not supplied" is distinguishable from an explicit None
@@ -82,6 +85,61 @@ def filter_tool_log_rows(
     if limit and limit > 0:
         out = out[:limit]
     return out
+
+
+class GlobalEmbeddingFallbackMixin:
+    """For providers with an optional ``_embedding_provider``: use it, else
+    the globally configured embeddings (MongoDB, Oracle)."""
+
+    def _get_embedding_provider(self):
+        """The provider's own embedding provider, else the global one."""
+        if self._embedding_provider is not None:
+            return self._embedding_provider
+        from ..embeddings import get_embedding_manager
+
+        return get_embedding_manager()
+
+    def _get_embedding_dimensions_safe(self) -> int:
+        """The embedding dimensions, or a RuntimeError saying how to configure them."""
+        try:
+            if self._embedding_provider is not None:
+                return self._embedding_provider.get_dimensions()
+            from ..embeddings import get_embedding_dimensions
+
+            return get_embedding_dimensions()
+        except Exception as e:
+            logger.error(f"Failed to get embedding dimensions: {e}")
+            raise RuntimeError(
+                "Cannot determine embedding dimensions. Please configure embeddings first using:\n"
+                "configure_embeddings('openai', {'model': 'text-embedding-3-small', 'dimensions': 512})\n"
+                "Or use lazy_vector_indexes=True to defer vector index creation."
+            )
+
+
+class FilteredSkillboxSearchMixin:
+    """``retrieve_skillbox_candidates`` for providers whose
+    ``retrieve_skillbox_item`` applies the lifecycle and tenant filters inside
+    vector search (MongoDB Atlas, Oracle)."""
+
+    def retrieve_skillbox_candidates(
+        self,
+        query: str,
+        *,
+        limit: int,
+        statuses: List[str],
+        agent_id: Optional[str],
+        user_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        return list(
+            self.retrieve_skillbox_item(
+                query,
+                limit,
+                statuses=statuses,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            or []
+        )
 
 
 class MemoryProvider(ABC):
@@ -279,6 +337,75 @@ class MemoryProvider(ABC):
         if isinstance(result, dict):
             return [result]
         return list(result or [])
+
+    def _clear_agent_toolbox_rows(self, agent_id: str) -> None:
+        """Delete the TOOLBOX rows mirrored for one agent."""
+        from ..enums.memory_type import MemoryType
+
+        for doc in list(self.list_all(MemoryType.TOOLBOX) or []):
+            if not isinstance(doc, dict):
+                continue
+            if doc.get("agent_id") != agent_id:
+                continue
+            doc_id = doc.get("_id") or doc.get("id")
+            if doc_id:
+                self.delete_by_id(str(doc_id), MemoryType.TOOLBOX)
+
+    def _sync_agent_tools_to_toolbox(
+        self, agent_id: str, tools: Optional[List[Dict[str, Any]]]
+    ) -> None:
+        """Mirror an agent's tool list into the TOOLBOX store.
+
+        Deletes any existing TOOLBOX rows for this ``agent_id`` before
+        re-inserting the current set so tools removed from the agent
+        don't linger in the playground's toolbox-memory pane.
+        ``tools=None`` is treated as "caller didn't include tools in this
+        save" and is a no-op — only an explicit empty list clears rows.
+        """
+        from ..enums.memory_type import MemoryType
+
+        if not agent_id or tools is None:
+            return
+
+        try:
+            self._clear_agent_toolbox_rows(agent_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to clear toolbox rows for agent %s: %s", agent_id, exc
+            )
+            return
+
+        if not tools:
+            return
+
+        for tool_meta in tools:
+            if not isinstance(tool_meta, dict):
+                continue
+            raw_id = tool_meta.get("_id") or tool_meta.get("name")
+            if not raw_id:
+                continue
+            tool_doc = {
+                "_id": f"{agent_id}:{raw_id}",
+                "tool_id": f"{agent_id}:{raw_id}",
+                "name": tool_meta.get("name"),
+                "description": tool_meta.get("description", ""),
+                "signature": tool_meta.get("signature", ""),
+                "docstring": tool_meta.get(
+                    "docstring", tool_meta.get("description", "")
+                ),
+                "tool_type": tool_meta.get("type", "function"),
+                "parameters": tool_meta.get("parameters", {}),
+                "agent_id": agent_id,
+            }
+            try:
+                self.store(tool_doc, memory_store_type=MemoryType.TOOLBOX)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to sync tool %s for agent %s to TOOLBOX: %s",
+                    tool_doc.get("name"),
+                    agent_id,
+                    exc,
+                )
 
     @abstractmethod
     def __init__(self, config: Dict[str, Any]):

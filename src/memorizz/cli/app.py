@@ -17,7 +17,7 @@ from typing import List, Optional
 
 import typer
 
-from .._env_io import resolve_oracle_in_database_embedding_from_env
+from .._env_io import env_bool, resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
 from .agent_commands import agents_app
 from .eval_commands import eval_app
@@ -26,6 +26,7 @@ from .learning_commands import learning_app
 from .mcp_commands import mcp_app
 from .memory_commands import memory_app
 from .notion_commands import notion_app
+from .plugin_commands import plugin_app
 from .settings_commands import config_app
 
 app = typer.Typer(
@@ -44,6 +45,7 @@ app.add_typer(learning_app, name="learning")
 app.add_typer(agents_app, name="agents")
 app.add_typer(harness_app, name="harness")
 app.add_typer(eval_app, name="eval")
+app.add_typer(plugin_app, name="plugin")
 
 
 def _eprint(msg: str) -> None:
@@ -177,11 +179,6 @@ def init(
     force: bool = typer.Option(False, "--force"),
 ):
     _init(local=local, force=force)
-
-
-def config_cmd():
-    """Compatibility entry point; the config group owns CLI dispatch."""
-    _show_config()
 
 
 @app.command(help="Print the installed MemoRizz capability report.")
@@ -615,9 +612,7 @@ def _show_config():
     else:
         console.print("  embedding:   [yellow]auto-detect[/yellow]")
 
-    continual_learning = os.environ.get(
-        "MEMORIZZ_CONTINUAL_LEARNING", ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    continual_learning = env_bool("MEMORIZZ_CONTINUAL_LEARNING")
     continual_label = "enabled" if continual_learning else "disabled"
     console.print(f"  continual learning: {continual_label}")
     try:

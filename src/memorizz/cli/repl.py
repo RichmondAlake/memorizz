@@ -30,15 +30,6 @@ from . import commands
 from . import config as cfg
 from .updates import update_notifier
 
-_TOOL_OUTCOME_LABELS = {
-    "success": "Completed",
-    "empty": "Completed · no results",
-    "degraded": "Completed with limitations",
-    "fallback": "Completed via fallback",
-    "provider_error": "Provider error",
-    "error": "Failed",
-}
-
 
 class SlashCompleter(Completer):
     """Complete ``/command`` names, only when the line starts with ``/``."""

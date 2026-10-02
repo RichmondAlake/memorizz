@@ -33,7 +33,6 @@ from ...observability.lineage import build_lineage_inspectors
 from ...observability.normalization import (
     TraceEvents,
     TraceSnapshot,
-    is_bundle,
     normalize_trace_snapshot,
     query_trace_events,
     select_trace_events,
@@ -42,6 +41,7 @@ from ...observability.pricing import DEFAULT_PRICING
 from .. import observability_view
 from ..analytics import usage_charts
 from ..helpers import (
+    _agent_field,
     _build_agent_nav_items,
     _build_agent_tool_count_map,
     _coerce_timestamp,
@@ -1386,72 +1386,6 @@ async def review_trace_recommendation(recommendation_id: str, request: Request):
     )
 
 
-@router.post("/traces/feedback")
-async def record_trace_feedback(request: Request):
-    form = await request.form()
-    context = {
-        key: _to_text(form.get(key)).strip()
-        for key in (
-            "application_id",
-            "agent_id",
-            "run_id",
-            "turn_id",
-            "root_trace_id",
-            "memory_id",
-            "thread_id",
-            "user_id",
-        )
-        if _to_text(form.get(key)).strip()
-    }
-    try:
-        row = ObservabilityStore(_state.get("provider")).record_feedback(
-            trace_context=context,
-            rating=float(form.get("rating") or 0),
-            verified=True,
-            source="operator_ui",
-            label=_to_text(form.get("label")).strip() or None,
-            comment=_to_text(form.get("comment")).strip() or None,
-            include_comment=False,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return JSONResponse({"ok": True, "feedback_id": row.get("record_id")})
-
-
-@router.post("/traces/outcomes")
-async def record_trace_outcome(request: Request):
-    form = await request.form()
-    context = {
-        key: _to_text(form.get(key)).strip()
-        for key in (
-            "application_id",
-            "agent_id",
-            "run_id",
-            "turn_id",
-            "root_trace_id",
-            "memory_id",
-            "thread_id",
-            "user_id",
-        )
-        if _to_text(form.get(key)).strip()
-    }
-    try:
-        row = ObservabilityStore(_state.get("provider")).record_outcome(
-            trace_context=context,
-            status=_to_text(form.get("status")).strip(),
-            verified=True,
-            source="operator_ui",
-            score=(
-                float(form.get("score"))
-                if form.get("score") not in (None, "")
-                else None
-            ),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return JSONResponse({"ok": True, "outcome_id": row.get("record_id")})
-
-
 def _load_trace_snapshot(
     *,
     agent_ids: Optional[List[str]] = None,
@@ -1742,20 +1676,6 @@ def _extract_trace_memory_id(payload: Dict[str, Any], fallback: str = "") -> str
     return memory_id or "—"
 
 
-def _extract_trace_thread_id(payload: Dict[str, Any], fallback: str = "") -> str:
-    """Extract thread/conversation ID from trace payloads."""
-    if not isinstance(payload, dict):
-        return _to_text(fallback).strip() or "—"
-
-    for key in ("thread_id", "threadId", "conversation_id", "conversationId"):
-        value = _to_text(payload.get(key)).strip()
-        if value:
-            return value
-
-    memory_fallback = _extract_trace_memory_id(payload, fallback=fallback)
-    return memory_fallback or "—"
-
-
 def _thread_row_key(thread_id: str, memory_id: str) -> str:
     """Build a stable key for thread rows."""
     return f"{memory_id}:{thread_id or memory_id}"
@@ -1868,11 +1788,7 @@ def _build_trace_agent_rows(
         row = {
             "agent_id": agent_id,
             "name": _extract_agent_persona_name(agent),
-            "mode": _to_text(
-                getattr(agent, "application_mode", None)
-                if not isinstance(agent, dict)
-                else agent.get("application_mode")
-            ).strip()
+            "mode": _to_text(_agent_field(agent, "application_mode")).strip()
             or "assistant",
             "memory_count": len(_extract_agent_memory_ids(agent)),
             "tool_count": int(tool_counts.get(agent_id, 0)),
@@ -1904,49 +1820,8 @@ def _build_trace_agent_rows(
     return rows
 
 
-def _expand_trace_bundle(
-    message: Dict[str, Any],
-    *,
-    memory_id: str,
-    thread_id: str,
-) -> Optional[List[Dict[str, Any]]]:
-    """Compatibility shim for integrations importing the old router helper."""
-    if not is_bundle(message):
-        return None
-    return normalize_trace_snapshot(
-        TraceSnapshot(
-            bundle_rows=[
-                {**message, "trace_memory_id": memory_id, "thread_id": thread_id},
-            ]
-        )
-    ).events
-
-
-def _load_agent_tool_log_events(
-    agent: Any,
-    memory_ids: List[str],
-    *,
-    thread_id: str = "",
-    thread_memory_id: str = "",
-    documents: Optional[List[Dict[str, Any]]] = None,
-) -> List[Dict[str, Any]]:
-    provider = _state.get("provider")
-    if documents is None:
-        from ...enums.memory_type import MemoryType
-
-        documents = provider.list_all(MemoryType.TOOL_LOG) if provider else []
-    return normalize_trace_snapshot(
-        TraceSnapshot(tool_rows=documents or []),
-        agent_ids=_trace_agent_ids(agent),
-        memory_ids=set(memory_ids),
-        thread_id=thread_id,
-        thread_memory_id=thread_memory_id,
-    ).events
-
-
 def _load_agent_trace_events(
     agent: Any,
-    per_memory_limit: int = 100,
     total_limit: int = 300,
     thread_id: Optional[str] = None,
     thread_memory_id: Optional[str] = None,
@@ -1957,8 +1832,6 @@ def _load_agent_trace_events(
     """Normalize all returned identities, including unregistered memories.
 
     The provider bounds storage rows; total_limit bounds normalized children.
-    per_memory_limit is retained for call compatibility and no longer silently
-    discards bundles before their children can be counted.
     """
     memory_ids = _extract_agent_memory_ids(agent)
     if conversation_docs is None:
@@ -1983,12 +1856,3 @@ def _load_agent_trace_events(
         limit=total_limit,
         **scoped_trace_filters(),
     ).events
-
-
-def _trace_sort_key(event: Dict[str, Any]):
-    """Sort trace events by timestamp when available."""
-    timestamp = _coerce_timestamp(event.get("timestamp"))
-    if timestamp is not None:
-        return (0, timestamp)
-    raw = _to_text(event.get("timestamp")).strip()
-    return (1, raw)

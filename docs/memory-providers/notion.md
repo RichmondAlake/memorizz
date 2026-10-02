@@ -132,7 +132,7 @@ matches = memory.retrieve_by_query(
 
 agent = MemAgent(memory_provider=memory, automations_enabled=False)
 # Configure the LLM and attach knowledge/memory scopes as in the SDK guide.
-# agent.run_stream(...) retains normal streaming behavior.
+# agent.run_stream_events(...) streams the answer as usual.
 
 memory.close()
 vectors.close()  # Injected providers remain caller-owned.
@@ -164,7 +164,7 @@ maintenance concurrently with a separate writing application process.
 Pass the constructed instance directly, for example:
 
 ```python
-from memorizz.memory_provider import MongoDBConfig, MongoDBProvider
+from memorizz.memory_provider.mongodb import MongoDBConfig, MongoDBProvider
 
 vectors = MongoDBProvider(MongoDBConfig(
     uri=os.environ["MONGODB_URI"], db_name="memorizz_notion_vectors",

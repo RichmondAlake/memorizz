@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 
 {% block title %}Evalground - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/evalground-runs.css?v=2"><link rel="stylesheet" href="/static/css/pages/evalground.css?v=1">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/evalground-runs.css?v=2"><link rel="stylesheet" href="/static/css/pages/evalground.css?v=2">{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, evalground_tabs %}
 {% call page_header('Evalground', 'Choose models and retrieval strategies with evidence from your workloads.', 'Evaluate', nav=evalground_tabs('evaluations'), actions_class='evaluation-actions') %}<a class="btn btn-primary" href="/evalground/compare">New comparison</a>
-    <a class="btn" href="#agent-evaluation" data-open-section="agent-evaluation">Evaluate an agent</a>{% endcall %}
+    <a class="btn" href="#agent-evaluation" data-open-section="agent-evaluation">Evaluate an agent</a>
+    <a class="btn" href="#terminal-bench" data-open-section="terminal-bench">Test a harness</a>{% endcall %}
 {#- Filled from the run library by evalground-runs.js; placeholders keep the layout steady while it loads. -#}
 <div id="run-library-stats" class="fleet-tape eval-tape" role="list" aria-label="Evaluation summary" aria-busy="true">
     {% for label in ['Evaluations', 'In progress', 'Completed', 'Needs attention', 'Known API cost', 'Latest run'] %}<div role="listitem"><span>{{ label }}</span><strong>—</strong></div>{% endfor %}
@@ -15,6 +16,7 @@
     <a href="/evalground/compare?type=reader"><strong>Compare answer models <span aria-hidden="true">↗</span></strong><p>Same evidence. Compare answer quality, latency and API cost.</p></a>
     <a href="/evalground/compare?type=reranker"><strong>Compare rerankers <span aria-hidden="true">↗</span></strong><p>Same candidates. Measure which method finds the right evidence.</p></a>
     <a href="#agent-evaluation" data-open-section="agent-evaluation"><strong>Evaluate an agent <span aria-hidden="true">↗</span></strong><p>Run a memory benchmark against an agent or retrieval pipeline.</p></a>
+    <a href="#terminal-bench" data-open-section="terminal-bench"><strong>Test a harness <span aria-hidden="true">↗</span></strong><p>Run Codex, Claude Code or a MemAgent on Terminal-Bench 4.0 tasks in Docker.</p></a>
 </div>
 
 <section id="run-library" class="detail-section evalground-section eval-library">
@@ -24,7 +26,7 @@
             <kbd aria-hidden="true">/</kbd>
             <input id="run-search" type="search" placeholder="Name, model, agent or run ID" aria-label="Search evaluations" autocomplete="off" data-monitor-filter-for="run-library-table">
         </label>
-        <label class="fleet-order">Run type<select id="run-kind"><option value="all">All run types</option><option value="reranker">Reranking experiments</option><option value="reader">Answer-model experiments</option><option value="pipeline">Pipeline experiments</option><option value="agent">Agent evaluations</option></select></label>
+        <label class="fleet-order">Run type<select id="run-kind"><option value="all">All run types</option><option value="reranker">Reranking experiments</option><option value="reader">Answer-model experiments</option><option value="pipeline">Pipeline experiments</option><option value="agent">Agent evaluations</option><option value="harness">Harness benchmarks</option></select></label>
         <label class="fleet-order">Status<select id="run-status"><option value="all">All statuses</option><option value="active">In progress</option><option value="completed">Completed</option><option value="attention">Needs attention</option></select></label>
         <label class="fleet-order">Sort by<select id="run-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="cost">Highest API cost</option><option value="column" hidden disabled>Column order</option></select></label>
         <button type="button" id="refresh-run-library" class="btn btn-sm">Refresh runs</button>
@@ -293,6 +295,108 @@
     </form>
 </details>
 
+<details id="terminal-bench" class="detail-section evalground-section evaluation-resource tb-section"{% if tb_run %} open{% endif %}><summary>Test a harness on Terminal-Bench 4.0</summary>
+    <p class="form-hint tb-intro">Harbor runs each task in its own Docker container and grades it with the task’s own tests. Codex and Claude Code are installed inside the container; a MemAgent works it from here. With MemoRizz memory on, a harness starts with what earlier runs learned, but never with lessons from the task it is solving.</p>
+    <ul class="tb-checks" id="tb-checks" aria-live="polite" aria-label="What this machine has">
+        <li data-check="harbor"><span class="tb-dot" aria-hidden="true"></span><span>Harbor</span><small>checking…</small></li>
+        <li data-check="docker"><span class="tb-dot" aria-hidden="true"></span><span>Docker</span><small>checking…</small></li>
+        <li data-check="key"><span class="tb-dot" aria-hidden="true"></span><span>Model key</span><small>checking…</small></li>
+        <li data-check="memory"><span class="tb-dot" aria-hidden="true"></span><span>Memory</span><small>checking…</small></li>
+    </ul>
+    <form id="tb-form" class="evalground-form tb-form" novalidate>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="tb-harness">Harness</label>
+                <select id="tb-harness" name="harness">
+                    <option value="codex">Codex · in the container</option>
+                    <option value="claude-code">Claude Code · in the container</option>
+                    <option value="memagent">MemAgent · drives the container</option>
+                    <option value="oracle">Reference solutions · free setup check</option>
+                </select>
+            </div>
+            <div class="form-group" data-tb-for="codex claude-code memagent">
+                <label for="tb-model">Model</label>
+                <input id="tb-model" name="model" list="tb-models" autocomplete="off" spellcheck="false">
+                <datalist id="tb-models"></datalist>
+                <span class="form-hint" id="tb-model-hint"></span>
+            </div>
+            <div class="form-group" data-tb-for="codex">
+                <label for="tb-codex-auth">Codex sign-in</label>
+                <select id="tb-codex-auth" name="codex_auth">
+                    <option value="api_key">API key · per token</option>
+                    <option value="chatgpt">ChatGPT sign-in · your plan</option>
+                </select>
+                <span class="form-hint is-warn" id="tb-codex-warning" hidden>Copies <code>~/.codex/auth.json</code> into each task container, where the task’s own code can read it.</span>
+            </div>
+            <div class="form-group">
+                <label for="tb-timeout">Time per task</label>
+                <select id="tb-timeout" name="agent_timeout_multiplier">
+                    <option value="0.0625">30 minutes</option>
+                    <option value="0.1" selected>48 minutes</option>
+                    <option value="0.25">2 hours</option>
+                    <option value="1">8 hours · the official limit</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="tb-attempts">Attempts per task</label>
+                <input id="tb-attempts" name="attempts" type="number" min="1" max="5" value="1">
+            </div>
+            <div class="form-group">
+                <label for="tb-concurrent">Parallel trials</label>
+                <input id="tb-concurrent" name="n_concurrent" type="number" min="1" max="4" value="1">
+                <span class="form-hint" id="tb-concurrent-hint"></span>
+            </div>
+            <div class="form-group" data-tb-for="memagent">
+                <label for="tb-cost">Cost cap per task (USD)</label>
+                <input id="tb-cost" name="max_cost_per_task" type="number" min="0.1" step="0.1" value="4">
+            </div>
+            <div class="form-group" data-tb-for="codex claude-code memagent">
+                <label for="tb-memory">MemoRizz memory</label>
+                <select id="tb-memory" name="memory">
+                    <option value="off">Off · the plain harness</option>
+                    <option value="on">On · recall earlier lessons</option>
+                </select>
+            </div>
+            <div class="form-group" data-tb-for="codex claude-code memagent" data-tb-memory>
+                <label for="tb-memory-id">Memory ID</label>
+                <input id="tb-memory-id" name="memory_id" value="terminal-bench">
+                <label class="tb-check"><input type="checkbox" name="learn" value="on" checked> Save a lesson from each finished task</label>
+            </div>
+        </div>
+        <fieldset class="tb-tasks">
+            <legend>Tasks <span class="optional" id="tb-task-count"></span></legend>
+            <div class="tb-task-tools">
+                <button type="button" class="btn btn-sm" data-tb-pick="smoke">Smoke set · {{ terminal_bench.smoke|length }} tasks</button>
+                <button type="button" class="btn btn-sm" data-tb-pick="none">Clear</button>
+                <input type="search" id="tb-task-filter" placeholder="Filter tasks" aria-label="Filter tasks" autocomplete="off">
+            </div>
+            <div class="tb-groups" id="tb-groups">
+                {% for group in terminal_bench.groups %}
+                <section class="tb-group" data-tb-group>
+                    <h4>{{ group.category }} <span>{{ group.tasks|length }}</span></h4>
+                    <div class="tb-task-grid">
+                        {% for task in group.tasks %}
+                        <label class="tb-task" data-name="{{ task.name }} {{ task.subcategory or '' }}">
+                            <input type="checkbox" name="tasks" value="{{ task.name }}"{% if tb_run and task.name in (tb_run.tasks or []) %} checked{% elif not tb_run and task.name in terminal_bench.smoke %} checked{% endif %}>
+                            <span class="tb-task-name">{{ task.name }}</span>
+                            <small>{{ task.subcategory or group.category }}{% if task.expert_h %} · ~{{ task.expert_h|round(1)|string|replace('.0', '') }} h expert{% endif %} · {{ task.cpus }} CPU · {{ (task.mem_mb / 1024)|round(0)|int }} GB</small>
+                        </label>
+                        {% endfor %}
+                    </div>
+                </section>
+                {% endfor %}
+            </div>
+            <p class="form-hint">{{ terminal_bench.task_count }} of the dataset’s tasks run without a GPU; {{ terminal_bench.gpu_tasks|join(', ') }} are left out.</p>
+        </fieldset>
+        <p class="tb-estimate" id="tb-estimate" aria-live="polite"></p>
+        <div class="eval-run-actions">
+            <button type="submit" id="tb-start" class="btn btn-primary">Run Terminal-Bench</button>
+            <button type="button" id="tb-stop" class="btn btn-danger" hidden>Stop run</button>
+        </div>
+        <p id="tb-status" class="form-hint eval-run-status" aria-live="polite"></p>
+    </form>
+</details>
+
 <div id="live-run-output-section" class="detail-section evalground-section" hidden>
     <h2>Live Output</h2>
     <pre id="live-run-output" class="eval-run-output"></pre>
@@ -394,7 +498,53 @@
 </div>
 {% endif %}
 
-{% if eval_results %}
+{% if eval_results and eval_results.metadata and eval_results.metadata.benchmark == 'terminal-bench' %}
+{% set tb = eval_results.metadata %}
+<div class="detail-section evalground-section tb-results">
+    <h2>Terminal-Bench 4.0 · <span class="mono">{{ tb.harness }}</span>{% if tb.model %} · {{ tb.model }}{% endif %}</h2>
+    <div class="eval-summary-grid">
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Tasks passed</div>
+            <div class="eval-summary-value">{{ (eval_results.overall_accuracy * 100)|round(1) }}%</div>
+            <small class="form-hint">{{ tb.passed }} of {{ tb.num_trials }} trial{{ '' if tb.num_trials == 1 else 's' }}</small>
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">API cost{% if eval_results.cost_is_estimate %} · estimate{% endif %}</div>
+            <div class="eval-summary-value">{% if eval_results.external_api_cost_usd is not none %}${{ '%.2f'|format(eval_results.external_api_cost_usd) }}{% else %}Unknown{% endif %}</div>
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Memory</div>
+            <div class="eval-summary-value tb-summary-text">{% if tb.memory_id %}<span class="mono">{{ tb.memory_id }}</span>{% else %}Off{% endif %}</div>
+            {% if tb.lessons_saved is defined %}<small class="form-hint">{{ tb.lessons_saved }} lesson{{ '' if tb.lessons_saved == 1 else 's' }} saved</small>{% endif %}
+        </div>
+        <div class="eval-summary-card">
+            <div class="eval-summary-label">Run time</div>
+            <div class="eval-summary-value">{% if tb.total_processing_time %}{{ (tb.total_processing_time / 60)|round(1) }} min{% else %}—{% endif %}</div>
+        </div>
+    </div>
+    {% if eval_charts %}{% from '_analytics_charts.html' import bars %}
+    <div class="usage-dashboard"><div class="usage-grid">{{ bars(eval_charts.categories, 'Pass rate by category', 'share of trials whose tests passed') }}</div></div>{% endif %}
+    <div class="tb-cases-wrap">
+        <table class="fleet-table tb-cases">
+            <caption class="visually-hidden">Each trial: its task, result, time, tokens and cost.</caption>
+            <thead><tr><th scope="col">Task</th><th scope="col">Result</th><th scope="col" class="num">Time</th><th scope="col" class="num">Tokens in / out</th><th scope="col" class="num">Cost</th><th scope="col">Memory</th></tr></thead>
+            <tbody>
+                {% for case in eval_results.cases %}
+                <tr>
+                    <td><span class="mono">{{ case.task }}</span><small>{{ case.category }}{% if case.subcategory %} · {{ case.subcategory }}{% endif %}</small></td>
+                    <td>{% if case.passed %}<span class="badge badge-success">Passed</span>{% elif case.reward is not none %}<span class="badge badge-warning">Failed</span>{% else %}<span class="badge badge-danger">Error</span>{% endif %}{% if case.error %}<small class="tb-error" title="{{ case.error }}">{{ case.error|truncate(90) }}</small>{% endif %}</td>
+                    <td class="num">{% if case.duration_s is not none %}{{ (case.duration_s / 60)|round(1) }} min{% else %}—{% endif %}</td>
+                    <td class="num">{% if case.input_tokens is not none %}{{ '{:,}'.format(case.input_tokens) }} / {{ '{:,}'.format(case.output_tokens or 0) }}{% else %}—{% endif %}</td>
+                    <td class="num">{% if case.cost_usd is not none %}${{ '%.2f'|format(case.cost_usd) }}{% else %}—{% endif %}</td>
+                    <td>{% if tb.memory_id %}{{ case.memory_sources }} record{{ '' if case.memory_sources == 1 else 's' }}{% else %}—{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="form-hint">Dataset <code>{{ tb.dataset }}</code> · Harbor job folder <code>{{ tb.job_dir }}</code>{% if tb.harbor_exit_code %} · Harbor exited with code {{ tb.harbor_exit_code }}{% endif %}. Runs with a shortened time limit or memory from earlier runs are not leaderboard-comparable.</p>
+</div>
+{% elif eval_results %}
 <div class="detail-section evalground-section">
     <h2>Results</h2>
     {% if eval_charts %}{% from '_analytics_charts.html' import bars %}
@@ -565,7 +715,9 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/evalground-runs.js?v=2" defer></script>
+<script type="application/json" id="tb-data">{{ {'smoke': terminal_bench.smoke, 'default_models': terminal_bench.default_models, 'run': tb_run}|tojson }}</script>
+<script src="/static/js/evalground-runs.js?v=4" defer></script>
+<script src="/static/js/terminal-bench.js?v=1" defer></script>
 <script>
 document.addEventListener("DOMContentLoaded", () => {
     const evalMonitor = window.memorizzEvalMonitor || null;

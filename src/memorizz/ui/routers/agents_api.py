@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
-from ..helpers import _list_agents
+from ..helpers import _approval_payload, _list_agents
 from ..state import _state
 
 logger = logging.getLogger(__name__)
@@ -38,24 +38,6 @@ async def _load_runtime_agent(agent_id: str):
     except Exception as exc:
         logger.error("Failed to load agent %s: %s", agent_id, exc)
         raise HTTPException(status_code=404, detail="Agent not found") from exc
-
-
-async def _approval_decision_payload(request: Request) -> Dict[str, Any]:
-    try:
-        payload = await request.json()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400, detail="Request body must be JSON"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Request body must be an object")
-    approver_id = str(payload.get("approver_id") or "").strip()
-    if not approver_id:
-        raise HTTPException(status_code=400, detail="approver_id is required")
-    return {
-        "approver_id": approver_id,
-        "reason": str(payload.get("reason") or "").strip() or None,
-    }
 
 
 def _serialize_agent(agent) -> Dict[str, Any]:
@@ -86,20 +68,6 @@ async def api_status():
         "provider_type": _state["provider_type"],
         "connection_info": _state["connection_info"],
     }
-
-
-@router.get("/capabilities")
-async def api_capabilities():
-    """Expose the stable deployment feature report to the local UI."""
-    from ...capabilities import capabilities
-
-    report = capabilities()
-    provider = _state.get("provider")
-    report["runtime"] = {
-        "connected": provider is not None,
-        "provider_type": _state.get("provider_type"),
-    }
-    return report
 
 
 @router.get("/agents")
@@ -202,23 +170,6 @@ async def api_agent_system_prompt(agent_id: str):
     }
 
 
-@router.get("/agents/{agent_id}/capabilities")
-async def api_agent_capabilities(agent_id: str, preflight: bool = False):
-    """Return effective agent capabilities, optionally including provider preflight."""
-    if not _state["provider"]:
-        raise HTTPException(status_code=400, detail="Not connected")
-    from ...memagent import MemAgent
-
-    try:
-        agent = await run_in_threadpool(
-            MemAgent.load, agent_id, memory_provider=_state["provider"]
-        )
-        return await run_in_threadpool(agent.capability_report, preflight=preflight)
-    except Exception as exc:
-        logger.error("Failed to build capability report for %s: %s", agent_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
 @router.get("/agents/{agent_id}/approvals")
 async def api_agent_approvals(
     agent_id: str, status: Optional[str] = None, limit: int = 100
@@ -240,7 +191,7 @@ async def api_agent_approvals(
 @router.post("/agents/{agent_id}/approvals/{proposal_id}/approve")
 async def api_agent_approve(agent_id: str, proposal_id: str, request: Request):
     """Approve one exact proposal; execution remains paused until resume."""
-    decision = await _approval_decision_payload(request)
+    decision = await _approval_payload(request)
     agent = await _load_runtime_agent(agent_id)
     try:
         proposal = await run_in_threadpool(agent.approve, proposal_id, **decision)
@@ -253,7 +204,7 @@ async def api_agent_approve(agent_id: str, proposal_id: str, request: Request):
 @router.post("/agents/{agent_id}/approvals/{proposal_id}/reject")
 async def api_agent_reject(agent_id: str, proposal_id: str, request: Request):
     """Reject a pending generic tool proposal without executing it."""
-    decision = await _approval_decision_payload(request)
+    decision = await _approval_payload(request)
     agent = await _load_runtime_agent(agent_id)
     try:
         proposal = await run_in_threadpool(agent.reject, proposal_id, **decision)
@@ -266,7 +217,7 @@ async def api_agent_reject(agent_id: str, proposal_id: str, request: Request):
 @router.post("/agents/{agent_id}/approvals/{proposal_id}/cancel")
 async def api_agent_cancel(agent_id: str, proposal_id: str, request: Request):
     """Cancel a pending proposal (explicit host-facing rejection alias)."""
-    decision = await _approval_decision_payload(request)
+    decision = await _approval_payload(request)
     agent = await _load_runtime_agent(agent_id)
     try:
         proposal = await run_in_threadpool(

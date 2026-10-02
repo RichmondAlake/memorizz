@@ -24,7 +24,14 @@ from ...enums.memory_type import MemoryType
 from ...long_term.semantic.persona.persona import Persona
 from ...long_term.semantic.persona.role_type import RoleType
 from ...memagent import MemAgentModel
-from ..base import MemoryProvider, MemoryProviderCapabilities, filter_tool_log_rows
+from ..base import _UNSET as _ANY_USER
+from ..base import (
+    FilteredSkillboxSearchMixin,
+    GlobalEmbeddingFallbackMixin,
+    MemoryProvider,
+    MemoryProviderCapabilities,
+    filter_tool_log_rows,
+)
 
 if TYPE_CHECKING:
     pass
@@ -623,6 +630,7 @@ class OracleConfig:
         pool_min: int = 1,
         pool_max: int = 5,
         pool_increment: int = 1,
+        vector_search_mode: str = "exact",
     ):
         """
         Initialize the Oracle provider with configuration settings.
@@ -675,6 +683,15 @@ class OracleConfig:
         if normalized_policy not in {"none", "lazy", "selected", "eager"}:
             raise ValueError("index_policy must be one of: none, lazy, selected, eager")
         self.index_policy = normalized_policy
+        if vector_search_mode not in {"exact", "approximate"}:
+            raise ValueError("vector_search_mode must be exact or approximate")
+        if vector_search_mode == "approximate" and normalized_policy == "none":
+            raise ValueError(
+                "Approximate search requires an enabled vector index policy"
+            )
+        # Exact remains the default for existing applications. Approximate reads
+        # opt in to Oracle's HNSW query rewrite; merely creating an index is not enough.
+        self.vector_search_mode = vector_search_mode
         # Compatibility attribute retained for applications that inspect it.
         self.lazy_vector_indexes = normalized_policy == "lazy"
         selected: set[MemoryType] = set()
@@ -696,7 +713,9 @@ class OracleConfig:
         self.pool_increment = pool_increment
 
 
-class OracleProvider(MemoryProvider):
+class OracleProvider(
+    GlobalEmbeddingFallbackMixin, FilteredSkillboxSearchMixin, MemoryProvider
+):
     """Oracle Database implementation of the MemoryProvider interface."""
 
     SUPPORTED_EMBEDDING_PROVIDERS = {
@@ -1063,32 +1082,6 @@ class OracleProvider(MemoryProvider):
                 exc,
             )
 
-    def _get_embedding_provider(self):
-        """Get the embedding provider to use, with fallback logic."""
-        if self._embedding_provider is not None:
-            return self._embedding_provider
-        else:
-            from ...embeddings import get_embedding_manager
-
-            return get_embedding_manager()
-
-    def _get_embedding_dimensions_safe(self) -> int:
-        """Safely get embedding dimensions with error handling."""
-        try:
-            if self._embedding_provider is not None:
-                return self._embedding_provider.get_dimensions()
-            else:
-                from ...embeddings import get_embedding_dimensions
-
-                return get_embedding_dimensions()
-        except Exception as e:
-            logger.error(f"Failed to get embedding dimensions: {e}")
-            raise RuntimeError(
-                "Cannot determine embedding dimensions. Please configure embeddings first using:\n"
-                "configure_embeddings('openai', {'model': 'text-embedding-3-small', 'dimensions': 512})\n"
-                "Or use lazy_vector_indexes=True to defer vector index creation."
-            )
-
     def _generate_embedding_if_needed(
         self, content: str, existing_embedding=None
     ) -> Optional[List[float]]:
@@ -1149,12 +1142,67 @@ class OracleProvider(MemoryProvider):
         match = pattern.search(str(ddl or ""))
         return int(match.group(1)) if match else None
 
+    @staticmethod
+    def _quoted(name: str) -> str:
+        return '"' + str(name).replace('"', '""') + '"'
+
+    @staticmethod
+    def _dimension_from_vector_info(info: Any) -> Optional[int]:
+        """``VECTOR(768,FLOAT32,DENSE)`` gives 768; a flexible ``*`` gives None."""
+        match = re.search(r"VECTOR\s*\(\s*(\d+)", str(info or ""), re.IGNORECASE)
+        return int(match.group(1)) if match else None
+
+    def _declared_vector_dimension(
+        self, cursor: Any, owner: str, table_name: str, column_name: str
+    ) -> Optional[int]:
+        """One VECTOR column's declared dimension, or None when it is flexible.
+
+        Tried in order: the driver's column metadata (python-oracledb reports
+        a VECTOR column's dimension on a zero-row query), ``VECTOR_INFO`` in
+        the data dictionary, and last the table DDL from ``DBMS_METADATA``.
+        ``DBMS_METADATA`` needs the XDB library, which the Oracle AI Database
+        Free lite image lacks: there it fails with ORA-00600 [unable to load
+        XDB library] and ends the session, so it is only a fallback.
+        """
+        cursor.execute(
+            f"SELECT {self._quoted(column_name)} "
+            f"FROM {self._quoted(owner)}.{self._quoted(table_name)} WHERE 1 = 0"
+        )
+        description = cursor.description[0] if cursor.description else None
+        if description is not None and hasattr(description, "vector_dimensions"):
+            dimension = description.vector_dimensions
+            return int(dimension) if dimension else None
+        try:
+            cursor.execute(
+                """
+                SELECT vector_info
+                FROM all_tab_cols
+                WHERE owner = :owner
+                  AND table_name = :table_name
+                  AND column_name = :column_name
+                """,
+                {"owner": owner, "table_name": table_name, "column_name": column_name},
+            )
+            row = cursor.fetchone()
+            if row is not None:
+                return self._dimension_from_vector_info(row[0])
+        except Exception:
+            pass  # releases without VECTOR_INFO: fall back to the DDL
+        cursor.execute(
+            "SELECT DBMS_METADATA.GET_DDL('TABLE', :table_name, :owner) FROM dual",
+            {"table_name": table_name, "owner": owner},
+        )
+        row = cursor.fetchone()
+        ddl_value = row[0] if row else None
+        ddl = ddl_value.read() if hasattr(ddl_value, "read") else str(ddl_value or "")
+        return self._vector_dimension_from_ddl(ddl, column_name)
+
     def get_vector_schema_dimensions(self) -> Dict[str, int]:
         """Return declared dimensions for schema ``EMBEDDING`` columns.
 
-        ``DBMS_METADATA.GET_DDL`` is used instead of ``USER_VECTOR_COLUMNS``
-        because the latter is not available in every Oracle AI Database
-        release that supports the VECTOR type.
+        Flexible columns (``VECTOR(*, ...)``) accept any dimension and are
+        left out. ``USER_VECTOR_COLUMNS`` is not used because it is not
+        available in every release that supports the VECTOR type.
         """
         owner = str(self.config.schema or self.config.user).strip().upper()
         dimensions: Dict[str, int] = {}
@@ -1174,23 +1222,9 @@ class OracleProvider(MemoryProvider):
                 )
                 columns = cursor.fetchall()
                 for table_name, column_name in columns:
-                    cursor.execute(
-                        """
-                        SELECT DBMS_METADATA.GET_DDL(
-                            'TABLE', :table_name, :owner
-                        )
-                        FROM dual
-                        """,
-                        {"table_name": table_name, "owner": owner},
+                    dimension = self._declared_vector_dimension(
+                        cursor, owner, table_name, column_name
                     )
-                    row = cursor.fetchone()
-                    ddl_value = row[0] if row else None
-                    ddl = (
-                        ddl_value.read()
-                        if hasattr(ddl_value, "read")
-                        else str(ddl_value or "")
-                    )
-                    dimension = self._vector_dimension_from_ddl(ddl, column_name)
                     if dimension is not None:
                         dimensions[f"{table_name}.{column_name}"] = dimension
                 cursor.close()
@@ -3758,11 +3792,18 @@ class OracleProvider(MemoryProvider):
             )
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
             return self.retrieve_workflow_by_query(
-                query, limit, user_id=kwargs.get("user_id", _UNSET)
+                query,
+                limit,
+                user_id=kwargs.get("user_id", _UNSET),
+                memory_id=memory_id,
             )
         elif memory_store_type == MemoryType.SUMMARIES:
             return self.retrieve_summaries_by_query(
-                query, limit, user_id=kwargs.get("user_id", _UNSET)
+                query,
+                limit,
+                user_id=kwargs.get("user_id", _UNSET),
+                memory_id=memory_id,
+                thread_id=kwargs.get("thread_id"),
             )
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             if isinstance(query, dict):
@@ -4444,7 +4485,8 @@ class OracleProvider(MemoryProvider):
         return filter_tool_log_rows(
             rows,
             memory_id=memory_id,
-            user_id=user_id,
+            # The shared filter only knows its own "not supplied" marker.
+            user_id=_ANY_USER if user_id is _UNSET else user_id,
             thread_id=thread_id,
             limit=limit,
         )
@@ -5781,29 +5823,12 @@ class OracleProvider(MemoryProvider):
             user_id=user_id,
         )
 
-    def retrieve_skillbox_candidates(
-        self,
-        query: str,
-        *,
-        limit: int,
-        statuses: List[str],
-        agent_id: Optional[str],
-        user_id: Optional[str],
-    ) -> List[Dict[str, Any]]:
-        """Oracle vector search with lifecycle and tenant pre-filters."""
-        return list(
-            self.retrieve_skillbox_item(
-                query,
-                limit,
-                statuses=statuses,
-                agent_id=agent_id,
-                user_id=user_id,
-            )
-            or []
-        )
-
     def retrieve_workflow_by_query(
-        self, query: Dict[str, Any], limit: int = 1, user_id: Any = _UNSET
+        self,
+        query: Dict[str, Any],
+        limit: int = 1,
+        user_id: Any = _UNSET,
+        memory_id: Optional[str] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """Retrieve workflows using vector search."""
         from ...embeddings import get_embedding
@@ -5815,11 +5840,20 @@ class OracleProvider(MemoryProvider):
             return []
 
         return self._vector_search(
-            MemoryType.WORKFLOW_MEMORY, embedding, limit=limit, user_id=user_id
+            MemoryType.WORKFLOW_MEMORY,
+            embedding,
+            limit=limit,
+            user_id=user_id,
+            memory_id=memory_id,
         )
 
     def retrieve_summaries_by_query(
-        self, query: Dict[str, Any], limit: int = 1, user_id: Any = _UNSET
+        self,
+        query: Dict[str, Any],
+        limit: int = 1,
+        user_id: Any = _UNSET,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """Retrieve summaries using vector search."""
         from ...embeddings import get_embedding
@@ -5831,7 +5865,12 @@ class OracleProvider(MemoryProvider):
             return []
 
         return self._vector_search(
-            MemoryType.SUMMARIES, embedding, limit=limit, user_id=user_id
+            MemoryType.SUMMARIES,
+            embedding,
+            limit=limit,
+            user_id=user_id,
+            memory_id=memory_id,
+            filters={"thread_id": thread_id} if thread_id is not None else None,
         )
 
     def find_similar_cache_entries(
@@ -6142,13 +6181,16 @@ class OracleProvider(MemoryProvider):
                 if memory_type == MemoryType.KNOWLEDGE_BASE:
                     fields = fields + self._knowledge_base_chunk_fields()
 
+                approximate = self.config.vector_search_mode == "approximate"
+                hint = "/*+ VECTOR_INDEX_TRANSFORM */" if approximate else ""
+                fetch_mode = "APPROX" if approximate else "EXACT"
                 sql = f"""
-                SELECT
+                SELECT {hint}
                     {_select_list(fields)}
                 FROM {table_name}
                 WHERE {where_clause}
                 ORDER BY VECTOR_DISTANCE(embedding, :query_vec, COSINE)
-                FETCH FIRST :limit ROWS ONLY
+                FETCH {fetch_mode} FIRST :limit ROWS ONLY
                 """
                 if memory_type == MemoryType.CONVERSATION_MEMORY:
                     try:
@@ -6482,12 +6524,15 @@ class OracleProvider(MemoryProvider):
             for config_key in (
                 "semantic_cache_config",
                 "tool_result_policy",
+                "tool_cache_config",
                 "context_policy",
                 "retrieval_policy",
                 "delegation_config",
                 "skill_retrieval_config",
                 "semantic_layer_config",
                 "context_window_tokens",
+                "context_window_source",
+                "thread_titles",
             ):
                 config_value = memagent_dict.get(config_key)
                 if config_value not in (None, {}, []):
@@ -7005,6 +7050,7 @@ class OracleProvider(MemoryProvider):
                 semantic_cache=bool(doc.get("semantic_cache", False)),
                 semantic_cache_config=cfg.get("semantic_cache_config"),
                 tool_result_policy=cfg.get("tool_result_policy"),
+                tool_cache_config=cfg.get("tool_cache_config"),
                 context_policy=cfg.get("context_policy"),
                 retrieval_policy=cfg.get("retrieval_policy"),
                 delegation_config=cfg.get("delegation_config"),
@@ -7012,6 +7058,8 @@ class OracleProvider(MemoryProvider):
                 skill_retrieval_config=cfg.get("skill_retrieval_config"),
                 semantic_layer_config=cfg.get("semantic_layer_config"),
                 context_window_tokens=cfg.get("context_window_tokens"),
+                context_window_source=cfg.get("context_window_source"),
+                thread_titles=cfg.get("thread_titles"),
                 browser_control=cfg.get("browser_control"),
                 meta_harness=bool(cfg.get("meta_harness", False)),
                 meta_harness_mode=cfg.get("meta_harness_mode"),
@@ -7286,6 +7334,7 @@ class OracleProvider(MemoryProvider):
             favorite_from_cfg = None
             semantic_cache_config = None
             tool_result_policy = None
+            tool_cache_config = None
             context_policy = None
             retrieval_policy = None
             delegation_config = None
@@ -7293,6 +7342,8 @@ class OracleProvider(MemoryProvider):
             skill_retrieval_config = None
             semantic_layer_config = None
             context_window_tokens = None
+            context_window_source = None
+            thread_titles = None
             application_id = None
             if llm_config:
                 additional_cfg = llm_config.get("additional_config") or {}
@@ -7321,6 +7372,7 @@ class OracleProvider(MemoryProvider):
                     "semantic_cache_config", None
                 )
                 tool_result_policy = additional_cfg.pop("tool_result_policy", None)
+                tool_cache_config = additional_cfg.pop("tool_cache_config", None)
                 context_policy = additional_cfg.pop("context_policy", None)
                 retrieval_policy = additional_cfg.pop("retrieval_policy", None)
                 delegation_config = additional_cfg.pop("delegation_config", None)
@@ -7334,6 +7386,10 @@ class OracleProvider(MemoryProvider):
                 context_window_tokens = additional_cfg.pop(
                     "context_window_tokens", None
                 )
+                context_window_source = additional_cfg.pop(
+                    "context_window_source", None
+                )
+                thread_titles = additional_cfg.pop("thread_titles", None)
                 self_aware = bool(additional_cfg.pop("self_aware", False))
                 self_aware_config = additional_cfg.pop("self_aware_config", None)
                 if not isinstance(self_aware_config, dict):
@@ -7389,6 +7445,7 @@ class OracleProvider(MemoryProvider):
                 semantic_cache=bool(agent_json.get("semanticCache")),
                 semantic_cache_config=semantic_cache_config,
                 tool_result_policy=tool_result_policy,
+                tool_cache_config=tool_cache_config,
                 context_policy=context_policy,
                 retrieval_policy=retrieval_policy,
                 delegation_config=delegation_config,
@@ -7396,6 +7453,8 @@ class OracleProvider(MemoryProvider):
                 skill_retrieval_config=skill_retrieval_config,
                 semantic_layer_config=semantic_layer_config,
                 context_window_tokens=context_window_tokens,
+                context_window_source=context_window_source,
+                thread_titles=thread_titles,
                 tools=tools if tools else None,
                 persona=persona,
                 sandbox_provider=sandbox_provider,

@@ -10,7 +10,7 @@ secret manager so saved agent definitions remain portable and safe to inspect.
 |---|---|---|---|
 | OpenAI | Base package | `OPENAI_API_KEY` | `openai` |
 | Anthropic | `memorizz[anthropic]` | `ANTHROPIC_API_KEY` | `anthropic` |
-| Ollama | Base package plus Ollama daemon | optional `OLLAMA_HOST` | `ollama` |
+| Ollama | Base package plus Ollama daemon | optional `OLLAMA_HOST` (models and embeddings) | `ollama` |
 | Azure OpenAI | Base package | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `OPENAI_API_VERSION` | `azure` |
 | Hugging Face | `memorizz[huggingface]` | optional `HF_TOKEN` | `huggingface` |
 | MLX | `memorizz[mlx]` on native Apple Silicon | none for public models | `mlx` |
@@ -70,11 +70,27 @@ limits change independently of Memorizz.
     )
     ```
 
-    The local context window defaults to 8,192 tokens and is sent to Ollama as
-    `options.num_ctx`. Set `context_window_tokens` in `llm_config` to change it.
-    Without that setting, `additional_config.num_ctx` takes precedence over
-    `OLLAMA_CONTEXT_LENGTH`, followed by the default. The provider saves and
-    reports the same effective window so history budgeting matches the request.
+    The context window is sent to Ollama as `options.num_ctx`. Set
+    `context_window_tokens` in `llm_config` to choose it; otherwise
+    `additional_config.num_ctx`, then `OLLAMA_CONTEXT_LENGTH`, then the model's
+    own context length, then 8,192. The model's length is used in full when its
+    attention cache fits in a quarter of this machine's RAM, estimated from the
+    daemon's model metadata (sliding-window, shared and state-space layers
+    included); otherwise the largest of 131,072, 65,536 or 32,768 that fits, and
+    never less than 16,384. On a 16 GB Mac that gives gemma4 131,072 and
+    qwen2.5:7b 32,768. A daemon on another machine gets 16,384. A MemAgent's
+    instructions and tool schemas alone take about 6–7k tokens, so smaller
+    windows leave little room for the conversation; long prompts on a local
+    model also take longer to read, so pick a smaller window if replies slow down.
+
+    Only a window you set is saved with the agent; a default is recomputed on
+    every load, so changing the model or its settings takes effect.
+
+    In the playground, **Settings → Context window** lists sizes up to what the
+    selected model supports (for example 131,072 for `gemma4`). The context
+    panel names the model in use and notes when it supports a larger window
+    than the one requested, and each reply's footnote names the model that
+    answered it.
 
 === "Azure OpenAI"
 

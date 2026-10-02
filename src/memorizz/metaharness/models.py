@@ -55,6 +55,8 @@ class HarnessStatus(str, Enum):
 class HarnessEventType(str, Enum):
     STATUS = "status"
     MESSAGE = "message"
+    # A harness's own reasoning, as far as it reports it (summaries or text).
+    REASONING = "reasoning"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     COMMAND = "command"
@@ -170,8 +172,12 @@ class HarnessPermissions:
     allowed_env: List[str] = field(default_factory=list)
     mcp_access: str = "read_only"
     require_approval: Optional[bool] = None
+    # Let the harness start its own subagents (Claude Code's Task tool, Codex's
+    # sub-agents). Off by default: each subagent is another model session.
+    allow_subagents: bool = False
 
     def __post_init__(self) -> None:
+        self.allow_subagents = bool(self.allow_subagents)
         self.workspace_mode = str(self.workspace_mode or "read_only").lower()
         if self.workspace_mode not in {"read_only", "direct"}:
             raise ValueError("workspace_mode must be read_only or direct")
@@ -514,6 +520,11 @@ class HarnessRun:
         return value
 
 
+def _optional_text(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
+
 @dataclass
 class HarnessStage:
     name: str
@@ -521,6 +532,38 @@ class HarnessStage:
     instruction: Optional[str] = None
     workspace_mode: str = "read_only"
     verification: Optional[VerificationSpec] = None
+    # Per-stage overrides; None inherits the plan's base task.
+    model: Optional[str] = None
+    agent_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.name = str(self.name or "").strip()
+        if not self.name:
+            raise ValueError("HarnessStage.name is required")
+        self.harness = str(self.harness or "auto").strip().lower().replace("_", "-")
+        self.instruction = _optional_text(self.instruction)
+        self.workspace_mode = str(self.workspace_mode or "read_only").lower()
+        if self.workspace_mode not in {"read_only", "direct"}:
+            raise ValueError("HarnessStage.workspace_mode must be read_only or direct")
+        if self.verification is not None:
+            self.verification = VerificationSpec.from_value(self.verification)
+        self.model = _optional_text(self.model)
+        self.agent_id = _optional_text(self.agent_id)
+
+    @classmethod
+    def from_value(cls, value: Any) -> "HarnessStage":
+        if isinstance(value, cls):
+            return value
+        payload = dict(value or {})
+        known = {item for item in cls.__dataclass_fields__}
+        return cls(**{key: val for key, val in payload.items() if key in known})
+
+    def to_dict(self) -> Dict[str, Any]:
+        value = asdict(self)
+        value["verification"] = (
+            self.verification.to_dict() if self.verification is not None else None
+        )
+        return value
 
 
 @dataclass
@@ -528,6 +571,7 @@ class HarnessPlan:
     stages: List[HarnessStage]
 
     def __post_init__(self) -> None:
+        self.stages = [HarnessStage.from_value(stage) for stage in self.stages or []]
         if not self.stages:
             raise ValueError("HarnessPlan requires at least one stage")
         writers = [stage for stage in self.stages if stage.workspace_mode == "direct"]
@@ -536,6 +580,63 @@ class HarnessPlan:
                 "A HarnessPlan may contain at most one write-capable stage"
             )
 
+    @classmethod
+    def from_value(cls, value: Any) -> "HarnessPlan":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, Mapping):
+            return cls(stages=list(value.get("stages") or []))
+        return cls(stages=list(value or []))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"stages": [stage.to_dict() for stage in self.stages]}
+
+
+@dataclass
+class HarnessOrchestration:
+    """Durable record of a staged plan or a harness comparison.
+
+    ``steps`` holds one entry per plan stage (in order) or per compared harness;
+    each gains a ``run_id`` once its harness run exists. The runs themselves stay
+    ordinary durable harness runs with their own events, approval and evidence.
+    """
+
+    orchestration_id: str
+    kind: str
+    status: HarnessStatus | str
+    task: Dict[str, Any]
+    steps: List[Dict[str, Any]]
+    current_step: Optional[int] = None
+    created_at: str = field(default_factory=utcnow_iso)
+    updated_at: str = field(default_factory=utcnow_iso)
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    heartbeat_at: Optional[str] = None
+    cancel_requested: bool = False
+    error_code: Optional[str] = None
+    error: Optional[str] = None
+    summary: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"plan", "compare"}:
+            raise ValueError("HarnessOrchestration.kind must be plan or compare")
+        self.status = (
+            self.status
+            if isinstance(self.status, HarnessStatus)
+            else HarnessStatus(self.status)
+        )
+        self.steps = [dict(step) for step in self.steps or []]
+        self.summary = dict(self.summary or {})
+
+    @property
+    def run_ids(self) -> List[str]:
+        return [str(step["run_id"]) for step in self.steps if step.get("run_id")]
+
+    def to_dict(self) -> Dict[str, Any]:
+        value = asdict(self)
+        value["status"] = self.status.value
+        return value
+
 
 __all__ = [
     "HarnessBudget",
@@ -543,6 +644,7 @@ __all__ = [
     "HarnessContextPack",
     "HarnessEvent",
     "HarnessEventType",
+    "HarnessOrchestration",
     "HarnessPermissions",
     "HarnessPlan",
     "HarnessResult",

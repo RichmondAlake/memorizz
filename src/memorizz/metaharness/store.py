@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
 from .._env_io import ensure_home, memorizz_home
-from .models import HarnessEvent, HarnessRun, HarnessStatus, utcnow_iso
+from .models import (
+    HarnessEvent,
+    HarnessOrchestration,
+    HarnessRun,
+    HarnessStatus,
+    utcnow_iso,
+)
 
 
 class HarnessRunStore(Protocol):
@@ -42,6 +48,36 @@ class HarnessRunStore(Protocol):
         ...
 
     def recover_interrupted(self) -> int:
+        ...
+
+    # Staged plans and comparisons. Optional: MetaHarness.start_plan and
+    # start_compare need them; single runs do not.
+    def create_orchestration(
+        self, orchestration: HarnessOrchestration
+    ) -> HarnessOrchestration:
+        ...
+
+    def get_orchestration(
+        self, orchestration_id: str
+    ) -> Optional[HarnessOrchestration]:
+        ...
+
+    def list_orchestrations(
+        self, *, limit: int = 50, status: Optional[str] = None
+    ) -> List[HarnessOrchestration]:
+        ...
+
+    def update_orchestration(
+        self, orchestration_id: str, **changes: Any
+    ) -> HarnessOrchestration:
+        ...
+
+    # Deleting finished runs and workflows. Optional: MetaHarness.delete_runs
+    # and delete_orchestration need them.
+    def delete(self, run_ids: List[str]) -> int:
+        ...
+
+    def delete_orchestration(self, orchestration_id: str) -> bool:
         ...
 
     def close(self) -> None:
@@ -92,6 +128,16 @@ class SQLiteHarnessRunStore:
                 acquired_at TEXT NOT NULL,
                 FOREIGN KEY (run_id) REFERENCES harness_runs(run_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS harness_orchestrations (
+                orchestration_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS harness_orchestrations_updated
+                ON harness_orchestrations(updated_at DESC);
             """
         )
 
@@ -226,6 +272,48 @@ class SQLiteHarnessRunStore:
             events.append(HarnessEvent(**json.loads(row["payload"])))
         return events
 
+    def event_counts(self, run_ids: List[str]) -> Dict[str, Dict[str, int]]:
+        """Actions per run by event type, counting each harness item once
+        (some harnesses report an item when it starts and when it ends)."""
+        ids = [str(run_id) for run_id in run_ids if run_id][:1000]
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT run_id, event_type, COUNT(DISTINCT COALESCE("
+                "json_extract(payload, '$.data.id'), sequence)) AS n "
+                f"FROM harness_events WHERE run_id IN ({marks}) "
+                "GROUP BY run_id, event_type",
+                ids,
+            ).fetchall()
+        counts: Dict[str, Dict[str, int]] = {}
+        for row in rows:
+            counts.setdefault(row["run_id"], {})[row["event_type"]] = int(row["n"])
+        return counts
+
+    def event_models(self, run_ids: List[str]) -> Dict[str, str]:
+        """The model each run's harness reported in its events, latest first
+        (Claude Code names it at start-up, Codex with its usage)."""
+        ids = [str(run_id) for run_id in run_ids if run_id][:1000]
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT run_id, json_extract(payload, '$.data.model') AS model "
+                f"FROM harness_events WHERE run_id IN ({marks}) "
+                "AND event_type IN ('status', 'usage') "
+                "AND json_type(payload, '$.data.model') = 'text' "
+                "ORDER BY run_id, sequence DESC",
+                ids,
+            ).fetchall()
+        models: Dict[str, str] = {}
+        for row in rows:
+            if row["model"] and row["run_id"] not in models:
+                models[row["run_id"]] = str(row["model"])
+        return models
+
     def acquire_workspace(self, workspace: str, run_id: str) -> bool:
         with self._lock:
             try:
@@ -237,6 +325,15 @@ class SQLiteHarnessRunStore:
                 return True
             except sqlite3.IntegrityError:
                 return False
+
+    def workspace_holder(self, workspace: str) -> Optional[str]:
+        """The run holding a workspace's write lease, if any."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT run_id FROM harness_workspace_leases WHERE workspace=?",
+                (str(workspace),),
+            ).fetchone()
+        return str(row["run_id"]) if row else None
 
     def release_workspace(self, workspace: str, run_id: str) -> None:
         with self._lock:
@@ -263,7 +360,153 @@ class SQLiteHarnessRunStore:
                 recovered += 1
         with self._lock:
             self._connection.execute("DELETE FROM harness_workspace_leases")
+        # A plan or comparison is driven by a thread in the host process, so a
+        # restart stops it even when its current run was only awaiting approval.
+        for orchestration in self.list_orchestrations(limit=10_000):
+            if not orchestration.status.terminal:
+                self.update_orchestration(
+                    orchestration.orchestration_id,
+                    status=HarnessStatus.INTERRUPTED.value,
+                    finished_at=utcnow_iso(),
+                    error_code="host_restarted",
+                    error=(
+                        "The harness host restarted during this workflow; "
+                        "later steps did not start."
+                    ),
+                )
         return recovered
+
+    @staticmethod
+    def _decode_orchestration(row: sqlite3.Row) -> HarnessOrchestration:
+        return HarnessOrchestration(**json.loads(row["payload"]))
+
+    @staticmethod
+    def _encode_orchestration(orchestration: HarnessOrchestration) -> str:
+        return json.dumps(
+            orchestration.to_dict(), ensure_ascii=False, sort_keys=True, default=str
+        )
+
+    def create_orchestration(
+        self, orchestration: HarnessOrchestration
+    ) -> HarnessOrchestration:
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO harness_orchestrations"
+                "(orchestration_id,kind,status,created_at,updated_at,payload) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    orchestration.orchestration_id,
+                    orchestration.kind,
+                    orchestration.status.value,
+                    orchestration.created_at,
+                    orchestration.updated_at,
+                    self._encode_orchestration(orchestration),
+                ),
+            )
+        return orchestration
+
+    def get_orchestration(
+        self, orchestration_id: str
+    ) -> Optional[HarnessOrchestration]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM harness_orchestrations WHERE orchestration_id=?",
+                (str(orchestration_id),),
+            ).fetchone()
+        return self._decode_orchestration(row) if row else None
+
+    def list_orchestrations(
+        self, *, limit: int = 50, status: Optional[str] = None
+    ) -> List[HarnessOrchestration]:
+        bounded = max(1, min(int(limit), 10_000))
+        with self._lock:
+            if status:
+                rows = self._connection.execute(
+                    "SELECT payload FROM harness_orchestrations WHERE status=? "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (str(status), bounded),
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT payload FROM harness_orchestrations "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (bounded,),
+                ).fetchall()
+        return [self._decode_orchestration(row) for row in rows]
+
+    def update_orchestration(
+        self, orchestration_id: str, **changes: Any
+    ) -> HarnessOrchestration:
+        with self._lock:
+            # The driver thread and a cancel request from another process can
+            # both write; each passes only the fields it owns.
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT payload FROM harness_orchestrations "
+                    "WHERE orchestration_id=?",
+                    (str(orchestration_id),),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"Unknown harness workflow: {orchestration_id}")
+                payload = self._decode_orchestration(row).to_dict()
+                payload.update(changes)
+                payload["updated_at"] = utcnow_iso()
+                updated = HarnessOrchestration(**payload)
+                self._connection.execute(
+                    "UPDATE harness_orchestrations SET status=?,updated_at=?,payload=? "
+                    "WHERE orchestration_id=?",
+                    (
+                        updated.status.value,
+                        updated.updated_at,
+                        self._encode_orchestration(updated),
+                        updated.orchestration_id,
+                    ),
+                )
+                self._connection.execute("COMMIT")
+                return updated
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def delete(self, run_ids: List[str]) -> int:
+        """Delete runs with their events and workspace leases; returns how
+        many runs were removed."""
+        ids = list(dict.fromkeys(str(run_id) for run_id in run_ids if run_id))
+        removed = 0
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start : start + 500]
+                    marks = ",".join("?" * len(chunk))
+                    # Explicit, so stores created without foreign keys on
+                    # lose them too.
+                    self._connection.execute(
+                        f"DELETE FROM harness_events WHERE run_id IN ({marks})", chunk
+                    )
+                    self._connection.execute(
+                        f"DELETE FROM harness_workspace_leases WHERE run_id IN ({marks})",
+                        chunk,
+                    )
+                    removed += self._connection.execute(
+                        f"DELETE FROM harness_runs WHERE run_id IN ({marks})", chunk
+                    ).rowcount
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        return removed
+
+    def delete_orchestration(self, orchestration_id: str) -> bool:
+        """Delete a workflow record. Its runs are deleted separately."""
+        with self._lock:
+            return bool(
+                self._connection.execute(
+                    "DELETE FROM harness_orchestrations WHERE orchestration_id=?",
+                    (str(orchestration_id),),
+                ).rowcount
+            )
 
     def close(self) -> None:
         with self._lock:

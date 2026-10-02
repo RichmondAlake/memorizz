@@ -10,6 +10,7 @@ into grid rows, chip counts and tape totals for ``/memory/workflows`` and
 evidence, failing, promoted), the criteria explainer, and the totals.
 """
 
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -20,7 +21,6 @@ from memorizz.long_term.procedural.workflow.canonicalization import (
     TrajectoryStats,
 )
 from memorizz.ui.learning_view import (
-    LEARNING_TABS,
     ago,
     build_skill_monitor,
     build_workflow_monitor,
@@ -102,18 +102,24 @@ class TestHelpers:
 
     @pytest.mark.unit
     def test_learning_tabs_link_the_four_sibling_pages(self):
-        assert [tab[0] for tab in LEARNING_TABS] == [
+        from memorizz.ui.state import templates
+
+        macro = templates.env.get_template("_learning_tabs.html").module
+        html = str(macro.learning_tabs("skills"))
+        links = re.findall(r'href="([^"]+)"', html)
+        assert links == [
             "/memory/workflows",
             "/memory/skills",
             "/learning-control-plane",
             "/persona-evolution",
         ]
-        assert [tab[1] for tab in LEARNING_TABS] == [
+        for label in (
             "Workflow trajectories",
             "Learned skills",
             "Control plane",
             "Persona evolution",
-        ]
+        ):
+            assert label in html
 
 
 class TestPromotionCriteria:

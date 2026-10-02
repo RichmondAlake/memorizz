@@ -16,6 +16,7 @@ from memorizz.benchmarks.common import (
     create_benchmark_memory_provider,
     normalize_memory_backend,
 )
+from memorizz.benchmarks.measurement import bounded_text, json_safe
 from memorizz.enums import MemoryType
 from memorizz.llms.openai import OpenAI
 from memorizz.tooling import governed_tool
@@ -34,32 +35,6 @@ def estimate_gpt_5_4_mini_cost(usage: Dict[str, Any]) -> float:
         + cached * MINI_CACHED_INPUT_USD_PER_MILLION
         + output * MINI_OUTPUT_USD_PER_MILLION
     ) / 1_000_000
-
-
-def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    dump = getattr(value, "model_dump", None)
-    if callable(dump):
-        return _jsonable(dump(exclude_none=True))
-    return str(value)
-
-
-def _bounded(value: Any, limit: int) -> tuple[str, bool]:
-    text = str(value or "")
-    if len(text) <= limit:
-        return text, False
-    head = max(1, limit // 2)
-    tail = max(1, limit - head)
-    return (
-        f"{text[:head]}\n...[{len(text) - head - tail} characters omitted]...\n"
-        f"{text[-tail:]}",
-        True,
-    )
 
 
 class BenchmarkSpendLimitExceeded(RuntimeError):
@@ -118,7 +93,7 @@ class TrackedOpenAI(OpenAI):
                         {
                             "id": call_id,
                             "name": str(call.function.name),
-                            "arguments": _jsonable(arguments),
+                            "arguments": json_safe(arguments),
                         }
                     )
                     if call_id:
@@ -149,7 +124,7 @@ class TrackedOpenAI(OpenAI):
         )
         for record in reversed(self.call_records):
             if any(call.get("id") == call_id for call in record["tool_calls"]):
-                record["tool_results"][call_id] = _jsonable(result)
+                record["tool_results"][call_id] = json_safe(result)
                 break
 
 
@@ -198,11 +173,11 @@ class DockerWorkspaceBridge:
         ]
         result = self.container.exec_run(wrapped, workdir=cwd, demux=True)
         stdout_raw, stderr_raw = result.output or (b"", b"")
-        stdout, stdout_truncated = _bounded(
+        stdout, stdout_truncated = bounded_text(
             (stdout_raw or b"").decode("utf-8", errors="replace"),
             self.max_output_chars,
         )
-        stderr, stderr_truncated = _bounded(
+        stderr, stderr_truncated = bounded_text(
             (stderr_raw or b"").decode("utf-8", errors="replace"),
             self.max_output_chars,
         )

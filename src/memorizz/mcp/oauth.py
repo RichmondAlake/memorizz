@@ -24,6 +24,8 @@ class PendingOAuthFlow:
     issuer: Optional[str] = None
     error: Optional[str] = None
     result: Optional[dict] = None
+    # A same-site path to return to after sign-in, such as the playground.
+    return_to: Optional[str] = None
     url_ready: threading.Event = field(default_factory=threading.Event)
     callback_ready: threading.Event = field(default_factory=threading.Event)
     completed: threading.Event = field(default_factory=threading.Event)

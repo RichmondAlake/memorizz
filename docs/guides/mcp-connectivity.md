@@ -28,6 +28,99 @@ pip install "memorizz[mcp,ui]"
 This page covers MemoRizz as an MCP client. To make MemoRizz memory and agents
 available to other MCP clients, see [Expose MemoRizz as an MCP server](mcp-server.md).
 
+## How agents see MCP tools
+
+Each tool a server has listed becomes a tool of its own for the agent, named
+`server__tool` (for example `f1__get_f1_next_event`) and carrying the server's
+input schema. Calls still go through the connection's policy: blocked and
+non-allowlisted tools are hidden, and tools that change data wait for approval.
+Small local models handle these much better than the two-step
+`mcp_list_tools` → `mcp_call_tool` facade, which remains as a fallback.
+
+Tool lists are cached per agent in `~/.memorizz/mcp_tools/` after any
+successful **Test**, **Tools** or `mcp_list_tools` call, and reused only while
+the server's URL or command is unchanged. With progressive tool disclosure (the
+default), an MCP tool is shown to the model when the request names it or its
+purpose clearly: two words of the request in the tool's name, or one plus its
+description ("create a page" finds `notion-create-pages`). Chat filler such as
+"can", "you" or "it" does not count. `discover_tools` finds the rest.
+
+When a model calls a tool it was not shown, the call does not run. If the name
+is exact, the tool is disclosed and its schema returned so the next call fits;
+a near-miss name (`notion-create-page`) gets the real name and schema instead.
+
+Before a call runs, or asks for approval, its arguments are checked against the
+tool's input schema:
+
+- Two certain fixes are applied, using only the model's own values: a field the
+  schema documents under a sibling object moves into it (a Notion page `title`
+  goes into `properties`), and an object wrapping a single piece of text becomes
+  that text where only a plain value is allowed.
+- Anything else that does not fit fails with the location and the fix, for
+  example `pages[0]: 'emoji' is not allowed here (allowed: content, icon, …)`,
+  and never reaches the server.
+
+A tool that changes data waits for approval whether it is called by name
+(`notion__notion-create-pages`) or through `mcp_call_tool`. The playground's
+approval card shows the exact arguments that will be sent.
+
+## Find and attach servers
+
+**MCP Connections → Find a server** lists the official connectors (Notion,
+Gmail, Google Calendar) and searches the
+[official MCP Registry](https://registry.modelcontextprotocol.io). Each result
+offers the ways it can run: **Hosted** (a remote URL) or **Local** (an npm,
+PyPI or Docker package started over stdio). Choosing one opens a short form
+that shows the URL or exact command, asks only for the values the server needs
+(tokens, environment variables, URL placeholders), and attaches the server to
+the agent. Secrets go straight to the encrypted credential store. For hosted
+servers MemoRizz detects whether the server uses OAuth sign-in, a token or no
+authentication; OAuth servers get a **Sign in** button once attached.
+
+Registry entries are published by third parties. Check the repository before
+connecting; a local package runs only when the agent or **Test** uses it, and
+mutating tools still require approval. The public registry can take 30 seconds
+or more for an uncached search; results are cached for ten minutes.
+
+The playground has the same search under **Settings → MCP Servers**. From the
+CLI:
+
+```bash
+memorizz mcp search linear      # presets and registry results, with the add command
+memorizz mcp search linear --json
+```
+
+Set `MEMORIZZ_MCP_REGISTRY_URL` to use a private registry that implements the
+same API.
+
+## Personal productivity assistant
+
+**Agents → Create agent → Start from a template: Personal productivity
+assistant** creates an agent with instructions, a persona and entity memory, and
+attaches Gmail, Google Calendar and Notion. It opens MCP Connections so you can
+sign in to each one. The assistant drafts but never sends mail (Gmail's MCP
+server has no send tool), reads your calendar, keeps Notion notes and tasks up
+to date, and treats email and page content as information, never as
+instructions. Drafts, labels and Notion edits wait for your approval.
+
+Gmail and Google Calendar need one Google OAuth client (see below); enter its ID
+and secret in the template form or later with **Edit**. In code:
+
+```python
+from memorizz.memagent.templates import PRODUCTIVITY_ASSISTANT, template_mcp_servers
+
+agent = MemAgent(
+    instruction=PRODUCTIVITY_ASSISTANT.instruction,
+    memory_provider=provider,
+    mcp_servers=template_mcp_servers(
+        PRODUCTIVITY_ASSISTANT,
+        redirect_uri="http://127.0.0.1:8765/api/mcp/oauth/callback",
+        google_client_id=CLIENT_ID,
+        google_client_secret=CLIENT_SECRET,
+    ),
+)
+```
+
 ## Notion
 
 The easiest UI flow is:
@@ -93,6 +186,27 @@ memorizz mcp test calendar
 Use Google's [Calendar MCP setup guide](https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server)
 for Cloud project, OAuth consent-screen, and access-policy requirements.
 
+## Gmail
+
+Gmail's MCP server is also a Google Developer Preview. Enable
+`gmail.googleapis.com` and `gmailmcp.googleapis.com` in the same Google Cloud
+project and reuse the OAuth client you made for Calendar (register the same
+redirect URI). The preset asks only for `gmail.readonly` and `gmail.compose`,
+so the agent can search and read threads and create drafts, but cannot send,
+trash or relabel mail. The server itself has no send tool.
+
+```bash
+memorizz mcp add gmail --preset gmail \
+  --client-id "$GOOGLE_OAUTH_CLIENT_ID" \
+  --client-secret "$GOOGLE_OAUTH_CLIENT_SECRET"
+memorizz mcp login gmail
+```
+
+Google lists tools without sign-in and asks for it only on a call, so
+**Authorize** starts sign-in with a read-only call (`list_labels` for Gmail,
+`list_calendars` for Calendar). MemoRizz requests exactly the scopes configured
+on the connection, never the wider set a server advertises.
+
 ## Local and custom servers
 
 Add a local SDK server without a shell:
@@ -143,7 +257,8 @@ agent.with_mcp_servers([...])  # replace connections at runtime
 
 ```text
 memorizz mcp list [--json]
-memorizz mcp add NAME [connection/auth/policy options]
+memorizz mcp search QUERY [--limit N] [--json]
+memorizz mcp add NAME [--preset notion|google-calendar|gmail] [connection/auth/policy options]
 memorizz mcp remove NAME
 memorizz mcp status [NAME] [--json]
 memorizz mcp login NAME

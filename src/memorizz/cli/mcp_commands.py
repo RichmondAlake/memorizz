@@ -12,21 +12,13 @@ from typing import List, Optional
 
 import typer
 
+from ..mcp import catalog
 from . import mcp_config
 
 mcp_app = typer.Typer(
     help="Connect to MCP servers or expose Memorizz as an MCP server.",
     no_args_is_help=True,
 )
-
-NOTION_URL = "https://mcp.notion.com/mcp"
-GOOGLE_CALENDAR_URL = "https://calendarmcp.googleapis.com/mcp/v1"
-DEFAULT_REDIRECT_URI = "http://127.0.0.1:8765/api/mcp/oauth/callback"
-GOOGLE_CALENDAR_SCOPES = [
-    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-    "https://www.googleapis.com/auth/calendar.events.freebusy",
-    "https://www.googleapis.com/auth/calendar.events.readonly",
-]
 
 
 def _console(*, stderr: bool = False):
@@ -102,6 +94,11 @@ def serve_memorizz(
         "--harness-workspace-root",
         help="Allowed harness workspace root; repeat to add roots.",
     ),
+    ingest_root: Optional[List[str]] = typer.Option(
+        None,
+        "--ingest-root",
+        help="Folder memorizz_ingest may read; repeat to add folders.",
+    ),
     stateless_http: Optional[bool] = typer.Option(
         None,
         "--stateless-http/--stateful-http",
@@ -136,6 +133,7 @@ def serve_memorizz(
         "harness_workspace_roots": (
             set(harness_workspace_root) if harness_workspace_root is not None else None
         ),
+        "ingest_roots": set(ingest_root) if ingest_root is not None else None,
         "stateless_http": stateless_http,
     }
     try:
@@ -280,7 +278,7 @@ def list_servers(
 def add_server(
     name: str = typer.Argument(..., help="Unique connection name."),
     preset: Optional[str] = typer.Option(
-        None, "--preset", help="notion or google-calendar"
+        None, "--preset", help="notion, google-calendar or gmail"
     ),
     transport: str = typer.Option("streamable_http", "--transport", "-t"),
     url: Optional[str] = typer.Option(None, "--url"),
@@ -325,19 +323,18 @@ def add_server(
     timeout: float = typer.Option(30.0, "--timeout", min=1.0),
 ):
     """Add or replace a connection; secret options are encrypted immediately."""
-    preset_value = (preset or "").strip().lower().replace("_", "-")
     scopes = list(scope or [])
-    if preset_value == "notion":
-        transport, url, auth = "streamable_http", NOTION_URL, "oauth"
-        redirect_uri = redirect_uri or DEFAULT_REDIRECT_URI
-    elif preset_value in {"calendar", "google-calendar", "google"}:
-        transport, url, auth = "streamable_http", GOOGLE_CALENDAR_URL, "oauth"
-        redirect_uri = redirect_uri or DEFAULT_REDIRECT_URI
-        scopes = scopes or list(GOOGLE_CALENDAR_SCOPES)
-        if not client_id:
-            raise typer.BadParameter("Google Calendar requires --client-id")
-    elif preset_value:
-        raise typer.BadParameter("--preset must be notion or google-calendar")
+    if preset:
+        try:
+            key = catalog.preset_key(preset)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        settings = catalog.PRESETS[key]
+        transport, url, auth = "streamable_http", settings["url"], "oauth"
+        redirect_uri = redirect_uri or catalog.DEFAULT_REDIRECT_URI
+        scopes = scopes or list(settings["scopes"])
+        if settings["needs_client"] and not client_id:
+            raise typer.BadParameter(f"{settings['title']} requires --client-id")
 
     auth_value = auth.strip().lower()
     if auth_value not in {"none", "bearer", "oauth"}:
@@ -381,6 +378,57 @@ def add_server(
     _console().print(f"[green]Saved[/green] {server['name']} in {path}")
     if auth_value == "oauth":
         _console().print(f"Next: [cyan]memorizz mcp login {server['name']}[/cyan]")
+
+
+@mcp_app.command("search")
+def search_servers(
+    query: str = typer.Argument(..., help="Words to look for, e.g. linear."),
+    limit: int = typer.Option(10, "--limit", min=1, max=100),
+    raw_json: bool = typer.Option(False, "--json"),
+):
+    """Find servers: built-in presets and the official MCP Registry."""
+    from rich.table import Table
+
+    result = catalog.search_registry(query, limit=limit)
+    presets = catalog.presets(query)
+    if raw_json:
+        _print_result({**result, "presets": presets}, raw_json=True)
+        _exit_for_result(result)
+        return
+    if not result.get("ok"):
+        _console(stderr=True).print(f"[red]{result.get('error')}[/red]")
+    table = Table(title=f"MCP servers for '{query}'")
+    for column in ("Name", "Connect with", "Description"):
+        table.add_column(column)
+    for preset in presets:
+        table.add_row(
+            preset["title"],
+            f"memorizz mcp add {preset['name']} --preset {preset['key']}",
+            preset["description"],
+        )
+    for entry in result.get("servers") or []:
+        table.add_row(
+            entry["registry_name"],
+            "\n".join(_add_command(entry, option) for option in entry["options"]),
+            entry["description"],
+        )
+    _console().print(table)
+    _exit_for_result(result)
+
+
+def _add_command(entry: dict, option: dict) -> str:
+    """The ``memorizz mcp add`` line for a registry option, secrets left out."""
+    config = option["config"]
+    parts = ["memorizz mcp add", entry["name"]]
+    if config["transport"] == "stdio":
+        parts += ["-t stdio", f"--command {config['command']}"]
+        parts += [f"--arg {json.dumps(arg)}" for arg in config["args"]]
+        parts += [f"--env {name}=..." for name in config.get("env") or {}]
+    else:
+        parts += [f"-t {config['transport']}", f"--url {config['url']}"]
+        if config["auth"]["type"] == "bearer":
+            parts.append("--auth bearer --token ...")
+    return " ".join(parts)
 
 
 @mcp_app.command("remove")

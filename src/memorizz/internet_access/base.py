@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .models import InternetPageContent, InternetSearchResult
 
@@ -44,6 +44,31 @@ class InternetAccessProvider(ABC):
     def close(self) -> None:
         """Cleanup resources (override when necessary)."""
         return None
+
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> Optional[int]:
+        """A positive int from a setting, or None."""
+        if value is None:
+            return None
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            return None
+        return result if result > 0 else None
+
+    @staticmethod
+    def _truncate_text(
+        value: Optional[str], limit: Optional[int]
+    ) -> Tuple[Optional[str], bool, Optional[int]]:
+        """``(text, was_truncated, original_length)``, cut to ``limit`` chars."""
+        if not value:
+            return value, False, None
+        if not limit or limit <= 0:
+            return value, False, len(value)
+        original_length = len(value)
+        if original_length <= limit:
+            return value, False, original_length
+        return value[:limit], True, original_length
 
 
 _PROVIDER_REGISTRY: Dict[str, type[InternetAccessProvider]] = {}

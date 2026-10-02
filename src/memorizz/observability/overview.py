@@ -31,6 +31,7 @@ _OK_STATUSES = {"success", "completed", "ok"}
 # failures even when trace content is hidden (metadata-only mode).
 TOOL_REASONS = {
     "tool_not_disclosed": "called before discover_tools disclosed it this turn",
+    "unknown_tool": "no tool has that name",
     "invalid_arguments": "arguments did not match the tool's signature",
     "tool_not_callable": "no callable is registered for it in this process",
     "invalid_tool_invocation": "rejected before running (not disclosed, bad "
@@ -380,15 +381,19 @@ def build_operations_overview(
     provider_errors = [error for run in runs for error in run["provider_errors"]]
     if failed:
         codes = Counter(run["error_code"] or "unreported" for run in failed)
+        # Failed runs per cause: a run that retried logs the same error twice.
         causes = Counter(
-            error["code"] for run in failed for error in run["provider_errors"]
+            code
+            for run in failed
+            for code in {error["code"] for error in run["provider_errors"]}
         )
         detail = f"Run error code: {codes.most_common(1)[0][0]}"
         if causes:
             cause, count = causes.most_common(1)[0]
             detail = (
                 f"Most common cause: {explain_provider_error(cause)} "
-                f"({count} of {len(failed)}). {detail}"
+                f"(in {count} of {len(failed)} failed run"
+                f"{'s' if len(failed) != 1 else ''}). {detail}"
             )
         attention.append(
             {

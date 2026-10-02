@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
@@ -13,11 +13,21 @@ eval_app = typer.Typer(help="Run and inspect reproducible memory evaluations.")
 dataset_app = typer.Typer(help="Synchronize and verify official benchmark assets.")
 protocol_app = typer.Typer(help="Inspect versioned paper-reproduction manifests.")
 terminal_bench_app = typer.Typer(
-    help="Forecast Terminal-Bench 2.1 cost and rank without submitting."
+    help=(
+        "Terminal-Bench 4.0: list its tasks, check this machine, and run "
+        "MemAgent, Codex or Claude Code on chosen tasks through Harbor. "
+        "`forecast` estimates a Terminal-Bench 2.1 submission's cost."
+    ),
+    no_args_is_help=True,
 )
 eval_app.add_typer(dataset_app, name="dataset")
 eval_app.add_typer(protocol_app, name="protocol")
 eval_app.add_typer(terminal_bench_app, name="terminal-bench")
+
+
+def _ollama_url(value: Optional[str]) -> str:
+    host = str(value or "").strip() or "http://localhost:11434"
+    return host if host.startswith(("http://", "https://")) else f"http://{host}"
 
 
 def _emit(value, *, compact: bool = False) -> None:
@@ -106,6 +116,147 @@ def dataset_sync(
     _emit(report, compact=compact)
 
 
+@terminal_bench_app.command("tasks")
+def terminal_bench_tasks(
+    category: Optional[str] = typer.Option(
+        None, "--category", help="Only this category, e.g. Security."
+    ),
+    include_gpu: bool = typer.Option(
+        False,
+        "--include-gpu",
+        help="Also list tasks that need a GPU (they can't run here).",
+    ),
+    compact: bool = typer.Option(False, "--compact"),
+) -> None:
+    """List Terminal-Bench 4.0 tasks with their category, expert time and resources."""
+
+    from ..benchmarks.terminal_bench_runner import runnable_tasks, task_catalog
+
+    catalog = task_catalog()
+    rows = list(catalog["tasks"]) if include_gpu else runnable_tasks(catalog)
+    if category:
+        wanted = category.strip().casefold()
+        rows = [
+            row for row in rows if str(row.get("category") or "").casefold() == wanted
+        ]
+    _emit(
+        {
+            "dataset": catalog.get("dataset"),
+            "version": catalog.get("version"),
+            "smoke": catalog.get("smoke"),
+            "count": len(rows),
+            "tasks": rows,
+        },
+        compact=compact,
+    )
+
+
+@terminal_bench_app.command("status")
+def terminal_bench_status(compact: bool = typer.Option(False, "--compact")) -> None:
+    """Whether this machine can run Terminal-Bench: Harbor, Docker and keys."""
+
+    from .._env_io import memory_root
+    from ..benchmarks.terminal_bench_runner import environment_status
+
+    _emit(environment_status(str(memory_root())), compact=compact)
+
+
+@terminal_bench_app.command("run")
+def terminal_bench_run(
+    harness: str = typer.Option(
+        ...,
+        "--harness",
+        help="memagent, codex, claude-code or oracle (reference solutions).",
+    ),
+    tasks: List[str] = typer.Option(
+        ...,
+        "--task",
+        help="Task name (see `tasks`); repeat, or give a comma-separated list.",
+    ),
+    output: Path = typer.Option(
+        ..., "--output", help="Where to write the results JSON (Evalground reads it)."
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", help="provider/model; default per harness."
+    ),
+    n_concurrent: int = typer.Option(1, "--n-concurrent", min=1),
+    attempts: int = typer.Option(1, "--attempts", min=1),
+    agent_timeout_multiplier: float = typer.Option(
+        0.1,
+        "--agent-timeout-multiplier",
+        help="Share of each task's eight-hour agent limit (0-1].",
+    ),
+    max_cost_per_task: float = typer.Option(4.0, "--max-cost-per-task", min=0.0),
+    memory_root: Optional[Path] = typer.Option(
+        None, "--memory-root", help="MemoRizz store for lessons (with --learn)."
+    ),
+    memory_id: str = typer.Option("terminal-bench", "--memory-id"),
+    user_id: str = typer.Option("terminal-bench", "--user-id"),
+    learn: bool = typer.Option(
+        False,
+        "--learn",
+        help="Save a lesson per trial to memory (needs --memory-root).",
+    ),
+    codex_auth: str = typer.Option(
+        "api_key", "--codex-auth", help="api_key or chatgpt (your Codex login)."
+    ),
+    jobs_dir: Optional[Path] = typer.Option(None, "--jobs-dir"),
+    job_name: Optional[str] = typer.Option(None, "--job-name"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the Harbor command and stop."
+    ),
+) -> None:
+    """Run a harness on Terminal-Bench 4.0 tasks through Harbor.
+
+    Writes results Evalground can show. Each trial runs in Docker and costs
+    model tokens; start with one task.
+    """
+
+    from ..benchmarks.terminal_bench_runner import main as run_terminal_bench
+
+    names = [name.strip() for item in tasks for name in item.split(",") if name.strip()]
+    argv = [
+        "--harness",
+        harness.strip().lower(),
+        "--tasks",
+        ",".join(names),
+        "--output",
+        str(output),
+        "--n-concurrent",
+        str(n_concurrent),
+        "--attempts",
+        str(attempts),
+        "--agent-timeout-multiplier",
+        str(agent_timeout_multiplier),
+        "--max-cost-per-task",
+        str(max_cost_per_task),
+        "--memory-id",
+        memory_id,
+        "--user-id",
+        user_id,
+        "--codex-auth",
+        codex_auth,
+    ]
+    for flag, value in (
+        ("--model", model),
+        ("--memory-root", memory_root),
+        ("--jobs-dir", jobs_dir),
+        ("--job-name", job_name),
+    ):
+        if value:
+            argv += [flag, str(value)]
+    if learn:
+        argv.append("--learn")
+    if dry_run:
+        argv.append("--dry-run")
+    try:
+        code = run_terminal_bench(argv)
+    except SystemExit as exc:  # argparse reports bad options this way
+        code = exc.code if isinstance(exc.code, int) else 2
+    if code:
+        raise typer.Exit(code)
+
+
 @terminal_bench_app.command("forecast")
 def terminal_bench_forecast(
     pilot_json: Optional[Path] = typer.Option(
@@ -163,6 +314,31 @@ def terminal_bench_forecast(
     _emit(report, compact=compact)
 
 
+@eval_app.command("compare")
+def compare_models(
+    config: Path = typer.Argument(
+        ..., help="Comparison config JSON, as Evalground's Comparisons page writes it."
+    ),
+) -> None:
+    """Run a model comparison from its config file.
+
+    Results land next to it and show on Evalground's Comparisons page.
+    """
+
+    from .._env_io import load_layered_env
+    from ..benchmarks.comparison import ComparisonConfig, run_comparison
+
+    load_layered_env()
+    path = config.expanduser().resolve()
+    try:
+        parsed = ComparisonConfig.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(
+            f"Unable to load the comparison config: {exc}"
+        ) from exc
+    run_comparison(parsed, path.parent)
+
+
 @eval_app.command("run")
 def run_evaluation(
     benchmark_id: str = typer.Argument(..., help="Benchmark identifier."),
@@ -191,6 +367,16 @@ def run_evaluation(
     reader_repair: bool = typer.Option(True, "--reader-repair/--no-reader-repair"),
     evaluation_mode: str = typer.Option("retrieval", "--evaluation-mode"),
     agent_template: Optional[Path] = typer.Option(None, "--agent-template"),
+    agent_id: Optional[str] = typer.Option(
+        None,
+        "--agent-id",
+        help="Saved MemAgent to evaluate (memagent mode), instead of --agent-template.",
+    ),
+    ollama_host: Optional[str] = typer.Option(
+        None,
+        "--ollama-host",
+        help="Ollama server for local models (default: OLLAMA_HOST or localhost).",
+    ),
     oracle_reader: bool = typer.Option(True, "--oracle-reader/--no-oracle-reader"),
     semantic_memory: bool = typer.Option(
         True, "--semantic-memory/--no-semantic-memory"
@@ -235,19 +421,44 @@ def run_evaluation(
     if selected_evaluation_mode not in {"retrieval", "memagent"}:
         raise typer.BadParameter("--evaluation-mode must be retrieval or memagent")
     template_model = None
+    if agent_id and agent_template is not None:
+        raise typer.BadParameter("Give --agent-id or --agent-template, not both")
     if selected_evaluation_mode == "memagent":
-        if agent_template is None:
-            raise typer.BadParameter(
-                "--agent-template is required for --evaluation-mode=memagent"
-            )
-        try:
-            from ..memagent.models import MemAgentModel
+        from ..memagent.models import MemAgentModel
 
-            template_model = MemAgentModel.model_validate_json(
-                agent_template.expanduser().read_text(encoding="utf-8")
+        if agent_id:
+            from ..benchmarks.agent_template import secret_free_agent_template
+            from .agent_commands import _provider
+
+            provider, _warnings = _provider()
+            try:
+                saved = provider.retrieve_memagent(agent_id.strip())
+            finally:
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    close()
+            if not saved:
+                raise typer.BadParameter(
+                    f"Agent not found: {agent_id}", param_hint="--agent-id"
+                )
+            template_model = MemAgentModel.model_validate(
+                secret_free_agent_template(saved)
             )
-        except (OSError, ValueError) as exc:
-            raise typer.BadParameter(f"Unable to load agent template: {exc}") from exc
+        elif agent_template is None:
+            raise typer.BadParameter(
+                "--agent-id or --agent-template is required for --evaluation-mode=memagent"
+            )
+        else:
+            try:
+                template_model = MemAgentModel.model_validate_json(
+                    agent_template.expanduser().read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError) as exc:
+                raise typer.BadParameter(
+                    f"Unable to load agent template: {exc}"
+                ) from exc
+    elif agent_id:
+        raise typer.BadParameter("--agent-id needs --evaluation-mode memagent")
     destination = (
         output.expanduser().resolve()
         if output
@@ -295,6 +506,7 @@ def run_evaluation(
             seed=seed,
             reasoning_effort=effort,
             max_output_tokens=max_output_tokens,
+            ollama_host=_ollama_url(ollama_host or os.getenv("OLLAMA_HOST")),
             progress=lambda line: typer.echo(line, err=True),
         )
     except (KeyError, OSError, RuntimeError, ValueError) as exc:

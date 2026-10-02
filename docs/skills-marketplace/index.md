@@ -6,7 +6,7 @@ MemoRizz agents can discover and use external agent skills at runtime through pl
 
 | Provider | Identifier | API Key Required | Tools Registered |
 | --- | --- | --- | --- |
-| **Vercel Agent Skills** | `vercel` | No (optional `GITHUB_TOKEN` for rate limits) | `vercel_skills_search`, `vercel_skill_fetch` |
+| **Vercel Agent Skills** | `vercel` | No (search uses skills.sh; optional `GITHUB_TOKEN` raises GitHub rate limits) | `vercel_skills_search`, `vercel_skill_fetch` |
 | **SkillsMP** | `skillsmp` | Yes (`SKILLSMP_API_KEY`) | `skills_marketplace_search` |
 
 ## Vercel Agent Skills
@@ -154,13 +154,36 @@ agent = MemAgent(
 | `limit` | `int` | `20` | Results per page (max 100) |
 | `sort_by` | `str` | `""` | `"stars"` or `"recent"` |
 
-## Web UI: Vercel Skills Page
+## Web UI: Skills page
 
-The local web UI includes a dedicated **Vercel Skills** page accessible from the sidebar. It provides:
+The local web UI has a **Skills** page in the sidebar. It searches the
+[skills.sh](https://skills.sh) directory, ranked by installs, with no token
+needed. Paste an `owner/repo` or GitHub URL to fetch a skill directly, and
+read the full `SKILL.md` before using it.
 
-- **Search bar** – search the skills ecosystem by keyword
-- **Repo fetch** – paste any `owner/repo` or GitHub URL to fetch a skill directly
-- **Skill cards** – browse results with repo links, descriptions, and star counts
-- **Instruction viewer** – read the full `SKILL.md` content inline, including frontmatter metadata
+### Attach a skill to an agent
 
-This page works independently of whether any agent has the Vercel provider enabled, making it useful for discovering skills before configuring agents.
+Select a result and choose **Attach skill**. MemoRizz saves the skill's
+`SKILL.md` under `~/.memorizz/skills/<owner>/<repo>/<skill>/`, records where it
+came from in `.memorizz-source.json` (repository, path and SHA-256), and adds
+the file to the agent's `skill_paths`. The agent then lists it with
+`list_skills` and reads it with `read_skill`. Attaching runs nothing; skill code
+only runs in a sandbox through the skill tools.
+
+The same search and **Attach** button are in the playground under
+**Settings → Skills**. To detach a skill, remove its row there and save.
+
+Skills from collections and plugins are found wherever they live in the
+repository (for example `skills/notion/knowledge-capture/SKILL.md`); when a
+name matches nothing, the error lists the skills the repository does contain.
+
+The HTTP API behind these buttons:
+
+```text
+GET    /api/agents/{agent_id}/skills
+POST   /api/agents/{agent_id}/skills        {"repo": "owner/repo", "skill_name": "name"}
+DELETE /api/agents/{agent_id}/skills?path=/absolute/path/SKILL.md
+```
+
+Attaching pins a reviewed skill to one agent. Enabling the marketplace instead
+lets the agent search and fetch skills on its own at run time.

@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "memorizz": {
+      "command": "./scripts/memorizz.sh",
+      "args": [
+        "mcp",
+        "serve",
+        "--transport",
+        "stdio",
+        "--allow-writes"
+      ],
+      "cwd": ".",
+      "env_vars": [
+        "MEMORIZZ_HOME",
+        "MEMORIZZ_MEMORY_ROOT",
+        "MEMORIZZ_BACKEND",
+        "MEMORIZZ_BIN",
+        "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER",
+        "MEMORIZZ_DEFAULT_EMBEDDING_MODEL",
+        "OLLAMA_HOST"
+      ],
+      "startup_timeout_sec": 120,
+      "tool_timeout_sec": 300,
+      "default_tools_approval_mode": "writes",
+      "tools": {
+        "memorizz_store_memory": {
+          "approval_mode": "approve"
+        },
+        "memorizz_update_memory": {
+          "approval_mode": "approve"
+        },
+        "memorizz_upsert_entity": {
+          "approval_mode": "approve"
+        }
+      }
+    }
+  }
+}

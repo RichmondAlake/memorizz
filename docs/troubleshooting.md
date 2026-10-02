@@ -51,10 +51,12 @@ Check `ollama ps` for the active context size and the Ollama server log for
 window without sending `num_ctx` to Ollama. The daemon could truncate the agent
 instructions, tool schemas, or conversation using a much smaller window.
 
-The Ollama provider now explicitly requests 8,192 tokens by default and uses
-that same value for history budgeting. Set `context_window_tokens` in the model
-configuration, or `OLLAMA_CONTEXT_LENGTH` before launching the CLI, to choose
-another window. Resuming the CLI or switching models refreshes the history
+The Ollama provider explicitly requests a window and uses that same value for
+history budgeting: the model's own context length when its attention cache fits
+in a quarter of this machine's RAM (otherwise the largest standard size that
+fits, at least 16,384 tokens), or 8,192 when the daemon does not report one. Set `context_window_tokens` in the
+model configuration, or `OLLAMA_CONTEXT_LENGTH` before launching the CLI, to
+choose another window. Resuming the CLI or switching models refreshes the history
 budget. See [model configuration](getting-started/model-providers.md).
 
 If a local model answers directly during the private tool phase, the streaming
@@ -64,10 +66,14 @@ See the [streaming contract](guides/streaming.md).
 
 ## Context budget or incomplete-answer errors
 
-- `context_window_exceeded`: shorten supplied context or tool descriptions, or
-  increase `llm_config["context_window_tokens"]` within your model's capacity.
-  Older conversation turns are removed first; the current question and its
-  tool evidence are preserved.
+- `context_window_exceeded`: the instructions, tools and current question do not
+  fit in 80% of the context window. The log line gives the tokens needed and
+  the budget. Increase `llm_config["context_window_tokens"]` (`num_ctx` for
+  Ollama) within your model's capacity, or shorten supplied context. Older
+  conversation turns are removed first; the current question and its tool
+  evidence are preserved. Agents saved by earlier releases could keep an
+  8,192-token cap after their model setting changed; a window set in
+  `llm_config` now takes precedence over that saved value.
 - `empty_response`: the model returned no answer. Retry or select another model.
 - `provider_length`: increase the provider's output-token limit (`num_predict`
   for Ollama, `max_tokens` or `max_completion_tokens` as supported by the
@@ -185,15 +191,18 @@ support report.
 
 ## Provider errors during streaming
 
-`run_stream()` emits a typed terminal error event. Set
-`raise_on_provider_error=True` when the host also needs an exception:
+The event stream ends with a single `run.done` event. On a provider failure
+its `status` is `error` and `error_code` says why, after any text already
+delivered:
 
 ```python
-for event in agent.run_stream(query, raise_on_provider_error=True):
-    handle(event)
+with agent.run_stream_events(query) as events:
+    for event in events:
+        if event["type"] == "answer.delta":
+            print(event["delta"], end="")
+        elif event["type"] == "run.done" and event["status"] == "error":
+            raise RuntimeError(event["error_code"])
 ```
-
-Authentication failures propagate after the terminal event.
 
 ## Preparing a useful bug report
 

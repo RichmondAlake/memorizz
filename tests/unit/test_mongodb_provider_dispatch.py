@@ -359,3 +359,30 @@ def test_memagent_objectid_lookup_still_works(provider):
     oid = str(stored["_id"])
     loaded = provider.retrieve_memagent(oid)
     assert loaded is not None and loaded.name == "ObjectId Agent"
+
+
+@pytest.mark.unit
+def test_tool_logs_resolve_by_uuid_tool_log_id_as_well_as_object_id(provider):
+    """Later turns show the model the UUID tool_log_id, not the ObjectId."""
+    record_id = provider.store(
+        {
+            "name": "web_search",
+            "tool_log_id": "7f1c7e2a-2b8a-4bbf-9a55-0d0f2f4f9d11",
+            "result": "stored output",
+        },
+        memory_store_type=MemoryType.TOOL_LOG,
+    )
+
+    by_object_id = provider.retrieve_by_id(record_id, MemoryType.TOOL_LOG)
+    by_uuid = provider.retrieve_by_id(
+        "7f1c7e2a-2b8a-4bbf-9a55-0d0f2f4f9d11", MemoryType.TOOL_LOG
+    )
+
+    assert by_object_id["result"] == by_uuid["result"] == "stored output"
+    assert provider.retrieve_by_id("not-a-real-log", MemoryType.TOOL_LOG) is None
+    # Other types keep matching only their _id.
+    provider.store(
+        {"name": "p", "tool_log_id": "shared-uuid"},
+        memory_store_type=MemoryType.PERSONAS,
+    )
+    assert provider.retrieve_by_id("shared-uuid", MemoryType.PERSONAS) is None

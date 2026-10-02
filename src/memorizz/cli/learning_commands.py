@@ -3,23 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
 import typer
 
+from .._env_io import env_text as _env
 from . import config as cfg
 
 learning_app = typer.Typer(
     help="Inspect, compile, and govern agent learning memory.",
     no_args_is_help=True,
 )
-
-
-def _env(name: str) -> Optional[str]:
-    value = os.getenv(name)
-    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 @contextmanager

@@ -243,9 +243,16 @@ class FakeModel:
         return "answer"
 
     def generate_stream(self, messages, tools=None, **kwargs):
-        if tools and any(
-            tool.get("function", {}).get("name") == "memorizz_finalize_answer"
-            for tool in tools
+        accepted = any(
+            "Finalization accepted" in str(m.get("content")) for m in messages
+        )
+        if (
+            tools
+            and not accepted
+            and any(
+                tool.get("function", {}).get("name") == "memorizz_finalize_answer"
+                for tool in tools
+            )
         ):
             from memorizz.llms.streaming import tool_response
 

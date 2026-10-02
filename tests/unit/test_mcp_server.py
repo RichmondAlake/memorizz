@@ -750,7 +750,22 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
     tools = manager.list_tools("memorizz-server")
     names = {tool["name"] for tool in tools["tools"]}
     assert tools["ok"] is True
-    assert len(names) == 24
+    assert len(names) == 46
+    assert {
+        "memorizz_ingest",
+        "memorizz_lookup_entities",
+        "memorizz_upsert_entity",
+        "memorizz_update_memory",
+        "memorizz_memory_status",
+    } <= names
+    assert {
+        "memorizz_retry_harness_run",
+        "memorizz_start_harness_plan",
+        "memorizz_start_harness_comparison",
+        "memorizz_list_harness_workflows",
+        "memorizz_get_harness_workflow",
+        "memorizz_cancel_harness_workflow",
+    } <= names
     assert all(
         tool["inputSchema"].get("additionalProperties") is False
         for tool in tools["tools"]
@@ -772,6 +787,13 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
         "memorizz_list_harness_runs",
         "memorizz_get_harness_events",
         "memorizz_cancel_harness_run",
+        "memorizz_rerun_harness_workflow",
+        "memorizz_delete_harness_runs",
+        "memorizz_delete_harness_workflow",
+        "memorizz_get_harness_conversation",
+        "memorizz_continue_harness_conversation",
+        "memorizz_record_turn",
+        "memorizz_summarize_session",
     }.issubset(names)
     strict_rejection = manager.call_tool(
         "memorizz-server", "memorizz_server_info", {"unknown_argument": True}
@@ -952,3 +974,127 @@ def test_authenticated_http_protocol_isolates_principals(tmp_path, monkeypatch):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+
+
+@pytest.mark.unit
+def test_harnesses_reach_the_agents_mcp_servers_only_through_policy(
+    tmp_path, monkeypatch
+):
+    """Connected tools: reads run, changes need write access and approval."""
+    from memorizz.memagent import MemAgentModel
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    provider = _filesystem_provider(tmp_path)
+    fixture = Path(__file__).parents[1] / "fixtures" / "mcp_stdio_server.py"
+    provider.store_memagent(
+        MemAgentModel(
+            agent_id="agent-1",
+            instruction="x",
+            mcp_servers=[
+                {
+                    "name": "items",
+                    "transport": "stdio",
+                    "command": sys.executable,
+                    "args": [str(fixture)],
+                    "timeout": 20,
+                }
+            ],
+        )
+    )
+    approvals = SQLiteApprovalStore(tmp_path / "approvals.sqlite3")
+    monkeypatch.setattr(
+        "memorizz.mcp.manager.default_approval_store", lambda *a, **k: approvals
+    )
+
+    def runtime(allow_writes):
+        return MemorizzRuntime(
+            MemorizzMCPServerConfig(
+                allow_writes=allow_writes, exposed_agent_ids={"agent-1"}
+            ),
+            provider=provider,
+            approval_store=approvals,
+        )
+
+    read_only = runtime(False)
+    listed = read_only.list_connected_tools("agent-1", _identity("alice"))
+    tools = {tool["name"]: tool for tool in listed["servers"][0]["tools"]}
+    assert listed["writes_allowed"] is False
+    assert tools["create_item"]["changes_data"] is True
+    assert tools["echo"]["changes_data"] is False
+
+    echoed = read_only.call_connected_tool(
+        "agent-1",
+        "items",
+        "echo",
+        {"payload": {"a": 1}},
+        _identity("alice"),
+        read_only=True,
+    )
+    assert echoed["ok"] is True
+    with pytest.raises(MemorizzServerError, match="changes data"):
+        read_only.call_connected_tool(
+            "agent-1",
+            "items",
+            "create_item",
+            {"name": "x"},
+            _identity("alice"),
+            read_only=True,
+        )
+    with pytest.raises(MemorizzServerError, match="read-only"):
+        read_only.call_connected_tool(
+            "agent-1", "items", "create_item", {"name": "x"}, _identity("alice")
+        )
+    with pytest.raises(MemorizzServerError, match="Agent was not found"):
+        read_only.list_connected_tools("agent-2", _identity("alice"))
+    # A harness server exposes one agent, so agent_id can be left out.
+    assert read_only.list_connected_tools("", _identity("alice"))["agent_id"] == (
+        "agent-1"
+    )
+
+    writer = runtime(True)
+    proposed = writer.call_connected_tool(
+        "agent-1", "items", "create_item", {"name": "x"}, _identity("alice")
+    )
+    assert proposed["status"] == "approval_required"
+    proposal_id = proposed["proposal"]["proposal_id"]
+    early = writer.resume_connected_tool_call(
+        "agent-1", proposal_id, _identity("alice")
+    )
+    assert early["ok"] is False and early["error_code"] == "invalid_approval_state"
+
+    approvals.approve(proposal_id, approver_id="operator")
+    done = writer.resume_connected_tool_call("agent-1", proposal_id, _identity("alice"))
+    assert done["ok"] is True
+
+
+def test_agents_with_personas_list_and_an_agentless_server_says_so(tmp_path):
+    """A harness run's server lists agents that carry a Persona, and with no
+    agent attached it reports no connected tools instead of failing."""
+    from memorizz.long_term.semantic.persona.persona import Persona
+    from memorizz.memagent import MemAgentModel
+
+    provider = _filesystem_provider(tmp_path)
+    provider.store_memagent(
+        MemAgentModel(
+            agent_id="agent-p",
+            name="With persona",
+            instruction="x",
+            persona=Persona(name="Guide", role="Assistant"),
+        )
+    )
+    runtime = MemorizzRuntime(
+        MemorizzMCPServerConfig(transport="stdio", exposed_agent_ids=None),
+        provider=provider,
+        approval_store=SQLiteApprovalStore(tmp_path / "approvals.sqlite3"),
+    )
+    alice = _identity("alice")
+
+    listed = runtime.list_agents(alice)
+    assert [agent["agent_id"] for agent in listed["agents"]] == ["agent-p"]
+    json.dumps(listed)
+
+    empty = runtime.list_connected_tools("", alice)
+    assert empty["ok"] is True and empty["servers"] == []
+    assert "memorizz_list_agents" in empty["note"]
+    with pytest.raises(MemorizzServerError, match="pass agent_id"):
+        runtime.call_connected_tool("", "notion", "search", {}, alice)

@@ -19,8 +19,11 @@ with agent.run_stream_events("Explain this document", user_id="alice") as events
 ```
 
 `arun_stream_events()` is an async iterator with the same events. Close it with
-`contextlib.aclosing` if breaking out early. Legacy `run_stream()` still yields
-strings and accepts a per-call diagnostic callback.
+`contextlib.aclosing` if breaking out early.
+
+`run_stream()`, which yields plain strings, is deprecated and will be removed in
+0.14. Move to `run_stream_events()`: `answer.delta` events carry the same text,
+and `run.done` reports errors and persistence that the string API cannot.
 
 ## Contract and completion
 
@@ -35,9 +38,20 @@ outcomes. Unknown write outcomes are not successes.
 `run.started` publishes IDs and the selected delivery/capability information.
 Deferred UI/service loading starts with `delivery_mode=initializing`; its
 `agent_ready` status publishes resolved capabilities. Other events include
-`status`, `tool.started`, `tool.completed`, `completion.check`, `usage` and
-`approval.required`. Tool arguments, results, provider reasoning and rejected
-candidate text are excluded. An error preserves delivered partial text and adds
+`status`, `tool.started`, `tool.completed`, `completion.check`, `usage`,
+`approval.required`, `capability.requested` and `capability.suggested`. Tool
+arguments, results, provider reasoning and rejected candidate text are
+excluded.
+
+`capability.requested` (with `capability`, `title`, `status` and `reason`)
+means the model called `request_capability` because the request needs
+something this agent lacks, such as `web_search`, `email`, `calendar`, `notes`,
+`code_execution` or `browser`. `capability.suggested` (with `capabilities`, a
+list of IDs) comes from a keyword check at the start of the turn, independent
+of the model, so small models that never call the tool still surface it. Hosts
+should read the current state from `memorizz.capability_gaps` (or the UI's
+`/api/agents/{id}/capabilities`) when rendering, since it changes as soon as
+something is enabled. An error preserves delivered partial text and adds
 a safe code in the terminal event, never exception prose in the answer.
 
 `empty_response` means the model produced no public answer, including when it
@@ -57,7 +71,7 @@ tokenization depends on the provider.
 
 | Delivery | Behavior |
 |---|---|
-| Default, no completion gate | `final_stream`: private tool phase, host-checked finalization, then incremental answer generation with tools disabled |
+| Default, no completion gate | `final_stream`: private tool phase, host-checked finalization, then incremental answer generation in which tool calls are never run |
 | Existing/enabled completion policy | `buffered` by default: accept the whole candidate before exposing any text |
 | Evidence-only completion policy | Explicit `delivery_mode="final_stream"` is supported |
 | Complete-answer validator or forbidden-response patterns | `final_stream` is rejected; required validators are never silently bypassed |
@@ -68,9 +82,14 @@ require_tool_calls=True)` checks evidence at the finalization boundary.
 The reserved `memorizz_finalize_answer` tool must be called alone when used;
 application tools must not use that name. A model that ends its tool phase with
 text instead is checked against the same host evidence requirements. Its draft
-stays private; after acceptance, a new request generates the public answer with
-tools disabled. Missing required evidence still blocks finalization. This extra
-phase can add model work. Cache hits
+stays private; after acceptance, a new request generates the public answer. It
+sends the same tool list, so the provider prompt cache carries over, and any
+tool call it makes is never run. Missing required evidence still blocks finalization. This extra
+phase can add model work. If a model still makes a tool call while answering,
+the call is never run: text already streamed
+stands as the answer, and otherwise the model is asked again, up to twice. A
+reply with no text and no tool call is re-requested once before it is an
+`empty_response` error. Cache hits
 are revalidated and delivered as an already-available answer; cache compatibility
 includes delivery policy. Persisted required runtime validators still fail
 closed until rebound by the host.

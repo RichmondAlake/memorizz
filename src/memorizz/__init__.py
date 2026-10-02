@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
@@ -29,9 +29,6 @@ _LAZY = {
     "MemAgent": (".memagent", "MemAgent"),
     "MemAgentModel": (".memagent", "MemAgentModel"),
     "MemAgentBuilder": (".memagent.builders", "MemAgentBuilder"),
-    "create_assistant": (".memagent.builders", "create_assistant"),
-    "create_chatbot": (".memagent.builders", "create_chatbot"),
-    "create_task_agent": (".memagent.builders", "create_task_agent"),
     "create_deep_research_agent": (".memagent.builders", "create_deep_research_agent"),
     "SubTask": (".task_decomposition", "SubTask"),
     "ApplicationMode": (".enums", "ApplicationMode"),
@@ -47,6 +44,7 @@ _LAZY = {
     "ToolOutcomeStatus": (".tool_outcomes", "ToolOutcomeStatus"),
     "ToolResult": (".tool_outcomes", "ToolResult"),
     "ToolResultPolicy": (".tooling", "ToolResultPolicy"),
+    "ToolCacheConfig": (".tool_cache", "ToolCacheConfig"),
     "ContextPolicy": (".tooling", "ContextPolicy"),
     "CompletionCandidate": (".completion", "CompletionCandidate"),
     "CompletionDecision": (".completion", "CompletionDecision"),
@@ -180,9 +178,6 @@ __all__ = [
     "MemAgent",
     "MemAgentModel",
     "MemAgentBuilder",
-    "create_assistant",
-    "create_chatbot",
-    "create_task_agent",
     "create_deep_research_agent",
     "SubTask",
     "ApplicationMode",
@@ -199,6 +194,7 @@ __all__ = [
     "ToolOutcomeStatus",
     "ToolResult",
     "ToolResultPolicy",
+    "ToolCacheConfig",
     "ContextPolicy",
     "CompletionCandidate",
     "CompletionDecision",

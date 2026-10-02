@@ -31,7 +31,6 @@ IMAGE = "gvenzl/oracle-free:23-slim-faststart"
 IMAGE_PREFIX = "gvenzl/oracle-free"
 VOLUME_NAME = "memorizz_oracle_data"
 INTERNAL_PORT = 1521
-DEFAULT_SERVICE = "FREEPDB1"
 
 # Readiness budgets. `start` is generous for a warm container; `create` covers
 # the first-boot initialization of gvenzl/oracle-free which builds FREEPDB1.

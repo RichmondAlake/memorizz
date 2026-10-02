@@ -15,6 +15,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from ...._time import parse_iso_datetime
 from ....embeddings import get_embedding
 
 # Distinguishes "no embedding supplied — generate one" (fresh skill) from
@@ -213,14 +214,6 @@ class Skill:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Skill":
-        def _dt(value):
-            if not value:
-                return None
-            try:
-                return datetime.fromisoformat(str(value))
-            except (TypeError, ValueError):
-                return None
-
         return cls(
             name=data.get("name", ""),
             description=data.get("description", ""),
@@ -236,10 +229,10 @@ class Skill:
             exemplar_workflow_id=data.get("exemplar_workflow_id"),
             status=SkillStatus(data.get("status", SkillStatus.CANDIDATE.value)),
             version=data.get("version", 1),
-            created_at=_dt(data.get("created_at")),
-            updated_at=_dt(data.get("updated_at")),
-            promoted_at=_dt(data.get("promoted_at")),
-            demoted_at=_dt(data.get("demoted_at")),
+            created_at=parse_iso_datetime(data.get("created_at")),
+            updated_at=parse_iso_datetime(data.get("updated_at")),
+            promoted_at=parse_iso_datetime(data.get("promoted_at")),
+            demoted_at=parse_iso_datetime(data.get("demoted_at")),
             demotion_reason=data.get("demotion_reason"),
             # Legacy skills pre-date trust-aware injection and must retain the
             # original user-context authority after upgrade.

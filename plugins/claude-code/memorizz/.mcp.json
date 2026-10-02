@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "memorizz": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/memorizz.sh",
+      "args": ["mcp", "serve", "--transport", "stdio", "--allow-writes"]
+    }
+  }
+}

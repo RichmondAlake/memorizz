@@ -15,6 +15,7 @@ from ...learning.compiler import MemoryCompiler
 from ..control_plane_monitor import build_control_plane_view
 from ..dashboard import template_helpers
 from ..helpers import (
+    _agent_field,
     _build_agent_nav_items,
     _extract_agent_identifier,
     _extract_agent_persona_name,
@@ -46,12 +47,6 @@ def _redirect(agent_id: str, **scope: Any) -> RedirectResponse:
     )
 
 
-def _agent_setting(agent: Any, key: str) -> Any:
-    if isinstance(agent, dict):
-        return agent.get(key)
-    return getattr(agent, key, None)
-
-
 def _capture_enabled(agent: Any) -> Optional[bool]:
     """Whether the saved agent records learning events (None: not a saved agent).
 
@@ -60,7 +55,7 @@ def _capture_enabled(agent: Any) -> Optional[bool]:
     """
     if agent is None:
         return None
-    return bool(_agent_setting(agent, "learning_control_plane"))
+    return bool(_agent_field(agent, "learning_control_plane"))
 
 
 @router.get("/learning-control-plane", response_class=HTMLResponse)
@@ -103,7 +98,7 @@ async def learning_control_plane_page(
                 thread_id=thread_id or None,
                 limit=50_000,
             )
-            saved = _agent_setting(selected_agent, "learning_control_plane_config")
+            saved = _agent_field(selected_agent, "learning_control_plane_config")
             budget = (
                 saved.get("evidence_token_budget") if isinstance(saved, dict) else None
             )

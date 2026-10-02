@@ -27,7 +27,7 @@ from .streaming import (
     current_cancellation,
     current_stream,
 )
-from .task_decomposition import SubTask, TaskDecomposer
+from .task_decomposition import SubTask, TaskDecomposer, _count_call
 from .tool_context import reset_tool_context, set_tool_context
 from .tool_outcomes import ToolResult
 
@@ -157,7 +157,6 @@ class MultiAgentOrchestrator:
         self._trace_id: Optional[str] = None
         self._request_memory_id: Optional[str] = None
         self._request_thread_id: Optional[str] = None
-        self._original_query: Optional[str] = None
         self._last_consolidation_report: Optional[Dict[str, Any]] = None
         self._last_execution_report: Optional[Dict[str, Any]] = None
         self._delegate_context_packs: Dict[str, Any] = {}
@@ -208,7 +207,6 @@ class MultiAgentOrchestrator:
         self._trace_id = trace_id or str(uuid.uuid4())
         self._request_memory_id = memory_id
         self._request_thread_id = thread_id
-        self._original_query = user_query
         self._request_context.setdefault("memory_query", user_query)
         self._request_context.setdefault(
             "shared_context_key", f"workflow:{self.workflow_id}"
@@ -1212,12 +1210,25 @@ class MultiAgentOrchestrator:
                 getattr(agent, "meta_harness", None) is not None
                 and getattr(agent, "meta_harness_mode", None) == "runtime"
             ):
+                # A delegate in a MemAgent harness run shares that run's
+                # workspace and approval; its own harness run is reported as
+                # soon as it starts, so the trace can link to it.
+                parent = (self._tool_context or {}).get("harness_parent")
                 harness_result = agent.run_on_harness(
                     task.description,
                     memory_id=memory_id,
                     thread_id=thread_id,
                     user_id=self._request_user_id,
                     context=request_context,
+                    parent_run=parent if isinstance(parent, dict) else None,
+                    on_start=lambda run_id: self._task_event(
+                        task,
+                        "task_progress",
+                        execution_context="worker",
+                        status="in_progress",
+                        harness=getattr(agent, "default_harness", None),
+                        harness_run_id=run_id,
+                    ),
                 )
                 if not harness_result.ok:
                     code = harness_result.error_code or harness_result.status.value
@@ -1263,6 +1274,25 @@ class MultiAgentOrchestrator:
         self, original_query: str, sub_task_results: List[Dict[str, Any]]
     ) -> str:
         """Consolidate results from all sub-tasks into a final response."""
+
+        # Name each delegate (and the harness it ran on) so the coordinator
+        # can say who found what instead of quoting agent IDs.
+        labels = {}
+        for agent in self.delegates or []:
+            name = getattr(agent, "name", None) or getattr(
+                getattr(agent, "persona", None), "name", None
+            )
+            if not name:
+                continue
+            if getattr(agent, "meta_harness_mode", None) == "runtime":
+                name = f"{name} (runs on {getattr(agent, 'default_harness', None) or 'a harness'})"
+            labels[str(agent.agent_id)] = str(name)
+        sub_task_results = [
+            {**item, "assigned_agent_name": labels[str(item.get("assigned_agent_id"))]}
+            if str(item.get("assigned_agent_id")) in labels
+            else item
+            for item in sub_task_results
+        ]
 
         started = time.monotonic()
         if self.consolidation_strategy == "primary":
@@ -1430,6 +1460,7 @@ class MultiAgentOrchestrator:
             rejection_count = 0
             while True:
                 response = self.root_agent.model.generate(messages, tools=None)
+                _count_call(self.root_agent)
                 response_text = self.task_decomposer._response_text(response).strip()
                 if not response_text:
                     raise ValueError(
@@ -1633,35 +1664,6 @@ class MultiAgentOrchestrator:
             )
         return "\n".join(lines)
 
-    def get_shared_memory_context(self) -> str:
-        """Get shared memory context for inclusion in agent prompts."""
-
-        if not self.shared_memory_id:
-            return ""
-
-        try:
-            # Get blackboard entries
-            entries = self.shared_memory.get_blackboard_entries(self.shared_memory_id)
-
-            if not entries:
-                return ""
-
-            context = "\n\n---------SHARED MEMORY CONTEXT---------\n"
-            context += "Multi-agent coordination information:\n\n"
-
-            for entry in entries[-10:]:  # Last 10 entries
-                context += f"Agent: {entry.get('agent_id', 'Unknown')}\n"
-                context += f"Type: {entry.get('entry_type', 'Unknown')}\n"
-                context += f"Content: {entry.get('content', 'No content')}\n"
-                context += f"Time: {entry.get('created_at', 'Unknown')}\n"
-                context += "---\n"
-
-            return context
-
-        except Exception as e:
-            logger.error(f"Error getting shared memory context: {e}")
-            return ""
-
     def _find_or_create_shared_session(self) -> Optional[Dict[str, Any]]:
         """
         Intelligent session management for hierarchical multi-agent coordination.
@@ -1726,52 +1728,6 @@ class MultiAgentOrchestrator:
                 trace_id=self._trace_id,
             )
             return None
-
-    def _enhance_task_decomposition_with_hierarchy(
-        self, user_query: str, *, plan: Any = None
-    ) -> List[SubTask]:
-        """
-        Enhanced task decomposition that considers the complete agent hierarchy.
-
-        Traditional decomposition only considers immediate delegates. This enhanced
-        version looks at the full shared memory session to understand the complete
-        agent capabilities available across all hierarchy levels.
-
-        Parameters:
-            user_query (str): The task to decompose
-
-        Returns:
-            List[SubTask]: Decomposed tasks optimized for the full hierarchy
-        """
-        try:
-            # Get the complete agent hierarchy from shared memory
-            hierarchy = self.shared_memory.get_agent_hierarchy(self.shared_memory_id)
-
-            logger.info(f"Task decomposition considering hierarchy: {hierarchy}")
-
-            # Standard task decomposition with immediate delegates
-            sub_tasks = self.task_decomposer.decompose_task(
-                user_query, self.delegates, plan=plan
-            )
-
-            # TODO: Future enhancement - analyze sub_agent capabilities for optimal task assignment
-            # This could involve:
-            # 1. Collecting capabilities from all sub-agents in the hierarchy
-            # 2. Re-optimizing task assignments based on the full capability set
-            # 3. Creating more granular tasks that leverage specific sub-agent strengths
-
-            logger.info(
-                f"Decomposed into {len(sub_tasks)} tasks for {hierarchy.get('total_agents', 0)} total agents"
-            )
-
-            return sub_tasks
-
-        except Exception as e:
-            logger.error(f"Error in enhanced task decomposition: {e}")
-            # Fallback to standard decomposition
-            return self.task_decomposer.decompose_task(
-                user_query, self.delegates, plan=plan
-            )
 
     # Hook methods for specialized orchestrators ---------------------------------
     def _after_task_decomposition(

@@ -36,7 +36,6 @@ from ...long_term.procedural.workflow.canonicalization import (
     aggregate_trajectory_stats,
 )
 from ..learning_view import (
-    LEARNING_TABS,
     build_skill_monitor,
     build_workflow_monitor,
     shape_class,
@@ -224,7 +223,6 @@ async def workflow_classes_page(request: Request):
                 agent_sections, total_runs=len(documents), now=now
             ),
             "total_workflows": len(documents),
-            "learning_tabs": LEARNING_TABS,
             "active_page": "workflows",
         },
     )
@@ -278,7 +276,6 @@ async def skills_page(request: Request):
             "connection_info": _state["connection_info"],
             "view": build_skill_monitor(skills),
             "skills": skills,
-            "learning_tabs": LEARNING_TABS,
             "active_page": "skills",
         },
     )
