@@ -510,33 +510,45 @@ class NativeMemAgentHarness(AgentHarness):
             if context_pack.rendered:
                 context["harness_memory_context"] = context_pack.rendered
                 context["harness_memory_source_ids"] = context_pack.source_ids
-            with _live_trace(self.agent, task.run_id, emit), _cancellable(
-                cancel_event
-            ) as stopped:
-                response = self.agent.run(
-                    task.task,
-                    memory_id=task.memory_id,
-                    thread_id=task.thread_id,
-                    user_id=task.user_id,
-                    context=context,
-                    tool_context={
-                        "_memorizz_harness_native": True,
-                        "workspace": str(workspace),
-                        "harness_run_id": task.run_id,
-                        # Delegates that run on harnesses share this run's
-                        # workspace and what it was approved for.
-                        "harness_parent": {
-                            "run_id": task.run_id,
+            try:
+                with _live_trace(self.agent, task.run_id, emit), _cancellable(
+                    cancel_event
+                ) as stopped:
+                    response = self.agent.run(
+                        task.task,
+                        memory_id=task.memory_id,
+                        thread_id=task.thread_id,
+                        user_id=task.user_id,
+                        context=context,
+                        tool_context={
+                            "_memorizz_harness_native": True,
                             "workspace": str(workspace),
-                            "permissions": task.permissions.to_dict(),
+                            "harness_run_id": task.run_id,
+                            # Delegates that run on harnesses share this run's
+                            # workspace and what it was approved for.
+                            "harness_parent": {
+                                "run_id": task.run_id,
+                                "workspace": str(workspace),
+                                "permissions": task.permissions.to_dict(),
+                            },
                         },
-                    },
-                    observability_context={
-                        "run_id": task.run_id,
-                        "memory_id": task.memory_id,
-                        "thread_id": task.thread_id,
-                        "user_id": task.user_id,
-                    },
+                        observability_context={
+                            "run_id": task.run_id,
+                            "memory_id": task.memory_id,
+                            "thread_id": task.thread_id,
+                            "user_id": task.user_id,
+                        },
+                    )
+            except Exception as exc:
+                from .security import redact
+
+                usage, cost = _memagent_usage(self.agent, model)
+                return AdapterOutcome(
+                    error_code="memagent_run_failed",
+                    error=f"{type(exc).__name__}: {redact(str(exc))}",
+                    usage=usage,
+                    cost_usd=cost,
+                    exit_code=1,
                 )
             if stopped.is_set():
                 # What it spent before stopping still counts.
@@ -692,6 +704,7 @@ def codex_list_cost(model: Optional[str], usage: Dict[str, Any]) -> Optional[flo
         {
             "provider": "openai",
             "model": model,
+            "service_tier": usage.get("service_tier"),
             "input_tokens": usage.get("input_tokens"),
             "cached_tokens": usage.get("cached_input_tokens") or 0,
             "cache_write_tokens": usage.get("cache_write_input_tokens") or 0,
@@ -954,6 +967,7 @@ class _CodexSubagentWatcher:
 class CodexHarness(SubprocessHarness):
     name = "codex"
     executable = "codex"
+    node_cli = True
     auth_environment = ("CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_HOME")
     authentication_remediation = (
         "Set OPENAI_API_KEY or CODEX_API_KEY, or authenticate the CLI with "
@@ -989,7 +1003,7 @@ class CodexHarness(SubprocessHarness):
                 text=True,
                 timeout=20,
                 check=False,
-                env=build_child_environment(allowed_names=self.auth_environment),
+                env=self._probe_environment(),
             )
             entries = json.loads(result.stdout or "{}").get("models") or []
             listed = [
@@ -1055,7 +1069,7 @@ class CodexHarness(SubprocessHarness):
                 text=True,
                 timeout=10,
                 check=False,
-                env=build_child_environment(allowed_names=self.auth_environment),
+                env=self._probe_environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             metadata.update(
@@ -1328,6 +1342,7 @@ class CodexHarness(SubprocessHarness):
 
 
 class ClaudeCodeHarness(SubprocessHarness):
+    node_cli = True
     name = "claude-code"
     executable = "claude"
     auth_environment = (
@@ -1362,7 +1377,7 @@ class ClaudeCodeHarness(SubprocessHarness):
                 text=True,
                 timeout=10,
                 check=False,
-                env=build_child_environment(),
+                env=build_child_environment(node_command=command),
             )
         except (OSError, subprocess.TimeoutExpired):
             return frozenset()
@@ -2191,6 +2206,7 @@ class PiHarness(SubprocessHarness):
 
     name = "pi"
     executable = "pi"
+    node_cli = True
     auth_environment = ("PI_CODING_AGENT_DIR",)
     authentication_remediation = (
         "Set the provider's API key (for example DEEPSEEK_API_KEY) or sign in with "
@@ -2259,7 +2275,9 @@ class PiHarness(SubprocessHarness):
                     timeout=20,
                     check=False,
                     env={
-                        **build_child_environment(allowed_names=keys),
+                        **build_child_environment(
+                            allowed_names=keys, node_command=self.command
+                        ),
                         **{
                             k: v
                             for k, v in self.extra_env.items()
@@ -2384,6 +2402,7 @@ class PiHarness(SubprocessHarness):
                             *self._provider_keys(provider),
                         ),
                         overrides=self.extra_env,
+                        node_command=str(capability.command),
                     ),
                 )
                 status = str(json.loads(result.stdout or "{}").get("status") or "")

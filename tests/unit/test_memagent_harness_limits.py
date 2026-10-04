@@ -145,6 +145,59 @@ def test_a_cost_limit_no_longer_blocks_a_local_memagent(tmp_path: Path, monkeypa
         provider.close()
 
 
+def test_provider_error_is_a_failed_run_and_not_a_cached_answer(tmp_path, monkeypatch):
+    from memorizz.memagent import MemAgent
+    from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+    from memorizz.metaharness import NativeMemAgentHarness
+    from memorizz.tool_context import get_tool_context
+
+    provider = FileSystemProvider(
+        FileSystemConfig(root_path=tmp_path / "memory", lazy_vector_indexes=True)
+    )
+    model = MockLLMProvider(["unused"])
+    error = RuntimeError("Function tools with reasoning_effort are not supported")
+    monkeypatch.setattr(
+        model, "generate", lambda *args, **kwargs: (_ for _ in ()).throw(error)
+    )
+    agent = MemAgent(model=model, memory_provider=provider, auto_register=False)
+    monkeypatch.setattr(agent.cache_manager, "enabled", True)
+    monkeypatch.setattr(
+        agent.cache_manager, "get_cached_response", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        agent.cache_manager,
+        "cache_response",
+        lambda *a, **kw: pytest.fail("Do not cache failed answers"),
+    )
+    service = MetaHarness(
+        adapters=[NativeMemAgentHarness(agent)],
+        run_store=SQLiteHarnessRunStore(tmp_path / "runs.sqlite3"),
+        approval_store=SQLiteApprovalStore(tmp_path / "approvals.sqlite3"),
+        allowed_workspace_roots=[str(tmp_path)],
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    try:
+        result = service.run(
+            HarnessTask(
+                task="Check",
+                workspace=str(workspace),
+                harness="memagent",
+                permissions=HarnessPermissions(mcp_access="none"),
+            )
+        )
+        assert result.status == HarnessStatus.FAILED and not result.ok
+        assert result.error_code == "memagent_run_failed"
+        assert "Function tools with reasoning_effort" in result.error
+        assert not result.final_response
+        assert not get_tool_context().get("_memorizz_harness_native")
+        assert service.get_run(result.run_id)["status"] == "failed"
+    finally:
+        service.close()
+        agent.close(close_memory_provider=False)
+        provider.close()
+
+
 def test_a_task_a_harness_cannot_run_is_explained_in_words(tmp_path: Path, monkeypatch):
     provider, agent_id, service, workspace = _saved_agent_service(tmp_path, monkeypatch)
     try:

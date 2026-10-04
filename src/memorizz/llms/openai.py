@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import openai
 
@@ -17,10 +17,6 @@ from .tool_metadata import ResponsesToolMetadataMixin
 
 # Suppress httpx logs to reduce noise from API requests
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
-# Use TYPE_CHECKING for forward references to avoid circular imports
-if TYPE_CHECKING:
-    pass
 
 
 class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
@@ -44,7 +40,7 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
         reasoning_effort: Optional[str] = None,
         response_format: Optional[Any] = None,
         prompt_cache_retention: Optional[str] = None,
-        api_mode: str = "chat_completions",
+        api_mode: str = "auto",
         additional_config: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ):
@@ -79,8 +75,10 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
             ``"24h"``). Only sent to the official OpenAI endpoint; local
             OpenAI-compatible servers don't understand it.
         api_mode : str, optional
-            Tool-loop endpoint: ``"chat_completions"`` (legacy/default) or
-            ``"responses"``. The Responses API is required for GPT-5.6
+            Tool-loop endpoint: ``"auto"`` (default), ``"chat_completions"``
+            or ``"responses"``. Auto uses Responses for official GPT-6 models
+            and Chat Completions for other models and compatible servers.
+            The Responses API is required for GPT-5.6
             function tools combined with non-zero reasoning effort and for
             all GPT-6 Astra function tools.
         """
@@ -99,9 +97,17 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
         self.client = openai.OpenAI(**client_kwargs)
         self.model = model
         self.base_url = base_url
-        normalized_api_mode = str(api_mode or "chat_completions").strip().lower()
-        if normalized_api_mode not in {"chat_completions", "responses"}:
-            raise ValueError("api_mode must be 'chat_completions' or 'responses'")
+        normalized_api_mode = str(api_mode or "auto").strip().lower()
+        if normalized_api_mode not in {"auto", "chat_completions", "responses"}:
+            raise ValueError(
+                "api_mode must be 'auto', 'chat_completions' or 'responses'"
+            )
+        if normalized_api_mode == "auto":
+            normalized_api_mode = (
+                "responses"
+                if not base_url and model.lower().startswith(("gpt-6-", "gpt-6."))
+                else "chat_completions"
+            )
         if base_url and normalized_api_mode == "responses":
             raise ValueError(
                 "api_mode='responses' is only supported by the official OpenAI endpoint"
@@ -170,7 +176,10 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
     def _infer_context_window_tokens(self, model: str) -> int:
         """Best-effort mapping of well-known OpenAI models to their context window."""
         normalized = model.lower() if model else ""
-        if normalized == "gpt-6-astra" or normalized.startswith("gpt-6-astra-"):
+        if any(
+            normalized == name or normalized.startswith(name + "-")
+            for name in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna")
+        ):
             return 1_050_000
         context_map = {
             # GPT-5 family
@@ -498,19 +507,27 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
             kwargs["tools"] = translated_tools
             kwargs["tool_choice"] = tool_choice
 
+        self._apply_responses_options(kwargs)
+        return kwargs
+
+    def _apply_responses_options(self, kwargs: Dict[str, Any]) -> None:
+        """Apply the same generation and cache options to every Responses request."""
         max_output_tokens = self._request_options.get("max_completion_tokens")
         if max_output_tokens is None:
             max_output_tokens = self._request_options.get("max_tokens")
         if max_output_tokens is not None:
             kwargs["max_output_tokens"] = max_output_tokens
-        if self.reasoning_effort is not None:
-            kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        effort = self._request_options.get("reasoning_effort", self.reasoning_effort)
+        if effort is not None:
+            kwargs["reasoning"] = {"effort": effort}
+        reasoning = (
+            self.model.lower().startswith(("gpt-6-", "gpt-6.")) and effort != "none"
+        )
         for key in ("temperature", "top_p"):
             value = self._request_options.get(key)
-            if value is not None:
+            if value is not None and not reasoning:
                 kwargs[key] = value
         self._apply_cache_options(kwargs)
-        return kwargs
 
     def _generate_responses(self, messages, tools, tool_choice):
         kwargs = self._responses_kwargs(messages, tools, tool_choice)
@@ -575,18 +592,7 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
         if instructions:
             kwargs["instructions"] = instructions
 
-        max_output_tokens = self._request_options.get("max_completion_tokens")
-        if max_output_tokens is None:
-            max_output_tokens = self._request_options.get("max_tokens")
-        if max_output_tokens is not None:
-            kwargs["max_output_tokens"] = max_output_tokens
-        if self.reasoning_effort is not None:
-            kwargs["reasoning"] = {"effort": self.reasoning_effort}
-        for key in ("temperature", "top_p"):
-            value = self._request_options.get(key)
-            if value is not None:
-                kwargs[key] = value
-        self._apply_cache_options(kwargs)
+        self._apply_responses_options(kwargs)
         self._last_usage = None
         self._last_response_metadata = {}
         response = self.client.responses.create(**kwargs)

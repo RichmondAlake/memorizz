@@ -36,6 +36,24 @@ SUITES = (
         "persona-browser-fixture-token",
         "/persona-evolution",
     ),
+    (
+        "harness_judge",
+        "MEMORIZZ_BROWSER_TEST_PORT",
+        "memorizz-browser-fixture-token",
+        "/harnesses",
+    ),
+    (
+        "harness_approval",
+        "MEMORIZZ_BROWSER_TEST_PORT",
+        "memorizz-browser-fixture-token",
+        "/harnesses",
+    ),
+    (
+        "harness_approval_empty",
+        "MEMORIZZ_BROWSER_TEST_PORT",
+        "memorizz-browser-fixture-token",
+        "/harnesses",
+    ),
 )
 
 
@@ -65,6 +83,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--node", default=shutil.which("node"))
+    parser.add_argument("--suite", action="append", choices=[suite[0] for suite in SUITES])
     args = parser.parse_args()
     if not args.node:
         parser.error("Node is required; specify --node /path/to/node")
@@ -74,6 +93,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     output = output.resolve()
     for name, port_variable, token, route in SUITES:
+        if args.suite and name not in args.suite:
+            continue
         port = _port()
         base = f"http://127.0.0.1:{port}"
         env = {
@@ -89,10 +110,17 @@ def main():
             "MEMORIZZ_USAGE_SCREENSHOT": str(output / "usage-desktop.png"),
             "MEMORIZZ_USAGE_MOBILE_SCREENSHOT": str(output / "usage-mobile.png"),
             "PERSONA_SCREENSHOT_DIR": str(output),
+            "MEMORIZZ_JUDGE_EVIDENCE": str(output / "harness-judge"),
+            "MEMORIZZ_HARNESS_BROWSER_SUITE": name,
+            "MEMORIZZ_BROWSER_EMPTY_LEDGER": "1"
+            if name == "harness_approval_empty"
+            else "",
         }
+        fixture = "harness" if name.startswith("harness_") else name
+        script = "harness_approval" if name == "harness_approval_empty" else name
         with (output / f"{name}-server.log").open("w") as log:
             process = subprocess.Popen(
-                [sys.executable, str(ROOT / f"tests/browser/{name}_app.py")],
+                [sys.executable, str(ROOT / f"tests/browser/{fixture}_app.py")],
                 cwd=ROOT,
                 env=env,
                 stdout=log,
@@ -101,11 +129,11 @@ def main():
             try:
                 _ready(process, base + route, token)
                 subprocess.run(
-                    [args.node, str(ROOT / f"tests/browser/{name}.cjs")],
+                    [args.node, str(ROOT / f"tests/browser/{script}.cjs")],
                     cwd=ROOT,
                     env=env,
                     check=True,
-                    timeout=120,
+                    timeout=420 if os.getenv("MEMORIZZ_BROWSER_LOCAL_JUDGE") else 120,
                 )
             finally:
                 process.terminate()

@@ -141,6 +141,24 @@ class SQLiteHarnessRunStore:
             );
             CREATE INDEX IF NOT EXISTS harness_orchestrations_updated
                 ON harness_orchestrations(updated_at DESC);
+            CREATE TABLE IF NOT EXISTS harness_judgments (
+                judgment_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS harness_judgment_runs (
+                judgment_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                PRIMARY KEY (judgment_id, run_id),
+                FOREIGN KEY (judgment_id) REFERENCES harness_judgments(judgment_id) ON DELETE CASCADE,
+                FOREIGN KEY (run_id) REFERENCES harness_runs(run_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS harness_judgment_runs_run
+                ON harness_judgment_runs(run_id);
+            CREATE TABLE IF NOT EXISTS harness_judge_settings (
+                id INTEGER PRIMARY KEY CHECK (id=1),
+                payload TEXT NOT NULL
+            );
             """
         )
 
@@ -534,6 +552,13 @@ class SQLiteHarnessRunStore:
                 for start in range(0, len(ids), 500):
                     chunk = ids[start : start + 500]
                     marks = ",".join("?" * len(chunk))
+                    # A judgment snapshots answers. Delete that evidence too,
+                    # including a batch that also contains other runs.
+                    self._connection.execute(
+                        "DELETE FROM harness_judgments WHERE judgment_id IN "
+                        f"(SELECT judgment_id FROM harness_judgment_runs WHERE run_id IN ({marks}))",
+                        chunk,
+                    )
                     # Explicit, so stores created without foreign keys on
                     # lose them too.
                     self._connection.execute(
@@ -551,6 +576,93 @@ class SQLiteHarnessRunStore:
                 self._connection.execute("ROLLBACK")
                 raise
         return removed
+
+    def judge_settings(self, value: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        with self._lock:
+            if value is not None:
+                self._connection.execute(
+                    "INSERT INTO harness_judge_settings(id,payload) VALUES(1,?) "
+                    "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                    (json.dumps(value, ensure_ascii=False, allow_nan=False),),
+                )
+            row = self._connection.execute(
+                "SELECT payload FROM harness_judge_settings WHERE id=1"
+            ).fetchone()
+        return json.loads(row["payload"]) if row else {}
+
+    def create_judgment(self, value: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "INSERT INTO harness_judgments(judgment_id,created_at,payload) VALUES(?,?,?)",
+                    (
+                        value["judgment_id"],
+                        value["created_at"],
+                        json.dumps(value, ensure_ascii=False, allow_nan=False),
+                    ),
+                )
+                self._connection.executemany(
+                    "INSERT INTO harness_judgment_runs(judgment_id,run_id) VALUES(?,?)",
+                    [(value["judgment_id"], run_id) for run_id in value["run_ids"]],
+                )
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        return value
+
+    def get_judgment(self, judgment_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM harness_judgments WHERE judgment_id=?",
+                (judgment_id,),
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def update_judgment(
+        self, judgment_id: str, **changes: Any
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                value = self.get_judgment(judgment_id)
+                # Deletion and shutdown must win over a late model response.
+                if value and value["status"] in {"queued", "running"}:
+                    value.update(changes)
+                    self._connection.execute(
+                        "UPDATE harness_judgments SET payload=? WHERE judgment_id=?",
+                        (
+                            json.dumps(value, ensure_ascii=False, allow_nan=False),
+                            judgment_id,
+                        ),
+                    )
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        return value
+
+    def latest_judgments(self, run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        ids = list(dict.fromkeys(run_ids))[:1000]
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT r.run_id,j.payload FROM harness_runs r "
+                "JOIN harness_judgments j ON j.judgment_id=("
+                "SELECT jr.judgment_id FROM harness_judgment_runs jr "
+                "JOIN harness_judgments newest ON newest.judgment_id=jr.judgment_id "
+                "WHERE jr.run_id=r.run_id ORDER BY newest.created_at DESC LIMIT 1) "
+                f"WHERE r.run_id IN ({marks})",
+                ids,
+            ).fetchall()
+        found: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            if row["run_id"] not in found:
+                found[row["run_id"]] = json.loads(row["payload"])
+        return found
 
     def delete_orchestration(self, orchestration_id: str) -> bool:
         """Delete a workflow record. Its runs are deleted separately."""

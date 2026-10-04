@@ -5,7 +5,6 @@
 # src/memorizz/llms/llm_provider.py
 
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -15,10 +14,6 @@ from typing import (
     Protocol,
     runtime_checkable,
 )
-
-# Use TYPE_CHECKING to handle forward references for type hints
-if TYPE_CHECKING:
-    pass
 
 """
 A protocol in Python (introduced in PEP 544 and part of the typing module) defines a structural typing rule.

@@ -203,29 +203,47 @@ def _openai_cards():
         "o3": (2, 0.5, 8),
         "o4-mini": (1.1, 0.275, 4.4),
         "gpt-6-astra": (10, 1, 50),
+        "gpt-6.1-sol": (2, 0.1, 10),
+        "gpt-6-sol": (2, 0.2, 10),
+        "gpt-6-luna": (0.1, 0.01, 0.5),
         "gpt-5.6-sol": (4, 0.4, 20),
         "gpt-5.6-terra": (2, 0.2, 12),
         "gpt-5.6-luna": (0.2, 0.02, 1.2),
     }
+    updated_models = {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}
     for model, (inputs, cached, outputs) in rates.items():
-        new_cache = model.startswith(("gpt-5.6", "gpt-6-"))
+        new_cache = model.startswith(("gpt-5.6", "gpt-6-", "gpt-6."))
         long = model in {"gpt-5.5", "gpt-5.4"} or new_cache
-        yield RateCard(
-            provider="openai",
-            model=model,
-            input_per_million=inputs,
-            cached_input_per_million=cached,
-            output_per_million=outputs,
-            cache_write_per_million=Decimal(str(inputs)) * Decimal("1.25")
-            if new_cache
-            else None,
-            source_url="https://developers.openai.com/api/docs/pricing",
-            as_of="2026-09-07",
-            version="openai-standard-2026-09-07",
-            long_context_threshold=272_000 if long else None,
-            long_input_multiplier=Decimal(2) if long else Decimal(1),
-            long_output_multiplier=Decimal("1.5") if long else Decimal(1),
-        )
+        tiers = {"default": Decimal(1)}
+        if model in updated_models:
+            # Fast mode also accepts the legacy priority tier name.
+            tiers.update(
+                fast=Decimal(2),
+                priority=Decimal(2),
+                batch=Decimal("0.5"),
+                flex=Decimal("0.5"),
+            )
+        as_of = "2026-10-03" if model in updated_models else "2026-09-07"
+        for tier, multiplier in tiers.items():
+            yield RateCard(
+                provider="openai",
+                model=model,
+                service_tier=tier,
+                input_per_million=Decimal(str(inputs)) * multiplier,
+                cached_input_per_million=Decimal(str(cached)) * multiplier,
+                output_per_million=Decimal(str(outputs)) * multiplier,
+                cache_write_per_million=Decimal(str(inputs))
+                * Decimal("1.25")
+                * multiplier
+                if new_cache
+                else None,
+                source_url="https://developers.openai.com/api/docs/pricing",
+                as_of=as_of,
+                version=f"openai-{tier if tier != 'default' else 'standard'}-{as_of}",
+                long_context_threshold=272_000 if long else None,
+                long_input_multiplier=Decimal(2) if long else Decimal(1),
+                long_output_multiplier=Decimal("1.5") if long else Decimal(1),
+            )
 
 
 def _anthropic_cards():

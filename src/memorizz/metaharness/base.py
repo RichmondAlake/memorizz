@@ -67,6 +67,7 @@ class SubprocessHarness(AgentHarness):
     """Base for structured, non-interactive vendor CLI adapters."""
 
     executable: str = ""
+    node_cli: bool = False
     auth_environment: tuple[str, ...] = ()
     authentication_remediation: Optional[str] = None
     _authentication_failure = re.compile(
@@ -113,7 +114,10 @@ class SubprocessHarness(AgentHarness):
 
     def _probe_environment(self) -> Dict[str, str]:
         """Environment for the version probe."""
-        return build_child_environment(allowed_names=self.auth_environment)
+        return build_child_environment(
+            allowed_names=self.auth_environment,
+            node_command=self.command if self.node_cli else None,
+        )
 
     def _auth_environment(self, task: HarnessTask) -> tuple[str, ...]:
         """Credential variables this task's process may inherit."""
@@ -125,6 +129,12 @@ class SubprocessHarness(AgentHarness):
         return build_child_environment(
             allowed_names=allowed_env,
             overrides=self.extra_env,
+            node_command=(
+                (self._probe_cache.command if self._probe_cache else None)
+                or self.command
+            )
+            if self.node_cli
+            else None,
         )
 
     def _capabilities(
@@ -216,16 +226,23 @@ class SubprocessHarness(AgentHarness):
                 check=False,
                 env=self._probe_environment(),
             )
-            version = (result.stdout or result.stderr).strip().splitlines()[0][:240]
             if result.returncode != 0:
+                lines = (result.stderr or result.stdout).strip().splitlines()
+                diagnostic = next(
+                    (line for line in lines if re.match(r"^\w*Error:", line)),
+                    lines[0] if lines else "",
+                )
                 return remember(
                     self._capabilities(
                         available=False,
                         command=resolved,
-                        version=version or None,
-                        error="Version probe failed",
+                        version=None,
+                        error=f"Version probe failed (exit {result.returncode})"
+                        + (f": {redact(diagnostic)[:500]}" if diagnostic else ""),
                     )
                 )
+            lines = (result.stdout or result.stderr).strip().splitlines()
+            version = str(redact(lines[0]))[:240] if lines else None
             return remember(
                 self._capabilities(
                     available=True,

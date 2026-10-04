@@ -79,6 +79,7 @@ from ..tool_cache import (
     callable_fingerprint,
     mcp_tool_is_cacheable,
 )
+from ..tool_context import get_tool_context
 from ..tooling import (
     ContextPolicy,
     SemanticToolRouter,
@@ -5807,7 +5808,11 @@ class MemAgent:
         except Exception as e:
             logger.error(f"MemAgent execution failed: {e}")
             turn_error_code = type(e).__name__
-            if session_for(self) is not None or delegated_execution.get():
+            if (
+                session_for(self) is not None
+                or delegated_execution.get()
+                or get_tool_context().get("_memorizz_harness_native")
+            ):
                 raise
             error_response = f"I apologize, but I encountered an error: {str(e)}"
             return error_response
@@ -9378,7 +9383,11 @@ class MemAgent:
             raise
         except Exception as e:
             logger.error(f"LLM interaction failed: {e}")
-            if session_for(self) is not None or delegated_execution.get():
+            if (
+                session_for(self) is not None
+                or delegated_execution.get()
+                or get_tool_context().get("_memorizz_harness_native")
+            ):
                 raise
 
             # Store workflow even on error if it exists

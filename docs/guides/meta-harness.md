@@ -74,6 +74,14 @@ memorizz harness doctor
 memorizz harness doctor codex
 ```
 
+For npm-installed Codex, pi, and Claude Code, MemoRizz uses the Node executable
+from the CLI's installation prefix for version checks, authentication checks,
+model discovery, and task execution. This also works through shell wrappers:
+the selected wrapper remains the executable. It prevents an older system Node
+earlier in `PATH` from breaking an nvm-installed CLI. An explicit `PATH` in an
+adapter's `extra_env` takes precedence for task execution. If no installation
+runtime is found, the inherited `PATH` is used.
+
 Claude Code builds that support `--restricted` and `--tools` run in restricted
 mode: exactly the policy's built-in tools are loaded, file tools are confined to
 the workspace, and user, project and local settings are ignored. A private
@@ -874,6 +882,18 @@ the executable or authentication is unavailable.
 
 ## Local UI
 
+Starting a comparison scrolls to its approval cards once they appear, or to
+the comparison workflow when approval is unnecessary. Existing approvals for
+other runs do not redirect the new comparison. Enter your name or email in
+the approval field: it labels the decision in the approval record and is
+remembered in this browser. Each harness must be approved separately.
+
+The OpenAI provider defaults to `api_mode="auto"`, which uses Responses for
+official GPT-6 models so function tools can keep their configured reasoning
+effort. Other models and OpenAI-compatible servers retain Chat Completions.
+Explicit `api_mode` overrides remain supported. Provider errors fail MemAgent
+harness runs and are not stored as successful answers or cached responses.
+
 Start the UI and open **Agent Harnesses**:
 
 ```bash
@@ -954,12 +974,32 @@ runtime or delegate mode, the default harness, and a workspace allowlist.
   selected**. You get a facts table (time, cost, tokens, actions, verification,
   with the fastest, cheapest and leanest successful run marked), a timeline
   with one lane per run starting at zero, and each run's answer and steps in
-  columns. Which answer is right is left to you. Two MemAgents compare the
+  columns. **Evaluate accuracy · judge and prompt** adds a saved LLM judgment
+  of each successful answer. Two MemAgents compare the
   same way (say one agent with a tool cache and one without): each MemAgent
   lane is named by its agent, a **Tool cache** row counts the tool calls each
   run answered from its cache, and those calls show as outlined bars on the
   timeline and as "from cache" in the steps. See
   [Tool call cache](context-efficiency.md#tool-call-cache).
+- **Answer evaluation.** In **More launch options**, tick **Evaluate answers
+  after the runs finish** for a single run or comparison. Or evaluate saved
+  outputs using **Compare selected** or a run's **Evaluate answer** button.
+  The default judge is the local Ollama `qwen2.5:3b`; choose another installed
+  model, or OpenAI/Anthropic with the provider's configured API credentials.
+  Edit the evaluation prompt, add an optional reference answer or evidence,
+  and set an accuracy target (80/100 by default). **Save judge settings** makes
+  these the defaults for later evaluations. No model is loaded until judging
+  is requested, and an unavailable local model never falls back to a paid API.
+  The table shows each score, judge model, evaluation time and API cost, and
+  the answer columns show its rationale, issues and exact rubric. The
+  **Most accurate (judge)** badge requires every successful answer to have
+  a current judgment of the same task with the same settings; ties are
+  marked. **Cheapest meeting target** and **Fastest meeting target** identify
+  successful answers that meet the accuracy target. Unknown costs prevent a
+  cheapest-among-qualified claim. Evaluation overhead stays separate from
+  harness cost and time. Judgments survive restarts and plugin re-imports;
+  changed answers are marked stale. Scores estimate answer accuracy from the
+  supplied evidence, rather than verifying workspace changes or test results.
 - **Model per harness.** In **Compare**, each ticked harness gets its own model
   picker. Every model field is a dropdown of up to ten of the newest models
   from each provider that harness runs (from the providers' own model lists,

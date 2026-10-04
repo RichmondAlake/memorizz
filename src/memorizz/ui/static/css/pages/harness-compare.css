@@ -90,6 +90,25 @@ body.theme-light .hxcmp {
     font-size: 12px;
 }
 
+/* Judge settings use the same fields in the launch form and comparison. */
+.hxjudge-launch { margin: 12px 0; padding: 14px; border: 1px solid var(--border-color); border-radius: 8px; }
+.hxjudge-launch legend { font-size: 13px; color: var(--text-secondary); }
+.hxjudge-enable { margin-bottom: 8px; }
+.hxjudge-grid { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 12px; }
+.hxjudge .form-group { margin: 10px 0; }
+.hxjudge label { display: block; font-size: 12px; margin-bottom: 5px; }
+.hxjudge input:not([type=checkbox]), .hxjudge select, .hxjudge textarea { box-sizing: border-box; width: 100%; padding: 8px 10px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 6px; font: inherit; font-size: 13px; }
+.hxjudge textarea { resize: vertical; }
+.hxjudge-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.hxjudge-result { padding: 12px; margin-bottom: 14px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
+.hxjudge-result small { display: block; color: var(--text-secondary); margin-top: 4px; }
+.hxjudge-result p { white-space: pre-wrap; }
+.hxjudge-result ul { padding-left: 18px; }
+.hxjudge-reference summary, .hxcmp-judge-settings > summary { cursor: pointer; font-size: 13px; }
+.hxcmp-judge-settings { border: 1px solid var(--border-color); padding: 12px; border-radius: 8px; }
+.hx-col-accuracy { white-space: nowrap; }
+@media (max-width: 640px) { .hxjudge-grid { grid-template-columns: 1fr; gap: 0; } }
+
 .hxcmp-key {
     display: inline-grid;
     place-items: center;

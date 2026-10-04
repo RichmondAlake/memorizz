@@ -140,6 +140,7 @@
             hiddenReasoning,
             actions: ACTION_KINDS.reduce((sum, kind) => sum + counts[kind], 0),
             answer: String(result.final_response || ''),
+            judgment: run.judgment || null,
             error: String(result.error || ''),
             verified,
             endAt: Math.max(endAt, ...bars.map(bar => bar.end), 0),
@@ -165,8 +166,30 @@
         pick('cost', 'Cheapest', s => s.costUsd);
         pick('actions', 'Fewest actions', s => s.actions);
         pick('tokens', 'Fewest tokens', s => (s.tokens.partial || (s.tokens.input === null && s.tokens.output === null) ? null : (s.tokens.input || 0) + (s.tokens.output || 0)));
+        // Do not award an accuracy winner from a partial panel or different
+        // tasks/rubrics. A failed evaluation is unknown, never a score of zero.
+        if (comparableJudgments(done)) {
+            const best = Math.max(...done.map(s => s.judgment.score));
+            const tied = done.filter(s => s.judgment.score === best);
+            tied.forEach(s => { (marks[s.runId] = marks[s.runId] || {}).accuracy = tied.length > 1 ? 'Most accurate · tied (judge)' : 'Most accurate (judge)'; });
+            const target = done[0].judgment.config.pass_score;
+            const qualified = done.filter(s => s.judgment.score >= target);
+            [['qualityCost', 'Cheapest meeting target', s => s.costUsd], ['qualityTime', 'Fastest meeting target', s => s.durationMs]].forEach(([field, label, value]) => {
+                // Unknown effort in a qualified candidate prevents a claim of
+                // cheapest/fastest across the whole qualified set.
+                if (!qualified.length || qualified.some(s => value(s) === null || value(s) === undefined)) return;
+                const bestValue = Math.min(...qualified.map(value));
+                qualified.filter(s => value(s) === bestValue).forEach(s => { (marks[s.runId] = marks[s.runId] || {})[field] = label; });
+            });
+        }
         return marks;
     };
+
+    const comparableJudgments = summaries => summaries.length >= 2
+        && summaries.every(s => s.judgment && s.judgment.status === 'completed' && Number.isFinite(s.judgment.score) && s.judgment.score >= 0 && s.judgment.score <= 100 && s.judgment.config_hash && s.judgment.config)
+        && new Set(summaries.map(s => s.judgment.config_hash)).size === 1
+        && new Set(summaries.map(s => s.judgment.response_model || s.judgment.config.model)).size === 1
+        && new Set(summaries.map(s => s.task.trim())).size === 1;
 
     // Bars that overlap in time go on separate rows (parallel subagents, say).
     const pack = (bars) => {
@@ -211,8 +234,14 @@
         const rows = [
             ['Status', s => '<span class="fleet-health fleet-health--' + (HEALTH[s.status] || 'idle') + '">' + esc(humanize(s.status)) + '</span>'],
             ['Model', s => s.model ? '<span class="mono">' + esc(s.model) + '</span>' : '<span class="hxcmp-muted">harness default</span>'],
-            ['Time', s => esc(fmtDuration(s.durationMs)) + (s.waitedMs >= 1000 ? '<small>' + esc('after ' + fmtDuration(s.waitedMs) + ' waiting for approval') + '</small>' : '') + badge(s, 'duration')],
-            ['Cost', s => (s.costEstimated ? '≈' : '') + esc(fmtUsd(s.costUsd)) + (s.costUsd === null ? ' <span class="hxcmp-muted">not reported</span>' : '') + badge(s, 'cost')],
+            ['Time', s => esc(fmtDuration(s.durationMs)) + (s.waitedMs >= 1000 ? '<small>' + esc('after ' + fmtDuration(s.waitedMs) + ' waiting for approval') + '</small>' : '') + badge(s, 'duration') + badge(s, 'qualityTime')],
+            ['Cost', s => (s.costEstimated ? '≈' : '') + esc(fmtUsd(s.costUsd)) + (s.costUsd === null ? ' <span class="hxcmp-muted">not reported</span>' : '') + badge(s, 'cost') + badge(s, 'qualityCost')],
+            ['Judged accuracy', s => s.judgment && s.judgment.status === 'completed' && Number.isFinite(s.judgment.score)
+                ? '<strong>' + esc(s.judgment.score + '/100') + '</strong>' + badge(s, 'accuracy') + '<small>' + esc(s.judgment.score >= s.judgment.config.pass_score ? 'Meets accuracy target (' + s.judgment.config.pass_score + ')' : 'Below accuracy target (' + s.judgment.config.pass_score + ')') + '</small>'
+                : '<span class="hxcmp-muted">' + esc(s.judgment ? humanize(s.judgment.status) : 'Not evaluated') + '</span>'],
+            ['Judge', s => s.judgment ? '<span class="mono">' + esc(s.judgment.config.provider + ' · ' + s.judgment.config.model) + '</span>' : '—'],
+            ['Evaluation time', s => s.judgment ? esc(fmtDuration(s.judgment.latency_ms)) : '—'],
+            ['Evaluation API cost', s => s.judgment ? (s.judgment.cost_basis === 'list_rate_estimate' && s.judgment.cost_usd != null ? '≈' : '') + esc(fmtUsd(num(s.judgment.cost_usd))) + (s.judgment.cost_basis === 'no_external_api_charge' ? '<small>local model</small>' : '') : '—'],
             ['Tokens', tokenCell],
             ['Actions', s => esc(String(s.actions)) + '<small>' + esc(ACTION_KINDS.filter(k => s.counts[k]).map(k => s.counts[k] + ' ' + BAR_KINDS[k].toLowerCase() + (s.counts[k] === 1 ? '' : 's')).join(' · ') || 'none') + '</small>' + badge(s, 'actions')],
             ['Tool cache', s => !s.cache || !s.cache.seen
@@ -228,7 +257,7 @@
         const sameTask = new Set(summaries.map(s => s.task.trim())).size <= 1;
         return (sameTask ? '' : '<p class="hxcmp-note">These runs were given different tasks, so compare them with care.</p>')
             + '<div class="hxcmp-table-wrap"><table class="hxcmp-facts"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>'
-            + '<p class="hxcmp-note">Highlights compare effort among runs that succeeded. Which answer is right is for you to judge below.</p>';
+            + '<p class="hxcmp-note">Cost and time measure harness execution. Evaluation overhead is shown separately. Accuracy badges require all successful answers to be judged on the same task with the same settings. Scores are the judge’s estimates; inspect its reasoning below.</p>';
     };
 
     const renderTimeline = (summaries) => {
@@ -298,19 +327,23 @@
     const open = (runIds, options = {}) => {
         if (!T()) throw new Error('harness-trajectory.js must load before harness-compare.js');
         const ids = [...new Set((runIds || []).map(String).filter(Boolean))];
-        if (ids.length < 2) throw new Error('Pick at least two runs to compare');
+        if (ids.length < (options.judge ? 1 : 2)) throw new Error('Pick at least two runs to compare');
         const shown = ids.slice(0, MAX_RUNS);
         const states = shown.map(id => ({id, run: null, events: [], after: 0, loaded: false, pending: null}));
         let timer = null;
         let closed = false;
+        let judgeControls = null;
+        let judgeMounted = false;
+        let pendingJudgment = null;
 
         const dialog = document.createElement('dialog');
         dialog.className = 'hxcmp';
         dialog.setAttribute('aria-labelledby', 'hxcmp-title');
-        dialog.innerHTML = '<header class="hxcmp-head"><div><h2 id="hxcmp-title">Compare ' + shown.length + ' runs</h2><p class="hxcmp-task"></p></div>'
+        dialog.innerHTML = '<header class="hxcmp-head"><div><h2 id="hxcmp-title">' + (shown.length === 1 ? 'Evaluate answer' : 'Compare ' + shown.length + ' runs') + '</h2><p class="hxcmp-task"></p></div>'
             + '<button type="button" class="btn btn-sm" data-hxcmp-close>Close</button></header>'
             + (ids.length > MAX_RUNS ? '<p class="hxcmp-note">Showing the first ' + MAX_RUNS + ' of ' + ids.length + ' runs.</p>' : '')
             + '<p class="hxcmp-status hxcmp-muted" aria-live="polite">Loading…</p>'
+            + '<section class="hxcmp-section"><details class="hxcmp-judge-settings"' + (options.judge ? ' open' : '') + '><summary>Evaluate accuracy · judge and prompt</summary><div class="hxcmp-judge-slot"></div></details></section>'
             + '<section class="hxcmp-section" aria-labelledby="hxcmp-facts-title"><h3 id="hxcmp-facts-title">At a glance</h3><div class="hxcmp-facts-slot"></div></section>'
             + '<section class="hxcmp-section" aria-labelledby="hxcmp-time-title"><h3 id="hxcmp-time-title">Timeline</h3><div class="hxcmp-timeline-slot"></div></section>'
             + '<section class="hxcmp-section" aria-labelledby="hxcmp-cols-title"><h3 id="hxcmp-cols-title">Answers and steps</h3><div class="hxcmp-cols" style="--cols:' + shown.length + '"></div></section>';
@@ -336,7 +369,7 @@
         };
         const refresh = async (all) => {
             await Promise.all(states.map(async (state) => {
-                if (!all && state.run && !ACTIVE.has(String(state.run.status))) return;
+                if (!all && !pendingJudgment && state.run && !ACTIVE.has(String(state.run.status)) && !['queued', 'running'].includes(state.run.judgment?.status)) return;
                 const body = await getJSON('/api/harness-runs/' + encodeURIComponent(state.id));
                 state.run = body.run || state.run;
                 await fetchEvents(state);
@@ -347,6 +380,22 @@
         const draw = () => {
             const now = Date.now();
             const summaries = states.map(state => summarize(state.run || {run_id: state.id}, state.events, now));
+            if (!judgeMounted && window.MemorizzJudge) {
+                judgeMounted = true;
+                const saved = summaries.find(s => s.judgment)?.judgment.config;
+                window.MemorizzJudge.mount($('.hxcmp-judge-slot'), {
+                    config: saved,
+                    runIds: () => states.filter(state => state.run?.status === 'succeeded' && String(state.run.result?.final_response || '').trim()).map(state => state.id),
+                    onStarted: judgment => {
+                        pendingJudgment = judgment.judgment_id;
+                        states.forEach(state => { if (judgment.run_ids.includes(state.id)) state.run.judgment = {status: 'queued', config: judgment.config, config_hash: judgment.config_hash, judgment_id: judgment.judgment_id}; });
+                        tick.settled = false;
+                        clearTimeout(timer);
+                        draw();
+                        timer = setTimeout(tick, 300);
+                    },
+                }).then(controls => { judgeControls = controls; });
+            }
             const task = options.title || (summaries[0] && summaries[0].task) || '';
             $('.hxcmp-task').textContent = task;
             $('.hxcmp-facts-slot').innerHTML = renderFacts(summaries);
@@ -360,23 +409,29 @@
                 const col = dialog.querySelectorAll('.hxcmp-col')[i];
                 if (!col) return;
                 const answer = col.querySelector('.hxcmp-answer');
-                const signature = s.status + ':' + s.answer.length + ':' + s.error.length;
+                const signature = s.status + ':' + s.answer.length + ':' + s.error.length + ':' + JSON.stringify(s.judgment);
                 if (answer.dataset.signature !== signature) {
                     answer.dataset.signature = signature;
-                    answer.innerHTML = (s.error && s.status !== 'succeeded' ? '<p class="hxcmp-error">' + esc(s.error) + '</p>' : '') + answerHtml(s.answer);
+                    answer.innerHTML = (window.MemorizzJudge ? window.MemorizzJudge.renderResult(s.judgment) : '') + (s.error && s.status !== 'succeeded' ? '<p class="hxcmp-error">' + esc(s.error) + '</p>' : '') + answerHtml(s.answer);
                 }
                 const traj = col.querySelector('.hxcmp-traj');
                 traj.dataset.active = String(s.active);
                 T().render(traj, states[i]);
             });
-            const live = summaries.some(s => s.active);
-            $('.hxcmp-status').textContent = live ? 'Updating while runs are active.' : '';
+            const judging = summaries.some(s => ['queued', 'running'].includes(s.judgment?.status));
+            if (pendingJudgment && !judging) {
+                pendingJudgment = null;
+                judgeControls?.status(summaries.some(s => s.judgment?.status === 'failed') ? 'Evaluation finished with errors. Inspect the results and retry.' : 'Evaluation finished.');
+            }
+            judgeControls?.setBusy(judging);
+            const live = summaries.some(s => s.active) || judging;
+            $('.hxcmp-status').textContent = judging ? 'Evaluating answers…' : live ? 'Updating while runs are active.' : '';
             return live;
         };
 
         const tick = async () => {
             if (closed) return;
-            try { await refresh(false); } catch (error) { $('.hxcmp-status').textContent = 'Could not refresh: ' + error.message; }
+            try { await refresh(!!tick.settled); } catch (error) { $('.hxcmp-status').textContent = 'Could not refresh: ' + error.message; }
             if (closed) return;
             const live = draw();
             // One more pass after the last run finishes picks up its final events.

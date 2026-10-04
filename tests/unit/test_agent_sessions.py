@@ -327,6 +327,115 @@ def test_a_codex_session_becomes_a_run_with_its_steps(tmp_path: Path):
     assert next(e for e in events if e.type.value == "reasoning").data["hidden"]
 
 
+def _codex_pricing_log(path, requests, *, duplicate=False, total_only=False):
+    at = "2026-10-03T11:00:00Z"
+    rows = [
+        {"timestamp": at, "type": "session_meta", "payload": {"id": "priced-session"}},
+        _item(
+            at, {"type": "UserMessage", "content": [{"type": "text", "text": "Work"}]}
+        ),
+    ]
+    totals = {}
+    for model, usage, tier in requests:
+        rows.append(
+            {
+                "timestamp": at,
+                "type": "turn_context",
+                "payload": {"model": model, "service_tier": tier},
+            }
+        )
+        for key, count in usage.items():
+            totals[key] = totals.get(key, 0) + count
+        info = {"total_token_usage": dict(totals)}
+        if not total_only:
+            info["last_token_usage"] = usage
+        event = {
+            "timestamp": at,
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": info},
+        }
+        rows.append(event)
+        if duplicate:
+            rows.append(event)
+    return _write(path, rows)
+
+
+def test_codex_prices_requests_without_a_session_wide_long_context_surcharge(tmp_path):
+    usage = {
+        "input_tokens": 200_000,
+        "cached_input_tokens": 100_000,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 1000,
+        "reasoning_output_tokens": 200,
+    }
+    log = _codex_pricing_log(
+        tmp_path / "priced.jsonl", [("gpt-6.1-sol", usage, None)] * 2, duplicate=True
+    )
+    run, events = read_session(log)
+    assert run.result["cost_usd"] == pytest.approx(0.44)
+    assert run.result["usage"]["input_tokens"] == 400_000
+    assert run.result["usage"]["cost_requests"] == 2
+    assert run.result["usage"]["cost_basis"] == "list_rate_estimate"
+    assert events[-1].data["cost_usd"] == pytest.approx(0.44)
+
+
+def test_codex_prices_a_long_request_and_a_short_request_separately(tmp_path):
+    long = {
+        "input_tokens": 300_000,
+        "cached_input_tokens": 100_000,
+        "cache_write_input_tokens": 50_000,
+        "output_tokens": 1000,
+    }
+    short = {**long, "input_tokens": 200_000, "cache_write_input_tokens": 0}
+    log = _codex_pricing_log(
+        tmp_path / "priced.jsonl",
+        [("gpt-6.1-sol", long, None), ("gpt-6.1-sol", short, None)],
+    )
+    run, _events = read_session(log)
+    assert run.result["cost_usd"] == pytest.approx(1.105)
+
+
+def test_codex_prices_model_and_service_tier_changes_per_request(tmp_path):
+    usage = {
+        "input_tokens": 1000,
+        "cached_input_tokens": 400,
+        "cache_write_input_tokens": 200,
+        "output_tokens": 100,
+    }
+    log = _codex_pricing_log(
+        tmp_path / "priced.jsonl",
+        [("gpt-6-sol", usage, None), ("gpt-6.1-sol", usage, "priority")],
+    )
+    run, _events = read_session(log)
+    assert run.result["cost_usd"] == pytest.approx(0.00706)
+
+
+@pytest.mark.parametrize("model,tier", [("unknown", None), ("gpt-6.1-sol", "unknown")])
+def test_codex_does_not_publish_a_partial_cost_for_unpriced_requests(
+    tmp_path, model, tier
+):
+    usage = {"input_tokens": 1000, "cached_input_tokens": 0, "output_tokens": 100}
+    log = _codex_pricing_log(
+        tmp_path / "priced.jsonl", [("gpt-6.1-sol", usage, None), (model, usage, tier)]
+    )
+    run, _events = read_session(log)
+    assert run.result["cost_usd"] is None
+    assert "cost_basis" not in run.result["usage"]
+
+
+def test_codex_older_logs_price_differences_between_cumulative_totals(tmp_path):
+    usage = {
+        "input_tokens": 200_000,
+        "cached_input_tokens": 100_000,
+        "output_tokens": 1000,
+    }
+    log = _codex_pricing_log(
+        tmp_path / "priced.jsonl", [("gpt-6.1-sol", usage, None)] * 2, total_only=True
+    )
+    run, _events = read_session(log)
+    assert run.result["cost_usd"] == pytest.approx(0.44)
+
+
 def test_a_claude_code_session_becomes_a_run_with_its_steps(tmp_path: Path):
     project = tmp_path / "shop"
     log = claude_transcript(tmp_path / "claude-session-1.jsonl", project)

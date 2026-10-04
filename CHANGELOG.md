@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.15.0 — 2026-10-04
+
+### Added
+
+- Configurable LLM judging for agent harness answers: evaluate saved outputs or
+  opt in when launching a run or comparison. The default is local Ollama
+  `qwen2.5:3b`; choose another model or OpenAI/Anthropic, edit the evaluation
+  prompt, supply reference evidence and set an accuracy target. Judgments keep
+  their own cost and timing, survive session imports and become stale when the
+  answer changes. Local evaluation never falls back to a paid provider.
+- Comparisons show judged accuracy, **Most accurate (judge)** badges and the
+  cheapest/fastest answers meeting the target. Badges require comparable current
+  judgments; scores estimate correctness from the supplied evidence.
+
+### Fixed
+
+- Codex session cost estimates include current GPT-6 rate cards, cached writes,
+  service tiers and long-context pricing, calculated per unique request rather
+  than from cumulative session tokens.
+- npm-installed harnesses use their installation's Node runtime for availability
+  probes and execution. Failed probes show a diagnostic instead of a stack trace
+  path as the version.
+- Starting a comparison reveals its approval queue or workflow, including the
+  first comparison after a reload. Approver identity explains that it records
+  the operator's name or email and remembers it in the browser.
+- Official GPT-6 models use Responses by default for reasoning with function
+  tools. Native MemAgent provider errors mark harness runs as failed and are
+  never cached as successful answers.
+
+### Changed
+
+- Consolidated OpenAI Responses request options and harness browser fixtures,
+  removed empty type-checking blocks, and added judge and approval navigation
+  acceptance checks to the release browser gate.
+
 ## 0.14.1 — 2026-10-02
 
 ### Changed

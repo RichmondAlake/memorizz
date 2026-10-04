@@ -70,6 +70,56 @@ def test_cache_writes_and_zero_usage():
 
 
 @pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("gpt-6.1-sol", Decimal("0.00234")),
+        ("gpt-6-sol", Decimal("0.00238")),
+        ("gpt-6-luna", Decimal("0.000119")),
+    ],
+)
+@pytest.mark.parametrize(
+    "tier,multiplier",
+    [
+        ("default", 1),
+        ("fast", 2),
+        ("priority", 2),
+        ("batch", Decimal("0.5")),
+        ("flex", Decimal("0.5")),
+    ],
+)
+def test_current_gpt6_rates_include_cache_writes_and_service_tier(
+    model, expected, tier, multiplier
+):
+    quote = DEFAULT_PRICING.quote(
+        result(
+            model=model,
+            service_tier=tier,
+            input_tokens=1000,
+            cached_tokens=400,
+            cache_write_tokens=200,
+            output_tokens=100,
+        )
+    )
+    assert Decimal(quote["cost_usd"]) == expected * multiplier
+    assert quote["pricing_as_of"] == "2026-10-03"
+
+
+def test_gpt61_long_context_prices_the_full_request_and_dated_snapshot():
+    usage = result(
+        model="gpt-6.1-sol-2026-09-29",
+        input_tokens=300_000,
+        cached_tokens=100_000,
+        cache_write_tokens=50_000,
+        output_tokens=1000,
+    )
+    assert Decimal(DEFAULT_PRICING.quote(usage)["cost_usd"]) == Decimal("0.885")
+    usage.update(input_tokens=272_000, cached_tokens=0, cache_write_tokens=0)
+    assert Decimal(DEFAULT_PRICING.quote(usage)["cost_usd"]) == Decimal("0.554")
+    usage["input_tokens"] = 272_001
+    assert Decimal(DEFAULT_PRICING.quote(usage)["cost_usd"]) == Decimal("1.103004")
+
+
+@pytest.mark.parametrize(
     "updates",
     [
         {"input_tokens": None},

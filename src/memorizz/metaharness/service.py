@@ -150,6 +150,7 @@ class MetaHarness:
         self._lock = threading.RLock()
         self._closing = False
         self._closed = False
+        self._judge = None
         self.recovered_runs = (
             self.run_store.recover_interrupted() if recover_interrupted else 0
         )
@@ -378,6 +379,10 @@ class MetaHarness:
     def _prepare(
         self, task: HarnessTask
     ) -> tuple[HarnessTask, Path, Dict[str, Any], Dict[str, Any]]:
+        if task.metadata.get("judge") is not None:
+            from .judging import judge_config
+
+            task.metadata["judge"] = judge_config(task.metadata["judge"])
         if task.harness in HARNESS_ALIASES:
             payload = task.to_dict()
             payload["harness"] = HARNESS_ALIASES[task.harness]
@@ -1284,6 +1289,23 @@ class MetaHarness:
             )
             self._record_memory_evidence(task, result)
             self._remember_single_run(task)
+            if task.metadata.get("judge") and result.ok and result.final_response:
+                try:
+                    self.judge_runs([task.run_id], task.metadata["judge"])
+                except ValueError as exc:
+                    if not self._closing:
+                        try:
+                            run = self.run_store.get(task.run_id)
+                            if run is not None:
+                                self._judge_service().record_failure(
+                                    run.to_dict(), task.metadata["judge"], str(exc)
+                                )
+                        except Exception:
+                            logger.exception(
+                                "Could not record the optional judge error"
+                            )
+                except Exception:
+                    logger.exception("Could not queue the optional answer judge")
         finally:
             # Stay visible to close() until the final writes are done, so it
             # never closes the store under a run that is still recording.
@@ -1716,14 +1738,56 @@ class MetaHarness:
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         run = self.run_store.get(run_id)
-        return run.to_dict() if run else None
+        return self._judged_runs([run.to_dict()])[0] if run else None
 
     def list_runs(
         self, *, limit: int = 100, status: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        return [
-            run.to_dict() for run in self.run_store.list(limit=limit, status=status)
-        ]
+        return self._judged_runs(
+            [run.to_dict() for run in self.run_store.list(limit=limit, status=status)]
+        )
+
+    def _judge_service(self):
+        from .judging import HarnessJudge
+
+        with self._lock:
+            if self._closing:
+                raise ValueError("The harness service is shutting down")
+            if self._judge is None:
+                if not callable(getattr(self.run_store, "create_judgment", None)):
+                    raise ValueError("This run store does not support saved judgments")
+                self._judge = HarnessJudge(self.run_store)
+            return self._judge
+
+    def _judged_runs(self, runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self._closing and callable(
+            getattr(self.run_store, "latest_judgments", None)
+        ):
+            return self._judge_service().annotate(runs)
+        return runs
+
+    def judge_settings(self, value: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._judge_service().settings(value)
+
+    def judge_runs(
+        self, run_ids: List[str], config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if (
+            not isinstance(run_ids, list)
+            or not 1 <= len(run_ids) <= 8
+            or any(not isinstance(run_id, str) or not run_id for run_id in run_ids)
+        ):
+            raise ValueError("Select between one and eight run IDs to judge")
+        runs = []
+        for run_id in dict.fromkeys(run_ids):
+            run = self.run_store.get(run_id)
+            if run is None:
+                raise KeyError(f"Unknown harness run: {run_id}")
+            runs.append(run.to_dict())
+        return self._judge_service().start(runs, config)
+
+    def get_judgment(self, judgment_id: str) -> Optional[Dict[str, Any]]:
+        return self._judge_service().get(judgment_id)
 
     def events(
         self, run_id: str, *, after: int = 0, limit: int = 1000
@@ -2899,6 +2963,8 @@ class MetaHarness:
                 adapter.cancel(run_id)
         for thread in threads:
             thread.join(timeout=5.0)
+        if self._judge is not None:
+            self._judge.close()
         for plane in self._owned_learning_control_planes.values():
             try:
                 plane.close()

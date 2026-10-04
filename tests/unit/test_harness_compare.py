@@ -134,3 +134,50 @@ def test_the_page_scripts_exist_with_the_public_api():
         in compare
     )
     assert (STATIC / "css" / "pages" / "harness-compare.css").exists()
+
+
+def test_accuracy_and_efficiency_badges_require_matching_complete_judgments():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is needed to run the page script")
+    script = r"""
+const vm = require('vm'), fs = require('fs');
+const ctx = {window: {}}; vm.createContext(ctx);
+for (const file of process.argv.slice(1)) vm.runInContext(fs.readFileSync(file, 'utf8'), ctx);
+const C = ctx.window.MemorizzCompare;
+const config = {provider:'ollama', model:'qwen2.5:3b', pass_score:80};
+const make = (id, score, cost, time) => C.summarize({run_id:id, harness:id, status:'succeeded', task:{task:'The same task'}, result:{cost_usd:cost,latency_ms:time,final_response:'answer'}, judgment:{status:'completed',score,config,config_hash:'rubric-a'}}, [], Date.now());
+const a = make('a', 98, 0.3, 8000), b = make('b', 85, 0.1, 4000), c = make('c', 20, 0.01, 1000);
+const matching = C.highlights([a,b,c]);
+const tie = C.highlights([a,{...b,judgment:{...b.judgment,score:98}}]);
+const mismatch = C.highlights([a,{...b,judgment:{...b.judgment,config_hash:'rubric-b'}}]);
+const missing = C.highlights([a,{...b,judgment:null}]);
+const failed = C.highlights([a,{...b,judgment:{...b.judgment,status:'failed',score:null}}]);
+const stale = C.highlights([a,{...b,judgment:{...b.judgment,status:'stale'}}]);
+const differentTask = C.highlights([a,{...b,task:'A different task'}]);
+const unknownCost = C.highlights([a,{...b,costUsd:null}]);
+console.log(JSON.stringify({matching,tie,mismatch,missing,failed,stale,differentTask,unknownCost}));
+"""
+    files = [
+        str(STATIC / "js" / "harness-trajectory.js"),
+        str(STATIC / "js" / "harness-compare.js"),
+    ]
+    done = subprocess.run(
+        [node, "-e", script, *files], capture_output=True, text=True, timeout=30
+    )
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["matching"]["a"]["accuracy"] == "Most accurate (judge)"
+    assert out["matching"]["b"]["qualityCost"] == "Cheapest meeting target"
+    assert out["matching"]["b"]["qualityTime"] == "Fastest meeting target"
+    assert out["matching"]["c"]["cost"] == "Cheapest"
+    assert "qualityCost" not in out["matching"]["c"]
+    assert (
+        "tied" in out["tie"]["a"]["accuracy"] and "tied" in out["tie"]["b"]["accuracy"]
+    )
+    for key in ("mismatch", "missing", "failed", "stale", "differentTask"):
+        assert all(
+            "accuracy" not in marks and "qualityCost" not in marks
+            for marks in out[key].values()
+        )
+    assert all("qualityCost" not in marks for marks in out["unknownCost"].values())

@@ -6,7 +6,7 @@
 
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import openai
 
@@ -15,10 +15,6 @@ from .tool_metadata import ResponsesToolMetadataMixin
 
 # Suppress httpx logs to reduce noise from API requests
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
-# Use TYPE_CHECKING for forward references to avoid circular imports
-if TYPE_CHECKING:
-    pass
 
 
 class AzureOpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):

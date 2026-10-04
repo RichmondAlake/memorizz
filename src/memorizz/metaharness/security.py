@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
@@ -132,6 +133,7 @@ def build_child_environment(
     *,
     allowed_names: Iterable[str] = (),
     overrides: Optional[Mapping[str, str]] = None,
+    node_command: Optional[str] = None,
 ) -> Dict[str, str]:
     names = set(_BASE_ENV)
     names.update(str(item) for item in allowed_names if str(item).strip())
@@ -142,7 +144,64 @@ def build_child_environment(
                 f"Secret environment variable {key!r} was not explicitly allowlisted"
             )
         result[str(key)] = str(value)
+    if node_command and "PATH" not in (overrides or {}):
+        result["PATH"] = _node_cli_path(node_command, result.get("PATH", os.defpath))
     return result
+
+
+def _node_cli_path(command: str, search_path: str) -> str:
+    """Use a Node CLI's installation runtime without replacing its wrapper.
+
+    npm links and terminal wrappers can reach an nvm installation while
+    /usr/bin/env node still selects an older (or different architecture) Node.
+    Only consider the selected CLI and same-name executables already on the
+    host's absolute PATH. Do not discover runtimes in the task workspace.
+    """
+    selected = shutil.which(command, path=search_path)
+    if not selected or not os.path.isabs(selected):
+        return search_path
+    candidates = [Path(selected)]
+    candidates.extend(
+        Path(directory) / Path(command).name
+        for directory in search_path.split(os.pathsep)
+        if os.path.isabs(directory)
+    )
+    for candidate in candidates:
+        try:
+            script = candidate.resolve()
+            if not script.is_file() or not os.access(script, os.X_OK):
+                continue
+            with script.open("rb") as handle:
+                shebang = handle.readline(256)
+            if not re.match(rb"^#!\s*/usr/bin/env\s+(?:-S\s+)?node(?:\s|$)", shebang):
+                if candidate == candidates[0] and not re.match(
+                    rb"^#!\s*(?:/bin/(?:ba)?sh|/usr/bin/env\s+(?:ba)?sh)(?:\s|$)",
+                    shebang,
+                ):
+                    return search_path
+                continue
+            # The original npm link is normally in <prefix>/bin; a pinned,
+            # resolved script instead lives under <prefix>/lib/node_modules.
+            directories = [candidate.parent]
+            directories.extend(
+                parent.parent.parent / "bin"
+                for parent in script.parents
+                if parent.name == "node_modules" and parent.parent.name == "lib"
+            )
+            for directory in directories:
+                node = directory / "node"
+                if node.is_file() and os.access(node, os.X_OK):
+                    runtime = str(directory.resolve())
+                    entries = search_path.split(os.pathsep)
+                    return os.pathsep.join(
+                        [runtime, *(p for p in entries if p != runtime)]
+                    )
+            # An explicit Node script with no sibling runtime should retain
+            # the caller's PATH, rather than borrow a different CLI install.
+            return search_path
+        except (OSError, RuntimeError):
+            continue
+    return search_path
 
 
 def resolve_workspace(workspace: str, allowed_roots: Iterable[str] = ()) -> Path:

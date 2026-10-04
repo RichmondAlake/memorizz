@@ -228,9 +228,13 @@ class _Session:
 
 
 def _read_codex(path: Path) -> Optional[Dict[str, Any]]:
+    from .adapters import codex_list_cost
+
     session = _Session()
     data = session.data
     started_at = None
+    service_tier = None
+    request_costs: List[Optional[float]] = []
     for row in _rows(path):
         kind = row.get("type")
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -243,6 +247,7 @@ def _read_codex(path: Path) -> Optional[Dict[str, Any]]:
         elif kind == "turn_context":
             data["model"] = payload.get("model") or data["model"]
             data["cwd"] = payload.get("cwd") or data["cwd"]
+            service_tier = payload.get("service_tier")
         elif kind == "response_item" and payload.get("role") == "developer":
             text = _codex_text(payload.get("content"))
             hook = _plugin_hook(text)
@@ -258,8 +263,25 @@ def _read_codex(path: Path) -> Optional[Dict[str, Any]]:
                     started=payload.get("started_at_ms"),
                 )
             elif event == "token_count":
-                total = (payload.get("info") or {}).get("total_token_usage")
-                if isinstance(total, dict):
+                info = payload.get("info") or {}
+                total = info.get("total_token_usage")
+                if isinstance(total, dict) and total != data["usage"]:
+                    # The same totals can be logged again for rate-limit updates.
+                    # Price each request: cumulative session input must not
+                    # trigger a single request's long-context surcharge.
+                    request_usage = info.get("last_token_usage")
+                    if not isinstance(request_usage, dict):
+                        request_usage = {
+                            key: value - data["usage"].get(key, 0)
+                            for key, value in total.items()
+                            if type(value) is int
+                        }
+                    request_costs.append(
+                        codex_list_cost(
+                            data["model"],
+                            {**request_usage, "service_tier": service_tier},
+                        )
+                    )
                     data["usage"] = dict(total)
             elif event == "task_complete" and payload.get("last_agent_message"):
                 data["final"] = str(payload["last_agent_message"])
@@ -282,11 +304,11 @@ def _read_codex(path: Path) -> Optional[Dict[str, Any]]:
             )
             if data["usage"].get(key) is not None
         }
-        from .adapters import codex_list_cost
-
-        data["cost_usd"] = codex_list_cost(data["model"], usage)
+        if request_costs and all(cost is not None for cost in request_costs):
+            data["cost_usd"] = round(sum(request_costs), 8)
         if data["cost_usd"] is not None:
             usage["cost_basis"] = "list_rate_estimate"
+            usage["cost_requests"] = len(request_costs)
         data["usage"] = usage
     return data
 

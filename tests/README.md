@@ -50,7 +50,8 @@ This comprehensive test suite covers all aspects of the refactored MemAgent arch
 
 The CI and release browser gate covers trace navigation, usage charts, JSON
 exports, Evalground and host-adapter Persona Evolution workflows on desktop and
-mobile. Fixtures use temporary storage and synthetic data, not live databases,
+mobile, plus harness judging and comparison approval navigation with both an
+existing queue and an empty ledger. Fixtures use temporary storage and synthetic data, not live databases,
 provider credentials or paid LLM calls.
 
 Install `memorizz[dev,ui]` from this checkout and Node 24, then run from the
@@ -70,6 +71,10 @@ chosen output location, or `--node /path/to/node` to select a different Node
 installation. Linux CI uses Playwright's `install --with-deps chromium` to install
 the required system libraries. These checks do not replace live-provider or
 consuming-application acceptance tests.
+
+Set `MEMORIZZ_BROWSER_LOCAL_JUDGE=1` to repeat the judge browser checks using
+installed local Ollama `qwen2.5:3b` and `qwen2.5:7b` models. The default release
+gate uses a synthetic evaluator and requires no model downloads or API calls.
 
 ### Run All Tests
 ```bash

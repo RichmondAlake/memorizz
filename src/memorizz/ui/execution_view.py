@@ -227,6 +227,7 @@ def shape_harness_run(
         "source": str(metadata.get("source") or ""),
         # A Codex or Claude Code session the MemoRizz plugin recorded.
         "plugin_session": metadata.get("source") == "plugin",
+        "judgment": _mapping(run.get("judgment")),
         "turns": int(metadata.get("turns") or 0),
         "session_log": str(metadata.get("session_log") or ""),
         "mode": str(task.get("mode") or "runtime"),
@@ -503,6 +504,7 @@ def workflow_setup(
         "denied_tools": ", ".join(permissions.get("denied_tools") or []),
         "allow_dirty_workspace": bool(permissions.get("allow_dirty_workspace")),
         "allow_subagents": bool(permissions.get("allow_subagents")),
+        "judge": _mapping(metadata.get("judge")),
     }
     rows = [_mapping(step) for step in steps]
     if kind == "compare":

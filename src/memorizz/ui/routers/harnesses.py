@@ -359,6 +359,11 @@ def _task_from_payload(payload: Dict[str, Any], *, write: bool):
             schema = json.loads(schema)
         except ValueError as exc:
             raise ValueError("Output schema must be valid JSON") from exc
+    judge = payload.get("judge")
+    if judge is not None:
+        from ...metaharness.judging import judge_config
+
+        judge = judge_config(judge)
     return harness_task(
         payload.get("task") or "",
         payload.get("workspace") or "",
@@ -389,8 +394,72 @@ def _task_from_payload(payload: Dict[str, Any], *, write: bool):
             ).lower(),
             "approval_owner_id": "ui:operator",
             "source": "ui",
+            **({"judge": judge} if judge is not None else {}),
         },
     )
+
+
+@router.get("/api/harness-judge/settings")
+async def api_harness_judge_settings():
+    from ...llms.model_lists import latest_models
+    from ...metaharness.judging import PROVIDERS
+
+    service = _service()
+    config, models = await asyncio.gather(
+        asyncio.to_thread(service.judge_settings),
+        asyncio.to_thread(latest_models, "ollama", limit=40),
+    )
+    return {
+        "ok": True,
+        "config": config,
+        "providers": PROVIDERS,
+        "models": {"ollama": models},
+        "read_only": ui_read_only(),
+    }
+
+
+@router.put("/api/harness-judge/settings")
+async def api_save_harness_judge_settings(request: Request):
+    try:
+        config = await asyncio.to_thread(
+            _service().judge_settings, await _json_object(request)
+        )
+        return {"ok": True, "config": config}
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/api/harness-judge/models")
+async def api_harness_judge_models(provider: str = "ollama"):
+    from ...llms.model_lists import latest_models
+    from ...metaharness.judging import PROVIDERS
+
+    if provider not in PROVIDERS:
+        raise HTTPException(status_code=400, detail="Unknown judge provider")
+    return {
+        "ok": True,
+        "models": await asyncio.to_thread(latest_models, provider, limit=40),
+    }
+
+
+@router.post("/api/harness-judgments")
+async def api_start_harness_judgment(request: Request):
+    payload = await _json_object(request)
+    try:
+        value = await asyncio.to_thread(
+            _service().judge_runs, payload.get("run_ids"), payload.get("config")
+        )
+        return {"ok": True, "judgment": value}
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/api/harness-judgments/{judgment_id}")
+async def api_harness_judgment(judgment_id: str):
+    value = await asyncio.to_thread(_service().get_judgment, judgment_id)
+    if value is None:
+        raise HTTPException(status_code=404, detail="Judgment not found")
+    return {"ok": True, "judgment": value}
 
 
 def default_memagent(
@@ -599,7 +668,10 @@ async def api_harness_activity():
 def _activity(runs, workflows, approvals) -> Dict[str, Any]:
     """Fingerprint of what the page shows, and whether anything is running."""
     marks = (
-        [[r.get("run_id"), r.get("status"), r.get("updated_at")] for r in runs]
+        [
+            [r.get("run_id"), r.get("status"), r.get("updated_at"), r.get("judgment")]
+            for r in runs
+        ]
         + [
             [w.get("orchestration_id"), w.get("status"), w.get("updated_at")]
             for w in workflows
@@ -612,6 +684,10 @@ def _activity(runs, workflows, approvals) -> Dict[str, Any]:
             json.dumps(marks, sort_keys=True, default=str).encode()
         ).hexdigest()[:16],
         "active": any(r.get("status") in active_states for r in runs)
+        or any(
+            (r.get("judgment") or {}).get("status") in {"queued", "running"}
+            for r in runs
+        )
         or any(w.get("status") in active_states for w in workflows),
     }
 
