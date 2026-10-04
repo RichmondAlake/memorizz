@@ -83,7 +83,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--node", default=shutil.which("node"))
-    parser.add_argument("--suite", action="append", choices=[suite[0] for suite in SUITES])
+    parser.add_argument(
+        "--suite", action="append", choices=[suite[0] for suite in SUITES]
+    )
     args = parser.parse_args()
     if not args.node:
         parser.error("Node is required; specify --node /path/to/node")
