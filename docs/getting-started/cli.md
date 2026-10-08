@@ -297,12 +297,22 @@ Running `memorizz` with no arguments launches the interactive loop:
 - **Ctrl-C** during a reply aborts just that reply (you stay in the REPL).
 - **Ctrl-C** at the prompt, **Ctrl-D**, or `/exit` saves the agent and quits.
 - Press **Tab** to autocomplete slash commands.
+- **Arrow keys on an empty line** are shortcuts: **←** lists your agents
+  (`/agents`), **→** lists the harnesses (`/harnesses`), **↓** opens the quick
+  actions menu (`/menu`). With text in the line they edit as usual, and **↑**
+  always walks history.
+- A **status bar** under the prompt shows the provider and model, the active
+  memory (project ids in full), the active harness and the hotkeys.
+- Startup plays a short crest animation on a colour terminal. Set
+  `MEMORIZZ_NO_ANIMATION=1` (or `NO_COLOR`) to skip it; it never runs when the
+  output is not a terminal.
 
 ## Slash commands
 
 | Command | Description |
 |---|---|
 | `/help` | List all commands + the current mode/model. |
+| `/menu` | Quick actions: the arrow-key shortcuts and the most used commands, plus the current model, memory and harness. |
 | `/models [name]` | Show the current model, list installed Ollama models, or switch models (keeps the provider). |
 | `/provider [name]` | Switch provider: `openai`/`anthropic`/`ollama`/`azure`/`huggingface`/`mlx`. |
 | `/ollama [list\|pull <tag>\|host <url>]` | List/pull Ollama models or set `OLLAMA_HOST`. |

@@ -19,6 +19,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
+from rich.columns import Columns
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -28,7 +29,7 @@ from rich.text import Text
 from .. import __version__
 from . import commands
 from . import config as cfg
-from . import harness_session
+from . import harness_session, ui
 from .updates import update_notifier
 
 
@@ -117,7 +118,11 @@ def _banner(console: Console, session) -> None:
         f"/memory-provider for memory setup · "
         f"/exit to quit[/dim]"
     )
-    console.print(Panel(body, expand=False, border_style="green"))
+    panel = Panel(body, expand=False, border_style="green")
+    if ui.should_animate(console):
+        console.print(Columns([ui.crest_text(), panel], padding=(0, 2)))
+    else:
+        console.print(panel)
     for warning in session.warnings or []:
         console.print(f"[yellow]![/yellow] {warning}")
 
@@ -214,15 +219,19 @@ def run_repl(session) -> None:
         history=SafeFileHistory(str(cfg.history_file())),
         completer=SlashCompleter(commands.command_completions()),
         complete_while_typing=True,
+        key_bindings=ui.key_bindings(session),
+        bottom_toolbar=lambda: ui.toolbar(session),
+        style=ui.STYLE,
+        color_depth=ui.color_depth(),
     )
 
+    ui.animate_crest(console)
     _banner(console, session)
 
     with patch_stdout(raw=True), update_notifier(console):
         while True:
-            prompt_text = harness_session.prompt_label(session)
             try:
-                line = ptk.prompt(prompt_text)
+                line = ptk.prompt(ui.prompt_fragments(session))
             except (KeyboardInterrupt, EOFError):
                 # Ctrl-C or Ctrl-D at the prompt exits; _stream_turn handles
                 # interrupts during a reply without ending the session.

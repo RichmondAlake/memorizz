@@ -9,6 +9,11 @@
   turns, folder, opening prompt, run id), and `/memory project [path]`
   switches the chat to a folder's project memory, the one the plugins write
   to, so questions about recent coding-agent work retrieve their turns.
+- Interactive CLI look and feel: a crest animation on startup (skipped off
+  a colour terminal or with `MEMORIZZ_NO_ANIMATION=1`), a status bar under the
+  prompt (provider and model, active memory, active harness, hotkeys), a
+  coloured prompt, arrow-key shortcuts on an empty line (← agents, →
+  harnesses, ↓ quick actions) and a `/menu` of the most used commands.
 
 ### Fixed
 

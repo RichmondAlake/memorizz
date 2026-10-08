@@ -1431,6 +1431,42 @@ def cmd_sessions(session, args: str):
     )
 
 
+def cmd_menu(session, args: str):
+    """Quick actions: the hotkeys and the commands people reach for most."""
+    from rich.markup import escape
+    from rich.table import Table
+
+    from . import harness_session, ui
+
+    console = _con(session)
+    table = Table(title="Quick actions", show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold yellow", no_wrap=True)
+    table.add_column(style="cyan", no_wrap=True)
+    table.add_column()
+    for key, command, what in ui.HOTKEYS:
+        table.add_row(key, command, what)
+    table.add_row("Tab", "/…", "complete a command")
+    table.add_row("", "/sessions", "what Codex and Claude Code did (plugin sessions)")
+    table.add_row(
+        "", escape("/memory project"), "chat over this folder's project memory"
+    )
+    table.add_row("", "/models", "show or switch the model")
+    table.add_row(
+        "", escape("/harness <name|auto|delegate|off>"), "route turns through a harness"
+    )
+    table.add_row(
+        "", escape("/compare <a> <b> <task>"), "one task on several harnesses"
+    )
+    table.add_row("", "/conversations", "resume a saved conversation")
+    table.add_row("", "/help", "every command")
+    console.print(table)
+    harness = harness_session.active_harness(session) or "off"
+    console.print(
+        f"[dim]now: {session.provider_name}/{session.model_name} · memory "
+        f"{ui.memory_label(session)} · harness {harness}[/dim]"
+    )
+
+
 def cmd_help(session, args: str):
     from rich.markup import escape
 
@@ -1663,6 +1699,9 @@ COMMANDS: Dict[str, Command] = {
         cmd_clear,
         "Erase the agent's stored memory (asks to confirm).",
         "/clear",
+    ),
+    "menu": Command(
+        cmd_menu, "Quick actions: hotkeys and the most used commands.", "/menu"
     ),
     "sessions": Command(
         cmd_sessions,
