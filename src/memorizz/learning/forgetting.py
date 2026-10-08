@@ -177,7 +177,7 @@ class ForgettingMechanism:
                 )
                 continue
             try:
-                current = self.store.get(candidate.target_id)
+                current = self.store.lookup(candidate.target_id)
                 if not current or current.get("record_type") != "learning_artifact":
                     raise ValueError("target is not a current learning artifact")
                 if (

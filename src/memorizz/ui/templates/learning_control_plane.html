@@ -25,6 +25,10 @@
         <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
         <button class="btn" type="submit">Plan forgetting (dry run)</button>
     </form>
+    <form method="post" action="/learning-control-plane/retention-plan" class="cl-inline-form">
+        <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
+        <button class="btn" type="submit" title="Score conversation, knowledge, entity, summary and workflow records by importance, recall and recency; low-retention records can be suppressed from retrieval, reversibly">Plan memory retention (dry run)</button>
+    </form>
     <form method="post" action="/learning-control-plane/compile" class="cl-inline-form">
         <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
         <button class="btn btn-primary" type="submit">Compile pending events</button>
@@ -85,8 +89,13 @@
 <section class="panel lcp-approve" aria-labelledby="lcp-forget-title">
     <div class="panel-header">
         <div>
+            {% if action.report.plan_kind == 'retention' %}
+            <h2 class="panel-title" id="lcp-forget-title">Approve reversible suppression</h2>
+            <p class="panel-description">The dry run found {{ action.report.candidate_count }} memory record(s) whose retention score (importance, recalls, recency since last use) decayed below the threshold. Applying hides them from retrieval; nothing is deleted and each can be restored below.</p>
+            {% else %}
             <h2 class="panel-title" id="lcp-forget-title">Approve reversible forgetting</h2>
             <p class="panel-description">The dry run found {{ action.report.candidate_count }} candidate(s). Applying writes tombstones only; immutable events are kept.</p>
+            {% endif %}
         </div>
         <span class="pill pill--warning">Awaiting approval</span>
     </div>
@@ -94,8 +103,47 @@
         <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="plan_id" value="{{ action.report.plan_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
         <label for="approved_by">Approver identity<input id="approved_by" name="approved_by" required autocomplete="off"></label>
         <label for="reason" class="is-wide">Reason<input id="reason" name="reason" placeholder="Optional" autocomplete="off"></label>
-        <button class="btn btn-danger" type="submit">Apply {{ action.report.candidate_count }} tombstone(s)</button>
+        <button class="btn btn-danger" type="submit">{% if action.report.plan_kind == 'retention' %}Suppress {{ action.report.candidate_count }} record(s){% else %}Apply {{ action.report.candidate_count }} tombstone(s){% endif %}</button>
     </form>
+</section>
+{% endif %}
+
+{% if selected_agent_id and suppressed %}
+<section class="panel lcp-suppressed" aria-labelledby="lcp-suppressed-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="lcp-suppressed-title">Suppressed memories</h2>
+            <p class="panel-description">{{ suppressed|length }} record(s) hidden from retrieval by an approved retention plan. They are still stored and audited; restore one to make it retrievable again.</p>
+        </div>
+        <span class="pill pill--warning">Reversible</span>
+    </div>
+    <div class="table-scroll">
+        <table class="data-table lcp-compact">
+            <thead><tr><th scope="col">Record</th><th scope="col">Type</th><th scope="col">Memory ID</th><th scope="col">Reason</th><th scope="col">Approved by</th><th scope="col">Since</th>{% if not ui_read_only %}<th scope="col">Restore</th>{% endif %}</tr></thead>
+            <tbody>
+            {% for item in suppressed[:50] %}
+            <tr>
+                <td class="mono" title="{{ item.record_id }}">{{ item.record_id[:12] }}</td>
+                <td>{{ item.memory_type|replace('_', ' ') }}</td>
+                <td class="mono" title="{{ item.memory_id }}">{{ (item.memory_id or '—')[:14] }}</td>
+                <td class="lcp-reason" title="{{ item.reason }}">{{ item.reason or '—' }}</td>
+                <td>{{ item.approver or '—' }}</td>
+                <td class="mono">{{ (item.suppressed_at or '')[:16] or '—' }}</td>
+                {% if not ui_read_only %}
+                <td>
+                    <form method="post" action="/learning-control-plane/unsuppress" class="cl-inline-form">
+                        <input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="record_id" value="{{ item.record_id }}"><input type="hidden" name="memory_type" value="{{ item.memory_type }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">
+                        <input name="approved_by" required placeholder="Approver" aria-label="Approver identity" autocomplete="off">
+                        <button class="btn btn-sm" type="submit">Restore</button>
+                    </form>
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if suppressed|length > 50 %}<p class="panel-empty">{{ suppressed|length - 50 }} more suppressed in this scope.</p>{% endif %}
 </section>
 {% endif %}
 

@@ -8,7 +8,6 @@ import hmac
 import json
 import logging
 import os
-import re
 import secrets
 import time
 from pathlib import Path
@@ -18,22 +17,44 @@ from fastapi import Request
 
 from .._env_io import env_bool
 from ..observability.privacy import pseudonym, validate_opaque
+from ..redaction import (
+    BEARER_TOKEN,
+    EMAIL,
+    QUERY_SECRET,
+    SECRET_TOKEN,
+    SENSITIVE_KEY_NAMES,
+    URI_CREDENTIALS,
+    KeyMatcher,
+    RedactionPolicy,
+)
+from ..redaction import redact as _redact
+from ..redaction import scrub_text
 from .trace_access import PERMISSIONS, TracePrincipal, current_principal
 
 logger = logging.getLogger(__name__)
 
-_SECRET_KEY = re.compile(
-    r"(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|"
-    r"password|passwd|secret|cookie|private[_-]?key)",
-    re.IGNORECASE,
+# Trace events carry token telemetry ("token_count", "max_tokens"), so the bare
+# names "token" and "credential(s)" only count as the whole key or a "_"/"-"
+# suffix here; every other credential name matches anywhere in the key.
+_BARE_KEY_NAMES = ("token", "credentials?")
+_SECRET_KEY = KeyMatcher(
+    search=tuple(name for name in SENSITIVE_KEY_NAMES if name not in _BARE_KEY_NAMES),
+    suffix=_BARE_KEY_NAMES,
 )
-_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
-_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
-_KEY_TOKEN = re.compile(r"\b(?:sk-(?:ant-)?|gh[oprsu]_|xox[baprs]-)[A-Za-z0-9_-]{8,}\b")
-_URI_CREDENTIALS = re.compile(
-    r"(?P<scheme>[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@", re.I
+_VALUE_RULES = (
+    (URI_CREDENTIALS, lambda match: f"{match.group('scheme')}[redacted]@"),
+    (BEARER_TOKEN, "Bearer [redacted]"),
+    (SECRET_TOKEN, "[redacted-key]"),
+    (QUERY_SECRET, r"\1[redacted]"),
+    (EMAIL, "[redacted-email]"),
 )
-_QUERY_SECRET = re.compile(r"(?i)([?&](?:api[_-]?key|token|secret|password)=)[^&#\s]+")
+_REDACTION = RedactionPolicy(
+    keys=_SECRET_KEY,
+    replacement="[redacted]",
+    pseudonym=pseudonym,
+    pseudonym_keys=frozenset({"user_id", "userId"}),
+    values=_VALUE_RULES,
+)
 
 
 def ui_read_only() -> bool:
@@ -264,32 +285,12 @@ def trace_content_mode() -> str:
 
 
 def _redact_scalar(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    text = _URI_CREDENTIALS.sub(
-        lambda match: f"{match.group('scheme')}[redacted]@", value
-    )
-    text = _BEARER.sub("Bearer [redacted]", text)
-    text = _KEY_TOKEN.sub("[redacted-key]", text)
-    text = _QUERY_SECRET.sub(r"\1[redacted]", text)
-    text = _EMAIL.sub("[redacted-email]", text)
-    return text
+    return scrub_text(value, _VALUE_RULES) if isinstance(value, str) else value
 
 
 def redact_value(value: Any, *, key: str = "") -> Any:
     """Recursively mask credentials and common personal identifiers."""
-    if _SECRET_KEY.search(key):
-        return "[redacted]"
-    if key in {"user_id", "userId"} and value:
-        return pseudonym(value)
-    if isinstance(value, dict):
-        return {
-            str(child_key): redact_value(child_value, key=str(child_key))
-            for child_key, child_value in value.items()
-        }
-    if isinstance(value, list):
-        return [redact_value(item) for item in value]
-    return _redact_scalar(value)
+    return _redact(value, _REDACTION, key=key)
 
 
 def redact_trace_events(

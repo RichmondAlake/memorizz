@@ -14,6 +14,7 @@ import os
 from typing import List
 
 from fastapi import APIRouter, Form
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/api/ollama", tags=["ollama"])
@@ -25,10 +26,11 @@ def _ollama_host() -> str:
 
 @router.post("/pull")
 async def ollama_pull(name: str = Form(...)):
-    """Pull an Ollama model. Synchronous — large pulls can take 5-15 min.
+    """Pull an Ollama model. Large pulls can take 5-15 min.
 
     We pass ``stream: false`` so the daemon buffers progress on its side and
-    only returns when the operation finishes.
+    only returns when the operation finishes. The wait happens in a worker
+    thread so the rest of the UI keeps answering meanwhile.
     """
     import urllib.error
     import urllib.request
@@ -41,9 +43,13 @@ async def ollama_pull(name: str = Form(...)):
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    try:
+
+    def _pull() -> dict:
         with urllib.request.urlopen(req, timeout=1800) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        payload = await run_in_threadpool(_pull)
     except urllib.error.HTTPError as exc:
         return JSONResponse(
             {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}"},
@@ -76,9 +82,13 @@ async def ollama_delete(name: str):
         method="DELETE",
         headers={"Content-Type": "application/json"},
     )
-    try:
+
+    def _delete() -> None:
         with urllib.request.urlopen(req, timeout=15):
             pass
+
+    try:
+        await run_in_threadpool(_delete)
     except urllib.error.HTTPError as exc:
         detail = (
             exc.read().decode("utf-8", "ignore") if hasattr(exc, "read") else exc.reason
@@ -107,9 +117,13 @@ async def ollama_installed():
     import urllib.request
 
     host = _ollama_host()
-    try:
+
+    def _tags() -> dict:
         with urllib.request.urlopen(f"{host}/api/tags", timeout=3) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        payload = await run_in_threadpool(_tags)
     except urllib.error.URLError as exc:
         return JSONResponse(
             {"reachable": False, "host": host, "error": str(exc.reason)}

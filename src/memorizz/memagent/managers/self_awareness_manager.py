@@ -11,7 +11,20 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
+
+# Self-aware tools that mutate the host or execute programs. ``core.py``
+# registers these with approval gating (``requires_approval``). Both the
+# registered delete tool name (``self_aware_delete_path``) and its documented
+# alias (``self_aware_delete_file``) are listed so either spelling is gated.
+DANGEROUS_TOOL_NAMES: FrozenSet[str] = frozenset(
+    {
+        "self_aware_run_command",
+        "self_aware_write_file",
+        "self_aware_delete_file",
+        "self_aware_delete_path",
+    }
+)
 
 
 class SelfAwarenessManager:
@@ -51,6 +64,168 @@ class SelfAwarenessManager:
         "rmdir",
     }
     FORBIDDEN_SHELL_TOKENS = (";", "&&", "||", "|", ">", "<", "`", "$(")
+
+    # Flags that turn an otherwise read-only command into program execution
+    # or a file write. Checked on the flag name (``--flag=value`` included).
+    DENIED_FLAGS: Dict[str, FrozenSet[str]] = {
+        "find": frozenset(
+            {
+                "-exec",
+                "-execdir",
+                "-ok",
+                "-okdir",
+                "-delete",
+                "-fprint",
+                "-fprint0",
+                "-fprintf",
+                "-fls",
+            }
+        ),
+        "rg": frozenset({"--pre", "--pre-glob", "--hostname-bin"}),
+    }
+    # git options parsed by ``git`` itself (before the subcommand). These
+    # re-point git at attacker-chosen config, trees or executables.
+    GIT_DENIED_TOP_LEVEL_FLAGS: FrozenSet[str] = frozenset(
+        {
+            "-c",
+            "-C",
+            "--exec-path",
+            "--git-dir",
+            "--work-tree",
+            "--config-env",
+            "--namespace",
+            "--super-prefix",
+            "--bare",
+            "-p",
+            "--paginate",
+        }
+    )
+    # git subcommand options that run external programs.
+    GIT_DENIED_SUBCOMMAND_FLAGS: FrozenSet[str] = frozenset(
+        {
+            "--upload-pack",
+            "--receive-pack",
+            "--exec",
+            "-O",
+            "--open-files-in-pager",
+            "--ext-diff",
+        }
+    )
+    # git subcommands that execute external programs, hooks, editors or
+    # network transports (local ``file://`` remotes run ``--upload-pack``).
+    GIT_DENIED_SUBCOMMANDS: FrozenSet[str] = frozenset(
+        {
+            "archive",
+            "bisect",
+            "citool",
+            "clone",
+            "credential",
+            "credential-cache",
+            "credential-cache--daemon",
+            "credential-store",
+            "cvsexportcommit",
+            "cvsimport",
+            "cvsserver",
+            "daemon",
+            "difftool",
+            "fast-import",
+            "fetch",
+            "filter-branch",
+            "gui",
+            "hook",
+            "http-backend",
+            "http-fetch",
+            "http-push",
+            "imap-send",
+            "instaweb",
+            "ls-remote",
+            "mergetool",
+            "p4",
+            "pull",
+            "push",
+            "rebase",
+            "receive-pack",
+            "remote-ext",
+            "remote-fd",
+            "remote-ftp",
+            "remote-ftps",
+            "remote-http",
+            "remote-https",
+            "send-email",
+            "shell",
+            "svn",
+            "upload-archive",
+            "upload-pack",
+            "web--browse",
+        }
+    )
+    # Used only when ``git --list-cmds=builtins`` is unavailable (git < 2.18).
+    GIT_BUILTIN_FALLBACK: FrozenSet[str] = frozenset(
+        {
+            "add",
+            "blame",
+            "branch",
+            "cat-file",
+            "check-attr",
+            "check-ignore",
+            "checkout",
+            "cherry",
+            "commit",
+            "config",
+            "count-objects",
+            "describe",
+            "diff",
+            "diff-files",
+            "diff-index",
+            "diff-tree",
+            "for-each-ref",
+            "format-patch",
+            "fsck",
+            "grep",
+            "help",
+            "init",
+            "log",
+            "ls-files",
+            "ls-tree",
+            "merge-base",
+            "mv",
+            "name-rev",
+            "range-diff",
+            "reflog",
+            "remote",
+            "reset",
+            "restore",
+            "rev-list",
+            "rev-parse",
+            "rm",
+            "shortlog",
+            "show",
+            "show-branch",
+            "show-ref",
+            "stash",
+            "status",
+            "submodule",
+            "switch",
+            "symbolic-ref",
+            "tag",
+            "var",
+            "verify-commit",
+            "verify-tag",
+            "version",
+            "whatchanged",
+            "worktree",
+        }
+    )
+    # Pager/editor overrides so git never spawns an interactive or
+    # config-selected program even when a flag slips through.
+    GIT_SAFE_ENV: Dict[str, str] = {
+        "GIT_PAGER": "cat",
+        "PAGER": "cat",
+        "GIT_EDITOR": ":",
+        "GIT_SEQUENCE_EDITOR": ":",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    _GIT_BUILTINS_CACHE: Dict[str, FrozenSet[str]] = {}
 
     def __init__(
         self, config: Optional[Dict[str, Any]] = None, cwd: Optional[str] = None
@@ -424,6 +599,13 @@ class SelfAwarenessManager:
 
         return {"path": self._display_path(target), "deleted": True}
 
+    # --- Tool metadata ---
+
+    @staticmethod
+    def dangerous_tool_names() -> FrozenSet[str]:
+        """Self-aware tool names that must be registered with approval gating."""
+        return DANGEROUS_TOOL_NAMES
+
     # --- Command execution ---
 
     def run_command(self, command: str, cwd: str = ".") -> Dict[str, Any]:
@@ -437,21 +619,33 @@ class SelfAwarenessManager:
         if not args:
             raise ValueError("command is required.")
 
-        cmd_name = Path(args[0]).name
+        cmd_name = str(args[0] or "").strip()
         self._validate_command_name(cmd_name)
+        # Only the PATH-resolved system binary may run: ``./bin/ls`` or
+        # ``/tmp/ls`` must never be accepted because their basename is listed.
+        executable = self._resolve_executable(cmd_name)
 
         working_dir = self._resolve_path(cwd)
-        self._validate_command_args(cmd_name, args[1:], working_dir)
+        self._validate_command_args(
+            cmd_name, args[1:], working_dir, executable=executable
+        )
+
+        env = None
+        if cmd_name == "git":
+            env = dict(os.environ)
+            env.update(self.GIT_SAFE_ENV)
 
         timeout = int(self._config["timeout_seconds"])
         max_output_chars = int(self._config["max_output_chars"])
         result = subprocess.run(
-            args,
+            [executable, *args[1:]],
             cwd=str(working_dir),
             capture_output=True,
             text=True,
             timeout=timeout,
             shell=False,
+            stdin=subprocess.DEVNULL,
+            env=env,
         )
 
         stdout = result.stdout or ""
@@ -467,6 +661,7 @@ class SelfAwarenessManager:
         return {
             "command": command_text,
             "args": args,
+            "executable": executable,
             "cwd": self._display_path(working_dir),
             "exit_code": int(result.returncode),
             "stdout": stdout,
@@ -480,6 +675,13 @@ class SelfAwarenessManager:
                 raise ValueError(f"Forbidden shell token in command: {token}")
 
     def _validate_command_name(self, cmd_name: str) -> None:
+        if not cmd_name or cmd_name.startswith("-"):
+            raise ValueError("command is required.")
+        if self._has_path_separator(cmd_name) or cmd_name in {".", ".."}:
+            raise PermissionError(
+                "Command must be a bare program name resolved from PATH, "
+                f"not a path: {cmd_name}"
+            )
         allowed = set(self.READ_COMMANDS)
         if self._config.get("allow_writes", False):
             allowed.update(self.WRITE_COMMANDS)
@@ -490,28 +692,165 @@ class SelfAwarenessManager:
         ):
             raise PermissionError(f"Delete command '{cmd_name}' is disabled.")
 
-    def _validate_command_args(self, cmd_name: str, args: List[str], cwd: Path) -> None:
-        if cmd_name not in self.COMMANDS_WITH_PATH_ARGS:
+    @staticmethod
+    def _has_path_separator(text: str) -> bool:
+        separators = {"/", "\\", os.sep}
+        if os.altsep:
+            separators.add(os.altsep)
+        return any(sep in text for sep in separators)
+
+    @staticmethod
+    def _resolve_executable(cmd_name: str) -> str:
+        """Resolve ``cmd_name`` via absolute PATH entries only."""
+        search_path = os.pathsep.join(
+            entry
+            for entry in os.environ.get("PATH", os.defpath).split(os.pathsep)
+            if entry and os.path.isabs(entry)
+        )
+        resolved = shutil.which(cmd_name, path=search_path or None)
+        if not resolved or not os.path.isabs(resolved):
+            raise PermissionError(f"Command '{cmd_name}' is not available on PATH.")
+        return resolved
+
+    @staticmethod
+    def _looks_like_path(text: str) -> bool:
+        """True for arguments that can resolve outside the working directory."""
+        if text.startswith(("/", "~", ".")):
+            return True
+        return SelfAwarenessManager._has_path_separator(text)
+
+    def _validate_path_arg(self, cmd_name: str, text: str, cwd: Path) -> None:
+        if cmd_name in self.DELETE_COMMANDS and any(
+            c in text for c in ("*", "?", "[", "]")
+        ):
+            raise ValueError("Wildcard/glob delete arguments are not allowed.")
+
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        resolved = candidate.resolve()
+        if not self._is_within_roots(resolved):
+            raise ValueError(f"Command argument path escapes allowed roots: {text}")
+        if cmd_name in self.DELETE_COMMANDS:
+            for root_value in self._config.get("root_paths", []):
+                if resolved == Path(root_value).resolve():
+                    raise ValueError("Cannot delete a configured root path.")
+
+    def _validate_flag_value_path(self, cmd_name: str, flag: str, cwd: Path) -> None:
+        """Reject ``--flag=/outside`` and glued ``-f/outside`` path values."""
+        value = ""
+        if "=" in flag:
+            value = flag.split("=", 1)[1]
+        elif not flag.startswith("--") and len(flag) > 2:
+            value = flag[2:]
+            if cmd_name == "rg":
+                # Combined short flags: ``-nf/etc/passwd`` glues the pattern
+                # file onto ``-f``. Any other value-taking flag ends the scan.
+                for index, char in enumerate(flag[1:], start=1):
+                    if char == "f":
+                        value = flag[index + 1 :]
+                        break
+                    if char in "gtTermABCEMjd":
+                        value = ""
+                        break
+        if value and self._looks_like_path(value):
+            self._validate_path_arg(cmd_name, value, cwd)
+
+    def _validate_command_args(
+        self,
+        cmd_name: str,
+        args: List[str],
+        cwd: Path,
+        executable: Optional[str] = None,
+    ) -> None:
+        if cmd_name == "git":
+            self._validate_git_args(args, cwd, executable)
             return
 
+        strict_paths = cmd_name in self.COMMANDS_WITH_PATH_ARGS
+        denied_flags = self.DENIED_FLAGS.get(cmd_name, frozenset())
         for arg in args:
             text = str(arg or "").strip()
             if not text:
                 continue
-            if text.startswith("-"):
+            if text.startswith("-") and text != "-":
+                flag_name = text.split("=", 1)[0]
+                if flag_name in denied_flags:
+                    raise PermissionError(
+                        f"Flag '{flag_name}' is not allowed for '{cmd_name}'."
+                    )
+                self._validate_flag_value_path(cmd_name, text, cwd)
                 continue
-            if cmd_name in self.DELETE_COMMANDS and any(
-                c in text for c in ("*", "?", "[", "]")
-            ):
-                raise ValueError("Wildcard/glob delete arguments are not allowed.")
+            if strict_paths or self._looks_like_path(text):
+                self._validate_path_arg(cmd_name, text, cwd)
 
-            candidate = Path(text).expanduser()
-            if not candidate.is_absolute():
-                candidate = cwd / candidate
-            resolved = candidate.resolve()
-            if not self._is_within_roots(resolved):
-                raise ValueError(f"Command argument path escapes allowed roots: {text}")
-            if cmd_name in self.DELETE_COMMANDS:
-                for root_value in self._config.get("root_paths", []):
-                    if resolved == Path(root_value).resolve():
-                        raise ValueError("Cannot delete a configured root path.")
+    def _validate_git_args(
+        self, args: List[str], cwd: Path, executable: Optional[str]
+    ) -> None:
+        subcommand: Optional[str] = None
+        for arg in args:
+            text = str(arg or "").strip()
+            if not text:
+                continue
+            flag_name = text.split("=", 1)[0]
+            if subcommand is None:
+                if text.startswith("-"):
+                    if flag_name in self.GIT_DENIED_TOP_LEVEL_FLAGS:
+                        raise PermissionError(
+                            f"git option '{flag_name}' is not allowed."
+                        )
+                    self._validate_flag_value_path("git", text, cwd)
+                    continue
+                subcommand = text
+                if subcommand in self.GIT_DENIED_SUBCOMMANDS:
+                    raise PermissionError(
+                        f"git subcommand '{subcommand}' is not allowed "
+                        "(runs external programs, hooks or transports)."
+                    )
+                builtins = self._git_builtins(executable)
+                if subcommand not in builtins:
+                    raise PermissionError(
+                        f"git '{subcommand}' is not a builtin command; aliases and "
+                        "external git-* commands are not allowed."
+                    )
+                continue
+            if text.startswith("-") and text != "-":
+                if flag_name in self.GIT_DENIED_SUBCOMMAND_FLAGS:
+                    raise PermissionError(f"git option '{flag_name}' is not allowed.")
+                self._validate_flag_value_path("git", text, cwd)
+                continue
+            if subcommand == "submodule" and text == "foreach":
+                raise PermissionError("git submodule foreach is not allowed.")
+            if self._looks_like_path(text):
+                self._validate_path_arg("git", text, cwd)
+
+    @classmethod
+    def _git_builtins(cls, executable: Optional[str]) -> FrozenSet[str]:
+        """Builtin git subcommands for ``executable`` (aliases are never listed)."""
+        if not executable:
+            try:
+                executable = cls._resolve_executable("git")
+            except PermissionError:
+                return cls.GIT_BUILTIN_FALLBACK
+        cached = cls._GIT_BUILTINS_CACHE.get(executable)
+        if cached is not None:
+            return cached
+        names: set = set()
+        try:
+            proc = subprocess.run(
+                [executable, "--list-cmds=builtins"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+            )
+            if proc.returncode == 0:
+                names = {
+                    line.strip() for line in proc.stdout.splitlines() if line.strip()
+                }
+        except Exception:
+            names = set()
+        builtins = frozenset(names) if names else cls.GIT_BUILTIN_FALLBACK
+        cls._GIT_BUILTINS_CACHE[executable] = builtins
+        return builtins

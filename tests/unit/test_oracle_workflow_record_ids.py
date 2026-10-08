@@ -50,6 +50,8 @@ def _provider(monkeypatch, cursor):
     monkeypatch.setattr(
         provider, "_get_table_name", lambda _memory_type: "workflow_memory"
     )
+    # Pre-migration schema: forgetting columns project as NULL, no lookups.
+    monkeypatch.setattr(provider, "_memory_type_has_column", lambda *_args: False)
     return provider, connection
 
 

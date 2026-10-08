@@ -5,7 +5,6 @@
 """Skillbox — the store manager for learned skills (Toolbox-shaped)."""
 
 import logging
-import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -14,6 +13,7 @@ from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
 from ....llms.llm_provider import LLMProvider
 from ....memory_provider import MemoryProvider
+from ....memory_provider.vectors import cosine
 from .skill import Skill, SkillStatus
 
 logger = logging.getLogger(__name__)
@@ -29,14 +29,8 @@ class ScoredSkill:
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+    """Skill similarity; an unusable embedding pair ranks as 0.0."""
+    return cosine(a, b, on_mismatch="zero")
 
 
 class Skillbox:

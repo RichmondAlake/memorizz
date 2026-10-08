@@ -1,5 +1,9 @@
 # MemoRizz in Codex and Claude Code
 
+Both plugins support [portable memory archives](memory-transfer.md) through the
+`memory-transfer` skill and `memorizz plugin export-memory` / `import-memory`.
+Claude Code also exposes export/import slash commands. Import previews by default.
+
 MemoRizz ships a plugin for **Codex** and one for **Claude Code**. Each gives
 the coding agent long-term memory through MemoRizz's MCP server:
 

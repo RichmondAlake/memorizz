@@ -15,6 +15,11 @@ from ...short_term_memory.semantic_cache import (
 
 logger = logging.getLogger(__name__)
 
+# Prefix of the fallback reply ``MemAgent`` returns when an LLM turn fails.
+# Such replies are never admitted to the semantic cache. ``core.py`` imports
+# this constant so the error text is defined in exactly one place.
+CACHE_ERROR_RESPONSE_PREFIX = "I encountered an error while processing your request"
+
 
 class CacheManager:
     """
@@ -146,9 +151,12 @@ class CacheManager:
             response: The response to cache.
             session_id: Optional session/conversation ID.
             user_id: Optional end-user identifier for multi-tenant scoping.
+            bypass_reason: When set, the response is not cached and the
+                bypass is recorded in the cache statistics.
 
         Returns:
-            True if successfully cached, False otherwise.
+            True if successfully cached, False otherwise. Error replies
+            (``CACHE_ERROR_RESPONSE_PREFIX``) are never cached.
         """
         if not self.enabled or not self.cache_instance:
             return False
@@ -156,6 +164,10 @@ class CacheManager:
         try:
             if bypass_reason:
                 self.cache_instance.record_bypass(bypass_reason)
+                return False
+            if str(response or "").lstrip().startswith(CACHE_ERROR_RESPONSE_PREFIX):
+                logger.debug("Not caching error response for query: %s", query[:50])
+                self.cache_instance.record_bypass("error_response")
                 return False
             kwargs: Dict[str, Any] = {
                 "query": query,

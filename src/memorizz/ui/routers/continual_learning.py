@@ -24,6 +24,7 @@ distillation validation gate.
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -325,39 +326,79 @@ async def distill_class(agent_id: str, canonical_hash: str):
 
 @router.post("/continual-learning/skills/{skill_id}/activate")
 async def activate_skill(skill_id: str):
-    """SHADOW/CANDIDATE → ACTIVE, with workflow stamp backfill."""
+    """SHADOW/CANDIDATE → ACTIVE, with workflow stamp backfill.
+
+    Redirects back to the skills page; a failure is carried in ``?error=``
+    (the same convention as the automation routes) instead of being
+    swallowed as if the skill had been activated.
+    """
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
     try:
-        agent_id = _skill_agent_id(skill_id)
-        manager = _build_manager(agent_id)
-        manager.activate_skill(skill_id)
+        skill = _find_skill(skill_id)
+        if skill is None:
+            return _skills_redirect(error=f"Skill {skill_id} was not found")
+        manager = _build_manager(skill.get("agent_id"))
+        if not manager.activate_skill(skill_id):
+            return _skills_redirect(
+                error=f"Skill {skill_id} could not be activated "
+                "(only shadow or candidate skills can be)"
+            )
     except Exception as exc:
         logger.error("Skill activation failed for %s: %s", skill_id, exc)
-    return RedirectResponse(url="/memory/skills", status_code=303)
+        return _skills_redirect(error=f"Skill activation failed: {exc}")
+    return _skills_redirect()
 
 
 @router.post("/continual-learning/skills/{skill_id}/demote")
 async def demote_skill(skill_id: str):
-    """Manual demotion: stops retrieval, releases suppressed workflows."""
+    """Manual demotion: stops retrieval, releases suppressed workflows.
+
+    Redirects back to the skills page, with ``?error=`` on failure.
+    """
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
     try:
-        agent_id = _skill_agent_id(skill_id)
-        manager = _build_manager(agent_id)
-        manager.demote_skill(skill_id, reason="manually demoted from UI")
+        skill = _find_skill(skill_id)
+        if skill is None:
+            return _skills_redirect(error=f"Skill {skill_id} was not found")
+        manager = _build_manager(skill.get("agent_id"))
+        if not manager.demote_skill(skill_id, reason="manually demoted from UI"):
+            return _skills_redirect(error=f"Skill {skill_id} could not be demoted")
     except Exception as exc:
         logger.error("Skill demotion failed for %s: %s", skill_id, exc)
-    return RedirectResponse(url="/memory/skills", status_code=303)
+        return _skills_redirect(error=f"Skill demotion failed: {exc}")
+    return _skills_redirect()
 
 
-def _skill_agent_id(skill_id: str) -> Optional[str]:
+def _skills_redirect(error: Optional[str] = None) -> RedirectResponse:
+    url = "/memory/skills"
+    if error:
+        url += "?error=" + quote(str(error)[:300])
+    return RedirectResponse(url=url, status_code=303)
+
+
+def _find_skill(skill_id: str) -> Optional[Dict[str, Any]]:
+    """The stored skill document for one id, from a filtered query.
+
+    Falls back to scanning the skillbox only when the provider rejects the
+    dictionary filter, so the common path reads one document, not all.
+    """
+    provider = _state["provider"]
+    wanted = str(skill_id)
     try:
-        for doc in (
-            _state["provider"].list_all(memory_store_type=MemoryType.SKILLBOX) or []
-        ):
-            if isinstance(doc, dict) and str(doc.get("skill_id")) == str(skill_id):
-                return doc.get("agent_id")
-    except Exception:
-        pass
+        rows = provider.retrieve_by_query(
+            {"skill_id": wanted}, memory_store_type=MemoryType.SKILLBOX, limit=1
+        )
+    except Exception as exc:
+        logger.debug("Skill lookup by id failed for %s, scanning: %s", skill_id, exc)
+        try:
+            rows = provider.list_all(memory_store_type=MemoryType.SKILLBOX)
+        except Exception:
+            rows = None
+    if isinstance(rows, dict):
+        rows = [rows]
+    for doc in rows or []:
+        if isinstance(doc, dict) and str(doc.get("skill_id")) == wanted:
+            return doc
     return None

@@ -48,7 +48,14 @@ class LearningControlPlaneStore:
         )
         return payload
 
-    def get(self, record_id: str) -> Optional[Dict[str, Any]]:
+    def lookup(self, record_id: str) -> Optional[Dict[str, Any]]:
+        """Read one record by its stored id without scanning the partition.
+
+        Every learning record is written with ``_id`` and ``memory_id`` equal
+        to its ``record_id``, so a by-id or by-name read is sufficient on all
+        first-party providers. Hot paths (idempotent writes, checkpoint and
+        tombstone reads) must use this instead of :meth:`get`.
+        """
         value = str(record_id or "").strip()
         if not value:
             return None
@@ -64,6 +71,20 @@ class LearningControlPlaneStore:
                 payload = self._payload(row)
                 if payload and str(payload.get("record_id") or "") == value:
                     return payload
+        return None
+
+    def get(self, record_id: str) -> Optional[Dict[str, Any]]:
+        """Read one record; falls back to a bounded partition scan.
+
+        The scan only exists for providers whose by-id reads cannot resolve a
+        string id. Prefer :meth:`lookup` on any per-turn path.
+        """
+        found = self.lookup(record_id)
+        if found is not None:
+            return found
+        value = str(record_id or "").strip()
+        if not value:
+            return None
         for payload in self.list_records(limit=10_000):
             if str(payload.get("record_id") or "") == value:
                 return payload
@@ -84,7 +105,7 @@ class LearningControlPlaneStore:
         )
         value["record_hash"] = value_hash
 
-        existing = self.get(record_id)
+        existing = self.lookup(record_id)
         if existing:
             existing_hash = existing.get("record_hash")
             if immutable and existing_hash and str(existing_hash) != value_hash:
@@ -158,6 +179,72 @@ class LearningControlPlaneStore:
         value.setdefault("tombstoned_at", utc_now())
         return self._put(value, immutable=False)
 
+    def _indexed_query_available(self) -> bool:
+        """True when the provider overrides the portable observability query.
+
+        The base-class implementation is itself a ``list_all`` scan, so using
+        it would only add overhead; database providers override it with
+        indexed predicates on ``agent_id`` and ``record_type``.
+        """
+        from ..memory_provider.base import MemoryProvider
+
+        method = getattr(type(self.provider), "query_observability_records", None)
+        base = MemoryProvider.__dict__.get("query_observability_records")
+        return callable(method) and method is not base
+
+    def _scan_partition(self) -> List[Mapping[str, Any]]:
+        try:
+            rows = self.provider.list_all(MemoryType.SHARED_MEMORY) or []
+        except TypeError:
+            rows = (
+                self.provider.list_all(memory_store_type=MemoryType.SHARED_MEMORY) or []
+            )
+        return [row for row in rows if isinstance(row, Mapping)]
+
+    def _partition_rows(
+        self,
+        *,
+        record_type: Optional[str],
+        user_id: Any,
+        limit: int,
+    ) -> List[Mapping[str, Any]]:
+        """Raw provider rows for this agent's learning partition.
+
+        Uses the provider's indexed observability query when one exists,
+        paging until ``limit`` rows are collected; otherwise falls back to a
+        full partition scan (filesystem and providers without an override).
+        Logical filters (memory_id, thread_id, run_id, stream_id) are applied
+        by the caller on the decoded payload.
+        """
+        if not self._indexed_query_available():
+            return self._scan_partition()
+        rows: List[Mapping[str, Any]] = []
+        cursor: Optional[str] = None
+        page_size = max(1, min(int(limit), 1000))
+        for _ in range(200):
+            kwargs: Dict[str, Any] = {
+                "agent_ids": [self.agent_id],
+                "record_type": record_type,
+                "limit": page_size,
+                "cursor": cursor,
+            }
+            if user_id is not ...:
+                kwargs["user_id"] = user_id
+            try:
+                page = self.provider.query_observability_records(
+                    MemoryType.SHARED_MEMORY, **kwargs
+                )
+            except (NotImplementedError, TypeError):
+                return self._scan_partition()
+            if not isinstance(page, Mapping):
+                return self._scan_partition()
+            items = page.get("items") or []
+            rows.extend(item for item in items if isinstance(item, Mapping))
+            cursor = page.get("next_cursor")
+            if not cursor or len(rows) >= limit:
+                break
+        return rows
+
     def list_records(
         self,
         *,
@@ -170,12 +257,9 @@ class LearningControlPlaneStore:
         limit: int = 1000,
     ) -> List[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 50_000))
-        try:
-            rows = self.provider.list_all(MemoryType.SHARED_MEMORY) or []
-        except TypeError:
-            rows = (
-                self.provider.list_all(memory_store_type=MemoryType.SHARED_MEMORY) or []
-            )
+        rows = self._partition_rows(
+            record_type=record_type, user_id=user_id, limit=safe_limit
+        )
         output: List[Dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, Mapping):

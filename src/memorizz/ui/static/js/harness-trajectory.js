@@ -3,7 +3,8 @@
    MemorizzTrajectory.render(container, {events, loaded}) draws the steps into a
    container whose data-active="true" marks a run still in progress. */
 (function () {
-    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+    // base.html's escapeHtml; the inline copy keeps the module working standalone.
+    const esc = typeof escapeHtml === 'function' ? escapeHtml : (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
     const fmtDuration = (ms) => {
         if (ms == null || !isFinite(ms)) return '—';
         if (ms < 1000) return Math.round(ms) + ' ms';

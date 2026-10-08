@@ -8,6 +8,11 @@ from ...llms.streaming import ProviderStreamError
 
 logger = logging.getLogger(__name__)
 
+# Framing tokens a chat provider adds around each message (role, separators)
+# and once per request (template), over and above the text itself.
+MESSAGE_OVERHEAD_TOKENS = 6
+REQUEST_OVERHEAD_TOKENS = 16
+
 
 def estimate_tokens(value):
     """Estimate text/JSON tokens without downloads or provider network calls.
@@ -21,6 +26,17 @@ def estimate_tokens(value):
     return math.ceil(len(value.encode("utf-8")) / 4)
 
 
+def estimate_message_tokens(message):
+    """Estimate one chat message's text content plus its per-message framing.
+
+    Prices only ``content`` (what the history window and auto-compaction
+    heuristics budget for). ``fit_prompt`` prices the whole serialized
+    message instead, because that is what reaches the provider.
+    """
+    content = message.get("content") if isinstance(message, dict) else message
+    return estimate_tokens(str(content or "")) + MESSAGE_OVERHEAD_TOKENS
+
+
 def fit_prompt(messages, tools, context_window_tokens):
     """Evict old turns; never cut instructions, the current query, or evidence.
 
@@ -32,8 +48,10 @@ def fit_prompt(messages, tools, context_window_tokens):
         return list(messages)
 
     budget = int(context_window_tokens * 0.8)
-    costs = [estimate_tokens(message) + 6 for message in messages]
-    total = sum(costs) + (estimate_tokens(tools) if tools else 0) + 16
+    costs = [estimate_tokens(message) + MESSAGE_OVERHEAD_TOKENS for message in messages]
+    total = (
+        sum(costs) + (estimate_tokens(tools) if tools else 0) + REQUEST_OVERHEAD_TOKENS
+    )
     if total <= budget:
         return list(messages)
 

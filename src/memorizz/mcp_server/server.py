@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Callable, Dict, Optional
 
 from mcp.server import MCPServer
@@ -38,8 +39,15 @@ class EntityRelationArgument(BaseModel):
 
 
 async def _tool_call(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    from ..memory_history import memory_change_context
+
     try:
-        return await asyncio.to_thread(function, *args, **kwargs)
+        with memory_change_context(
+            actor=current_identity().principal or "local-mcp",
+            source="mcp:" + function.__name__,
+            harness_run_id=os.getenv("MEMORIZZ_HARNESS_RUN_ID"),
+        ):
+            return await asyncio.to_thread(function, *args, **kwargs)
     except MemorizzServerError as exc:
         raise ToolError(f"{exc.code}: {exc.message}") from exc
     except Exception as exc:
@@ -336,21 +344,30 @@ def create_memorizz_mcp_server(
     ) -> Dict[str, Any]:
         """Run a scoped turn. Opt into progress or memorizz.events.v1 notifications."""
         if event_format is not None:
+            from ..memory_history import memory_change_context
             from .streaming import execute_stream
 
+            identity = current_identity()
             try:
-                return await execute_stream(
-                    service,
-                    message,
-                    current_identity(),
-                    ctx,
-                    event_format=event_format,
-                    agent_id=agent_id,
-                    memory_id=memory_id,
-                    thread_id=thread_id,
-                    context=context,
-                    delivery_mode=delivery_mode,
-                )
+                # Same attribution as _tool_call: the streamed turn's memory
+                # writes are journalled to the caller, not "unknown".
+                with memory_change_context(
+                    actor=identity.principal or "local-mcp",
+                    source="mcp:execute_agent",
+                    harness_run_id=os.getenv("MEMORIZZ_HARNESS_RUN_ID"),
+                ):
+                    return await execute_stream(
+                        service,
+                        message,
+                        identity,
+                        ctx,
+                        event_format=event_format,
+                        agent_id=agent_id,
+                        memory_id=memory_id,
+                        thread_id=thread_id,
+                        context=context,
+                        delivery_mode=delivery_mode,
+                    )
             except MemorizzServerError as exc:
                 raise ToolError(f"{exc.code}: {exc.message}") from exc
         if delivery_mode is not None:
@@ -570,7 +587,11 @@ def create_memorizz_mcp_server(
     ) -> Dict[str, Any]:
         """List the tools on an agent's own MCP servers (Notion, Gmail and so
         on), whether each server is signed in, and which tools change data.
-        agent_id may be omitted when this server serves a single agent."""
+        A tool counts as read-only only when its server annotates it
+        readOnlyHint, the server's read_only_tools policy names it, or its name
+        starts with a read verb (get, list, search, find, ...); every other
+        tool is treated as changing data. agent_id may be omitted when this
+        server serves a single agent."""
         return await _tool_call(
             service.list_connected_tools,
             agent_id,
@@ -586,8 +607,10 @@ def create_memorizz_mcp_server(
         agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Call a read-only tool on one of the agent's MCP servers (search,
-        list, get). Credentials stay in MemoRizz. Tools that change data are
-        refused; use memorizz_call_connected_tool for those."""
+        list, get). Credentials stay in MemoRizz. Any tool not annotated
+        readOnlyHint, not in the server's read_only_tools policy and not named
+        with a leading read verb is treated as changing data and refused here;
+        use memorizz_call_connected_tool for those."""
         return await _tool_call(
             service.call_connected_tool,
             agent_id,
@@ -741,6 +764,63 @@ def create_memorizz_mcp_server(
         )
 
     @server.tool(annotations=read_only)
+    async def memorizz_export_memories(
+        memory_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        memory_types: Optional[list[str]] = None,
+        include_delegates: bool = True,
+        include_history: bool = True,
+        include_context: bool = True,
+    ) -> Dict[str, Any]:
+        """Export a version-1 taxonomy-aligned memory archive for this tenant.
+
+        Includes current records, explicit relationships and available history.
+        Credentials/executable objects are omitted. For large archives use
+        memorizz memory export FILE from the local CLI.
+        """
+        return await _tool_call(
+            service.export_memories,
+            current_identity(),
+            memory_id=memory_id,
+            agent_id=agent_id,
+            memory_types=memory_types,
+            include_delegates=include_delegates,
+            include_history=include_history,
+            include_context=include_context,
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
+        )
+    )
+    async def memorizz_import_memories(
+        archive: Dict[str, Any],
+        dry_run: bool = True,
+        conflict: str = "error",
+        id_strategy: str = "preserve",
+        target_memory_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Validate/preview or restore a memorizz.memory archive for this tenant.
+
+        Defaults to dry_run=true (no writes). Set dry_run=false to apply.
+        conflict: error/skip/replace; id_strategy: preserve/new (clone graph).
+        Writes require the server's write policy and scope. No agent is executed.
+        """
+        return await _tool_call(
+            service.import_memories,
+            archive,
+            current_identity(),
+            dry_run=dry_run,
+            conflict=conflict,
+            id_strategy=id_strategy,
+            target_memory_id=target_memory_id,
+        )
+
+    @server.tool(annotations=read_only)
     async def memorizz_list_memories(
         memory_type: str = "knowledge_base",
         memory_id: Optional[str] = None,
@@ -791,6 +871,35 @@ def create_memorizz_mcp_server(
         """Read one tenant-scoped memory record by ID."""
         return await _tool_call(
             service.get_memory, record_id, memory_type, current_identity()
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_get_memory_timeline(
+        agent_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        action: Optional[str] = None,
+        actor: Optional[str] = None,
+        limit: int = 200,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Inspect tenant-scoped memory evolution, changed fields and explicit lineage.
+
+        Versions contain hashes, not memory content. Pass next_cursor to continue
+        through older changes; missing history is never invented.
+        """
+        return await _tool_call(
+            service.memory_timeline,
+            current_identity(),
+            agent_id=agent_id,
+            memory_id=memory_id,
+            run_id=run_id,
+            memory_type=memory_type,
+            action=action,
+            actor=actor,
+            limit=limit,
+            cursor=cursor,
         )
 
     @server.tool(annotations=write)

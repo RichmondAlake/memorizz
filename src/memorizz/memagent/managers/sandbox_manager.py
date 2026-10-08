@@ -104,6 +104,101 @@ class SandboxManager(ProviderSlot):
 
     # --- Tool generation ---
 
+    def _provider_security_posture(self) -> Dict[str, Any]:
+        """Report whether the configured provider is a real security boundary.
+
+        Order of precedence: an explicit ``is_security_sandbox`` attribute on
+        the provider (or key in ``get_config()``), then the provider's
+        ``security_boundary`` config entry, then the provider name and mode.
+        """
+        provider = self.provider
+        name = ""
+        config: Dict[str, Any] = {}
+        if provider is not None:
+            try:
+                name = str(provider.get_provider_name() or "")
+            except Exception:
+                name = str(getattr(provider, "provider_name", "") or "")
+            try:
+                config = dict(provider.get_config() or {})
+            except Exception:
+                config = {}
+        name = name.strip().lower()
+        mode = str(config.get("mode") or "").strip().lower()
+
+        flag = getattr(provider, "is_security_sandbox", None)
+        if not isinstance(flag, bool):
+            flag = config.get("is_security_sandbox")
+        if isinstance(flag, bool):
+            is_sandbox: Optional[bool] = flag
+        else:
+            boundary = str(config.get("security_boundary") or "").strip().lower()
+            if boundary:
+                is_sandbox = "not_strong_sandbox" not in boundary and (
+                    "not_a_sandbox" not in boundary
+                )
+            elif name == "graalpy":
+                is_sandbox = mode == "java_wrapper"
+            elif name in {"e2b", "daytona"}:
+                is_sandbox = True
+            else:
+                is_sandbox = None
+
+        return {
+            "name": name,
+            "mode": mode,
+            "is_security_sandbox": is_sandbox,
+            "allow_network": config.get("allow_network"),
+        }
+
+    def _execute_code_description(self) -> str:
+        """Build an honest ``execute_code`` tool description for the provider."""
+        posture = self._provider_security_posture()
+        label = posture["name"] or "configured"
+        if posture["mode"]:
+            label = f"{label} ({posture['mode']} mode)"
+
+        if posture["is_security_sandbox"] is True:
+            summary = (
+                f"Execute code in the isolated {label} sandbox and return the "
+                "output. The provider enforces a security boundary between the "
+                "code and this host, so it is suitable for untrusted code."
+            )
+        else:
+            if posture["is_security_sandbox"] is False:
+                reason = (
+                    "This is NOT a security sandbox: trusted code only, no "
+                    "filesystem isolation. Code runs with this process's host "
+                    "identity and can read and write the host filesystem; only "
+                    "environment variables are filtered"
+                )
+            else:
+                reason = (
+                    "This provider declares no security boundary: treat it as "
+                    "trusted code only, no filesystem isolation"
+                )
+            if posture["allow_network"] is False:
+                reason += " and network access is denied by policy."
+            elif posture["allow_network"] is True:
+                reason += " and network access is allowed."
+            else:
+                reason += "."
+            summary = (
+                f"Execute code with the {label} provider and return the output. "
+                f"{reason} Never run code from untrusted sources with this tool."
+            )
+
+        return (
+            f"{summary}\n\n"
+            "Stateful providers keep one bounded session, so files written with "
+            "sandbox_write_file remain available until close().\n\n"
+            "Args:\n"
+            "    code: The source code to execute.\n"
+            "    language: Programming language (default: python).\n\n"
+            "Returns:\n"
+            "    JSON string with stdout, stderr, error, and execution results."
+        )
+
     def get_tools(self) -> List[Callable]:
         """Return tool functions suitable for MemAgent tool registration.
 
@@ -111,15 +206,15 @@ class SandboxManager(ProviderSlot):
         - ``execute_code``: Execute code in the sandbox.
         - ``sandbox_write_file``: Write a file in the sandbox.
         - ``sandbox_read_file``: Read a file from the sandbox.
+
+        The ``execute_code`` description states honestly whether the provider
+        is a security boundary (E2B/Daytona, GraalPy ``java_wrapper``) or a
+        bounded host subprocess for trusted code only (GraalPy ``subprocess``).
         """
         manager = self  # capture for closures
 
         def execute_code(code: str, language: str = "python") -> str:
-            """Execute code in a secure sandbox environment and return the output.
-
-            Use this tool to run Python (or other language) code safely in an isolated
-            environment. Stateful providers keep one bounded session, so files
-            written with sandbox_write_file remain available until close().
+            """Execute code with the configured sandbox provider and return the output.
 
             Args:
                 code: The source code to execute.
@@ -130,6 +225,8 @@ class SandboxManager(ProviderSlot):
             """
             result = manager.execute_code(code=code, language=language)
             return result.to_json()
+
+        execute_code.__doc__ = manager._execute_code_description()
 
         def sandbox_write_file(path: str, content: str) -> str:
             """Write a file inside the sandbox environment.

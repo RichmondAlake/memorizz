@@ -64,6 +64,10 @@ class AutomationStore(Protocol):
     def record_delivery(
         self, run_id: str, delivery: AutomationDelivery
     ) -> AutomationDelivery:
+        """Upsert by ``delivery_id`` so one (run, recipient) is recorded once."""
+        ...
+
+    def list_deliveries(self, run_id: str) -> List[AutomationDelivery]:
         ...
 
     def list_runs(self, job_id: str, limit: int = 50) -> List[AutomationRun]:

@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% from '_ui.html' import page_header %}
+{% block title %}Export & import memory - MemoRizz{% endblock %}
+{% block body_attrs %} data-sidebar-scope="memory" data-sidebar-default="collapsed"{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/pages/memory-transfer.css?v=2">
+<script src="/static/js/memory-transfer.js?v=1" defer></script>
+{% endblock %}
+{% block content %}
+{{ page_header('Export & import memory', 'Move a memory graph between MemoRizz stores, or keep a portable copy of its current state and recorded history.', 'Memory') }}
+<div class="mt-format"><strong>MemoRizz memory archive · v1</strong><span>.memorizz.json · 13 taxonomy stores · SHA-256 integrity</span></div>
+<div class="mt-grid">
+<section class="mt-panel" aria-labelledby="export-heading">
+    <h2 id="export-heading">Export memory</h2>
+    <p>Download current values, ownership, delegate relationships and available lineage.</p>
+    <form id="memory-export-form">
+        <label class="form-group">Agent<select name="agent_id"><option value="">All agents and memories</option>{% for agent in agents %}<option value="{{ agent.agent_id }}" {% if agent.agent_id == agent_id %}selected{% endif %}>{{ agent.name or agent.agent_id }} · {{ agent.agent_id[:8] }}</option>{% endfor %}</select></label>
+        <label class="form-group">Memory namespace<input name="memory_id" value="{{ memory_id }}" placeholder="All namespaces in the selected scope"></label>
+        <fieldset><legend>Memory taxonomy</legend><div class="mt-types">{% for kind, category in taxonomy.items() %}<label title="{{ category }}"><input type="checkbox" name="memory_type" value="{{ kind }}" checked>{{ kind|replace('_', ' ')|capitalize }}</label>{% endfor %}</div></fieldset>
+        <div class="mt-options"><label><input type="checkbox" name="include_delegates" checked> Include delegates and their private memories</label><label><input type="checkbox" name="include_history" checked> Include recorded memory evolution</label><label><input type="checkbox" name="include_context" checked> Include captured context and observability records</label></div>
+        <p class="form-note">Provider credentials, executable objects and embeddings are omitted. Memory text and captured prompts are included.</p>
+        <button class="btn btn-primary" type="submit">Download archive</button>
+        <p id="memory-export-status" role="status" aria-live="polite"></p>
+    </form>
+</section>
+<section class="mt-panel" aria-labelledby="import-heading">
+    <h2 id="import-heading">Import memory</h2>
+    <p>Validate the format and inspect planned changes before restoring records.</p>
+    {% if read_only %}<p class="form-note">Import is disabled while this portal is read-only.</p>{% endif %}
+    <form id="memory-import-form" data-read-only="{{ 'true' if read_only else 'false' }}">
+        <label class="form-group">Archive file<input type="file" id="memory-archive-file" accept=".json,application/json" required {% if read_only %}disabled{% endif %}></label>
+        <label class="form-group">Record identities<select name="id_strategy"><option value="preserve">Preserve IDs · restore the original graph</option><option value="new">New IDs · create an independent copy</option></select></label>
+        <label class="form-group">Existing records<select name="conflict"><option value="error">Stop if any records already exist</option><option value="skip">Skip existing records</option><option value="replace">Replace matching records</option></select></label>
+        <p class="form-note">New IDs keep separate delegate namespaces and remap internal links. Imported agents have automations disabled. Import saves records without running agents or tools.</p>
+        <div class="mt-actions"><button class="btn" type="submit" {% if read_only %}disabled{% endif %}>Preview import</button><button class="btn btn-primary" id="memory-import-apply" type="button" disabled>Import reviewed archive</button></div>
+        <p id="memory-import-status" role="status" aria-live="polite"></p>
+    </form>
+    <section id="memory-import-preview" class="mt-preview" aria-label="Import preview" hidden></section>
+</section>
+</div>
+<details class="mt-help"><summary>What an archive preserves</summary><p>All selected taxonomy records, current values, explicit source links, configured delegates, private and shared memories, and available change/context records. History records preserve timestamps, writer attribution and hashes; deleted or older memory values are not reconstructed. Imported changes begin a new write boundary.</p><p>Archives are memory copies rather than complete database backups. External files, credentials, model weights, and the harness run database stay outside the archive. An export can overlap concurrent writes. A restore can commit partially if a provider fails; its report identifies how many records were written. Reconnect tools/providers and regenerate embeddings before relying on semantic search.</p><p>SDK: <code>MemoryArchive(provider)</code> · CLI: <code>memorizz memory export</code> / <code>import</code> · MCP: <code>memorizz_export_memories</code> / <code>memorizz_import_memories</code></p></details>
+{% endblock %}

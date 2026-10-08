@@ -14,60 +14,132 @@ import socket
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import urlparse
 
+from ..redaction import SENSITIVE_KEY_NAMES, KeyMatcher, RedactionPolicy
+from ..redaction import redact as _redact
 from .errors import MCPConfigurationError, MCPPolicyError
 from .models import MCPServerConfig
 
-_MUTATION_PREFIXES = (
-    "add",
-    "archive",
-    "cancel",
-    "create",
-    "delete",
-    "edit",
-    "execute",
-    "forget",
-    "invite",
-    "move",
-    "publish",
-    "remove",
-    "respond",
-    "send",
-    "set",
-    "share",
-    "store",
-    "update",
-    "upload",
-    "write",
+# A connected tool is assumed to change data unless the server, the host or
+# its name says it only reads. "export" is deliberately absent: exports often
+# create files or share data.
+_READ_ONLY_PREFIXES = frozenset(
+    {
+        "check",
+        "count",
+        "describe",
+        "fetch",
+        "find",
+        "get",
+        "info",
+        "inspect",
+        "list",
+        "lookup",
+        "preview",
+        "query",
+        "read",
+        "search",
+        "show",
+        "status",
+        "view",
+    }
 )
 
-_SENSITIVE_KEYS = {
-    "access_token",
-    "api_key",
-    "authorization",
-    "bearer_token",
-    "client_secret",
-    "code_verifier",
-    "cookie",
-    "password",
-    "refresh_token",
-    "secret",
-    "token",
-}
+_CONNECTIVES = frozenset({"and", "then", "or", "with", "plus"})
+
+# Verbs that always mean a mutation, wherever they appear in the name
+# ("get_and_delete" is a delete). Unknown verbs are mutations too; this set
+# only exists so a read verb earlier in the name cannot launder them.
+_MUTATION_VERBS = frozenset(
+    {
+        "add",
+        "append",
+        "apply",
+        "approve",
+        "archive",
+        "assign",
+        "attach",
+        "book",
+        "buy",
+        "call",
+        "cancel",
+        "clear",
+        "close",
+        "compact",
+        "compile",
+        "confirm",
+        "continue",
+        "create",
+        "delete",
+        "deploy",
+        "destroy",
+        "detach",
+        "disable",
+        "drop",
+        "edit",
+        "enable",
+        "execute",
+        "forget",
+        "forward",
+        "import",
+        "ingest",
+        "insert",
+        "invite",
+        "label",
+        "launch",
+        "merge",
+        "move",
+        "patch",
+        "pause",
+        "post",
+        "publish",
+        "purchase",
+        "purge",
+        "put",
+        "record",
+        "register",
+        "reject",
+        "remove",
+        "rename",
+        "reply",
+        "rerun",
+        "reschedule",
+        "reset",
+        "restore",
+        "resume",
+        "retry",
+        "revoke",
+        "run",
+        "save",
+        "schedule",
+        "send",
+        "set",
+        "share",
+        "start",
+        "stop",
+        "store",
+        "submit",
+        "summarize",
+        "sync",
+        "trash",
+        "trigger",
+        "unsubscribe",
+        "update",
+        "upload",
+        "upsert",
+        "write",
+    }
+)
+
+# Whole-key matches only: MCP argument names are structured, and string values
+# are tool traffic that must round-trip untouched.
+_REDACTION = RedactionPolicy(
+    keys=KeyMatcher(exact=SENSITIVE_KEY_NAMES), replacement="***", tuples="tuple"
+)
 
 
 def redact(value: Any) -> Any:
     """Recursively redact known credential-bearing fields."""
-    if isinstance(value, dict):
-        result: Dict[str, Any] = {}
-        for key, item in value.items():
-            normalized = str(key).strip().lower()
-            result[str(key)] = "***" if normalized in _SENSITIVE_KEYS else redact(item)
-        return result
-    if isinstance(value, list):
-        return [redact(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(redact(item) for item in value)
-    return value
+    return _redact(value, _REDACTION)
 
 
 def validate_remote_url(url: str, allow_private_network: bool = False) -> None:
@@ -162,7 +234,16 @@ def tool_is_mutating(
     read_only_tools: Iterable[str] = (),
     mutation_tools: Iterable[str] = (),
 ) -> bool:
-    """Classify side effects using host policy, MCP annotations, then fallback."""
+    """Whether a connected tool may change external data.
+
+    A tool is read-only only when (a) the host's per-server ``read_only_tools``
+    allowlist names it, (b) the server annotates it ``readOnlyHint=True``, or
+    (c) the first word of its name is a read verb (``get``, ``list``,
+    ``search``, ...). Everything else, including un-annotated names such as
+    ``reply``, ``forward`` or ``confirm_booking``, is treated as a mutation
+    and goes through approval. ``mutation_tools`` and ``destructiveHint``
+    always win.
+    """
     normalized_name = str(tool_name or "").strip()
     if normalized_name in set(mutation_tools):
         return True
@@ -180,11 +261,32 @@ def tool_is_mutating(
         return True
     if read_only is True:
         return False
-    # MCP annotations are advisory and optional. Unknown tools fail safe to a
-    # conservative name heuristic unless the host explicitly classifies them.
-    normalized = str(tool_name or "").strip().lower().replace("-", "_")
-    segments = [part for part in normalized.replace(".", "_").split("_") if part]
-    return any(segment in _MUTATION_PREFIXES for segment in segments)
+    if read_only is False:
+        return True
+    # MCP annotations are advisory and optional. Without one, the name decides:
+    # any mutation verb anywhere makes it a mutation; otherwise the first verb
+    # found while walking the segments must be a read verb (so a vendor or
+    # product prefix such as "notion-search" or "memorizz_list_memories" does
+    # not hide the read verb); anything else is treated as a mutation and the
+    # host allowlist covers the rest.
+    normalized = normalized_name.lower().replace("-", "_").replace(".", "_")
+    segments = [part for part in normalized.split("_") if part]
+    decisive = None
+    for index, segment in enumerate(segments):
+        if segment in _MUTATION_VERBS:
+            return True
+        if segment in _READ_ONLY_PREFIXES:
+            decisive = index
+            break
+    if decisive is None:
+        return True
+    # "get_and_delete" / "search_then_send": a mutation verb chained to the
+    # read verb with a connective is a mutation. Nouns such as "run" in
+    # "get_harness_run" are not chained and stay read-only.
+    for index in range(decisive + 1, len(segments)):
+        if segments[index] in _MUTATION_VERBS and segments[index - 1] in _CONNECTIVES:
+            return True
+    return False
 
 
 def enforce_tool_policy(

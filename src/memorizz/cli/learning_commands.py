@@ -166,4 +166,92 @@ def forget_apply(
     _print(applied, raw_json)
 
 
+@learning_app.command("retention-plan")
+def retention_plan(
+    agent_id: str = typer.Option(..., "--agent-id"),
+    memory_id: Optional[str] = typer.Option(None, "--memory-id"),
+    user_id: Optional[str] = typer.Option(None, "--user-id"),
+    thread_id: Optional[str] = typer.Option(None, "--thread-id"),
+    backend: Optional[str] = typer.Option(None, "--backend"),
+    raw_json: bool = typer.Option(False, "--json"),
+):
+    """Dry-run plan over primary memories whose retention score decayed (nothing is changed)."""
+    with _runtime(agent_id, backend) as plane:
+        report = plane.plan_retention(
+            memory_id=memory_id,
+            user_id=user_id if user_id is not None else ...,
+            thread_id=thread_id,
+        ).to_dict()
+    report["plan_kind"] = "retention"
+    _print(report, raw_json)
+
+
+@learning_app.command("retention-apply")
+def retention_apply(
+    plan_id: str = typer.Argument(...),
+    agent_id: str = typer.Option(..., "--agent-id"),
+    approved_by: str = typer.Option(..., "--approved-by"),
+    reason: Optional[str] = typer.Option(None, "--reason"),
+    memory_id: Optional[str] = typer.Option(None, "--memory-id"),
+    user_id: Optional[str] = typer.Option(None, "--user-id"),
+    thread_id: Optional[str] = typer.Option(None, "--thread-id"),
+    backend: Optional[str] = typer.Option(None, "--backend"),
+    raw_json: bool = typer.Option(False, "--json"),
+):
+    """Suppress (never delete) the memories of a stored retention plan; reversible."""
+    with _runtime(agent_id, backend) as plane:
+        report = plane.get_forgetting_plan(
+            plan_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+        )
+        if not plane.is_retention_plan(report):
+            raise typer.BadParameter(
+                "plan_id refers to an artifact forgetting plan; use forget-apply"
+            )
+        applied = plane.apply_retention(
+            report,
+            approved_by=approved_by,
+            reason=reason,
+            scope={"memory_id": memory_id, "user_id": user_id, "thread_id": thread_id},
+        ).to_dict()
+    applied["plan_kind"] = "retention"
+    _print(applied, raw_json)
+
+
+@learning_app.command("suppressed")
+def suppressed_memories(
+    agent_id: str = typer.Option(..., "--agent-id"),
+    memory_id: Optional[str] = typer.Option(None, "--memory-id"),
+    user_id: Optional[str] = typer.Option(None, "--user-id"),
+    backend: Optional[str] = typer.Option(None, "--backend"),
+    raw_json: bool = typer.Option(False, "--json"),
+):
+    """List memories currently hidden from retrieval by a retention plan."""
+    with _runtime(agent_id, backend) as plane:
+        rows = plane.suppressed_memories(
+            memory_id=memory_id, user_id=user_id if user_id is not None else ...
+        )
+    _print({"agent_id": agent_id, "count": len(rows), "suppressed": rows}, raw_json)
+
+
+@learning_app.command("unsuppress")
+def unsuppress_memory(
+    record_id: str = typer.Argument(...),
+    memory_type: str = typer.Option(..., "--memory-type"),
+    agent_id: str = typer.Option(..., "--agent-id"),
+    approved_by: str = typer.Option(..., "--approved-by"),
+    reason: Optional[str] = typer.Option(None, "--reason"),
+    backend: Optional[str] = typer.Option(None, "--backend"),
+    raw_json: bool = typer.Option(False, "--json"),
+):
+    """Restore a suppressed memory to retrieval."""
+    with _runtime(agent_id, backend) as plane:
+        restored = plane.unsuppress_memory(
+            record_id, memory_type, approved_by=approved_by, reason=reason
+        )
+    _print(
+        {"record_id": record_id, "memory_type": memory_type, "restored": restored},
+        raw_json,
+    )
+
+
 __all__ = ["learning_app"]

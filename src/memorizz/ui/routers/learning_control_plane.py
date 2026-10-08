@@ -37,6 +37,20 @@ def _plane(agent_id: str) -> LearningControlPlane:
     )
 
 
+def _retention_overrides(agent_id: str) -> Optional[Dict[str, Any]]:
+    """The agent's per-agent ``retrieval_policy["retention"]`` mapping, if any."""
+    try:
+        agent = _state["provider"].retrieve_memagent(agent_id)
+    except Exception:
+        return None
+    policy = getattr(agent, "retrieval_policy", None)
+    if hasattr(policy, "to_dict"):
+        policy = policy.to_dict()
+    if isinstance(policy, dict) and isinstance(policy.get("retention"), dict):
+        return dict(policy["retention"])
+    return None
+
+
 def _redirect(agent_id: str, **scope: Any) -> RedirectResponse:
     query = {"agent_id": agent_id}
     query.update(
@@ -118,9 +132,21 @@ async def learning_control_plane_page(
             error = str(exc)
         finally:
             plane.close()
+    suppressed = []
+    if selected:
+        review_plane = _plane(selected)
+        try:
+            suppressed = review_plane.suppressed_memories(
+                memory_id=memory_id or None, user_id=user_id if user_id else ...
+            )
+        except Exception as exc:
+            logger.debug("Suppressed-memory listing failed: %s", exc)
+        finally:
+            review_plane.close()
     return templates.TemplateResponse(
         "learning_control_plane.html",
         {
+            "suppressed": suppressed,
             "request": request,
             "provider_type": _state["provider_type"],
             "connection_info": _state["connection_info"],
@@ -226,20 +252,103 @@ async def apply_forgetting(
             user_id=user_id or None,
             thread_id=thread_id or None,
         )
-        report = plane.apply_forgetting(
-            plan,
-            approved_by=approved_by,
-            reason=reason,
-            scope={
-                "memory_id": memory_id or None,
-                "user_id": user_id or None,
-                "thread_id": thread_id or None,
-            },
-        ).to_dict()
+        scope = {
+            "memory_id": memory_id or None,
+            "user_id": user_id or None,
+            "thread_id": thread_id or None,
+        }
+        if plane.is_retention_plan(plan):
+            report = plane.apply_retention(
+                plan,
+                approved_by=approved_by,
+                reason=reason,
+                scope=scope,
+                config=_retention_overrides(agent_id),
+            ).to_dict()
+            message = (
+                f"Suppressed {report['tombstoned']} memory record(s); "
+                "each can be restored below"
+            )
+            report["plan_kind"] = "retention"
+        else:
+            report = plane.apply_forgetting(
+                plan, approved_by=approved_by, reason=reason, scope=scope
+            ).to_dict()
+            message = f"Tombstoned {report['tombstoned']} artifact(s)"
         _last_actions[agent_id] = {
             "kind": "forget-apply",
-            "message": f"Tombstoned {report['tombstoned']} artifact(s)",
+            "message": message,
             "report": report,
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        _last_actions[agent_id] = {"kind": "error", "message": str(exc)}
+    finally:
+        plane.close()
+    return _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+
+
+@router.post("/learning-control-plane/retention-plan")
+async def plan_retention(
+    agent_id: str = Form(...),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Dry run over primary memories (conversation, knowledge, entities, ...)."""
+    plane = _plane(agent_id)
+    try:
+        report = plane.plan_retention(
+            memory_id=memory_id or None,
+            user_id=user_id if user_id else ...,
+            thread_id=thread_id or None,
+            config=_retention_overrides(agent_id),
+        ).to_dict()
+        report["plan_kind"] = "retention"
+        _last_actions[agent_id] = {
+            "kind": "forget-plan",
+            "message": (
+                f"Dry run found {report['candidate_count']} memory record(s) "
+                f"to suppress; {report['retained']} retained"
+            ),
+            "report": report,
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        _last_actions[agent_id] = {"kind": "error", "message": str(exc)}
+    finally:
+        plane.close()
+    return _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+
+
+@router.post("/learning-control-plane/unsuppress")
+async def unsuppress_memory(
+    agent_id: str = Form(...),
+    record_id: str = Form(...),
+    memory_type: str = Form(...),
+    approved_by: str = Form(...),
+    reason: Optional[str] = Form(None),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Reverse a suppression; the record returns to retrieval immediately."""
+    plane = _plane(agent_id)
+    try:
+        restored = plane.unsuppress_memory(
+            record_id, memory_type, approved_by=approved_by, reason=reason
+        )
+        _last_actions[agent_id] = {
+            "kind": "unsuppress",
+            "message": (
+                f"Restored {record_id[:12]} to retrieval"
+                if restored
+                else f"{record_id[:12]} was not suppressed"
+            ),
             "at": datetime.now().isoformat(timespec="seconds"),
         }
     except Exception as exc:

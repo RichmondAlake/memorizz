@@ -2,13 +2,9 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-"""Operational commands for Oracle setup, the local UI, and automations.
+"""Operational CLI commands: Oracle setup and teardown, the local UI, automations.
 
-Relocated verbatim from the original ``memorizz/cli.py`` so existing behavior is
-preserved. The only change is the package-relative script anchors: this module
-now lives one directory deeper (``memorizz/cli/legacy.py`` vs ``memorizz/cli.py``),
-so paths are resolved from ``_PKG_DIR`` (``src/memorizz``) to keep the candidate
-locations byte-identical to before.
+Script locations are resolved from ``_PKG_DIR`` (``src/memorizz``).
 """
 
 import os

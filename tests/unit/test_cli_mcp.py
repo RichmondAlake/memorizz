@@ -88,7 +88,16 @@ def test_cli_notion_and_google_presets_are_safe(tmp_path):
 
 
 @pytest.mark.unit
-def test_cli_capability_report_matches_current_mcp_surface():
+def test_cli_capability_report_matches_current_mcp_surface(tmp_path):
+    from memorizz.approval import SQLiteApprovalStore
+    from memorizz.capabilities import _mcp_tool_functions
+    from memorizz.mcp_server import (
+        MemorizzMCPServerConfig,
+        MemorizzRuntime,
+        create_memorizz_mcp_server,
+    )
+    from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+
     result = runner.invoke(app, ["capabilities", "--json"])
 
     assert result.exit_code == 0, result.output
@@ -96,7 +105,23 @@ def test_cli_capability_report_matches_current_mcp_surface():
     assert report["version"] == __version__
     assert report["features"]["mcp_client"]["available"] is True
     assert report["features"]["mcp_server"]["available"] is True
-    assert report["features"]["mcp_server"]["tool_count"] == 24
+    # The count is whatever the server registers today, never a literal.
+    config = MemorizzMCPServerConfig()
+    server = create_memorizz_mcp_server(
+        config,
+        runtime=MemorizzRuntime(
+            config,
+            provider=FileSystemProvider(
+                FileSystemConfig(root_path=tmp_path / "memory", use_faiss=False)
+            ),
+            approval_store=SQLiteApprovalStore(tmp_path / "approvals.sqlite3"),
+        ),
+    )
+    registered = server._tool_manager._tools
+    assert all(name.startswith("memorizz_") for name in registered)
+    assert report["features"]["mcp_server"]["tool_count"] == len(registered)
+    # The import-free fallback agrees with the registry.
+    assert _mcp_tool_functions() == len(registered)
     assert report["features"]["mcp_server"]["strict_input_schemas"] is True
     assert report["features"]["agent_creation"] == {
         "available": True,

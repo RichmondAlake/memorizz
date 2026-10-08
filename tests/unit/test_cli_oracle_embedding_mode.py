@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
-from memorizz.cli import agent_factory, legacy
+from memorizz.cli import agent_factory
+from memorizz.cli import operations as legacy
 
 
 def _set_oracle_env(monkeypatch):

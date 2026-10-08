@@ -23,6 +23,20 @@ from .constants import DEFAULT_MAX_STEPS
 logger = logging.getLogger(__name__)
 
 
+def _scrub_internet_access_config(config):
+    """Drop credential values from an internet provider config.
+
+    Built-in providers already omit the key, but a third-party provider or an
+    agent record saved by an older release may still carry one. The key is
+    resolved from the environment on restore, never from the record.
+    """
+    if not isinstance(config, dict):
+        return config
+    from ..internet_access.base import scrub_secret_config
+
+    return scrub_secret_config(config)
+
+
 def download_memory(agent, memagent) -> bool:
     """Copy ``memagent``'s memory_ids onto ``agent`` (see MemAgent.download_memory)."""
     try:
@@ -159,7 +173,9 @@ def save_agent(agent):
             is_favorite=agent.is_favorite,
             internet_access_provider=agent.get_internet_access_provider_name(),
             internet_access_config=(
-                agent.internet_access_manager.get_provider_config()
+                _scrub_internet_access_config(
+                    agent.internet_access_manager.get_provider_config()
+                )
                 if agent.has_internet_access()
                 else None
             ),
@@ -569,6 +585,10 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
             provider_name = None
         if provider_config is not None and not isinstance(provider_config, dict):
             provider_config = None
+        if provider_config is not None:
+            # A record saved by an older release may hold the key itself; the
+            # provider resolves it from the environment instead.
+            provider_config = _scrub_internet_access_config(provider_config)
         if provider_name:
             try:
                 from ..internet_access import create_internet_access_provider
@@ -837,6 +857,8 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         ),
         streaming=overrides.get("streaming", True),
         auto_register=overrides.get("auto_register", True),
+        capture_context_snapshots=overrides.get("capture_context_snapshots", False),
+        capture_memory_history=overrides.get("capture_memory_history", False),
     )
 
     # Hydrate knowledge_base_ids separately — it isn't a constructor arg

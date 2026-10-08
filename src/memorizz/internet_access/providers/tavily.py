@@ -69,9 +69,10 @@ class TavilyProvider(InternetAccessProvider):
             merged_config.get("include_raw_page", False)
         )
 
+        # The key is held on the instance only; ``get_config()`` (and so the
+        # saved agent record) reports ``api_key_set`` instead of the value.
         super().__init__(
             {
-                "api_key": resolved_api_key,
                 "base_url": resolved_base_url,
                 "timeout": resolved_timeout,
                 "search_depth": resolved_search_depth,

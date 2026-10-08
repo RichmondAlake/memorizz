@@ -12,6 +12,7 @@ and degrade gracefully when the SDK isn't installed in the current env.
 from typing import List
 
 from fastapi import APIRouter, Form
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/api/huggingface", tags=["huggingface"])
@@ -32,7 +33,8 @@ async def huggingface_pull(repo_id: str = Form(...)):
             status_code=503,
         )
     try:
-        path = snapshot_download(repo_id=repo_id)
+        # Downloads block for minutes; keep them off the event loop.
+        path = await run_in_threadpool(snapshot_download, repo_id=repo_id)
     except Exception as exc:  # pragma: no cover - depends on network
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
     return JSONResponse(

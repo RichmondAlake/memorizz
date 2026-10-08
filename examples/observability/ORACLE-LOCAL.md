@@ -2,8 +2,8 @@
 
 Created from the machine's existing native ARM image `gvenzl/oracle-free:23`;
 no image was downloaded. The running server reports Oracle AI Database 26ai Free,
-release 23.26.2.0.0. This isolated instance does not use OpenSpeech or another
-application's database/container.
+release 23.26.2.0.0. This isolated instance does not share any other
+application's database or container.
 
 | Setting | Value |
 |---|---|

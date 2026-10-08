@@ -24,16 +24,20 @@ into the context window. The pipeline is the standard assembly-time stack:
    deterministic across turns (re-ranking retrieved chunks between turns is
    a documented prompt-cache killer).
 
-All functions are dependency-free (no numpy) — candidate sets are tiny
-(tens of items), so pure-Python cosine is more than fast enough.
+Candidate sets are tiny (tens of items), so the shared cosine helper's
+pure-Python path is more than fast enough.
 """
 
 import hashlib
 import logging
 import math
+import os
 import re
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from ...memory_provider.vectors import cosine
 
 logger = logging.getLogger(__name__)
 
@@ -85,19 +89,8 @@ def content_fingerprint(text: Any) -> str:
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> Optional[float]:
-    """Pure-Python cosine similarity; None when either vector is unusable."""
-    if not a or not b or len(a) != len(b):
-        return None
-    dot = 0.0
-    norm_a = 0.0
-    norm_b = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        norm_a += x * x
-        norm_b += y * y
-    if norm_a <= 0.0 or norm_b <= 0.0:
-        return None
-    return dot / math.sqrt(norm_a * norm_b)
+    """Cosine similarity; None when either vector is unusable."""
+    return cosine(a, b, on_mismatch="none")
 
 
 def _parse_timestamp(value: Any) -> Optional[float]:
@@ -121,14 +114,250 @@ def _parse_timestamp(value: Any) -> Optional[float]:
         return None
 
 
-def _recency_score(timestamp: Optional[float], now: Optional[float] = None) -> float:
+_RECENCY_ANCHORS = ("last_accessed", "created")
+
+
+@dataclass(frozen=True)
+class RetrievalScoring:
+    """Generative-Agents retrieval scoring (Park et al. 2023), adapted to MemoRizz.
+
+    ``score = alpha_recency * recency + alpha_importance * importance
+    + alpha_relevance * relevance`` where each term is min-max normalised over
+    the candidate set when ``normalize`` is true. Recency is an exponential
+    decay per hour since the memory was *last accessed* (falls back to its
+    creation time when no access has been recorded), importance is the
+    stored 0..1 rating (``default_importance`` when a record has none) and
+    relevance is cosine-to-query or the provider score. The paper uses
+    0.995 per hour and equal weights of 1.
+    """
+
+    recency_decay_per_hour: float = 0.995
+    recency_anchor: str = "last_accessed"
+    alpha_recency: float = 1.0
+    alpha_importance: float = 1.0
+    alpha_relevance: float = 1.0
+    normalize: bool = True
+    default_importance: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.recency_anchor not in _RECENCY_ANCHORS:
+            object.__setattr__(self, "recency_anchor", "last_accessed")
+        decay = float(self.recency_decay_per_hour)
+        if not (0.0 < decay <= 1.0):
+            object.__setattr__(self, "recency_decay_per_hour", 0.995)
+        for name in ("alpha_recency", "alpha_importance", "alpha_relevance"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                object.__setattr__(self, name, 1.0)
+        importance = float(self.default_importance)
+        object.__setattr__(self, "default_importance", min(1.0, max(0.0, importance)))
+
+    @property
+    def weight_total(self) -> float:
+        total = self.alpha_recency + self.alpha_importance + self.alpha_relevance
+        return total if total > 0.0 else 1.0
+
+    @classmethod
+    def from_mapping(
+        cls, value: Any, *, base: Optional["RetrievalScoring"] = None
+    ) -> "RetrievalScoring":
+        """Overlay a config mapping (str/float values) on ``base``; bad values are ignored."""
+        current = base or cls()
+        if not isinstance(value, dict):
+            return current
+        updates: Dict[str, Any] = {}
+        for name in (
+            "recency_decay_per_hour",
+            "alpha_recency",
+            "alpha_importance",
+            "alpha_relevance",
+            "default_importance",
+        ):
+            if name in value and value[name] not in (None, ""):
+                try:
+                    updates[name] = float(value[name])
+                except (TypeError, ValueError):
+                    continue
+        anchor = value.get("recency_anchor")
+        if isinstance(anchor, str) and anchor.strip().lower() in _RECENCY_ANCHORS:
+            updates["recency_anchor"] = anchor.strip().lower()
+        if "normalize" in value and value["normalize"] not in (None, ""):
+            raw = value["normalize"]
+            updates["normalize"] = (
+                raw
+                if isinstance(raw, bool)
+                else str(raw).strip().lower() in {"1", "true", "yes", "on"}
+            )
+        return replace(current, **updates) if updates else current
+
+    @classmethod
+    def from_env(cls, environ: Optional[Dict[str, str]] = None) -> "RetrievalScoring":
+        """Global defaults from ``MEMORIZZ_*`` settings (the Settings page writes these)."""
+        env = os.environ if environ is None else environ
+        mapping = {
+            "recency_decay_per_hour": env.get("MEMORIZZ_RECENCY_DECAY_PER_HOUR"),
+            "recency_anchor": env.get("MEMORIZZ_RECENCY_ANCHOR"),
+            "alpha_recency": env.get("MEMORIZZ_ALPHA_RECENCY"),
+            "alpha_importance": env.get("MEMORIZZ_ALPHA_IMPORTANCE"),
+            "alpha_relevance": env.get("MEMORIZZ_ALPHA_RELEVANCE"),
+            "default_importance": env.get("MEMORIZZ_DEFAULT_IMPORTANCE"),
+            "normalize": env.get("MEMORIZZ_SCORE_NORMALIZE"),
+        }
+        return cls.from_mapping(
+            {k: v for k, v in mapping.items() if v not in (None, "")}
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "recency_decay_per_hour": self.recency_decay_per_hour,
+            "recency_anchor": self.recency_anchor,
+            "alpha_recency": self.alpha_recency,
+            "alpha_importance": self.alpha_importance,
+            "alpha_relevance": self.alpha_relevance,
+            "normalize": self.normalize,
+            "default_importance": self.default_importance,
+        }
+
+
+def _recency_score(
+    timestamp: Optional[float],
+    now: Optional[float] = None,
+    decay_per_hour: float = _RECENCY_DECAY_PER_HOUR,
+) -> float:
     """Exponential decay in [0, 1]; 1.0 for missing timestamps (no penalty)."""
     if timestamp is None:
         return 1.0
     if now is None:
         now = datetime.now(timezone.utc).timestamp()
     hours = max(0.0, (now - timestamp) / 3600.0)
-    return _RECENCY_DECAY_PER_HOUR**hours
+    return decay_per_hour**hours
+
+
+def _candidate_last_accessed(row: Any) -> Optional[float]:
+    """Epoch seconds of the last recorded recall of this memory, if any."""
+    if not isinstance(row, dict):
+        return None
+    for key in ("last_accessed_at", "last_accessed", "last_recalled_at"):
+        value = _parse_timestamp(row.get(key))
+        if value is not None:
+            return value
+    content = row.get("content")
+    if isinstance(content, dict):
+        for key in ("last_accessed_at", "last_accessed"):
+            value = _parse_timestamp(content.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _candidate_importance(row: Any) -> Optional[float]:
+    """Stored 0..1 importance rating, or None when the record has none."""
+    if not isinstance(row, dict):
+        return None
+    value = row.get("importance")
+    if value is None and isinstance(row.get("content"), dict):
+        value = row["content"].get("importance")
+    if value is None and isinstance(row.get("metadata"), dict):
+        value = row["metadata"].get("importance")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    if number > 1.0 and number <= 10.0:
+        number = number / 10.0  # Generative-Agents 1..10 poignancy scale
+    return min(1.0, max(0.0, number))
+
+
+def is_suppressed(row: Any) -> bool:
+    """True when governed forgetting hid this record from retrieval.
+
+    Suppression is reversible metadata (``retention_state == "suppressed"``)
+    written by an approved forgetting plan; the record itself is retained.
+    """
+    if not isinstance(row, dict):
+        return False
+    for holder in (row, row.get("content"), row.get("metadata")):
+        if isinstance(holder, dict):
+            state = holder.get("retention_state")
+            if isinstance(state, str) and state.strip().lower() == "suppressed":
+                return True
+    return False
+
+
+def _minmax(values: List[float]) -> List[float]:
+    """Min-max normalise to [0, 1]; a constant signal maps to 1.0 (no penalty)."""
+    if not values:
+        return values
+    low, high = min(values), max(values)
+    if high - low <= 1e-12:
+        return [1.0 for _ in values]
+    return [(value - low) / (high - low) for value in values]
+
+
+def score_candidates(
+    kept: List[Dict[str, Any]],
+    *,
+    scoring: RetrievalScoring,
+    now: Optional[float] = None,
+) -> None:
+    """Attach ``_relevance`` (0..1) and ``_scoring`` parts to each candidate in place.
+
+    ``cand["_raw_relevance"]`` must already hold cosine-to-query or the
+    provider score. The blended value is divided by the weight total so MMR
+    can compare it against cosine similarities on the same scale.
+    """
+    if not kept:
+        return
+    if now is None:
+        now = datetime.now(timezone.utc).timestamp()
+    anchors = []
+    for cand in kept:
+        anchor = cand.get("timestamp")
+        if (
+            scoring.recency_anchor == "last_accessed"
+            and cand.get("last_accessed") is not None
+        ):
+            anchor = cand["last_accessed"]
+        anchors.append(anchor)
+    recency_raw = [
+        _recency_score(anchor, now, scoring.recency_decay_per_hour)
+        for anchor in anchors
+    ]
+    importance_raw = [
+        cand["importance"]
+        if cand.get("importance") is not None
+        else scoring.default_importance
+        for cand in kept
+    ]
+    relevance_raw = [float(cand.get("_raw_relevance") or 0.0) for cand in kept]
+    if scoring.normalize and len(kept) > 1:
+        recency = _minmax(recency_raw)
+        importance = _minmax(importance_raw)
+        relevance = _minmax(relevance_raw)
+    else:
+        recency, importance, relevance = recency_raw, importance_raw, relevance_raw
+    total = scoring.weight_total
+    for index, cand in enumerate(kept):
+        score = (
+            scoring.alpha_recency * recency[index]
+            + scoring.alpha_importance * importance[index]
+            + scoring.alpha_relevance * relevance[index]
+        ) / total
+        cand["_relevance"] = score
+        cand["_scoring"] = {
+            "recency": round(recency[index], 6),
+            "importance": round(importance[index], 6),
+            "relevance": round(relevance[index], 6),
+            "recency_raw": round(recency_raw[index], 6),
+            "importance_raw": round(importance_raw[index], 6),
+            "relevance_raw": round(relevance_raw[index], 6),
+            "score": round(score, 6),
+            "anchor": scoring.recency_anchor
+            if cand.get("last_accessed") is not None
+            else "created",
+        }
 
 
 def candidate_text(row: Any) -> str:
@@ -345,6 +574,7 @@ def dedupe_and_select(
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     mmr_lambda: float = DEFAULT_MMR_LAMBDA,
     recency_weight: float = DEFAULT_RECENCY_WEIGHT,
+    scoring: Optional[RetrievalScoring] = None,
     max_items: int = 5,
     max_chars_per_item: int = 600,
     dedupe_parent_sources: bool = False,
@@ -367,6 +597,11 @@ def dedupe_and_select(
         Hard cap on selected memories (post-dedup).
     max_chars_per_item : int
         Rendered text is truncated to this many characters per memory.
+    scoring : RetrievalScoring, optional
+        Recency/importance/relevance weights and decay (see
+        :class:`RetrievalScoring`). Defaults to the ``MEMORIZZ_*`` environment
+        settings, which are the Generative-Agents values when unset. The
+        legacy ``recency_weight`` argument is accepted but no longer used.
     dedupe_parent_sources : bool
         Keep only the highest-scoring candidate for a shared parent source.
         This is useful when an original record and a derived semantic record
@@ -418,6 +653,10 @@ def dedupe_and_select(
                 "selection_reason": "selection_not_observed",
             }
             selection_ledger.append(decision)
+        if is_suppressed(row):
+            if decision is not None:
+                decision["selection_reason"] = "suppressed"
+            continue
         text = candidate_text(row).strip()
         if not text:
             if decision is not None:
@@ -443,6 +682,8 @@ def dedupe_and_select(
             "normalized": normalized,
             "embedding": candidate_embedding(row),
             "timestamp": _candidate_timestamp(row),
+            "last_accessed": _candidate_last_accessed(row),
+            "importance": _candidate_importance(row),
             "id": _candidate_id(row),
             "score": _candidate_score(row),
             **_candidate_provenance(row),
@@ -519,6 +760,7 @@ def dedupe_and_select(
     # (cosine-to-query blended with recency); otherwise fall back to the
     # provider score order already established above.
     now = datetime.now(timezone.utc).timestamp()
+    resolved_scoring = scoring or RetrievalScoring.from_env()
     if query_embedding is not None:
         query_vec = list(query_embedding)
         for cand in kept:
@@ -532,10 +774,8 @@ def dedupe_and_select(
                 # query. Preserve that provider evidence instead of scoring it
                 # only against the less-specific original query.
                 relevance = max(relevance, cand["score"])
-            recency = _recency_score(cand["timestamp"], now)
-            cand["_relevance"] = (
-                1.0 - recency_weight
-            ) * relevance + recency_weight * recency
+            cand["_raw_relevance"] = relevance
+        score_candidates(kept, scoring=resolved_scoring, now=now)
 
         selected: List[Dict[str, Any]] = []
         remaining = list(kept)
@@ -563,7 +803,13 @@ def dedupe_and_select(
             selected.append(best)
             remaining.remove(best)
     else:
-        selected = kept[:max_items]
+        # No query vector: the provider score is the relevance signal, and
+        # recency/importance still apply (Generative Agents always blends all three).
+        for cand in kept:
+            cand["_raw_relevance"] = cand["score"]
+        score_candidates(kept, scoring=resolved_scoring, now=now)
+        ranked = sorted(kept, key=lambda c: (-c["_relevance"], c["id"]))
+        selected = ranked[:max_items]
 
     for candidate in kept:
         mark(candidate, "budget_exceeded")
@@ -588,6 +834,12 @@ def dedupe_and_select(
             "id": cand["id"],
             "timestamp": cand["timestamp"],
         }
+        if cand.get("_scoring") is not None:
+            result["scoring"] = dict(cand["_scoring"])
+        if cand.get("last_accessed") is not None:
+            result["last_accessed_at"] = cand["last_accessed"]
+        if cand.get("importance") is not None:
+            result["importance"] = cand["importance"]
         for field in _PROVENANCE_FIELDS:
             if cand.get(field) is not None:
                 result[field] = cand[field]

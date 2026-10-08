@@ -41,9 +41,23 @@ class DeepResearchOrchestrator(MultiAgentOrchestrator):
                     getattr(agent, "agent_id", "unknown"),
                 )
 
-    def execute(self, user_query: str, memory_id: str = None, thread_id: str = None):
-        """Execute Deep Research workflow."""
-        return self.execute_multi_agent_workflow(user_query, memory_id, thread_id)
+    def execute(
+        self,
+        user_query: str,
+        memory_id: str = None,
+        thread_id: str = None,
+        *,
+        user_id: Optional[str] = None,
+        **kwargs: Any,
+    ):
+        """Execute the Deep Research workflow for one user.
+
+        ``user_id`` scopes every delegate's memory to that tenant; other
+        keyword arguments reach :meth:`execute_multi_agent_workflow`.
+        """
+        return self.execute_multi_agent_workflow(
+            user_query, memory_id, thread_id, user_id=user_id, **kwargs
+        )
 
     # Hook overrides -----------------------------------------------------------
     def _after_task_decomposition(
@@ -140,7 +154,9 @@ class DeepResearchOrchestrator(MultiAgentOrchestrator):
             )
 
         return self.synthesis_agent.run(
-            synthesis_input, memory_id=self.shared_memory_id
+            synthesis_input,
+            memory_id=self.shared_memory_id,
+            user_id=getattr(self, "_request_user_id", None),
         )
 
 
@@ -196,5 +212,9 @@ class DeepResearchWorkflow:
         return cls(orchestrator)
 
     def run(self, query: str, **kwargs) -> str:
-        """Execute the deep research workflow."""
+        """Execute the deep research workflow.
+
+        Accepts ``memory_id``, ``thread_id`` and ``user_id`` (the tenant whose
+        memory the research is scoped to).
+        """
         return self._orchestrator.execute(query, **kwargs)

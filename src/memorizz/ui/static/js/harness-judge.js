@@ -1,7 +1,8 @@
 /* Shared judge controls for launches and saved-output comparisons. */
 (() => {
     'use strict';
-    const esc = text => String(text == null ? '' : text).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+    // base.html's escapeHtml; the inline copy keeps the module working standalone.
+    const esc = typeof escapeHtml === 'function' ? escapeHtml : text => String(text == null ? '' : text).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
     let defaults = null;
     let loading = null;
     let serial = 0;

@@ -9,7 +9,8 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 # Use TYPE_CHECKING for forward references to avoid circular imports
 if TYPE_CHECKING:
@@ -21,6 +22,35 @@ logger = logging.getLogger(__name__)
 # Sentinel so "user_id not supplied" is distinguishable from an explicit None
 # (matching the MongoDB provider's _MONGO_UNSET convention).
 _UNSET = object()
+
+
+def _observation_matches(
+    row,
+    *,
+    agent_id=None,
+    memory_ids=None,
+    user_id=_UNSET,
+    application_id=None,
+    exclude_ids=(),
+):
+    """Exact observation scope; a namespace does not override another owner."""
+    if not isinstance(row, dict):
+        return False
+    owner = str(row.get("agent_id") or row.get("owner_agent_id") or "")
+    wanted = set(memory_ids or ())
+    if agent_id:
+        if owner and owner != str(agent_id):
+            return False
+        if owner != str(agent_id) and row.get("memory_id") not in wanted:
+            return False
+    elif wanted and row.get("memory_id") not in wanted:
+        return False
+    if user_id is not _UNSET and row.get("user_id") != user_id:
+        return False
+    if application_id is not None and row.get("application_id") != application_id:
+        return False
+    identifier = str(row.get("_id") or row.get("id") or "")
+    return identifier not in exclude_ids
 
 
 def provider_manages_embeddings(provider) -> bool:
@@ -142,8 +172,72 @@ class FilteredSkillboxSearchMixin:
         )
 
 
+def _expiry_epoch(value: Any) -> Optional[float]:
+    """Coerce a ``datetime``, ISO-8601 string or epoch number to epoch seconds.
+
+    Providers persist ``expires_at`` differently (MongoDB/Oracle return
+    ``datetime``, the filesystem provider an ISO string, custom providers may
+    store epoch seconds). Naive datetimes are read as UTC: pymongo encodes
+    naive values as UTC and hands them back naive. ``None`` means "no usable
+    value".
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            return _expiry_epoch(datetime.fromisoformat(text.replace("Z", "+00:00")))
+        except ValueError:
+            return None
+    return None
+
+
 class MemoryProvider(ABC):
     """Abstract base class for memory providers."""
+
+    def query_memory_observations(
+        self,
+        memory_store_type,
+        *,
+        agent_id=None,
+        memory_ids=None,
+        user_id=_UNSET,
+        application_id=None,
+        exclude_ids=(),
+        limit=200,
+    ):
+        """Bounded current records for a timeline; native providers override.
+
+        This compatibility fallback supports third-party providers. First-party
+        providers push scopes/limits into their metadata index or database.
+        """
+        from itertools import islice
+
+        matches = (
+            row
+            for row in self.list_all(memory_store_type) or []
+            if _observation_matches(
+                row,
+                agent_id=agent_id,
+                memory_ids=memory_ids,
+                user_id=user_id,
+                application_id=application_id,
+                exclude_ids=exclude_ids,
+            )
+        )
+        return list(islice(matches, max(1, min(int(limit), 1000))))
 
     def memory_capabilities(self) -> MemoryProviderCapabilities:
         """Describe the portable contract without probing optional internals."""
@@ -507,6 +601,27 @@ class MemoryProvider(ABC):
         only anonymous/legacy rows, and a string selects that exact tenant.
         """
 
+    def list_archive_records(self, memory_type):
+        """Complete portable records for archive export (no silent page truncation)."""
+        return self.list_all(memory_type)
+
+    def store_archive_record(
+        self, memory_type, record_id, data, *, replace=False, reembed=False
+    ):
+        """Restore one record without evaluating tool or agent configuration."""
+        document = dict(data, _id=record_id, id=record_id)
+        if reembed:
+            from ..embeddings import get_embedding
+
+            text = (
+                document.get("content")
+                or document.get("description")
+                or document.get("name")
+            )
+            if isinstance(text, str) and text:
+                document["embedding"] = get_embedding(text)
+        return self.store(document, memory_store_type=memory_type)
+
     def query_observability_records(
         self,
         memory_store_type: Any,
@@ -519,6 +634,7 @@ class MemoryProvider(ABC):
         record_type: Optional[str] = None,
         tool_name: Optional[str] = None,
         success: Optional[bool] = None,
+        event_filters: Optional[Dict[str, Any]] = None,
         start_time: Any = None,
         end_time: Any = None,
         limit: int = 250,
@@ -548,7 +664,7 @@ class MemoryProvider(ABC):
             # Oracle and older third-party providers can keep shared-memory
             # metadata only inside the JSON payload. Decode it for filtering
             # without changing the returned provider document.
-            if record_type and not row.get("record_type"):
+            if event_filters or (record_type and not row.get("record_type")):
                 content = row.get("content")
                 if hasattr(content, "read"):
                     try:
@@ -564,6 +680,9 @@ class MemoryProvider(ABC):
                         payload = None
                     if isinstance(payload, dict):
                         filter_row = {**row, **payload}
+                elif isinstance(content, dict):
+                    # Oracle's JSON columns are already decoded by the driver.
+                    filter_row = {**row, **content}
             if record_type is not None and str(
                 filter_row.get("record_type") or ""
             ) != str(record_type):
@@ -598,12 +717,24 @@ class MemoryProvider(ABC):
                 continue
             if success is not None and filter_row.get("success") is not success:
                 continue
-            timestamp = filter_row.get("timestamp")
+            if any(
+                filter_row.get(key) != value
+                for key, value in (event_filters or {}).items()
+            ):
+                continue
+            timestamp = (
+                filter_row.get("timestamp")
+                or filter_row.get("started_at")
+                or filter_row.get("created_at")
+                or filter_row.get("updated_at")
+            )
             if start_time is not None and str(timestamp or "") < str(start_time):
                 continue
             if end_time is not None and str(timestamp or "") > str(end_time):
                 continue
             result_row = dict(row)
+            if result_row.get("timestamp") is None and timestamp is not None:
+                result_row["timestamp"] = timestamp
             for key in (
                 "record_type",
                 "application_id",
@@ -872,6 +1003,97 @@ class MemoryProvider(ABC):
                 )
             )
             if not matches:
+                continue
+            record_id = row.get("_id") or row.get("id") or row.get("cache_key")
+            if record_id is None:
+                continue
+            try:
+                if self.delete_by_id(
+                    str(record_id), memory_store_type=MemoryType.SEMANTIC_CACHE
+                ):
+                    deleted += 1
+            except Exception:
+                continue
+        return deleted
+
+    def touch_many(
+        self,
+        record_ids: Iterable[str],
+        memory_store_type: Any,
+        *,
+        now: Any = None,
+    ) -> int:
+        """Record a recall of each memory: bump ``access_count``, set ``last_accessed_at``.
+
+        This is the reinforcement signal of the Generative-Agents retrieval
+        score (recency is measured since the last access). The portable
+        implementation reads and updates each record; database providers
+        should override it with one UPDATE statement. It never touches the
+        record's ``timestamp`` or embedding, and failures are logged rather
+        than raised because a recall must never fail a turn.
+        """
+        from datetime import datetime, timezone
+
+        if now is None:
+            now_value = datetime.now(timezone.utc).isoformat()
+        elif hasattr(now, "isoformat"):
+            now_value = now.isoformat()
+        else:
+            now_value = now
+        touched = 0
+        for record_id in record_ids:
+            identifier = str(record_id or "").strip()
+            if not identifier:
+                continue
+            try:
+                row = self.retrieve_by_id(identifier, memory_store_type)
+            except Exception:
+                row = None
+            if not isinstance(row, dict):
+                continue
+            try:
+                count = int(row.get("access_count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            try:
+                if self.update_by_id(
+                    identifier,
+                    {"last_accessed_at": now_value, "access_count": count + 1},
+                    memory_store_type,
+                ):
+                    touched += 1
+            except Exception as exc:
+                logger.debug("touch_many could not update %s: %s", identifier, exc)
+        return touched
+
+    def purge_expired_semantic_cache(self, now=None) -> int:
+        """Delete semantic-cache rows whose ``expires_at`` lies before ``now``.
+
+        Generic ``list_all`` + ``delete_by_id`` implementation so every
+        provider purges expired rows; native providers may override it with
+        one bulk delete but must keep this exact signature. ``now`` accepts a
+        ``datetime``, epoch seconds, or ``None`` for the current time.
+        ``expires_at`` may be a ``datetime``, an ISO-8601 string or epoch
+        seconds; rows without a parseable value are kept.
+
+        Returns the number of rows deleted.
+        """
+        from ..enums.memory_type import MemoryType
+
+        cutoff = time.time() if now is None else _expiry_epoch(now)
+        if cutoff is None:
+            raise ValueError(f"Unsupported value for now: {now!r}")
+        try:
+            rows = self.list_all(memory_store_type=MemoryType.SEMANTIC_CACHE) or []
+        except Exception:
+            return 0
+
+        deleted = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            expires_at = _expiry_epoch(row.get("expires_at"))
+            if expires_at is None or expires_at >= cutoff:
                 continue
             record_id = row.get("_id") or row.get("id") or row.get("cache_key")
             if record_id is None:

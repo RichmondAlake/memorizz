@@ -938,6 +938,7 @@ class MetaHarness:
             "MEMORIZZ_MCP_SERVER_ALLOW_WRITES": "true" if writes else "false",
             "MEMORIZZ_MCP_SERVER_ALLOW_AGENT_EXECUTION": "false",
             "MEMORIZZ_MCP_SERVER_LOCAL_PRINCIPAL": str(task.user_id or ""),
+            "MEMORIZZ_HARNESS_RUN_ID": task.run_id,
         }
         if task.agent_id:
             server_env["MEMORIZZ_MCP_SERVER_AGENT_IDS"] = task.agent_id
@@ -1043,6 +1044,29 @@ class MetaHarness:
         return turn
 
     def _execute(
+        self,
+        task: HarnessTask,
+        *,
+        workspace: Path,
+        before: Dict[str, Any],
+        routing: Dict[str, Any],
+    ) -> HarnessResult:
+        from ..memory_history import enable_memory_history, memory_change_context
+
+        enable_memory_history(self.memory_provider)
+        with memory_change_context(
+            actor=task.harness,
+            source="harness",
+            agent_id=task.agent_id,
+            memory_id=task.memory_id,
+            user_id=task.user_id,
+            harness_run_id=task.run_id,
+        ):
+            return self._execute_with_history(
+                task, workspace=workspace, before=before, routing=routing
+            )
+
+    def _execute_with_history(
         self,
         task: HarnessTask,
         *,

@@ -783,42 +783,6 @@ def register_longmemeval_v2_backend():
                 },
             }
 
-        def _save_backend(self, output_dir: Path) -> None:
-            compiler_report = None
-            learning_report = None
-            if self.agent is not None and self.learning_control_plane:
-                compiler_report = self.agent.compile_memory(
-                    memory_id=self.memory_id,
-                    user_id=self.user_id,
-                    thread_id=self.query_thread_id,
-                )
-                learning_report = self.agent.learning_report(
-                    memory_id=self.memory_id, user_id=self.user_id
-                )
-            (output_dir / "memorizz_backend.json").write_text(
-                json.dumps(
-                    {
-                        "memory_id": self.memory_id,
-                        "trajectory_count": self._trajectory_count,
-                        "indexed_chunk_count": self._chunk_count,
-                        "summary_ids": self._summary_ids,
-                        "memory_backend": self.memory_backend,
-                        "learning_control_plane": learning_report,
-                        "memory_compiler": compiler_report,
-                        "memory_model_usage": dict(self.model.total_usage),
-                        "memory_model_call_count": self.model.call_count,
-                        "memory_model_estimated_cost_usd": (
-                            self.model.estimated_cost_usd
-                        ),
-                    },
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            if self.agent is not None:
-                self.agent.close(close_memory_provider=True)
-
     return MemoRizzLongMemEvalV2Memory
 
 

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from '_ui.html' import page_header %}
+{% block title %}Memory evolution - MemoRizz{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=7">
+<script src="/static/js/memory-evolution.js?v=7" defer></script>
+{% endblock %}
+{% block content %}
+{% call page_header('Memory evolution', 'Follow recorded memory changes, their authors and explicit branches across time.', 'Observability') %}
+<a class="btn" href="/traces{% if agent_id %}?agent_id={{ agent_id|urlencode }}{% endif %}">Observability</a>
+{% if archive_available %}<a class="btn" href="/memory-transfer?agent_id={{ agent_id|urlencode }}&amp;memory_id={{ memory_id|urlencode }}">Export / import</a>{% endif %}
+{% if agent_id %}<a class="btn" href="/agents/{{ agent_id|urlencode }}/playground">Playground</a>{% endif %}
+{% endcall %}
+<details class="me-scope"{% if not (agent_id or memory_id or run_id) %} open{% endif %}><summary>Agent, memory namespace and run</summary>
+<form id="memory-evolution-scope" class="filter-bar">
+    <label>Agent ID<input name="agent_id" value="{{ agent_id }}" placeholder="Optional agent"></label>
+    <label>Memory namespace<input name="memory_id" value="{{ memory_id }}" placeholder="Optional conversation or project"></label>
+    <label>Harness run<input name="run_id" value="{{ run_id }}" placeholder="Optional run ID"></label>
+    {% for key, value in scope.items() %}<input type="hidden" name="{{ key }}" value="{{ value or '' }}">{% endfor %}
+    <button type="submit" class="btn btn-primary">View history</button>
+</form>
+</details>
+{% include '_memory_evolution.html' %}
+{% endblock %}

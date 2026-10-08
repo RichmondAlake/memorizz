@@ -12,32 +12,16 @@ from __future__ import annotations
 import base64
 import json
 import os
-import re
 import urllib.parse
 import urllib.request
 from typing import Any, Dict
 
+from .numbers import normalize_whatsapp_number
+
 
 def _normalize_whatsapp_address(value: str, *, field_name: str) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        raise ValueError(f"'{field_name}' is required")
-
-    text = raw
-    if text.lower().startswith("whatsapp:"):
-        text = text.split(":", 1)[1].strip()
-
-    # Remove common formatting characters; Twilio expects E.164.
-    number = re.sub(r"[\s\-()]", "", text)
-    if number and not number.startswith("+") and number.isdigit():
-        number = f"+{number}"
-
-    if not (number.startswith("+") and number[1:].isdigit()):
-        raise ValueError(
-            f"{field_name} must be an E.164 number (e.g. +15551234567) optionally prefixed with 'whatsapp:'. Got: {raw!r}"
-        )
-
-    return f"whatsapp:{number}"
+    """``whatsapp:+E164`` as Twilio expects it; ``ValueError`` names ``field_name``."""
+    return f"whatsapp:{normalize_whatsapp_number(value, field_name=field_name)}"
 
 
 class TwilioWhatsAppSender:

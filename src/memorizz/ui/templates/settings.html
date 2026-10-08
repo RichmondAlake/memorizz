@@ -2,7 +2,7 @@
 
 {% block title %}Settings - Memorizz{% endblock %}
 
-{% block head %}<link rel="stylesheet" href="/static/css/pages/settings.css?v=3">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/settings.css?v=3"><script src="/static/js/local-models.js?v=1"></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header %}
@@ -215,240 +215,34 @@
 
         function setHiddenModelValue(value) {
             modelHiddenInput.value = (value || '').trim();
-            scheduleLocalCheck();
+            localModels.schedule();
         }
 
-        // Debounced wrapper because the custom-model text input fires `input`
-        // on every keystroke; we don't want to spam the API per char typed.
-        let _localCheckDebounce = null;
-        function scheduleLocalCheck() {
-            if (_localCheckDebounce) clearTimeout(_localCheckDebounce);
-            _localCheckDebounce = setTimeout(checkLocalModelAvailability, 350);
-        }
-
-        // Race protection — if a second fetch starts before the first returns
-        // (e.g. user flips providers quickly) only the most recent paints.
-        let _localCheckSeq = 0;
-        async function checkLocalModelAvailability() {
-            const statusEl = document.getElementById('local-model-status');
-            if (!statusEl) return;
-
-            const provider = (providerSelect.value || '').trim();
-            const model = (modelHiddenInput.value || '').trim();
-            if ((provider !== 'ollama' && provider !== 'huggingface') || !model) {
-                statusEl.style.display = 'none';
-                statusEl.innerHTML = '';
-                return;
-            }
-
-            const seq = ++_localCheckSeq;
-            statusEl.style.display = 'block';
-            statusEl.innerHTML = '<p class="form-hint">Checking '
-                + (provider === 'ollama' ? 'local Ollama' : 'HuggingFace cache')
-                + '…</p>';
-
-            const url = provider === 'ollama'
-                ? '/api/ollama/installed'
-                : '/api/huggingface/installed';
-
-            let info;
-            try {
-                const res = await fetch(url, { cache: 'no-store' });
-                info = await res.json();
-            } catch (err) {
-                if (seq !== _localCheckSeq) return;
-                statusEl.innerHTML =
-                    '<div class="warning-message"><strong>Could not reach the UI server</strong>: '
-                    + escapeHtml(String(err)) + '</div>';
-                return;
-            }
-            if (seq !== _localCheckSeq) return;
-
-            if (provider === 'ollama') {
-                renderOllamaStatus(statusEl, model, info);
-            } else {
-                renderHuggingFaceStatus(statusEl, model, info);
-            }
-        }
-
-        function renderOllamaStatus(statusEl, model, info) {
-            if (!info.reachable) {
-                statusEl.innerHTML =
-                    '<div class="warning-message">'
-                    + '<strong>Ollama is not running</strong> at <code>'
-                    + escapeHtml(info.host) + '</code>'
-                    + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
-                    + '.<br>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a> and start it, then '
-                    + '<a href="#" data-local-refresh>refresh this check</a>.'
-                    + '</div>';
-                wireRefreshLink(statusEl);
-                return;
-            }
-
-            // Ollama treats a bare name as `:latest` — match both directions
-            // so existing values like `llama3.1` register as installed when
-            // the user actually pulled `llama3.1:latest`.
-            const installed = (info.models || []).some(function(m) {
-                return m === model
-                    || m === model + ':latest'
-                    || m + ':latest' === model;
-            });
-
-            const base = model.split(':')[0];
-            const libUrl = 'https://ollama.com/library/' + encodeURIComponent(base);
-
-            const banner = installed
-                ? '<div class="success-message">'
-                    + '<strong><code>' + escapeHtml(model) + '</code> is available offline</strong>'
-                    + ' on Ollama at <code>' + escapeHtml(info.host) + '</code>.'
-                    + '</div>'
-                : '<div class="warning-message">'
-                    + '<strong><code>' + escapeHtml(model) + '</code> is not installed locally.</strong><br>'
-                    + 'Run <code>ollama pull ' + escapeHtml(model) + '</code> in a terminal, or '
-                    + '<a href="' + libUrl + '" target="_blank" rel="noopener">browse <code>'
-                    + escapeHtml(base) + '</code> on ollama.com</a>. '
-                    + 'Then <a href="#" data-local-refresh>refresh this check</a>.'
-                    + '</div>';
-
-            statusEl.innerHTML = banner + manageListHtml(info.models, 'ollama', 'Ollama');
-            wireRefreshLink(statusEl);
-        }
-
-        function renderHuggingFaceStatus(statusEl, model, info) {
-            if (!info.available) {
-                statusEl.innerHTML =
-                    '<div class="warning-message">'
-                    + '<strong>HuggingFace cache unavailable</strong>'
-                    + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
-                    + '.<br>Install the SDK with <code>pip install memorizz[huggingface]</code>, then '
-                    + '<a href="#" data-local-refresh>refresh this check</a>.'
-                    + '</div>';
-                wireRefreshLink(statusEl);
-                return;
-            }
-
-            // HF repo IDs are case-sensitive; only exact match counts.
-            const cached = (info.models || []).indexOf(model) !== -1;
-            const repoUrl = 'https://huggingface.co/'
-                + model.split('/').map(encodeURIComponent).join('/');
-            const cacheLoc = info.cache_dir || 'local HF cache';
-
-            const banner = cached
-                ? '<div class="success-message">'
-                    + '<strong><code>' + escapeHtml(model) + '</code> is cached locally</strong>'
-                    + ' at <code>' + escapeHtml(cacheLoc) + '</code>.'
-                    + '</div>'
-                : '<div class="warning-message">'
-                    + '<strong><code>' + escapeHtml(model) + '</code> is not cached locally.</strong><br>'
-                    + 'It will be downloaded the first time the agent loads (a few hundred MB to several GB). '
-                    + 'You can pre-download with <code>huggingface-cli download ' + escapeHtml(model) + '</code>, '
-                    + 'or <a href="' + repoUrl + '" target="_blank" rel="noopener">view the model card</a>. '
-                    + 'Then <a href="#" data-local-refresh>refresh this check</a>.'
-                    + '</div>';
-
-            statusEl.innerHTML = banner + manageListHtml(info.models, 'huggingface', 'HuggingFace');
-            wireRefreshLink(statusEl);
-        }
-
-        // Build the manage-list panel: every locally-pulled model with a
-        // trash button, plus every catalog model that isn't pulled yet with
-        // a download button. Catalog data comes from the same `modelCatalog`
-        // dict the dropdown uses, so the two surfaces never drift.
-        function manageListHtml(installedModels, provider, label) {
-            const installed = (installedModels || []).filter(Boolean);
-            const installedSet = new Set(installed);
-            const isInstalled = function(val) {
-                if (installedSet.has(val)) return true;
-                if (provider === 'ollama') {
-                    if (installedSet.has(val + ':latest')) return true;
-                    if (val.endsWith(':latest') && installedSet.has(val.slice(0, -7))) return true;
-                }
-                return false;
-            };
-
-            const catalog = (modelCatalog[provider] || []);
-            const catalogValueSet = new Set(catalog.map(function(m) { return m.value; }));
-            const catalogInstalled = catalog.filter(function(m) { return isInstalled(m.value); });
-            const catalogMissing = catalog.filter(function(m) { return !isInstalled(m.value); });
-            // User-pulled models that we don't have a catalog row for.
-            const extras = installed.filter(function(name) {
-                if (catalogValueSet.has(name)) return false;
-                if (provider === 'ollama' && name.endsWith(':latest')) {
-                    if (catalogValueSet.has(name.slice(0, -7))) return false;
-                }
-                return true;
-            });
-            const totalInstalled = catalogInstalled.length + extras.length;
-
-            if (totalInstalled === 0 && catalogMissing.length === 0) {
-                return '';
-            }
-
-            const rows = [];
-            if (totalInstalled > 0) {
-                rows.push('<div class="model-list-section">Available offline ('
-                    + totalInstalled + ')</div>');
-                catalogInstalled.forEach(function(m) {
-                    rows.push(modelRow(m.value, m.label, provider, 'delete'));
-                });
-                extras.forEach(function(name) {
-                    rows.push(modelRow(name, name, provider, 'delete'));
-                });
-            }
-            if (catalogMissing.length > 0) {
-                rows.push('<div class="model-list-section">Available to download ('
-                    + catalogMissing.length + ')</div>');
-                catalogMissing.forEach(function(m) {
-                    rows.push(modelRow(m.value, m.label, provider, 'pull'));
-                });
-            }
-
-            return '<details class="model-manager" open>'
-                + '<summary>Manage ' + escapeHtml(label) + ' models</summary>'
-                + '<div class="model-list">' + rows.join('') + '</div>'
-                + '</details>';
-        }
-
-        function modelRow(value, label, provider, action) {
-            const icon = action === 'delete' ? trashIconSvg() : downloadIconSvg();
-            const title = action === 'delete' ? 'Remove from local cache' : 'Download to local cache';
-            const aria = action === 'delete' ? ('Remove ' + value) : ('Download ' + value);
-            const labelHtml = (label && label !== value)
-                ? '<span class="model-row-label"> &mdash; ' + escapeHtml(label) + '</span>'
-                : '';
-            // Only "Available offline" rows (action === 'delete') are
-            // selectable — picking one loads it into the Default Model
-            // field above and triggers the existing setHiddenModelValue
-            // flow so Save Keys persists it. Catalog rows that aren't
-            // pulled yet stay non-selectable; they'd 404 if selected.
-            const isSelectable = action === 'delete';
-            const currentValue = (modelHiddenInput.value || '').trim();
-            const isSelected = isSelectable && currentValue === value;
-            const inner = '<code>' + escapeHtml(value) + '</code>' + labelHtml;
-            const textHtml = isSelectable
-                ? '<button type="button" class="model-row-select"'
-                    + ' data-select-model="' + escapeHtml(value) + '"'
-                    + ' aria-pressed="' + (isSelected ? 'true' : 'false') + '"'
-                    + ' title="Use this model as the Default Model">'
-                    + (isSelected
-                        ? '<span class="model-row-check" aria-hidden="true">✓</span>'
-                        : '')
-                    + inner
-                    + '</button>'
-                : '<div class="model-row-text">' + inner + '</div>';
-            return '<div class="model-row" data-row-action="' + action + '"'
-                + (isSelected ? ' data-selected="true"' : '')
-                + '>'
-                + textHtml
-                + '<button type="button" class="model-action-btn"'
-                + ' data-action="' + action + '"'
-                + ' data-provider="' + escapeHtml(provider) + '"'
-                + ' data-model="' + escapeHtml(value) + '"'
-                + ' title="' + escapeHtml(title) + '"'
-                + ' aria-label="' + escapeHtml(aria) + '">'
-                + icon + '</button>'
-                + '</div>';
-        }
+        // Availability banner + "Manage models" panel for local providers,
+        // rendered by the shared widget (static/js/local-models.js). The
+        // panel's catalog is the same `modelCatalog` the dropdown uses, so
+        // the two surfaces never drift; picking an "Available offline" row
+        // loads it into the Default Model field via selectModelFromRow so
+        // Save Keys persists it.
+        const localModels = window.MemorizzLocalModels.mount({
+            statusId: 'local-model-status',
+            providers: ['ollama', 'huggingface'],
+            provider: function() { return (providerSelect.value || '').trim(); },
+            model: function() { return (modelHiddenInput.value || '').trim(); },
+            refreshAttr: 'data-local-refresh',
+            copy: {
+                refreshText: 'refresh this check',
+                ollamaMissing: 'Run {pull} in a terminal, or {browse}. Then {refresh}.',
+                huggingfaceUnavailable: 'Install the SDK with <code>pip install memorizz[huggingface]</code>, then {refresh}.',
+                huggingfaceMissing: 'It will be downloaded the first time the agent loads (a few hundred MB to several GB). You can pre-download with {download}, or {card}. Then {refresh}.',
+            },
+            manage: {
+                catalog: modelCatalog,
+                attrPrefix: 'data-',
+                selectTitle: 'Use this model as the Default Model',
+                onSelect: selectModelFromRow,
+            },
+        });
 
         function selectModelFromRow(value) {
             const provider = (providerSelect.value || '').trim();
@@ -468,35 +262,6 @@
             }
             setHiddenModelValue(value);
         }
-
-        // Single click handler delegated from document, so freshly-rendered
-        // rows after a refresh keep working without re-binding. Pull/delete
-        // plumbing lives in the shared handleLocalModelAction()
-        // (static/js/app.js); this wrapper maps the settings page's data
-        // attributes onto it and refreshes availability afterwards.
-        async function handleModelActionClick(button) {
-            await handleLocalModelAction(
-                button,
-                button.dataset.action,
-                button.dataset.provider,
-                button.dataset.model,
-                checkLocalModelAvailability
-            );
-        }
-
-        document.addEventListener('click', function(ev) {
-            const btn = ev.target.closest && ev.target.closest('.model-action-btn');
-            if (!btn) return;
-            ev.preventDefault();
-            handleModelActionClick(btn);
-        });
-
-        document.addEventListener('click', function(ev) {
-            const sel = ev.target.closest && ev.target.closest('[data-select-model]');
-            if (!sel) return;
-            ev.preventDefault();
-            selectModelFromRow(sel.getAttribute('data-select-model'));
-        });
 
         // Toggle dropdown vs. manage-list as the single selector. We watch
         // the status panel for a `.model-manager` element: if one is
@@ -518,15 +283,6 @@
             });
         }
         syncDropdownVisibility();
-
-        function wireRefreshLink(scope) {
-            const link = scope.querySelector('[data-local-refresh]');
-            if (!link) return;
-            link.addEventListener('click', function(ev) {
-                ev.preventDefault();
-                checkLocalModelAvailability();
-            });
-        }
 
         function showCustomInput(show) {
             modelCustomInput.style.display = show ? '' : 'none';

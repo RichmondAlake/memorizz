@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from memorizz.ui.app import create_app
 
 PROFILE = {
-    "agent_id": "openspeech-chat-assistant",
+    "agent_id": "acme-chat-assistant",
     "revision": 2,
     "paused": False,
     "pending": {
@@ -30,7 +30,7 @@ PROFILE = {
         ],
     },
     "persona": {
-        "name": "OpenSpeech",
+        "name": "Acme Support",
         "role": "Learning partner",
         "goals": "Learn effectively.",
         "version": 1,
@@ -111,7 +111,7 @@ def test_canonical_diff_and_evidence_render_and_escape_html(make_client):
     )
     assert "Trace editing stays disabled" in response.text
     assert (
-        "/traces?agent_id=openspeech-chat-assistant&user_id=account-1&thread_id=thread-1#trace-timeline"
+        "/traces?agent_id=acme-chat-assistant&user_id=account-1&thread_id=thread-1#trace-timeline"
         in response.text
     )
     assert response.headers["cache-control"] == "no-store"

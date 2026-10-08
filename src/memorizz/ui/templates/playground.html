@@ -5,12 +5,16 @@
 {% block body_attrs %} class="page-playground" data-sidebar-scope="playground" data-sidebar-default="collapsed"{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="/static/css/playground.css?v=12">
+<link rel="stylesheet" href="/static/css/playground.css?v=13">
+<link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=7">
+<script src="/static/js/memory-evolution.js?v=7" defer></script>
+<script src="/static/js/context-history.js?v=2" defer></script>
 <link rel="stylesheet" href="/static/css/catalog.css?v=4">
 <script src="/static/js/catalog.js?v=2" defer></script>
 <!-- marked.js for markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
 <script src="/static/js/safe-markdown.js?v=2"></script>
+<script src="/static/js/local-models.js?v=1"></script>
 <style>
     /* Local-model manager widget styles are shared in styles.css
        (.local-model-status .model-manager etc). Below: page-specific rules.
@@ -450,10 +454,18 @@
             {% endif %}
         </div>
         <div class="pg-tab-panel" role="tabpanel" id="pg-panel-context" aria-labelledby="pg-tab-context" hidden>
-            <div class="pg-section-head">
-                <h3 class="pg-section-title">Sent to the model</h3>
-                <span class="pg-section-meta" id="context-window-count">{{ context_window|length }} messages</span>
+            <div class="pg-context-nav" data-context-navigator data-agent-id="{{ agent.agent_id }}">
+                <button type="button" class="btn btn-sm" data-context-previous aria-label="Previous turn" disabled>←</button>
+                <span data-context-position aria-live="polite">Current context · estimate</span>
+                <button type="button" class="btn btn-sm" data-context-next aria-label="Next turn" disabled>→</button>
             </div>
+            <div class="pg-section-head">
+                <h3 class="pg-section-title" data-context-heading>Current context · estimate</h3>
+                <span class="pg-section-meta" id="context-window-count">{{ token_stats.message_count or 0 }} history messages</span>
+            </div>
+            <div data-context-snapshot hidden></div>
+            <div data-context-preview>
+            <p class="pg-panel-intro">Current configuration and budgeted history. New retrieval, the next prompt, and tool selection can change the next request.</p>
                     {% if agent.instruction %}
                     <details class="context-block context-block-collapsible" open>
                         <summary class="context-block-title">System instruction</summary>
@@ -616,7 +628,7 @@
                         <div id="context-conversation-container">
                         {% if context_window %}
                         <div class="context-log">
-                            {% for msg in context_window %}
+                            {% for msg in token_stats.history_messages or [] %}
                             <div class="context-log-item">
                                 <div class="context-log-meta">
                                     <span class="context-log-role">{{ msg.role|default('unknown')|capitalize }}</span>
@@ -633,8 +645,21 @@
                         {% endif %}
                         </div>
                     </details>
+            </div>
         </div>
         <div class="pg-tab-panel" role="tabpanel" id="pg-panel-memory" aria-labelledby="pg-tab-memory" hidden>
+            <div class="pg-memory-actions">
+                <a class="btn btn-sm" href="/memory-transfer?agent_id={{ agent.agent_id|urlencode }}">Export &amp; import memory</a>
+            </div>
+            <details class="context-block context-block-collapsible" id="pg-memory-evolution">
+                <summary class="context-block-title">Memory evolution</summary>
+                <div class="context-block-body">
+                    <div class="me-embed-heading"><a data-evolution-full href="/traces/memory-evolution?agent_id={{ agent.agent_id|urlencode }}">Full timeline ↗</a></div>
+                    {% with agent_id = agent.agent_id, memory_id = '', compact = true %}
+                    {% include '_memory_evolution.html' %}
+                    {% endwith %}
+                </div>
+            </details>
             <p class="pg-panel-intro">What this agent has stored for the current conversation.</p>
                     <details class="context-block context-block-collapsible" open>
                         <summary class="context-block-title">Toolbox</summary>
@@ -1326,11 +1351,11 @@ function onProviderChange() {
 }
 
 // =====================================================================
-// Local model pre-flight + manage panel for the Playground.
-// Mirrors the logic in settings.html so users see the same Available
-// Offline / Available to Download list (with select + trash + download
-// buttons), and so they're warned *before* sending a chat that the
-// chosen model isn't actually present locally.
+// Local model pre-flight + manage panel for the Playground, rendered by
+// the shared widget (static/js/local-models.js) so users see the same
+// Available Offline / Available to Download list as Settings (with
+// select + trash + download buttons), and are warned *before* sending a
+// chat that the chosen model isn't actually present locally.
 // =====================================================================
 
 function pgCurrentModel() {
@@ -1362,13 +1387,31 @@ function pgSelectModel(value) {
     if (dirty) dirty.hidden = false;
 }
 
-let _pgLocalCheckSeq = 0;
-let _pgLocalCheckDebounce = null;
-
-function pgScheduleLocalCheck() {
-    if (_pgLocalCheckDebounce) clearTimeout(_pgLocalCheckDebounce);
-    _pgLocalCheckDebounce = setTimeout(playgroundCheckLocalModel, 350);
+function pgCurrentProvider() {
+    return (document.getElementById('cfg-llm-provider').value || '').trim();
 }
+
+const pgLocalModels = window.MemorizzLocalModels.mount({
+    statusId: 'cfg-local-model-status',
+    provider: pgCurrentProvider,
+    model: pgCurrentModel,
+    refresh: playgroundCheckLocalModel,
+    refreshAttr: 'data-pg-refresh',
+    copy: {
+        warningPrefix: 'Pre-flight: ',
+        refreshText: 'refresh',
+        ollamaDownRefreshText: 'refresh this check',
+        ollamaMissing: 'Sending a message will fail with a 404. Run {pull}, click the download icon below, or {browse}. Then {refresh}.',
+        huggingfaceUnavailable: 'Install it with <code>pip install memorizz[huggingface]</code>, then {refresh}.',
+        huggingfaceMissing: 'Sending a message will trigger a download (a few hundred MB to several GB) and may stall. Click the download icon below, or pre-download with {download}, or {card}. Then {refresh}.',
+    },
+    manage: {
+        catalog: PROVIDER_MODELS,
+        attrPrefix: 'data-pg-',
+        selectTitle: 'Use this model in the playground',
+        onSelect: pgSelectModel,
+    },
+});
 
 const PG_WINDOW_SIZES = [8192, 16384, 32768, 65536, 131072, 262144];
 let _pgWindowSeq = 0;
@@ -1421,54 +1464,13 @@ async function pgRefreshContextWindow(provider, model) {
 }
 
 async function playgroundCheckLocalModel() {
-    const statusEl = document.getElementById('cfg-local-model-status');
-    const fieldEl = document.getElementById('cfg-llm-model-field');
-    if (!statusEl || !fieldEl) return;
-
-    const provider = (document.getElementById('cfg-llm-provider').value || '').trim();
-    const model = pgCurrentModel();
-    void pgRefreshContextWindow(provider, model);
-
-    // MLX uses the same HF cache directory as `huggingface_hub`, so the
-    // /api/huggingface/installed endpoint already covers it.
-    const usesHFCache = provider === 'huggingface' || provider === 'mlx';
-    if (provider !== 'ollama' && !usesHFCache || !model) {
-        statusEl.style.display = 'none';
-        statusEl.innerHTML = '';
-        fieldEl.classList.remove('is-local-provider');
-        return;
-    }
-
-    const seq = ++_pgLocalCheckSeq;
-    statusEl.style.display = 'block';
-    let providerLabel = 'local Ollama';
-    if (provider === 'huggingface') providerLabel = 'HuggingFace cache';
-    if (provider === 'mlx') providerLabel = 'MLX cache (HuggingFace)';
-    statusEl.innerHTML = '<p class="form-hint">Checking ' + providerLabel + '…</p>';
-
-    const url = provider === 'ollama'
-        ? '/api/ollama/installed'
-        : '/api/huggingface/installed';
-
-    let info;
-    try {
-        const res = await fetch(url, { cache: 'no-store' });
-        info = await res.json();
-    } catch (err) {
-        if (seq !== _pgLocalCheckSeq) return;
-        statusEl.innerHTML = '<div class="warning-message"><strong>Could not reach the UI server</strong>: '
-            + escapeHtml(String(err)) + '</div>';
-        return;
-    }
-    if (seq !== _pgLocalCheckSeq) return;
-
-    if (provider === 'ollama') {
-        pgRenderOllama(statusEl, model, info);
-    } else {
-        // MLX shares the HF cache; the same renderer applies.
-        pgRenderHuggingFace(statusEl, model, info);
-    }
-    pgSyncFieldClass();
+    if (!document.getElementById('cfg-local-model-status')
+        || !document.getElementById('cfg-llm-model-field')) return;
+    void pgRefreshContextWindow(pgCurrentProvider(), pgCurrentModel());
+    // check() resolves true once the panel reflects the current inputs
+    // (hidden for a hosted provider, or a banner); the field class only
+    // follows a painted result, never a fetch error or a superseded check.
+    if (await pgLocalModels.check()) pgSyncFieldClass();
 }
 
 function pgSyncFieldClass() {
@@ -1478,193 +1480,12 @@ function pgSyncFieldClass() {
     fieldEl.classList.toggle('is-local-provider', hasManageList);
 }
 
-function pgRenderOllama(statusEl, model, info) {
-    if (!info.reachable) {
-        statusEl.innerHTML = '<div class="warning-message">'
-            + '<strong>Ollama is not running</strong> at <code>'
-            + escapeHtml(info.host) + '</code>'
-            + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
-            + '.<br>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a> and start it, then '
-            + '<a href="#" data-pg-refresh>refresh this check</a>.'
-            + '</div>';
-        pgWireRefresh(statusEl);
-        return;
-    }
-    const installed = (info.models || []).some(function(m) {
-        return m === model || m === model + ':latest' || m + ':latest' === model;
-    });
-    const base = model.split(':')[0];
-    const libUrl = 'https://ollama.com/library/' + encodeURIComponent(base);
-    const banner = installed
-        ? '<div class="success-message">'
-            + '<strong><code>' + escapeHtml(model) + '</code> is available offline</strong>'
-            + ' on Ollama at <code>' + escapeHtml(info.host) + '</code>.'
-            + '</div>'
-        : '<div class="warning-message">'
-            + '<strong>Pre-flight: <code>' + escapeHtml(model) + '</code> is not installed locally.</strong><br>'
-            + 'Sending a message will fail with a 404. Run <code>ollama pull '
-            + escapeHtml(model) + '</code>, click the download icon below, or '
-            + '<a href="' + libUrl + '" target="_blank" rel="noopener">browse <code>'
-            + escapeHtml(base) + '</code> on ollama.com</a>. Then '
-            + '<a href="#" data-pg-refresh>refresh</a>.'
-            + '</div>';
-    statusEl.innerHTML = banner + pgManageListHtml(info.models, 'ollama', 'Ollama');
-    pgWireRefresh(statusEl);
-}
-
-function pgRenderHuggingFace(statusEl, model, info) {
-    if (!info.available) {
-        statusEl.innerHTML = '<div class="warning-message">'
-            + '<strong>HuggingFace cache unavailable</strong>'
-            + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
-            + '.<br>Install it with <code>pip install memorizz[huggingface]</code>, then '
-            + '<a href="#" data-pg-refresh>refresh</a>.'
-            + '</div>';
-        pgWireRefresh(statusEl);
-        return;
-    }
-    const cached = (info.models || []).indexOf(model) !== -1;
-    const repoUrl = 'https://huggingface.co/'
-        + model.split('/').map(encodeURIComponent).join('/');
-    const cacheLoc = info.cache_dir || 'local HF cache';
-    const banner = cached
-        ? '<div class="success-message">'
-            + '<strong><code>' + escapeHtml(model) + '</code> is cached locally</strong> at '
-            + '<code>' + escapeHtml(cacheLoc) + '</code>.'
-            + '</div>'
-        : '<div class="warning-message">'
-            + '<strong>Pre-flight: <code>' + escapeHtml(model) + '</code> is not cached locally.</strong><br>'
-            + 'Sending a message will trigger a download (a few hundred MB to several GB) and may stall. '
-            + 'Click the download icon below, or pre-download with '
-            + '<code>huggingface-cli download ' + escapeHtml(model) + '</code>, '
-            + 'or <a href="' + repoUrl + '" target="_blank" rel="noopener">view the model card</a>. Then '
-            + '<a href="#" data-pg-refresh>refresh</a>.'
-            + '</div>';
-    statusEl.innerHTML = banner + pgManageListHtml(info.models, 'huggingface', 'HuggingFace');
-    pgWireRefresh(statusEl);
-}
-
-function pgWireRefresh(scope) {
-    const link = scope.querySelector('[data-pg-refresh]');
-    if (!link) return;
-    link.addEventListener('click', function(ev) {
-        ev.preventDefault();
-        playgroundCheckLocalModel();
-    });
-}
-
-function pgManageListHtml(installedModels, provider, label) {
-    const installed = (installedModels || []).filter(Boolean);
-    const installedSet = new Set(installed);
-    const isInstalled = function(val) {
-        if (installedSet.has(val)) return true;
-        if (provider === 'ollama') {
-            if (installedSet.has(val + ':latest')) return true;
-            if (val.endsWith(':latest') && installedSet.has(val.slice(0, -7))) return true;
-        }
-        return false;
-    };
-    const catalog = (PROVIDER_MODELS[provider] || []);
-    const catalogValueSet = new Set(catalog.map(function(m) { return m.value; }));
-    const catalogInstalled = catalog.filter(function(m) { return isInstalled(m.value); });
-    const catalogMissing = catalog.filter(function(m) { return !isInstalled(m.value); });
-    const extras = installed.filter(function(name) {
-        if (catalogValueSet.has(name)) return false;
-        if (provider === 'ollama' && name.endsWith(':latest')) {
-            if (catalogValueSet.has(name.slice(0, -7))) return false;
-        }
-        return true;
-    });
-    const totalInstalled = catalogInstalled.length + extras.length;
-    if (totalInstalled === 0 && catalogMissing.length === 0) return '';
-
-    const rows = [];
-    if (totalInstalled > 0) {
-        rows.push('<div class="model-list-section">Available offline (' + totalInstalled + ')</div>');
-        catalogInstalled.forEach(function(m) {
-            rows.push(pgModelRow(m.value, m.label, provider, 'delete'));
-        });
-        extras.forEach(function(name) {
-            rows.push(pgModelRow(name, name, provider, 'delete'));
-        });
-    }
-    if (catalogMissing.length > 0) {
-        rows.push('<div class="model-list-section">Available to download (' + catalogMissing.length + ')</div>');
-        catalogMissing.forEach(function(m) {
-            rows.push(pgModelRow(m.value, m.label, provider, 'pull'));
-        });
-    }
-    return '<details class="model-manager" open>'
-        + '<summary>Manage ' + escapeHtml(label) + ' models</summary>'
-        + '<div class="model-list">' + rows.join('') + '</div>'
-        + '</details>';
-}
-
-function pgModelRow(value, label, provider, action) {
-    const icon = action === 'delete' ? trashIconSvg() : downloadIconSvg();
-    const title = action === 'delete' ? 'Remove from local cache' : 'Download to local cache';
-    const aria = action === 'delete' ? ('Remove ' + value) : ('Download ' + value);
-    const labelHtml = (label && label !== value)
-        ? '<span class="model-row-label"> &mdash; ' + escapeHtml(label) + '</span>'
-        : '';
-    const isSelectable = action === 'delete';
-    const isSelected = isSelectable && pgCurrentModel() === value;
-    const inner = '<code>' + escapeHtml(value) + '</code>' + labelHtml;
-    const textHtml = isSelectable
-        ? '<button type="button" class="model-row-select"'
-            + ' data-pg-select-model="' + escapeHtml(value) + '"'
-            + ' aria-pressed="' + (isSelected ? 'true' : 'false') + '"'
-            + ' title="Use this model in the playground">'
-            + (isSelected ? '<span class="model-row-check" aria-hidden="true">✓</span>' : '')
-            + inner
-            + '</button>'
-        : '<div class="model-row-text">' + inner + '</div>';
-    return '<div class="model-row" data-row-action="' + action + '"'
-        + (isSelected ? ' data-selected="true"' : '')
-        + '>'
-        + textHtml
-        + '<button type="button" class="model-action-btn"'
-        + ' data-pg-action="' + action + '"'
-        + ' data-pg-provider="' + escapeHtml(provider) + '"'
-        + ' data-pg-model="' + escapeHtml(value) + '"'
-        + ' title="' + escapeHtml(title) + '"'
-        + ' aria-label="' + escapeHtml(aria) + '">'
-        + icon + '</button>'
-        + '</div>';
-}
-
-// Pull/delete plumbing lives in the shared handleLocalModelAction()
-// (static/js/app.js); this wrapper just maps the playground's data
-// attributes onto it and refreshes the pre-flight status afterwards.
-async function pgHandleActionClick(button) {
-    await handleLocalModelAction(
-        button,
-        button.dataset.pgAction,
-        button.dataset.pgProvider,
-        button.dataset.pgModel,
-        playgroundCheckLocalModel
-    );
-}
-
-document.addEventListener('click', function(ev) {
-    const btn = ev.target.closest && ev.target.closest('.model-action-btn[data-pg-action]');
-    if (!btn) return;
-    ev.preventDefault();
-    pgHandleActionClick(btn);
-});
-document.addEventListener('click', function(ev) {
-    const sel = ev.target.closest && ev.target.closest('[data-pg-select-model]');
-    if (!sel) return;
-    ev.preventDefault();
-    pgSelectModel(sel.getAttribute('data-pg-select-model'));
-});
-
 // Re-check on dropdown / custom-input changes so the banner updates live.
 (function wirePgModelChangeListeners() {
     const select = document.getElementById('cfg-llm-model');
     const customInput = document.getElementById('cfg-llm-model-custom');
     if (select) select.addEventListener('change', playgroundCheckLocalModel);
-    if (customInput) customInput.addEventListener('input', pgScheduleLocalCheck);
+    if (customInput) customInput.addEventListener('input', pgLocalModels.schedule);
 })();
 
 function removeDynamicRow(buttonEl) {
@@ -1869,7 +1690,9 @@ function initPlaygroundLayout() {
         const docks = pgPanelDocks(name);
         pgSetPanel(name, docks && state[name] !== false, false);
     });
-    openInspectorTab(state.tab || 'overview', false, false);
+    const requestedTab = new URLSearchParams(window.location.search).get('inspector');
+    const validTab = ['overview', 'context', 'memory', 'settings'].includes(requestedTab) ? requestedTab : null;
+    openInspectorTab(validTab || state.tab || 'overview', false, !!validTab);
     document.addEventListener('keydown', function(event) {
         // While a reply streams, Esc stops it instead (see the composer handler).
         if (event.key === 'Escape' && !isStreaming) pgCloseDrawers();
@@ -2342,7 +2165,6 @@ function renderContextWorkflows(entries) {
         const name = entry && entry.name ? String(entry.name) : 'unnamed_workflow';
         const timestamp = entry && entry.timestamp ? String(entry.timestamp) : '';
         const status = entry && entry.status ? String(entry.status) : '';
-        const injectionRole = entry && entry.injection_role ? String(entry.injection_role) : 'user';
         const outcome = entry && entry.outcome ? String(entry.outcome) : '';
         const stepCount = entry && Number.isFinite(Number(entry.step_count)) ? Number(entry.step_count) : 0;
         const userQuery = entry && entry.user_query ? String(entry.user_query) : '';
@@ -2384,6 +2206,7 @@ function renderContextSkills(entries) {
     const rows = entries.map(function(entry) {
         const name = entry && entry.name ? String(entry.name) : 'unnamed_skill';
         const status = entry && entry.status ? String(entry.status) : '';
+        const injectionRole = entry && entry.injection_role ? String(entry.injection_role) : 'user';
         const version = entry && entry.version != null ? String(entry.version) : '';
         const description = entry && entry.description ? String(entry.description) : '';
         const demotionReason = entry && entry.demotion_reason ? String(entry.demotion_reason) : '';
@@ -2618,7 +2441,7 @@ function updateContextWindowCount(messageCount) {
     const countEl = document.getElementById('context-window-count');
     if (!countEl) return;
     const count = Number(messageCount) || 0;
-    countEl.textContent = `${count} message${count === 1 ? '' : 's'}`;
+    countEl.textContent = `${count} history message${count === 1 ? '' : 's'}`;
 }
 
 function applyTokenStats(stats) {
@@ -2794,6 +2617,9 @@ async function loadThreadMessages(memoryId, options = {}) {
         renderContextSummaries([]);
         renderContextToolLogs([]);
         updateContextWindowCount(0);
+        if (window.MemorizzContextHistory) void window.MemorizzContextHistory.refresh('');
+        const evolutionRoot = document.querySelector('#pg-memory-evolution [data-memory-evolution]');
+        if (evolutionRoot && window.MemorizzMemoryEvolution) window.MemorizzMemoryEvolution.mount(evolutionRoot).setScope({agentId: AGENT_ID, memoryId: '', runId: ''});
         return;
     }
 
@@ -2819,14 +2645,19 @@ async function loadThreadMessages(memoryId, options = {}) {
         if (renderChat) {
             renderThreadMessages(messages, normalized);
         }
-        renderContextConversation(messages);
+        renderContextConversation(payload.token_stats?.history_messages || messages.filter(message => message.message_type !== 'trace_bundle'));
         renderContextToolbox(Array.isArray(payload.toolbox_memory) ? payload.toolbox_memory : []);
         renderContextWorkflows(Array.isArray(payload.workflow_memory) ? payload.workflow_memory : []);
         renderContextSkills(Array.isArray(payload.skill_memory) ? payload.skill_memory : []);
         renderContextEntities(Array.isArray(payload.entity_memory) ? payload.entity_memory : []);
         renderContextSummaries(Array.isArray(payload.summary_memory) ? payload.summary_memory : []);
         renderContextToolLogs(Array.isArray(payload.tool_log_memory) ? payload.tool_log_memory : []);
-        updateContextWindowCount(messages.length);
+        updateContextWindowCount(payload.token_stats?.message_count || 0);
+        if (window.MemorizzContextHistory) void window.MemorizzContextHistory.refresh(normalized);
+        const evolutionRoot = document.querySelector('#pg-memory-evolution [data-memory-evolution]');
+        if (evolutionRoot && window.MemorizzMemoryEvolution) window.MemorizzMemoryEvolution.mount(evolutionRoot).setScope({agentId: AGENT_ID, memoryId: normalized, runId: ''});
+        const fullEvolution = document.querySelector('[data-evolution-full]');
+        if (fullEvolution) fullEvolution.href = '/traces/memory-evolution?' + new URLSearchParams({agent_id: AGENT_ID, memory_id: normalized});
         applyTokenStats(payload.token_stats || null);
         updateThreadTabMeta(
             normalized,
@@ -3334,7 +3165,11 @@ async function compactContextWindow() {
         const result = await response.json();
 
         if (result.ok) {
-            appendMessage('system', `Context compacted: ${result.summary_count || 0} summaries generated. ${result.message || ''}`);
+            const count = Number(result.summary_count) || 0;
+            const message = count > 0
+                ? `Context compacted: ${count} ${count === 1 ? 'summary' : 'summaries'} created.`
+                : 'No compaction performed. No new summaries were created; recent messages are kept unchanged.';
+            appendMessage('system', result.message || message);
             // Refresh thread to show updated context
             if (memoryId) {
                 await loadThreadMessages(memoryId, { renderChat: false });

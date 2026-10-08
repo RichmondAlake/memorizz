@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any, Optional
 
 from .runner import run_job_once
@@ -66,7 +67,10 @@ def execute_claimed_job(
     try:
         for attempt in range(1, attempts + 1):
             # A separate thread bounds each attempt; shutdown(wait=False) keeps
-            # a hung model call from blocking past the timeout.
+            # a hung model call from blocking past the timeout. A hung attempt
+            # cannot be killed, so it is abandoned: its stop event blocks any
+            # delivery, and no retry starts while it may still be running.
+            stop_event = threading.Event()
             inner = ThreadPoolExecutor(max_workers=1)
             try:
                 future = inner.submit(
@@ -76,8 +80,20 @@ def execute_claimed_job(
                     scheduled_for_utc=scheduled_for,
                     memory_provider=memory_provider,
                     store=store,
+                    stop_event=stop_event,
                 )
-                result_payload = future.result(timeout=max_seconds)
+                try:
+                    result_payload = future.result(timeout=max_seconds)
+                except FutureTimeoutError:
+                    if future.done():
+                        raise  # the job itself raised a TimeoutError
+                    stop_event.set()
+                    status = "failed"
+                    last_error = (
+                        f"Timed out after {max_seconds} seconds; the attempt "
+                        "was abandoned without delivery and not retried"
+                    )
+                    break
                 status, last_error = _delivery_outcome(result_payload)
                 break
             except Exception as exc:
@@ -101,6 +117,10 @@ def execute_claimed_job(
                     tz_name=job.timezone,
                     after_utc=now_utc,
                 )
+                if getattr(job, "enabled", True) is False:
+                    # A manual run of a paused job: it was claimed without
+                    # being enabled and must stay paused afterwards.
+                    patch["enabled"] = False
         except Exception as exc:
             # An invalid schedule would otherwise retry in a tight loop.
             patch.update(enabled=False, next_run_at=now_utc)

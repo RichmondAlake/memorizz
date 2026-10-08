@@ -1,6 +1,7 @@
 """Request-scoped MCP progress; answer events are an opt-in vendor extension."""
 
 import asyncio
+import os
 
 from mcp.types import ProgressNotification, ProgressNotificationParams
 
@@ -10,6 +11,7 @@ REQUEST_META = "io.memorizz/stream-request"
 
 
 async def execute_stream(service, message, identity, ctx, *, event_format, **kwargs):
+    from ..memory_history import memory_change_context
     from .runtime import MemorizzServerError
 
     if event_format not in {"progress", FORMAT}:
@@ -26,9 +28,16 @@ async def execute_stream(service, message, identity, ctx, *, event_format, **kwa
             "progress_token_required", "Event streaming requires a progress token"
         )
     await ctx.report_progress(0, message="Preparing agent")
-    setup = asyncio.create_task(
-        asyncio.to_thread(service.execute_agent_events, message, identity, **kwargs)
-    )
+    # The worker thread copies this context, so the turn's memory writes are
+    # journalled to the caller exactly as on the non-streaming path.
+    with memory_change_context(
+        actor=getattr(identity, "principal", None) or "local-mcp",
+        source="mcp:execute_agent",
+        harness_run_id=os.getenv("MEMORIZZ_HARNESS_RUN_ID"),
+    ):
+        setup = asyncio.create_task(
+            asyncio.to_thread(service.execute_agent_events, message, identity, **kwargs)
+        )
     try:
         stream = await asyncio.shield(setup)
     except asyncio.CancelledError:

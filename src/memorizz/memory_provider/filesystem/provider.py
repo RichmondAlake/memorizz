@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from ...enums.memory_type import MemoryType
 from ..base import _UNSET as _ANY_USER
 from ..base import MemoryProvider, MemoryProviderCapabilities, filter_tool_log_rows
+from ..vectors import cosine, flatten_vector
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,34 @@ class _FsUserIdUnset:
 
 _FS_UNSET = _FsUserIdUnset()
 
+# Record ids double as filenames inside the per-type store directory. These
+# are the only shapes that could leave that directory or collide with the
+# provider's own files; everything else (":" "@" spaces, unicode) stays legal
+# so stores written before validation remain readable.
+_RECORD_ID_MAX_LENGTH = 255
+_RECORD_ID_FORBIDDEN_CHARS = ("/", "\\", "\x00")
+
+
+def _validate_record_id(record_id: Any) -> str:
+    """Return ``record_id`` as a string safe to use as a filename stem.
+
+    Raises ``ValueError`` for ids containing a path separator or NUL, a ``..``
+    segment, a leading ``.``, an empty value, or more than 255 characters.
+    """
+    text = str(record_id) if record_id is not None else ""
+    if not text:
+        raise ValueError("record id must not be empty")
+    if len(text) > _RECORD_ID_MAX_LENGTH:
+        raise ValueError(
+            f"record id longer than {_RECORD_ID_MAX_LENGTH} characters: {text[:40]!r}..."
+        )
+    if any(char in text for char in _RECORD_ID_FORBIDDEN_CHARS):
+        raise ValueError(f"record id contains a path separator or NUL: {text!r}")
+    # With separators rejected above, a ".." segment can only be the whole id.
+    if text.startswith("."):
+        raise ValueError(f"record id must not start with '.': {text!r}")
+    return text
+
 
 _FS_USER_SCOPED_TYPES = frozenset(
     {
@@ -52,6 +81,9 @@ _FS_USER_SCOPED_TYPES = frozenset(
         MemoryType.SEMANTIC_CACHE,
         MemoryType.ENTITY_MEMORY,
         MemoryType.TOOL_LOG,
+        # Skills carry a user_id (MongoDB scopes them too); listing for one
+        # tenant must not leak another's.
+        MemoryType.SKILLBOX,
     }
 )
 
@@ -168,7 +200,8 @@ class FileSystemProvider(MemoryProvider):
                 )
             else:
                 scores = [
-                    self._cosine_similarity(query, row["embedding"]) for row in eligible
+                    cosine(query, row["embedding"], on_mismatch="raise")
+                    for row in eligible
                 ]
             # Only materialize the requested result vectors; all ranking and
             # scope checks run from the warmed vector cache, not per-file reads.
@@ -191,6 +224,12 @@ class FileSystemProvider(MemoryProvider):
         self._faiss = self._load_faiss() if config.use_faiss else None
         self._store_paths: Dict[MemoryType, Path] = {}
         self._indexes: Dict[MemoryType, Dict[str, Dict[str, Any]]] = {}
+        # What index.json held when this instance last read or wrote it;
+        # ``_save_index`` diffs against it so only local edits are merged in.
+        self._index_baselines: Dict[MemoryType, Dict[str, Dict[str, Any]]] = {}
+        # (mtime_ns, size) of index.json at the last read/write per store, so a
+        # read path can notice another process's write with one stat() call.
+        self._index_signatures: Dict[MemoryType, Any] = {}
         self._locks: Dict[MemoryType, threading.RLock] = {
             memory_type: threading.RLock() for memory_type in MemoryType
         }
@@ -260,6 +299,28 @@ class FileSystemProvider(MemoryProvider):
         self._write_document(memory_type, record_id, document)
         return record_id
 
+    def store_archive_record(
+        self, memory_type, record_id, data, *, replace=False, reembed=False
+    ):
+        # Bypass agent save side effects; the archive explicitly contains the
+        # tools and all timestamps. Loading it never imports executable code.
+        document = self._prepare_document(dict(data, _id=record_id, id=record_id))
+        if reembed:
+            from ...embeddings import get_embedding
+
+            text = (
+                document.get("content")
+                or document.get("description")
+                or document.get("name")
+            )
+            if isinstance(text, str) and text:
+                document["embedding"] = get_embedding(text)
+        with self._locks[memory_type]:
+            if not replace and self._read_document(memory_type, record_id) is not None:
+                raise ValueError("A destination record appeared after import preview")
+            self._write_document(memory_type, record_id, document)
+        return record_id
+
     def store_many(
         self,
         rows: List[Dict[str, Any]],
@@ -319,6 +380,7 @@ class FileSystemProvider(MemoryProvider):
         **kwargs,
     ) -> Optional[List[Dict[str, Any]]]:
         resolved_type = self._normalize_memory_type(memory_type or memory_store_type)
+        self._refresh_index_from_disk(resolved_type)
         user_id_scope = kwargs.get("user_id", _FS_UNSET)
         thread_id = kwargs.get("thread_id")
         namespace = kwargs.get("namespace")
@@ -425,6 +487,15 @@ class FileSystemProvider(MemoryProvider):
                 metadata = self._indexes.get(memory_type, {})
                 if id in metadata:
                     return self._read_document(memory_type, id)
+                # Another instance on this root (CLI, MCP server, UI) may have
+                # written the file after this index was loaded.
+                document = self._adopt_from_disk(memory_type, id)
+                if document is not None:
+                    try:
+                        self._save_index(memory_type)
+                    except (OSError, sqlite3.Error) as exc:
+                        logger.debug("Index repair skipped for %s: %s", id, exc)
+                    return document
                 if memory_type == MemoryType.TOOL_LOG:
                     # Logs written before tool_log_id became the record ID.
                     for doc_id in list(metadata):
@@ -445,13 +516,14 @@ class FileSystemProvider(MemoryProvider):
             else list(MemoryType)
         )
         for memory_type in memory_types:
-            with self._locks[memory_type]:
-                for doc_id, meta in self._indexes[memory_type].items():
-                    if meta.get("name") == name:
-                        document = self._read_document(memory_type, doc_id)
-                        if not include_embedding and document:
-                            document.pop("embedding", None)
-                        return document
+            self._refresh_index_from_disk(MemoryType.CONVERSATION_MEMORY)
+        with self._locks[memory_type]:
+            for doc_id, meta in self._indexes[memory_type].items():
+                if meta.get("name") == name:
+                    document = self._read_document(memory_type, doc_id)
+                    if not include_embedding and document:
+                        document.pop("embedding", None)
+                    return document
         return None
 
     def delete_observability_bundle(self, record_id, fingerprint):
@@ -473,9 +545,13 @@ class FileSystemProvider(MemoryProvider):
         self, id: str, memory_store_type: Union[str, MemoryType, None]
     ) -> bool:
         memory_type = self._normalize_memory_type(memory_store_type)
+        self._refresh_index_from_disk(memory_type)
         with self._locks[memory_type]:
             metadata = self._indexes[memory_type]
-            if id not in metadata:
+            if (
+                id not in metadata
+                and self._adopt_from_disk(memory_type, id, as_baseline=True) is None
+            ):
                 return False
             file_path = self._document_path(memory_type, id)
             if file_path.exists():
@@ -513,6 +589,7 @@ class FileSystemProvider(MemoryProvider):
         user_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         memory_type = self._normalize_memory_type(memory_store_type)
+        self._refresh_index_from_disk(memory_type)
         documents: List[Dict[str, Any]] = []
         apply_user_filter = (
             user_id is not _FS_UNSET and memory_type in _FS_USER_SCOPED_TYPES
@@ -526,6 +603,49 @@ class FileSystemProvider(MemoryProvider):
                     continue
                 documents.append(document)
         return documents
+
+    def query_memory_observations(
+        self,
+        memory_store_type,
+        *,
+        agent_id=None,
+        memory_ids=None,
+        user_id=_ANY_USER,
+        application_id=None,
+        exclude_ids=(),
+        limit=200,
+    ):
+        from ..base import _observation_matches
+
+        kind = self._normalize_memory_type(memory_store_type)
+        self._refresh_index_from_disk(kind)
+        matches, safe_limit = [], max(1, min(int(limit), 1000))
+        scope = dict(
+            agent_id=agent_id,
+            memory_ids=memory_ids,
+            user_id=user_id,
+            application_id=application_id,
+            exclude_ids=exclude_ids,
+        )
+        with self._locks[kind]:
+            for identifier, metadata in self._indexes[kind].items():
+                document = None
+                if "observation_scope_version" not in metadata:
+                    # Upgrade old index entries lazily in memory, including
+                    # read-only portals. Subsequent queries use cached scope.
+                    document = self._read_document(kind, identifier)
+                    if not document:
+                        continue
+                    metadata = self._build_metadata(document)
+                    self._indexes[kind][identifier] = metadata
+                if not _observation_matches({**metadata, "_id": identifier}, **scope):
+                    continue
+                document = document or self._read_document(kind, identifier)
+                if _observation_matches(document, **scope):
+                    matches.append(document)
+                    if len(matches) == safe_limit:
+                        break
+        return matches
 
     def list_tool_logs(
         self,
@@ -563,6 +683,7 @@ class FileSystemProvider(MemoryProvider):
             memory_type or MemoryType.CONVERSATION_MEMORY
         )
         apply_user_filter = user_id is not _FS_UNSET
+        self._refresh_index_from_disk(MemoryType.CONVERSATION_MEMORY)
         with self._locks[resolved_type]:
             documents: List[Tuple[float, Dict[str, Any]]] = []
             for doc_id in self._indexes[resolved_type]:
@@ -623,11 +744,12 @@ class FileSystemProvider(MemoryProvider):
         memory_store_type: Union[str, MemoryType, None],
     ) -> bool:
         memory_type = self._normalize_memory_type(memory_store_type)
+        self._refresh_index_from_disk(memory_type)
         with self._locks[memory_type]:
             document = self._read_document(memory_type, id)
             if not document:
                 return False
-            document.update(self._prepare_document(data))
+            document.update(self._normalize_document(data))
             document["_id"] = id
             document["id"] = id
             document["updated_at"] = datetime.utcnow().isoformat()
@@ -740,11 +862,18 @@ class FileSystemProvider(MemoryProvider):
             store_path.mkdir(parents=True, exist_ok=True)
             self._store_paths[memory_type] = store_path
             index = self._read_index_file(store_path)
+            if index is None:
+                index = self._rebuild_index_from_files(memory_type)
             self._indexes[memory_type] = index
+            self._index_baselines[memory_type] = dict(index)
+            self._index_signatures[memory_type] = self._index_signature(store_path)
             self._vector_state[memory_type] = {
                 "index": None,
                 "doc_ids": [],
                 "dirty": True,
+                # Bumped on every write; a rebuild only clears ``dirty`` when
+                # no write landed while it ran outside the store lock.
+                "generation": 0,
             }
 
     def _setup_embedding_provider(self, config: FileSystemConfig):
@@ -795,9 +924,19 @@ class FileSystemProvider(MemoryProvider):
         return dict(memory_unit)
 
     def _prepare_document(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalise a whole document for storage, stamping a default timestamp."""
         document = dict(data)
         if document.get("timestamp") is None:
             document["timestamp"] = datetime.utcnow().isoformat()
+        return self._normalize_document(document)
+
+    def _normalize_document(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """JSON-normalise ``data`` without adding fields.
+
+        Partial updates go through here: a patch such as ``{"embedding": [...]}``
+        must not receive ``timestamp=now`` or it reorders conversation history.
+        """
+        document = dict(data)
 
         tools = document.get("tools")
         if isinstance(tools, list):
@@ -870,12 +1009,21 @@ class FileSystemProvider(MemoryProvider):
                 self._mark_vector_index_dirty(memory_type)
 
     def _document_path(self, memory_type: MemoryType, document_id: str) -> Path:
-        return self._store_paths[memory_type] / f"{document_id}.json"
+        # Every id-to-filename conversion goes through here, so a caller
+        # supplied id can never resolve outside the store directory.
+        return (
+            self._store_paths[memory_type] / f"{_validate_record_id(document_id)}.json"
+        )
 
     def _read_document(
         self, memory_type: MemoryType, document_id: str
     ) -> Optional[Dict[str, Any]]:
-        file_path = self._document_path(memory_type, document_id)
+        try:
+            file_path = self._document_path(memory_type, document_id)
+        except ValueError:
+            # An id that cannot name a file inside the store is a plain miss
+            # for readers; only writers reject it loudly.
+            return None
         if not file_path.exists():
             return None
         try:
@@ -913,38 +1061,166 @@ class FileSystemProvider(MemoryProvider):
             "name": document.get("name") or document.get("title"),
             "memory_id": document.get("memory_id"),
             "user_id": document.get("user_id"),
+            "agent_id": document.get("agent_id"),
+            "owner_agent_id": document.get("owner_agent_id"),
+            "application_id": document.get("application_id"),
+            "observation_scope_version": 1,
             "timestamp": timestamp,
             "has_embedding": bool(document.get("embedding")),
             "thread_id": document.get("thread_id") or document.get("conversation_id"),
         }
 
-    def _read_index_file(self, store_path: Path) -> Dict[str, Dict[str, Any]]:
+    @staticmethod
+    def _index_signature(store_path: Path) -> Any:
+        try:
+            stat = (store_path / "index.json").stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _refresh_index_from_disk(self, memory_type: MemoryType) -> bool:
+        """Pick up index entries written by another process since our last sync.
+
+        One ``stat()`` per read path; when index.json changed on disk, merge
+        it under the store lock while keeping this instance's own unsynced
+        edits (additions, updates and removals relative to the baseline).
+        Returns True when anything changed. The vector index is marked dirty
+        so new documents become searchable without a restart.
+        """
+        store_path = self._store_paths.get(memory_type)
+        if store_path is None:
+            return False
+        signature = self._index_signature(store_path)
+        if signature is None or signature == self._index_signatures.get(memory_type):
+            return False
+        with self._locks[memory_type]:
+            if signature == self._index_signatures.get(memory_type):
+                return False
+            on_disk = self._read_index_file(store_path)
+            if on_disk is None:
+                return False
+            mine = self._indexes[memory_type]
+            baseline = self._index_baselines.get(memory_type, {})
+            merged = dict(on_disk)
+            for doc_id in baseline:
+                if doc_id not in mine:
+                    merged.pop(doc_id, None)
+            for doc_id, meta in mine.items():
+                if doc_id not in baseline or baseline[doc_id] != meta:
+                    merged[doc_id] = meta
+            changed = merged != mine
+            mine.clear()
+            mine.update(merged)
+            self._index_baselines[memory_type] = dict(on_disk)
+            self._index_signatures[memory_type] = signature
+            if changed:
+                self._mark_vector_index_dirty(memory_type)
+        return changed
+
+    def _read_index_file(self, store_path: Path) -> Optional[Dict[str, Dict[str, Any]]]:
+        """Return the on-disk index items, or ``None`` when missing or corrupt."""
         index_path = store_path / "index.json"
         if not index_path.exists():
-            return {}
+            return None
         try:
             with index_path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
             items = payload.get("items")
             if isinstance(items, dict):
                 return items
+            logger.warning("Index %s has no items mapping; rebuilding", index_path)
         except Exception as exc:
             logger.warning("Failed to load index from %s: %s", index_path, exc)
-        return {}
+        return None
+
+    def _rebuild_index_from_files(
+        self, memory_type: MemoryType
+    ) -> Dict[str, Dict[str, Any]]:
+        """Recreate index metadata from the documents present in the store."""
+        store_path = self._store_paths[memory_type]
+        rebuilt: Dict[str, Dict[str, Any]] = {}
+        for path in sorted(store_path.glob("*.json")):
+            if path.name == "index.json":
+                continue
+            document = self._read_document(memory_type, path.stem)
+            if document:
+                rebuilt[path.stem] = self._build_metadata(document)
+        return rebuilt
+
+    @contextmanager
+    def _cross_process_index_lock(self):
+        """Serialize index.json read-merge-write across processes on one root.
+
+        The CLI, MCP server and UI each hold their own provider instance over
+        the same directory; SQLite gives crash-released locking everywhere.
+        """
+        with closing(
+            sqlite3.connect(self.root_path / ".index-lock.sqlite3", timeout=5)
+        ) as lock:
+            lock.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            finally:
+                lock.rollback()
 
     def _save_index(self, memory_type: MemoryType) -> None:
+        """Persist this instance's index changes without dropping others'.
+
+        The in-memory index is a snapshot plus local edits. Reload the file,
+        apply only what changed here since the last sync (additions, updates
+        and removals relative to the baseline) and write the merge back, so
+        two instances on one root never orphan each other's records.
+        """
         store_path = self._store_paths[memory_type]
         index_path = store_path / "index.json"
-        # Unique tmp name: two threads saving the same index must never race
-        # on one shared tmp path (os.replace of a missing file raises ENOENT).
-        tmp_path = index_path.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
-        payload = {
-            "version": self.INDEX_VERSION,
-            "items": self._indexes[memory_type],
-        }
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False)
-        os.replace(tmp_path, index_path)
+        mine = self._indexes[memory_type]
+        baseline = self._index_baselines.get(memory_type, {})
+        with self._cross_process_index_lock():
+            on_disk = self._read_index_file(store_path)
+            if on_disk is None:
+                on_disk = self._rebuild_index_from_files(memory_type)
+            merged = dict(on_disk)
+            for doc_id in baseline:
+                if doc_id not in mine:
+                    merged.pop(doc_id, None)
+            for doc_id, meta in mine.items():
+                if doc_id not in baseline or baseline[doc_id] != meta:
+                    merged[doc_id] = meta
+            # Unique tmp name: two threads saving the same index must never
+            # race on one shared tmp path (os.replace of a missing file
+            # raises ENOENT).
+            tmp_path = index_path.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
+            payload = {"version": self.INDEX_VERSION, "items": merged}
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(tmp_path, index_path)
+        # Keep the dict identity: callers hold references to it under the lock.
+        mine.clear()
+        mine.update(merged)
+        self._index_baselines[memory_type] = dict(merged)
+        self._index_signatures[memory_type] = self._index_signature(store_path)
+
+    def _adopt_from_disk(
+        self,
+        memory_type: MemoryType,
+        document_id: str,
+        *,
+        as_baseline: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Index a document another instance wrote after this index was loaded.
+
+        Returns the document, or ``None`` when no such file exists (or the id
+        cannot name a file). With ``as_baseline`` the entry also counts as
+        already synced, so a following removal propagates to index.json.
+        """
+        document = self._read_document(memory_type, document_id)
+        if not document:
+            return None
+        metadata = self._build_metadata(document)
+        self._indexes[memory_type][document_id] = metadata
+        if as_baseline:
+            self._index_baselines[memory_type][document_id] = metadata
+        return document
 
     @staticmethod
     def _user_id_scope_matches(document: Dict[str, Any], user_id: Any) -> bool:
@@ -957,6 +1233,25 @@ class FileSystemProvider(MemoryProvider):
         if user_id is _FS_UNSET:
             return True
         return document.get("user_id") == user_id
+
+    @staticmethod
+    def _metadata_scope_may_match(
+        meta: Dict[str, Any], memory_id: Optional[str], user_id: Any
+    ) -> bool:
+        """Cheap pre-filter on index metadata; the document check still runs.
+
+        Index rows written before a field was recorded lack the key and stay
+        eligible so the document-level filter decides for them.
+        """
+        if memory_id and "memory_id" in meta and meta.get("memory_id") != memory_id:
+            return False
+        if (
+            user_id is not _FS_UNSET
+            and "user_id" in meta
+            and meta.get("user_id") != user_id
+        ):
+            return False
+        return True
 
     @staticmethod
     def _retrieval_scope_matches(
@@ -1126,29 +1421,59 @@ class FileSystemProvider(MemoryProvider):
             )
 
         top_k = max(limit or 1, 1)
-        # Over-fetch so the user_id filter still returns enough matches.
-        distances, indices = index.search(query_vector.reshape(1, -1), top_k * 4)
+        # A global top-k followed by memory_id/user_id filtering gives a small
+        # tenant a false miss when a larger one fills every slot. Narrow the
+        # candidates from index metadata first (no document reads for other
+        # tenants) and widen to the whole index when the scope is still short.
+        eligible: Optional[set] = None
+        if memory_id or user_id is not _FS_UNSET:
+            with self._locks[memory_type]:
+                eligible = {
+                    doc_id
+                    for doc_id, meta in self._indexes[memory_type].items()
+                    if self._metadata_scope_may_match(meta, memory_id, user_id)
+                }
+            if not eligible:
+                return self._keyword_search(
+                    memory_type,
+                    query,
+                    limit,
+                    memory_id,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    namespace=namespace,
+                )
+        wanted = top_k if eligible is None else min(top_k, len(eligible))
 
         matches: List[Dict[str, Any]] = []
-        for position, score in zip(indices[0], distances[0]):
-            if position < 0 or position >= len(doc_ids):
-                continue
-            doc_id = doc_ids[position]
-            document = self._read_document(memory_type, doc_id)
-            if not document:
-                continue
-            if memory_id and document.get("memory_id") != memory_id:
-                continue
-            if not self._user_id_scope_matches(document, user_id):
-                continue
-            if not self._retrieval_scope_matches(
-                document, thread_id=thread_id, namespace=namespace
-            ):
-                continue
-            document["score"] = float(score)
-            matches.append(document)
-            if len(matches) >= top_k:
+        k = min(top_k * 4, len(doc_ids))
+        while True:
+            distances, indices = index.search(query_vector.reshape(1, -1), k)
+            matches = []
+            for position, score in zip(indices[0], distances[0]):
+                if position < 0 or position >= len(doc_ids):
+                    continue
+                doc_id = doc_ids[position]
+                if eligible is not None and doc_id not in eligible:
+                    continue
+                document = self._read_document(memory_type, doc_id)
+                if not document:
+                    continue
+                if memory_id and document.get("memory_id") != memory_id:
+                    continue
+                if not self._user_id_scope_matches(document, user_id):
+                    continue
+                if not self._retrieval_scope_matches(
+                    document, thread_id=thread_id, namespace=namespace
+                ):
+                    continue
+                document["score"] = float(score)
+                matches.append(document)
+                if len(matches) >= top_k:
+                    break
+            if len(matches) >= wanted or k >= len(doc_ids):
                 break
+            k = len(doc_ids)
         return matches or self._keyword_search(
             memory_type,
             query,
@@ -1283,6 +1608,7 @@ class FileSystemProvider(MemoryProvider):
         doc_ids: List[str] = []
         vectors: List[np.ndarray] = []
         with self._locks[memory_type]:
+            generation = state.get("generation", 0)
             for doc_id in self._indexes[memory_type]:
                 document = self._read_document(memory_type, doc_id)
                 if not document:
@@ -1295,19 +1621,22 @@ class FileSystemProvider(MemoryProvider):
                 vectors.append(vector)
 
         if not vectors:
-            state["index"] = None
-            state["doc_ids"] = []
-            state["dirty"] = False
-            return None, []
+            index = None
+            doc_ids = []
+        else:
+            dimension = vectors[0].shape[0]
+            index = self._faiss.IndexFlatIP(dimension)
+            stacked = np.stack(vectors, axis=0)
+            index.add(stacked)
 
-        dimension = vectors[0].shape[0]
-        index = self._faiss.IndexFlatIP(dimension)
-        stacked = np.stack(vectors, axis=0)
-        index.add(stacked)
-
-        state["index"] = index
-        state["doc_ids"] = doc_ids
-        state["dirty"] = False
+        with self._locks[memory_type]:
+            state["index"] = index
+            state["doc_ids"] = doc_ids
+            # A write that landed after the read phase bumped the generation;
+            # leave ``dirty`` set so the next search rebuilds instead of
+            # hiding that record until some later write.
+            if state.get("generation", 0) == generation:
+                state["dirty"] = False
         return index, doc_ids
 
     def _mark_vector_index_dirty(self, memory_type: MemoryType) -> None:
@@ -1315,37 +1644,17 @@ class FileSystemProvider(MemoryProvider):
             self._composed_vector_cache = None
         if memory_type not in self._vector_state:
             return
-        self._vector_state[memory_type]["dirty"] = True
+        state = self._vector_state[memory_type]
+        state["dirty"] = True
+        state["generation"] = state.get("generation", 0) + 1
 
     def _cosine_similarity(
         self, vector_a: Union[List[float], Any], vector_b: Union[List[float], Any]
     ) -> Optional[float]:
-        if np is None:
-            # Pure Python fallback
-            try:
-                dot = sum(a * b for a, b in zip(vector_a, vector_b))
-                norm_a = sum(a * a for a in vector_a) ** 0.5
-                norm_b = sum(b * b for b in vector_b) ** 0.5
-                if norm_a == 0 or norm_b == 0:
-                    return None
-                return dot / (norm_a * norm_b)
-            except Exception:
-                return None
-
-        vec_a = np.asarray(vector_a, dtype="float32").ravel()
-        vec_b = np.asarray(vector_b, dtype="float32").ravel()
-        # Guard against malformed/mismatched embeddings (e.g. a document embedded
-        # with a different model/dimension, or a nested [[...]] shape). Flatten to
-        # 1-D and bail on shape mismatch so np.dot stays scalar — otherwise
-        # float(np.dot(...)) raises "only length-1 arrays can be converted to
-        # Python scalars" and aborts brute-force retrieval.
-        if vec_a.size == 0 or vec_a.shape != vec_b.shape:
-            return None
-        norm_a = np.linalg.norm(vec_a)
-        norm_b = np.linalg.norm(vec_b)
-        if norm_a == 0 or norm_b == 0:
-            return None
-        return float(np.dot(vec_a, vec_b) / (norm_a * norm_b))
+        # Flatten first: a document embedded with a nested [[...]] shape must
+        # still score; a dimension mismatch is None and the document is skipped
+        # instead of aborting brute-force retrieval.
+        return cosine(flatten_vector(vector_a), flatten_vector(vector_b))
 
     def _normalize_vector(self, vector: np.ndarray) -> np.ndarray:
         if np is None:

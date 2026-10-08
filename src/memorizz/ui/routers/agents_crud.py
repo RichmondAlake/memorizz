@@ -619,6 +619,7 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "tool_cache": bool(getattr(agent, "tool_cache_config", None)),
         "continual_learning": bool(getattr(agent, "continual_learning", False)),
         "learning_control_plane": bool(getattr(agent, "learning_control_plane", False)),
+        "forgetting": _forgetting_form_values(getattr(agent, "retrieval_policy", None)),
         "skill_injection_role": skill_injection_role,
         "continual_learning_require_shadow": bool(
             continual_learning_config.get("require_shadow", False)
@@ -698,6 +699,193 @@ def _fleet_rows(agents, overview) -> List[Dict[str, Any]]:
             }
         )
     return rows
+
+
+_FORGETTING_SCORING_FIELDS = (
+    "recency_decay_per_hour",
+    "recency_anchor",
+    "alpha_recency",
+    "alpha_importance",
+    "alpha_relevance",
+)
+_FORGETTING_RETENTION_FIELDS = ("enabled", "min_retention", "grace_days")
+
+
+def _forgetting_form_values(retrieval_policy: Any) -> Dict[str, str]:
+    """Template values for the per-agent Forgetting group ("" = inherit global)."""
+    policy = retrieval_policy if isinstance(retrieval_policy, dict) else {}
+    if hasattr(retrieval_policy, "to_dict"):
+        policy = retrieval_policy.to_dict()
+    scoring = policy.get("scoring") if isinstance(policy.get("scoring"), dict) else {}
+    retention = (
+        policy.get("retention") if isinstance(policy.get("retention"), dict) else {}
+    )
+    values: Dict[str, str] = {}
+    for name in _FORGETTING_SCORING_FIELDS:
+        value = scoring.get(name)
+        values[f"scoring_{name}"] = "" if value in (None, "") else str(value)
+    for name in _FORGETTING_RETENTION_FIELDS:
+        value = retention.get(name)
+        if name == "enabled":
+            values["retention_enabled"] = (
+                "" if value in (None, "") else ("on" if _parse_bool(value) else "off")
+            )
+        else:
+            values[f"retention_{name}"] = "" if value in (None, "") else str(value)
+    return values
+
+
+def _retrieval_policy_with_forgetting(
+    existing_policy: Any, form: Dict[str, Optional[str]]
+) -> Optional[Dict[str, Any]]:
+    """Merge the Forgetting form group into an agent's retrieval policy dict.
+
+    Blank fields mean "inherit the global MEMORIZZ_* settings"; when every
+    field is blank the override keys are removed so nothing is pinned.
+    """
+    policy: Dict[str, Any] = {}
+    if hasattr(existing_policy, "to_dict"):
+        policy = dict(existing_policy.to_dict())
+    elif isinstance(existing_policy, dict):
+        policy = dict(existing_policy)
+    scoring: Dict[str, Any] = {}
+    for name in _FORGETTING_SCORING_FIELDS:
+        raw = _to_text(form.get(f"scoring_{name}")).strip()
+        if not raw:
+            continue
+        if name == "recency_anchor":
+            if raw.lower() in ("last_accessed", "created"):
+                scoring[name] = raw.lower()
+            continue
+        try:
+            scoring[name] = float(raw)
+        except ValueError:
+            continue
+    retention: Dict[str, Any] = {}
+    enabled = _to_text(form.get("retention_enabled")).strip().lower()
+    if enabled in ("on", "off", "true", "false", "1", "0"):
+        retention["enabled"] = enabled in ("on", "true", "1")
+    for name in ("min_retention", "grace_days"):
+        raw = _to_text(form.get(f"retention_{name}")).strip()
+        if not raw:
+            continue
+        try:
+            retention[name] = float(raw)
+        except ValueError:
+            continue
+    if scoring:
+        policy["scoring"] = scoring
+    else:
+        policy.pop("scoring", None)
+    if retention:
+        policy["retention"] = retention
+    else:
+        policy.pop("retention", None)
+    return policy or None
+
+
+def _parse_default_timezone(
+    default_timezone: str, error: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """The Default timezone field: blank is unset; an unknown zone is the
+    form's error unless an earlier check already set one."""
+    default_timezone_value = _to_text(default_timezone).strip() or None
+    if not error and default_timezone_value:
+        try:
+            from ...automation.schedule import validate_timezone_name
+
+            validate_timezone_name(default_timezone_value)
+        except Exception as exc:
+            error = str(exc)
+    return default_timezone_value, error
+
+
+def _whatsapp_form_values(
+    whatsapp_enabled: Optional[str], whatsapp_welcome_message: str
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """The WhatsApp toggle and, when it is on, the config the agent stores."""
+    enabled = _parse_bool(whatsapp_enabled)
+    config = None
+    if enabled:
+        config = {
+            "welcome_message": _to_text(whatsapp_welcome_message).strip() or None,
+            "auto_reply_enabled": True,
+            "timeout_seconds": 60,
+        }
+    return enabled, config
+
+
+def _parse_harness_form_fields(
+    meta_harness_mode: str,
+    default_harness: str,
+    harness_workspace: str,
+    error: Optional[str],
+) -> Tuple[str, str, str, Optional[str]]:
+    """Normalise the Harness fields: mode, default harness, workspace.
+
+    The checks run in that order and the first error wins, so an error an
+    earlier section set comes back unchanged (and the workspace is then
+    left as typed, not resolved).
+    """
+    meta_harness_mode_value = _to_text(meta_harness_mode).strip().lower()
+    if meta_harness_mode_value not in {"", "delegate", "runtime"} and not error:
+        error = "Meta-harness mode must be disabled, delegate, or runtime"
+    default_harness_value = (
+        _to_text(default_harness).strip().lower().replace("_", "-") or "auto"
+    )
+    if default_harness_value not in DEFAULT_HARNESS_CHOICES and not error:
+        error = "Default harness must be auto, codex, claude-code, openhands, deepseek, pi, hermes, or native"
+    harness_workspace_value = _to_text(harness_workspace).strip()
+    if harness_workspace_value and not error:
+        try:
+            resolved_harness_workspace = (
+                Path(harness_workspace_value).expanduser().resolve(strict=True)
+            )
+            if not resolved_harness_workspace.is_dir():
+                raise ValueError("not a directory")
+            harness_workspace_value = str(resolved_harness_workspace)
+        except (OSError, ValueError):
+            error = "Harness workspace must be an existing directory"
+    return (
+        meta_harness_mode_value,
+        default_harness_value,
+        harness_workspace_value,
+        error,
+    )
+
+
+def _render_agent_form(
+    request: Request,
+    *,
+    error: Optional[str],
+    form_data: Dict[str, Any],
+    agent_id: Optional[str] = None,
+):
+    """Render ``agent_form.html`` with the chrome every create/edit response shares.
+
+    ``agent_id`` set means the edit form (its title, action and the agent nav);
+    unset means the create form. ``form_data`` holds the field values.
+    """
+    is_edit = agent_id is not None
+    context: Dict[str, Any] = {
+        "request": request,
+        "provider_type": _state["provider_type"],
+        "connection_info": _state["connection_info"],
+    }
+    if is_edit:
+        context["agents_nav"] = _build_agent_nav_items(active_agent_id=agent_id)
+        context["active_agent_id"] = agent_id
+    context.update(
+        {
+            "active_page": "agents",
+            "form_title": "Edit Agent" if is_edit else "Create Agent",
+            "form_action": f"/agents/{agent_id}/edit" if is_edit else "/agents/new",
+            "is_edit": is_edit,
+            "error": error,
+            **form_data,
+        }
+    )
+    return templates.TemplateResponse("agent_form.html", context)
 
 
 @router.get("/agents", response_class=HTMLResponse)
@@ -848,17 +1036,10 @@ async def agent_create_page(request: Request):
         or ""
     )
 
-    return templates.TemplateResponse(
-        "agent_form.html",
-        {
-            "request": request,
-            "provider_type": _state["provider_type"],
-            "connection_info": _state["connection_info"],
-            "active_page": "agents",
-            "form_title": "Create Agent",
-            "form_action": "/agents/new",
-            "is_edit": False,
-            "error": None,
+    return _render_agent_form(
+        request,
+        error=None,
+        form_data={
             "agent_id": "",
             "agent_name": "",
             "instruction": DEFAULT_INSTRUCTION,
@@ -869,6 +1050,7 @@ async def agent_create_page(request: Request):
             "tool_cache": False,
             "continual_learning": False,
             "learning_control_plane": False,
+            "forgetting": _forgetting_form_values(None),
             "skill_injection_role": "user",
             "continual_learning_require_shadow": False,
             "continual_learning_shadow_evaluation": False,
@@ -1025,6 +1207,14 @@ async def agent_create_submit(
     tool_cache: Optional[str] = Form(None),
     continual_learning: Optional[str] = Form(None),
     learning_control_plane: Optional[str] = Form(None),
+    forgetting_scoring_recency_decay_per_hour: Optional[str] = Form(None),
+    forgetting_scoring_recency_anchor: Optional[str] = Form(None),
+    forgetting_scoring_alpha_recency: Optional[str] = Form(None),
+    forgetting_scoring_alpha_importance: Optional[str] = Form(None),
+    forgetting_scoring_alpha_relevance: Optional[str] = Form(None),
+    forgetting_retention_enabled: Optional[str] = Form(None),
+    forgetting_retention_min_retention: Optional[str] = Form(None),
+    forgetting_retention_grace_days: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -1083,6 +1273,17 @@ async def agent_create_submit(
     continual_learning_enabled = _parse_bool(continual_learning)
     learning_control_plane_enabled = _parse_bool(learning_control_plane)
     learning_control_plane_config_value = {"enabled": learning_control_plane_enabled}
+    forgetting_form = {
+        "scoring_recency_decay_per_hour": forgetting_scoring_recency_decay_per_hour,
+        "scoring_recency_anchor": forgetting_scoring_recency_anchor,
+        "scoring_alpha_recency": forgetting_scoring_alpha_recency,
+        "scoring_alpha_importance": forgetting_scoring_alpha_importance,
+        "scoring_alpha_relevance": forgetting_scoring_alpha_relevance,
+        "retention_enabled": forgetting_retention_enabled,
+        "retention_min_retention": forgetting_retention_min_retention,
+        "retention_grace_days": forgetting_retention_grace_days,
+    }
+    retrieval_policy_value = _retrieval_policy_with_forgetting(None, forgetting_form)
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
     )
@@ -1111,14 +1312,7 @@ async def agent_create_submit(
         allow_deletes=self_aware_allow_deletes_value,
     )
     automations_enabled_value = _parse_bool(automations_enabled)
-    default_timezone_value = _to_text(default_timezone).strip() or None
-    if not error and default_timezone_value:
-        try:
-            from ...automation.schedule import validate_timezone_name
-
-            validate_timezone_name(default_timezone_value)
-        except Exception as exc:
-            error = str(exc)
+    default_timezone_value, error = _parse_default_timezone(default_timezone, error)
 
     # Delegates (only when the form's Delegates section was posted).
     delegates_value: Optional[List[str]] = None
@@ -1145,15 +1339,9 @@ async def agent_create_submit(
         if not error and delegation_error:
             error = delegation_error
 
-    # WhatsApp configuration
-    whatsapp_enabled_value = _parse_bool(whatsapp_enabled)
-    whatsapp_config_value = None
-    if whatsapp_enabled_value:
-        whatsapp_config_value = {
-            "welcome_message": _to_text(whatsapp_welcome_message).strip() or None,
-            "auto_reply_enabled": True,
-            "timeout_seconds": 60,
-        }
+    whatsapp_enabled_value, whatsapp_config_value = _whatsapp_form_values(
+        whatsapp_enabled, whatsapp_welcome_message
+    )
 
     memory_types_value = _build_memory_types_for_agent(
         application_mode=application_mode or "assistant",
@@ -1166,25 +1354,14 @@ async def agent_create_submit(
     browser_control_provider_value = _normalize_browser_control_provider_name(
         browser_control_provider
     )
-    meta_harness_mode_value = _to_text(meta_harness_mode).strip().lower()
-    if meta_harness_mode_value not in {"", "delegate", "runtime"} and not error:
-        error = "Meta-harness mode must be disabled, delegate, or runtime"
-    default_harness_value = (
-        _to_text(default_harness).strip().lower().replace("_", "-") or "auto"
+    (
+        meta_harness_mode_value,
+        default_harness_value,
+        harness_workspace_value,
+        error,
+    ) = _parse_harness_form_fields(
+        meta_harness_mode, default_harness, harness_workspace, error
     )
-    if default_harness_value not in DEFAULT_HARNESS_CHOICES and not error:
-        error = "Default harness must be auto, codex, claude-code, openhands, deepseek, pi, hermes, or native"
-    harness_workspace_value = _to_text(harness_workspace).strip()
-    if harness_workspace_value and not error:
-        try:
-            resolved_harness_workspace = (
-                Path(harness_workspace_value).expanduser().resolve(strict=True)
-            )
-            if not resolved_harness_workspace.is_dir():
-                raise ValueError("not a directory")
-            harness_workspace_value = str(resolved_harness_workspace)
-        except (OSError, ValueError):
-            error = "Harness workspace must be an existing directory"
     harness_config_value = (
         {
             "workspace": harness_workspace_value,
@@ -1196,64 +1373,54 @@ async def agent_create_submit(
     if _to_text(harness_model).strip():
         harness_config_value["model"] = _to_text(harness_model).strip()
 
+    # What was submitted, as the form shows it again when a check fails.
+    form_data = {
+        "agent_id": "",
+        "agent_name": agent_name,
+        "instruction": instruction,
+        "application_mode": application_mode,
+        "max_steps": max_steps,
+        "tool_access": tool_access,
+        "semantic_cache": semantic_cache_enabled,
+        "tool_cache": tool_cache_enabled,
+        "continual_learning": continual_learning_enabled,
+        "learning_control_plane": learning_control_plane_enabled,
+        "skill_injection_role": skill_injection_role,
+        "continual_learning_require_shadow": continual_learning_require_shadow_value,
+        "continual_learning_shadow_evaluation": (
+            continual_learning_shadow_evaluation_value
+        ),
+        "memory_ids_raw": memory_ids,
+        "persona_id": persona_id,
+        "persona_name": persona_name,
+        "persona_role": persona_role,
+        "persona_goals": persona_goals,
+        "persona_background": persona_background,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "llm_config_json": llm_config_json,
+        "sandbox_provider": sandbox_provider,
+        "browser_control_provider": browser_control_provider_value,
+        "meta_harness_mode": meta_harness_mode_value,
+        "default_harness": default_harness_value,
+        "harness_workspace": harness_workspace_value,
+        "harness_model": _to_text(harness_model).strip(),
+        "internet_provider": internet_provider,
+        "skills_marketplace_provider": skills_marketplace_provider_value,
+        "enable_entity_memory": enable_entity_memory_value,
+        "enable_workflow_memory": enable_workflow_memory_value,
+        "self_aware": self_aware_enabled,
+        "self_aware_root_paths": self_aware_root_paths,
+        "self_aware_allow_writes": self_aware_allow_writes_value,
+        "self_aware_allow_deletes": self_aware_allow_deletes_value,
+        "automations_enabled": automations_enabled_value,
+        "default_timezone": default_timezone,
+        "agent_tools": [],
+        **delegation_form_ctx,
+    }
+
     if error:
-        return templates.TemplateResponse(
-            "agent_form.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "active_page": "agents",
-                "form_title": "Create Agent",
-                "form_action": "/agents/new",
-                "is_edit": False,
-                "error": error,
-                "agent_id": "",
-                "agent_name": agent_name,
-                "instruction": instruction,
-                "application_mode": application_mode,
-                "max_steps": max_steps,
-                "tool_access": tool_access,
-                "semantic_cache": semantic_cache_enabled,
-                "tool_cache": tool_cache_enabled,
-                "continual_learning": continual_learning_enabled,
-                "learning_control_plane": learning_control_plane_enabled,
-                "skill_injection_role": skill_injection_role,
-                "continual_learning_require_shadow": (
-                    continual_learning_require_shadow_value
-                ),
-                "continual_learning_shadow_evaluation": (
-                    continual_learning_shadow_evaluation_value
-                ),
-                "memory_ids_raw": memory_ids,
-                "persona_id": persona_id,
-                "persona_name": persona_name,
-                "persona_role": persona_role,
-                "persona_goals": persona_goals,
-                "persona_background": persona_background,
-                "llm_provider": llm_provider,
-                "llm_model": llm_model,
-                "llm_config_json": llm_config_json,
-                "sandbox_provider": sandbox_provider,
-                "browser_control_provider": browser_control_provider_value,
-                "meta_harness_mode": meta_harness_mode_value,
-                "default_harness": default_harness_value,
-                "harness_workspace": harness_workspace_value,
-                "harness_model": _to_text(harness_model).strip(),
-                "internet_provider": internet_provider,
-                "skills_marketplace_provider": skills_marketplace_provider_value,
-                "enable_entity_memory": enable_entity_memory_value,
-                "enable_workflow_memory": enable_workflow_memory_value,
-                "self_aware": self_aware_enabled,
-                "self_aware_root_paths": self_aware_root_paths,
-                "self_aware_allow_writes": self_aware_allow_writes_value,
-                "self_aware_allow_deletes": self_aware_allow_deletes_value,
-                "automations_enabled": automations_enabled_value,
-                "default_timezone": default_timezone,
-                "agent_tools": [],
-                **delegation_form_ctx,
-            },
-        )
+        return _render_agent_form(request, error=error, form_data=form_data)
 
     instruction_value = instruction.strip() if instruction else ""
     sandbox_value = sandbox_provider.strip() if sandbox_provider else None
@@ -1284,68 +1451,16 @@ async def agent_create_submit(
         or skills_marketplace_validation_error
         or self_aware_validation_error
     ):
-        return templates.TemplateResponse(
-            "agent_form.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "active_page": "agents",
-                "form_title": "Create Agent",
-                "form_action": "/agents/new",
-                "is_edit": False,
-                "error": (
-                    sandbox_validation_error
-                    or browser_control_validation_error
-                    or internet_validation_error
-                    or skills_marketplace_validation_error
-                    or self_aware_validation_error
-                ),
-                "agent_id": "",
-                "agent_name": agent_name,
-                "instruction": instruction,
-                "application_mode": application_mode,
-                "max_steps": max_steps,
-                "tool_access": tool_access,
-                "semantic_cache": semantic_cache_enabled,
-                "tool_cache": tool_cache_enabled,
-                "continual_learning": continual_learning_enabled,
-                "learning_control_plane": learning_control_plane_enabled,
-                "skill_injection_role": skill_injection_role,
-                "continual_learning_require_shadow": (
-                    continual_learning_require_shadow_value
-                ),
-                "continual_learning_shadow_evaluation": (
-                    continual_learning_shadow_evaluation_value
-                ),
-                "memory_ids_raw": memory_ids,
-                "persona_id": persona_id,
-                "persona_name": persona_name,
-                "persona_role": persona_role,
-                "persona_goals": persona_goals,
-                "persona_background": persona_background,
-                "llm_provider": llm_provider,
-                "llm_model": llm_model,
-                "llm_config_json": llm_config_json,
-                "sandbox_provider": sandbox_provider,
-                "browser_control_provider": browser_control_provider_value,
-                "meta_harness_mode": meta_harness_mode_value,
-                "default_harness": default_harness_value,
-                "harness_workspace": harness_workspace_value,
-                "harness_model": _to_text(harness_model).strip(),
-                "internet_provider": internet_provider,
-                "skills_marketplace_provider": skills_marketplace_provider_value,
-                "enable_entity_memory": enable_entity_memory_value,
-                "enable_workflow_memory": enable_workflow_memory_value,
-                "self_aware": self_aware_enabled,
-                "self_aware_root_paths": self_aware_root_paths,
-                "self_aware_allow_writes": self_aware_allow_writes_value,
-                "self_aware_allow_deletes": self_aware_allow_deletes_value,
-                "automations_enabled": automations_enabled_value,
-                "default_timezone": default_timezone,
-                "agent_tools": [],
-                **delegation_form_ctx,
-            },
+        return _render_agent_form(
+            request,
+            error=(
+                sandbox_validation_error
+                or browser_control_validation_error
+                or internet_validation_error
+                or skills_marketplace_validation_error
+                or self_aware_validation_error
+            ),
+            form_data=form_data,
         )
 
     # Reconcile persona with PERSONAS collection: reuse/update linked
@@ -1386,6 +1501,7 @@ async def agent_create_submit(
         continual_learning_config=continual_learning_config_value,
         learning_control_plane=learning_control_plane_enabled,
         learning_control_plane_config=learning_control_plane_config_value,
+        retrieval_policy=retrieval_policy_value,
         automations_enabled=automations_enabled_value,
         default_timezone=default_timezone_value,
         whatsapp_enabled=whatsapp_enabled_value,
@@ -1403,62 +1519,8 @@ async def agent_create_submit(
         agent_id = None
 
     if error or not agent_id:
-        return templates.TemplateResponse(
-            "agent_form.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "active_page": "agents",
-                "form_title": "Create Agent",
-                "form_action": "/agents/new",
-                "is_edit": False,
-                "error": error or "Failed to create agent.",
-                "agent_id": "",
-                "agent_name": agent_name,
-                "instruction": instruction,
-                "application_mode": application_mode,
-                "max_steps": max_steps,
-                "tool_access": tool_access,
-                "semantic_cache": semantic_cache_enabled,
-                "tool_cache": tool_cache_enabled,
-                "continual_learning": continual_learning_enabled,
-                "learning_control_plane": learning_control_plane_enabled,
-                "skill_injection_role": skill_injection_role,
-                "continual_learning_require_shadow": (
-                    continual_learning_require_shadow_value
-                ),
-                "continual_learning_shadow_evaluation": (
-                    continual_learning_shadow_evaluation_value
-                ),
-                "memory_ids_raw": memory_ids,
-                "persona_id": persona_id,
-                "persona_name": persona_name,
-                "persona_role": persona_role,
-                "persona_goals": persona_goals,
-                "persona_background": persona_background,
-                "llm_provider": llm_provider,
-                "llm_model": llm_model,
-                "llm_config_json": llm_config_json,
-                "sandbox_provider": sandbox_provider,
-                "browser_control_provider": browser_control_provider_value,
-                "meta_harness_mode": meta_harness_mode_value,
-                "default_harness": default_harness_value,
-                "harness_workspace": harness_workspace_value,
-                "harness_model": _to_text(harness_model).strip(),
-                "internet_provider": internet_provider,
-                "skills_marketplace_provider": skills_marketplace_provider_value,
-                "enable_entity_memory": enable_entity_memory_value,
-                "enable_workflow_memory": enable_workflow_memory_value,
-                "self_aware": self_aware_enabled,
-                "self_aware_root_paths": self_aware_root_paths,
-                "self_aware_allow_writes": self_aware_allow_writes_value,
-                "self_aware_allow_deletes": self_aware_allow_deletes_value,
-                "automations_enabled": automations_enabled_value,
-                "default_timezone": default_timezone,
-                "agent_tools": [],
-                **delegation_form_ctx,
-            },
+        return _render_agent_form(
+            request, error=error or "Failed to create agent.", form_data=form_data
         )
 
     return RedirectResponse(url=f"/agents/{agent_id}/playground", status_code=302)
@@ -1476,21 +1538,8 @@ async def agent_edit_page(request: Request, agent_id: str):
 
     form_data = _build_agent_form_data(agent)
 
-    return templates.TemplateResponse(
-        "agent_form.html",
-        {
-            "request": request,
-            "provider_type": _state["provider_type"],
-            "connection_info": _state["connection_info"],
-            "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-            "active_agent_id": agent_id,
-            "active_page": "agents",
-            "form_title": "Edit Agent",
-            "form_action": f"/agents/{agent_id}/edit",
-            "is_edit": True,
-            "error": None,
-            **form_data,
-        },
+    return _render_agent_form(
+        request, error=None, form_data=form_data, agent_id=agent_id
     )
 
 
@@ -1508,6 +1557,14 @@ async def agent_edit_submit(
     tool_cache: Optional[str] = Form(None),
     continual_learning: Optional[str] = Form(None),
     learning_control_plane: Optional[str] = Form(None),
+    forgetting_scoring_recency_decay_per_hour: Optional[str] = Form(None),
+    forgetting_scoring_recency_anchor: Optional[str] = Form(None),
+    forgetting_scoring_alpha_recency: Optional[str] = Form(None),
+    forgetting_scoring_alpha_importance: Optional[str] = Form(None),
+    forgetting_scoring_alpha_relevance: Optional[str] = Form(None),
+    forgetting_retention_enabled: Optional[str] = Form(None),
+    forgetting_retention_min_retention: Optional[str] = Form(None),
+    forgetting_retention_grace_days: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -1577,6 +1634,19 @@ async def agent_edit_submit(
         else {}
     )
     learning_control_plane_config_value["enabled"] = learning_control_plane_enabled
+    forgetting_form = {
+        "scoring_recency_decay_per_hour": forgetting_scoring_recency_decay_per_hour,
+        "scoring_recency_anchor": forgetting_scoring_recency_anchor,
+        "scoring_alpha_recency": forgetting_scoring_alpha_recency,
+        "scoring_alpha_importance": forgetting_scoring_alpha_importance,
+        "scoring_alpha_relevance": forgetting_scoring_alpha_relevance,
+        "retention_enabled": forgetting_retention_enabled,
+        "retention_min_retention": forgetting_retention_min_retention,
+        "retention_grace_days": forgetting_retention_grace_days,
+    }
+    retrieval_policy_value = _retrieval_policy_with_forgetting(
+        getattr(existing, "retrieval_policy", None), forgetting_form
+    )
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
     )
@@ -1613,24 +1683,11 @@ async def agent_edit_submit(
         base_config=existing_self_aware_config,
     )
     automations_enabled_value = _parse_bool(automations_enabled)
-    default_timezone_value = _to_text(default_timezone).strip() or None
-    if not error and default_timezone_value:
-        try:
-            from ...automation.schedule import validate_timezone_name
+    default_timezone_value, error = _parse_default_timezone(default_timezone, error)
 
-            validate_timezone_name(default_timezone_value)
-        except Exception as exc:
-            error = str(exc)
-
-    # WhatsApp configuration
-    whatsapp_enabled_value = _parse_bool(whatsapp_enabled)
-    whatsapp_config_value = None
-    if whatsapp_enabled_value:
-        whatsapp_config_value = {
-            "welcome_message": _to_text(whatsapp_welcome_message).strip() or None,
-            "auto_reply_enabled": True,
-            "timeout_seconds": 60,
-        }
+    whatsapp_enabled_value, whatsapp_config_value = _whatsapp_form_values(
+        whatsapp_enabled, whatsapp_welcome_message
+    )
 
     memory_types_value = _build_memory_types_for_agent(
         application_mode=application_mode
@@ -1681,25 +1738,14 @@ async def agent_edit_submit(
         and isinstance(existing_browser_control, dict)
         else None,
     )
-    meta_harness_mode_value = _to_text(meta_harness_mode).strip().lower()
-    if meta_harness_mode_value not in {"", "delegate", "runtime"} and not error:
-        error = "Meta-harness mode must be disabled, delegate, or runtime"
-    default_harness_value = (
-        _to_text(default_harness).strip().lower().replace("_", "-") or "auto"
+    (
+        meta_harness_mode_value,
+        default_harness_value,
+        harness_workspace_value,
+        error,
+    ) = _parse_harness_form_fields(
+        meta_harness_mode, default_harness, harness_workspace, error
     )
-    if default_harness_value not in DEFAULT_HARNESS_CHOICES and not error:
-        error = "Default harness must be auto, codex, claude-code, openhands, deepseek, pi, hermes, or native"
-    harness_workspace_value = _to_text(harness_workspace).strip()
-    if harness_workspace_value and not error:
-        try:
-            resolved_harness_workspace = (
-                Path(harness_workspace_value).expanduser().resolve(strict=True)
-            )
-            if not resolved_harness_workspace.is_dir():
-                raise ValueError("not a directory")
-            harness_workspace_value = str(resolved_harness_workspace)
-        except (OSError, ValueError):
-            error = "Harness workspace must be an existing directory"
     existing_harness_config = getattr(existing, "harness_config", None)
     harness_config_value = (
         dict(existing_harness_config)
@@ -1760,6 +1806,15 @@ async def agent_edit_submit(
         "default_timezone": default_timezone,
     }
 
+    def _render_error(message: str):
+        # Saved values first, then what was just submitted, so the form shows
+        # the user's input with the message.
+        form_data = _build_agent_form_data(existing)
+        form_data.update(form_override_data)
+        return _render_agent_form(
+            request, error=message, form_data=form_data, agent_id=agent_id
+        )
+
     # Delegates (only when the form's Delegates section was posted).
     delegation_update: Dict[str, Any] = {}
     if delegation_form:
@@ -1787,24 +1842,7 @@ async def agent_edit_submit(
             error = delegation_error
 
     if error:
-        form_data = _build_agent_form_data(existing)
-        form_data.update(form_override_data)
-        return templates.TemplateResponse(
-            "agent_form.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                "active_agent_id": agent_id,
-                "active_page": "agents",
-                "form_title": "Edit Agent",
-                "form_action": f"/agents/{agent_id}/edit",
-                "is_edit": True,
-                "error": error,
-                **form_data,
-            },
-        )
+        return _render_error(error)
 
     instruction_value = instruction.strip() if instruction else ""
     browser_control_changed = (
@@ -1815,92 +1853,24 @@ async def agent_edit_submit(
             browser_control_provider_value, browser_control_config_value
         )
         if browser_control_validation_error:
-            form_data = _build_agent_form_data(existing)
-            form_data.update(form_override_data)
-            return templates.TemplateResponse(
-                "agent_form.html",
-                {
-                    "request": request,
-                    "provider_type": _state["provider_type"],
-                    "connection_info": _state["connection_info"],
-                    "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                    "active_agent_id": agent_id,
-                    "active_page": "agents",
-                    "form_title": "Edit Agent",
-                    "form_action": f"/agents/{agent_id}/edit",
-                    "is_edit": True,
-                    "error": browser_control_validation_error,
-                    **form_data,
-                },
-            )
+            return _render_error(browser_control_validation_error)
     internet_value = _normalize_internet_provider_name(internet_provider) or None
     internet_config = _build_internet_provider_config(internet_value)
     internet_validation_error = _validate_internet_provider_choice(
         internet_value, internet_config
     )
     if internet_validation_error:
-        form_data = _build_agent_form_data(existing)
-        form_data.update(form_override_data)
-        return templates.TemplateResponse(
-            "agent_form.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                "active_agent_id": agent_id,
-                "active_page": "agents",
-                "form_title": "Edit Agent",
-                "form_action": f"/agents/{agent_id}/edit",
-                "is_edit": True,
-                "error": internet_validation_error,
-                **form_data,
-            },
-        )
+        return _render_error(internet_validation_error)
 
     skills_marketplace_validation_error = _validate_skills_marketplace_provider_choice(
         skills_marketplace_value,
         skills_marketplace_config_value,
     )
     if skills_marketplace_validation_error:
-        form_data = _build_agent_form_data(existing)
-        form_data.update(form_override_data)
-        return templates.TemplateResponse(
-            "agent_form.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                "active_agent_id": agent_id,
-                "active_page": "agents",
-                "form_title": "Edit Agent",
-                "form_action": f"/agents/{agent_id}/edit",
-                "is_edit": True,
-                "error": skills_marketplace_validation_error,
-                **form_data,
-            },
-        )
+        return _render_error(skills_marketplace_validation_error)
 
     if self_aware_validation_error:
-        form_data = _build_agent_form_data(existing)
-        form_data.update(form_override_data)
-        return templates.TemplateResponse(
-            "agent_form.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                "active_agent_id": agent_id,
-                "active_page": "agents",
-                "form_title": "Edit Agent",
-                "form_action": f"/agents/{agent_id}/edit",
-                "is_edit": True,
-                "error": self_aware_validation_error,
-                **form_data,
-            },
-        )
+        return _render_error(self_aware_validation_error)
 
     sandbox_value = sandbox_provider.strip() if sandbox_provider else None
     if sandbox_value is None:
@@ -1915,24 +1885,7 @@ async def agent_edit_submit(
     if sandbox_changed:
         sandbox_validation_error = _validate_sandbox_provider_choice(sandbox_value)
         if sandbox_validation_error:
-            form_data = _build_agent_form_data(existing)
-            form_data.update(form_override_data)
-            return templates.TemplateResponse(
-                "agent_form.html",
-                {
-                    "request": request,
-                    "provider_type": _state["provider_type"],
-                    "connection_info": _state["connection_info"],
-                    "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                    "active_agent_id": agent_id,
-                    "active_page": "agents",
-                    "form_title": "Edit Agent",
-                    "form_action": f"/agents/{agent_id}/edit",
-                    "is_edit": True,
-                    "error": sandbox_validation_error,
-                    **form_data,
-                },
-            )
+            return _render_error(sandbox_validation_error)
 
     # Reconcile persona with PERSONAS collection: updates become new
     # versions on the linked record (with change_trigger source_type='ui_form'),
@@ -1984,6 +1937,7 @@ async def agent_edit_submit(
             "continual_learning_config": continual_learning_config_value,
             "learning_control_plane": learning_control_plane_enabled,
             "learning_control_plane_config": learning_control_plane_config_value,
+            "retrieval_policy": retrieval_policy_value,
             "automations_enabled": automations_enabled_value,
             "default_timezone": default_timezone_value,
             "whatsapp_enabled": whatsapp_enabled_value,
@@ -2001,22 +1955,11 @@ async def agent_edit_submit(
         )
     except Exception as e:
         logger.error(f"Failed to update agent {agent_id}: {e}")
-        form_data = _build_agent_form_data(updated)
-        return templates.TemplateResponse(
-            "agent_form.html",
-            {
-                "request": request,
-                "provider_type": _state["provider_type"],
-                "connection_info": _state["connection_info"],
-                "agents_nav": _build_agent_nav_items(active_agent_id=agent_id),
-                "active_agent_id": agent_id,
-                "active_page": "agents",
-                "form_title": "Edit Agent",
-                "form_action": f"/agents/{agent_id}/edit",
-                "is_edit": True,
-                "error": str(e),
-                **form_data,
-            },
+        return _render_agent_form(
+            request,
+            error=str(e),
+            form_data=_build_agent_form_data(updated),
+            agent_id=agent_id,
         )
 
     return RedirectResponse(url=f"/agents/{agent_id}/playground", status_code=302)

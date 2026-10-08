@@ -254,19 +254,41 @@ def test_duplicate_consolidation_is_dry_run_first_and_soft_supersedes(
         memory_id="primary-user",
         user_id="user-1",
     )
-    second_id = entity_store.upsert_entity(
-        name="  richmond   alake  ",
-        entity_type="PERSON",
-        attributes=[
-            {
-                "name": "role",
-                "value": "AI Memory Engineer",
-                "confidence": 0.95,
-            },
-            {"name": "timezone", "value": "Europe/London"},
-        ],
-        memory_id="primary-user",
-        user_id="user-1",
+    # A duplicate written by a release before name-only upserts converged on
+    # one storage key: the same person under a spelling variant, with its own
+    # random id. Upserting it today would merge into ``first_id`` instead.
+    second_id = str(uuid.uuid4())
+    legacy_stamp = "2024-01-01T00:00:00"
+    provider.store(
+        {
+            "_id": second_id,
+            "entity_id": second_id,
+            "name": "  richmond   alake  ",
+            "entity_type": "PERSON",
+            "attributes": [
+                {
+                    "name": "role",
+                    "value": "AI Memory Engineer",
+                    "confidence": 0.95,
+                    "created_at": legacy_stamp,
+                    "updated_at": legacy_stamp,
+                },
+                {
+                    "name": "timezone",
+                    "value": "Europe/London",
+                    "confidence": 0.8,
+                    "created_at": legacy_stamp,
+                    "updated_at": legacy_stamp,
+                },
+            ],
+            "relations": [],
+            "metadata": {},
+            "memory_id": "primary-user",
+            "user_id": "user-1",
+            "created_at": legacy_stamp,
+            "updated_at": legacy_stamp,
+        },
+        memory_store_type=MemoryType.ENTITY_MEMORY,
     )
     assert first_id != second_id
 

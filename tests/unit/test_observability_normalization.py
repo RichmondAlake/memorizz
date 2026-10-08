@@ -1,4 +1,4 @@
-"""Regression coverage for the OpenSpeech bundle/agent association incident."""
+"""Regression coverage for the bundle/agent association defect (trace bundles attributed to the wrong agent)."""
 
 import json
 from unittest.mock import patch

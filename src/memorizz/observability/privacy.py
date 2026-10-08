@@ -6,9 +6,13 @@ import os
 import re
 import secrets
 
+from ..redaction import EMAIL_ADDRESS, SECRET_TOKEN
+
 _PROCESS_KEY = secrets.token_bytes(32)
+# An opaque identifier must not carry an address, any bearer token, a vendor
+# API key or a URI.
 _SENSITIVE = re.compile(
-    r"(?:[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|\bBearer\s+\S+|\b(?:sk-|ghp_|xoxb-)[\w-]{8,}|\w+://)",
+    rf"(?:{EMAIL_ADDRESS.pattern}|\bBearer\s+\S+|{SECRET_TOKEN.pattern}|\w+://)",
     re.I,
 )
 

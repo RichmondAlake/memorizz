@@ -11,23 +11,23 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
-_SENSITIVE_KEYS = re.compile(
-    r"(?:api[_-]?key|token|secret|password|authorization|cookie|credential)", re.I
+from ..redaction import (
+    SENSITIVE_KEY_NAMES,
+    SENSITIVE_VALUE,
+    KeyMatcher,
+    RedactionPolicy,
+    is_token_telemetry,
 )
-_TOKEN_TELEMETRY_KEYS = re.compile(
-    r"^(?:[a-z0-9]+_)*(?:input|output|total|prompt|completion|reasoning|"
-    r"cached|candidate|context|memory|evidence|thinking|write)_tokens(?:_details)?"
-    r"(?:_(?:mean|median|min|max|sum|stdev|sample_stdev|p(?:50|90|95|99)|"
-    r"mean_delta|paired_deltas))?$|"
-    r"^(?:tokens_(?:used|saved|avoided)|token_estimates?|token_count)$|"
-    r"^[a-z0-9_]+_(?:token_count|token_budget)$|^per_million_tokens$",
-    re.I,
-)
-_SENSITIVE_VALUES = re.compile(
-    r"(?:(?<![A-Za-z0-9])(?:sk|pk|tvly|e2b|npm|pypi)[-_]"
-    r"[A-Za-z0-9._-]{12,}(?![A-Za-z0-9])|"
-    r"Bearer\s+[A-Za-z0-9._~+/-]{12,})",
-    re.I,
+from ..redaction import redact as _redact
+
+# Harness reports are free-form, so a credential name anywhere in a key counts;
+# token *counts* ("input_tokens", "totalTokens") are telemetry and stay.
+_SENSITIVE_KEYS = KeyMatcher(search=SENSITIVE_KEY_NAMES)
+_REDACTION = RedactionPolicy(
+    keys=_SENSITIVE_KEYS,
+    replacement="[REDACTED]",
+    preserve=is_token_telemetry,
+    values=((SENSITIVE_VALUE, "[REDACTED]"),),
 )
 _BASE_ENV = {
     # Preserve the caller's home directory so vendor CLIs can use their normal
@@ -55,46 +55,9 @@ class HarnessSecurityError(ValueError):
     """Raised before a harness process starts when its envelope is unsafe."""
 
 
-def _is_safe_token_telemetry(key: str, value: Any) -> bool:
-    """Distinguish safe token telemetry from similarly named credentials."""
-    # camelCase counters (pi's ``totalTokens``) match their snake_case form.
-    normalized_key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
-    normalized_key = normalized_key.replace("-", "_").lower()
-    if normalized_key == "token_reporting":
-        return isinstance(value, bool) or value is None
-    if normalized_key in {"tokens", "token_usage"}:
-        # A block of counters (Hermes reports ``tokens: {input, output, ...}``).
-        return isinstance(value, Mapping) and all(
-            isinstance(item, (int, float))
-            and not isinstance(item, bool)
-            or item is None
-            for item in value.values()
-        )
-    if not _TOKEN_TELEMETRY_KEYS.fullmatch(normalized_key):
-        return False
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float, Mapping, list, tuple)) or value is None:
-        return True
-    return isinstance(value, str) and value.strip().isdigit()
-
-
 def redact(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            str(key): (
-                "[REDACTED]"
-                if _SENSITIVE_KEYS.search(str(key))
-                and not _is_safe_token_telemetry(str(key), item)
-                else redact(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [redact(item) for item in value]
-    if isinstance(value, str):
-        return _SENSITIVE_VALUES.sub("[REDACTED]", value)
-    return value
+    """Mask credential-bearing keys and token-shaped strings in a report."""
+    return _redact(value, _REDACTION)
 
 
 def redact_paths(value: Any, replacements: Mapping[str, str]) -> Any:
@@ -139,7 +102,7 @@ def build_child_environment(
     names.update(str(item) for item in allowed_names if str(item).strip())
     result = {name: os.environ[name] for name in names if name in os.environ}
     for key, value in dict(overrides or {}).items():
-        if _SENSITIVE_KEYS.search(str(key)) and key not in names:
+        if _SENSITIVE_KEYS(key) and key not in names:
             raise HarnessSecurityError(
                 f"Secret environment variable {key!r} was not explicitly allowlisted"
             )

@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
@@ -25,6 +25,13 @@ from .capabilities import capabilities as capabilities
 
 # name -> (submodule, attribute). Imported on first attribute access.
 _LAZY = {
+    "MemoryArchive": (".memory_archive", "MemoryArchive"),
+    "MemoryArchiveError": (".memory_archive", "MemoryArchiveError"),
+    "OpenAIDecisions": (".decisions", "OpenAIDecisions"),
+    "MemoryHistory": (".memory_history", "MemoryHistory"),
+    "memory_change_context": (".memory_history", "memory_change_context"),
+    "enable_memory_history": (".memory_history", "enable_memory_history"),
+    "ContextSnapshots": (".observability.context_snapshots", "ContextSnapshots"),
     # Agent
     "MemAgent": (".memagent", "MemAgent"),
     "MemAgentModel": (".memagent", "MemAgentModel"),
@@ -174,6 +181,12 @@ def __dir__():
 
 __all__ = [
     "__version__",
+    "MemoryArchive",
+    "MemoryArchiveError",
+    "MemoryHistory",
+    "ContextSnapshots",
+    "memory_change_context",
+    "enable_memory_history",
     # Agent
     "MemAgent",
     "MemAgentModel",

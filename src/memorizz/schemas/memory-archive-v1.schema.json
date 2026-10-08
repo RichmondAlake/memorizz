@@ -1,0 +1,448 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://richmondalake.github.io/memorizz/schemas/memory-archive-v1.schema.json",
+  "title": "MemoRizz memory archive version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "version",
+    "taxonomy",
+    "manifest",
+    "stores",
+    "integrity"
+  ],
+  "properties": {
+    "format": {
+      "const": "memorizz.memory"
+    },
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "taxonomy": {
+      "const": {
+        "personas": "long_term.semantic",
+        "toolbox": "long_term.procedural",
+        "entity_memory": "long_term.semantic",
+        "short_term_memory": "short_term",
+        "knowledge_base": "long_term.semantic",
+        "conversation_memory": "long_term.episodic",
+        "workflow_memory": "long_term.procedural",
+        "skillbox": "long_term.procedural",
+        "agents": "agent_configuration",
+        "shared_memory": "coordination",
+        "summaries": "long_term.episodic",
+        "semantic_cache": "short_term",
+        "tool_log": "long_term.episodic"
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "memorizz_version",
+        "source_provider",
+        "scope",
+        "counts",
+        "record_count",
+        "includes",
+        "warnings"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "personas",
+            "toolbox",
+            "entity_memory",
+            "short_term_memory",
+            "knowledge_base",
+            "conversation_memory",
+            "workflow_memory",
+            "skillbox",
+            "agents",
+            "shared_memory",
+            "summaries",
+            "semantic_cache",
+            "tool_log"
+          ],
+          "properties": {
+            "personas": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "toolbox": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "entity_memory": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "short_term_memory": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "knowledge_base": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "conversation_memory": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "workflow_memory": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "skillbox": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "agents": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "shared_memory": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "summaries": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "semantic_cache": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_log": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "stores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "personas",
+        "toolbox",
+        "entity_memory",
+        "short_term_memory",
+        "knowledge_base",
+        "conversation_memory",
+        "workflow_memory",
+        "skillbox",
+        "agents",
+        "shared_memory",
+        "summaries",
+        "semantic_cache",
+        "tool_log"
+      ],
+      "properties": {
+        "personas": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "toolbox": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "entity_memory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "short_term_memory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "knowledge_base": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "conversation_memory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "workflow_memory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "skillbox": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "shared_memory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "summaries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "semantic_cache": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "tool_log": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "data"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "data": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "digest"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}

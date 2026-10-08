@@ -22,10 +22,15 @@
 {#- Tabs switch memory types without the sidebar, which starts collapsed here. -#}
 {% set memory_tabs = [] %}
 {% for key, info in memory_pages.items() %}{% set _ = memory_tabs.append(('/memory/' ~ key, info[0]|replace(' memory', ''), key)) %}{% endfor %}
-{{ page_header(page_info[0], page_info[1], 'Memory', nav=page_tabs(memory_tabs, memory_type, 'Memory types')) }}
+{% call page_header(page_info[0], page_info[1], 'Memory', nav=page_tabs(memory_tabs, memory_type, 'Memory types')) %}
+    <a class="btn btn-sm" href="/memory-transfer">Export &amp; import memory</a>
+{% endcall %}
 
 {% if load_error %}
 <p class="error-message" role="alert">{{ load_error }}</p>
+{% endif %}
+{% if action_error %}
+<p class="error-message" role="alert">{{ action_error }}</p>
 {% elif view.records %}
 {% set records = view.records %}
 <div class="fleet-tape" role="list" aria-label="{{ page_info[0] }} summary">

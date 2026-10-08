@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..enums.memory_type import MemoryType
 from ..long_term.semantic.entity_memory import EntityMemory
+from ..memagent.utils.context_dedup import is_suppressed
 from .models import (
     EvidenceItem,
     EvidencePack,
@@ -386,6 +387,8 @@ class EvidencePlanner:
             return None
         source_id = _row_id(row)
         if source_id in tombstones:
+            return None
+        if is_suppressed(row):
             return None
         content = _row_content(source_type, row).strip()
         if not content:

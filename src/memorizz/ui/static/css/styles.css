@@ -1849,7 +1849,6 @@ details.agent-template > summary {
 .trace-insight-card {
     padding: var(--spacing-md);
     border: 1px solid var(--border-color);
-    border-left: 3px solid var(--accent-primary);
     border-radius: var(--radius-md);
     background: var(--bg-card);
 }
@@ -4708,19 +4707,6 @@ body.theme-light .connect-btn {
     padding: 17px;
     background: var(--bg-secondary);
     border-color: var(--border-color);
-    border-left-width: 2px;
-}
-
-.trace-insight-card--p0 {
-    border-left-color: var(--accent-danger);
-}
-
-.trace-insight-card--p1 {
-    border-left-color: var(--accent-warning);
-}
-
-.trace-insight-card--p2 {
-    border-left-color: var(--accent-primary);
 }
 
 .trace-priority--p0 {

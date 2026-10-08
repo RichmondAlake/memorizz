@@ -303,7 +303,7 @@ Running `memorizz` with no arguments launches the interactive loop:
 | Command | Description |
 |---|---|
 | `/help` | List all commands + the current mode/model. |
-| `/model [name]` | Show or switch the chat model (keeps the provider). |
+| `/models [name]` | Show the current model, list installed Ollama models, or switch models (keeps the provider). |
 | `/provider [name]` | Switch provider: `openai`/`anthropic`/`ollama`/`azure`/`huggingface`/`mlx`. |
 | `/ollama [list\|pull <tag>\|host <url>]` | List/pull Ollama models or set `OLLAMA_HOST`. |
 | `/web [on\|off\|tavily\|firecrawl]` | Enable/disable internet search (Tavily/Firecrawl). |
@@ -317,6 +317,9 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/new` | Start a fresh conversation thread (keeps long-term memory). |
 | `/clear` | **Erase the agent's entire stored memory** (asks to confirm). |
 | `/cls` | Clear the terminal screen. |
+| `/harnesses` | List the external harnesses (Codex, Claude Code, OpenHands, pi, Hermes, ...) and whether each is ready. |
+| `/harness <name\|auto\|delegate\|off>` | Run the following turns on that harness with MemoRizz memory, traces and approvals; `auto` lets MemoRizz pick, `delegate` keeps your model in charge and lets it hand parts to its harness delegates, `off` returns to native execution. Session only. |
+| `/compare <harness> <harness> <task>` | Run one read-only task on two or more harnesses side by side and print each verdict; saved as a workflow. |
 | `/agents` | List saved agents. |
 | `/agent <id>` | Load a saved agent by id. |
 | `/persona [name \| goals \| background]` | Show or set the agent's persona. |
@@ -329,6 +332,85 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/memory-provider [filesystem\|mongodb\|oracle\|notion]` | Guided memory setup for the next launch; add `--project` for this project's `.env`. |
 | `/docs [cli\|ui]` | Open the documentation in your browser. |
 | `/exit` | Save the agent and quit. |
+
+### Switch harnesses
+
+The chat can hand whole turns to an installed coding agent while MemoRizz
+keeps the memory. The prompt shows the active harness next to the mode:
+
+```text
+memorizz> /harnesses
+Harnesses (active: off)
+  codex        codex-cli 0.160.0   ready
+  claude-code  2.1.293             ready
+  deepseek                         not ready  DEEPSEEK_API_KEY is not set.
+memorizz> /harness codex
+Harness → codex  (this session only; /harness off to return to native execution)
+memorizz·codex> summarise what this repository does
+...
+memorizz·codex> /harness off
+Harness off (was codex); turns run natively again.
+```
+
+Each turn is a governed harness run: MemoRizz retrieves the relevant memories
+for the harness, exposes the permitted MCP access, records the run with its
+events, and saves the answer to the conversation. A turn that needs a write is
+held as an approval; the chat prints the waiting proposal ids after the turn
+so you can `/approvals approve <id> <name>` and `/approvals resume <id>`
+without leaving the terminal. The choice lives on the session, not the saved
+agent: `/harness off` restores exactly what the agent had. Launch straight
+into a harness with `memorizz chat --harness codex`, or run one turn with
+`memorizz run "..." --harness codex`.
+
+Two multi-harness forms live in the chat as well:
+
+```text
+memorizz> /harness delegate
+Harness → delegate  (this session only; your model plans, harnesses do the parts)
+Harness delegates (2, delegation on):
+  Codex reviewer (codex)   4f1c…
+  pi summariser (pi)       9a0e…
+Tools added for this session: run_harness_task, get_harness_run, list_agent_harnesses
+memorizz·delegate> review mathlib.py for bugs and summarise README.md
+
+memorizz> /compare codex claude-code where can totals lose precision in billing.py?
+Comparing codex vs claude-code on: where can totals lose precision in billing.py?
+[1/2] codex: running
+[2/2] claude-code: running
+...
+┌ Comparison 3c2e… · succeeded ───────────────────────────────┐
+│ Harness      Status     Verified  Cost     Time   Answer      │
+│ codex        succeeded  -         $0.0000  14.2s  Totals …   │
+│ claude-code  succeeded  -         $0.0312  21.7s  The sum …  │
+└──────────────────────────────────────────────────────────────┘
+Saved as workflow 3c2e…: memorizz harness show-workflow 3c2e… or the Agent Harnesses page.
+```
+
+`/harness delegate` is the coordinator pattern: your agent's own model keeps
+the turn, splits the work across its harness delegates (create one with
+`memorizz harness delegate create --harness codex --coordinator <agent-id>
+--attach`) and can call any harness directly through `run_harness_task`.
+`/compare` takes the leading words that name configured harnesses and treats
+the rest as the task; it is read-only, runs in the current folder, Ctrl-C
+cancels it, and the comparison is kept as a workflow. A compared `memagent`
+runs another saved agent (the chat's own agent cannot hand a task to itself):
+`memagent=<agent-id>` names it, otherwise the agent last used with a harness,
+else the newest, is picked and announced.
+
+### Switch models
+
+At the `memorizz>` prompt, `/models` shows the current model and, when using
+Ollama, lists installed models. Pass a name to switch for the current session:
+
+```text
+/models
+/models qwen2.5:7b
+```
+
+Download an Ollama model first with `/ollama pull <tag>` if it is not installed.
+Use `/provider ollama` to select Ollama when switching from another provider.
+Model switches keep the current conversation and memories. `/model` remains
+available as a compatibility alias; help and Tab completion use `/models`.
 
 ## Modes
 
@@ -605,13 +687,20 @@ memorizz plugin uninstall codex|claude-code
 memorizz plugin memory-id [PATH]
 memorizz plugin import-session LOG...   # past Codex/Claude Code sessions onto the Harnesses page
 memorizz plugin hook session-start|prompt|stop|summarize   # run by the plugins' hooks
+memorizz learning retention-plan --agent-id ID [--memory-id M] [--json]   # dry run over primary memories
+memorizz learning retention-apply PLAN_ID --agent-id ID --approved-by NAME   # reversible suppression
+memorizz learning suppressed --agent-id ID
+memorizz learning unsuppress RECORD_ID --memory-type TYPE --agent-id ID --approved-by NAME
 # Uses MEMORIZZ_BACKEND=filesystem|mongodb|oracle (filesystem by default)
 ```
 
 The `learning` commands use `--backend filesystem|mongodb|oracle`, preserve
 tenant filters, and emit JSON with `--json`. Forget planning is always a dry
 run; application writes reversible tombstones and requires an approver
-identity. See the [Learning Control Plane guide](../guides/learning-control-plane.md).
+identity. The `retention-*` commands do the same for primary memories, hiding
+records from retrieval with a reversible `retention_state` instead of deleting
+them. See the [Learning Control Plane guide](../guides/learning-control-plane.md)
+and the [forgetting mechanism](../guides/forgetting-mechanism.md).
 
 ## MCP connections
 
@@ -682,7 +771,7 @@ Zero-config auto-selection already prefers tool-capable, non-reasoning families.
 ```bash
 ollama pull llama3.1:8b
 # then in the REPL:
-/model llama3.1:8b
+/models llama3.1:8b
 ```
 
 **No provider configured.** Set a key (`/login` or `export OPENAI_API_KEY=...`)

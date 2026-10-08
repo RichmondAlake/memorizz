@@ -36,9 +36,11 @@ def _text_model(name: str) -> bool:
 def discover_models(
     provider: str, *, host: str = "http://localhost:11434", refresh: bool = False
 ) -> dict:
-    key_name = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(
-        provider
-    )
+    key_name = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai_decisions": "OPENAI_API_KEY",
+    }.get(provider)
     key = os.environ.get(key_name, "") if key_name else ""
     cache_key = (provider, host, hashlib.sha256(key.encode()).hexdigest())
     cached = _cache.get(cache_key)
@@ -135,6 +137,12 @@ def discover_models(
             data.update(
                 source="local_cache",
                 message="Locally cached model repositories; verify compatibility with this adapter.",
+            )
+        elif provider == "openai_decisions":
+            entries = [("gpt-6-luna", "GPT-6 Luna · Decisions API")]
+            data.update(
+                source="documented_catalog",
+                message="Dedicated /v1/decisions endpoint. Typed predicates, choices and scores; account access is checked on the live request.",
             )
         elif provider in {"jev", "voyage"}:
             names = (

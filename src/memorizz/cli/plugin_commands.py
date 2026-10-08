@@ -695,6 +695,89 @@ def import_session(
         typer.echo("Open `memorizz ui` → Harnesses to see their steps.")
 
 
+@plugin_app.command("export-memory")
+def export_project_memory(
+    output: Path = typer.Argument(..., help="Destination .memorizz.json file."),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+):
+    """Export this plugin project's memories, including session history."""
+    from ..memory_archive import MemoryArchive, write_archive
+
+    provider = None
+    try:
+        namespace = project_memory_id(workspace or Path.cwd())
+        if _remote_url():
+            response = remote_tool(
+                "memorizz_export_memories", {"memory_id": namespace}, timeout=60
+            )
+            if not response or not response.get("ok"):
+                raise ValueError("The remote server did not export an archive")
+            archive = response["archive"]
+        else:
+            provider = _store()
+            archive = MemoryArchive(provider).export(
+                memory_id=namespace, user_id=_user_id()
+            )
+        write_archive(archive, output, overwrite=overwrite)
+        typer.echo(
+            json.dumps({"path": str(output), "manifest": archive["manifest"]}, indent=2)
+        )
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+    finally:
+        if provider:
+            provider.close()
+
+
+@plugin_app.command("import-memory")
+def import_project_memory(
+    archive: Path = typer.Argument(..., exists=True, dir_okay=False),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+    apply: bool = typer.Option(False, "--apply"),
+    conflict: str = typer.Option("error", "--conflict"),
+    new_ids: bool = typer.Option(False, "--new-ids"),
+    preserve_namespace: bool = typer.Option(
+        False,
+        "--preserve-namespace",
+        help="Keep the original project namespace instead of restoring to this project.",
+    ),
+):
+    """Preview/restore a project archive into the current project's memory."""
+    from ..memory_archive import MemoryArchive, read_archive
+
+    provider = None
+    try:
+        value = read_archive(archive)
+        options = {
+            "dry_run": not apply,
+            "conflict": conflict,
+            "id_strategy": "new" if new_ids else "preserve",
+            "target_memory_id": None
+            if preserve_namespace
+            else project_memory_id(workspace or Path.cwd()),
+        }
+        if _remote_url():
+            report = remote_tool(
+                "memorizz_import_memories", {"archive": value, **options}, timeout=60
+            )
+        else:
+            provider = _store()
+            report = MemoryArchive(provider).import_archive(
+                value, user_id=_user_id(), **options
+            )
+        typer.echo(json.dumps(report, indent=2))
+        if not report or not report.get("ok"):
+            raise typer.Exit(1)
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+    finally:
+        if provider:
+            provider.close()
+
+
 @plugin_app.command("memory-id")
 def memory_id(
     path: Optional[Path] = typer.Argument(

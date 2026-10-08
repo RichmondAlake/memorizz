@@ -6,6 +6,7 @@ import base64
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from bson import ObjectId
@@ -86,6 +87,44 @@ def _mongo_user_id_predicate(user_id: Any) -> Dict[str, Any]:
     if user_id is None:
         return {"user_id": {"$in": [None]}}
     return {"user_id": user_id}
+
+
+def _mongo_id_predicate(record_id: Any) -> Dict[str, Any]:
+    """Match a row by ``_id`` whether it was stored as a string or an ObjectId.
+
+    The provider writes string primary keys itself (toolbox rows use
+    ``"<agent_id>:<tool>"``, immutable trace bundles use their logical id,
+    vectors use uuid5 keys and ``store`` keeps any caller-supplied ``_id``),
+    so an ObjectId-only lookup silently misses those rows.
+    """
+    candidates: List[Any] = [record_id]
+    if not isinstance(record_id, ObjectId) and ObjectId.is_valid(record_id):
+        candidates.append(ObjectId(record_id))
+    return {"_id": {"$in": candidates}}
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Return an aware UTC datetime; naive values are taken as UTC (BSON's rule)."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_expiry(value: Any) -> Optional[datetime]:
+    """Coerce a stored/caller ``expires_at`` to aware UTC; ``None`` if unparsable."""
+    if isinstance(value, datetime):
+        return _as_utc(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            return _as_utc(datetime.fromisoformat(text))
+        except ValueError:
+            return None
+    return None
 
 
 def _lexical_tokens(value: Any) -> set[str]:
@@ -929,6 +968,16 @@ class MongoDBProvider(
                 [("memory_id", 1), ("thread_id", 1), ("period_end", -1)],
             ),
         ],
+        MemoryType.SEMANTIC_CACHE: [
+            # TTL: MongoDB drops a row once its date-typed ``expires_at`` has
+            # passed. String timestamps are ignored by TTL indexes; the
+            # explicit ``purge_expired_semantic_cache`` handles those.
+            (
+                "semantic_cache_expires_at_ttl",
+                [("expires_at", 1)],
+                {"expireAfterSeconds": 0},
+            ),
+        ],
     }
 
     def _ensure_unique_agent_ids(self) -> None:
@@ -970,6 +1019,7 @@ class MongoDBProvider(
             MemoryType.SHARED_MEMORY: self.shared_memory_collection,
             MemoryType.ENTITY_MEMORY: self.entity_memory_collection,
             MemoryType.SUMMARIES: self.summaries_collection,
+            MemoryType.SEMANTIC_CACHE: self.semantic_cache_collection,
         }
         for memory_type, specs in self._BTREE_INDEX_SPECS.items():
             collection = collections_by_type.get(memory_type)
@@ -1165,6 +1215,37 @@ class MongoDBProvider(
         for field in _mongo_id_fields_to_strip(memory_store_type):
             data_copy.pop(field, None)
         return str(self._write_document(collection, data_copy, memory_store_type))
+
+    def list_archive_records(self, memory_type):
+        return self.list_all(memory_type, include_embedding=True)
+
+    def store_archive_record(
+        self, memory_type, record_id, data, *, replace=False, reembed=False
+    ):
+        collection = self._collection(memory_type)
+        # Preserve native ObjectId addressing for ordinary MongoDB records.
+        native_id = ObjectId(record_id) if ObjectId.is_valid(record_id) else record_id
+        document = dict(data, _id=native_id)
+        document.pop("id", None)
+        if memory_type == MemoryType.MEMAGENT:
+            old = collection.find_one({"agent_id": record_id}, {"_id": 1})
+            if old:
+                native_id = document["_id"] = old["_id"]
+        if reembed:
+            from ...embeddings import get_embedding
+
+            text = (
+                document.get("content")
+                or document.get("description")
+                or document.get("name")
+            )
+            if isinstance(text, str) and text:
+                document["embedding"] = get_embedding(text)
+        if replace:
+            collection.replace_one({"_id": native_id}, document, upsert=True)
+        else:
+            collection.insert_one(document)
+        return record_id
 
     def store_many(
         self,
@@ -1367,6 +1448,12 @@ class MongoDBProvider(
             return []
         elif memory_store_type == MemoryType.SHARED_MEMORY:
             if isinstance(query, dict):
+                # Shared memory is not in the user-scoped set (list_all stays
+                # unscoped, as on the filesystem provider), but an explicit
+                # user_id on a dict query must still filter — the filesystem
+                # provider applies it to every dict query.
+                if user_id_scope is not _MONGO_UNSET:
+                    query = {**query, **_mongo_user_id_predicate(user_id_scope)}
                 return self.shared_memory_collection.find(query, projection).limit(
                     limit
                 )
@@ -1385,13 +1472,17 @@ class MongoDBProvider(
             # 1. Dict query: Loading existing cache entries (e.g., {"agent_id": "xyz"})
             # 2. String query: Semantic similarity search (e.g., "What is Python?")
             if isinstance(query, dict):
-                # This is a filter query for loading existing cache entries
-                return self.semantic_cache_collection.find(
-                    query, {"embedding": 0}
-                ).limit(limit)
+                # This is a filter query for loading existing cache entries.
+                # Honour include_embedding: the in-memory cache preload needs
+                # the stored vectors back, otherwise it loads zero rows.
+                return self.semantic_cache_collection.find(query, projection).limit(
+                    limit
+                )
             else:
                 # This is a text query for semantic similarity search
-                return self.find_similar_cache_entries(query, limit=limit, **kwargs)
+                return self.find_similar_cache_entries(
+                    query, limit=limit, include_embedding=include_embedding, **kwargs
+                )
         elif memory_store_type == MemoryType.MEMAGENT:
             if isinstance(query, dict):
                 return self.memagent_collection.find(query, projection).limit(limit)
@@ -1446,9 +1537,7 @@ class MongoDBProvider(
             projection = {"embedding": 0}
 
         try:
-            doc = None
-            if ObjectId.is_valid(id):
-                doc = collection.find_one({"_id": ObjectId(id)}, projection)
+            doc = collection.find_one(_mongo_id_predicate(id), projection)
             # Tool logs also carry a UUID tool_log_id, and that is the ID the
             # recent-logs hint shows the model in later turns.
             if doc is None and memory_store_type == MemoryType.TOOL_LOG:
@@ -1965,6 +2054,7 @@ class MongoDBProvider(
             limit,
             search_filter=search_filter or None,
             num_candidates=100,  # cache hit-rate tuned, not query-volume scaled
+            include_embedding=bool(kwargs.get("include_embedding")),
         )
         return self._run_vector_search(
             self.semantic_cache_collection, pipeline, label="semantic_cache"
@@ -2000,6 +2090,51 @@ class MongoDBProvider(
         except Exception as e:
             logger.warning(f"Failed to clear semantic cache: {e}")
             return 0
+
+    def purge_expired_semantic_cache(self, now: Any = None) -> int:
+        """Delete semantic-cache rows whose ``expires_at`` is before ``now``.
+
+        Rows written by :class:`SemanticCache` carry a datetime ``expires_at``;
+        rows imported from archives or other providers may carry an ISO-8601
+        string instead. Both are honoured. The TTL index on ``expires_at``
+        lets MongoDB reap date-typed rows in the background; this is the
+        explicit, immediate variant the base contract exposes.
+
+        Parameters:
+        -----------
+        now : datetime | str | float, optional
+            The cutoff; defaults to the current UTC time.
+
+        Returns:
+        --------
+        int
+            Number of rows deleted.
+        """
+        cutoff = _parse_expiry(now) if now is not None else None
+        if cutoff is None:
+            cutoff = datetime.now(timezone.utc)
+
+        deleted = 0
+        try:
+            deleted += self.semantic_cache_collection.delete_many(
+                {"expires_at": {"$lt": cutoff}}
+            ).deleted_count
+            # BSON comparisons are type-bracketed: a datetime cutoff never
+            # matches string timestamps, so compare those client-side.
+            expired_ids: List[Any] = []
+            for row in self.semantic_cache_collection.find(
+                {"expires_at": {"$type": "string"}}, {"_id": 1, "expires_at": 1}
+            ):
+                stamp = _parse_expiry(row.get("expires_at"))
+                if stamp is not None and stamp < cutoff:
+                    expired_ids.append(row["_id"])
+            if expired_ids:
+                deleted += self.semantic_cache_collection.delete_many(
+                    {"_id": {"$in": expired_ids}}
+                ).deleted_count
+        except Exception as e:
+            logger.warning(f"Failed to purge expired semantic cache: {e}")
+        return int(deleted)
 
     def delete_observability_bundle(self, record_id, fingerprint):
         from ...observability.index import digest
@@ -2041,11 +2176,10 @@ class MongoDBProvider(
         if collection is None:
             return False
 
-        # Delete using MongoDB _id only
+        # Delete using MongoDB _id only (string or ObjectId form)
         try:
-            if ObjectId.is_valid(id):
-                result = collection.delete_one({"_id": ObjectId(id)})
-                return result.deleted_count > 0
+            result = collection.delete_one(_mongo_id_predicate(id))
+            return result.deleted_count > 0
         except Exception:
             pass
 
@@ -2098,9 +2232,11 @@ class MongoDBProvider(
         collection = self._collection(memory_store_type)
         if collection is None:
             return False
-        result = collection.delete_many({})
+        # Success means "the store is now empty", not "rows were removed":
+        # an already-empty store is not a failure (filesystem/Notion agree).
+        collection.delete_many({})
 
-        return result.deleted_count > 0
+        return True
 
     def list_all(
         self,
@@ -2240,6 +2376,67 @@ class MongoDBProvider(
             self._observability_index = MongoSpanIndex(self.db)
         return self._observability_index
 
+    def query_memory_observations(
+        self,
+        memory_store_type,
+        *,
+        agent_id=None,
+        memory_ids=None,
+        application_id=None,
+        exclude_ids=(),
+        limit=200,
+        **kwargs,
+    ):
+        from ..base import _UNSET, _observation_matches
+
+        user_id = kwargs.get("user_id", _UNSET)
+        kind = MemoryType(memory_store_type)
+        clauses = []
+        if agent_id:
+            owners = [
+                {"agent_id": str(agent_id)},
+                {"agent_id": None, "owner_agent_id": str(agent_id)},
+            ]
+            if memory_ids:
+                owners.append(
+                    {
+                        "agent_id": None,
+                        "owner_agent_id": None,
+                        "memory_id": {"$in": list(memory_ids)},
+                    }
+                )
+            clauses.append({"$or": owners})
+        elif memory_ids:
+            clauses.append({"memory_id": {"$in": list(memory_ids)}})
+        if user_id is not _UNSET:
+            clauses.append({"user_id": user_id})
+        if application_id is not None:
+            clauses.append({"application_id": application_id})
+        if exclude_ids:
+            excluded = list(exclude_ids)
+            excluded.extend(
+                ObjectId(value) for value in exclude_ids if ObjectId.is_valid(value)
+            )
+            clauses.append({"_id": {"$nin": excluded}})
+        predicate = {"$and": clauses} if clauses else {}
+        rows = (
+            self._collection(kind)
+            .find(predicate, {"embedding": 0})
+            .limit(max(1, min(int(limit), 1000)))
+        )
+        return [
+            row
+            for row in rows
+            if _observation_matches(
+                row,
+                agent_id=agent_id,
+                memory_ids=memory_ids,
+                user_id=user_id,
+                application_id=application_id,
+                exclude_ids=exclude_ids,
+            )
+        ]
+
     def query_observability_records(
         self,
         memory_store_type: Any,
@@ -2252,6 +2449,7 @@ class MongoDBProvider(
         record_type: Optional[str] = None,
         tool_name: Optional[str] = None,
         success: Optional[bool] = None,
+        event_filters: Optional[Dict[str, Any]] = None,
         start_time: Any = None,
         end_time: Any = None,
         limit: int = 250,
@@ -2308,6 +2506,19 @@ class MongoDBProvider(
             clauses.append({"tool_name": str(tool_name)})
         if success is not None:
             clauses.append({"success": bool(success)})
+        for key, value in (event_filters or {}).items():
+            field = (
+                "trace_memory_id"
+                if key == "memory_id"
+                else (
+                    "history_" + key
+                    if key in {"memory_type", "action", "actor"}
+                    else key
+                )
+            )
+            # Older journals lack these indexed metadata fields. Keep them
+            # eligible and let the reader validate the canonical payload.
+            clauses.append({"$or": [{field: value}, {field: {"$exists": False}}]})
         if start_time is not None or end_time is not None:
             timestamp_filter: Dict[str, Any] = {}
             if start_time is not None:
@@ -2446,13 +2657,11 @@ class MongoDBProvider(
             return []
 
     def compare_and_swap_shared_memory(self, memory_id, expected_content, content):
-        if not ObjectId.is_valid(memory_id):
-            return False
         collection = self._collection(MemoryType.SHARED_MEMORY)
         if collection is None:
             raise RuntimeError("Shared-memory collection is unavailable")
         result = collection.update_one(
-            {"_id": ObjectId(memory_id), "content": expected_content},
+            {**_mongo_id_predicate(memory_id), "content": expected_content},
             {"$set": {"content": content}},
         )
         return result.matched_count == 1
@@ -2477,22 +2686,22 @@ class MongoDBProvider(
         bool
             True if update was successful, False otherwise.
         """
+        # Success means "a row was found", not "a field changed": an
+        # idempotent re-save of identical data is still a successful update
+        # (matches the filesystem and Notion providers).
         if memory_store_type == MemoryType.MEMAGENT:
             payload, _ = self._prepare_memagent_payload(data)
             payload.pop("_id", None)
             try:
-                if ObjectId.is_valid(id):
-                    result = self.memagent_collection.update_one(
-                        {"_id": ObjectId(id)}, {"$set": payload}
+                result = self.memagent_collection.update_one(
+                    self._memagent_id_query(id), {"$set": payload}
+                )
+                success = result.matched_count > 0
+                if not success:
+                    logger.warning(
+                        f"Update operation found no documents to modify for id: {id}"
                     )
-                    success = result.modified_count > 0
-                    if not success:
-                        logger.warning(
-                            f"Update operation found no documents to modify for id: {id}"
-                        )
-                    return success
-                logger.error(f"Invalid ObjectId: {id}")
-                return False
+                return success
             except Exception as e:
                 logger.error(
                     f"Error updating document with id {id}: {e}", exc_info=True
@@ -2501,9 +2710,10 @@ class MongoDBProvider(
         if memory_store_type == MemoryType.SEMANTIC_CACHE and not ObjectId.is_valid(id):
             try:
                 result = self.semantic_cache_collection.update_one(
-                    {"cache_key": id}, {"$set": data}
+                    {"$or": [_mongo_id_predicate(id), {"cache_key": id}]},
+                    {"$set": data},
                 )
-                return result.modified_count > 0
+                return result.matched_count > 0
             except Exception as e:
                 logger.error(f"Error updating semantic cache with id {id}: {e}")
                 return False
@@ -2516,19 +2726,15 @@ class MongoDBProvider(
             )
             return False
 
-        # Update using MongoDB _id only
+        # Update using MongoDB _id only (string or ObjectId form)
         try:
-            if ObjectId.is_valid(id):
-                result = collection.update_one({"_id": ObjectId(id)}, {"$set": data})
-                success = result.modified_count > 0
-                if not success:
-                    logger.warning(
-                        f"Update operation found no documents to modify for id: {id}"
-                    )
-                return success
-            else:
-                logger.error(f"Invalid ObjectId: {id}")
-                return False
+            result = collection.update_one(_mongo_id_predicate(id), {"$set": data})
+            success = result.matched_count > 0
+            if not success:
+                logger.warning(
+                    f"Update operation found no documents to modify for id: {id}"
+                )
+            return success
         except Exception as e:
             logger.error(f"Error updating document with id {id}: {e}", exc_info=True)
             return False
@@ -2813,7 +3019,7 @@ class MongoDBProvider(
                 self._memagent_id_query(agent_id),
                 {"$set": {"memory_ids": memory_ids}},
             )
-            return result.modified_count > 0
+            return result.matched_count > 0
         except Exception:
             return False
 
@@ -2836,7 +3042,7 @@ class MongoDBProvider(
                 self._memagent_id_query(agent_id),
                 {"$unset": {"memory_ids": []}},
             )
-            return result.modified_count > 0
+            return result.matched_count > 0
         except Exception:
             return False
 
@@ -2863,21 +3069,24 @@ class MongoDBProvider(
             if memagent is None:
                 raise ValueError(f"MemAgent with id {agent_id} not found")
 
-            # Delete all the memory units associated with the memagent by deleting the memory_ids and their corresponding memory store in the memory provider.
-            for memory_id in memagent.memory_ids:
-                # Loop through all the memory stores and delete records with the memory_ids
+            # Delete every memory unit tagged with one of the agent's
+            # memory_ids, in every store except the agent store itself (the
+            # agent row is deleted below). Same sweep as the filesystem
+            # provider: agent-scoped definitions without a memory_id
+            # (personas, toolbox entries) are left alone.
+            for memory_id in memagent.memory_ids or []:
                 for memory_type in MemoryType:
+                    if memory_type == MemoryType.MEMAGENT:
+                        continue
                     self._delete_memory_units_by_memory_id(memory_id, memory_type)
-        else:
-            try:
-                result = self.memagent_collection.delete_one(
-                    self._memagent_id_query(agent_id)
-                )
-                return result.deleted_count > 0
-            except Exception:
-                return False
 
-        return True
+        try:
+            result = self.memagent_collection.delete_one(
+                self._memagent_id_query(agent_id)
+            )
+            return result.deleted_count > 0
+        except Exception:
+            return False
 
     def _delete_memory_units_by_memory_id(
         self, memory_id: str, memory_type: MemoryType
@@ -2885,35 +3094,22 @@ class MongoDBProvider(
         """
         Delete all the memory units associated with the memory_id.
 
+        Resolves the collection through ``_collection`` so every memory type
+        (including ones added later) is swept; the previous if/elif chain
+        silently skipped entity memory, summaries, semantic cache, shared
+        memory and the skillbox.
+
         Parameters:
         -----------
         memory_id : str
             The id of the memory to delete.
         memory_type : MemoryType
             The type of memory to delete.
-
-        Returns:
-        --------
-        bool
-            True if deletion was successful, False otherwise.
         """
-        if memory_type == MemoryType.CONVERSATION_MEMORY:
-            self.conversation_memory_collection.delete_many({"memory_id": memory_id})
-
-        elif memory_type == MemoryType.WORKFLOW_MEMORY:
-            self.workflow_memory_collection.delete_many({"memory_id": memory_id})
-        elif memory_type == MemoryType.SHORT_TERM_MEMORY:
-            self.short_term_memory_collection.delete_many({"memory_id": memory_id})
-        elif memory_type == MemoryType.KNOWLEDGE_BASE:
-            self.knowledge_base_collection.delete_many({"memory_id": memory_id})
-        elif memory_type == MemoryType.PERSONAS:
-            self.persona_collection.delete_many({"memory_id": memory_id})
-        elif memory_type == MemoryType.TOOLBOX:
-            self.toolbox_collection.delete_many({"memory_id": memory_id})
-        elif memory_type == MemoryType.MEMAGENT:
-            self.memagent_collection.delete_many({"memory_id": memory_id})
-        elif memory_type == MemoryType.TOOL_LOG:
-            self.tool_log_collection.delete_many({"memory_id": memory_id})
+        collection = self._collection(memory_type)
+        if collection is None:
+            return
+        collection.delete_many({"memory_id": memory_id})
 
     def _setup_vector_search_index(
         self,

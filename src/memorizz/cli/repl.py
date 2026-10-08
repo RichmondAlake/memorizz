@@ -28,6 +28,7 @@ from rich.text import Text
 from .. import __version__
 from . import commands
 from . import config as cfg
+from . import harness_session
 from .updates import update_notifier
 
 
@@ -219,7 +220,7 @@ def run_repl(session) -> None:
 
     with patch_stdout(raw=True), update_notifier(console):
         while True:
-            prompt_text = "code> " if session.code_mode else "memorizz> "
+            prompt_text = harness_session.prompt_label(session)
             try:
                 line = ptk.prompt(prompt_text)
             except (KeyboardInterrupt, EOFError):
@@ -238,3 +239,4 @@ def run_repl(session) -> None:
                 continue
 
             _stream_turn(session, line)
+            harness_session.report_pending_approvals(session, console)

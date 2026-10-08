@@ -23,6 +23,7 @@ import logging
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -72,6 +73,10 @@ from ..state import _state, templates
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["playground"])
+
+# Messages served per thread request: the newest page, as the CLI shows.
+THREAD_PAGE_SIZE = 200
+THREAD_PAGE_MAX = 1000
 
 
 def _serialize_toolbox_memory_item(document: Dict[str, Any]) -> Dict[str, str]:
@@ -928,6 +933,7 @@ def _build_token_stats(
         # What compaction cannot shrink: the prompt without any history.
         "fixed_percentage": share(total_tokens - history_tokens),
         "message_count": len(sent),
+        "history_messages": sent,
         "thread_message_count": len(rows),
         "compact_at": compact_at,
         "compaction_available": compaction_available,
@@ -1096,7 +1102,10 @@ async def playground_index(request: Request):
 
 @router.get("/agents/{agent_id}/playground", response_class=HTMLResponse)
 async def agent_playground(
-    request: Request, agent_id: str, config_error: Optional[str] = None
+    request: Request,
+    agent_id: str,
+    config_error: Optional[str] = None,
+    memory_id: Optional[str] = None,
 ):
     """Show the playground page for interacting with an agent."""
     if not _state["provider"]:
@@ -1130,6 +1139,14 @@ async def agent_playground(
             memory_ids = getattr(agent, "memory_ids", None) or []
             if isinstance(memory_ids, list) and memory_ids:
                 default_memory_id = _to_text(memory_ids[0]).strip()
+
+        if memory_id:
+            available = set(getattr(agent, "memory_ids", None) or []) | {
+                str(thread.get("memory_id", "")) for thread in threads
+            }
+            if memory_id not in available:
+                raise HTTPException(404, "Conversation not found")
+            default_memory_id = memory_id
 
         if default_memory_id:
             context_window = _load_thread_messages(default_memory_id, limit=None)
@@ -1395,25 +1412,25 @@ async def agent_playground_stream(request: Request, agent_id: str):
             check_cancelled()
         session.stack.callback(lock.release)
         check_cancelled()
-        overrides: Dict[str, Any] = {"streaming": True}
+        overrides: Dict[str, Any] = {
+            "streaming": True,
+            "capture_context_snapshots": True,
+            "capture_memory_history": True,
+        }
         if override_instruction:
             overrides["instruction"] = override_instruction
         agent_instance = MemAgent.load(
             agent_id, memory_provider=_state["provider"], **overrides
         )
+        # The stored record drives the model override and the sandbox,
+        # internet and entity-memory checks below: read it once per message.
+        stored_agent = _state["provider"].retrieve_memagent(agent_id)
         # Apply runtime model override if user changed the model in the playground
         if override_model:
             try:
                 from ...llms.llm_factory import create_llm_provider
 
-                llm_config = (
-                    getattr(
-                        _state["provider"].retrieve_memagent(agent_id),
-                        "llm_config",
-                        {},
-                    )
-                    or {}
-                )
+                llm_config = dict(getattr(stored_agent, "llm_config", None) or {})
                 llm_config["model"] = override_model
 
                 # Carry over the API key from the already-loaded
@@ -1443,9 +1460,6 @@ async def agent_playground_stream(request: Request, agent_id: str):
                 # the real reason instead of "No LLM model configured".
                 agent_instance._llm_init_error = f"{type(exc).__name__}: {exc}"
                 logger.warning("Could not apply model override: %s", exc)
-
-        # Load stored agent config for sandbox, internet, and entity-memory checks.
-        stored_agent = _state["provider"].retrieve_memagent(agent_id)
 
         # Apply sandbox provider from agent config or global default.
         # Skip if the agent already attempted sandbox init during load()
@@ -1848,6 +1862,34 @@ def _delete_conversation(
             if candidate and provider.delete_by_id(str(candidate), MemoryType.TOOL_LOG):
                 counts["tool_logs"] += 1
                 break
+    # Captured inputs contain conversation content. Remove this thread's
+    # snapshots too; the content-free change journal can retain deletion metadata.
+    from ...observability.context_snapshots import RECORD_TYPE
+    from ...observability.store import ObservabilityStore
+
+    cursor = None
+    snapshot_ids = []
+    while True:
+        page = provider.query_observability_records(
+            MemoryType.SHARED_MEMORY,
+            agent_ids=[agent_id],
+            record_type=RECORD_TYPE,
+            limit=1000,
+            cursor=cursor,
+        )
+        for row in page.get("items", []):
+            payload = ObservabilityStore._payload(row)
+            if (
+                payload
+                and payload.get("agent_id") == agent_id
+                and payload.get("memory_id") == memory_id
+            ):
+                snapshot_ids.append(payload["record_id"])
+        cursor = page.get("next_cursor")
+        if not cursor:
+            break
+    for snapshot_id in snapshot_ids:
+        provider.delete_by_id(snapshot_id, MemoryType.SHARED_MEMORY)
     return counts
 
 
@@ -1964,12 +2006,15 @@ async def agent_playground_compact(request: Request, agent_id: str):
         return JSONResponse(
             {
                 "ok": True,
+                "compacted": bool(summary_ids),
                 "summary_count": len(summary_ids),
                 "summary_ids": summary_ids,
                 "message": (
-                    f"Generated {len(summary_ids)} summary/summaries to compact context."
+                    f"Context compacted: {len(summary_ids)} "
+                    f"{'summary' if len(summary_ids) == 1 else 'summaries'} created."
                     if summary_ids
-                    else "No new summaries needed — context is already compact."
+                    else "No compaction performed. No new summaries were created; "
+                    "recent messages are kept unchanged."
                 ),
             }
         )
@@ -2000,8 +2045,10 @@ def _thread_order_key(row: Dict[str, Any]) -> float:
 
 
 @router.get("/agents/{agent_id}/playground/thread")
-async def agent_playground_thread(agent_id: str, memory_id: str = ""):
-    """Return conversation history for a specific thread memory_id."""
+async def agent_playground_thread(
+    agent_id: str, memory_id: str = "", limit: int = THREAD_PAGE_SIZE
+):
+    """Return the newest page of one of the agent's own conversations."""
     if not _state["provider"]:
         raise HTTPException(status_code=400, detail="Not connected")
 
@@ -2010,9 +2057,15 @@ async def agent_playground_thread(agent_id: str, memory_id: str = ""):
         raise HTTPException(status_code=404, detail="Agent not found")
 
     requested_memory_id = _to_text(memory_id).strip()
+    # Same membership rule as renaming or deleting a conversation.
+    if requested_memory_id and requested_memory_id not in (
+        getattr(agent, "memory_ids", None) or []
+    ):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    page_size = max(1, min(int(limit or THREAD_PAGE_SIZE), THREAD_PAGE_MAX))
     messages: List[Dict[str, Any]] = []
     if requested_memory_id:
-        messages = _load_thread_messages(requested_memory_id, limit=None)
+        messages = _load_thread_messages(requested_memory_id, limit=page_size)
         messages.extend(
             _load_thread_trace_bundles(
                 agent_id=agent_id,
@@ -2082,6 +2135,14 @@ async def agent_playground_thread(agent_id: str, memory_id: str = ""):
     }
 
 
+def _config_error_redirect(agent_id: str, message: str) -> RedirectResponse:
+    """Back to the playground with the config panel's error in the query string."""
+    return RedirectResponse(
+        url=f"/agents/{agent_id}/playground?config_error={quote(message)}",
+        status_code=302,
+    )
+
+
 @router.post("/agents/{agent_id}/playground/config")
 async def agent_playground_config_update(request: Request, agent_id: str):
     """Update agent config from the playground panel."""
@@ -2135,12 +2196,7 @@ async def agent_playground_config_update(request: Request, agent_id: str):
     if raw_skill_paths is not None:
         parsed_skill_paths, parse_error = _parse_skill_paths_json(str(raw_skill_paths))
     if parse_error:
-        from urllib.parse import quote
-
-        return RedirectResponse(
-            url=f"/agents/{agent_id}/playground?config_error={quote(parse_error[:200])}",
-            status_code=302,
-        )
+        return _config_error_redirect(agent_id, parse_error[:200])
 
     # Build updated fields. When the user switches providers we have
     # to start a fresh dict instead of merging onto the old one —
@@ -2220,15 +2276,7 @@ async def agent_playground_config_update(request: Request, agent_id: str):
     )
     self_aware_validation_error = _validate_self_aware_config(self_aware_config_value)
     if self_aware_validation_error:
-        from urllib.parse import quote
-
-        return RedirectResponse(
-            url=(
-                f"/agents/{agent_id}/playground?config_error="
-                f"{quote(self_aware_validation_error[:220])}"
-            ),
-            status_code=302,
-        )
+        return _config_error_redirect(agent_id, self_aware_validation_error[:220])
 
     if raw_automations_enabled is None:
         automations_enabled_value = bool(getattr(existing, "automations_enabled", True))
@@ -2244,15 +2292,7 @@ async def agent_playground_config_update(request: Request, agent_id: str):
 
             validate_timezone_name(default_timezone_value)
         except Exception as exc:
-            from urllib.parse import quote
-
-            return RedirectResponse(
-                url=(
-                    f"/agents/{agent_id}/playground?config_error="
-                    f"{quote(str(exc)[:220])}"
-                ),
-                status_code=302,
-            )
+            return _config_error_redirect(agent_id, str(exc)[:220])
     memory_types_value = _build_memory_types_for_agent(
         application_mode=getattr(existing, "application_mode", "assistant"),
         enable_entity_memory=enable_entity_memory_value,
@@ -2274,15 +2314,7 @@ async def agent_playground_config_update(request: Request, agent_id: str):
     if sandbox_changed:
         sandbox_validation_error = _validate_sandbox_provider_choice(sandbox_value)
         if sandbox_validation_error:
-            from urllib.parse import quote
-
-            return RedirectResponse(
-                url=(
-                    f"/agents/{agent_id}/playground?config_error="
-                    f"{quote(sandbox_validation_error[:220])}"
-                ),
-                status_code=302,
-            )
+            return _config_error_redirect(agent_id, sandbox_validation_error[:220])
 
     existing_browser_control = getattr(existing, "browser_control", None)
     existing_browser_provider = _normalize_browser_control_provider_name(
@@ -2301,15 +2333,7 @@ async def agent_playground_config_update(request: Request, agent_id: str):
             browser_control_value, browser_control_config_value
         )
         if browser_validation_error:
-            from urllib.parse import quote
-
-            return RedirectResponse(
-                url=(
-                    f"/agents/{agent_id}/playground?config_error="
-                    f"{quote(browser_validation_error[:220])}"
-                ),
-                status_code=302,
-            )
+            return _config_error_redirect(agent_id, browser_validation_error[:220])
 
     internet_value = new_internet_provider or None
     internet_config_value = _build_internet_provider_config(internet_value)
@@ -2317,15 +2341,7 @@ async def agent_playground_config_update(request: Request, agent_id: str):
         internet_value, internet_config_value
     )
     if internet_validation_error:
-        from urllib.parse import quote
-
-        return RedirectResponse(
-            url=(
-                f"/agents/{agent_id}/playground?config_error="
-                f"{quote(internet_validation_error[:220])}"
-            ),
-            status_code=302,
-        )
+        return _config_error_redirect(agent_id, internet_validation_error[:220])
 
     skills_marketplace_value = new_skills_marketplace_provider or None
     existing_skills_provider = _normalize_skills_marketplace_provider_name(
@@ -2346,14 +2362,8 @@ async def agent_playground_config_update(request: Request, agent_id: str):
         skills_marketplace_config_value,
     )
     if skills_marketplace_validation_error:
-        from urllib.parse import quote
-
-        return RedirectResponse(
-            url=(
-                f"/agents/{agent_id}/playground?config_error="
-                f"{quote(skills_marketplace_validation_error[:220])}"
-            ),
-            status_code=302,
+        return _config_error_redirect(
+            agent_id, skills_marketplace_validation_error[:220]
         )
 
     window_update: Dict[str, Any] = {}
@@ -2396,12 +2406,6 @@ async def agent_playground_config_update(request: Request, agent_id: str):
         )
     except Exception as e:
         logger.error(f"Failed to update agent config {agent_id}: {e}")
-        # Redirect back to playground with error as query param
-        from urllib.parse import quote
-
-        return RedirectResponse(
-            url=f"/agents/{agent_id}/playground?config_error={quote(str(e)[:200])}",
-            status_code=302,
-        )
+        return _config_error_redirect(agent_id, str(e)[:200])
 
     return RedirectResponse(url=f"/agents/{agent_id}/playground", status_code=302)

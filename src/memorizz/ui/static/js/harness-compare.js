@@ -232,6 +232,7 @@
                 + badge(s, 'tokens');
         };
         const rows = [
+            ['Memory evolution', s => '<a href="/traces/memory-evolution?run_id=' + encodeURIComponent(s.runId) + '" target="_blank" rel="noopener">View memory timeline ↗</a>'],
             ['Status', s => '<span class="fleet-health fleet-health--' + (HEALTH[s.status] || 'idle') + '">' + esc(humanize(s.status)) + '</span>'],
             ['Model', s => s.model ? '<span class="mono">' + esc(s.model) + '</span>' : '<span class="hxcmp-muted">harness default</span>'],
             ['Time', s => esc(fmtDuration(s.durationMs)) + (s.waitedMs >= 1000 ? '<small>' + esc('after ' + fmtDuration(s.waitedMs) + ' waiting for approval') + '</small>' : '') + badge(s, 'duration') + badge(s, 'qualityTime')],
@@ -312,7 +313,7 @@
     const renderColumnShells = (summaries) => summaries.map((s, i) => '<article class="hxcmp-col" data-run="' + esc(s.runId) + '">'
         + '<header><span class="hxcmp-key hxcmp-key--' + i + '">' + (i + 1) + '</span><strong>' + esc(s.label) + '</strong>' + (s.model ? '<span class="mono hxcmp-model">' + esc(s.model) + '</span>' : '') + '<span class="mono hxcmp-muted">' + esc(s.runId.slice(0, 8)) + '</span></header>'
         + '<section class="hxcmp-answer" aria-label="Answer"></section>'
-        + '<h4>Trajectory</h4><div class="hx-traj hxcmp-traj" data-active="false"></div></article>').join('');
+        + '<h4>Trajectory</h4><a href="/traces/memory-evolution?run_id=' + encodeURIComponent(s.runId) + '" target="_blank" rel="noopener">Memory evolution ↗</a><div class="hx-traj hxcmp-traj" data-active="false"></div></article>').join('');
 
     // ------------------------------------------------------------------
     // The dialog

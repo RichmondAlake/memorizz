@@ -5,10 +5,10 @@
 """Process incoming WhatsApp messages and generate responses."""
 
 import logging
-import re
 from typing import Any, Dict
 
 from ...memagent import MemAgent
+from .numbers import normalize_whatsapp_number
 
 logger = logging.getLogger(__name__)
 
@@ -22,21 +22,12 @@ def normalize_phone_to_memory_id(phone: str) -> str:
 
     Returns:
         Memory ID in format "whatsapp_+1234567890"
+
+    Raises:
+        ValueError: The number is empty or not E.164, so no memory can be keyed
+            by it (the caller reports the failure instead of running the agent).
     """
-    # Remove "whatsapp:" prefix if present
-    number = phone
-    if number.lower().startswith("whatsapp:"):
-        number = number.split(":", 1)[1].strip()
-
-    # Remove any whitespace, hyphens, parentheses
-    number = re.sub(r"[\s\-()]", "", number)
-
-    # Ensure it starts with + for E.164 format
-    if not number.startswith("+"):
-        number = f"+{number}"
-
-    # Return formatted memory_id
-    return f"whatsapp_{number}"
+    return f"whatsapp_{normalize_whatsapp_number(phone, field_name='from')}"
 
 
 def process_incoming_message(

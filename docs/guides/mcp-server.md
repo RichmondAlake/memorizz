@@ -1,5 +1,9 @@
 # Expose MemoRizz as an MCP server
 
+Portable memory archives are available through `memorizz_export_memories` and
+`memorizz_import_memories`. They use a versioned, taxonomy-aligned format with
+tenant checks and a preview before restore. See [Export and import memory](memory-transfer.md).
+
 Streaming is now the default delivery path. See the
 [streaming contract, defaults and compatibility modes](streaming.md)
 for the SDK event iterator, CLI opt-out, UI lifecycle and opt-in MCP answer events.
@@ -172,6 +176,7 @@ external origin, not the internal bind address.
 | Call any tool on the agent's MCP server | `memorizz_call_connected_tool` | `memorizz:read`; tools that change data also need `memorizz:write` and return a durable proposal |
 | Run an approved connected-tool call | `memorizz_resume_connected_tool_call` | `memorizz:write` |
 | List/search/read memories | `memorizz_list_memories`, `memorizz_search_memories`, `memorizz_get_memory` | `memorizz:read` |
+| Inspect memory changes, attribution and lineage | `memorizz_get_memory_timeline` | `memorizz:read`; exact tenant and agent allowlist scope |
 | Report backend, policy, embedding readiness and record counts | `memorizz_memory_status` | `memorizz:read` |
 | Store memory | `memorizz_store_memory` | `memorizz:write` |
 | Replace a memory, keeping the old one as superseded | `memorizz_update_memory` | `memorizz:write` |

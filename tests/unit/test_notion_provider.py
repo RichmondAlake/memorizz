@@ -62,6 +62,84 @@ def save(provider, content="I prefer coffee", **fields):
     return provider.store({"content": content, **fields}, MemoryType.KNOWLEDGE_BASE)
 
 
+def test_memory_observations_are_scoped_bounded_and_include_owner_alias(
+    stack, monkeypatch
+):
+    provider, _, api, _ = stack
+    api.page_size = 1
+    save(provider, agent_id="other", memory_id="m", user_id=None, application_id="app")
+    save(
+        provider,
+        owner_agent_id="other",
+        memory_id="m",
+        user_id=None,
+        application_id="app",
+    )
+    save(provider, agent_id="a", user_id="bob", application_id="app")
+    known = save(provider, agent_id="a", user_id=None, application_id="app")
+    alias = save(provider, owner_agent_id="a", user_id=None, application_id="app")
+    unowned = save(provider, memory_id="m", user_id=None, application_id="app")
+    monkeypatch.setattr(provider, "list_all", lambda *a, **k: pytest.fail("full scan"))
+    rows = provider.query_memory_observations(
+        MemoryType.KNOWLEDGE_BASE,
+        agent_id="a",
+        memory_ids=["m"],
+        user_id=None,
+        application_id="app",
+        exclude_ids=[known],
+        limit=2,
+    )
+    assert {row["id"] for row in rows} == {alias, unowned}
+
+
+def test_filtered_history_follows_empty_notion_pages(stack):
+    from memorizz import MemoryHistory
+
+    provider, _, api, _ = stack
+    api.page_size = 1
+    history = MemoryHistory(provider, record_changes=True)
+    for index in range(9):
+        with history.recording(actor="a", agent_id="a", memory_id="m"):
+            identifier = save(provider, content=str(index))
+            if index % 3 == 0:
+                provider.update_by_id(
+                    identifier, {"content": "corrected"}, MemoryType.KNOWLEDGE_BASE
+                )
+    first = history.timeline(agent_id="a", action="updated", limit=2)
+    second = history.timeline(
+        agent_id="a", action="updated", limit=2, cursor=first["next_cursor"]
+    )
+    assert len(first["events"]) == 2 and len(second["events"]) == 1
+    assert second["next_cursor"] is None
+    assert len({e["record_id"] for e in first["events"] + second["events"]}) == 3
+
+
+def test_archive_restore_defers_embeddings_and_preserves_memory(stack, tmp_path):
+    from memorizz import MemoryArchive
+
+    provider, _, _, embedder = stack
+    source = FileSystemProvider(
+        FileSystemConfig(tmp_path / "archive-source", use_faiss=False)
+    )
+    identifier = source.store(
+        {"content": "Portable coffee", "memory_id": "project", "user_id": "alice"},
+        MemoryType.KNOWLEDGE_BASE,
+    )
+    before = len(embedder.calls)
+    report = MemoryArchive(provider).import_archive(
+        MemoryArchive(source).export(), dry_run=False
+    )
+    assert report["ok"] and len(embedder.calls) == before
+    assert (
+        provider.retrieve_by_id(identifier, MemoryType.KNOWLEDGE_BASE)["content"]
+        == "Portable coffee"
+    )
+    assert (
+        provider._state.get(identifier, MemoryType.KNOWLEDGE_BASE.value)["status"]
+        == "pending"
+    )
+
+
 def page_id(provider, identifier, memory_type=MemoryType.KNOWLEDGE_BASE):
     return provider._state.get(identifier, memory_type.value)["page_id"]
 

@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -58,6 +59,7 @@ from .routers.knowledge_base import router as knowledge_base_router
 from .routers.learning_control_plane import router as learning_control_plane_router
 from .routers.mcp import router as mcp_router
 from .routers.memory_pages import router as memory_pages_router
+from .routers.memory_transfer import router as memory_transfer_router
 from .routers.ollama import router as ollama_router
 from .routers.oracle_docker import router as oracle_docker_router
 from .routers.playground import router as playground_router
@@ -534,10 +536,174 @@ SETTINGS_SECTIONS = [
             },
         ],
     },
+    {
+        "title": "Forgetting mechanism",
+        "description": "How memories decay and are suppressed (Generative Agents: recency since last use, importance, relevance). These are global defaults for new processes; each agent can override the scoring and suppression values in its own settings.",
+        "fields": [
+            {
+                "env": "MEMORIZZ_IMPORTANCE_RATER",
+                "label": "Importance rater",
+                "field_type": "select",
+                "options": [
+                    {"value": "", "label": "Inherit default (heuristic)"},
+                    {"value": "heuristic", "label": "Heuristic (free, deterministic)"},
+                    {
+                        "value": "llm",
+                        "label": "Model-rated (paper method, batched off the user path)",
+                    },
+                    {"value": "off", "label": "Off (store no rating)"},
+                ],
+                "hint": "How each new memory gets its 0 to 1 importance. Model-rated uses the model below, or the agent's own model.",
+            },
+            {
+                "env": "MEMORIZZ_IMPORTANCE_MODEL",
+                "label": "Importance rating model",
+                "placeholder": "qwen2.5:3b",
+                "hint": "Small or local model used only for importance ratings in model-rated mode.",
+            },
+            {
+                "env": "MEMORIZZ_RECENCY_DECAY_PER_HOUR",
+                "label": "Recency decay per hour",
+                "placeholder": "0.995",
+                "hint": "Exponential decay applied per hour since the memory was last used. 0.995 is the paper's value (half-life about 5.8 days).",
+            },
+            {
+                "env": "MEMORIZZ_RECENCY_ANCHOR",
+                "label": "Recency anchor",
+                "field_type": "select",
+                "options": [
+                    {"value": "", "label": "Inherit default (last access)"},
+                    {"value": "last_accessed", "label": "Last access (paper)"},
+                    {"value": "created", "label": "Creation time"},
+                ],
+                "hint": "Measure recency from the last recall (memories that keep being used decay slowly) or from creation.",
+            },
+            {
+                "env": "MEMORIZZ_ALPHA_RECENCY",
+                "label": "Weight: recency",
+                "placeholder": "1",
+                "hint": "Relative weight of recency in the retrieval score.",
+            },
+            {
+                "env": "MEMORIZZ_ALPHA_IMPORTANCE",
+                "label": "Weight: importance",
+                "placeholder": "1",
+                "hint": "Relative weight of importance in the retrieval score.",
+            },
+            {
+                "env": "MEMORIZZ_ALPHA_RELEVANCE",
+                "label": "Weight: relevance",
+                "placeholder": "1",
+                "hint": "Relative weight of query relevance in the retrieval score.",
+            },
+            {
+                "env": "MEMORIZZ_DEFAULT_IMPORTANCE",
+                "label": "Default importance",
+                "placeholder": "0.5",
+                "hint": "Importance assumed for records that were stored without a rating.",
+            },
+            {
+                "env": "MEMORIZZ_RETENTION_ENABLED",
+                "label": "Suppression planner",
+                "field_type": "select",
+                "options": [
+                    {"value": "", "label": "Inherit default (off)"},
+                    {"value": "true", "label": "Enabled"},
+                    {"value": "false", "label": "Disabled"},
+                ],
+                "hint": "Allows dry-run retention plans. Applying a plan still needs a named approver and only hides records from retrieval; nothing is deleted and every suppression can be restored.",
+            },
+            {
+                "env": "MEMORIZZ_RETENTION_MIN_SCORE",
+                "label": "Minimum retention score",
+                "placeholder": "0.15",
+                "hint": "Records whose retention (mean of importance, recall usage and recency) stays below this become suppression candidates.",
+            },
+            {
+                "env": "MEMORIZZ_RETENTION_GRACE_DAYS",
+                "label": "Grace period (days)",
+                "placeholder": "30",
+                "hint": "Records younger than this are never candidates.",
+            },
+            {
+                "env": "MEMORIZZ_RETENTION_PROTECT_VERIFIED",
+                "label": "Protect verified records",
+                "field_type": "select",
+                "options": [
+                    {"value": "", "label": "Inherit default (protected)"},
+                    {"value": "true", "label": "Protected"},
+                    {"value": "false", "label": "Eligible"},
+                ],
+                "hint": "Verified outcomes are never suppressed unless you opt out.",
+            },
+            {
+                "env": "MEMORIZZ_RETENTION_PROTECT_PINNED",
+                "label": "Protect pinned records",
+                "field_type": "select",
+                "options": [
+                    {"value": "", "label": "Inherit default (protected)"},
+                    {"value": "true", "label": "Protected"},
+                    {"value": "false", "label": "Eligible"},
+                ],
+                "hint": "Pinned records are never suppressed unless you opt out.",
+            },
+            {
+                "env": "MEMORIZZ_RETENTION_MEMORY_TYPES",
+                "label": "Memory types the planner considers",
+                "placeholder": "conversation_memory, knowledge_base, entity_memory, summaries, workflow_memory",
+                "hint": "Comma-separated memory types; unknown names are ignored.",
+            },
+            {
+                "env": "MEMORIZZ_REFLECTION_ENABLED",
+                "label": "Reflection trigger",
+                "field_type": "select",
+                "options": [
+                    {"value": "", "label": "Inherit default (off)"},
+                    {"value": "true", "label": "Enabled"},
+                    {"value": "false", "label": "Disabled"},
+                ],
+                "hint": "When the summed importance of new memories in a conversation passes the threshold, run the summariser once (the paper's reflection step).",
+            },
+            {
+                "env": "MEMORIZZ_REFLECTION_THRESHOLD",
+                "label": "Reflection threshold",
+                "placeholder": "15",
+                "hint": "Sum of importance (0 to 1 scale) that triggers a reflection; the paper uses 150 on its 1 to 10 scale.",
+            },
+        ],
+    },
 ]
 SETTINGS_FIELDS = [
     field for section in SETTINGS_SECTIONS for field in section["fields"]
 ]
+
+
+# Routes that authenticate every request themselves (by provider signature).
+# They stay reachable without a UI session, in read-only mode, and without a
+# browser Origin check, because no browser form ever reaches them.
+_SIGNATURE_AUTHENTICATED_PATHS = frozenset({"/webhook/whatsapp/incoming"})
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _request_is_cross_origin(request: Request) -> bool:
+    """Whether a browser sent this request from another site.
+
+    ``Origin`` is authoritative; ``Referer`` stands in when a browser omits
+    it. Requests carrying neither (curl, scripts, navigations that strip the
+    header) pass. Only host:port is compared, so a TLS-terminating proxy in
+    front of the UI does not break its own forms.
+    """
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if not source:
+        return False
+    source = source.strip()
+    if source.lower() == "null":
+        return True
+    parsed = urlsplit(source)
+    if not parsed.scheme or not parsed.netloc:
+        return True
+    return parsed.netloc.lower() != request.url.netloc.lower()
 
 
 @asynccontextmanager
@@ -722,7 +888,11 @@ def create_app(
         from .trace_access import current_principal
 
         path = request.url.path
-        public_path = path == "/login" or path.startswith("/static/")
+        public_path = (
+            path == "/login"
+            or path.startswith("/static/")
+            or path in _SIGNATURE_AUTHENTICATED_PATHS
+        )
         principal = access.principal_for_request(request)
 
         def denied(detail, status_code=403):
@@ -758,11 +928,39 @@ def create_app(
                 status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        # Deny cross-site submissions on every state-changing route. The
+        # signature-authenticated webhooks check each request themselves. API
+        # clients send a bearer token (a browser form never does; it would
+        # need a CORS preflight this app does not grant), which exempts them
+        # everywhere except the privileged trace and persona actions, which
+        # stay same-site only.
+        if (
+            request.method.upper() not in _SAFE_METHODS
+            and path not in _SIGNATURE_AUTHENTICATED_PATHS
+            and _request_is_cross_origin(request)
+        ):
+            if path.startswith("/traces") or path.startswith("/persona-evolution"):
+                return denied("Cross-origin trace action denied")
+            bearer_client = (
+                request.headers.get("authorization", "").lower().startswith("bearer ")
+            )
+            if not bearer_client:
+                return JSONResponse(
+                    {"detail": "Cross-origin request denied"},
+                    status_code=403,
+                    headers={"Cache-Control": "no-store, max-age=0"},
+                )
         if (
             read_only_mode
-            and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+            and request.method.upper() not in _SAFE_METHODS
             and path
-            not in {"/login", "/connect", "/traces/account/resolve", "/traces/reveal"}
+            not in {
+                "/login",
+                "/connect",
+                "/traces/account/resolve",
+                "/traces/reveal",
+                *_SIGNATURE_AUTHENTICATED_PATHS,
+            }
             and not (
                 path == "/persona-evolution/action"
                 and app.state.persona_evolution_actions
@@ -804,20 +1002,19 @@ def create_app(
                 and path not in allowed_posts
             ):
                 return denied("This account is restricted to trace inspection")
-        # Prevent cross-origin form submissions to privileged trace actions.
-        if (
-            path.startswith("/traces") or path.startswith("/persona-evolution")
-        ) and request.method not in {
-            "GET",
-            "HEAD",
-            "OPTIONS",
-        }:
-            origin = request.headers.get("origin")
-            if origin and origin != str(request.base_url).rstrip("/"):
-                return denied("Cross-origin trace action denied")
         token = current_principal.set(principal) if principal is not None else None
+        from ..memory_history import enable_memory_history, memory_change_context
+
+        if _state.get("provider") is not None and not read_only_mode:
+            enable_memory_history(_state["provider"])
+        history_scope = memory_change_context(
+            actor=principal.principal_id if principal else "local",
+            source="ui",
+            **(principal.filters() if principal else {}),
+        )
         try:
-            response = await call_next(request)
+            with history_scope:
+                response = await call_next(request)
             if path.startswith("/traces") and response.status_code in {401, 403}:
                 audit_trace_view(
                     request, "trace_access_denied", content_mode="metadata"
@@ -838,6 +1035,9 @@ def create_app(
     app.include_router(oracle_docker_router)
     app.include_router(agents_api_router)
     app.include_router(traces_router)
+    from .routers.memory_history import router as memory_history_router
+
+    app.include_router(memory_history_router)
     from .routers.usage import router as usage_router
 
     app.include_router(usage_router)
@@ -852,6 +1052,7 @@ def create_app(
     app.include_router(harnesses_router)
     app.include_router(capabilities_router)
     app.include_router(memory_pages_router)
+    app.include_router(memory_transfer_router)
     app.include_router(mcp_router)
     app.include_router(vercel_skills_router)
     app.include_router(knowledge_base_router)
@@ -1854,12 +2055,13 @@ def create_app(
             )
             return RedirectResponse(url=f"/automations/{safe_job_id}", status_code=302)
 
+        # Lease the job as it is: a paused automation runs once and stays
+        # paused, it is not silently re-enabled.
         job = store.claim_job(
             safe_job_id,
             worker_id=worker_id,
             now_utc=now_utc,
             lease_seconds=lease_seconds,
-            force_enable=True,
         )
         if job is None:
             return RedirectResponse(

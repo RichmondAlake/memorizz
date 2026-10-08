@@ -38,6 +38,18 @@ from ..models import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
+_DARWIN_SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+
+def _sandbox_exec_available() -> bool:
+    """Whether macOS ``sandbox-exec`` can confine the subprocess."""
+    return platform.system() == "Darwin" and os.path.isfile(_DARWIN_SANDBOX_EXEC)
+
+
+def _sbpl_quote(path: str) -> str:
+    """Escape a path for a double-quoted SBPL string literal."""
+    return path.replace("\\", "\\\\").replace('"', '\\"')
+
 
 class GraalPySandboxProvider(SandboxProvider):
     """Local GraalPy execution provider (https://graalvm.org/python/).
@@ -200,8 +212,16 @@ class GraalPySandboxProvider(SandboxProvider):
                 if self.mode == "java_wrapper"
                 else "bounded_execution_provider_not_strong_sandbox"
             ),
+            # Only the GraalVM UNTRUSTED wrapper is an isolation boundary;
+            # subprocess mode is an execution provider, and tool descriptions
+            # must say so.
+            "is_security_sandbox": self.mode == "java_wrapper",
             "allow_network": self.allow_network,
             "network_policy": self._network_policy(),
+            "host_read_policy": self._host_read_policy(),
+            "host_read_deny_roots": (
+                self._host_read_deny_roots() if self.mode == "subprocess" else []
+            ),
             "environment_allowlist": sorted(self.env_allowlist),
             "max_memory_mb": self.max_memory_mb,
             "max_cpu_seconds": self.max_cpu_seconds,
@@ -234,19 +254,28 @@ class GraalPySandboxProvider(SandboxProvider):
                 exit_code=1,
             )
 
+        try:
+            env = self._safe_environment(envs)
+        except ValueError as exc:
+            # A refused environment is a result the tool can report, not an
+            # exception out of execute_code.
+            return ExecutionResult(
+                error=f"GraalPy refused the execution environment: {exc}",
+                exit_code=2,
+                metadata=self.get_config(),
+            )
+
         if self.mode == "java_wrapper":
-            return self._execute_java_wrapper(code, timeout, envs)
-        return self._execute_subprocess(code, timeout, envs)
+            return self._execute_java_wrapper(code, timeout, env)
+        return self._execute_subprocess(code, timeout, env)
 
     def _execute_subprocess(
         self,
         code: str,
         timeout: int,
-        envs: Optional[Dict[str, str]] = None,
+        env: Dict[str, str],
     ) -> ExecutionResult:
         """Execute code via ``graalpy -c`` subprocess."""
-        env = self._safe_environment(envs)
-
         try:
             result = subprocess.run(
                 self._subprocess_command(code),
@@ -296,7 +325,7 @@ class GraalPySandboxProvider(SandboxProvider):
         self,
         code: str,
         timeout: int,
-        envs: Optional[Dict[str, str]] = None,
+        env: Dict[str, str],
     ) -> ExecutionResult:
         """Execute code via the Java Polyglot wrapper with SandboxPolicy."""
         java_path = shutil.which("java")
@@ -308,8 +337,6 @@ class GraalPySandboxProvider(SandboxProvider):
                 ),
                 exit_code=127,
             )
-
-        env = self._safe_environment(envs)
 
         # Write code to a temp file to avoid shell escaping issues
         try:
@@ -425,11 +452,11 @@ class GraalPySandboxProvider(SandboxProvider):
         command = [self.graalpy_path, "-c", code]
         if self.allow_network:
             return command
-        if platform.system() == "Darwin" and os.path.isfile("/usr/bin/sandbox-exec"):
+        if _sandbox_exec_available():
             return [
-                "/usr/bin/sandbox-exec",
+                _DARWIN_SANDBOX_EXEC,
                 "-p",
-                "(version 1)(allow default)(deny network*)",
+                self._darwin_sandbox_profile(),
                 *command,
             ]
         if platform.system() == "Linux":
@@ -444,12 +471,62 @@ class GraalPySandboxProvider(SandboxProvider):
             "allow_network=True only for trusted code."
         )
 
+    def _darwin_sandbox_profile(self) -> str:
+        """The ``sandbox-exec`` profile: no network, no reads of the host home.
+
+        SBPL applies the last matching rule, so the allow for the provider's
+        own directory (and the GraalPy distribution, which may live under
+        ``$HOME``) follows the deny rules.
+        """
+        rules = ["(version 1)", "(allow default)", "(deny network*)"]
+        for root in self._host_read_deny_roots():
+            rules.append(f'(deny file-read* (subpath "{_sbpl_quote(root)}"))')
+        for root in self._host_read_allow_roots():
+            rules.append(f'(allow file-read* (subpath "{_sbpl_quote(root)}"))')
+        return "".join(rules)
+
+    def _host_read_deny_roots(self) -> list[str]:
+        """Host directories guest code may not read: ``$HOME`` and MEMORIZZ_HOME."""
+        roots: list[str] = []
+        candidates = (
+            os.environ.get("HOME") or str(Path.home()),
+            os.environ.get("MEMORIZZ_HOME", ""),
+        )
+        for candidate in candidates:
+            candidate = (candidate or "").strip()
+            if not candidate:
+                continue
+            resolved = os.path.realpath(os.path.expanduser(candidate))
+            if resolved == os.path.sep or resolved in roots:
+                continue
+            roots.append(resolved)
+        return roots
+
+    def _host_read_allow_roots(self) -> list[str]:
+        """Directories that stay readable inside the deny roots."""
+        roots = [os.path.realpath(self.working_dir)]
+        executable = self._resolve_executable()
+        if executable:
+            distribution = str(Path(os.path.realpath(executable)).parent.parent)
+            if distribution != os.path.sep and distribution not in roots:
+                roots.append(distribution)
+        return roots
+
+    def _host_read_policy(self) -> str:
+        if self.mode == "java_wrapper":
+            return "blocked_by_graalvm_io_none"
+        if self.allow_network:
+            return "unrestricted_trusted_code"
+        if _sandbox_exec_available():
+            return "home_denied_by_sandbox_exec"
+        return "unrestricted_execution_provider"
+
     def _network_policy(self) -> str:
         if self.mode == "java_wrapper":
             return "blocked_by_graalvm_io_none"
         if self.allow_network:
             return "explicitly_allowed_for_trusted_code"
-        if platform.system() == "Darwin" and os.path.isfile("/usr/bin/sandbox-exec"):
+        if _sandbox_exec_available():
             return "blocked_by_sandbox_exec"
         if platform.system() == "Linux" and shutil.which("unshare"):
             return "blocked_by_network_namespace_fail_closed"

@@ -20,8 +20,190 @@ from .settings_commands import (
 )
 
 memory_app = typer.Typer(
-    help="Configure the memory provider (separate from the LLM).", no_args_is_help=True
+    help="Configure, inspect, export and import memory.", no_args_is_help=True
 )
+
+
+@memory_app.command("export")
+def memory_export(
+    output: Path = typer.Argument(..., help="Destination .memorizz.json archive."),
+    agent_id: Optional[str] = typer.Option(None, "--agent-id"),
+    memory_id: Optional[str] = typer.Option(None, "--memory-id"),
+    memory_types: Optional[str] = typer.Option(
+        None, "--types", help="Comma-separated canonical taxonomy keys; default all."
+    ),
+    include_delegates: bool = typer.Option(True, "--delegates/--no-delegates"),
+    include_history: bool = typer.Option(True, "--history/--no-history"),
+    include_context: bool = typer.Option(True, "--context/--no-context"),
+    user_id: Optional[str] = typer.Option(None, "--user-id"),
+    anonymous: bool = typer.Option(
+        False, "--anonymous", help="Export only anonymous records."
+    ),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+):
+    """Export a portable, versioned archive including lineage and delegates."""
+    from ..memory_archive import MemoryArchive
+    from .agent_factory import detect_memory_provider
+    from .config import load_layered_env
+
+    load_layered_env()
+    provider = detect_memory_provider({}, [])
+    try:
+        if anonymous and user_id:
+            raise ValueError("Choose --anonymous or --user-id")
+        scope = (
+            {"user_id": user_id}
+            if user_id is not None
+            else {"user_id": None}
+            if anonymous
+            else {}
+        )
+        result = MemoryArchive(provider).export_file(
+            output,
+            overwrite=overwrite,
+            agent_id=agent_id,
+            memory_id=memory_id,
+            memory_types=memory_types.split(",") if memory_types else None,
+            include_delegates=include_delegates,
+            include_history=include_history,
+            include_context=include_context,
+            **scope,
+        )
+        typer.echo(
+            json.dumps(
+                {"path": str(output), "manifest": result}, ensure_ascii=False, indent=2
+            )
+        )
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+    finally:
+        provider.close()
+
+
+@memory_app.command("import")
+def memory_import(
+    archive: Path = typer.Argument(..., exists=True, dir_okay=False),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Commit the restore; default is a preview with no writes.",
+    ),
+    conflict: str = typer.Option(
+        "error", "--conflict", help="error, skip, or replace."
+    ),
+    new_ids: bool = typer.Option(
+        False,
+        "--new-ids",
+        help="Clone the graph with new record, agent, namespace and execution IDs.",
+    ),
+    target_memory_id: Optional[str] = typer.Option(None, "--target-memory-id"),
+    user_id: Optional[str] = typer.Option(None, "--user-id"),
+    anonymous: bool = typer.Option(False, "--anonymous"),
+    reembed: bool = typer.Option(
+        False,
+        "--reembed",
+        help="Generate embeddings using the destination model (may incur costs).",
+    ),
+):
+    """Validate and preview an archive, then restore it with --apply."""
+    from ..memory_archive import MemoryArchive
+    from .agent_factory import detect_memory_provider
+    from .config import load_layered_env
+
+    load_layered_env()
+    provider = detect_memory_provider({}, [])
+    try:
+        if anonymous and user_id:
+            raise ValueError("Choose --anonymous or --user-id")
+        scope = (
+            {"user_id": user_id}
+            if user_id is not None
+            else {"user_id": None}
+            if anonymous
+            else {}
+        )
+        result = MemoryArchive(provider).import_file(
+            archive,
+            dry_run=not apply,
+            conflict=conflict,
+            id_strategy="new" if new_ids else "preserve",
+            target_memory_id=target_memory_id,
+            reembed=reembed,
+            **scope,
+        )
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["ok"]:
+            raise typer.Exit(1)
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+    finally:
+        provider.close()
+
+
+@memory_app.command("timeline")
+def memory_timeline(
+    agent_id: Optional[str] = typer.Option(None, "--agent-id"),
+    memory_id: Optional[str] = typer.Option(None, "--memory-id"),
+    run_id: Optional[str] = typer.Option(None, "--run-id"),
+    memory_type: Optional[str] = typer.Option(None, "--type"),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    action: Optional[str] = typer.Option(None, "--action"),
+    user_id: Optional[str] = typer.Option(
+        None, "--user-id", help="Exact tenant scope; omitted = local administrator."
+    ),
+    limit: int = typer.Option(200, "--limit", min=1, max=1000),
+    cursor: Optional[str] = typer.Option(None, "--cursor"),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """Inspect recorded memory changes, attribution and lineage."""
+    from ..memory_history import MemoryHistory
+    from .agent_factory import detect_memory_provider
+    from .config import load_layered_env
+
+    load_layered_env()
+    provider = detect_memory_provider({}, [])
+    try:
+        filters = {"user_id": user_id} if user_id is not None else {}
+        page = MemoryHistory(provider).timeline(
+            agent_id=agent_id,
+            memory_id=memory_id,
+            run_id=run_id,
+            memory_type=memory_type,
+            actor=actor,
+            action=action,
+            limit=limit,
+            cursor=cursor,
+            **filters,
+        )
+        if as_json:
+            typer.echo(json.dumps(page, ensure_ascii=False))
+        else:
+            from rich.console import Console
+            from rich.table import Table
+
+            table = Table(
+                "Time", "Change", "Type", "Actor", "Source", "Record", "Fields"
+            )
+            for event in page["events"]:
+                table.add_row(
+                    str(event.get("timestamp", "")),
+                    event["action"],
+                    event["memory_type"],
+                    event["actor"],
+                    event["source"],
+                    event["target_record_id"],
+                    ", ".join(event["changed_fields"]),
+                )
+            Console().print(table)
+            typer.echo(page["coverage"])
+            if page.get("next_cursor"):
+                typer.echo("Next page: --cursor " + page["next_cursor"])
+    finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
 
 
 def _choice(label, choices, default):

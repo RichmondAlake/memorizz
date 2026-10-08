@@ -20,5 +20,4 @@ class ConversationMemoryUnit(BaseModel):
     ] = None  # Optional for Oracle VECTOR (NULL vs empty list)
     agent_id: Optional[str] = None
     user_id: Optional[str] = None
-    recall_recency: Optional[float] = None
     associated_thread_ids: Optional[list[str]] = None

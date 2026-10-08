@@ -43,6 +43,11 @@ All providers should preserve canonical identifiers, timestamps, metadata, and
 scope. Semantic retrieval must apply tenant/agent/toolbox filters before vector
 top-k selection—not after it.
 
+For portable copies, [export and import memories](../guides/memory-transfer.md)
+as a `.memorizz.json` file. The
+[MemoRizz Memory Archive v1 format](../guides/memory-archive-format.md) groups all
+13 stores by this taxonomy and preserves explicit relationships between records.
+
 ## Storage is not context
 
 Persisting a record does not mean sending it to the model. On each turn the
@@ -53,6 +58,20 @@ retaining links to their source messages.
 
 This separation lets an application keep rich durable history without paying
 to place every record in every prompt.
+
+## Forgetting
+
+Memories are never silently deleted. Retrieval scores every candidate the way
+Generative Agents do: recency since the memory was last used (exponential
+decay, 0.995 per hour by default), its stored importance (rated when it was
+written) and relevance to the query, each normalised and equally weighted.
+Selecting a memory into a prompt counts as a recall, so useful memories stay
+fresh and unused ones sink. A separate, governed tier lets an operator plan a
+dry run over low-retention records, approve it, and hide them from retrieval
+with a reversible `retention_state`; pinned, verified and cited records are
+protected. Defaults live on the Settings page; each agent can override the
+scoring and the planner thresholds. See the
+[forgetting mechanism](../guides/forgetting-mechanism.md).
 
 ## Turn lifecycle
 

@@ -111,6 +111,15 @@ def token_price(provider: str, model: str, override: dict | None = None) -> dict
             "source": "https://docs.typesafe.ai/models",
             "as_of": "2026-09-23",
         }
+    if provider == "openai_decisions" and model == "gpt-6-luna":
+        return {
+            "input": 0.10,
+            "cached_input": 0.0,
+            "cache_write": 0.0,
+            "output": 0.0,
+            "source": "https://developers.openai.com/api/docs/guides/decisions",
+            "as_of": "2026-10-07",
+        }
     if provider == "voyage" and model in {"rerank-2.5", "rerank-2.5-lite", "rerank-3"}:
         rate = 0.02 if model == "rerank-2.5-lite" else 0.05
         return {
@@ -170,7 +179,7 @@ def usage_cost(provider: str, usage: dict, price: dict | None) -> float | None:
     om = price.get("long_output_multiplier", 1) if long else 1
     write = (
         int(usage.get("cache_write_tokens") or 0)
-        if provider in {"anthropic", "openai"}
+        if provider in {"anthropic", "openai", "openai_decisions"}
         else 0
     )
     one_hour = (

@@ -236,7 +236,7 @@ class MemoryCompiler:
             thread_id=thread_id,
         )
         checkpoint_id = self._checkpoint_id(stream_id)
-        checkpoint = self.store.get(checkpoint_id) or {}
+        checkpoint = self.store.lookup(checkpoint_id) or {}
         processed = {
             str(item)
             for item in (checkpoint.get("processed_event_hashes") or [])

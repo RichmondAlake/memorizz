@@ -41,6 +41,11 @@ refine what an agent knows over time.
   configurable chunking, embeddings, and semantic or hybrid search.
 - **Manage context:** deduplicate retrieved memories, summarize and compact
   history, inspect recall decisions, and control retention and forgetting.
+- **Forget the way Generative Agents do:** retrieval ranks memories by recency
+  since last use, stored importance and relevance, recalls reinforce a memory,
+  and a governed planner suppresses, never deletes, records whose retention
+  decayed; every suppression is approved and reversible. See the
+  [forgetting mechanism](docs/guides/forgetting-mechanism.md).
 
 Explore [memory concepts and scope](docs/getting-started/concepts.md),
 [storage providers](docs/memory-providers/filesystem.md), and
@@ -128,7 +133,8 @@ and reversible forgetting. Together, these capabilities help agents retain,
 recall, reuse, and refine experience.
 
 Read about [continual learning](docs/guides/continual-learning.md), the
-[learning control plane](docs/guides/learning-control-plane.md), and
+[learning control plane](docs/guides/learning-control-plane.md), the
+[forgetting mechanism](docs/guides/forgetting-mechanism.md), and
 [evaluation methods](docs/evaluation-suite.md).
 
 ## Quick start

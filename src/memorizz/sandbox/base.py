@@ -10,6 +10,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
+from .._registry import ProviderRegistry
 from .models import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -108,19 +109,22 @@ class SandboxProvider(ABC):
 
 # --- Provider registry ---
 
-_PROVIDER_REGISTRY: Dict[str, type[SandboxProvider]] = {}
+_REGISTRY: ProviderRegistry[SandboxProvider] = ProviderRegistry(
+    logger=logger,
+    unknown_message="Unknown sandbox provider: %s",
+    init_error_message="Failed to initialize sandbox provider '%s' with config keys: %s",
+)
+_PROVIDER_REGISTRY: Dict[str, type[SandboxProvider]] = _REGISTRY.providers
 
 
 def register_provider(name: str, provider_cls: type[SandboxProvider]) -> None:
     """Register a sandbox provider by name."""
-    _PROVIDER_REGISTRY[name.lower()] = provider_cls
+    _REGISTRY.register(name, provider_cls)
 
 
 def get_provider_class(name: str) -> Optional[type[SandboxProvider]]:
     """Return the provider class for a given name."""
-    if not name:
-        return None
-    return _PROVIDER_REGISTRY.get(name.lower())
+    return _REGISTRY.get(name)
 
 
 def create_sandbox_provider(
@@ -136,27 +140,4 @@ def create_sandbox_provider(
     Returns:
         A SandboxProvider instance, or None if the name is unknown.
     """
-    provider_cls = get_provider_class(name)
-    if not provider_cls:
-        logger.warning("Unknown sandbox provider: %s", name)
-        return None
-
-    config = dict(config or {})
-    try:
-        provider = provider_cls(**config)
-    except TypeError:
-        try:
-            provider = provider_cls(config=config)  # type: ignore[arg-type]
-        except TypeError as exc:
-            logger.error(
-                "Failed to initialize sandbox provider '%s' with config keys: %s",
-                name,
-                list(config.keys()),
-            )
-            raise exc
-
-    validation_error = provider.validate_configuration()
-    if validation_error:
-        raise ValueError(validation_error)
-
-    return provider
+    return _REGISTRY.create(name, config)

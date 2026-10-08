@@ -9,6 +9,7 @@ behavior are unchanged.
 """
 
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -22,7 +23,7 @@ router = APIRouter(tags=["memory-pages"])
 
 
 @router.get("/memory/{memory_type}", response_class=HTMLResponse)
-async def memory_list(request: Request, memory_type: str):
+async def memory_list(request: Request, memory_type: str, error: Optional[str] = None):
     """Show list of items for a memory type."""
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
@@ -85,6 +86,7 @@ async def memory_list(request: Request, memory_type: str):
             # Notion reads a bounded page, so its count is a floor, not a total.
             "total_known": _state.get("provider_type") != "notion",
             "load_error": load_error,
+            "action_error": (error or "")[:400],
             "active_page": memory_type,
         },
     )

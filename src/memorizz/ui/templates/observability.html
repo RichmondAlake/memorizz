@@ -1,12 +1,19 @@
 {% extends "base.html" %}
 
 {% block title %}Observability &amp; Monitoring - Memorizz{% endblock %}
-{% block head %}<script src="/static/js/observability.js?v=3" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=2">{% endblock %}
+{% block head %}<script src="/static/js/observability.js?v=3" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=2"><link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=7"><script src="/static/js/memory-evolution.js?v=7" defer></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, observability_tabs, empty_state %}
 {% from '_fmt.html' import tape, count %}
-{{ page_header('Observability', 'Follow context lineage, grounding, cache routing, tool execution and verified outcomes by agent and thread.', 'Operations', nav=observability_tabs('traces', selection_urls)) }}
+{% call page_header('Observability', 'Follow context lineage, grounding, cache routing, tool execution and verified outcomes by agent and thread.', 'Operations', nav=observability_tabs('traces', selection_urls)) %}<a class="btn" href="/traces/memory-evolution?{{ request.query_params }}">Memory evolution</a>{% endcall %}
+
+{% if selected_agent_id %}
+<details class="detail-section" id="observability-memory-evolution">
+    <summary>Memory evolution for this agent</summary>
+    {% with agent_id=selected_agent_id, memory_id=selected_thread_memory_id or '', run_id='' %}{% include '_memory_evolution.html' %}{% endwith %}
+</details>
+{% endif %}
 
 {{ tape(trace_tape, 'Loaded trace window summary') }}
 
@@ -337,7 +344,7 @@
     <div class="trace-insights-list">
         {% for insight in trace_analysis.insights %}
         {% set saved = persisted_recommendations.get(insight.id) %}
-        <article class="trace-insight-card trace-insight-card--{{ insight.priority|lower }}">
+        <article class="trace-insight-card">
             <div class="trace-insight-heading">
                 <div>
                     <span class="trace-priority trace-priority--{{ insight.priority|lower }}">{{ insight.priority }}</span>

@@ -36,6 +36,41 @@ def _callable_accepts(fn: Any, name: str) -> bool:
     )
 
 
+_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool"})
+
+
+def normalize_history_item(item: Any) -> Optional[Dict[str, str]]:
+    """Normalize a conversation-history record into a ``{role, content}`` chat message.
+
+    Provider loads return flat rows (``{"role": ..., "content": "text"}``)
+    while ``MemoryManager.save_memory_unit`` appends in-session rows to the
+    conversation cache in the nested shape ``{"content": {"role": ...,
+    "content": "text"}}``. Both shapes normalize identically here, so prompt
+    building and compaction never need to know which one they received.
+
+    Returns ``None`` for records with no text.
+    """
+    role = ""
+    text = ""
+
+    if isinstance(item, dict):
+        if "role" in item and ("content" in item or "text" in item):
+            role = str(item.get("role") or "").strip().lower()
+            text = str(item.get("content") or item.get("text") or "")
+        elif "content" in item and isinstance(item.get("content"), dict):
+            nested = item.get("content") or {}
+            role = str(nested.get("role") or "user").strip().lower()
+            text = str(nested.get("content") or nested.get("text") or "")
+
+    if not text.strip():
+        return None
+
+    if role not in _CHAT_ROLES:
+        role = "user"
+
+    return {"role": role, "content": text}
+
+
 class MemoryManager:
     """
     Manages all memory-related operations for MemAgent.
@@ -55,6 +90,9 @@ class MemoryManager:
         self._conversation_memory_cache = {}
         # Prevent unbounded growth when conversation memory is updated in-place.
         self._conversation_memory_cache_max_entries = 5000
+
+    # Flat provider rows and nested in-session cache rows both normalize here.
+    normalize_history_item = staticmethod(normalize_history_item)
 
     @staticmethod
     def _history_timestamp(entry: Dict[str, Any]) -> float:
@@ -667,6 +705,8 @@ class MemoryManager:
         self,
         tool_log_id: str,
         user_id: Any = _UNSET,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Retrieve a tool log entry by its ID.
@@ -676,16 +716,28 @@ class MemoryManager:
             user_id: Optional user scope. Omit for an administrative/unscoped
                 read; pass ``None`` for anonymous rows or a tenant ID for an
                 exact scoped read.
+            memory_id: Optional memory scope. When set, a row recorded under a
+                different ``memory_id`` is treated as not found.
+            thread_id: Optional thread scope. When set, a row recorded in a
+                different conversation thread is treated as not found.
 
         Returns:
-            The tool log entry dict, or None if not found.
+            The tool log entry dict, or None if not found or out of scope.
         """
         try:
             result = self.memory_provider.retrieve_by_id(
                 tool_log_id, MemoryType.TOOL_LOG
             )
-            if result and isinstance(result, dict) and user_id is not _UNSET:
-                if result.get("user_id") != user_id:
+            if result and isinstance(result, dict):
+                if user_id is not _UNSET and result.get("user_id") != user_id:
+                    return None
+                if memory_id is not None and str(result.get("memory_id") or "") != str(
+                    memory_id
+                ):
+                    return None
+                if thread_id is not None and self._entry_thread_id(result) != str(
+                    thread_id
+                ):
                     return None
             return result
         except Exception as e:
@@ -894,40 +946,55 @@ class MemoryManager:
                     kwargs["thread_id"] = str(thread_id)
                 documents = native(**kwargs) or []
             else:
-                documents = self.memory_provider.list_all(MemoryType.SUMMARIES) or []
+                # Tenant-scope the fallback scan at the provider when it
+                # understands ``user_id`` (the base contract does); legacy
+                # providers get the positional call and are filtered below.
+                list_all = self.memory_provider.list_all
+                if _callable_accepts(list_all, "user_id"):
+                    documents = list_all(MemoryType.SUMMARIES, user_id=user_id) or []
+                else:
+                    documents = list_all(MemoryType.SUMMARIES) or []
         except Exception as exc:
             logger.debug("Failed to list summaries for thread %s: %s", memory_id, exc)
             return []
 
         normalized_memory_id = str(memory_id or "").strip()
         normalized_agent_id = str(agent_id or "").strip()
-        filtered: List[Dict[str, Any]] = []
+        wanted_thread_id = str(thread_id) if thread_id is not None else None
 
-        for doc in documents:
+        def _in_scope(doc: Any) -> bool:
             if not isinstance(doc, dict):
-                continue
-
+                return False
             # Tenant isolation: only include rows whose user_id exactly matches
             # the requested scope (including None == None for legacy rows).
-            doc_user_id = doc.get("user_id")
-            if doc_user_id != user_id:
-                continue
-
+            if doc.get("user_id") != user_id:
+                return False
+            if (
+                wanted_thread_id is not None
+                and self._entry_thread_id(doc) != wanted_thread_id
+            ):
+                return False
+            # Match by memory_id or agent_id
             doc_memory_id = str(
                 doc.get("memory_id") or doc.get("memoryId") or ""
             ).strip()
-            doc_agent_id = str(doc.get("agent_id") or doc.get("agentId") or "").strip()
-            doc_thread_id = self._entry_thread_id(doc)
-
-            if thread_id is not None and doc_thread_id != str(thread_id):
-                continue
-
-            # Match by memory_id or agent_id
             if normalized_memory_id and doc_memory_id != normalized_memory_id:
-                if normalized_agent_id and doc_agent_id != normalized_agent_id:
-                    continue
-                elif not normalized_agent_id:
-                    continue
+                doc_agent_id = str(
+                    doc.get("agent_id") or doc.get("agentId") or ""
+                ).strip()
+                if not normalized_agent_id or doc_agent_id != normalized_agent_id:
+                    return False
+            return True
+
+        # Drop out-of-scope rows before any per-document work.
+        documents = [doc for doc in documents if _in_scope(doc)]
+        filtered: List[Dict[str, Any]] = []
+
+        for doc in documents:
+            doc_memory_id = str(
+                doc.get("memory_id") or doc.get("memoryId") or ""
+            ).strip()
+            doc_thread_id = self._entry_thread_id(doc)
 
             content = str(doc.get("content") or "").strip()
             summary_id = str(doc.get("id") or doc.get("_id") or "").strip()
@@ -978,6 +1045,9 @@ class MemoryManager:
         Retrieve specific conversation messages by their IDs.
 
         Used to reconstruct the original conversation from a summary.
+
+        The ``MemoryProvider`` contract has no batch ``retrieve_many``
+        primitive (only ``store_many``), so this is one provider call per id.
         """
         results: List[Dict[str, Any]] = []
         for msg_id in message_ids:
@@ -1008,6 +1078,11 @@ class MemoryManager:
         preventing double-counting of information.
 
         Returns the number of messages successfully marked.
+
+        The ``MemoryProvider`` contract has no batch ``update_many``
+        primitive, so this is one ``update_by_id`` call per message. Providers
+        with an atomic ``store_summary_with_links`` (Oracle) link the rows
+        inside the summary store and never reach this method.
         """
         marked = 0
         for msg_id in message_ids:
@@ -1343,13 +1418,16 @@ class MemoryManager:
                             self.mark_messages_as_summarized(
                                 source_message_ids, summary_id
                             )
-                            # Clear conversation cache so next load reflects changes
-                            self.clear_conversation_cache(chunk_memory_id)
                         except Exception as mark_exc:
                             logger.debug(
                                 "Could not mark messages as summarized: %s",
                                 mark_exc,
                             )
+                    # Whichever store primitive linked the rows, the
+                    # in-process conversation cache still holds the unmarked
+                    # originals: drop it so the next load reflects the summary.
+                    if source_message_ids:
+                        self.clear_conversation_cache(chunk_memory_id)
 
                     logger.info(
                         f"Created summary {summary_id} for memory_id {chunk_memory_id} covering {len(memory_chunk)} memories"

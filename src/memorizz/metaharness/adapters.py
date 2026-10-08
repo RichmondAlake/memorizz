@@ -666,6 +666,8 @@ class PersistedMemAgentHarness(AgentHarness):
                 memory_provider=self.memory_provider,
                 meta_harness=False,
                 meta_harness_mode=None,
+                capture_memory_history=True,
+                capture_context_snapshots=True,
                 **overrides,
             )
             if overrides:

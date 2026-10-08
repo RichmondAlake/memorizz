@@ -53,3 +53,11 @@ Or try it for one session without installing:
 Start a new session and allow the `memorizz` tools when Claude first asks.
 Without a `memorizz` on Claude Code's PATH the plugin runs it from PyPI with
 `uvx`.
+
+## Portable memory archives
+
+The `memory-transfer` skill exports/restores project or agent memory graphs
+through the MCP archive tools and `memorizz plugin export-memory` /
+`import-memory`. Import previews by default; `--apply` commits it. See the
+[archive guide](../../../docs/guides/memory-transfer.md) for format, scope and
+conflict options.

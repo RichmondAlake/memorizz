@@ -14,6 +14,7 @@ import os
 from typing import Optional
 
 from fastapi import APIRouter, Form
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 router = APIRouter(prefix="/api/docker/oracle", tags=["oracle-docker"])
@@ -71,13 +72,13 @@ async def docker_oracle_runtime():
 async def docker_oracle_runtime_start():
     """Best-effort: launch the installed runtime and wait for the daemon.
 
-    Synchronous because the cold-start budget (~30-60s for Docker Desktop) fits
-    comfortably inside one HTTP request and avoids us having to invent a polling
-    endpoint just for this transition.
+    One request because the cold-start budget (~30-60s for Docker Desktop) fits
+    comfortably inside it and avoids us having to invent a polling endpoint just
+    for this transition. The wait runs in a worker thread, not on the loop.
     """
     from .. import docker_oracle as _do
 
-    ok, message = _do.start_runtime()
+    ok, message = await run_in_threadpool(_do.start_runtime)
     return JSONResponse({"ok": ok, "message": message}, status_code=200 if ok else 500)
 
 
@@ -104,7 +105,7 @@ async def docker_oracle_start(container_name: str = Form(...)):
             },
             status_code=404,
         )
-    ok, message = _do.start_container(container_name)
+    ok, message = await run_in_threadpool(_do.start_container, container_name)
     return JSONResponse({"ok": ok, "message": message}, status_code=200 if ok else 500)
 
 
@@ -195,5 +196,7 @@ async def docker_oracle_create(
             status_code=409,
         )
     port = _do.parse_port_from_dsn(oracle_dsn)
-    ok, message = _do.create_container(oracle_user, oracle_password, port)
+    ok, message = await run_in_threadpool(
+        _do.create_container, oracle_user, oracle_password, port
+    )
     return JSONResponse({"ok": ok, "message": message}, status_code=200 if ok else 500)

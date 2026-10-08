@@ -1,0 +1,29 @@
+<section class="me-view{% if compact %} me-compact{% endif %}" data-memory-evolution{% if compact %} data-me-compact{% endif %}{% if lazy %} data-me-lazy{% endif %} data-agent-id="{{ agent_id or '' }}" data-memory-id="{{ memory_id or '' }}" data-run-id="{{ run_id or '' }}" aria-label="Memory evolution timeline">
+    <nav class="me-agent-nav" data-me-agent-nav aria-label="Agent memory navigation" hidden></nav>
+    <div class="me-toolbar">
+        {% if compact %}<details class="me-filters"><summary><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"/><circle cx="7" cy="5" r="2"/><circle cx="13" cy="10" r="2"/><circle cx="8" cy="15" r="2"/></svg>Filters<span data-me-filter-count hidden></span></summary>{% endif %}
+        <div class="me-filter-fields">
+        <label class="me-search">Search loaded history<input type="search" data-me-search aria-label="Search loaded memory history" placeholder="Find a memory, writer or source…"></label>
+        <label>Memory type<select data-me-type aria-label="Filter memory type"><option value="">All types</option></select></label>
+        <label>Change<select data-me-action aria-label="Filter change"><option value="">All changes</option><option value="created">Created</option><option value="updated">Updated</option><option value="deleted">Deleted</option><option value="observed">Existing records</option></select></label>
+        <label>Writer<select data-me-actor aria-label="Filter writer"><option value="">All writers</option></select></label>
+        <label>Execution<select data-me-execution aria-label="Filter loaded executions"><option value="">All loaded executions</option></select></label>
+        {% if not compact %}<label>Group by<select data-me-group aria-label="Group memory changes"><option value="type">Memory type</option><option value="writer">Writer</option></select></label>{% endif %}
+        <label class="me-check"><input type="checkbox" data-me-existing> Include records with unknown history</label>
+        </div>
+        {% if compact %}</details>{% endif %}
+        <div class="me-move"><button class="btn btn-sm" type="button" data-me-left aria-label="Scroll timeline left" title="Earlier changes">←</button><button class="btn btn-sm" type="button" data-me-right aria-label="Scroll timeline right" title="Later changes">→</button><button class="btn btn-sm" type="button" data-me-refresh aria-label="Refresh memory history" title="Refresh memory history">{% if compact %}<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 8a6 6 0 1 0 .1 4M16 3v5h-5"/></svg>{% else %}Refresh{% endif %}</button></div>
+    </div>
+    <p class="me-status" data-me-status role="status" aria-live="polite">Loading memory history…</p>
+    <div class="me-summary" data-me-summary aria-label="Visible change summary"></div>
+    <p class="me-coverage-note" data-me-coverage-note></p>
+    <p class="me-legend"><span><span class="me-key me-created">●</span> Created</span><span><span class="me-key me-updated">●</span> Updated</span><span><span class="me-key me-deleted">●</span> Deleted</span>{% if not compact %}<span><span class="me-key me-observed">○</span> Existing record</span>{% endif %}<span title="Recorded versions of the same memory"><svg width="22" height="10" aria-hidden="true"><path d="M0 5h22" class="me-edge"/></svg> Version</span><span title="An explicit source identifier, not inferred similarity"><svg width="22" height="10" aria-hidden="true"><path d="M0 5h22" class="me-edge me-edge-branch"/></svg> Explicit source</span></p>
+    <div class="me-timebar"><span data-me-range>Recorded change times</span><div class="me-view-controls">{% if not compact %}<button type="button" data-me-related class="btn btn-sm" aria-pressed="false" disabled title="Select a change, then focus on its recorded versions and explicit sources">Related changes</button><button type="button" data-me-latest class="btn btn-sm">Latest change</button>{% endif %}<select data-me-timezone aria-label="Timeline timezone"><option value="local">Local time</option><option value="UTC">UTC</option></select></div></div>
+    <div class="me-workbench"><div class="me-graph">
+    <div class="me-scroll" data-me-scroll tabindex="0" aria-label="Horizontally scrollable memory timeline">
+        <div class="me-canvas" data-me-canvas><div class="me-axis" data-me-axis aria-label="Dates and times of recorded changes"></div><div class="me-lanes" data-me-lanes></div><svg class="me-links" data-me-links aria-hidden="true"></svg><div data-me-nodes></div></div>
+    </div>
+    <div class="me-bottom"><button type="button" class="btn btn-sm" data-me-older hidden>Load older changes</button><span>{% if compact %}Scroll to explore · select a change for details{% else %}Use the arrows, horizontal scroll, or Shift + mouse wheel. Select a node to inspect its change.{% endif %}</span></div>
+    </div><aside class="me-detail" data-me-detail aria-label="Selected memory change" aria-live="polite" hidden></aside></div>
+    <details class="me-help"><summary>About this timeline</summary><p data-me-coverage>History starts when recording is enabled. Earlier history and direct backend writes may be unavailable.</p><p>The ruler shows when each memory change was recorded. Changes are spaced for readability; gap labels show actual elapsed time. A run label identifies the execution associated with a change. Existing records have unknown execution history.</p><p>Solid lines connect recorded versions. Dashed lines follow explicit sources or derivation links. Existing records have unknown historical attribution.</p></details>
+</section>

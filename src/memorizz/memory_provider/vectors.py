@@ -2,15 +2,100 @@
 
 The document provider remains authoritative. These records contain embeddings,
 opaque source references, and retrieval scope, never a second copy of memory text.
+:func:`cosine` is the one similarity used by every brute-force ranking.
 """
 
 import hashlib
 import json
 import math
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - optional dependency
+    np = None
 
 VECTOR_MARKER = "memorizz.vector.v1"
+_MISMATCH_POLICIES = frozenset({"none", "zero", "raise"})
+# numpy wins only once a vector is big enough for its per-call overhead to pay.
+_NUMPY_FROM_DIMENSIONS = 64
+
+
+def _cosine_or_none(a: Any, b: Any) -> Optional[float]:
+    if np is not None and (
+        isinstance(a, np.ndarray)
+        or isinstance(b, np.ndarray)
+        or len(a) > _NUMPY_FROM_DIMENSIONS
+    ):
+        vec_a = np.asarray(a, dtype="float64")
+        vec_b = np.asarray(b, dtype="float64")
+        if vec_a.ndim != 1 or vec_a.shape != vec_b.shape or vec_a.size == 0:
+            return None
+        norm_a = float(np.linalg.norm(vec_a))
+        norm_b = float(np.linalg.norm(vec_b))
+        if norm_a == 0.0 or norm_b == 0.0:
+            return None
+        return float(np.dot(vec_a, vec_b) / (norm_a * norm_b))
+    if len(a) == 0 or len(a) != len(b):
+        return None
+    dot = norm_a = norm_b = 0.0
+    for x, y in zip(a, b):
+        x = float(x)
+        y = float(y)
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if norm_a == 0.0 or norm_b == 0.0:
+        return None
+    return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+
+
+def cosine(a: Any, b: Any, *, on_mismatch: str = "none") -> Optional[float]:
+    """Cosine similarity of two 1-D vectors, or the mismatch policy's result.
+
+    A mismatch is an empty vector, two vectors of different length, a zero
+    vector or non-numeric content. ``on_mismatch`` decides what comes back
+    then: ``"none"`` returns ``None``, ``"zero"`` returns ``0.0`` and
+    ``"raise"`` raises ``ValueError``. Pure Python for small vectors; numpy,
+    when installed, for larger ones and for array inputs.
+    """
+    if on_mismatch not in _MISMATCH_POLICIES:
+        raise ValueError(f"Unknown on_mismatch policy: {on_mismatch!r}")
+    try:
+        result = _cosine_or_none(a, b)
+    except (TypeError, ValueError):
+        result = None
+    if result is not None:
+        return result
+    if on_mismatch == "zero":
+        return 0.0
+    if on_mismatch == "raise":
+        raise ValueError(
+            "Cosine similarity needs two non-empty, non-zero numeric vectors of "
+            "the same length"
+        )
+    return None
+
+
+def flatten_vector(vector: Any) -> Any:
+    """``vector`` as one flat sequence, so a nested ``[[...]]`` embedding still scores."""
+    if np is not None:
+        try:
+            return np.asarray(vector, dtype="float64").ravel()
+        except (TypeError, ValueError):
+            pass
+    flat: List[Any] = []
+    pending = [vector]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, (list, tuple)):
+            pending.extend(reversed(item))
+        else:
+            flat.append(item)
+    return flat
+
+
 VECTOR_SCOPE_FIELDS = frozenset(
     {
         "user_id",

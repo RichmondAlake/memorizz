@@ -1,5 +1,120 @@
 # Changelog
 
+## 0.16.0 — 2026-10-08
+
+### Added
+
+- Memory evolution and historical context: Playground → Memory → **Memory
+  evolution** shows a scrollable timeline of creations, corrections, deletions
+  and explicit source relationships with the actor, originating source,
+  changed fields, version hashes and run identifiers of each change, filters
+  by memory type, actor or change, and paging that keeps loaded history. It is
+  backed by a provider-neutral memory history journal (opt-in for SDK
+  providers, on for the UI and MCP host) and by context snapshots captured at
+  the model boundary, so the Context tab replays the exact request of a past
+  turn (`capture_context_snapshots=True` for standalone SDK agents). Forgetting
+  decisions appear on the same timeline. See the Memory evolution guide.
+- Memory archive v1, export and import: a portable `.memorizz.json` archive
+  (`"format": "memorizz.memory"`, version 1) exports and restores a memory
+  graph through the UI (**Memory types → Export & import**), the SDK, the CLI,
+  the MCP server and the Codex and Claude Code plugins (`/export-memory`,
+  `/import-memory` and the memory-transfer skill). Filesystem, MongoDB, Oracle
+  and Notion implement archive storage; agent exports carry delegates, their
+  private namespaces, owned shared records and evolution/context records. One
+  redaction engine now scrubs credentials across MCP traffic, harness reports,
+  archives, the UI and the observability validator. See the Memory archive
+  format and Export and import memory guides.
+- Benchmark comparisons can rerank with the OpenAI Decisions API through a
+  typed client that never executes actions or tools, using the paired question
+  recipes shared with Jev.
+- Sandbox, internet-access and browser-control providers are built from one
+  name-keyed provider registry.
+- Forgetting mechanism modelled on Generative Agents: retrieval now scores
+  memories by recency since last access, stored importance and relevance (each
+  min-max normalised, equal weights by default), reinforces memories when they
+  are selected into a prompt, and rates importance at store time (heuristic,
+  model-rated or off). A governed retention planner lists primary memories
+  whose retention decayed, applies an approved plan as reversible suppression
+  (never deletion), and can restore any record. Available from the SDK
+  (`plan_retention`, `apply_retention`, `unsuppress_memory`), the CLI
+  (`memorizz learning retention-plan|retention-apply|suppressed|unsuppress`),
+  the Learning control plane page, a new **Forgetting mechanism** section on
+  the Settings page and per-agent overrides in the agent form. See the
+  Forgetting mechanism guide.
+- Provider contract: `touch_many` records recalls, `purge_expired_semantic_cache`
+  removes expired cache rows; Oracle persists importance, last access, recall
+  counts and retention state.
+- Interactive CLI harness routing: `/harnesses` lists the external harnesses
+  and their readiness, `/harness <codex|claude-code|...|auto|off>` runs the
+  following turns on that harness with MemoRizz memory, tracing and approvals
+  (session only; `off` restores the saved agent), the prompt shows the active
+  harness, and approvals raised by a harness turn are printed inline.
+  `memorizz chat --harness` and `memorizz run --harness` set it at launch.
+  `/harness delegate` keeps the agent's model in charge with its harness
+  delegates and the `run_harness_task` tool; `/compare <harness> <harness>
+  <task>` runs a read-only comparison from the prompt and saves it as a
+  workflow.
+
+### Changed
+
+- The interactive CLI now uses `/models` to show the current model, list
+  installed Ollama models or switch models. Help, Tab completion and model
+  suggestions use the plural command; `/model` remains a compatibility alias.
+
+### Fixed
+
+- Reapplying an empty MCP configuration at CLI startup no longer prints
+  "Tool not found for removal" warnings for helpers that were never registered.
+  Repeated cleanup also tolerates MCP tools removed individually.
+- Slash-command help now displays optional arguments such as `[name]`
+  literally instead of interpreting them as console formatting.
+
+- Security: the self-aware command tool could run arbitrary host commands
+  through `find -exec`, git configuration flags or a script whose basename was
+  allow-listed; it now resolves binaries from PATH, denies those flags and
+  requires approval. Cross-origin form posts were accepted on every
+  non-trace UI route; all state-changing routes now reject them (bearer-token
+  clients and the signature-verified Twilio webhook excepted). Connected MCP
+  tools without annotations were treated as read-only unless their name
+  contained a known verb; they are now mutations unless a read verb, the
+  server annotation or the host allowlist says otherwise. Internet-provider
+  API keys are no longer written into agent records.
+- Data integrity: filesystem record ids can no longer escape the memory root;
+  embedding-only updates keep the original timestamp (conversation order was
+  being scrambled by the backfill); several processes on one filesystem root
+  no longer overwrite each other's index and read paths pick up other
+  processes' writes without a restart; MCP `update_memory` no longer persists
+  the redacted view; deleting a knowledge base from one agent no longer deletes
+  it for every agent; Oracle semantic-cache clear/invalidate were silent
+  no-ops and summaries/entities could not be deleted by their exposed ids;
+  MongoDB cascade delete now removes the agent and every memory type and by-id
+  reads accept string ids.
+- Agent loop: provider errors are no longer stored as assistant replies or
+  admitted to the semantic cache; an approval pause inside a multi-tool turn no
+  longer drops sibling calls; the embedding backfill is drained on close;
+  internet tools recover after a cool-down instead of locking out; compaction
+  counts in-session rows; tool-log reads are scoped to the conversation;
+  context-local state is created eagerly to avoid a first-use race.
+- UI and automations: blocking model pulls, Docker and dataset downloads no
+  longer stall the event loop; the Twilio webhook works with UI auth enabled;
+  "Run now" keeps paused automations paused and timed-out runs are neither
+  retried while still running nor delivered twice; uploads are capped at 50 MiB.
+- Semantic cache: expired rows are purged, re-caching upserts by cache key,
+  preload loads vectors on MongoDB and Oracle, hit counts increment.
+- Entity memory: model-supplied identity keys can no longer poison a tenant
+  scope; name-only upserts converge on one record.
+- The capability report derives its MCP tool count from the registry.
+- WhatsApp: one E.164 normaliser is shared by every address handler.
+
+### Performance
+
+- Learning control-plane reads no longer scan the shared-memory partition on
+  per-turn paths and use indexed observability queries where providers offer
+  them; fleet pages read one row per conversation and no longer instantiate a
+  full agent per row; Oracle conversation history, tool logs and start-up DDL
+  use SQL limits and a single dictionary read; agent saves skip re-embedding
+  unchanged tools; comparison runs throttle result rewrites.
+
 ## 0.15.0 — 2026-10-04
 
 ### Added

@@ -62,3 +62,111 @@ def test_learning_status_events_and_compile_use_the_filesystem_backend(
     compiled = runner.invoke(app, ["learning", "compile", *common], env=environment)
     assert compiled.exit_code == 0, compiled.output
     assert json.loads(compiled.output)["compiled_events"] == 1
+
+
+def test_retention_plan_apply_and_restore_through_the_cli(tmp_path, monkeypatch):
+    import time
+
+    from memorizz.enums import MemoryType
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    monkeypatch.setenv("MEMORIZZ_RETENTION_MIN_SCORE", "0.3")
+    provider = FileSystemProvider(FileSystemConfig(root_path=tmp_path / "memory"))
+    provider.store(
+        {
+            "_id": "stale-fact",
+            "name": "stale-fact",
+            "content": "never recalled",
+            "agent_id": "agent-cli",
+            "memory_id": "memory-cli",
+            "timestamp": time.time() - 120 * 86_400,
+            "importance": 0.1,
+            "embedding": [1.0, 0.0],
+        },
+        MemoryType.KNOWLEDGE_BASE,
+    )
+    common = [
+        "--agent-id",
+        "agent-cli",
+        "--memory-id",
+        "memory-cli",
+        "--backend",
+        "filesystem",
+        "--json",
+    ]
+    environment = {
+        "MEMORIZZ_HOME": str(tmp_path),
+        "MEMORIZZ_RETENTION_MIN_SCORE": "0.3",
+    }
+
+    planned = runner.invoke(
+        app, ["learning", "retention-plan", *common], env=environment
+    )
+    assert planned.exit_code == 0, planned.output
+    report = json.loads(planned.output)
+    assert report["plan_kind"] == "retention" and report["candidate_count"] == 1
+    plan_id = report["plan_id"]
+
+    applied = runner.invoke(
+        app,
+        [
+            "learning",
+            "retention-apply",
+            plan_id,
+            "--approved-by",
+            "operator-7",
+            *common,
+        ],
+        env=environment,
+    )
+    assert applied.exit_code == 0, applied.output
+    assert json.loads(applied.output)["tombstoned"] == 1
+    assert (
+        provider.retrieve_by_id("stale-fact", MemoryType.KNOWLEDGE_BASE)[
+            "retention_state"
+        ]
+        == "suppressed"
+    )
+
+    listed = runner.invoke(
+        app,
+        [
+            "learning",
+            "suppressed",
+            "--agent-id",
+            "agent-cli",
+            "--backend",
+            "filesystem",
+            "--json",
+        ],
+        env=environment,
+    )
+    assert listed.exit_code == 0, listed.output
+    assert json.loads(listed.output)["count"] == 1
+
+    restored = runner.invoke(
+        app,
+        [
+            "learning",
+            "unsuppress",
+            "stale-fact",
+            "--memory-type",
+            "knowledge_base",
+            "--agent-id",
+            "agent-cli",
+            "--approved-by",
+            "operator-7",
+            "--backend",
+            "filesystem",
+            "--json",
+        ],
+        env=environment,
+    )
+    assert restored.exit_code == 0, restored.output
+    assert json.loads(restored.output)["restored"] is True
+    assert (
+        provider.retrieve_by_id("stale-fact", MemoryType.KNOWLEDGE_BASE)[
+            "retention_state"
+        ]
+        == "active"
+    )

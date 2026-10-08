@@ -83,3 +83,10 @@ Use it when something seems missing.
 In the user's MemoRizz store (files under `~/.memorizz/memory` by default, or
 MongoDB/Oracle as configured). The MemoRizz UI (`memorizz ui`) and CLI show
 them, and the user's MemoRizz agents can use them too.
+
+## Export and import
+
+For portable memory copies, project moves, backups or graph restores, use the
+`memory-transfer` skill. The MCP tools are `memorizz_export_memories` and
+`memorizz_import_memories`; the local CLI has `memorizz plugin export-memory`
+and `import-memory`. These differ from document ingestion or session-log import.

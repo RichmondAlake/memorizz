@@ -10,7 +10,16 @@ import time
 
 from .measurement import MeasuredModel, MeasurementLedger, token_price
 
-RERANKERS = {"none", "heuristic", "llm", "cross_encoder", "cohere", "voyage", "jev"}
+RERANKERS = {
+    "none",
+    "heuristic",
+    "llm",
+    "cross_encoder",
+    "cohere",
+    "voyage",
+    "jev",
+    "openai_decisions",
+}
 
 
 class Reranker:
@@ -59,6 +68,22 @@ class Reranker:
                     for text in texts
                 ]
                 usage = {"prompt_tokens": 0, "completion_tokens": 0}
+            elif self.kind == "openai_decisions":
+                from .openai_decisions import rank_decisions
+
+                scores, measured = rank_decisions(
+                    query, texts, self.spec.get("jev_method", "noul"), model_name
+                )
+                usage = {
+                    "prompt_tokens": measured.get("input_tokens"),
+                    "completion_tokens": measured.get("output_tokens", 0),
+                    "cached_tokens": (measured.get("input_tokens_details") or {}).get(
+                        "cached_tokens", 0
+                    ),
+                    "cache_write_tokens": (
+                        measured.get("input_tokens_details") or {}
+                    ).get("cache_write_tokens", 0),
+                }
             elif self.kind == "cross_encoder":
                 scores = self.model.predict([(query, text) for text in texts]).tolist()
             elif self.kind == "llm":
@@ -191,9 +216,13 @@ class Reranker:
                 for v in scores
             ):
                 raise ValueError("Reranker scores must be finite numbers")
-            if self.kind in {"jev", "llm", "cohere", "voyage"} and any(
-                not 0 <= v <= 1 for v in scores
-            ):
+            if self.kind in {
+                "jev",
+                "openai_decisions",
+                "llm",
+                "cohere",
+                "voyage",
+            } and any(not 0 <= v <= 1 for v in scores):
                 raise ValueError("Reranker probability outside [0, 1]")
             order = sorted(range(len(candidates)), key=lambda i: (-scores[i], i))
             status = "completed"

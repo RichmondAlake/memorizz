@@ -57,6 +57,29 @@ def kb(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_semantic_lookup_returns_ingested_document_in_requested_namespace(kb):
+    """KnowledgeBase and the real filesystem query contract must agree."""
+    knowledge_base, _ = kb
+    harbor_id = knowledge_base.ingest_knowledge(
+        "Harbor launch budget is 1200 dollars.",
+        namespace="harbor",
+        chunking_strategy="none",
+    )
+    knowledge_base.ingest_knowledge(
+        "Another launch budget is 5000 dollars.",
+        namespace="other-project",
+        chunking_strategy="none",
+    )
+
+    matches = knowledge_base.retrieve_knowledge_by_query(
+        "launch budget", namespace="harbor", limit=1
+    )
+
+    assert len(matches) == 1
+    assert matches[0]["knowledge_base_id"] == harbor_id
+    assert matches[0]["content"] == "Harbor launch budget is 1200 dollars."
+
+
 def test_ingest_knowledge_writes_user_id_to_every_chunk(kb):
     """Every chunk produced by ingest_knowledge carries the caller's user_id."""
     knowledge_base, provider = kb

@@ -200,8 +200,10 @@ class FileSystemAutomationStore:
         worker_id: str,
         now_utc: datetime,
         lease_seconds: int,
-        force_enable: bool = True,
+        force_enable: bool = False,
     ) -> Optional[AutomationJob]:
+        """Lease one job for a manual run. A paused job stays paused unless
+        the caller asks for ``force_enable``."""
         now = as_utc(now_utc) or _utcnow()
         lease_expiry = now + timedelta(seconds=int(lease_seconds or 0))
         with self._lock, self._file_lock():
@@ -275,3 +277,13 @@ class FileSystemAutomationStore:
         with self._lock:
             self._write(self._deliveries_dir / f"{delivery.delivery_id}.json", delivery)
         return delivery
+
+    def list_deliveries(self, run_id: str) -> List[AutomationDelivery]:
+        with self._lock:
+            rows = [
+                self._load(p, AutomationDelivery)
+                for p in self._deliveries_dir.glob("*.json")
+            ]
+        rows = [d for d in rows if d is not None and d.run_id == run_id]
+        rows.sort(key=lambda d: as_utc(d.created_at) or _utcnow())
+        return rows

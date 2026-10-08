@@ -156,6 +156,13 @@ class ObservabilityStore:
         document.update(
             {key: item for key, item in metadata.items() if item is not None}
         )
+        if value.get("record_type") == "memory_history_change":
+            document.update(
+                {
+                    "history_" + key: value.get(key)
+                    for key in ("memory_type", "action", "actor")
+                }
+            )
         if is_bundle:
             document["immutable_trace"] = True
         for key in (

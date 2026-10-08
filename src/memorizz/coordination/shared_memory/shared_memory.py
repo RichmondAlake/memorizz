@@ -328,7 +328,15 @@ class SharedMemory:
                     return False
             entries.append(value)
 
-        return self._mutate_payload(memory_id, append)
+        from ...memory_history import memory_change_context
+
+        # The entry's author is explicit; retain an outer coordinator as initiator.
+        with memory_change_context(
+            actor=agent_id,
+            source="shared-memory:blackboard",
+            label="Shared " + entry_type.replace("_", " "),
+        ):
+            return self._mutate_payload(memory_id, append)
 
     # Structured message helpers -------------------------------------------------
     def post_message(

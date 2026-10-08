@@ -83,6 +83,25 @@ def _identity(principal="alice", *scopes):
     )
 
 
+def test_timeline_reads_are_exactly_tenant_scoped(tmp_path):
+    from memorizz import MemoryHistory, MemoryType
+
+    provider = FileSystemProvider(
+        FileSystemConfig(root_path=tmp_path / "memory", use_faiss=False)
+    )
+    runtime = _runtime(tmp_path, provider=provider)
+    history = MemoryHistory(provider)
+    for tenant in ("alice", "bob", None):
+        with history.recording(actor=tenant or "anonymous", user_id=tenant):
+            provider.store(
+                {"content": "private", "user_id": tenant}, MemoryType.KNOWLEDGE_BASE
+            )
+    result = runtime.memory_timeline(_identity("alice", READ_SCOPE))
+    assert len(result["events"]) == 1
+    assert result["events"][0]["actor"] == "alice"
+    assert "private" not in str(result)
+
+
 def _runtime(tmp_path, *, provider=None, **config):
     config.setdefault("allow_writes", True)
     config.setdefault("ingest_roots", {str(tmp_path / "project")})

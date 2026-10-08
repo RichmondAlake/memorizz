@@ -165,6 +165,7 @@ class SelectionDecision(_BoundedModel):
         "near_duplicate",
         "already_in_history",
         "parent_source_duplicate",
+        "suppressed",
         "selection_not_observed",
     ]
 

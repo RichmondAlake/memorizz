@@ -374,7 +374,7 @@ class OracleAutomationStore:
         worker_id: str,
         now_utc: datetime,
         lease_seconds: int,
-        force_enable: bool = True,
+        force_enable: bool = False,
     ) -> Optional[AutomationJob]:
         """Claim a specific job by ID for immediate execution.
 
@@ -579,6 +579,43 @@ class OracleAutomationStore:
             conn.commit()
 
         return delivery
+
+    def list_deliveries(self, run_id: str) -> List[AutomationDelivery]:
+        """Deliveries recorded for one run (used for idempotent re-delivery)."""
+        deliveries_table = self._table("automation_deliveries")
+        rows: List[AutomationDelivery] = []
+        with self.provider.pool.acquire() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT delivery_id, channel, provider, recipient, status,
+                       provider_message_id, error
+                FROM {deliveries_table}
+                WHERE run_id = :run_id
+                """,
+                {"run_id": run_id},
+            )
+            for record in cursor.fetchall():
+                values = [v.read() if hasattr(v, "read") else v for v in record]
+                data = {
+                    "delivery_id": values[0],
+                    "run_id": run_id,
+                    "channel": values[1],
+                    "provider": values[2],
+                    "recipient": values[3],
+                    "status": values[4],
+                    "provider_message_id": values[5],
+                    "error": values[6],
+                }
+                try:
+                    rows.append(
+                        AutomationDelivery(
+                            **{k: v for k, v in data.items() if v is not None}
+                        )
+                    )
+                except Exception:
+                    continue
+        return rows
 
     def list_runs(self, job_id: str, limit: int = 50) -> List[AutomationRun]:
         runs_table = self._table("automation_runs")

@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
-import re
+import threading
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from ..channels.whatsapp.numbers import normalize_whatsapp_number
 from ..channels.whatsapp.twilio import TwilioWhatsAppSender
 from ..memagent import MemAgent
 from .models import AutomationDelivery, AutomationJob
@@ -24,18 +25,39 @@ AUTOMATION_DIRECTIVE = (
 )
 
 
+class AttemptAbandoned(RuntimeError):
+    """The worker gave up on this attempt (timeout); nothing may be delivered."""
+
+
+def _delivery_id(run_id: str, recipient: str) -> str:
+    """One stable id per (run, recipient), so a repeat never records twice."""
+    return str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"memorizz:automation:{run_id}:{recipient}")
+    )
+
+
+def _sent_deliveries(store: Any, run_id: str) -> Dict[str, AutomationDelivery]:
+    """Recipients this run already reached, keyed by recipient."""
+    lister = getattr(store, "list_deliveries", None)
+    if not callable(lister):
+        return {}
+    try:
+        rows = lister(run_id) or []
+    except Exception:
+        return {}
+    return {d.recipient: d for d in rows if getattr(d, "status", None) == "sent"}
+
+
+def _abandoned(stop_event: Optional[threading.Event]) -> bool:
+    return stop_event is not None and stop_event.is_set()
+
+
 def _normalize_whatsapp_recipient(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
+    """``whatsapp:+E164`` for a deliverable recipient, else "" (skipped)."""
+    try:
+        return f"whatsapp:{normalize_whatsapp_number(value)}"
+    except ValueError:
         return ""
-    if text.lower().startswith("whatsapp:"):
-        text = text.split(":", 1)[1].strip()
-    number = re.sub(r"[\s\-()]", "", text)
-    if number and not number.startswith("+") and number.isdigit():
-        number = f"+{number}"
-    if not (number.startswith("+") and number[1:].isdigit()):
-        return ""
-    return f"whatsapp:{number}"
 
 
 def _get_whatsapp_recipients(job: AutomationJob) -> List[str]:
@@ -107,7 +129,14 @@ def deliver_job_output(
     run_id: str,
     output_text: str,
     store: Any,
+    stop_event: Optional[threading.Event] = None,
 ) -> List[AutomationDelivery]:
+    """Send the output once per (run, recipient).
+
+    A recipient the store already shows as sent for this run is skipped, and
+    nothing more goes out once ``stop_event`` is set (the worker abandoned
+    this attempt), so an attempt that outlives its timeout cannot deliver.
+    """
     if not job.delivery_type or job.delivery_type == "in_chat":
         # "in_chat" delivery is a no-op here — the response is already
         # persisted in the agent's conversation memory via agent.run().
@@ -120,11 +149,19 @@ def deliver_job_output(
     if not recipients:
         return []
 
-    sender = TwilioWhatsAppSender.from_env()
-    deliveries: List[AutomationDelivery] = []
+    already_sent = _sent_deliveries(store, run_id)
+    pending = [r for r in recipients if r not in already_sent]
+    deliveries: List[AutomationDelivery] = [
+        already_sent[r] for r in recipients if r in already_sent
+    ]
+    if not pending:
+        return deliveries
 
-    for recipient in recipients:
-        delivery_id = str(uuid.uuid4())
+    sender = TwilioWhatsAppSender.from_env()
+    for recipient in pending:
+        if _abandoned(stop_event):
+            break
+        delivery_id = _delivery_id(run_id, recipient)
         try:
             resp = sender.send(to=recipient, body=output_text)
             msg_id = str(resp.get("provider_message_id") or "") or None
@@ -165,13 +202,24 @@ def run_job_once(
     scheduled_for_utc: datetime,
     memory_provider: Any,
     store: Any,
+    stop_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     result = execute_job_action(
         job, scheduled_for_utc=scheduled_for_utc, memory_provider=memory_provider
     )
+    if _abandoned(stop_event):
+        # The worker already recorded this run as timed out; delivering now
+        # would send a result nobody is tracking.
+        raise AttemptAbandoned(
+            f"Attempt for run {run_id} exceeded its time limit before delivery"
+        )
     response = str(result.get("response") or "")
     deliveries = deliver_job_output(
-        job, run_id=run_id, output_text=response, store=store
+        job,
+        run_id=run_id,
+        output_text=response,
+        store=store,
+        stop_event=stop_event,
     )
     result["deliveries"] = [d.model_dump() for d in deliveries]
     if deliveries:

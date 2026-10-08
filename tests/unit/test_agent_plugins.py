@@ -66,7 +66,12 @@ def test_the_plugin_has_what_codex_loads():
     assert "async" not in hooks["Stop"][0]["hooks"][0]
     # Codex runs SessionEnd synchronously and allows at most 3 seconds.
     assert hooks["SessionEnd"][0]["hooks"][0]["timeout"] <= 3
-    for skill in ("memorizz-memory", "memorizz-agents", "memory-curator"):
+    for skill in (
+        "memorizz-memory",
+        "memorizz-agents",
+        "memory-curator",
+        "memory-transfer",
+    ):
         text = (PLUGIN / "skills" / skill / "SKILL.md").read_text()
         assert text.startswith(f"---\nname: {skill}\ndescription: ")
     marketplace = json.loads(

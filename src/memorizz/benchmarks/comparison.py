@@ -31,6 +31,26 @@ from .memory_suite import (
 from .memory_suite.runner import _bootstrap_mean_ci, _percentile
 from .rerankers import Reranker
 
+# Model-call ledgers append on every reader/judge/reranker call; rewriting the
+# whole result.json each time is O(calls^2) bytes. Per-case and lifecycle saves
+# stay immediate; per-call saves are throttled to this interval.
+LEDGER_SAVE_INTERVAL_S = 5.0
+
+
+def _throttled(save, *, interval_seconds, clock):
+    """Call ``save`` only when ``interval_seconds`` passed since the last save.
+
+    ``clock`` returns the monotonic time of the last completed save so a
+    forced save elsewhere (case end, run end) resets the interval too.
+    """
+
+    def wrapper():
+        last = clock() or 0.0
+        if time.monotonic() - last >= interval_seconds:
+            save()
+
+    return wrapper
+
 
 class ModelSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -48,6 +68,7 @@ class ModelSpec(BaseModel):
         "cohere",
         "voyage",
         "jev",
+        "openai_decisions",
     ]
     model: str = Field(default="", max_length=200)
     label: str = Field(default="", max_length=100)
@@ -589,10 +610,27 @@ def run_comparison(
     output = directory / "result.json"
     candidates = {}
 
+    last_saved = {"at": 0.0, "candidates": None}
+
     def save():
         state["comparisons"] = comparisons(state["runs"])
         state["updated_at"] = time.time()
         atomic_json(output, state)
+        last_saved["at"] = time.monotonic()
+
+    save_throttled = _throttled(
+        save, interval_seconds=LEDGER_SAVE_INTERVAL_S, clock=lambda: last_saved["at"]
+    )
+
+    def save_candidates():
+        # Frozen candidates only change when a run fills them; skip identical rewrites.
+        signature = (
+            len(candidates),
+            sum(len(v) if hasattr(v, "__len__") else 1 for v in candidates.values()),
+        )
+        if last_saved["candidates"] != signature:
+            atomic_json(directory / "candidates.json", candidates)
+            last_saved["candidates"] = signature
 
     def check():
         if (directory / "cancel").exists():
@@ -639,7 +677,7 @@ def run_comparison(
                     "calls": [],
                 }
                 state["runs"].append(row)
-                ledger = MeasurementLedger(check=check, on_append=save)
+                ledger = MeasurementLedger(check=check, on_append=save_throttled)
                 row["calls"] = ledger.calls
                 runner = None
                 save()
@@ -666,7 +704,7 @@ def run_comparison(
                     def on_case(case):
                         row["cases"].append(case)
                         row["summary"] = summarize_run(row, config.local_hourly_usd)
-                        atomic_json(directory / "candidates.json", candidates)
+                        save_candidates()
                         save()
 
                     runner = runner_factory(

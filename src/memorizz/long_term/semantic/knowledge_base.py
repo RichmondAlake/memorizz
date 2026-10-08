@@ -8,7 +8,7 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from ...embeddings import get_embedding
 from ...enums.memory_type import MemoryType
@@ -17,6 +17,33 @@ from . import extractors as _extractors
 from .extractors import EmptyDocumentError, ExtractorError, FileSource
 
 logger = logging.getLogger(__name__)
+
+# Tenant-scope sentinel, mirroring the memory-provider contract: omitting
+# ``user_id`` is an unscoped read, ``None`` selects anonymous rows, and a
+# string selects that exact tenant.
+_UNSET = object()
+
+
+def _embed_chunks(chunks: List[str]) -> List[Optional[List[float]]]:
+    """Embed every chunk, in one batch when the embedding manager offers one."""
+    from ...embeddings import get_embedding_manager  # resolved at call time
+
+    try:
+        manager = get_embedding_manager()
+    except Exception as exc:
+        logger.debug("No embedding manager for batch embedding: %s", exc)
+        manager = None
+    batch = getattr(manager, "get_embeddings", None)
+    if callable(batch):
+        vectors = list(batch(list(chunks)))
+        if len(vectors) == len(chunks):
+            return vectors
+        logger.warning(
+            "Batch embedding returned %s vectors for %s chunks; embedding singly",
+            len(vectors),
+            len(chunks),
+        )
+    return [get_embedding(chunk) for chunk in chunks]
 
 
 def _persist_agent(agent: Any) -> None:
@@ -147,6 +174,8 @@ def _chunk_semantic(
     """
     import numpy as np
 
+    from ...memory_provider.vectors import cosine
+
     text = (corpus or "").strip()
     if not text:
         return []
@@ -156,19 +185,18 @@ def _chunk_semantic(
         return sentences
 
     embed = embedding_function or get_embedding
-    embeddings = np.array([embed(sentence) for sentence in sentences], dtype=float)
-    norms = np.linalg.norm(embeddings, axis=1)
-    # Guard against zero-vectors (unusual but possible for empty-ish sentences).
-    norms[norms == 0] = 1.0
-    unit = embeddings / norms[:, None]
-    # Cosine distance between sentence i and i+1
-    sims = np.sum(unit[:-1] * unit[1:], axis=1)
-    distances = 1.0 - sims
+    embeddings = [embed(sentence) for sentence in sentences]
+    # Cosine distance between sentence i and i+1; an unusable embedding (a
+    # zero vector for an empty-ish sentence) counts as a full topic shift.
+    distances = [
+        1.0 - cosine(embeddings[i], embeddings[i + 1], on_mismatch="zero")
+        for i in range(len(embeddings) - 1)
+    ]
 
     # Clamp the percentile to a sensible range to avoid degenerate cuts
     pct = min(max(float(breakpoint_percentile), 0.0), 100.0)
     threshold = float(np.percentile(distances, pct))
-    breakpoint_indices = [i for i, d in enumerate(distances.tolist()) if d >= threshold]
+    breakpoint_indices = [i for i, d in enumerate(distances) if d >= threshold]
 
     chunks: List[str] = []
     start = 0
@@ -337,22 +365,20 @@ class KnowledgeBase:
         )
         now = datetime.now().isoformat()
 
-        embedder_failed = embeddings == "off"
+        chunk_embeddings: List[Optional[List[float]]] = [None] * len(chunks)
+        if not managed and embeddings != "off":
+            try:
+                chunk_embeddings = _embed_chunks(chunks)
+            except Exception as exc:
+                if embeddings == "required":
+                    raise
+                logger.warning(
+                    "Storing knowledge without embeddings (%s); keyword search "
+                    "still finds it",
+                    type(exc).__name__,
+                )
         for index, chunk_text in enumerate(chunks):
-            embedding = None
-            if not managed and not embedder_failed:
-                try:
-                    embedding = get_embedding(chunk_text)
-                except Exception as exc:
-                    if embeddings == "required":
-                        raise
-                    # Don't retry an embedder that is down for every chunk.
-                    embedder_failed = True
-                    logger.warning(
-                        "Storing knowledge without embeddings (%s); keyword search "
-                        "still finds it",
-                        type(exc).__name__,
-                    )
+            embedding = chunk_embeddings[index]
             entry = {
                 **dict(metadata or {}),
                 "content": chunk_text,
@@ -374,7 +400,9 @@ class KnowledgeBase:
 
         return knowledge_base_id
 
-    def retrieve_knowledge(self, knowledge_base_id: str) -> List[Dict[str, Any]]:
+    def retrieve_knowledge(
+        self, knowledge_base_id: str, *, user_id: Any = _UNSET
+    ) -> List[Dict[str, Any]]:
         """
         Retrieve all knowledge entries associated with a given knowledge_base_id.
 
@@ -385,6 +413,10 @@ class KnowledgeBase:
         -----------
         knowledge_base_id : str
             The unique ID to retrieve knowledge for.
+        user_id : optional (keyword)
+            Tenant scope. Omit it for an unscoped read, pass ``None`` for the
+            anonymous bucket, or a string for that exact tenant; rows outside
+            the scope are never returned.
 
         Returns:
         --------
@@ -392,9 +424,7 @@ class KnowledgeBase:
             A list of knowledge documents, each containing the original content,
             its embedding, and the memory ID.
         """
-        all_entries = self.memory_provider.list_all(
-            memory_store_type=MemoryType.KNOWLEDGE_BASE
-        )
+        all_entries = self._list_entries(user_id=user_id)
 
         knowledge_entries = [
             entry
@@ -404,8 +434,36 @@ class KnowledgeBase:
         knowledge_entries.sort(key=lambda e: e.get("chunk_index", 0))
         return knowledge_entries
 
+    def _list_entries(self, *, user_id: Any = _UNSET) -> List[Dict[str, Any]]:
+        """Every knowledge row, scoped by ``user_id`` when one is given.
+
+        The scope is pushed to the provider and re-checked on every returned
+        row, so a provider written before ``list_all`` took ``user_id`` still
+        isolates tenants.
+        """
+        if user_id is _UNSET:
+            rows = self.memory_provider.list_all(
+                memory_store_type=MemoryType.KNOWLEDGE_BASE
+            )
+            return list(rows or [])
+        try:
+            rows = self.memory_provider.list_all(
+                memory_store_type=MemoryType.KNOWLEDGE_BASE, user_id=user_id
+            )
+        except TypeError:
+            rows = self.memory_provider.list_all(
+                memory_store_type=MemoryType.KNOWLEDGE_BASE
+            )
+        return [row for row in (rows or []) if row.get("user_id") == user_id]
+
     def retrieve_knowledge_by_query(
-        self, query: str, namespace: Optional[str] = None, limit: int = 5
+        self,
+        query: str,
+        namespace: Optional[str] = None,
+        limit: int = 5,
+        *,
+        knowledge_base_ids: Optional[Sequence[str]] = None,
+        user_id: Any = _UNSET,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve knowledge entries that are semantically similar to the query.
@@ -418,52 +476,80 @@ class KnowledgeBase:
             If provided, limit the search to knowledge within this namespace.
         limit : int
             Maximum number of entries to return.
+        knowledge_base_ids : Optional[Sequence[str]] (keyword)
+            Only return chunks from these knowledge bases, for example the
+            ones attached to an agent. Providers rank before this filter is
+            applied, so a proportionally larger candidate window is requested
+            and filtered here; an empty sequence selects nothing.
+        user_id : optional (keyword)
+            Tenant scope, pushed into the provider query and re-checked on
+            every row. Omit it for an unscoped read, pass ``None`` for the
+            anonymous bucket, or a string for that exact tenant.
 
         Returns:
         --------
         List[Dict[str, Any]]
             A list of knowledge documents that are semantically similar to the query.
         """
-        capabilities = getattr(self.memory_provider, "memory_capabilities", None)
-        if (
-            callable(capabilities)
-            and getattr(capabilities(), "manages_embeddings", False) is True
-        ):
-            # The document and vector providers may use different models. Let
-            # the selected semantic backend embed both stored text and queries.
-            return (
-                self.memory_provider.retrieve_by_query(
-                    query,
-                    memory_store_type=MemoryType.KNOWLEDGE_BASE,
-                    namespace=namespace,
-                    limit=limit,
-                )
-                or []
-            )
-
-        # Generate embedding for the query
-        query_embedding = get_embedding(query)
-
-        # Create a query object for semantic search
-        query_obj = {"embedding": query_embedding, "limit": limit}
-
-        # If namespace is provided, add it to the query
-        if namespace:
-            query_obj["namespace"] = namespace
-
-        # Use the retrieve_by_query method for semantics search
-        results = self.memory_provider.retrieve_by_query(
-            query_obj, memory_store_type=MemoryType.KNOWLEDGE_BASE, limit=limit
+        safe_limit = max(1, int(limit or 5))
+        wanted_ids = None
+        if knowledge_base_ids is not None:
+            wanted_ids = {
+                str(value).strip()
+                for value in knowledge_base_ids
+                if str(value or "").strip()
+            }
+            if not wanted_ids:
+                return []
+        # Client-side filtering needs more candidates than the final page.
+        candidate_limit = (
+            safe_limit if wanted_ids is None else min(1000, max(safe_limit * 10, 50))
         )
+
+        query_kwargs: Dict[str, Any] = {
+            "memory_store_type": MemoryType.KNOWLEDGE_BASE,
+            "namespace": namespace,
+        }
+        if user_id is not _UNSET:
+            query_kwargs["user_id"] = user_id
+
+        # A string requests semantic retrieval in the provider contract. A
+        # dictionary is an exact filter on filesystem storage, so passing an
+        # embedding dictionary here silently returned no knowledge. Providers
+        # also own their query embedder, including composed semantic backends.
+        try:
+            results = self.memory_provider.retrieve_by_query(
+                query, limit=candidate_limit, **query_kwargs
+            )
+        except TypeError:
+            if "user_id" not in query_kwargs:
+                raise
+            # A provider written before ``user_id`` existed: the scope is
+            # enforced below on every row instead.
+            query_kwargs.pop("user_id")
+            candidate_limit = min(1000, max(safe_limit * 10, 50))
+            results = self.memory_provider.retrieve_by_query(
+                query, limit=candidate_limit, **query_kwargs
+            )
 
         # If results is a single dict, wrap it in a list
         if results and isinstance(results, dict):
             results = [results]
+        rows = [row for row in (results or []) if isinstance(row, dict)]
 
-        # If no results, return empty list
-        return results or []
+        if user_id is not _UNSET:
+            rows = [row for row in rows if row.get("user_id") == user_id]
+        if wanted_ids is not None:
+            rows = [
+                row
+                for row in rows
+                if str(row.get("knowledge_base_id") or "") in wanted_ids
+            ]
+        return rows[:safe_limit]
 
-    def delete_knowledge(self, knowledge_base_id: str) -> bool:
+    def delete_knowledge(
+        self, knowledge_base_id: str, *, user_id: Any = _UNSET
+    ) -> bool:
         """
         Delete all knowledge entries (all chunks) associated with a given knowledge_base_id.
 
@@ -471,14 +557,29 @@ class KnowledgeBase:
         -----------
         knowledge_base_id : str
             The unique ID of the knowledge to delete.
+        user_id : optional (keyword)
+            Owner guard. When given (``None`` for the anonymous bucket), the
+            delete is refused and nothing is removed if any chunk of this
+            knowledge base belongs to a different owner.
 
         Returns:
         --------
         bool
-            True if deletion was successful, False otherwise.
+            True if deletion was successful, False otherwise (including a
+            refused cross-tenant delete).
         """
         # Get all entries with this memory ID
         entries = self.retrieve_knowledge(knowledge_base_id)
+        if user_id is not _UNSET:
+            foreign = [entry for entry in entries if entry.get("user_id") != user_id]
+            if foreign:
+                logger.warning(
+                    "Refusing to delete knowledge base %s: %s chunk(s) belong to "
+                    "another owner",
+                    knowledge_base_id,
+                    len(foreign),
+                )
+                return False
 
         # Delete each entry
         success = True
@@ -673,7 +774,9 @@ class KnowledgeBase:
             "results": results,
         }
 
-    def attach_to_agent(self, agent, knowledge_base_id: str) -> bool:
+    def attach_to_agent(
+        self, agent, knowledge_base_id: str, *, user_id: Any = _UNSET
+    ) -> bool:
         """
         Attach the knowledge base entry to a MemAgent.
 
@@ -685,6 +788,9 @@ class KnowledgeBase:
             The agent to attach the knowledge to.
         knowledge_base_id : str
             The unique ID of the knowledge to attach.
+        user_id : optional (keyword)
+            Tenant scope for the existence check; a knowledge base owned by
+            another tenant is reported as missing.
 
         Returns:
         --------
@@ -693,7 +799,7 @@ class KnowledgeBase:
         """
         try:
             # Verify that the knowledge exists
-            entries = self.retrieve_knowledge(knowledge_base_id)
+            entries = self.retrieve_knowledge(knowledge_base_id, user_id=user_id)
             if not entries:
                 return False
 

@@ -54,13 +54,13 @@ def fs_provider(tmp_path):
 def test_named_application_agent_has_stable_identity_and_auto_upserts(fs_provider):
     first = MemAgent(
         name="chat-assistant",
-        application_id="openspeech",
+        application_id="acme-support",
         memory_provider=fs_provider,
         memory_types=[MemoryType.CONVERSATION_MEMORY],
     )
     second = MemAgent(
         name="chat-assistant",
-        application_id="openspeech",
+        application_id="acme-support",
         memory_provider=fs_provider,
         memory_types=[MemoryType.CONVERSATION_MEMORY],
     )
@@ -70,7 +70,7 @@ def test_named_application_agent_has_stable_identity_and_auto_upserts(fs_provide
 
     stored = fs_provider.retrieve_memagent(first.agent_id)
     assert stored is not None
-    assert stored.application_id == "openspeech"
+    assert stored.application_id == "acme-support"
     assert stored.memory_ids == ["memory-1"]
 
 
@@ -158,7 +158,7 @@ def test_context_and_cache_provenance_are_traceable_without_raw_request_content(
 
     agent = MemAgent(
         name="context-provenance-agent",
-        application_id="openspeech",
+        application_id="acme-support",
         model=_DeterministicToolModel(),
         tools=[lookup],
         memory_provider=fs_provider,

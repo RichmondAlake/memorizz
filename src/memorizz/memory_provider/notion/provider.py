@@ -798,6 +798,13 @@ class NotionProvider(MemoryProvider):
     ):
         return self._store(data, memory_store_type, memory_id, memory_unit)
 
+    def store_archive_record(
+        self, memory_type, record_id, data, *, replace=False, reembed=False
+    ):
+        return self._store(
+            dict(data, _id=record_id, id=record_id), memory_type, index_memory=reembed
+        )
+
     def _store(
         self,
         data=None,
@@ -806,6 +813,7 @@ class NotionProvider(MemoryProvider):
         memory_unit=None,
         *,
         merge=False,
+        index_memory=True,
     ):
         self._require_write()
         if memory_unit is not None:
@@ -962,6 +970,10 @@ class NotionProvider(MemoryProvider):
                     status="pending",
                     connection=connection,
                 )
+                if not index_memory:
+                    # The Notion value is durably stored. Keep its semantic
+                    # projection pending until the user requests repair_index.
+                    return identifier
                 try:
                     self._index(record, memory_type, page["id"], embedding=embedding)
                 except Exception:
@@ -1267,6 +1279,61 @@ class NotionProvider(MemoryProvider):
             rows, memory_id=memory_id, user_id=user_id, thread_id=thread_id, limit=limit
         )
 
+    def query_memory_observations(
+        self,
+        memory_store_type,
+        *,
+        agent_id=None,
+        memory_ids=None,
+        user_id=_UNSET,
+        application_id=None,
+        exclude_ids=(),
+        limit=200,
+    ):
+        from ..base import _observation_matches
+
+        safe_limit = max(1, min(int(limit), 1000))
+        queries = (
+            [
+                {"agent_id": str(agent_id)},
+                {"agent_id": None, "owner_agent_id": str(agent_id)},
+            ]
+            if agent_id
+            else []
+        )
+        queries.extend(
+            {
+                "memory_id": namespace,
+                **({"agent_id": None, "owner_agent_id": None} if agent_id else {}),
+            }
+            for namespace in dict.fromkeys(memory_ids or ())
+        )
+        rows, seen = [], set()
+        for query in queries or [{}]:
+            if application_id is not None:
+                query["application_id"] = application_id
+            if exclude_ids or seen:
+                query["id"] = {"$nin": list(set(exclude_ids) | seen)}
+            for row in self._records(
+                MemoryType(memory_store_type),
+                query=query,
+                user_id=user_id,
+                limit=safe_limit - len(rows),
+            ):
+                if row["id"] not in seen and _observation_matches(
+                    row,
+                    agent_id=agent_id,
+                    memory_ids=memory_ids,
+                    user_id=user_id,
+                    application_id=application_id,
+                    exclude_ids=exclude_ids,
+                ):
+                    rows.append(row)
+                    seen.add(row["id"])
+                    if len(rows) == safe_limit:
+                        return rows
+        return rows
+
     def query_observability_records(
         self,
         memory_store_type,
@@ -1279,6 +1346,7 @@ class NotionProvider(MemoryProvider):
         record_type=None,
         tool_name=None,
         success=None,
+        event_filters=None,
         start_time=None,
         end_time=None,
         limit=250,
@@ -1345,6 +1413,7 @@ class NotionProvider(MemoryProvider):
                     predicate,
                     tool_name,
                     success,
+                    event_filters,
                     [(operator, bound.isoformat()) for operator, bound in time_bounds],
                 ]
             ).encode()
@@ -1432,6 +1501,14 @@ class NotionProvider(MemoryProvider):
                 continue
             if success is not None and row.get("success") is not success:
                 continue
+            if event_filters:
+                from ...observability.store import ObservabilityStore
+
+                payload = ObservabilityStore._payload(row) or row
+                if any(
+                    payload.get(key) != value for key, value in event_filters.items()
+                ):
+                    continue
             items.append(row)
         next_cursor = None
         if result.get("has_more"):

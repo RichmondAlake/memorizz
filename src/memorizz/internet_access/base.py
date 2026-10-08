@@ -10,9 +10,39 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
+from .._registry import ProviderRegistry
 from .models import InternetPageContent, InternetSearchResult
 
 logger = logging.getLogger(__name__)
+
+# Config keys whose values are credentials. They never leave ``get_config()``
+# and are dropped from any saved config on restore.
+_SECRET_CONFIG_KEYS = frozenset(
+    {"api_key", "apikey", "api_token", "token", "secret", "password", "authorization"}
+)
+# Keys that describe a saved config and are never constructor arguments.
+_DERIVED_CONFIG_KEYS = frozenset({"api_key_set"})
+
+
+def scrub_secret_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A copy of ``config`` without credential values.
+
+    ``api_key_set`` records that a key was present, so a restored provider
+    knows to resolve it from the environment instead.
+    """
+    source = dict(config or {})
+    had_key = any(
+        str(key).lower() in _SECRET_CONFIG_KEYS and bool(value)
+        for key, value in source.items()
+    )
+    safe = {
+        key: value
+        for key, value in source.items()
+        if str(key).lower() not in _SECRET_CONFIG_KEYS
+    }
+    if had_key or "api_key_set" in source:
+        safe["api_key_set"] = bool(had_key or source.get("api_key_set"))
+    return safe
 
 
 class InternetAccessProvider(ABC):
@@ -28,8 +58,18 @@ class InternetAccessProvider(ABC):
         return getattr(self, "provider_name", self.__class__.__name__).lower()
 
     def get_config(self) -> Dict[str, Any]:
-        """Return serializable config information."""
-        return dict(self._config)
+        """Return serializable config information; never the API key itself.
+
+        Providers that hold a key report ``api_key_set`` instead. The saved
+        agent record carries this config, so the key must come back from the
+        environment (``TAVILY_API_KEY`` and the like) on restore.
+        """
+        safe = scrub_secret_config(self._config)
+        if hasattr(self, "api_key"):
+            safe["api_key_set"] = bool(
+                getattr(self, "api_key", None) or safe.get("api_key_set")
+            )
+        return safe
 
     @abstractmethod
     def search(
@@ -71,40 +111,29 @@ class InternetAccessProvider(ABC):
         return value[:limit], True, original_length
 
 
-_PROVIDER_REGISTRY: Dict[str, type[InternetAccessProvider]] = {}
+_REGISTRY: ProviderRegistry[InternetAccessProvider] = ProviderRegistry(
+    logger=logger,
+    unknown_message="Unknown internet access provider: %s",
+    init_error_message="Failed to initialize provider '%s' with config keys: %s",
+    # ``api_key_set`` only describes a saved config; constructors never take it.
+    drop_config_keys=_DERIVED_CONFIG_KEYS,
+    validate=False,
+)
+_PROVIDER_REGISTRY: Dict[str, type[InternetAccessProvider]] = _REGISTRY.providers
 
 
 def register_provider(name: str, provider_cls: type[InternetAccessProvider]) -> None:
     """Register an internet access provider by name."""
-    _PROVIDER_REGISTRY[name.lower()] = provider_cls
+    _REGISTRY.register(name, provider_cls)
 
 
 def get_provider_class(name: str) -> Optional[type[InternetAccessProvider]]:
     """Return the provider class for a given name."""
-    if not name:
-        return None
-    return _PROVIDER_REGISTRY.get(name.lower())
+    return _REGISTRY.get(name)
 
 
 def create_internet_access_provider(
     name: str, config: Optional[Dict[str, Any]] = None
 ) -> Optional[InternetAccessProvider]:
     """Instantiate a provider from the registry."""
-    provider_cls = get_provider_class(name)
-    if not provider_cls:
-        logger.warning("Unknown internet access provider: %s", name)
-        return None
-
-    config = config or {}
-    try:
-        return provider_cls(**config)
-    except TypeError:
-        try:
-            return provider_cls(config=config)  # type: ignore[arg-type]
-        except TypeError as exc:
-            logger.error(
-                "Failed to initialize provider '%s' with config keys: %s",
-                name,
-                list(config.keys()),
-            )
-            raise exc
+    return _REGISTRY.create(name, config)

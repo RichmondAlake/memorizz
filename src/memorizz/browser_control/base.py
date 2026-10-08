@@ -10,6 +10,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
+from .._registry import ProviderRegistry
 from .models import BrowserControlResult
 
 logger = logging.getLogger(__name__)
@@ -49,35 +50,28 @@ class BrowserControlProvider(ABC):
         return None
 
 
-_PROVIDER_REGISTRY: Dict[str, type[BrowserControlProvider]] = {}
-
-
 def _provider_key(name: str) -> str:
     return str(name or "").strip().lower().replace("-", "").replace("_", "")
 
 
+_REGISTRY: ProviderRegistry[BrowserControlProvider] = ProviderRegistry(
+    logger=logger,
+    unknown_message="Unknown browser-control provider: %s",
+    normalize=_provider_key,
+)
+_PROVIDER_REGISTRY: Dict[str, type[BrowserControlProvider]] = _REGISTRY.providers
+
+
 def register_provider(name: str, provider_cls: type[BrowserControlProvider]) -> None:
-    _PROVIDER_REGISTRY[_provider_key(name)] = provider_cls
+    _REGISTRY.register(name, provider_cls)
 
 
 def get_provider_class(name: str) -> Optional[type[BrowserControlProvider]]:
-    return _PROVIDER_REGISTRY.get(_provider_key(name))
+    return _REGISTRY.get(name)
 
 
 def create_browser_control_provider(
     name: str, config: Optional[Dict[str, Any]] = None
 ) -> Optional[BrowserControlProvider]:
     """Instantiate and validate a registered browser-control provider."""
-    provider_cls = get_provider_class(name)
-    if provider_cls is None:
-        logger.warning("Unknown browser-control provider: %s", name)
-        return None
-    values = dict(config or {})
-    try:
-        provider = provider_cls(**values)
-    except TypeError:
-        provider = provider_cls(config=values)  # type: ignore[arg-type]
-    issue = provider.validate_configuration()
-    if issue:
-        raise ValueError(issue)
-    return provider
+    return _REGISTRY.create(name, config)

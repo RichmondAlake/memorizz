@@ -17,9 +17,10 @@ import urllib.request
 import uuid
 import warnings
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from contextlib import contextmanager
-from contextvars import ContextVar
-from datetime import datetime
+from contextvars import ContextVar, copy_context
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import (
@@ -28,6 +29,7 @@ from typing import (
     Callable,
     Dict,
     Generator,
+    Iterable,
     List,
     Optional,
     Set,
@@ -116,8 +118,15 @@ from .managers import (
     SelfAwarenessManager,
     ToolManager,
 )
-from .utils.context_dedup import dedupe_and_select, filter_skill_covered_workflows
-from .utils.prompt_budget import estimate_tokens, fit_prompt
+from .utils.context_dedup import (
+    RetrievalScoring,
+    _candidate_id,
+    dedupe_and_select,
+    filter_skill_covered_workflows,
+    is_suppressed,
+)
+from .utils.importance import ImportanceConfig, ImportanceRater
+from .utils.prompt_budget import estimate_message_tokens, estimate_tokens, fit_prompt
 from .utils.tool_log import (  # noqa: F401  — re-exported for compatibility
     _build_tool_log_placeholder,
     _extract_identifiers,
@@ -175,6 +184,7 @@ _OBSERVABILITY_CONTEXT_FIELDS = frozenset(
 
 
 _CONTEXT_LOCAL_MISSING = object()
+_CONTEXT_LOCAL_CREATE_LOCK = threading.Lock()
 
 
 class _ContextLocal:
@@ -198,12 +208,26 @@ class _ContextLocal:
     def _var(self, instance: Any) -> ContextVar:
         variable = instance.__dict__.get(self.storage_name)
         if variable is None:
-            variable = ContextVar(
-                f"memorizz_{id(instance)}_{self.name}",
-                default=_CONTEXT_LOCAL_MISSING,
-            )
-            instance.__dict__[self.storage_name] = variable
+            # Two threads taking a shared agent's first turn at once must not
+            # each create a ContextVar: the loser would read the winner's
+            # (empty) variable and lose its run/turn identity.
+            with _CONTEXT_LOCAL_CREATE_LOCK:
+                variable = instance.__dict__.get(self.storage_name)
+                if variable is None:
+                    variable = ContextVar(
+                        f"memorizz_{id(instance)}_{self.name}",
+                        default=_CONTEXT_LOCAL_MISSING,
+                    )
+                    instance.__dict__[self.storage_name] = variable
         return variable
+
+    @classmethod
+    def initialize(cls, instance: Any) -> None:
+        """Create every descriptor's ContextVar on ``instance`` up front."""
+        for klass in type(instance).__mro__:
+            for descriptor in vars(klass).values():
+                if isinstance(descriptor, cls):
+                    descriptor._var(instance)
 
     def __get__(self, instance: Any, owner: Any = None) -> Any:
         if instance is None:
@@ -305,6 +329,7 @@ class MemAgent:
     _current_root_trace_id = _ContextLocal()
     _current_parent_span_id = _ContextLocal()
     _last_trace_context = _ContextLocal(dict)
+    _history_scope = _ContextLocal()
     _last_tool_outcomes = _ContextLocal(list)
     _last_retrieved_memories = _ContextLocal(list)
     _last_retrieval_stats = _ContextLocal(dict)
@@ -323,10 +348,25 @@ class MemAgent:
     _turn_had_nondeterministic_tools = _ContextLocal(lambda: False)
     _turn_cache_domains = _ContextLocal(set)
     _cache_bypass_reason = _ContextLocal()
+    # Set when the turn's answer is a failure message (provider error,
+    # exhausted loop); run/run_stream then neither cache nor record it.
+    _interaction_error_code = _ContextLocal()
+    # Sibling tool calls of the call being executed, recorded in an approval
+    # checkpoint so a resume can answer every tool_call_id of the turn.
+    _deferred_sibling_tool_calls = _ContextLocal(list)
     _activated_skill_ids = _ContextLocal(list)
     _approval_execution_active = _ContextLocal(lambda: False)
     _last_context_window_stats = _ContextLocal()
     _last_completion_decisions = _ContextLocal(list)
+
+    # Internet tools pause for this long after this many consecutive provider
+    # failures (override per process with MEMORIZZ_INTERNET_ACCESS_COOLDOWN_SECONDS
+    # or per agent via ``internet_access_cooldown_seconds``).
+    INTERNET_ACCESS_FAILURE_THRESHOLD = 3
+    INTERNET_ACCESS_COOLDOWN_SECONDS = 300.0
+    _internet_access_clock = staticmethod(time.monotonic)
+    # Bounded wait in close() for background conversation-embedding writes.
+    embedding_backfill_close_timeout = 30.0
 
     def __init__(
         self,
@@ -392,9 +432,15 @@ class MemAgent:
         auto_register: bool = True,
         is_favorite: bool = False,
         streaming: bool = True,
+        capture_context_snapshots: bool = False,
+        capture_memory_history: bool = False,
     ):
         """Initialize the MemAgent with configuration."""
+        # Eager creation: no first-use race between concurrent runs.
+        _ContextLocal.initialize(self)
         self.streaming = streaming
+        self.capture_context_snapshots = capture_context_snapshots
+        self.capture_memory_history = capture_memory_history
         self.environment_reports: Dict[str, Any] = {}
         self._last_close_report: Optional[Dict[str, Any]] = None
         self.meta_harness = None
@@ -454,6 +500,10 @@ class MemAgent:
             memory_provider = None
             self.uses_default_memory_provider = False
         self.memory_provider = memory_provider
+        if self.capture_memory_history and memory_provider:
+            from ..memory_history import enable_memory_history
+
+            enable_memory_history(memory_provider)
         self.memory_ids = (
             memory_ids
             if isinstance(memory_ids, list)
@@ -662,9 +712,24 @@ class MemAgent:
         self._conversation_embedding_enabled = os.getenv(
             "MEMORIZZ_DISABLE_CONVERSATION_EMBEDDINGS", ""
         ).strip().lower() not in ("1", "true", "yes")
+        # One background worker (embedding backfill, memory reinforcement,
+        # importance re-rating). ``_embedding_backfill_executor`` points at it
+        # only once a conversation embedding backfill was scheduled.
+        self._background_worker: Optional[ThreadPoolExecutor] = None
         self._embedding_backfill_executor: Optional[ThreadPoolExecutor] = None
+        self._embedding_backfill_futures: Set[Any] = set()
+        self._embedding_backfill_lock = threading.Lock()
+        # Generative-Agents reflection: importance accumulated per memory_id
+        # since that conversation last reflected (see _note_importance_for_reflection).
+        self._reflection_importance: Dict[str, float] = {}
+        self._reflection_lock = threading.Lock()
+        self._retrieval_scoring_cache: Optional[Tuple[Any, RetrievalScoring]] = None
         self._internet_access_failure_count = 0
         self._internet_access_disabled_reason: Optional[str] = None
+        # Monotonic deadline until which internet tools are paused (circuit
+        # breaker); None when open. Per agent instance, never permanent.
+        self._internet_access_disabled_until: Optional[float] = None
+        self.internet_access_cooldown_seconds = self._configured_internet_cooldown()
         self._sandbox_tools_registered = False
         self._sandbox_tool_names = (
             "execute_code",
@@ -1695,13 +1760,6 @@ class MemAgent:
             return 40
         return _MIN_HISTORY_LIMIT
 
-    def _estimate_text_tokens(self, text: Any) -> int:
-        """Estimate token count quickly without provider-specific tokenizers."""
-        content = str(text or "").strip()
-        if not content:
-            return 0
-        return max(1, int(len(content) / 4))
-
     def _normalize_history_item(self, item: Any) -> Optional[Dict[str, str]]:
         """Normalize history records from provider formats into chat messages."""
         role = ""
@@ -1733,6 +1791,9 @@ class MemAgent:
 
         normalized: List[Dict[str, str]] = []
         for item in history:
+            if is_suppressed(item):
+                # Governed forgetting hid this row; it never reaches the model.
+                continue
             parsed = self._normalize_history_item(item)
             if parsed:
                 normalized.append(parsed)
@@ -1763,8 +1824,8 @@ class MemAgent:
             return normalized[self._quantize_history_start(ideal_start, normalized) :]
 
         base_tokens = (
-            self._estimate_text_tokens(system_prompt)
-            + self._estimate_text_tokens(query)
+            estimate_tokens(system_prompt)
+            + estimate_tokens(query)
             + _PROMPT_BUFFER_TOKENS
         )
         prompt_budget = int(context_window * _PROMPT_WINDOW_RATIO)
@@ -1777,9 +1838,7 @@ class MemAgent:
         consumed = 0
         budget_start = total
         for index in range(total - 1, -1, -1):
-            message_cost = (
-                self._estimate_text_tokens(normalized[index].get("content")) + 6
-            )
+            message_cost = estimate_message_tokens(normalized[index])
             if (consumed + message_cost) > history_budget:
                 break
             consumed += message_cost
@@ -2337,10 +2396,7 @@ class MemAgent:
                     "error": "No memory manager available.",
                     "tool_log_id": tool_log_id,
                 }
-            result = self.memory_manager.retrieve_tool_log(
-                tool_log_id,
-                user_id=self._current_user_id,
-            )
+            result = self._retrieve_scoped_tool_log(tool_log_id)
             if not result:
                 return {
                     "ok": False,
@@ -2419,21 +2475,27 @@ class MemAgent:
             ]
         return estimate_tokens(schemas)
 
+    def _compaction_messages(self, history: Any) -> List[Dict[str, str]]:
+        """The user/assistant turns in ``history``, whether rows are flat
+        provider rows or in-session cache rows nested under ``content``."""
+        messages: List[Dict[str, str]] = []
+        for item in history or []:
+            if is_suppressed(item):
+                continue
+            parsed = self._normalize_history_item(item)
+            if parsed and parsed.get("role") in {"user", "assistant"}:
+                messages.append(parsed)
+        return messages
+
     def _compaction_estimate(
         self, history: List[Any], system_prompt: str, query: str
     ) -> int:
         """Tokens the next request would need with the full, untrimmed history."""
-        messages = [
-            item
-            for item in history or []
-            if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
-        ]
+        messages = self._compaction_messages(history)
         return (
             estimate_tokens(system_prompt)
             + estimate_tokens(query)
-            + sum(
-                estimate_tokens(str(item.get("content") or "")) + 6 for item in messages
-            )
+            + sum(estimate_message_tokens(item) for item in messages)
             + self._estimated_tool_tokens()
         )
 
@@ -2464,11 +2526,7 @@ class MemAgent:
         if estimate * 100 < threshold * window:
             return history
         keep = int(self.context_policy.keep_recent_messages)
-        messages = [
-            item
-            for item in history
-            if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
-        ]
+        messages = self._compaction_messages(history)
         # Compact in batches (at least as many messages as are kept) so a
         # threshold below the fixed prompt size cannot trigger every turn.
         if len(messages) < 2 * keep:
@@ -2563,6 +2621,41 @@ class MemAgent:
 
             self._summary_registry.append(meta)
             self._known_summary_ids.add(summary_id)
+
+    def _retrieve_scoped_tool_log(self, tool_log_id: str) -> Optional[Dict[str, Any]]:
+        """Read a tool log only inside the current user/memory/thread scope.
+
+        The memory manager is asked to scope the read when it accepts the
+        scope keywords; the returned row is checked here regardless, so an
+        id from another conversation never expands into this one.
+        """
+        if not self.memory_manager:
+            return None
+        retrieve = self.memory_manager.retrieve_tool_log
+        scope = {
+            "memory_id": self._current_memory_id,
+            "thread_id": self._current_thread_id,
+        }
+        kwargs: Dict[str, Any] = {"user_id": self._current_user_id}
+        try:
+            accepted = inspect.signature(retrieve).parameters
+        except (TypeError, ValueError):
+            accepted = {}
+        for key, value in scope.items():
+            if key in accepted and value is not None:
+                kwargs[key] = value
+        result = retrieve(tool_log_id, **kwargs)
+        if not isinstance(result, dict):
+            return None
+        if scope["memory_id"] is not None and str(result.get("memory_id") or "") != str(
+            scope["memory_id"]
+        ):
+            return None
+        if scope["thread_id"] is not None:
+            row_thread = self.memory_manager._entry_thread_id(result)
+            if row_thread != str(scope["thread_id"]):
+                return None
+        return result
 
     def fetch_context_summary(
         self,
@@ -3268,6 +3361,10 @@ class MemAgent:
         """Remove the MCP facade tools when no connection remains configured."""
         if not self.tool_manager:
             return
+        # An empty saved MCP configuration is applied at CLI startup even when
+        # no MCP tools have been registered. Cleanup must also tolerate tools
+        # removed individually before a server is disconnected.
+        registered = set(self.tool_manager.list_tools())
         for tool_name in (
             "list_mcp_servers",
             "mcp_list_tools",
@@ -3278,13 +3375,16 @@ class MemAgent:
             "mcp_list_prompts",
             "mcp_get_prompt",
         ):
+            if tool_name not in registered:
+                continue
             try:
                 self.tool_manager.remove_tool(tool_name)
             except Exception:
                 pass
         for names in self._mcp_server_tools.values():
             for tool_name in names:
-                self.tool_manager.remove_tool(tool_name)
+                if tool_name in registered:
+                    self.tool_manager.remove_tool(tool_name)
         self._mcp_server_tools = {}
         self._mcp_tool_targets = {}
         self._mcp_tools_registered = False
@@ -3353,6 +3453,7 @@ class MemAgent:
         # Reset failure tracking whenever provider changes
         self._internet_access_failure_count = 0
         self._internet_access_disabled_reason = None
+        self._internet_access_disabled_until = None
 
         if provider:
             self._register_internet_access_tools()
@@ -3429,7 +3530,7 @@ class MemAgent:
         return bool(
             self.internet_access_manager
             and self.internet_access_manager.is_enabled()
-            and not self._internet_access_disabled_reason
+            and not self._internet_access_block_reason()
         )
 
     def get_internet_access_provider_name(self) -> Optional[str]:
@@ -4268,6 +4369,13 @@ class MemAgent:
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=True,
+            approval_reason="Writes a file on the host under the self-aware roots",
+            domains=("self_aware", "workspace"),
+        )
         def self_aware_write_file(
             path: str, content: str, mode: str = "overwrite"
         ) -> Dict[str, Any]:
@@ -4279,6 +4387,13 @@ class MemAgent:
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=True,
+            approval_reason="Deletes a path on the host under the self-aware roots",
+            domains=("self_aware", "workspace"),
+        )
         def self_aware_delete_path(
             path: str, recursive: bool = False, force: bool = False
         ) -> Dict[str, Any]:
@@ -4290,6 +4405,13 @@ class MemAgent:
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=True,
+            approval_reason="Runs a host command under the self-aware roots",
+            domains=("self_aware", "workspace"),
+        )
         def self_aware_run_command(command: str, cwd: str = ".") -> Dict[str, Any]:
             """Run a guarded allowlisted host command under allowed roots."""
             try:
@@ -4389,21 +4511,40 @@ class MemAgent:
         read-only provider or a transient database outage never blocks chat.
         """
         provider = self.memory_provider
-        desired_memory_ids = {str(item) for item in self.memory_ids if item}
         if (
             not self.auto_register
             or provider is None
             or not hasattr(provider, "store_memagent")
-            or desired_memory_ids.issubset(self._registered_memory_ids)
         ):
+            return
+        registered = self._registered_memory_ids
+        memory_ids = self.memory_ids
+        # Every turn of an existing conversation lands here: skip the set
+        # rebuild when the (append-only) list has not grown.
+        if (
+            registered
+            and len(memory_ids) == len(registered)
+            and (not memory_ids or str(memory_ids[-1]) in registered)
+        ):
+            return
+        desired_memory_ids = {str(item) for item in memory_ids if item}
+        if desired_memory_ids.issubset(registered):
             return
 
         with self._registration_lock:
-            desired_memory_ids = {str(item) for item in self.memory_ids if item}
+            memory_ids = [str(item) for item in self.memory_ids if item]
+            desired_memory_ids = set(memory_ids)
             if desired_memory_ids.issubset(self._registered_memory_ids):
                 return
             try:
-                persistence.save_agent(self)
+                updater = getattr(provider, "update_memagent_memory_ids", None)
+                if self._registered_memory_ids and callable(updater):
+                    # The agent document already exists; only its memory
+                    # list grew, so patch that instead of rewriting it all.
+                    if not updater(self.agent_id, list(memory_ids)):
+                        persistence.save_agent(self)
+                else:
+                    persistence.save_agent(self)
                 self._registered_memory_ids = desired_memory_ids
                 self._registration_attempted = True
             except Exception as exc:
@@ -4461,6 +4602,20 @@ class MemAgent:
         self._last_selection_ledger = []
         self._last_memory_attribution_context = None
         self._last_trace_context = self._trace_identity_payload()
+        if self.memory_provider and (
+            self.capture_memory_history
+            or getattr(self.memory_provider, "_memory_history_enabled", False) is True
+        ):
+            from ..memory_history import enable_memory_history, memory_change_context
+
+            enable_memory_history(self.memory_provider)
+            scope = memory_change_context(
+                actor=self.agent_id, source="agent", **self._trace_identity_payload()
+            )
+            scope.__enter__()
+            self._history_scope = scope
+            if session:
+                session.stack.callback(self._close_history_scope)
         if query is not None and self.learning_control_plane is not None:
             try:
                 self.learning_control_plane.begin_run(
@@ -4651,14 +4806,10 @@ class MemAgent:
         persona_manager = getattr(self, "persona_manager", None)
         persona = persona_manager.current_persona if persona_manager else None
         persona_ref = persona_reference(persona) if persona else None
+        # ``_build_system_prompt`` has already rendered the persona block for
+        # this turn and stored its length; do not render it a second time.
         persona_chars = (
-            len(
-                persona_manager.get_persona_prompt(
-                    include_history=True, history_limit=5
-                )
-            )
-            if persona_ref
-            else 0
+            getattr(self, "_rendered_persona_chars", 0) if persona_ref else 0
         )
 
         history = [
@@ -5053,6 +5204,67 @@ class MemAgent:
                 )
             except Exception as exc:
                 logger.debug("Learning run-completion capture failed: %s", exc)
+        if session_for(self) is None:
+            self._close_history_scope()
+
+    def _close_history_scope(self):
+        scope = self._history_scope
+        if scope is not None:
+            self._history_scope = None
+            scope.__exit__(None, None, None)
+
+    @property
+    def memory_history(self):
+        """Provider-neutral evolution journal (scope reads to this agent)."""
+        from ..memory_history import MemoryHistory
+
+        return MemoryHistory(self.memory_provider)
+
+    def get_context_history(self, memory_id=None):
+        """Metadata for requests captured with capture_context_snapshots=True."""
+        from ..observability.context_snapshots import ContextSnapshots
+
+        return ContextSnapshots(self.memory_provider).list(
+            agent_id=self.agent_id, memory_id=memory_id
+        )
+
+    def _capture_model_context(self, span_id, messages, tools, iteration, stage):
+        if not self.capture_context_snapshots or not self.memory_provider:
+            return
+        try:
+            from ..observability.context_snapshots import ContextSnapshots
+
+            model_name = getattr(self.model, "model", None)
+            if not isinstance(model_name, str):
+                model_name = type(self.model).__name__
+            snapshot = ContextSnapshots(self.memory_provider).capture(
+                identity=self._trace_identity_payload(),
+                span_id=span_id,
+                messages=messages,
+                tools=tools,
+                model=model_name,
+                window_tokens=self._context_window_tokens,
+                iteration=iteration,
+                stage=stage,
+                memory_evidence=self._last_memory_context_evidence,
+            )
+            self._emit_stream_event(
+                "trace",
+                {
+                    "trace_kind": "context_snapshot",
+                    "title": "Model context captured",
+                    "snapshot_id": snapshot["record_id"],
+                    "span_id": span_id,
+                    "parent_span_id": self._current_root_trace_id,
+                    "message_count": snapshot["message_count"],
+                    "estimated_tokens": snapshot["estimated_tokens"],
+                    "content": "",
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Model context snapshot could not be recorded", exc_info=False
+            )
 
     def get_trace_context(self) -> Dict[str, Any]:
         """Return identifiers for linking application outcomes to the last turn."""
@@ -5350,6 +5562,7 @@ class MemAgent:
         response_metadata = {}
         try:
             messages = self._fit_prompt(messages, tools)
+            self._capture_model_context(span_id, messages, tools, iteration, stage)
             response = self.model.generate(messages, tools=tools)
             from ..llms.response_metadata import response_metadata as describe_response
 
@@ -5448,6 +5661,7 @@ class MemAgent:
         error: Optional[BaseException] = None
         try:
             messages = self._fit_prompt(messages, tools)
+            self._capture_model_context(span_id, messages, tools, iteration, stage)
             stream = iter(self.model.generate_stream(messages, tools=tools))
             while True:
                 check_cancelled()
@@ -5521,6 +5735,173 @@ class MemAgent:
                     **({"ttft_ms": round(ttft_ms, 3)} if ttft_ms is not None else {}),
                 },
             )
+
+    def _begin_turn_cache_lookup(
+        self,
+        query: str,
+        thread_id: str,
+        user_id: Optional[str],
+        context: Optional[Dict[str, Any]],
+        *,
+        stream: bool = False,
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Reset per-turn state and consult the semantic cache for ``query``.
+
+        Returns the turn's cache metadata, computed once here and reused by
+        :meth:`_finish_turn` for the write, and a cached reply that passed
+        host completion validation (``None`` when the turn needs a fresh
+        model call). Shared by ``run`` and ``run_stream``.
+        """
+        self._turn_had_side_effects = False
+        self._turn_had_nondeterministic_tools = False
+        self._turn_cache_domains = set()
+        self._cache_bypass_reason = None
+        self._interaction_error_code = None
+        self._last_completion_decisions = []
+        cache_metadata = self._semantic_cache_metadata(context)
+        cache_lookup_bypass = self._semantic_cache_preflight_bypass(
+            query, user_id=user_id
+        )
+        if not self.cache_manager.enabled:
+            self._emit_cache_decision_trace("disabled", cache_metadata)
+        elif cache_lookup_bypass:
+            self._emit_cache_decision_trace(
+                "bypassed", cache_metadata, bypass_reason=cache_lookup_bypass
+            )
+        if cache_lookup_bypass and self.learning_control_plane is not None:
+            try:
+                self.learning_control_plane.record_cache(
+                    hit=False,
+                    query=query,
+                    reason=cache_lookup_bypass,
+                    scope=self._trace_identity_payload(),
+                )
+            except Exception:
+                pass
+        if not self.cache_manager.enabled:
+            return cache_metadata, None
+        cached_response = self.cache_manager.get_cached_response(
+            query,
+            thread_id,
+            user_id=user_id,
+            metadata=cache_metadata,
+            bypass_reason=cache_lookup_bypass,
+        )
+        if not cache_lookup_bypass:
+            self._emit_cache_decision_trace(
+                "hit" if cached_response else "miss", cache_metadata
+            )
+        if not cached_response:
+            return cache_metadata, None
+        # Cache lookup is not an authorization boundary. Re-run host
+        # completion validation so changing runtime policy, external
+        # acceptance state, or a trusted validator cannot be bypassed by a
+        # response accepted on an earlier turn.
+        cache_decision = self._evaluate_completion_candidate(
+            query=query,
+            response=cached_response,
+            iteration=0,
+            tool_call_count=0,
+        )
+        if cache_decision.accepted:
+            return cache_metadata, cached_response
+        logger.info(
+            "Cached %s rejected by completion policy (%s); "
+            "continuing with a fresh model turn",
+            "stream response" if stream else "response",
+            cache_decision.code,
+        )
+        self._emit_cache_decision_trace(
+            "rejected",
+            cache_metadata,
+            bypass_reason=cache_decision.code,
+        )
+        return cache_metadata, None
+
+    def _accept_cached_turn(
+        self,
+        query: str,
+        cached_response: str,
+        memory_id: str,
+        thread_id: str,
+        user_id: Optional[str],
+    ) -> None:
+        """Count a validated cache hit and store it as this turn's exchange."""
+        if self.learning_control_plane is not None:
+            try:
+                self.learning_control_plane.record_cache(
+                    hit=True,
+                    query=query,
+                    reason="exact_or_semantic_cache_hit",
+                    scope=self._trace_identity_payload(),
+                )
+            except Exception:
+                pass
+        self._record_interaction(
+            query, cached_response, memory_id, thread_id, user_id=user_id
+        )
+
+    def _turn_failure_code(self, *, stream: bool = False) -> Optional[str]:
+        """The error code when this turn's reply is a failure message, else None.
+
+        A provider failure or an exhausted tool loop produced an apology, not
+        an answer: the caller must neither cache nor record it and must close
+        the trace as a failed turn.
+        """
+        interaction_error = self._interaction_error_code
+        if interaction_error:
+            logger.warning(
+                "MemAgent %s %s failed (%s); reply not cached or recorded",
+                self.agent_id,
+                "stream" if stream else "turn",
+                interaction_error,
+            )
+        return interaction_error
+
+    def _with_turn_cache_domains(
+        self, cache_metadata: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """``cache_metadata`` with the domains tools declared this turn merged in."""
+        domains = set(cache_metadata.get("domains") or ())
+        domains.update(self._turn_cache_domains)
+        return {
+            **cache_metadata,
+            "domain": sorted(domains)[0] if len(domains) == 1 else None,
+            "domains": sorted(domains),
+        }
+
+    def _finish_turn(
+        self,
+        query: str,
+        response: str,
+        memory_id: str,
+        thread_id: str,
+        user_id: Optional[str],
+        cache_metadata: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> None:
+        """Attribute, cache and record a completed model turn.
+
+        ``cache_metadata`` is the lookup metadata from
+        :meth:`_begin_turn_cache_lookup`; the cache domains that tools
+        declared during the turn are merged into it before the write.
+        """
+        self._emit_memory_reference_trace(response)
+        if self.cache_manager.enabled:
+            if session:
+                session.persistence["cache"] = "unknown"
+            self.cache_manager.cache_response(
+                query,
+                response,
+                thread_id,
+                user_id=user_id,
+                metadata=self._with_turn_cache_domains(cache_metadata),
+                deterministic=not self._turn_had_nondeterministic_tools,
+                read_only=not self._turn_had_side_effects,
+                bypass_reason=self._cache_bypass_reason,
+            )
+        self._record_interaction(query, response, memory_id, thread_id, user_id=user_id)
 
     def run(
         self,
@@ -5661,88 +6042,16 @@ class MemAgent:
             self._begin_trace_turn(user_id, query=query)
             trace_initialized = True
             self._emit_context_provenance_trace(observability_context, context)
-            self._turn_had_side_effects = False
-            self._turn_had_nondeterministic_tools = False
-            self._turn_cache_domains = set()
-            self._cache_bypass_reason = None
-            self._last_completion_decisions = []
-            cache_metadata = self._semantic_cache_metadata(context)
-            cache_lookup_bypass = self._semantic_cache_preflight_bypass(
-                query, user_id=user_id
+            cache_metadata, cached_response = self._begin_turn_cache_lookup(
+                query, thread_id, user_id, context
             )
-            if not self.cache_manager.enabled:
-                self._emit_cache_decision_trace("disabled", cache_metadata)
-            elif cache_lookup_bypass:
-                self._emit_cache_decision_trace(
-                    "bypassed", cache_metadata, bypass_reason=cache_lookup_bypass
+            if cached_response:
+                logger.info("Returning host-validated cached response")
+                self._accept_cached_turn(
+                    query, cached_response, memory_id, thread_id, user_id
                 )
-            if cache_lookup_bypass and self.learning_control_plane is not None:
-                try:
-                    self.learning_control_plane.record_cache(
-                        hit=False,
-                        query=query,
-                        reason=cache_lookup_bypass,
-                        scope=self._trace_identity_payload(),
-                    )
-                except Exception:
-                    pass
-
-            # 2. Check semantic cache first
-            cached_response = None
-            if self.cache_manager.enabled:
-                cached_response = self.cache_manager.get_cached_response(
-                    query,
-                    thread_id,
-                    user_id=user_id,
-                    metadata=cache_metadata,
-                    bypass_reason=cache_lookup_bypass,
-                )
-                if not cache_lookup_bypass:
-                    self._emit_cache_decision_trace(
-                        "hit" if cached_response else "miss", cache_metadata
-                    )
-                if cached_response:
-                    # Cache lookup is not an authorization boundary. Re-run
-                    # host completion validation so changing runtime policy,
-                    # external acceptance state, or a trusted validator cannot
-                    # be bypassed by a response accepted on an earlier turn.
-                    cache_decision = self._evaluate_completion_candidate(
-                        query=query,
-                        response=cached_response,
-                        iteration=0,
-                        tool_call_count=0,
-                    )
-                    if cache_decision.accepted:
-                        logger.info("Returning host-validated cached response")
-                        if self.learning_control_plane is not None:
-                            try:
-                                self.learning_control_plane.record_cache(
-                                    hit=True,
-                                    query=query,
-                                    reason="exact_or_semantic_cache_hit",
-                                    scope=self._trace_identity_payload(),
-                                )
-                            except Exception:
-                                pass
-                        self._record_interaction(
-                            query,
-                            cached_response,
-                            memory_id,
-                            thread_id,
-                            user_id=user_id,
-                        )
-                        turn_status = "success"
-                        return cached_response
-                    logger.info(
-                        "Cached response rejected by completion policy (%s); "
-                        "continuing with a fresh model turn",
-                        cache_decision.code,
-                    )
-                    self._emit_cache_decision_trace(
-                        "rejected",
-                        cache_metadata,
-                        bypass_reason=cache_decision.code,
-                    )
+                turn_status = "success"
+                return cached_response
 
             # 3. Build context and prompt
             built_context = self._build_context(
@@ -5754,8 +6063,8 @@ class MemAgent:
                 ),
             )
             built_context = self._attach_personalization_context(built_context, context)
-            self._emit_memory_context_trace(built_context)
             system_prompt = self._build_system_prompt()
+            self._emit_memory_context_trace(built_context)
 
             # 4. Execute with LLM
             response = self._execute_llm_interaction(
@@ -5770,24 +6079,14 @@ class MemAgent:
             if stream_session is not None and stream_session.outcome != "completed":
                 turn_status = stream_session.outcome
                 return ""
-            self._emit_memory_reference_trace(response)
+            interaction_error = self._turn_failure_code()
+            if interaction_error:
+                turn_error_code = interaction_error
+                return response
 
-            # 5. Cache the response
-            if self.cache_manager.enabled:
-                self.cache_manager.cache_response(
-                    query,
-                    response,
-                    thread_id,
-                    user_id=user_id,
-                    metadata=self._semantic_cache_metadata(context),
-                    deterministic=not self._turn_had_nondeterministic_tools,
-                    read_only=not self._turn_had_side_effects,
-                    bypass_reason=self._cache_bypass_reason,
-                )
-
-            # 6. Record interaction in memory
-            self._record_interaction(
-                query, response, memory_id, thread_id, user_id=user_id
+            # 5-6. Cache the response and record the exchange in memory
+            self._finish_turn(
+                query, response, memory_id, thread_id, user_id, cache_metadata
             )
 
             logger.info(f"MemAgent {self.agent_id} completed successfully")
@@ -5832,6 +6131,69 @@ class MemAgent:
             reset_tool_context(_tc_token)
 
     def delegate(
+        self,
+        query: str,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        *,
+        user_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        tool_context: Optional[Dict[str, Any]] = None,
+        plan: Any = None,
+        trace_id: Optional[str] = None,
+        return_report: bool = False,
+        allow_root_fallback: Optional[bool] = None,
+        thread_strategy: Optional[str] = None,
+        max_workers: Optional[int] = None,
+        timeout: Optional[float] = None,
+        cancellation: Any = None,
+        on_task_event: Any = None,
+        on_task_result: Any = None,
+        task_completion_policy: Any = None,
+    ) -> Any:
+        """Delegate within a request-local coordinator attribution scope."""
+        from contextlib import nullcontext
+
+        from ..memory_history import enable_memory_history, memory_change_context
+
+        record = self.memory_provider and (
+            self.capture_memory_history
+            or getattr(self.memory_provider, "_memory_history_enabled", False) is True
+        )
+        scope = nullcontext()
+        if record:
+            enable_memory_history(self.memory_provider)
+            scope = memory_change_context(
+                actor=self.agent_id,
+                source="agent:delegation",
+                agent_id=self.agent_id,
+                memory_id=memory_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                application_id=self.application_id,
+            )
+        with scope:
+            return self._delegate(
+                query,
+                memory_id,
+                thread_id,
+                user_id=user_id,
+                context=context,
+                tool_context=tool_context,
+                plan=plan,
+                trace_id=trace_id,
+                return_report=return_report,
+                allow_root_fallback=allow_root_fallback,
+                thread_strategy=thread_strategy,
+                max_workers=max_workers,
+                timeout=timeout,
+                cancellation=cancellation,
+                on_task_event=on_task_event,
+                on_task_result=on_task_result,
+                task_completion_policy=task_completion_policy,
+            )
+
+    def _delegate(
         self,
         query: str,
         memory_id: Optional[str] = None,
@@ -5908,6 +6270,8 @@ class MemAgent:
                 bypass_reason=cache_bypass_reason,
             )
             if cache_bypass_reason:
+                # Belt and braces: a cache that ignores the bypass reason must
+                # still never admit an invalid or runtime-contract plan.
                 cached_response = None
             if cached_response:
                 cache_decision = self._evaluate_completion_candidate(
@@ -6383,6 +6747,15 @@ class MemAgent:
             except (TypeError, ValueError):
                 pass
 
+        # Every tool_call of the paused assistant turn needs a result before
+        # the model is asked again; siblings skipped for this approval get an
+        # explicit "not executed" result.
+        self._ensure_tool_call_results(
+            messages,
+            checkpoint.get("deferred_tool_calls"),
+            paused_tool_name=logical_tool_name,
+        )
+
         if not continue_model or not self.model:
             self._persist_workflow_run(workflow)
             return ApprovalResumeResult(
@@ -6438,15 +6811,14 @@ class MemAgent:
                             consumed=True,
                         )
                     self._append_assistant_tool_calls(messages, message)
-                    for next_call in message.tool_calls:
-                        self._execute_and_record_tool_call(
-                            next_call,
-                            messages,
-                            workflow,
-                            user_id,
-                            streaming=False,
-                            query=query,
-                        )
+                    self._execute_turn_tool_calls(
+                        message.tool_calls,
+                        messages,
+                        workflow,
+                        user_id,
+                        streaming=False,
+                        query=query,
+                    )
                     continue
                 break
         except ApprovalRequired as approval:
@@ -6627,88 +6999,23 @@ class MemAgent:
             )
             self._emit_trace_turn_start()
             self._emit_context_provenance_trace(observability_context, context)
-            self._turn_had_side_effects = False
-            self._turn_had_nondeterministic_tools = False
-            self._turn_cache_domains = set()
-            self._cache_bypass_reason = None
-            self._last_completion_decisions = []
-            cache_metadata = self._semantic_cache_metadata(context)
-            cache_lookup_bypass = self._semantic_cache_preflight_bypass(
-                query, user_id=user_id
+            cache_metadata, cached = self._begin_turn_cache_lookup(
+                query, thread_id, user_id, context, stream=True
             )
-            if not self.cache_manager.enabled:
-                self._emit_cache_decision_trace("disabled", cache_metadata)
-            elif cache_lookup_bypass:
-                self._emit_cache_decision_trace(
-                    "bypassed", cache_metadata, bypass_reason=cache_lookup_bypass
+            if cached:
+                yield cached
+                if session:
+                    session.answer_done()
+                check_cancelled()
+                self._accept_cached_turn(query, cached, memory_id, thread_id, user_id)
+                turn_status = "success"
+                self._finish_trace_turn(turn_status)
+                trace_finished = True
+                self._emit_stream_event(
+                    "stream_end",
+                    {"reason": "cache_hit", "agent_id": self.agent_id},
                 )
-            if cache_lookup_bypass and self.learning_control_plane is not None:
-                try:
-                    self.learning_control_plane.record_cache(
-                        hit=False,
-                        query=query,
-                        reason=cache_lookup_bypass,
-                        scope=self._trace_identity_payload(),
-                    )
-                except Exception:
-                    pass
-
-            # 2. Check semantic cache first
-            if self.cache_manager.enabled:
-                cached = self.cache_manager.get_cached_response(
-                    query,
-                    thread_id,
-                    user_id=user_id,
-                    metadata=cache_metadata,
-                    bypass_reason=cache_lookup_bypass,
-                )
-                if not cache_lookup_bypass:
-                    self._emit_cache_decision_trace(
-                        "hit" if cached else "miss", cache_metadata
-                    )
-                if cached:
-                    cache_decision = self._evaluate_completion_candidate(
-                        query=query,
-                        response=cached,
-                        iteration=0,
-                        tool_call_count=0,
-                    )
-                    if cache_decision.accepted:
-                        yield cached
-                        if session:
-                            session.answer_done()
-                        check_cancelled()
-                        if self.learning_control_plane is not None:
-                            try:
-                                self.learning_control_plane.record_cache(
-                                    hit=True,
-                                    query=query,
-                                    reason="exact_or_semantic_cache_hit",
-                                    scope=self._trace_identity_payload(),
-                                )
-                            except Exception:
-                                pass
-                        self._record_interaction(
-                            query, cached, memory_id, thread_id, user_id=user_id
-                        )
-                        turn_status = "success"
-                        self._finish_trace_turn(turn_status)
-                        trace_finished = True
-                        self._emit_stream_event(
-                            "stream_end",
-                            {"reason": "cache_hit", "agent_id": self.agent_id},
-                        )
-                        return
-                    logger.info(
-                        "Cached stream response rejected by completion policy "
-                        "(%s); continuing with a fresh model turn",
-                        cache_decision.code,
-                    )
-                    self._emit_cache_decision_trace(
-                        "rejected",
-                        cache_metadata,
-                        bypass_reason=cache_decision.code,
-                    )
+                return
 
             # 3. Build context and prompt
             built_context = self._build_context(
@@ -6720,8 +7027,8 @@ class MemAgent:
                 ),
             )
             built_context = self._attach_personalization_context(built_context, context)
-            self._emit_memory_context_trace(built_context)
             system_prompt = self._build_system_prompt()
+            self._emit_memory_context_trace(built_context)
             if session:
                 session.emit("status", stage="context_ready")
 
@@ -6741,28 +7048,32 @@ class MemAgent:
                 turn_error_code = session.error_code
                 return
             check_cancelled()
+            interaction_error = self._turn_failure_code(stream=True)
+            if interaction_error:
+                turn_error_code = interaction_error
+                self._finish_trace_turn("error", error_code=interaction_error)
+                trace_finished = True
+                self._emit_stream_event(
+                    "stream_end",
+                    {
+                        "reason": "error",
+                        "error_code": interaction_error,
+                        "agent_id": self.agent_id,
+                    },
+                )
+                return
             if session:
                 session.answer_done()
-            self._emit_memory_reference_trace(full_response)
 
-            # 5. Cache the response
-            if self.cache_manager.enabled:
-                if session:
-                    session.persistence["cache"] = "unknown"
-                self.cache_manager.cache_response(
-                    query,
-                    full_response,
-                    thread_id,
-                    user_id=user_id,
-                    metadata=self._semantic_cache_metadata(context),
-                    deterministic=not self._turn_had_nondeterministic_tools,
-                    read_only=not self._turn_had_side_effects,
-                    bypass_reason=self._cache_bypass_reason,
-                )
-
-            # 6. Record interaction in memory
-            self._record_interaction(
-                query, full_response, memory_id, thread_id, user_id=user_id
+            # 5-6. Cache the response and record the exchange in memory
+            self._finish_turn(
+                query,
+                full_response,
+                memory_id,
+                thread_id,
+                user_id,
+                cache_metadata,
+                session=session,
             )
             turn_status = "success"
             self._finish_trace_turn(turn_status)
@@ -7423,6 +7734,190 @@ class MemAgent:
             }
         )
 
+    def _tool_call_needs_approval(self, tool_call: Any) -> bool:
+        """Best-effort pre-check: would executing this call pause for approval?"""
+        if self._approval_execution_active:
+            return False
+        function = getattr(tool_call, "function", None)
+        name = str(getattr(function, "name", "") or "")
+        if not name:
+            return False
+        try:
+            arguments = json.loads(getattr(function, "arguments", None) or "{}")
+        except (TypeError, ValueError):
+            arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        logical_name, logical_arguments = name, arguments
+        router = getattr(self, "semantic_tool_router", None)
+        if router is not None and name == router.INVOCATION_TOOL:
+            requested = str(arguments.get("tool_name") or "").strip()
+            if requested:
+                try:
+                    logical_name = router._resolve_name(requested)
+                except Exception:
+                    logical_name = requested
+            nested = arguments.get("arguments")
+            if isinstance(nested, dict):
+                logical_arguments = nested
+        try:
+            policy = self._effective_tool_policy(logical_name, logical_arguments)
+        except Exception:
+            return False
+        return bool(policy.get("requires_approval"))
+
+    @staticmethod
+    def _describe_tool_call(tool_call: Any) -> Dict[str, Any]:
+        function = getattr(tool_call, "function", None)
+        return {
+            "tool_call_id": getattr(tool_call, "id", None),
+            "name": str(getattr(function, "name", "") or ""),
+            "arguments": getattr(function, "arguments", None),
+        }
+
+    @staticmethod
+    def _deferred_tool_result(paused_tool_name: str) -> str:
+        """Tool message for a call skipped because a sibling awaits approval."""
+        return json.dumps(
+            {
+                "ok": False,
+                "status": "not_executed",
+                "error_code": "sibling_awaiting_approval",
+                "message": (
+                    "Not executed: another tool call in this turn "
+                    f"({paused_tool_name}) is waiting for human approval. "
+                    "Call this tool again after that approval is resolved "
+                    "if it is still needed."
+                ),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    def _execute_turn_tool_calls(
+        self,
+        tool_calls: Any,
+        messages: List[Dict[str, Any]],
+        workflow,
+        user_id: Optional[str],
+        *,
+        streaming: bool,
+        query: str,
+        execute: Optional[Callable[[Any], Any]] = None,
+    ) -> None:
+        """Run one model turn's tool calls so an approval pause leaves no call unanswered.
+
+        Calls that will not need approval run first, so a pause on a guarded
+        call already carries their results in its checkpoint. When a call
+        pauses, the calls still waiting get a "not executed" result and are
+        listed in the checkpoint (``deferred_tool_calls``); a provider would
+        otherwise reject the continuation for the unanswered tool_call_ids.
+        """
+        calls = list(tool_calls or [])
+        if execute is None:
+
+            def execute(call: Any) -> Any:
+                return self._execute_and_record_tool_call(
+                    call,
+                    messages,
+                    workflow,
+                    user_id,
+                    streaming=streaming,
+                    query=query,
+                )
+
+        guarded = {id(call) for call in calls if self._tool_call_needs_approval(call)}
+        ordered = [call for call in calls if id(call) not in guarded] + [
+            call for call in calls if id(call) in guarded
+        ]
+        for index, call in enumerate(ordered):
+            check_cancelled()
+            remaining = ordered[index + 1 :]
+            self._deferred_sibling_tool_calls = [
+                self._describe_tool_call(sibling) for sibling in remaining
+            ]
+            try:
+                execute(call)
+            except ApprovalRequired:
+                paused = str(
+                    getattr(getattr(call, "function", None), "name", "") or "tool"
+                )
+                answered = {
+                    item.get("tool_call_id")
+                    for item in messages
+                    if isinstance(item, dict) and item.get("role") == "tool"
+                }
+                for sibling in remaining:
+                    sibling_id = getattr(sibling, "id", None)
+                    if sibling_id in answered:
+                        continue
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": sibling_id,
+                            "name": self._describe_tool_call(sibling)["name"],
+                            "content": self._deferred_tool_result(paused),
+                        }
+                    )
+                raise
+            finally:
+                self._deferred_sibling_tool_calls = []
+
+    def _ensure_tool_call_results(
+        self,
+        messages: List[Dict[str, Any]],
+        deferred: Optional[List[Dict[str, Any]]] = None,
+        *,
+        paused_tool_name: str = "tool",
+    ) -> None:
+        """Give every tool_call of the last assistant turn a tool result.
+
+        A checkpoint resumed with siblings that never ran (guarded siblings,
+        or checkpoints written before siblings were handled) gets explicit
+        "not executed" results for them before the model is called again.
+        """
+        last_assistant: Optional[int] = None
+        for index in range(len(messages) - 1, -1, -1):
+            item = messages[index]
+            if (
+                isinstance(item, dict)
+                and item.get("role") == "assistant"
+                and item.get("tool_calls")
+            ):
+                last_assistant = index
+                break
+        if last_assistant is None:
+            return
+        answered = {
+            item.get("tool_call_id")
+            for item in messages[last_assistant + 1 :]
+            if isinstance(item, dict) and item.get("role") == "tool"
+        }
+        names = {
+            item.get("tool_call_id"): item.get("name")
+            for item in (deferred or [])
+            if isinstance(item, dict)
+        }
+        for call in messages[last_assistant].get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            call_id = call.get("id")
+            if call_id is None or call_id in answered:
+                continue
+            function = call.get("function") or {}
+            name = names.get(call_id) or (
+                function.get("name") if isinstance(function, dict) else None
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name or "tool",
+                    "content": self._deferred_tool_result(paused_tool_name),
+                }
+            )
+            answered.add(call_id)
+
     def _get_approval_store(self) -> ApprovalStore:
         """Create the package-owned durable store only when approval is needed."""
         if self.approval_store is None:
@@ -7788,6 +8283,11 @@ class MemAgent:
                         "router_state": (
                             router.checkpoint_state() if router is not None else {}
                         ),
+                        # Sibling calls of this turn that did not run; the
+                        # resume answers them so no tool_call_id is left open.
+                        "deferred_tool_calls": _to_jsonable(
+                            list(self._deferred_sibling_tool_calls or [])
+                        ),
                     }
                     proposal = self._get_approval_store().propose(
                         owner_id=self.agent_id,
@@ -8101,6 +8601,86 @@ class MemAgent:
         # a size-aware tool-log pointer.
         return result
 
+    def _prepare_turn_request(
+        self,
+        system_prompt: str,
+        query: str,
+        context: Dict[str, Any],
+        user_id: Optional[str],
+        request_context: Optional[Dict[str, Any]],
+        *,
+        streaming_tools: bool = False,
+    ) -> Tuple[Any, List[Dict[str, Any]], Any]:
+        """Workflow capture, prompt messages, tool surface and provider
+        prompt-cache scope for one model turn, as every tool loop needs them.
+
+        ``request_context`` is forwarded to :meth:`_build_prompt_messages`
+        and is *not* persisted to ``conversation_memory``. With
+        ``streaming_tools`` the tool list is copied (the session loop appends
+        its finalizer) and a provider that cannot stream tool calls is
+        refused before the cache scope is pinned.
+        """
+        workflow = self._init_workflow_capture(query, user_id)
+        messages = self._build_prompt_messages(
+            system_prompt, query, context, request_context=request_context
+        )
+        # Build a scoped progressive tool surface and pin prompt-cache scope.
+        if getattr(self, "semantic_tool_router", None) is not None:
+            self.semantic_tool_router.begin_turn(user_id=user_id)
+        tools = self._build_llm_tools(query, user_id=user_id)
+        if streaming_tools:
+            from ..llms.streaming import streaming_capabilities
+
+            tools = list(tools or [])
+            if tools and not streaming_capabilities(self.model)["tool_calls"]:
+                raise ProviderStreamError("provider_tools_unsupported")
+        self._set_provider_cache_scope()
+        return workflow, messages, tools
+
+    def _run_tool_turn(
+        self,
+        message: Any,
+        messages: List[Dict[str, Any]],
+        workflow: Any,
+        user_id: Optional[str],
+        *,
+        streaming: bool,
+        query: str,
+    ) -> int:
+        """Append the assistant's tool-call turn to ``messages`` and run its
+        calls; returns how many calls the model made."""
+        self._append_assistant_tool_calls(messages, message)
+        call_count = len(message.tool_calls)
+        self._execute_turn_tool_calls(
+            message.tool_calls,
+            messages,
+            workflow,
+            user_id,
+            streaming=streaming,
+            query=query,
+        )
+        return call_count
+
+    def _note_completion_rejection(
+        self,
+        messages: List[Dict[str, Any]],
+        candidate: str,
+        decision: Any,
+        rejections: int,
+    ) -> int:
+        """Count a rejected completion and queue the policy's retry instruction.
+
+        Raises :class:`CompletionRejectedError` once the policy's rejection
+        limit is exceeded; otherwise returns the new rejection count.
+        """
+        rejections += 1
+        if rejections > self.completion_policy.max_rejections:
+            raise CompletionRejectedError(decision, rejections)
+        self._append_completion_rejection(
+            messages, candidate, self.completion_policy.retry_message(decision)
+        )
+        return rejections
+
     def _execute_llm_interaction_stream(
         self, system_prompt, query, context, user_id=None, request_context=None
     ):
@@ -8114,19 +8694,15 @@ class MemAgent:
                 request_context=request_context,
             )
             return
-        from ..llms.streaming import streaming_capabilities
-
         self._suggest_capabilities(session, query)
-        workflow = self._init_workflow_capture(query, user_id)
-        messages = self._build_prompt_messages(
-            system_prompt, query, context, request_context=request_context
+        workflow, messages, tools = self._prepare_turn_request(
+            system_prompt,
+            query,
+            context,
+            user_id,
+            request_context,
+            streaming_tools=True,
         )
-        if getattr(self, "semantic_tool_router", None) is not None:
-            self.semantic_tool_router.begin_turn(user_id=user_id)
-        tools = list(self._build_llm_tools(query, user_id=user_id) or [])
-        if tools and not streaming_capabilities(self.model)["tool_calls"]:
-            raise ProviderStreamError("provider_tools_unsupported")
-        self._set_provider_cache_scope()
         finalize = "memorizz_finalize_answer"
         final_phase = not tools
         if session.mode == "final_stream" and tools:
@@ -8251,8 +8827,9 @@ class MemAgent:
                                 break
                             message = event["response"].choices[0].message
                             self._append_assistant_tool_calls(messages, message)
-                            for call in message.tool_calls:
-                                check_cancelled()
+
+                            def _run_call(call: Any) -> None:
+                                nonlocal final_phase, tool_count
                                 if (
                                     call.function.name == finalize
                                     and session.mode == "final_stream"
@@ -8287,6 +8864,16 @@ class MemAgent:
                                         streaming=True,
                                         query=query,
                                     )
+
+                            self._execute_turn_tool_calls(
+                                message.tool_calls,
+                                messages,
+                                workflow,
+                                user_id,
+                                streaming=True,
+                                query=query,
+                                execute=_run_call,
+                            )
                         elif kind == "done":
                             self._record_context_window_usage(
                                 stage=f"stream_iteration_{iteration + 1}"
@@ -8340,13 +8927,8 @@ class MemAgent:
                                 tool_call_count=tool_count,
                             )
                             if not decision.accepted:
-                                rejections += 1
-                                if rejections > self.completion_policy.max_rejections:
-                                    raise CompletionRejectedError(decision, rejections)
-                                self._append_completion_rejection(
-                                    messages,
-                                    candidate,
-                                    self.completion_policy.retry_message(decision),
+                                rejections = self._note_completion_rejection(
+                                    messages, candidate, decision, rejections
                                 )
                                 break
                             if session.mode == "buffered" and candidate:
@@ -8364,6 +8946,14 @@ class MemAgent:
             session.emit(
                 "approval.required", proposal=proposal.to_dict(include_arguments=False)
             )
+        except BaseException:
+            # Successful tools do not make a successful workflow when the
+            # subsequent model call fails or the stream is cancelled.
+            if workflow is not None:
+                from ..long_term.procedural.workflow import WorkflowOutcome
+
+                workflow.outcome = WorkflowOutcome.FAILURE
+            raise
         finally:
             session.persistence["workflow"] = (
                 "written"
@@ -8390,7 +8980,9 @@ class MemAgent:
             yield self._no_llm_message()
             return
 
-        workflow = self._init_workflow_capture(query, user_id)
+        workflow, messages, tools = self._prepare_turn_request(
+            system_prompt, query, context, user_id, request_context
+        )
 
         workflow_persisted = False
 
@@ -8400,17 +8992,6 @@ class MemAgent:
                 return
             if self._persist_workflow_run(workflow):
                 workflow_persisted = True
-
-        # Build messages (same as _execute_llm_interaction)
-        messages = self._build_prompt_messages(
-            system_prompt, query, context, request_context=request_context
-        )
-
-        # Build a scoped progressive tool surface and pin prompt-cache scope.
-        if getattr(self, "semantic_tool_router", None) is not None:
-            self.semantic_tool_router.begin_turn(user_id=user_id)
-        tools = self._build_llm_tools(query, user_id=user_id)
-        self._set_provider_cache_scope()
 
         # Streaming loop with tool calling
         max_iterations = self._get_tool_iteration_limit()
@@ -8473,17 +9054,14 @@ class MemAgent:
                         response = event["response"]
                         message = response.choices[0].message
 
-                        self._append_assistant_tool_calls(messages, message)
-                        for tool_call in message.tool_calls:
-                            tool_call_count += 1
-                            self._execute_and_record_tool_call(
-                                tool_call,
-                                messages,
-                                workflow,
-                                user_id,
-                                streaming=True,
-                                query=query,
-                            )
+                        tool_call_count += self._run_tool_turn(
+                            message,
+                            messages,
+                            workflow,
+                            user_id,
+                            streaming=True,
+                            query=query,
+                        )
 
                         # Continue to next iteration to stream the final response
                         continue
@@ -8506,18 +9084,8 @@ class MemAgent:
                                 tool_call_count=tool_call_count,
                             )
                             if not decision.accepted:
-                                rejection_count += 1
-                                if (
-                                    rejection_count
-                                    > self.completion_policy.max_rejections
-                                ):
-                                    raise CompletionRejectedError(
-                                        decision, rejection_count
-                                    )
-                                self._append_completion_rejection(
-                                    messages,
-                                    final_content,
-                                    self.completion_policy.retry_message(decision),
+                                rejection_count = self._note_completion_rejection(
+                                    messages, final_content, decision, rejection_count
                                 )
                                 break
                             if final_content:
@@ -8542,6 +9110,7 @@ class MemAgent:
             )
             if gate_enabled:
                 raise CompletionRejectedError(exhausted, rejection_count)
+            self._mark_interaction_error("iteration_limit")
             yield (
                 "\n\nI reached the maximum number of tool-call iterations "
                 f"({max_iterations}). Please try again."
@@ -8625,6 +9194,8 @@ class MemAgent:
                 def _skip(item: Any) -> bool:
                     if self._is_trace_bundle_message(item):
                         return True
+                    if is_suppressed(item):
+                        return True
                     if isinstance(item, dict):
                         role = str(item.get("role") or "").strip().lower()
                         if role == Role.TOOL.value and _is_tool_placeholder_content(
@@ -8662,17 +9233,18 @@ class MemAgent:
                     except Exception as exc:
                         logger.debug("Query expansion skipped: %s", exc)
                 retrieval_queries = retrieval_queries[: policy.max_query_variants]
+                # Thread text the retrievers below use to drop near-duplicates.
+                history_texts = [
+                    str((item.get("content") or {}).get("content") or "")
+                    if isinstance(item.get("content"), dict)
+                    else str(item.get("content") or "")
+                    for item in context.get("conversation_history", [])
+                    if isinstance(item, dict)
+                ]
                 if (
                     self.learning_control_plane is not None
                     and self.learning_control_plane_config.retrieval_enabled
                 ):
-                    history_texts = [
-                        str((item.get("content") or {}).get("content") or "")
-                        if isinstance(item.get("content"), dict)
-                        else str(item.get("content") or "")
-                        for item in context.get("conversation_history", [])
-                        if isinstance(item, dict)
-                    ]
                     try:
                         context["evidence_pack"] = self._timed_memory_read(
                             "evidence_pack",
@@ -8694,6 +9266,9 @@ class MemAgent:
                     else:
                         # EvidencePack owns multi-source retrieval for this
                         # turn; skip the duplicate legacy retrieval path.
+                        self._schedule_evidence_reinforcement(
+                            context.get("evidence_pack")
+                        )
                         active = set()
                 if (
                     MemoryType.KNOWLEDGE_BASE in active
@@ -8752,13 +9327,6 @@ class MemAgent:
                             candidates.append((source, row))
 
                 if candidates:
-                    history_texts = [
-                        str((item.get("content") or {}).get("content") or "")
-                        if isinstance(item.get("content"), dict)
-                        else str(item.get("content") or "")
-                        for item in context.get("conversation_history", [])
-                        if isinstance(item, dict)
-                    ]
                     query_embedding = None
                     try:
                         from ..embeddings import get_embedding
@@ -8776,9 +9344,11 @@ class MemAgent:
                         max_items=policy.max_items,
                         dedupe_parent_sources=policy.dedupe_parent_sources,
                         selection_ledger=self._last_selection_ledger,
+                        scoring=self._retrieval_scoring(),
                     )
                     if selected:
                         context["retrieved_memories"] = selected
+                        self._schedule_memory_reinforcement(selected, candidates)
             except Exception as e:
                 logger.warning(f"Failed to retrieve relevant memories: {e}")
             finally:
@@ -8827,6 +9397,10 @@ class MemAgent:
                     thread_id=self._current_thread_id,
                 )
                 if isinstance(summaries, (list, tuple)) and summaries:
+                    summaries = [
+                        entry for entry in summaries if not is_suppressed(entry)
+                    ]
+                if summaries:
                     context["summaries"] = list(summaries)
             except Exception as e:
                 logger.debug("Failed to load summary references: %s", e)
@@ -9224,19 +9798,9 @@ class MemAgent:
             return self._no_llm_message()
 
         try:
-            # Initialize workflow tracking if workflow memory is active
-            workflow = self._init_workflow_capture(query, user_id)
-
-            # Build initial messages
-            messages = self._build_prompt_messages(
-                system_prompt, query, context, request_context=request_context
+            workflow, messages, tools = self._prepare_turn_request(
+                system_prompt, query, context, user_id, request_context
             )
-
-            # Build a scoped progressive tool surface and pin prompt-cache scope.
-            if getattr(self, "semantic_tool_router", None) is not None:
-                self.semantic_tool_router.begin_turn(user_id=user_id)
-            tools = self._build_llm_tools(query, user_id=user_id)
-            self._set_provider_cache_scope()
 
             # Execute main loop with tool calling
             max_iterations = self._get_tool_iteration_limit()
@@ -9272,13 +9836,8 @@ class MemAgent:
                     if decision.accepted:
                         self._persist_workflow_run(workflow)
                         return final_content
-                    rejection_count += 1
-                    if rejection_count > self.completion_policy.max_rejections:
-                        raise CompletionRejectedError(decision, rejection_count)
-                    self._append_completion_rejection(
-                        messages,
-                        final_content,
-                        self.completion_policy.retry_message(decision),
+                    rejection_count = self._note_completion_rejection(
+                        messages, final_content, decision, rejection_count
                     )
                     continue
 
@@ -9309,27 +9868,19 @@ class MemAgent:
                         if decision.accepted:
                             self._persist_workflow_run(workflow)
                             return final_content
-                        rejection_count += 1
-                        if rejection_count > self.completion_policy.max_rejections:
-                            raise CompletionRejectedError(decision, rejection_count)
-                        self._append_completion_rejection(
-                            messages,
-                            final_content,
-                            self.completion_policy.retry_message(decision),
+                        rejection_count = self._note_completion_rejection(
+                            messages, final_content, decision, rejection_count
                         )
                         continue
 
-                    self._append_assistant_tool_calls(messages, message)
-                    for tool_call in message.tool_calls:
-                        tool_call_count += 1
-                        self._execute_and_record_tool_call(
-                            tool_call,
-                            messages,
-                            workflow,
-                            user_id,
-                            streaming=False,
-                            query=query,
-                        )
+                    tool_call_count += self._run_tool_turn(
+                        message,
+                        messages,
+                        workflow,
+                        user_id,
+                        streaming=False,
+                        query=query,
+                    )
 
                     # Continue loop to get final response
                     continue
@@ -9342,6 +9893,7 @@ class MemAgent:
                     )
                 if session_for(self) is not None:
                     raise ProviderStreamError("unexpected_response_format")
+                self._mark_interaction_error("unexpected_response_format")
                 self._persist_workflow_run(workflow)
                 return fallback_response
 
@@ -9353,6 +9905,7 @@ class MemAgent:
                 )
             if session_for(self) is not None:
                 raise ProviderStreamError("iteration_limit")
+            self._mark_interaction_error("iteration_limit")
             final_response = (
                 "I reached the maximum number of tool-call iterations "
                 f"({max_iterations}). Please try again."
@@ -9394,7 +9947,18 @@ class MemAgent:
             if "workflow" in locals():
                 self._persist_workflow_run(workflow)
 
+            self._mark_interaction_error("provider_error")
             return f"I encountered an error while processing your request: {str(e)}"
+
+    def _mark_interaction_error(self, code: str) -> None:
+        """Flag this turn's reply as a failure message rather than an answer.
+
+        ``run``/``run_stream`` then skip the semantic cache and the
+        conversation write for it and close the turn trace as an error, so a
+        provider outage never becomes a cached or replayed "answer".
+        """
+        self._interaction_error_code = code
+        self._cache_bypass_reason = code
 
     def _register_entity_memory_tools(self):
         """Register built-in tools that expose entity memory to the LLM."""
@@ -9678,15 +10242,12 @@ class MemAgent:
                     "message": "No knowledge base entries are attached to this agent.",
                 }
             try:
-                from ..long_term.semantic.knowledge_base import KnowledgeBase
-
-                kb = KnowledgeBase(memory_provider=self.memory_provider)
-                raw = kb.retrieve_knowledge_by_query(
+                raw = self._retrieve_knowledge_candidates(
+                    self._knowledge_base_instance(),
                     query=query,
                     namespace=namespace,
-                    # Over-fetch so we can filter to the agent's KB ids and
-                    # still return `limit` results in the common case.
-                    limit=max(limit * 4, limit),
+                    limit=limit,
+                    kb_ids=kb_ids,
                 )
             except Exception as exc:
                 logger.warning("knowledge_base_lookup failed: %s", exc)
@@ -9731,6 +10292,79 @@ class MemAgent:
         except Exception as exc:
             logger.debug("Could not register knowledge_base_lookup: %s", exc)
 
+    def _knowledge_base_instance(self) -> Any:
+        """The agent's KnowledgeBase, reused across lookups."""
+        existing = getattr(self, "knowledge_base", None)
+        if existing is not None and callable(
+            getattr(existing, "retrieve_knowledge_by_query", None)
+        ):
+            return existing
+        from ..long_term.semantic.knowledge_base import KnowledgeBase
+
+        cached = getattr(self, "_knowledge_base_cache", None)
+        if (
+            cached is not None
+            and type(cached) is KnowledgeBase
+            and getattr(cached, "memory_provider", None) is self.memory_provider
+        ):
+            return cached
+        cached = KnowledgeBase(memory_provider=self.memory_provider)
+        self._knowledge_base_cache = cached
+        return cached
+
+    @staticmethod
+    def _knowledge_entry_in_scope(entry: Any, kb_ids: Set[str]) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        entry_kb_id = entry.get("knowledge_base_id") or entry.get("knowledgeBaseId")
+        return not entry_kb_id or entry_kb_id in kb_ids
+
+    _KNOWLEDGE_LOOKUP_MAX_CANDIDATES = 1000
+
+    def _retrieve_knowledge_candidates(
+        self,
+        kb: Any,
+        *,
+        query: str,
+        namespace: Optional[str],
+        limit: int,
+        kb_ids: Set[str],
+    ) -> List[Any]:
+        """Candidates for ``knowledge_base_lookup``.
+
+        When the store can scope the search to this agent's knowledge-base
+        ids (and user) it does so. Otherwise the over-fetch widens in
+        proportion to how many candidates were filtered out, so a small
+        knowledge base is not drowned out by other agents' documents.
+        """
+        retrieve = kb.retrieve_knowledge_by_query
+        try:
+            accepted = inspect.signature(retrieve).parameters
+        except (TypeError, ValueError):
+            accepted = {}
+        kwargs: Dict[str, Any] = {"query": query, "namespace": namespace}
+        if "user_id" in accepted:
+            kwargs["user_id"] = self._current_user_id
+        wanted = max(int(limit), 1)
+        if "knowledge_base_ids" in accepted:
+            kwargs["knowledge_base_ids"] = sorted(kb_ids)
+            return list(retrieve(limit=wanted, **kwargs) or [])
+
+        ceiling = max(int(self._KNOWLEDGE_LOOKUP_MAX_CANDIDATES), wanted)
+        candidate_limit = min(max(wanted * 4, wanted), ceiling)
+        while True:
+            raw = list(retrieve(limit=candidate_limit, **kwargs) or [])
+            matching = sum(
+                1 for entry in raw if self._knowledge_entry_in_scope(entry, kb_ids)
+            )
+            exhausted = len(raw) < candidate_limit or candidate_limit >= ceiling
+            if matching >= wanted or exhausted:
+                return raw
+            # Scale by the observed hit ratio (at least double) and retry.
+            ratio = matching / max(len(raw), 1)
+            proportional = int(wanted / ratio) + 1 if ratio > 0 else candidate_limit * 5
+            candidate_limit = min(max(proportional, candidate_limit * 2), ceiling)
+
     def _register_internet_access_tools(self):
         """Register tools that expose internet search and browsing."""
         if not (
@@ -9746,8 +10380,9 @@ class MemAgent:
         def internet_search(query: str, max_results: int = 5) -> Any:
             """Search the public internet for up-to-date information."""
             try:
-                if self._internet_access_disabled_reason:
-                    message = f"Internet access disabled: {self._internet_access_disabled_reason}"
+                blocked = self._internet_access_block_reason()
+                if blocked:
+                    message = f"Internet access disabled: {blocked}"
                     return self._internet_error_result(
                         {
                             "ok": False,
@@ -9777,8 +10412,9 @@ class MemAgent:
         def open_web_page(url: str) -> Any:
             """Fetch and summarize the contents of a website."""
             try:
-                if self._internet_access_disabled_reason:
-                    message = f"Internet access disabled: {self._internet_access_disabled_reason}"
+                blocked = self._internet_access_block_reason()
+                if blocked:
+                    message = f"Internet access disabled: {blocked}"
                     return self._internet_error_result(
                         {
                             "ok": False,
@@ -10280,28 +10916,69 @@ class MemAgent:
 
         self._skills_marketplace_tools_registered = False
 
+    @classmethod
+    def _configured_internet_cooldown(cls) -> float:
+        raw = os.getenv("MEMORIZZ_INTERNET_ACCESS_COOLDOWN_SECONDS", "").strip()
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid MEMORIZZ_INTERNET_ACCESS_COOLDOWN_SECONDS=%r",
+                    raw,
+                )
+        return float(cls.INTERNET_ACCESS_COOLDOWN_SECONDS)
+
+    def _internet_access_block_reason(self) -> Optional[str]:
+        """Why internet tools are paused right now, or None once the cool-down ends."""
+        until = self._internet_access_disabled_until
+        if until is None:
+            return None
+        now = self._internet_access_clock()
+        if now >= until:
+            # Cool-down elapsed: the next call is a real retry.
+            self._internet_access_disabled_until = None
+            self._internet_access_disabled_reason = None
+            self._internet_access_failure_count = 0
+            logger.info("Internet access cool-down elapsed; internet tools re-enabled")
+            return None
+        remaining = max(0, int(round(until - now)))
+        retry_at = (datetime.now(timezone.utc) + timedelta(seconds=remaining)).strftime(
+            "%H:%M:%S UTC"
+        )
+        reason = (
+            "Internet access paused after "
+            f"{self._internet_access_failure_count} consecutive failures; "
+            f"retrying in {remaining}s (at {retry_at})."
+        )
+        self._internet_access_disabled_reason = reason
+        return reason
+
     def _handle_internet_access_error(self, message: str) -> Dict[str, Any]:
-        """Track repeated provider failures and disable tools after threshold."""
+        """Count provider failures; pause the tools for a cool-down past the threshold."""
         self._internet_access_failure_count += 1
+        blocked = self._internet_access_block_reason()
         if (
-            self._internet_access_failure_count >= 3
-            and not self._internet_access_disabled_reason
+            blocked is None
+            and self._internet_access_failure_count
+            >= self.INTERNET_ACCESS_FAILURE_THRESHOLD
         ):
-            self._internet_access_disabled_reason = (
-                "Internet access temporarily disabled after repeated failures."
+            cooldown = max(0.0, float(self.internet_access_cooldown_seconds))
+            self._internet_access_disabled_until = (
+                self._internet_access_clock() + cooldown
             )
+            blocked = self._internet_access_block_reason()
             logger.warning(
-                "Disabling internet access tools after %s failures.",
+                "Pausing internet access tools for %.0fs after %s failures.",
+                cooldown,
                 self._internet_access_failure_count,
             )
         return {
             "ok": False,
             "error_code": "provider_error",
             "provider": self.get_internet_access_provider_name(),
-            "retryable": not bool(self._internet_access_disabled_reason),
-            "error": message
-            if not self._internet_access_disabled_reason
-            else f"{message} | {self._internet_access_disabled_reason}",
+            "retryable": not bool(blocked),
+            "error": message if not blocked else f"{message} | {blocked}",
         }
 
     def _record_interaction(
@@ -10381,6 +11058,18 @@ class MemAgent:
                     "written" if user_unit_id and assistant_unit_id else "unknown"
                 )
 
+            # Rate the new rows' importance (Generative Agents poignancy) and,
+            # once enough importance has accumulated, reflect on the thread.
+            self._store_importance_ratings(
+                [
+                    (user_unit_id, query, Role.USER.value),
+                    (assistant_unit_id, response, Role.ASSISTANT.value),
+                ],
+                memory_id=memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+
             # Backfill embeddings off the hot path so episodic semantic
             # recall (vector search over conversation rows) has vectors to
             # match — rows are created with embedding=None so the user-facing
@@ -10427,11 +11116,6 @@ class MemAgent:
         if not pairs:
             return
 
-        if self._embedding_backfill_executor is None:
-            self._embedding_backfill_executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="memorizz-embed-backfill"
-            )
-
         provider = self.memory_provider
 
         def _backfill() -> None:
@@ -10447,17 +11131,482 @@ class MemAgent:
                             MemoryType.CONVERSATION_MEMORY,
                         )
                 except Exception as exc:
-                    logger.debug(
+                    logger.warning(
                         "Conversation embedding backfill failed for %s: %s",
                         unit_id,
                         exc,
                     )
 
+        self._submit_background(
+            _backfill, label="conversation embedding backfill", backfill=True
+        )
+
+    def _background_executor(self) -> ThreadPoolExecutor:
+        """The agent's single background worker (embedding backfill, memory
+        reinforcement, importance re-rating); ``close()`` drains it."""
+        if self._background_worker is None:
+            self._background_worker = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="memorizz-embed-backfill"
+            )
+        return self._background_worker
+
+    def _submit_background(
+        self, task: Callable[[], None], *, label: str, backfill: bool = False
+    ) -> bool:
+        """Run ``task`` on the background worker in a copy of the current context.
+
+        The copied context keeps the turn's memory-history actor on the
+        worker's writes. The future is tracked so ``close()`` waits for it;
+        failures are logged at WARNING and never reach the user-facing turn.
+        """
+
+        def _run() -> None:
+            try:
+                task()
+            except Exception as exc:
+                logger.warning("Background %s failed: %s", label, exc)
+
+        context = copy_context()
         try:
-            self._embedding_backfill_executor.submit(_backfill)
+            executor = self._background_executor()
+            if backfill:
+                self._embedding_backfill_executor = executor
+            future = executor.submit(context.run, _run)
         except RuntimeError:
             # Executor shut down (interpreter teardown) — skip quietly.
-            pass
+            return False
+        with self._embedding_backfill_lock:
+            self._embedding_backfill_futures.add(future)
+        future.add_done_callback(self._discard_embedding_backfill_future)
+        return True
+
+    def _discard_embedding_backfill_future(self, future: Any) -> None:
+        with self._embedding_backfill_lock:
+            self._embedding_backfill_futures.discard(future)
+
+    def _shutdown_embedding_backfill(self, timeout: float = 30.0) -> bool:
+        """Wait (bounded) for pending embedding backfills, then stop the worker.
+
+        Returns True when nothing was left pending.
+        """
+        executor = self._background_worker
+        if executor is None:
+            return True
+        self._background_worker = None
+        self._embedding_backfill_executor = None
+        with self._embedding_backfill_lock:
+            pending = [f for f in self._embedding_backfill_futures if not f.done()]
+        complete = True
+        if pending:
+            _done, not_done = wait_for_futures(pending, timeout=timeout)
+            if not_done:
+                complete = False
+                logger.warning(
+                    "Closing with %d conversation embedding backfill(s) still "
+                    "pending after %.0fs",
+                    len(not_done),
+                    timeout,
+                )
+        executor.shutdown(wait=False, cancel_futures=True)
+        return complete
+
+    # ------------------------------------------------------------------
+    # Forgetting mechanism (docs/guides/forgetting-mechanism.md)
+    # ------------------------------------------------------------------
+
+    def _retrieval_scoring(self) -> RetrievalScoring:
+        """This agent's retrieval scoring: policy ``scoring`` overrides laid
+        over the global ``MEMORIZZ_*`` defaults, cached per policy object."""
+        policy = self.retrieval_policy
+        cached = getattr(self, "_retrieval_scoring_cache", None)
+        if cached is not None and cached[0] is policy:
+            return cached[1]
+        scoring = RetrievalScoring.from_mapping(
+            getattr(policy, "scoring", None), base=RetrievalScoring.from_env()
+        )
+        self._retrieval_scoring_cache = (policy, scoring)
+        return scoring
+
+    @property
+    def retrieval_scoring(self) -> RetrievalScoring:
+        """Recency/importance/relevance weights used to rank retrieved memories."""
+        return self._retrieval_scoring()
+
+    # Retrieval source labels -> the provider store that holds the record.
+    _REINFORCEMENT_MEMORY_TYPES = {
+        "episodic": MemoryType.CONVERSATION_MEMORY,
+        "conversation": MemoryType.CONVERSATION_MEMORY,
+        "conversation_memory": MemoryType.CONVERSATION_MEMORY,
+        "knowledge_base": MemoryType.KNOWLEDGE_BASE,
+        "entity": MemoryType.ENTITY_MEMORY,
+        "entity_memory": MemoryType.ENTITY_MEMORY,
+        "summaries": MemoryType.SUMMARIES,
+        "workflow": MemoryType.WORKFLOW_MEMORY,
+        "workflow_memory": MemoryType.WORKFLOW_MEMORY,
+    }
+
+    @staticmethod
+    def _record_id_of(row: Any) -> str:
+        if not isinstance(row, dict):
+            return ""
+        for key in ("_id", "id"):
+            value = row.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    def _schedule_memory_reinforcement(
+        self, selected: List[Dict[str, Any]], candidates: Iterable[Tuple[str, Any]]
+    ) -> None:
+        """Record the recall of the selected memories off the user path.
+
+        ``touch_many`` bumps ``access_count`` and sets ``last_accessed_at``
+        (never ``timestamp`` or the embedding), which is what makes recency
+        decay since *last access* in the retrieval score.
+        """
+        if not selected:
+            return
+        record_ids: Dict[Tuple[str, str], str] = {}
+        for source, row in candidates or ():
+            record_id = self._record_id_of(row)
+            if record_id:
+                record_ids.setdefault((str(source), _candidate_id(row)), record_id)
+        grouped: Dict[MemoryType, List[str]] = {}
+        for item in selected:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or "")
+            memory_type = self._REINFORCEMENT_MEMORY_TYPES.get(source)
+            if memory_type is None:
+                continue
+            record_id = record_ids.get((source, str(item.get("id") or "")), "")
+            if not record_id:
+                continue
+            bucket = grouped.setdefault(memory_type, [])
+            if record_id not in bucket:
+                bucket.append(record_id)
+        self._submit_memory_touches(grouped)
+
+    def _schedule_evidence_reinforcement(self, pack: Any) -> None:
+        """Reinforce the provider records an EvidencePack put in the prompt."""
+        items = getattr(pack, "items", None) or ()
+        grouped: Dict[MemoryType, List[str]] = {}
+        for item in items:
+            source_type = str(getattr(item, "source_type", "") or "")
+            record_id = str(getattr(item, "source_id", "") or "").strip()
+            memory_type = self._REINFORCEMENT_MEMORY_TYPES.get(source_type)
+            if memory_type is None or not record_id:
+                continue
+            bucket = grouped.setdefault(memory_type, [])
+            if record_id not in bucket:
+                bucket.append(record_id)
+        self._submit_memory_touches(grouped)
+
+    def _submit_memory_touches(self, grouped: Dict[MemoryType, List[str]]) -> None:
+        provider = self.memory_provider
+        touch = getattr(provider, "touch_many", None)
+        if not grouped or provider is None or not callable(touch):
+            return
+
+        def _touch() -> None:
+            for memory_type, ids in grouped.items():
+                try:
+                    touch(list(ids), memory_type)
+                except Exception as exc:
+                    logger.warning(
+                        "Memory reinforcement failed for %s: %s",
+                        getattr(memory_type, "value", memory_type),
+                        exc,
+                    )
+
+        self._submit_background(_touch, label="memory reinforcement")
+
+    def _importance_rater(
+        self, *, generate: Optional[Callable[[str], str]] = None
+    ) -> ImportanceRater:
+        """The importance rater: ``MEMORIZZ_IMPORTANCE_*`` settings overlaid
+        with the policy's ``scoring.importance`` mapping when present."""
+        config = ImportanceConfig.from_env()
+        scoring = getattr(self.retrieval_policy, "scoring", None)
+        overlay = scoring.get("importance") if isinstance(scoring, dict) else None
+        if isinstance(overlay, dict):
+            config = ImportanceConfig.from_mapping(overlay, base=config)
+        return ImportanceRater(config, generate=generate)
+
+    def _importance_generate(self) -> Optional[Callable[[str], str]]:
+        """A one-prompt ``generate`` on the agent's own model for LLM ratings."""
+        model = self.model
+        if model is None:
+            return None
+        text_fn = getattr(model, "generate_text", None)
+        if callable(text_fn):
+            return lambda prompt: str(text_fn(prompt) or "")
+        generate = getattr(model, "generate", None)
+        if not callable(generate):
+            return None
+
+        def _call(prompt: str) -> str:
+            response = generate([{"role": "user", "content": prompt}])
+            if isinstance(response, str):
+                return response
+            choices = getattr(response, "choices", None)
+            if choices:
+                message = getattr(choices[0], "message", None)
+                return str(getattr(message, "content", "") or "")
+            return str(response or "")
+
+        return _call
+
+    def _store_importance_ratings(
+        self,
+        stored: List[Tuple[Optional[str], str, str]],
+        *,
+        memory_id: str,
+        user_id: Optional[str],
+        thread_id: Optional[str],
+    ) -> None:
+        """Rate new conversation rows and store ``importance``/``importance_source``.
+
+        Heuristic ratings are free and written synchronously. In ``llm`` mode
+        the heuristic value is stored now and replaced off the user path by
+        the model's rating (one short batched call per turn). Nothing here
+        can fail the turn.
+        """
+        provider = self.memory_provider
+        if provider is None or not callable(getattr(provider, "update_by_id", None)):
+            return
+        try:
+            rater = self._importance_rater()
+            if not rater.enabled:
+                return
+            rows = [
+                (unit_id, str(text), role)
+                for unit_id, text, role in stored
+                if unit_id and str(text or "").strip()
+            ]
+            total = 0.0
+            for unit_id, text, role in rows:
+                importance, source = rater.rate(text, role=role)
+                if importance is None:
+                    continue
+                provider.update_by_id(
+                    unit_id,
+                    {"importance": importance, "importance_source": source},
+                    MemoryType.CONVERSATION_MEMORY,
+                )
+                total += float(importance)
+            if rows and rater.config.mode == "llm":
+                generate = self._importance_generate()
+                if generate is not None:
+                    self._schedule_importance_rerating(rows, generate)
+            self._note_importance_for_reflection(
+                memory_id, total, user_id=user_id, thread_id=thread_id
+            )
+        except Exception as exc:
+            logger.warning("Importance rating failed for memory %s: %s", memory_id, exc)
+
+    def _schedule_importance_rerating(
+        self,
+        rows: List[Tuple[str, str, str]],
+        generate: Callable[[str], str],
+    ) -> None:
+        provider = self.memory_provider
+        rater = self._importance_rater(generate=generate)
+        unit_ids = [unit_id for unit_id, _text, _role in rows]
+        items = [{"text": text, "role": role, "kind": role} for _id, text, role in rows]
+
+        def _rerate() -> None:
+            for unit_id, (importance, source) in zip(unit_ids, rater.rate_many(items)):
+                if importance is None or source != "llm":
+                    continue  # model unavailable: the stored heuristic stands
+                try:
+                    provider.update_by_id(
+                        unit_id,
+                        {"importance": importance, "importance_source": source},
+                        MemoryType.CONVERSATION_MEMORY,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Importance re-rating failed for %s: %s", unit_id, exc
+                    )
+
+        self._submit_background(_rerate, label="importance re-rating")
+
+    # Reflection (Generative Agents): once the importance of new memories in a
+    # conversation adds up to the threshold, summarize that conversation.
+    REFLECTION_THRESHOLD = 15.0  # 0..1 scale; the paper's 150 on 1..10
+
+    @classmethod
+    def _reflection_settings(cls) -> Tuple[bool, float]:
+        enabled = os.getenv("MEMORIZZ_REFLECTION_ENABLED", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        threshold = float(cls.REFLECTION_THRESHOLD)
+        raw = os.getenv("MEMORIZZ_REFLECTION_THRESHOLD", "").strip()
+        if raw:
+            try:
+                threshold = max(0.0, float(raw))
+            except ValueError:
+                logger.warning("Ignoring invalid MEMORIZZ_REFLECTION_THRESHOLD=%r", raw)
+        return enabled, threshold
+
+    def _note_importance_for_reflection(
+        self,
+        memory_id: Optional[str],
+        total: float,
+        *,
+        user_id: Optional[str],
+        thread_id: Optional[str],
+    ) -> None:
+        enabled, threshold = self._reflection_settings()
+        if not enabled or threshold <= 0.0 or total <= 0.0 or not memory_id:
+            return
+        with self._reflection_lock:
+            accumulated = self._reflection_importance.get(memory_id, 0.0) + total
+            if accumulated < threshold:
+                self._reflection_importance[memory_id] = accumulated
+                return
+            self._reflection_importance[memory_id] = 0.0
+        self._run_reflection(
+            memory_id,
+            accumulated=accumulated,
+            threshold=threshold,
+            user_id=user_id,
+            thread_id=thread_id,
+        )
+
+    def _run_reflection(
+        self,
+        memory_id: str,
+        *,
+        accumulated: float,
+        threshold: float,
+        user_id: Optional[str],
+        thread_id: Optional[str],
+    ) -> List[str]:
+        """Compact this conversation's older memories into a summary once."""
+        keep = int(getattr(self.context_policy, "keep_recent_messages", 0) or 0)
+        summary_ids: List[str] = []
+        try:
+            summary_ids = list(
+                self.generate_summaries(
+                    days_back=36500,
+                    max_memories_per_summary=50,
+                    memory_id=memory_id,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    keep_recent=keep,
+                    summary_type="compaction",
+                )
+                or []
+            )
+        except Exception as exc:
+            logger.warning("Reflection for memory %s failed: %s", memory_id, exc)
+        self._emit_stream_event(
+            "trace",
+            {
+                "trace_kind": "reflection",
+                "title": "Reflection triggered",
+                "memory_id": memory_id,
+                "accumulated_importance": round(accumulated, 3),
+                "threshold": threshold,
+                "summary_ids": summary_ids,
+                "status": "success" if summary_ids else "no_summary",
+                "success": bool(summary_ids),
+                "content": "",
+            },
+        )
+        return summary_ids
+
+    @property
+    def retention_config(self) -> Any:
+        """Governed-suppression settings: policy ``retention`` overrides laid
+        over the global ``MEMORIZZ_RETENTION_*`` defaults."""
+        from ..learning.retention import RetentionConfig
+
+        return RetentionConfig.from_mapping(
+            getattr(self.retrieval_policy, "retention", None),
+            base=RetentionConfig.from_env(),
+        )
+
+    def _retention_planner(self) -> Any:
+        from ..learning.retention import RetentionPlanner
+
+        if self.memory_provider is None:
+            raise ValueError("Memory retention requires a memory provider")
+        return RetentionPlanner(
+            self.memory_provider,
+            agent_id=self.agent_id,
+            config=self.retention_config,
+            scoring=self.retrieval_scoring,
+        )
+
+    def plan_memory_retention(
+        self, memory_id: Optional[str] = None, *, user_id: Any = ...
+    ) -> Any:
+        """Dry-run plan of this agent's memories whose retention score decayed.
+
+        With the learning control plane enabled the plan is a durable event;
+        otherwise the planner runs directly on the memory provider.
+        """
+        plane = self.learning_control_plane
+        if plane is not None:
+            return plane.plan_retention(
+                memory_id=memory_id,
+                user_id=user_id,
+                scoring=self.retrieval_scoring,
+                config=self.retention_config,
+            )
+        return self._retention_planner().plan(
+            memory_ids=[memory_id] if memory_id else None, user_id=user_id
+        )
+
+    def apply_memory_retention(
+        self, report: Any, approved_by: str, reason: Optional[str] = None
+    ) -> Any:
+        """Suppress (never delete) the memories of an approved retention plan."""
+        plane = self.learning_control_plane
+        if plane is not None:
+            return plane.apply_retention(
+                report,
+                approved_by=approved_by,
+                reason=reason,
+                config=self.retention_config,
+            )
+        return self._retention_planner().apply(
+            report, approved_by=approved_by, reason=reason
+        )
+
+    def unsuppress_memory(
+        self,
+        record_id: str,
+        memory_type: Any,
+        approved_by: str,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """Reverse a suppression so the record is retrievable again."""
+        plane = self.learning_control_plane
+        if plane is not None:
+            return plane.unsuppress_memory(
+                record_id, memory_type, approved_by=approved_by, reason=reason
+            )
+        return self._retention_planner().unsuppress(
+            record_id, memory_type, approved_by=approved_by, reason=reason
+        )
+
+    def suppressed_memories(
+        self, memory_id: Optional[str] = None, *, user_id: Any = ...
+    ) -> List[Dict[str, Any]]:
+        """Currently suppressed records in scope (for review)."""
+        plane = self.learning_control_plane
+        if plane is not None:
+            return plane.suppressed_memories(memory_id=memory_id, user_id=user_id)
+        return self._retention_planner().suppressed(
+            memory_ids=[memory_id] if memory_id else None, user_id=user_id
+        )
 
     # Conversation state management methods
     def start_new_thread(self, memory_id: str = None) -> str:
@@ -10551,7 +11700,6 @@ class MemAgent:
             shared[memory_id] = thread_id
             while len(shared) > 4096:
                 shared.pop(next(iter(shared)))
-        logger.info("Reset thread state")
 
     @staticmethod
     def _fingerprint(value: Any) -> str:
@@ -11029,11 +12177,21 @@ class MemAgent:
                             score = 0.0
                         if score >= resolved_policy.min_relevance_score:
                             thresholded.append(("conversation", row))
+                    # Hosts may call this with a duck-typed agent (see the
+                    # personalization tests); fall back to the global scoring
+                    # and skip reinforcement when the helpers are absent.
+                    resolve_scoring = getattr(self, "_retrieval_scoring", None)
+                    reinforce = getattr(self, "_schedule_memory_reinforcement", None)
                     selected_memories = dedupe_and_select(
                         thresholded,
                         max_items=resolved_policy.max_conversation_memories,
                         dedupe_parent_sources=True,
+                        scoring=(
+                            resolve_scoring() if callable(resolve_scoring) else None
+                        ),
                     )
+                    if callable(reinforce):
+                        reinforce(selected_memories, thresholded)
                     diagnostics["conversation_selected_count"] = len(selected_memories)
                 except Exception as exc:
                     diagnostics.update(
@@ -11045,7 +12203,11 @@ class MemAgent:
                     )
 
         for item in additional_memories or []:
-            if isinstance(item, dict) and self._memory_row_text(item):
+            if (
+                isinstance(item, dict)
+                and not is_suppressed(item)
+                and self._memory_row_text(item)
+            ):
                 selected_memories.append(dict(item))
         selected_memories = selected_memories[
             : resolved_policy.max_conversation_memories
@@ -11202,6 +12364,16 @@ class MemAgent:
                 report["ok"] = False
                 report["closed"][label] = False
                 report["errors"].append(f"{label} close failed: {exc}")
+
+        # Stop background embedding writes before the provider they write to.
+        try:
+            report["closed"]["embedding_backfill"] = self._shutdown_embedding_backfill(
+                timeout=self.embedding_backfill_close_timeout
+            )
+        except Exception as exc:
+            report["ok"] = False
+            report["closed"]["embedding_backfill"] = False
+            report["errors"].append(f"embedding_backfill close failed: {exc}")
 
         _close("sandbox", getattr(self, "sandbox_manager", None))
         _close("browser_control", getattr(self, "browser_control_manager", None))

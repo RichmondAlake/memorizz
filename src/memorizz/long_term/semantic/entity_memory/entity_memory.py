@@ -152,8 +152,31 @@ class EntityMemory:
         now = self._timestamp()
         normalized_identity = self._normalize_identity_key(identity_key)
         supplied_metadata = dict(metadata or {})
+        if "identity_key" in supplied_metadata:
+            # Only the host's ``identity_key`` argument binds a canonical
+            # identity. A model- or caller-supplied value in metadata is
+            # stored verbatim otherwise, and one invalid key used to break
+            # every scoped read for the tenant.
+            supplied_metadata.pop("identity_key")
+            logger.info(
+                "Ignoring caller-supplied metadata.identity_key; pass identity_key "
+                "as an argument instead"
+            )
         if normalized_identity:
             supplied_metadata["identity_key"] = normalized_identity
+        # Without a canonical identity or an explicit entity_id, the record is
+        # keyed by its normalised (scope, type, name) so racing first writes
+        # and name variants converge on one row.
+        name_key = (
+            self._name_identity_key(name, entity_type)
+            if not entity_id and not normalized_identity
+            else ""
+        )
+        name_bound_id = (
+            self._deterministic_name_id(name_key, memory_id=memory_id, user_id=user_id)
+            if name_key
+            else ""
+        )
 
         existing = None
         # A canonical identity is host/application authority. When both an
@@ -171,12 +194,20 @@ class EntityMemory:
             existing = self._fetch_one(
                 {"name": name}, memory_id=memory_id, user_id=user_id
             )
+        if not existing and name_bound_id:
+            # A case or spacing variant of a name this scope already holds
+            # merges into that record instead of overwriting its row.
+            existing = self._fetch_one(
+                {"entity_id": name_bound_id}, memory_id=memory_id, user_id=user_id
+            )
         if existing:
             entity_id = str(existing.get("entity_id") or entity_id or uuid.uuid4())
         elif normalized_identity:
             entity_id = self._deterministic_entity_id(
                 normalized_identity, memory_id=memory_id, user_id=user_id
             )
+        elif name_bound_id:
+            entity_id = name_bound_id
         else:
             entity_id = entity_id or str(uuid.uuid4())
 
@@ -226,6 +257,12 @@ class EntityMemory:
             # documents with different generated _id values. Filesystem uses
             # this as its document path and Oracle accepts the UUID as its row
             # id, so retries become idempotent across all built-in providers.
+            record["_id"] = record["entity_id"]
+        elif not existing and name_bound_id:
+            # Name-only first writes were check-then-insert: two concurrent
+            # writers both missed the lookup and inserted two rows. The same
+            # deterministic storage key makes them converge on one row;
+            # ``consolidate_duplicate_entities`` still merges legacy pairs.
             record["_id"] = record["entity_id"]
         self.memory_provider.store(
             data=record,
@@ -615,6 +652,63 @@ class EntityMemory:
         return normalized
 
     @staticmethod
+    def _name_identity_key(name: Optional[str], entity_type: Optional[str]) -> str:
+        """The normalised ``name:<type>:<name>`` key a name-only write converges on."""
+        normalized_name = " ".join(str(name or "").casefold().split())
+        if not normalized_name:
+            return ""
+        normalized_type = " ".join(str(entity_type or "unknown").casefold().split())
+        return f"name:{normalized_type}:{normalized_name}"
+
+    @staticmethod
+    def _deterministic_name_id(
+        name_key: str,
+        *,
+        memory_id: Optional[str],
+        user_id: Optional[str],
+    ) -> str:
+        """A stable id for a name-keyed entity in one scope.
+
+        The scope document uses ``name_key`` rather than ``identity_key`` so it
+        can never collide with an identity-bound id.
+        """
+        scope = json.dumps(
+            {"memory_id": memory_id, "name_key": name_key, "user_id": user_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"memorizz:entity:{scope}"))
+
+    _invalid_identity_key_logged = False
+
+    @classmethod
+    def _stored_identity_key(cls, metadata: Any) -> str:
+        """The normalised identity key on a stored record, or ``""``.
+
+        An invalid stored value (one an older release accepted verbatim) is
+        treated as absent rather than raising out of every read, and is logged
+        once per process.
+        """
+        if not isinstance(metadata, dict):
+            return ""
+        raw = metadata.get("identity_key")
+        if raw is None or raw == "":
+            return ""
+        try:
+            return cls._normalize_identity_key(raw)
+        except ValueError as exc:
+            if not EntityMemory._invalid_identity_key_logged:
+                EntityMemory._invalid_identity_key_logged = True
+                logger.warning(
+                    "Ignoring an invalid stored entity identity_key (%s); the record "
+                    "is treated as unbound. Further occurrences are logged at debug.",
+                    exc,
+                )
+            else:
+                logger.debug("Ignoring an invalid stored entity identity_key (%s)", exc)
+            return ""
+
+    @staticmethod
     def _deterministic_entity_id(
         identity_key: str,
         *,
@@ -640,13 +734,7 @@ class EntityMemory:
         user_id: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         for row in self.list_entities(memory_id=memory_id, user_id=user_id):
-            metadata = row.get("metadata") or {}
-            if not isinstance(metadata, dict):
-                continue
-            if (
-                self._normalize_identity_key(metadata.get("identity_key"))
-                == identity_key
-            ):
+            if self._stored_identity_key(row.get("metadata")) == identity_key:
                 return row
         return None
 
@@ -660,12 +748,7 @@ class EntityMemory:
 
     @classmethod
     def _duplicate_group_key(cls, record: Dict[str, Any]) -> str:
-        metadata = record.get("metadata") or {}
-        identity_key = (
-            cls._normalize_identity_key(metadata.get("identity_key"))
-            if isinstance(metadata, dict)
-            else ""
-        )
+        identity_key = cls._stored_identity_key(record.get("metadata"))
         if identity_key:
             return f"identity:{identity_key}"
         name = " ".join(str(record.get("name") or "").casefold().split())
@@ -975,8 +1058,7 @@ class EntityMemory:
             explicit_self = bool(
                 name in _SELF_ENTITY_ALIASES
                 or metadata.get("is_self") is True
-                or cls._normalize_identity_key(metadata.get("identity_key"))
-                in _SELF_IDENTITY_KEYS
+                or cls._stored_identity_key(metadata) in _SELF_IDENTITY_KEYS
                 or str(metadata.get("subject") or "").casefold()
                 in {"current_user", "user", "self"}
             )
@@ -1074,6 +1156,18 @@ class EntityMemory:
         record["user_id"] = user_id
         if metadata:
             record["metadata"] = {**record.get("metadata", {}), **metadata}
+        stored_metadata = record.get("metadata")
+        if (
+            isinstance(stored_metadata, dict)
+            and "identity_key" in stored_metadata
+            and not self._stored_identity_key(stored_metadata)
+        ):
+            # Heal a poisoned record on its next write.
+            record["metadata"] = {
+                key: value
+                for key, value in stored_metadata.items()
+                if key != "identity_key"
+            }
 
         record_attributes = self._merge_attributes(
             record.get("attributes", []), attributes, timestamp

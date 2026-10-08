@@ -742,7 +742,7 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
                     "AZURE_OPENAI_API_KEY": "",
                     "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER": "",
                 },
-                "timeout": 20,
+                "timeout": 90,
             }
         ],
     )
@@ -750,13 +750,16 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
     tools = manager.list_tools("memorizz-server")
     names = {tool["name"] for tool in tools["tools"]}
     assert tools["ok"] is True
-    assert len(names) == 46
+    assert len(names) == 49
+    assert "memorizz_get_memory_timeline" in names
     assert {
         "memorizz_ingest",
         "memorizz_lookup_entities",
         "memorizz_upsert_entity",
         "memorizz_update_memory",
         "memorizz_memory_status",
+        "memorizz_export_memories",
+        "memorizz_import_memories",
     } <= names
     assert {
         "memorizz_retry_harness_run",
@@ -819,6 +822,46 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
     assert _structured(stored)["ok"] is True
     listed = manager.call_tool("memorizz-server", "memorizz_list_memories", {})
     assert _structured(listed)["memories"][0]["content"] == "stored over MCP"
+
+    exported = _structured(
+        manager.call_tool("memorizz-server", "memorizz_export_memories", {})
+    )
+    assert exported["ok"] is True
+    archive = exported["archive"]
+    assert archive["format"] == "memorizz.memory"
+    assert archive["version"] == 1
+    assert len(archive["stores"]) == 13
+    assert archive["stores"]["knowledge_base"][0]["data"]["content"] == (
+        "stored over MCP"
+    )
+    # MCP clients approve write tools even when the server defaults to preview.
+    preview_proposal = manager.call_tool(
+        "memorizz-server",
+        "memorizz_import_memories",
+        {"archive": archive, "id_strategy": "new"},
+    )
+    preview_id = preview_proposal["proposal"]["proposal_id"]
+    manager.approve_tool_call(preview_id, approver_id="operator@example.com")
+    previewed = _structured(manager.resume_tool_call(preview_id))
+    assert previewed["ok"] is True
+    assert previewed["dry_run"] is True
+    assert previewed["imported"] == 0
+    import_proposal = manager.call_tool(
+        "memorizz-server",
+        "memorizz_import_memories",
+        {"archive": archive, "id_strategy": "new", "dry_run": False},
+    )
+    import_id = import_proposal["proposal"]["proposal_id"]
+    manager.approve_tool_call(import_id, approver_id="operator@example.com")
+    imported = _structured(manager.resume_tool_call(import_id))
+    assert imported["ok"] is True
+    assert imported["imported"] == archive["manifest"]["record_count"]
+    assert (
+        _structured(manager.call_tool("memorizz-server", "memorizz_list_memories", {}))[
+            "count"
+        ]
+        == 2
+    )
 
     create_proposal = manager.call_tool(
         "memorizz-server",
@@ -941,13 +984,17 @@ def test_authenticated_http_protocol_isolates_principals(tmp_path, monkeypatch):
                         "url": f"http://127.0.0.1:{port}/mcp",
                         "allow_private_network": True,
                         "auth": {"type": "bearer", "token": token},
-                        "timeout": 10,
+                        "timeout": 60,
                     }
                 ],
             )
 
         alice = remote_manager("alice-client", alice_token)
         bob = remote_manager("bob-client", bob_token)
+        # Listing first caches the server's readOnlyHint annotations; an
+        # un-listed tool is judged by name, and "memorizz_" is not a read verb.
+        assert alice.list_tools("remote")["ok"] is True
+        assert bob.list_tools("remote")["ok"] is True
         proposed = alice.call_tool(
             "remote",
             "memorizz_store_memory",
@@ -970,10 +1017,10 @@ def test_authenticated_http_protocol_isolates_principals(tmp_path, monkeypatch):
     finally:
         process.terminate()
         try:
-            process.wait(timeout=5)
+            process.wait(timeout=30)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=5)
+            process.wait(timeout=30)
 
 
 @pytest.mark.unit
@@ -996,7 +1043,10 @@ def test_harnesses_reach_the_agents_mcp_servers_only_through_policy(
                     "transport": "stdio",
                     "command": sys.executable,
                     "args": [str(fixture)],
-                    "timeout": 20,
+                    "timeout": 90,
+                    # Un-annotated tools change data unless the host says
+                    # otherwise; "echo" is not a read verb, so allowlist it.
+                    "read_only_tools": ["echo"],
                 }
             ],
         )

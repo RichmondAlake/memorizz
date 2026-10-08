@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.15.0"
+version = "0.16.0"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -84,8 +84,8 @@ voyageai = ["voyageai"]
 rerank = ["sentence-transformers>=5.0.0"]
 huggingface = [
     "numpy>=1.21,<2",
-    "sentence-transformers>=5.0.0",
-    "transformers>=5.5.0",
+    "sentence-transformers>=6.1.0",
+    "transformers>=5.19.0",
     "huggingface-hub>=1.0.0",
     "accelerate>=1.0.0",
 ]
@@ -168,8 +168,8 @@ all = [
     "voyageai",
     "faiss-cpu>=1.7.4",
     "numpy>=1.21,<2",
-    "sentence-transformers>=5.0.0",
-    "transformers>=5.5.0",
+    "sentence-transformers>=6.1.0",
+    "transformers>=5.19.0",
     "huggingface-hub>=1.0.0",
     "accelerate>=1.0.0",
     "fastapi>=0.104.0",

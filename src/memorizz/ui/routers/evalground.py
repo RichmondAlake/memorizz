@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ...benchmarks.agent_template import secret_free_agent_template
@@ -1470,7 +1471,8 @@ async def evalground_download(request: Request):
     download_error = None
 
     if missing_variants:
-        success, message = _run_longmemeval_dataset_download()
+        # The download script runs for minutes; keep it off the event loop.
+        success, message = await run_in_threadpool(_run_longmemeval_dataset_download)
         if success:
             download_message = message
         else:
@@ -1559,6 +1561,8 @@ async def evalground_download(request: Request):
             "trace_experiments": _list_trace_experiments(),
             "selected_run_id": None,
             "selected_run_status": None,
+            "terminal_bench": _terminal_bench_catalog(),
+            "tb_run": None,
             "active_page": "evalground",
         },
     )

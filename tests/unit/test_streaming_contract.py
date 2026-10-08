@@ -35,6 +35,37 @@ def text_provider(text="hello"):
     yield {"type": "done", "content": text}
 
 
+def test_provider_failure_persists_partial_workflow_as_failure(
+    streaming_agent, monkeypatch
+):
+    from memorizz.long_term.procedural.workflow import Workflow, WorkflowOutcome
+
+    workflow = Workflow(
+        name="Partial tool workflow",
+        steps={"Step 1: lookup": {"result": {"ok": True}}},
+        embedding=None,
+        generate_embedding=False,
+    )
+    monkeypatch.setattr(streaming_agent, "_init_workflow_capture", lambda *a: workflow)
+
+    def failed_provider(*args, **kwargs):
+        raise ProviderStreamError("provider_length")
+        yield
+
+    streaming_agent.model.generate_stream = failed_provider
+    with streaming_agent.run_stream_events("use the successful lookup") as stream:
+        events = list(stream)
+
+    assert events[-1]["status"] == "error"
+    assert events[-1]["error_code"] == "provider_length"
+    writes = streaming_agent.memory_provider.store.call_args_list
+    assert any(
+        call.args[0].get("outcome") == WorkflowOutcome.FAILURE.value
+        for call in writes
+        if call.args and isinstance(call.args[0], dict)
+    )
+
+
 def assert_contract(events):
     assert events[0]["type"] == "run.started"
     assert events[-1]["type"] == "run.done"

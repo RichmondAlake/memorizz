@@ -26,7 +26,7 @@
                 + '<line x1="12" y1="15" x2="12" y2="3"></line></svg>';
         }
     </script>
-    <link rel="stylesheet" href="/static/css/styles.css?v=38">
+    <link rel="stylesheet" href="/static/css/styles.css?v=39">
     {% block head %}{% endblock %}
     <link rel="stylesheet" href="/static/css/console.css?v=27">
 </head>
@@ -70,7 +70,7 @@
             </div>
 
             <nav class="sidebar-nav">
-                {% set memory_pages = ['personas', 'toolbox', 'conversations', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache'] %}
+                {% set memory_pages = ['personas', 'toolbox', 'conversations', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache', 'memory-transfer'] %}
                 {% set continual_learning_pages = ['workflows', 'skills', 'learning-control-plane', 'persona-evolution'] %}
                 <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
@@ -138,6 +138,7 @@
                         <span class="nav-caret">▾</span>
                     </summary>
                     <div class="nav-dropdown-content">
+                        <a href="/memory-transfer" class="nav-item nav-item--sub {% if active_page == 'memory-transfer' %}active{% endif %}">Export &amp; import</a>
                         <a href="/memory/personas" class="nav-item nav-item--sub {% if active_page == 'personas' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

@@ -60,8 +60,17 @@ class RetrievalPolicy:
     query_expansion: bool = False
     max_query_variants: int = 2
     dedupe_parent_sources: bool = False
+    # Per-agent forgetting overrides (see RetrievalScoring / RetentionConfig);
+    # None means "inherit the global MEMORIZZ_* settings".
+    scoring: Optional[Dict[str, Any]] = None
+    retention: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
+        for name in ("scoring", "retention"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, dict):
+                raise TypeError(f"{name} must be a mapping or None")
+            object.__setattr__(self, name, dict(value) if value else None)
         object.__setattr__(
             self,
             "conversation_scope",
@@ -169,4 +178,8 @@ class RetrievalPolicy:
             result["max_query_variants"] = self.max_query_variants
         if self.dedupe_parent_sources:
             result["dedupe_parent_sources"] = True
+        if self.scoring:
+            result["scoring"] = dict(self.scoring)
+        if self.retention:
+            result["retention"] = dict(self.retention)
         return result

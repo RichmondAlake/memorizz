@@ -2,23 +2,21 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import hashlib
+import inspect
 import logging
 import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-
-try:
-    import numpy as np
-except ImportError:
-    np = None
 
 from ..embeddings import EmbeddingManager, get_embedding_manager
 from ..enums.memory_type import MemoryType
 from ..enums.semantic_cache_scope import SemanticCacheScope
 from ..memory_provider.base import MemoryProvider
+from ..memory_provider.vectors import cosine
 from ..memory_unit.semantic_cache_entry import SemanticCacheEntry
 from ..tool_cache import DEFAULT_FRESHNESS_BY_DOMAIN
 
@@ -109,6 +107,9 @@ class SemanticCacheInspection:
 
 class SemanticCache:
     """Enhanced semantic cache with vector similarity search and intelligent management."""
+
+    # Sweep expired provider rows after this many successful writes.
+    PROVIDER_PURGE_INTERVAL = 50
 
     @property
     def agent_id(self) -> Optional[str]:
@@ -266,43 +267,8 @@ class SemanticCache:
         return self._embedding_cache[query]
 
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Calculate cosine similarity between two vectors."""
-        try:
-            if len(vec1) != len(vec2) or not vec1:
-                return 0.0
-
-            # Numpy is fast for large vectors, but the per-call overhead dominates for
-            # tiny vectors (which are common in tests). Prefer a pure-Python path for
-            # small dimensions to keep cache lookups predictable.
-            if np is not None and len(vec1) > 64:
-                vec1_np = np.asarray(vec1, dtype=float)
-                vec2_np = np.asarray(vec2, dtype=float)
-
-                norm1 = float(np.linalg.norm(vec1_np))
-                norm2 = float(np.linalg.norm(vec2_np))
-                if norm1 == 0.0 or norm2 == 0.0:
-                    return 0.0
-
-                return float(np.dot(vec1_np, vec2_np) / (norm1 * norm2))
-
-            import math
-
-            dot_product = 0.0
-            norm1 = 0.0
-            norm2 = 0.0
-            for a, b in zip(vec1, vec2):
-                dot_product += float(a) * float(b)
-                norm1 += float(a) * float(a)
-                norm2 += float(b) * float(b)
-
-            if norm1 == 0.0 or norm2 == 0.0:
-                return 0.0
-
-            return dot_product / (math.sqrt(norm1) * math.sqrt(norm2))
-
-        except Exception as e:
-            logger.warning(f"Error calculating cosine similarity: {e}")
-            return 0.0
+        """Cosine similarity; an unusable vector pair scores 0.0 (a miss)."""
+        return cosine(vec1, vec2, on_mismatch="zero")
 
     def _should_use_memory_provider(self) -> bool:
         """
@@ -406,15 +372,13 @@ class SemanticCache:
                 best_match = SemanticCacheEntry(
                     query=query_text,
                     response=candidate["response"],
-                    embedding=candidate.get("embedding", []),
+                    embedding=list(candidate.get("embedding") or []),
                     timestamp=timestamp,
                     session_id=candidate.get("session_id"),
                     memory_id=candidate.get("memory_id"),
                     agent_id=candidate.get("agent_id"),
                     user_id=candidate.get("user_id"),
-                    usage_count=candidate.get(
-                        "usage_count", candidate.get("hit_count", 0)
-                    ),
+                    usage_count=self._stored_hit_count(candidate),
                     last_accessed=candidate.get("last_accessed"),
                     metadata=candidate.get("metadata", {}),
                     cache_key=candidate.get("cache_key"),
@@ -496,6 +460,71 @@ class SemanticCache:
         key_parts.append(f"user:{user_id if user_id is not None else '<anonymous>'}")
 
         return str(uuid.uuid5(uuid.NAMESPACE_OID, "|".join(key_parts)))
+
+    @staticmethod
+    def _persistent_record_id(cache_key: str) -> str:
+        """Stable provider record id for a cache key (same key, same row)."""
+        digest = hashlib.sha256(str(cache_key).encode("utf-8")).hexdigest()
+        return f"sc-{digest[:32]}"
+
+    def _update_in_memory_provider(self, record_id: str, data: Dict[str, Any]) -> bool:
+        """``update_by_id`` that reports a missing row or provider error as False."""
+        update = getattr(self.memory_provider, "update_by_id", None)
+        if not callable(update):
+            return False
+        patch = {key: value for key, value in data.items() if key != "_id"}
+        try:
+            return bool(
+                update(
+                    id=record_id,
+                    data=patch,
+                    memory_store_type=MemoryType.SEMANTIC_CACHE,
+                )
+            )
+        except Exception as exc:
+            logger.debug(f"update_by_id({record_id}) did not apply: {exc}")
+            return False
+
+    def _purge_expired_from_memory_provider(self) -> int:
+        """Delete expired rows through the provider's purge hook, if it has one."""
+        purge = getattr(self.memory_provider, "purge_expired_semantic_cache", None)
+        if not callable(purge):
+            return 0
+        try:
+            removed = int(purge() or 0)
+        except Exception as exc:
+            logger.warning("Persistent semantic-cache purge failed: %s", exc)
+            return 0
+        if removed:
+            logger.debug(f"Purged {removed} expired semantic cache rows")
+        return removed
+
+    @staticmethod
+    def _accepts_keyword(func: Any, name: str) -> bool:
+        """Whether ``func`` takes ``name`` (or ``**kwargs``); optimistic if unknown."""
+        try:
+            parameters = inspect.signature(func).parameters
+        except (TypeError, ValueError):
+            return True
+        if name in parameters:
+            return True
+        return any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
+    @staticmethod
+    def _stored_hit_count(row: Dict[str, Any]) -> int:
+        """Read the persisted hit count; ``hit_count`` is the field writes update."""
+        for field_name in ("hit_count", "usage_count"):
+            value = row.get(field_name)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return 0
 
     def _exact_cache_match(
         self,
@@ -774,6 +803,9 @@ class SemanticCache:
                 best_similarity = 1.0
             elif should_use_provider:
                 logger.debug("Using memory provider for semantic cache retrieval")
+                # The exact-key check above already refused a stale entry;
+                # drop it (and any other expired rows) from memory as well.
+                self._cleanup_expired_entries()
                 best_match = self._search_via_memory_provider(
                     query,
                     threshold,
@@ -884,43 +916,25 @@ class SemanticCache:
     def _update_usage_in_memory_provider(self, entry: SemanticCacheEntry) -> bool:
         """Update usage statistics in the memory provider."""
         try:
-            # If we have the document ID from the cache hit, use it directly
+            count = int(entry.usage_count)
+            # Oracle's table only has hit_count (it ignores unknown columns);
+            # MongoDB/filesystem rows carry both fields, so write both or the
+            # next read (which prefers hit_count) pins the count at 1.
+            update_data = {"hit_count": count, "usage_count": count}
+            candidates: List[str] = []
+            # The row id from a provider hit or preload, when we have it.
             if entry.metadata and "_id" in entry.metadata:
-                # Oracle semantic_cache table only has hit_count, not last_accessed
-                update_data = {
-                    "hit_count": entry.usage_count,  # Map usage_count to hit_count for Oracle
-                }
-
-                return self.memory_provider.update_by_id(
-                    id=entry.metadata["_id"],
-                    data=update_data,
-                    memory_store_type=MemoryType.SEMANTIC_CACHE,
-                )
-            else:
-                # Fallback: use cache_key to find and update
-                if entry.cache_key:
-                    # Directly update by cache_key without needing _id
-                    # Oracle semantic_cache table only has hit_count, not last_accessed or usage_count
-                    update_data = {
-                        "cache_key": entry.cache_key,
-                        "hit_count": entry.usage_count,  # Map usage_count to hit_count for Oracle
-                    }
-
-                    # Try update_by_id with cache_key as the identifier
-                    try:
-                        return self.memory_provider.update_by_id(
-                            id=entry.cache_key,
-                            data=update_data,
-                            memory_store_type=MemoryType.SEMANTIC_CACHE,
-                        )
-                    except Exception:
-                        # If that fails, log and continue
-                        logger.debug(
-                            f"Could not update usage by cache_key: {entry.cache_key}"
-                        )
-                        return False
-
-                return False
+                candidates.append(str(entry.metadata["_id"]))
+            if entry.cache_key:
+                stable_id = self._persistent_record_id(entry.cache_key)
+                if stable_id not in candidates:
+                    candidates.append(stable_id)
+                # Providers that resolve the row by cache_key (Oracle, MongoDB).
+                candidates.append(entry.cache_key)
+            for record_id in candidates:
+                if self._update_in_memory_provider(record_id, update_data):
+                    return True
+            return False
 
         except Exception as e:
             logger.warning(f"Failed to update usage statistics in memory provider: {e}")
@@ -991,7 +1005,7 @@ class SemanticCache:
                 self.cache[cache_key] = entry
 
             # Clean up if necessary
-            self._evict_lru_entries()
+            evicted = self._evict_lru_entries()
 
             # Sync to memory provider if enabled
             if self.memory_provider and self.config.enable_memory_provider_sync:
@@ -1003,6 +1017,17 @@ class SemanticCache:
 
             logger.debug(f"Cache SET: stored query: {query[:50]}...")
             self._stats["writes"] += 1
+            # Expired rows otherwise accumulate forever in the provider: sweep
+            # them every PROVIDER_PURGE_INTERVAL writes and whenever the
+            # in-memory cache overflowed.
+            if (
+                self.memory_provider
+                and self.config.enable_memory_provider_sync
+                and (
+                    evicted or self._stats["writes"] % self.PROVIDER_PURGE_INTERVAL == 0
+                )
+            ):
+                self._purge_expired_from_memory_provider()
             return True
 
         except Exception as e:
@@ -1017,7 +1042,11 @@ class SemanticCache:
             # Prepare data for storage
             data = entry.model_dump()
             data["cache_key"] = cache_key
-            data["created_at"] = datetime.fromtimestamp(entry.timestamp)
+            # Timezone-aware UTC: pymongo encodes naive datetimes as UTC, so a
+            # naive local-time value would shift TTL/purge by the UTC offset.
+            data["created_at"] = datetime.fromtimestamp(
+                entry.timestamp, tz=timezone.utc
+            )
             data["agent_id"] = self.agent_id
             data["memory_id"] = self.memory_id
             data["user_id"] = getattr(entry, "user_id", None)
@@ -1026,14 +1055,20 @@ class SemanticCache:
             data["hit_count"] = entry.usage_count
             if self.config.ttl_hours > 0:
                 data["expires_at"] = datetime.fromtimestamp(
-                    entry.timestamp + (self.config.ttl_hours * 3600)
+                    entry.timestamp + (self.config.ttl_hours * 3600), tz=timezone.utc
                 )
 
             # Map 'query' to 'query_text' for compatibility with Oracle provider
             if "query" in data:
                 data["query_text"] = data["query"]
 
-            # Store in memory provider using the correct method
+            # Re-caching the same scoped query (after expiry or invalidation)
+            # must land on the same row on every provider: update the stable
+            # id first and only insert when no such row exists yet.
+            record_id = self._persistent_record_id(cache_key)
+            data["_id"] = record_id
+            if self._update_in_memory_provider(record_id, data):
+                return True
             self.memory_provider.store(
                 data=data, memory_store_type=MemoryType.SEMANTIC_CACHE
             )
@@ -1052,6 +1087,10 @@ class SemanticCache:
             if not self.memory_provider:
                 return 0
 
+            # Expired rows are dead weight on every provider; drop them before
+            # loading so a preload cannot carry them along.
+            self._purge_expired_from_memory_provider()
+
             # Build query for cached entries
             query = {}
             if self.agent_id:
@@ -1059,12 +1098,24 @@ class SemanticCache:
             if self.memory_id:
                 query["memory_id"] = self.memory_id
 
-            # Retrieve cached entries using the correct method
-            result = self.memory_provider.retrieve_by_query(
-                query=query,
-                memory_store_type=MemoryType.SEMANTIC_CACHE,
-                limit=self.config.max_cache_size,
-            )
+            # Retrieve cached entries using the correct method. MongoDB and
+            # Oracle project embeddings out unless asked, so ask whenever the
+            # provider's signature allows it.
+            retrieve = self.memory_provider.retrieve_by_query
+            kwargs: Dict[str, Any] = {
+                "query": query,
+                "memory_store_type": MemoryType.SEMANTIC_CACHE,
+                "limit": self.config.max_cache_size,
+            }
+            if self._accepts_keyword(retrieve, "include_embedding"):
+                kwargs["include_embedding"] = True
+            try:
+                result = retrieve(**kwargs)
+            except TypeError:
+                if "include_embedding" not in kwargs:
+                    raise
+                kwargs.pop("include_embedding")
+                result = retrieve(**kwargs)
 
             # Handle both single result and list results
             if result is None:
@@ -1104,13 +1155,15 @@ class SemanticCache:
                     cache_entry = SemanticCacheEntry(
                         query=query_text,
                         response=entry_data["response"],
-                        embedding=entry_data["embedding"],
+                        # Providers that do not project embeddings still feed
+                        # exact-match lookups; similarity simply scores 0.
+                        embedding=list(entry_data.get("embedding") or []),
                         timestamp=timestamp,
                         session_id=entry_data.get("session_id"),
                         memory_id=entry_data.get("memory_id"),
                         agent_id=entry_data.get("agent_id"),
                         user_id=entry_data.get("user_id"),
-                        usage_count=entry_data.get("usage_count", 0),
+                        usage_count=self._stored_hit_count(entry_data),
                         last_accessed=entry_data.get("last_accessed"),
                         metadata=metadata,
                         cache_key=entry_data.get("cache_key"),

@@ -187,6 +187,15 @@ application evidence can be added later with `record_task_outcome()`.
 
 ## Reversible forgetting
 
+Two kinds of plan share the same approve-and-apply flow. The first, described
+below, tombstones compiled learning artifacts. The second scores primary
+memories (conversation, knowledge base, entities, summaries, workflows) by
+importance, recall count and recency since last use, and *suppresses* records
+whose retention decayed; see the [Forgetting mechanism](forgetting-mechanism.md)
+guide for the scoring, the settings and the restore path. Both appear on the
+Learning control plane page.
+
+
 Forgetting is a retrieval-governance mechanism, not destruction of the audit
 trail. The planner identifies duplicate projections and old, low-utility
 artifacts. It preserves verified outcome artifacts by default and produces a

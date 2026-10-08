@@ -40,11 +40,167 @@ def _saved_agent(memory, **fields):
     return agent_id
 
 
+def test_playground_context_link_selects_the_requested_conversation(ui, memory):
+    agent_id = _saved_agent(memory, memory_ids=["one", "two"])
+    response = ui.get(
+        f"/agents/{agent_id}/playground?memory_id=two&inspector=context&turn_id=selected"
+    )
+    assert response.status_code == 200
+    assert 'id="pg-memory-id" type="hidden" value="two"' in response.text
+    assert (
+        ui.get(f"/agents/{agent_id}/playground?memory_id=someone-else").status_code
+        == 404
+    )
+
+
+@pytest.mark.parametrize(
+    "ids,expected,compacted",
+    [
+        ([], "No compaction performed.", False),
+        (["summary"], "Context compacted: 1 summary created.", True),
+        (["s1", "s2"], "Context compacted: 2 summaries created.", True),
+    ],
+)
+def test_compaction_message_reports_only_actual_changes(
+    ui, memory, monkeypatch, ids, expected, compacted
+):
+    agent_id = _saved_agent(memory, memory_ids=["m"])
+    instance = SimpleNamespace(
+        context_policy=SimpleNamespace(keep_recent_messages=6),
+        _current_user_id=None,
+        _current_thread_id=None,
+        generate_summaries=Mock(return_value=ids),
+    )
+    monkeypatch.setattr(MemAgent, "load", lambda *a, **k: instance)
+    response = ui.post(
+        f"/agents/{agent_id}/playground/compact", data={"memory_id": "m"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["message"].startswith(expected)
+    assert payload["compacted"] is compacted
+    assert payload["summary_count"] == len(ids)
+
+
+def test_context_turn_history_uses_real_requests_and_marks_missing_turns(ui, memory):
+    from memorizz.observability.context_snapshots import ContextSnapshots
+    from memorizz.observability.store import ObservabilityStore
+
+    agent_id = _saved_agent(memory, memory_ids=["m", "other"])
+    snapshots = ContextSnapshots(memory)
+    saved = snapshots.capture(
+        identity={
+            "agent_id": agent_id,
+            "memory_id": "m",
+            "turn_id": "new",
+            "timestamp": "2026-10-07T12:00:00Z",
+        },
+        span_id="new",
+        messages=[{"role": "user", "content": "actual question"}],
+        tools=[],
+        model="local",
+        window_tokens=1024,
+        iteration=1,
+        stage="answer",
+    )
+    for turn, events in (
+        ("old", [{"trace_kind": "model_call"}]),
+        ("cache", [{"trace_kind": "cache_decision"}]),
+        ("envelope", [{"run_id": "harness-run", "type": "model_call", "data": {}}]),
+    ):
+        ObservabilityStore(memory)._put(
+            {
+                "record_id": "bundle-" + turn,
+                "record_type": "observability_trace_bundle",
+                "agent_id": agent_id,
+                "memory_id": "m",
+                "turn_id": turn,
+                "events": events,
+            }
+        )
+    url = f"/agents/{agent_id}/playground/context-history"
+    response = ui.get(url, params={"memory_id": "m"})
+    assert response.status_code == 200, response.text
+    turns = {t["turn_id"]: t for t in response.json()["turns"]}
+    assert turns["new"]["calls"][0]["record_id"] == saved["record_id"]
+    assert turns["old"]["status"] == "unavailable"
+    assert turns["cache"]["status"] == "no_model_request"
+    assert "envelope" not in turns
+    page = ui.get(url, params={"memory_id": "m", "limit": 1})
+    assert "next_cursors" in page.json()
+    detail = ui.get(url + "/" + saved["record_id"], params={"memory_id": "m"})
+    assert detail.json()["snapshot"]["messages"] == [
+        {"role": "user", "content": "actual question"}
+    ]
+    assert (
+        ui.get(
+            url + "/" + saved["record_id"], params={"memory_id": "other"}
+        ).status_code
+        == 404
+    )
+    assert ui.get(url, params={"memory_id": "unknown"}).status_code == 404
+    ui.delete(f"/api/agents/{agent_id}/threads/m")
+    assert snapshots.get(saved["record_id"], agent_id=agent_id) is None
+
+
+def test_captured_request_respects_content_policy_and_tenant_scope(
+    ui, memory, monkeypatch
+):
+    from memorizz.observability.context_snapshots import ContextSnapshots
+    from memorizz.ui.routers import memory_history as routes
+
+    agent_id = _saved_agent(memory, memory_ids=["m"])
+    snapshot = ContextSnapshots(memory).capture(
+        identity={"agent_id": agent_id, "memory_id": "m", "user_id": "alice"},
+        span_id="private-span",
+        messages=[{"role": "user", "content": "private request"}],
+        tools=[],
+        model="local",
+        window_tokens=1024,
+        iteration=1,
+        stage="answer",
+    )
+    url = f"/agents/{agent_id}/playground/context-history/{snapshot['record_id']}"
+    assert ui.get(url, params={"memory_id": "m", "user_id": "bob"}).status_code == 404
+    assert ui.get(url, params={"memory_id": "m", "user_id": "alice"}).status_code == 200
+    monkeypatch.setattr(routes, "trace_content_mode", lambda: "metadata")
+    payload = ui.get(url, params={"memory_id": "m"}).json()
+    assert payload["content_mode"] == "metadata"
+    assert "messages" not in payload["snapshot"] and "tools" not in payload["snapshot"]
+    monkeypatch.setattr(
+        routes, "scoped_trace_filters", lambda *_args: {"user_id": "bob"}
+    )
+    assert ui.get(url, params={"memory_id": "m"}).status_code == 404
+
+
 def test_thread_titles_survive_save_and_load(memory):
     agent_id = _saved_agent(memory, thread_titles={"t1": "Trip plans"})
     loaded = MemAgent.load(agent_id, memory_provider=memory, auto_register=False)
     try:
         assert loaded.thread_titles == {"t1": "Trip plans"}
+    finally:
+        loaded.close()
+
+
+def test_loading_agent_preserves_runtime_capture_overrides(memory):
+    agent_id = _saved_agent(memory)
+    loaded = MemAgent.load(
+        agent_id,
+        memory_provider=memory,
+        auto_register=False,
+        capture_context_snapshots=True,
+        capture_memory_history=True,
+    )
+    try:
+        assert loaded.capture_context_snapshots is True
+        assert loaded.capture_memory_history is True
+        record_id = memory.store(
+            {"content": "tracked change"}, MemoryType.KNOWLEDGE_BASE
+        )
+        assert any(
+            event["target_record_id"] == record_id
+            for event in loaded.memory_history.timeline()["events"]
+        )
     finally:
         loaded.close()
 

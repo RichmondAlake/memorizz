@@ -19,7 +19,7 @@ class Fixture:
             "review_state": "not_reviewed",
             "history_limit": 50,
             "persona": {
-                "name": "OpenSpeech",
+                "name": "Acme Support",
                 "role": "Learning partner",
                 "version": 1,
                 "goals": "Help this user understand their sources, learn effectively, and create grounded work.",

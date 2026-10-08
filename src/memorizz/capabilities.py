@@ -55,6 +55,69 @@ def _browser_python(entry_point: str | None) -> str | None:
     return None
 
 
+_MCP_SERVER_MODULE = "memorizz.mcp_server.server"
+
+
+class _RegistryOnlyRuntime:
+    """Stands in for a runtime while the server's tools are registered; the
+    tool bodies are never called."""
+
+
+def _is_tool_decorator(node: Any) -> bool:
+    import ast
+
+    target = node.func if isinstance(node, ast.Call) else node
+    return isinstance(target, ast.Attribute) and target.attr == "tool"
+
+
+def _mcp_tool_functions() -> int:
+    """Count the ``memorizz_*`` tool functions the server registers under its
+    default policy, from the module's source without importing it (the MCP SDK
+    may not be installed). Tools nested under a policy ``if`` are optional and
+    left out, matching a default-configured registry."""
+    import ast
+
+    try:
+        origin = getattr(importlib.util.find_spec(_MCP_SERVER_MODULE), "origin", None)
+        tree = ast.parse(Path(origin).read_text(encoding="utf-8")) if origin else None
+    except (ImportError, OSError, SyntaxError, TypeError, UnicodeError, ValueError):
+        return 0
+    if tree is None:
+        return 0
+    factories = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "create_memorizz_mcp_server"
+    ]
+    return sum(
+        1
+        for factory in factories
+        for node in factory.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name.startswith("memorizz_")
+        and any(_is_tool_decorator(item) for item in node.decorator_list)
+    )
+
+
+def mcp_server_tool_count() -> int:
+    """The number of tools the first-party MCP server registers: read from the
+    live registry when the MCP SDK is installed, else counted from source."""
+    try:
+        from .mcp_server.config import MemorizzMCPServerConfig
+        from .mcp_server.server import create_memorizz_mcp_server
+
+        server = create_memorizz_mcp_server(
+            MemorizzMCPServerConfig(), runtime=_RegistryOnlyRuntime()
+        )
+        tools = getattr(getattr(server, "_tool_manager", None), "_tools", None)
+        if isinstance(tools, dict) and tools:
+            return len(tools)
+    except Exception:
+        pass
+    return _mcp_tool_functions()
+
+
 def capabilities() -> Dict[str, Any]:
     """Return versioned feature states instead of relying on a version floor."""
     from . import __version__
@@ -102,6 +165,15 @@ def capabilities() -> Dict[str, Any]:
         "version": __version__,
         "capability_schema": 4,
         "features": {
+            "memory_archives": {
+                "available": True,
+                "format": "memorizz.memory",
+                "version": 1,
+                "taxonomy_stores": 13,
+                "interfaces": ["sdk", "cli", "ui", "mcp", "plugin"],
+                "import_preview": True,
+                "delegate_graphs": True,
+            },
             "mcp_client": {
                 "available": mcp_client_ready,
                 "transports": ["stdio", "streamable-http", "sse"],
@@ -111,7 +183,7 @@ def capabilities() -> Dict[str, Any]:
                 "available": mcp_server_ready,
                 "transports": ["stdio", "streamable-http"],
                 "install_extra": "mcp",
-                "tool_count": 24,
+                "tool_count": mcp_server_tool_count(),
                 "strict_input_schemas": True,
                 "resources": 4,
                 "prompts": 1,

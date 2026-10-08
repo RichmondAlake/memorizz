@@ -49,6 +49,9 @@ class Session:
     user_id: Optional[str] = None
     console: Any = None
     warnings: Optional[List[str]] = None
+    # Session-scoped harness routing (``/harness``); never saved on the agent.
+    harness: Optional[str] = None
+    harness_backup: Optional[Dict[str, Any]] = None
 
     @property
     def provider_name(self) -> str:

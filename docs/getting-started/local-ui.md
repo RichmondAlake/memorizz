@@ -29,10 +29,16 @@ The Memorizz local UI gives you a browser-based workflow for connecting to your 
   learned skills.
 - Enable the memory-first learning control plane, inspect immutable event and
   artifact counts, compile pending events, and approve reversible forgetting.
+- Plan memory retention (a dry run over conversation, knowledge, entity,
+  summary and workflow records whose retention decayed), approve it as
+  reversible suppression, review suppressed memories and restore them.
 - Review run traces by agent and thread.
 - Run AgentMemBench, LongMemEval-V2, LoCoMo-Plus, BEAM, MemoryAgentBench, and
   legacy LongMemEval in Evalground.
-- Manage runtime keys and defaults in Settings.
+- Manage runtime keys and defaults in Settings, including the **Forgetting
+  mechanism** section (importance rater, recency decay and weights, suppression
+  thresholds, reflection). Each agent's form has a *Forgetting (per-agent
+  overrides)* group for the same values.
 
 ## 1. Install UI Dependencies
 
@@ -113,11 +119,12 @@ Once connected, the sidebar is your main navigation.
 | Automations | `/automations` | Create schedules, inspect runs, and manage worker-backed agent jobs. |
 | Memory Types | `/memory/{type}` | Browse stored memory entries by type (`personas`, `toolbox`, `conversations`, etc.). |
 | Continual Learning | `/memory/workflows` and `/memory/skills` | Review canonical trajectory classes, run gated distillation, inspect persisted skill authority, and activate/demote skills. |
-| Learning Control Plane | `/learning-control-plane` | Inspect scoped event/artifact counts, compile pending events, and plan/apply reversible forgetting. |
+| Learning Control Plane | `/learning-control-plane` | Inspect scoped event/artifact counts, compile pending events, plan/apply reversible forgetting of compiled artifacts, and plan/approve/restore reversible suppression of primary memories. |
 | Agent Harnesses | `/harnesses` | Probe adapters, launch bounded runs, decide exact approvals, cancel work, and inspect verification evidence. |
 | Traces | `/traces` | Filter/search agents and inspect thread-level trace timelines. |
+| Memory Evolution | `/traces/memory-evolution` | Scroll memory versions, inspect actors and origins, and follow explicit branches; also embedded in playground and harness evidence. |
 | Evalground | `/evalground` | Run local open-model memory suites, monitor logs, and review run history/results. |
-| Settings | `/settings` | Save credentials and defaults; shows the actual `.env` target, precedence warnings and the active memory provider. Existing clients need reconnection. |
+| Settings | `/settings` | Save credentials and defaults, including the Forgetting mechanism section; shows the actual `.env` target, precedence warnings and the active memory provider. Existing clients need reconnection. |
 
 Settings includes Notion credentials, its memory data-source ID and separate
 vector backend. For guided access checks or explicitly creating a new Notion

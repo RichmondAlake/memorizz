@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}{{ form_title|capitalize }} - Memorizz{% endblock %}
+{% block head %}<script src="/static/js/local-models.js?v=1"></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, id_chip %}
@@ -127,6 +128,34 @@
                 </label>
                 <p class="form-hint">Continual learning enables this automatically unless you explicitly turn it off.</p>
             </div>
+            {% set fg = forgetting if forgetting is defined and forgetting else {} %}
+            <details class="form-group" id="forgetting-overrides">
+                <summary>Forgetting (per-agent overrides)</summary>
+                <p class="form-hint">Memories are ranked by recency since last use, importance and relevance (Generative Agents). Blank fields inherit the global defaults from Settings → Forgetting mechanism.</p>
+                <div class="form-grid">
+                    <label>Recency decay per hour<input type="number" step="0.0001" min="0.5" max="1" name="forgetting_scoring_recency_decay_per_hour" value="{{ fg.get('scoring_recency_decay_per_hour', '') }}" placeholder="0.995"></label>
+                    <label>Recency anchor
+                        <select name="forgetting_scoring_recency_anchor">
+                            <option value="" {% if not fg.get('scoring_recency_anchor') %}selected{% endif %}>Inherit</option>
+                            <option value="last_accessed" {% if fg.get('scoring_recency_anchor') == 'last_accessed' %}selected{% endif %}>Last access (paper)</option>
+                            <option value="created" {% if fg.get('scoring_recency_anchor') == 'created' %}selected{% endif %}>Creation time</option>
+                        </select>
+                    </label>
+                    <label>Weight: recency<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_recency" value="{{ fg.get('scoring_alpha_recency', '') }}" placeholder="1"></label>
+                    <label>Weight: importance<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_importance" value="{{ fg.get('scoring_alpha_importance', '') }}" placeholder="1"></label>
+                    <label>Weight: relevance<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_relevance" value="{{ fg.get('scoring_alpha_relevance', '') }}" placeholder="1"></label>
+                    <label>Suppression planner
+                        <select name="forgetting_retention_enabled">
+                            <option value="" {% if not fg.get('retention_enabled') %}selected{% endif %}>Inherit</option>
+                            <option value="on" {% if fg.get('retention_enabled') == 'on' %}selected{% endif %}>Enabled</option>
+                            <option value="off" {% if fg.get('retention_enabled') == 'off' %}selected{% endif %}>Disabled</option>
+                        </select>
+                    </label>
+                    <label>Minimum retention score<input type="number" step="0.01" min="0" max="1" name="forgetting_retention_min_retention" value="{{ fg.get('retention_min_retention', '') }}" placeholder="0.15"></label>
+                    <label>Grace period (days)<input type="number" step="1" min="0" name="forgetting_retention_grace_days" value="{{ fg.get('retention_grace_days', '') }}" placeholder="30"></label>
+                </div>
+                <p class="form-hint">Suppression only ever hides a memory from retrieval after an approved dry run on the learning control-plane page; nothing is deleted and every suppression can be restored.</p>
+            </details>
             <div class="form-group">
                 <label for="skill_injection_role">Authority for newly learned skills</label>
                 <select id="skill_injection_role" name="skill_injection_role"
@@ -373,15 +402,11 @@
         refreshLLMHint();
     })();
 
-    // Pre-flight check for local-model providers. Mirrors playground.html's
-    // playgroundCheckLocalModel() but banner-only — pull/delete UI stays in
-    // Settings → Local models. The point here is just so users don't save an
-    // agent pointing at an Ollama tag they never pulled (which 404s mid-chat).
+    // Pre-flight check for local-model providers, banner-only (the shared
+    // widget in static/js/local-models.js; pull/delete UI stays in Settings
+    // → Local models). The point is that users don't save an agent pointing
+    // at an Ollama tag they never pulled (which 404s mid-chat).
     (function () {
-        const REQUIRES_LOCAL = new Set(['ollama', 'huggingface', 'mlx']);
-        let _seq = 0;
-        let _debounce = null;
-
         function currentProvider() {
             const el = document.getElementById('llm_provider');
             return ((el && el.value) || '').trim().toLowerCase();
@@ -401,142 +426,36 @@
             return '';
         }
 
-        async function refresh() {
-            const statusEl = document.getElementById('llm_model_status');
-            if (!statusEl) return;
-            const provider = currentProvider();
-            const model = currentModel();
-            if (!REQUIRES_LOCAL.has(provider) || !model) {
-                statusEl.style.display = 'none';
-                statusEl.innerHTML = '';
-                return;
-            }
-            const seq = ++_seq;
-            statusEl.style.display = 'block';
-            let label = 'local Ollama';
-            if (provider === 'huggingface') label = 'HuggingFace cache';
-            if (provider === 'mlx') label = 'MLX cache (HuggingFace)';
-            statusEl.innerHTML = '<p class="form-hint">Checking ' + label + '…</p>';
-
-            const url = provider === 'ollama'
-                ? '/api/ollama/installed'
-                : '/api/huggingface/installed';
-            let info;
-            try {
-                const res = await fetch(url, { cache: 'no-store' });
-                info = await res.json();
-            } catch (err) {
-                if (seq !== _seq) return;
-                statusEl.innerHTML = '<div class="warning-message"><strong>Could not reach the UI server</strong>: '
-                    + escapeHtml(String(err)) + '</div>';
-                return;
-            }
-            if (seq !== _seq) return;
-
-            if (provider === 'ollama') {
-                renderOllama(statusEl, model, info);
-            } else {
-                renderHF(statusEl, model, info);
-            }
-        }
-
-        function renderOllama(statusEl, model, info) {
-            if (!info.reachable) {
-                statusEl.innerHTML = '<div class="warning-message">'
-                    + '<strong>Ollama is not running</strong> at <code>'
-                    + escapeHtml(info.host || 'localhost:11434') + '</code>'
-                    + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
-                    + '.<br>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a> and start it, then '
-                    + '<a href="#" data-preflight-refresh>refresh</a>.'
-                    + '</div>';
-                wireRefreshLink(statusEl);
-                return;
-            }
-            // `gemma4` and `gemma4:latest` reference the same blob on disk —
-            // treat them as equivalent so the banner doesn't whine about a
-            // tag the user technically does have.
-            const installed = (info.models || []).some(function (m) {
-                return m === model || m === model + ':latest' || m + ':latest' === model;
-            });
-            const base = model.split(':')[0];
-            const libUrl = 'https://ollama.com/library/' + encodeURIComponent(base);
-            statusEl.innerHTML = installed
-                ? '<div class="success-message">'
-                    + '<strong><code>' + escapeHtml(model) + '</code> is available offline</strong>'
-                    + ' on Ollama at <code>' + escapeHtml(info.host || 'localhost:11434') + '</code>.'
-                    + '</div>'
-                : '<div class="warning-message">'
-                    + '<strong>Pre-flight: <code>' + escapeHtml(model) + '</code> is not installed locally.</strong><br>'
-                    + 'Saving this agent is fine, but the first chat will fail with a 404. '
-                    + 'Run <code>ollama pull ' + escapeHtml(model) + '</code>, '
-                    + 'pull from <a href="/settings#local-models">Settings → Local models</a>, or '
-                    + '<a href="' + libUrl + '" target="_blank" rel="noopener">browse <code>'
-                    + escapeHtml(base) + '</code> on ollama.com</a>. Then '
-                    + '<a href="#" data-preflight-refresh>refresh</a>.'
-                    + '</div>';
-            wireRefreshLink(statusEl);
-        }
-
-        function renderHF(statusEl, model, info) {
-            if (!info.available) {
-                statusEl.innerHTML = '<div class="warning-message">'
-                    + '<strong>HuggingFace cache unavailable</strong>'
-                    + (info.error ? ' &mdash; ' + escapeHtml(info.error) : '')
-                    + '.<br>Install it with <code>pip install memorizz[huggingface]</code>, then '
-                    + '<a href="#" data-preflight-refresh>refresh</a>.'
-                    + '</div>';
-                wireRefreshLink(statusEl);
-                return;
-            }
-            const cached = (info.models || []).indexOf(model) !== -1;
-            const repoUrl = 'https://huggingface.co/'
-                + model.split('/').map(encodeURIComponent).join('/');
-            const cacheLoc = info.cache_dir || 'local HF cache';
-            statusEl.innerHTML = cached
-                ? '<div class="success-message">'
-                    + '<strong><code>' + escapeHtml(model) + '</code> is cached locally</strong> at '
-                    + '<code>' + escapeHtml(cacheLoc) + '</code>.'
-                    + '</div>'
-                : '<div class="warning-message">'
-                    + '<strong>Pre-flight: <code>' + escapeHtml(model) + '</code> is not cached locally.</strong><br>'
-                    + 'First chat will trigger a multi-GB download and may stall. '
-                    + 'Pre-download with <code>huggingface-cli download ' + escapeHtml(model) + '</code>, '
-                    + 'pull from <a href="/settings#local-models">Settings → Local models</a>, '
-                    + 'or <a href="' + repoUrl + '" target="_blank" rel="noopener">view the model card</a>. Then '
-                    + '<a href="#" data-preflight-refresh>refresh</a>.'
-                    + '</div>';
-            wireRefreshLink(statusEl);
-        }
-
-        function wireRefreshLink(scope) {
-            const link = scope.querySelector('[data-preflight-refresh]');
-            if (!link) return;
-            link.addEventListener('click', function (ev) {
-                ev.preventDefault();
-                refresh();
-            });
-        }
-
-        function schedule() {
-            if (_debounce) clearTimeout(_debounce);
-            _debounce = setTimeout(refresh, 350);
-        }
+        const preflight = window.MemorizzLocalModels.mount({
+            statusId: 'llm_model_status',
+            provider: currentProvider,
+            model: currentModel,
+            refreshAttr: 'data-preflight-refresh',
+            hostFallback: 'localhost:11434',
+            copy: {
+                warningPrefix: 'Pre-flight: ',
+                refreshText: 'refresh',
+                ollamaMissing: 'Saving this agent is fine, but the first chat will fail with a 404. Run {pull}, pull from <a href="/settings#local-models">Settings → Local models</a>, or {browse}. Then {refresh}.',
+                huggingfaceUnavailable: 'Install it with <code>pip install memorizz[huggingface]</code>, then {refresh}.',
+                huggingfaceMissing: 'First chat will trigger a multi-GB download and may stall. Pre-download with {download}, pull from <a href="/settings#local-models">Settings → Local models</a>, or {card}. Then {refresh}.',
+            },
+        });
 
         document.addEventListener('change', function (e) {
             if (e.target && (e.target.id === 'llm_model_select'
                 || e.target.id === 'llm_model_custom'
                 || e.target.id === 'llm_provider')) {
-                refresh();
+                preflight.check();
             }
         });
         document.addEventListener('input', function (e) {
             if (e.target && e.target.id === 'llm_model_custom') {
-                schedule();
+                preflight.schedule();
             }
         });
-        document.addEventListener('DOMContentLoaded', refresh);
+        document.addEventListener('DOMContentLoaded', preflight.check);
         // DOMContentLoaded may have already fired by the time this script runs.
-        refresh();
+        preflight.check();
     })();
     </script>
 

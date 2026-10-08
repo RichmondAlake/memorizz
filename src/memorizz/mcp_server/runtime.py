@@ -178,6 +178,9 @@ _EMBEDDINGS_HINT = (
 _NO_EMBEDDINGS_NOTE = (
     "No embedding model is working, so these are keyword matches. " + _EMBEDDINGS_HINT
 )
+# How far a tenant-scoped harness listing may widen its store query while
+# looking for the caller's rows (the SQLite store caps listings at 10,000).
+_TENANT_SCAN_LIMIT = 10_000
 _UPDATE_DROPPED_FIELDS = frozenset(
     {
         "_id",
@@ -302,7 +305,52 @@ class MemorizzRuntime:
                 self._provider = agent_factory.detect_memory_provider({}, warnings)
                 for warning in warnings:
                     logger.warning("MCP server provider: %s", warning)
+            from ..memory_history import enable_memory_history
+
+            enable_memory_history(self._provider)
             return self._provider
+
+    def memory_timeline(
+        self,
+        identity: RequestIdentity,
+        *,
+        agent_id=None,
+        memory_id=None,
+        run_id=None,
+        memory_type=None,
+        action=None,
+        actor=None,
+        limit=200,
+        cursor=None,
+    ):
+        """Read content-free change history with the caller's exact tenant scope."""
+        from ..memory_history import MemoryHistory
+
+        self._require_scope(identity, READ_SCOPE)
+        if agent_id:
+            self._assert_agent_exposed(agent_id, identity)
+        if run_id:
+            self._harness_run_for_identity(run_id, identity)
+        if memory_type:
+            self._normalize_memory_type(memory_type, identity)
+        page = MemoryHistory(self.provider).timeline(
+            agent_id=agent_id,
+            memory_id=memory_id,
+            run_id=run_id,
+            user_id=identity.principal,
+            memory_type=memory_type,
+            action=action,
+            actor=actor,
+            limit=self._bounded_limit(limit),
+            cursor=cursor,
+        )
+        # A configured agent allowlist also applies when no agent was requested.
+        page["events"] = [
+            e
+            for e in page["events"]
+            if not e.get("agent_id") or self._is_agent_exposed(e["agent_id"], identity)
+        ]
+        return {"ok": True, **page}
 
     @property
     def meta_harness(self):
@@ -471,6 +519,8 @@ class MemorizzRuntime:
                     "ingest",
                     "entities",
                     "status",
+                    "export",
+                    "import",
                 ],
                 "conversation": ["list", "read", "compact"],
                 "meta_harness": [
@@ -1732,6 +1782,115 @@ class MemorizzRuntime:
                 break
         return values
 
+    def export_memories(
+        self,
+        identity: RequestIdentity,
+        *,
+        memory_id=None,
+        agent_id=None,
+        memory_types=None,
+        include_delegates=True,
+        include_history=True,
+        include_context=True,
+    ):
+        """Inline portable archive; large/local backups use the CLI file interface."""
+        from ..memory_archive import MemoryArchive, MemoryArchiveError, seal_archive
+
+        self._require_scope(identity, READ_SCOPE)
+        if agent_id:
+            self._assert_agent_exposed(agent_id, identity)
+        types = (
+            memory_types
+            if memory_types is not None
+            else [
+                t.value
+                for t in MemoryType
+                if self.config.transport == "stdio" or t in _TENANT_MEMORY_TYPES
+            ]
+        )
+        for kind in types:
+            self._normalize_memory_type(kind, identity)
+        try:
+            archive = MemoryArchive(self.provider).export(
+                memory_id=memory_id,
+                agent_id=agent_id,
+                memory_types=types,
+                include_delegates=include_delegates,
+                include_history=include_history,
+                include_context=include_context,
+                user_id=identity.principal,
+                max_bytes=self.config.max_request_body_size,
+            )
+            for records in archive["stores"].values():
+                records[:] = [
+                    r
+                    for r in records
+                    if not _document_field(r["data"], "agent_id")
+                    or self._is_agent_exposed(
+                        _document_field(r["data"], "agent_id"), identity
+                    )
+                ]
+            archive["manifest"]["scope"]["agent_ids"] = [
+                identifier
+                for identifier in archive["manifest"]["scope"]["agent_ids"]
+                if self._is_agent_exposed(identifier, identity)
+            ]
+            archive["manifest"]["counts"] = {
+                k: len(v) for k, v in archive["stores"].items()
+            }
+            archive["manifest"]["record_count"] = sum(
+                archive["manifest"]["counts"].values()
+            )
+            return {"ok": True, "archive": seal_archive(archive)}
+        except MemoryArchiveError as exc:
+            raise MemorizzServerError("archive_error", str(exc)) from exc
+
+    def import_memories(
+        self,
+        archive,
+        identity: RequestIdentity,
+        *,
+        dry_run=True,
+        conflict="error",
+        id_strategy="preserve",
+        target_memory_id=None,
+    ):
+        from ..memory_archive import MemoryArchive, MemoryArchiveError, validate_archive
+
+        self._require_scope(identity, READ_SCOPE if dry_run else WRITE_SCOPE)
+        try:
+            archive = validate_archive(
+                archive, max_bytes=self.config.max_request_body_size
+            )
+            for records in archive["stores"].values():
+                for record in records:
+                    owner = _document_field(record["data"], "agent_id")
+                    if owner:
+                        self._assert_agent_exposed(owner, identity)
+                        if (
+                            id_strategy == "new"
+                            and self.config.exposed_agent_ids is not None
+                        ):
+                            raise MemoryArchiveError(
+                                "New agent identities require an unrestricted agent allowlist"
+                            )
+            types = (
+                list(MemoryType)
+                if self.config.transport == "stdio"
+                else _TENANT_MEMORY_TYPES
+            )
+            return MemoryArchive(self.provider).import_archive(
+                archive,
+                dry_run=dry_run,
+                conflict=conflict,
+                id_strategy=id_strategy,
+                target_memory_id=target_memory_id,
+                user_id=identity.principal,
+                allowed_types=types,
+            )
+        except MemoryArchiveError as exc:
+            raise MemorizzServerError("archive_error", str(exc)) from exc
+
     def list_memories(
         self,
         memory_type: str,
@@ -2166,6 +2325,17 @@ class MemorizzRuntime:
             )
         return memory, thread
 
+    def _capture_agent_id(
+        self, agent_id: Any, identity: RequestIdentity
+    ) -> Optional[str]:
+        """The agent a captured turn or summary is filed under: optional, but
+        when given it must be one this server exposes to the caller."""
+        normalized = str(agent_id or "").strip()
+        if not normalized:
+            return None
+        self._assert_agent_exposed(normalized, identity)
+        return normalized[:80]
+
     def record_turn(
         self,
         memory_id: str,
@@ -2193,6 +2363,7 @@ class MemorizzRuntime:
             and not str(assistant_message or "").strip()
         ):
             raise MemorizzServerError("invalid_content", "The turn has no text")
+        resolved_agent_id = self._capture_agent_id(agent_id, identity)
         try:
             record_ids = record_turn(
                 self.provider,
@@ -2200,7 +2371,7 @@ class MemorizzRuntime:
                 thread_id=thread,
                 user_message=user_message,
                 assistant_message=assistant_message,
-                agent_id=str(agent_id or "").strip()[:80] or None,
+                agent_id=resolved_agent_id,
                 user_id=identity.principal,
             )
         except Exception as exc:
@@ -2229,6 +2400,7 @@ class MemorizzRuntime:
 
         self._require_scope(identity, WRITE_SCOPE)
         memory, thread = self._episodic_scope(memory_id, thread_id)
+        resolved_agent_id = self._capture_agent_id(agent_id, identity)
         model = default_model()
         if model is None:
             return {
@@ -2242,7 +2414,7 @@ class MemorizzRuntime:
                 self.provider,
                 memory_id=memory,
                 thread_id=thread,
-                agent_id=str(agent_id or "").strip()[:80] or None,
+                agent_id=resolved_agent_id,
                 user_id=identity.principal,
                 model=model,
             )
@@ -2363,12 +2535,23 @@ class MemorizzRuntime:
                     "superseded_at": now,
                 },
             }
+        # ``old`` is the caller's view: secrets redacted and values stringified
+        # for JSON. The replacement is built from the stored record itself so
+        # the update never persists "***" or loses native types.
+        try:
+            raw = self.provider.retrieve_by_id(old_id, resolved_type)
+        except Exception as exc:
+            raise MemorizzServerError(
+                "provider_error", "The memory provider could not read the memory"
+            ) from exc
+        if not isinstance(raw, dict) or _document_user_id(raw) != identity.principal:
+            raise MemorizzServerError("memory_not_found", "Memory was not found")
         document = {
             key: value
-            for key, value in old.items()
+            for key, value in raw.items()
             if key not in _UPDATE_DROPPED_FIELDS
         }
-        memory_id = str(old.get("memory_id") or uuid.uuid4())
+        memory_id = str(raw.get("memory_id") or uuid.uuid4())
         document.update(
             {
                 "content": text,
@@ -3116,12 +3299,14 @@ class MemorizzRuntime:
             raise MemorizzServerError(
                 "mcp_server_not_found", "The agent has no MCP server with that name"
             ) from exc
+        tools = manager.cached_tools(config.name)
+        if not tools:
+            # Never listed yet: fetch the server's annotations once so the
+            # classification rests on them rather than on the name alone.
+            if manager.list_tools(config.name).get("ok"):
+                tools = manager.cached_tools(config.name)
         metadata = next(
-            (
-                tool
-                for tool in manager.cached_tools(config.name)
-                if tool["name"] == tool_name
-            ),
+            (tool for tool in tools if tool["name"] == tool_name),
             None,
         )
         changes_data = tool_is_mutating(
@@ -3477,6 +3662,9 @@ class MemorizzRuntime:
                 raise MemorizzServerError(
                     "invalid_harness_plan", "A stage instruction is too long"
                 )
+            stage_agent_id = str(row.get("agent_id") or "").strip()
+            if stage_agent_id:
+                self._assert_agent_exposed(stage_agent_id, identity)
         if any(bool(row.get("write")) for row in rows):
             self._require_harness_execution(identity)
             self._require_scope(identity, WRITE_SCOPE)
@@ -3662,6 +3850,45 @@ class MemorizzRuntime:
             )
         return value
 
+    def _tenant_harness_rows(
+        self,
+        lister: Callable[..., Any],
+        identity: RequestIdentity,
+        *,
+        status: Optional[str],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Up to ``limit`` of the caller's rows, newest first. The owner goes
+        into the store query when it accepts one; otherwise the listing is
+        widened (bounded) until enough owned rows are found, so a tenant whose
+        work is older than other tenants' recent work still sees it."""
+        if identity.principal is None:
+            return list(lister(status=status, limit=limit) or [])
+
+        def owned(rows: Any) -> List[Dict[str, Any]]:
+            return [
+                row
+                for row in list(rows or [])
+                if isinstance(row, dict)
+                and (row.get("task") or {}).get("user_id") == identity.principal
+            ]
+
+        if _accepts_keyword(lister, "user_id"):
+            return owned(
+                lister(status=status, limit=limit, user_id=identity.principal)
+            )[:limit]
+        batch = limit
+        while True:
+            rows = list(lister(status=status, limit=batch) or [])
+            matches = owned(rows)
+            if (
+                len(matches) >= limit
+                or len(rows) < batch
+                or batch >= _TENANT_SCAN_LIMIT
+            ):
+                return matches[:limit]
+            batch = min(batch * 4, _TENANT_SCAN_LIMIT)
+
     def list_harness_workflows(
         self,
         identity: RequestIdentity,
@@ -3670,15 +3897,12 @@ class MemorizzRuntime:
         limit: int = 20,
     ) -> Dict[str, Any]:
         self._require_scope(identity, READ_SCOPE)
-        rows = self.meta_harness.list_orchestrations(
-            status=status, limit=self._bounded_limit(limit)
+        rows = self._tenant_harness_rows(
+            self.meta_harness.list_orchestrations,
+            identity,
+            status=status,
+            limit=self._bounded_limit(limit),
         )
-        if identity.principal is not None:
-            rows = [
-                row
-                for row in rows
-                if (row.get("task") or {}).get("user_id") == identity.principal
-            ]
         return {"ok": True, "workflows": rows, "count": len(rows)}
 
     def get_harness_workflow(
@@ -3717,15 +3941,12 @@ class MemorizzRuntime:
         limit: int = 50,
     ) -> Dict[str, Any]:
         self._require_scope(identity, READ_SCOPE)
-        rows = self.meta_harness.list_runs(
-            status=status, limit=self._bounded_limit(limit)
+        rows = self._tenant_harness_rows(
+            self.meta_harness.list_runs,
+            identity,
+            status=status,
+            limit=self._bounded_limit(limit),
         )
-        if identity.principal is not None:
-            rows = [
-                row
-                for row in rows
-                if (row.get("task") or {}).get("user_id") == identity.principal
-            ]
         return {"ok": True, "runs": rows, "count": len(rows)}
 
     def get_harness_events(

@@ -972,6 +972,12 @@ body.theme-light .pg-composer {
     line-height: 1.5;
 }
 
+.pg-memory-actions {
+    display: flex;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
 .pg-section {
     margin-top: 12px;
     padding: 14px 16px;

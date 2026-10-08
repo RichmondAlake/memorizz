@@ -144,8 +144,10 @@ class MongoDBAutomationStore:
         worker_id: str,
         now_utc: datetime,
         lease_seconds: int,
-        force_enable: bool = True,
+        force_enable: bool = False,
     ) -> Optional[AutomationJob]:
+        """Lease one job for a manual run. A paused job stays paused unless
+        the caller asks for ``force_enable``."""
         from pymongo import ReturnDocument
 
         now = as_utc(now_utc) or _utcnow()
@@ -229,5 +231,13 @@ class MongoDBAutomationStore:
     ) -> AutomationDelivery:
         if delivery.created_at is None:
             delivery.created_at = _utcnow()
-        self.deliveries.insert_one(delivery.model_dump(mode="python"))
+        self.deliveries.replace_one(
+            {"delivery_id": delivery.delivery_id},
+            delivery.model_dump(mode="python"),
+            upsert=True,
+        )
         return delivery
+
+    def list_deliveries(self, run_id: str) -> List[AutomationDelivery]:
+        docs = self.deliveries.find({"run_id": run_id}).sort("created_at", 1)
+        return [AutomationDelivery.model_validate(_strip_id(d)) for d in docs]

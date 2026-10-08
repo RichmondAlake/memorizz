@@ -21,6 +21,7 @@ from .models import (
     canonical_json,
     content_digest,
 )
+from .retention import RetentionConfig, RetentionPlanner
 from .store import LearningControlPlaneStore, LearningRecordConflictError
 
 logger = logging.getLogger(__name__)
@@ -111,7 +112,7 @@ class LearningControlPlane:
                 "learn-evt-"
                 + hashlib.sha256(str(idempotency_key).encode()).hexdigest()[:32]
             )
-            existing = self.store.get(event_id)
+            existing = self.store.lookup(event_id)
             if existing:
                 try:
                     existing_event = LearningEvent.from_dict(existing)
@@ -403,6 +404,122 @@ class LearningControlPlane:
         )
         return report
 
+    # -- primary-memory retention (reversible suppression) -------------------
+
+    def retention_planner(
+        self, *, scoring: Any = None, config: Any = None
+    ) -> RetentionPlanner:
+        """A planner for this agent's primary memories (conversation, KB, ...).
+
+        ``config`` may be a RetentionConfig or the agent's per-agent override
+        mapping (``retrieval_policy["retention"]``); mappings are overlaid on
+        the global ``MEMORIZZ_RETENTION_*`` defaults.
+        """
+        from ..memagent.utils.context_dedup import RetrievalScoring
+
+        if isinstance(config, RetentionConfig):
+            resolved_config = config
+        else:
+            resolved_config = RetentionConfig.from_mapping(
+                config, base=RetentionConfig.from_env()
+            )
+        resolved_scoring = scoring or RetrievalScoring.from_env()
+        return RetentionPlanner(
+            self.store.provider,
+            agent_id=self.agent_id,
+            config=resolved_config,
+            scoring=resolved_scoring,
+            learning_store=self.store,
+        )
+
+    @staticmethod
+    def is_retention_plan(report: ForgettingReport) -> bool:
+        """True when every candidate targets a primary memory type."""
+        from ..enums.memory_type import MemoryType
+
+        values = {item.value for item in MemoryType}
+        return bool(report.candidates) and all(
+            candidate.target_type in values for candidate in report.candidates
+        )
+
+    def plan_retention(
+        self,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Any = ...,
+        thread_id: Optional[str] = None,
+        scoring: Any = None,
+        config: Any = None,
+    ) -> ForgettingReport:
+        """Dry-run plan of primary memories whose retention score decayed."""
+        planner = self.retention_planner(scoring=scoring, config=config)
+        report = planner.plan(
+            memory_ids=[memory_id] if memory_id else None,
+            user_id=user_id if user_id is not None else ...,
+        )
+        self._last_forgetting_report = report
+        self.emit(
+            LearningEventType.FORGETTING_PLANNED,
+            {**report.to_dict(), "plan_kind": "retention"},
+            scope={
+                "memory_id": memory_id,
+                "user_id": None if user_id is ... else user_id,
+                "thread_id": thread_id,
+            },
+            compile_if_due=False,
+        )
+        return report
+
+    def apply_retention(
+        self,
+        report: ForgettingReport,
+        *,
+        approved_by: str,
+        reason: Optional[str] = None,
+        scope: Optional[Mapping[str, Any]] = None,
+        config: Any = None,
+    ) -> ForgettingReport:
+        """Suppress (never delete) the memories of an approved retention plan."""
+        application_key = f"retention-applied:{report.plan_id}"
+        application_id = (
+            "learn-evt-" + hashlib.sha256(application_key.encode()).hexdigest()[:32]
+        )
+        if self.store.lookup(application_id):
+            raise ValueError("This retention plan has already been applied")
+        applied = self.retention_planner(config=config).apply(
+            report, approved_by=approved_by, reason=reason
+        )
+        self._last_forgetting_report = applied
+        self.emit(
+            LearningEventType.MEMORY_FORGOTTEN,
+            {**applied.to_dict(), "plan_kind": "retention"},
+            scope=scope,
+            idempotency_key=application_key,
+            compile_if_due=False,
+        )
+        return applied
+
+    def unsuppress_memory(
+        self,
+        record_id: str,
+        memory_type: Any,
+        *,
+        approved_by: str,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """Reverse a suppression so the record is retrievable again."""
+        return self.retention_planner().unsuppress(
+            record_id, memory_type, approved_by=approved_by, reason=reason
+        )
+
+    def suppressed_memories(
+        self, *, memory_id: Optional[str] = None, user_id: Any = ...
+    ) -> list:
+        return self.retention_planner().suppressed(
+            memory_ids=[memory_id] if memory_id else None,
+            user_id=user_id if user_id is not None else ...,
+        )
+
     def get_forgetting_plan(
         self,
         plan_id: str,
@@ -440,7 +557,7 @@ class LearningControlPlane:
         application_id = (
             "learn-evt-" + hashlib.sha256(application_key.encode()).hexdigest()[:32]
         )
-        if self.store.get(application_id):
+        if self.store.lookup(application_id):
             raise ValueError("This forgetting plan has already been applied")
         applied = self.forgetting.apply(report, approved_by=approved_by, reason=reason)
         self._last_forgetting_report = applied

@@ -1,0 +1,85 @@
+{
+  "format": "memorizz.memory",
+  "version": 1,
+  "taxonomy": {
+    "personas": "long_term.semantic",
+    "toolbox": "long_term.procedural",
+    "entity_memory": "long_term.semantic",
+    "short_term_memory": "short_term",
+    "knowledge_base": "long_term.semantic",
+    "conversation_memory": "long_term.episodic",
+    "workflow_memory": "long_term.procedural",
+    "skillbox": "long_term.procedural",
+    "agents": "agent_configuration",
+    "shared_memory": "coordination",
+    "summaries": "long_term.episodic",
+    "semantic_cache": "short_term",
+    "tool_log": "long_term.episodic"
+  },
+  "manifest": {
+    "created_at": "2026-10-08T10:00:00+00:00",
+    "memorizz_version": "0.15.0",
+    "source_provider": "FileSystemProvider",
+    "scope": {
+      "agent_id": null,
+      "memory_id": "harbor-demo",
+      "agent_ids": [],
+      "user_id": null,
+      "user_scoped": true,
+      "application_id": null
+    },
+    "counts": {
+      "personas": 0,
+      "toolbox": 0,
+      "entity_memory": 0,
+      "short_term_memory": 0,
+      "knowledge_base": 1,
+      "conversation_memory": 0,
+      "workflow_memory": 0,
+      "skillbox": 0,
+      "agents": 0,
+      "shared_memory": 0,
+      "summaries": 0,
+      "semantic_cache": 0,
+      "tool_log": 0
+    },
+    "record_count": 1,
+    "includes": {
+      "delegates": false,
+      "history": false,
+      "context": false,
+      "embeddings": false
+    },
+    "omitted_fields": [],
+    "external_references": [],
+    "warnings": []
+  },
+  "stores": {
+    "personas": [],
+    "toolbox": [],
+    "entity_memory": [],
+    "short_term_memory": [],
+    "knowledge_base": [
+      {
+        "id": "dfbde207-859c-4cde-9921-37e959d31ade",
+        "data": {
+          "memory_id": "harbor-demo",
+          "user_id": null,
+          "content": "The release owner is Mira. Launch is after 19:00 UTC."
+        }
+      }
+    ],
+    "conversation_memory": [],
+    "workflow_memory": [],
+    "skillbox": [],
+    "agents": [],
+    "shared_memory": [],
+    "summaries": [],
+    "semantic_cache": [],
+    "tool_log": []
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "digest": "5425043213135dcae23f2718b127b87e0425887ffc2121eeb3c4478bd0f7b6f0"
+  }
+}

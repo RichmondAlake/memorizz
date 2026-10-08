@@ -143,6 +143,52 @@ def test_long_tool_names_stay_within_the_provider_limit():
     assert MemAgent._mcp_tool_name("my server", "get.item") == "my_server__get_item"
 
 
+@pytest.mark.parametrize("state", ["unconfigured", "configured", "partly_removed"])
+def test_empty_mcp_configuration_cleans_up_quietly(
+    tmp_path, monkeypatch, caplog, state
+):
+    from memorizz import MemAgent
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    agent = (
+        MemAgent(memory_provider=False, auto_register=False)
+        if state == "unconfigured"
+        else _agent_with_cached_f1_tools(tmp_path, monkeypatch)
+    )
+
+    def local_tool() -> str:
+        """A local tool that must survive MCP cleanup."""
+        return "local"
+
+    try:
+        agent.tool_manager.add_tool(local_tool)
+        before = set(agent.tool_manager.list_tools())
+        mcp_tools = {
+            name
+            for name in before
+            if name.startswith(("mcp_", "f1__")) or name == "list_mcp_servers"
+        }
+        if state == "partly_removed":
+            agent.tool_manager.remove_tool("mcp_list_tools")
+            agent.tool_manager.remove_tool("f1__get_f1_next_event")
+        caplog.clear()
+        with caplog.at_level(
+            "WARNING", logger="memorizz.memagent.managers.tool_manager"
+        ):
+            # Applying the same empty saved configuration on every launch is
+            # expected, including when a user already removed some tools.
+            agent.with_mcp_servers([])
+            agent.with_mcp_servers([])
+        assert "Tool not found for removal" not in caplog.text
+        assert set(agent.tool_manager.list_tools()) == before - mcp_tools
+        assert agent.tool_manager.execute_tool("local_tool", {})[0] == "local"
+        assert agent._mcp_server_tools == {}
+        assert agent._mcp_tool_targets == {}
+        assert agent._mcp_tools_registered is False
+    finally:
+        agent.close()
+
+
 class _SemanticToolbox:
     """A toolbox index that knows only the built-in tools."""
 

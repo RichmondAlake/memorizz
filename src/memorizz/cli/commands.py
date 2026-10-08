@@ -92,7 +92,7 @@ def cmd_model(session, args: str):
                 console.print("Available Ollama models:")
                 for m in models:
                     console.print(f"  • {m}")
-        console.print("Usage: /model <model-name>")
+        console.print("Usage: /models <model-name>")
         return
     new_config = dict(session.llm_config)
     new_config["model"] = name
@@ -874,7 +874,7 @@ def _login_ollama(console) -> None:
     if result.returncode == 0:
         console.print(
             "[green]Signed in to Ollama Cloud.[/green] Try "
-            "[cyan]/model glm-5.2:cloud[/cyan]."
+            "[cyan]/models glm-5.2:cloud[/cyan]."
         )
     else:
         console.print(
@@ -1170,13 +1170,210 @@ def cmd_exit(session, args: str):
     return False
 
 
+def cmd_harnesses(session, args: str):
+    """List configured harnesses and whether each is ready to run."""
+    from . import harness_session
+
+    console = _con(session)
+    try:
+        rows = harness_session.list_harness_status(session)
+    except Exception as exc:
+        console.print(f"[red]Could not list harnesses:[/red] {exc}")
+        return
+    if not rows:
+        console.print(
+            "[dim]No harnesses configured. See `memorizz harness doctor`.[/dim]"
+        )
+        return
+    active = harness_session.active_harness(session)
+    console.print(f"[bold]Harnesses[/bold] (active: {active or 'off'})")
+    for row in rows:
+        if row["ready"] is True:
+            state = "[green]ready[/green]"
+        elif row["ready"] is False:
+            state = f"[red]not ready[/red] [dim]{row.get('reason') or ''}[/dim]"
+        else:
+            state = "[dim]unknown[/dim]"
+        marker = "▶ " if row["name"] == active else "  "
+        version = f" [dim]{row['version']}[/dim]" if row.get("version") else ""
+        console.print(f"{marker}[cyan]{row['name']}[/cyan]{version}  {state}")
+    console.print("Usage: /harness <name|auto|off>")
+
+
+def cmd_harness(session, args: str):
+    """Route the following turns through an external harness, or back to native."""
+    from . import harness_session
+
+    console = _con(session)
+    name = args.strip().lower()
+    if not name:
+        active = harness_session.active_harness(session)
+        mode = getattr(session.agent, "meta_harness_mode", None)
+        if active == harness_session.DELEGATE:
+            rows = harness_session.harness_delegates(session)
+            console.print(
+                "Harness: [cyan]delegate[/cyan] (your model stays in charge; it can "
+                f"hand work to {len(rows)} harness delegate(s) and call harnesses as tools)"
+            )
+        elif active:
+            console.print(
+                f"Harness: [cyan]{active}[/cyan] (runtime mode, session only; "
+                "memory, traces and approvals stay in MemoRizz)"
+            )
+        elif mode:
+            console.print(
+                f"Harness: [dim]off for this session[/dim]; the saved agent uses "
+                f"{mode} mode with default '{getattr(session.agent, 'default_harness', 'auto')}'."
+            )
+        else:
+            console.print("Harness: [dim]off[/dim] (native MemAgent execution)")
+        console.print(
+            "Usage: /harness <codex|claude-code|auto|delegate|off>   (see /harnesses)"
+        )
+        return
+    if name in {"off", "none", "native"}:
+        result = harness_session.clear_harness(session)
+        previous = result.get("previous")
+        console.print(
+            "[green]Harness off[/green]"
+            + (f" (was {previous})" if previous else "")
+            + "; turns run natively again."
+        )
+        return
+    try:
+        result = harness_session.apply_harness(session, name)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return
+    except Exception as exc:
+        console.print(f"[red]Could not attach harness:[/red] {exc}")
+        return
+    if result["harness"] == harness_session.DELEGATE:
+        _print_delegate_mode(console, session, result)
+        return
+    console.print(
+        f"[green]Harness →[/green] {result['harness']}  "
+        "[dim](this session only; /harness off to return to native execution)[/dim]"
+    )
+    if result["harness"] == "auto":
+        console.print("[dim]MemoRizz picks a ready harness per turn.[/dim]")
+
+
+def _print_delegate_mode(console, session, result) -> None:
+    console.print(
+        "[green]Harness → delegate[/green]  [dim](this session only; your model "
+        "plans, harnesses do the parts; /harness off to return)[/dim]"
+    )
+    rows = result.get("delegates") or []
+    if rows:
+        state = "on" if result.get("delegation_enabled") else "off"
+        console.print(f"Harness delegates ({len(rows)}, delegation {state}):")
+        for row in rows:
+            model = f" [dim]{row['model']}[/dim]" if row.get("model") else ""
+            console.print(
+                f"  [cyan]{row['name']}[/cyan] ({row['harness']}){model}  {row['id']}"
+            )
+        if not result.get("delegation_enabled"):
+            console.print(
+                "  [yellow]Delegation is off for this agent[/yellow]; enable it in the "
+                "agent's Delegates section for the model to fan work out."
+            )
+    else:
+        agent_id = getattr(session.agent, "agent_id", None) or "<agent-id>"
+        console.print(
+            "No harness delegates yet. Create one with:\n"
+            f"  [cyan]memorizz harness delegate create --harness codex "
+            f"--coordinator {agent_id} --attach[/cyan]"
+        )
+    console.print(
+        "Tools added for this session: "
+        + ", ".join(f"[cyan]{name}[/cyan]" for name in result.get("tools") or [])
+        + "  [dim](see /tools)[/dim]"
+    )
+    console.print(
+        "[dim]Delegates work in a scratch folder with no web access unless the "
+        "playground grants them a workspace.[/dim]"
+    )
+
+
+def cmd_compare(session, args: str):
+    """Run one read-only task on two or more harnesses side by side."""
+    from . import harness_session
+
+    console = _con(session)
+    try:
+        names, task, options = harness_session.parse_compare_args(session, args)
+    except ValueError as exc:
+        console.print(str(exc))
+        return
+    except Exception as exc:
+        console.print(f"[red]Could not read the harness list:[/red] {exc}")
+        return
+    console.print(
+        f"[bold]Comparing[/bold] {' vs '.join(names)} on: {task}\n"
+        "[dim]Read-only, in the current folder. Ctrl-C cancels.[/dim]"
+    )
+    try:
+        report = harness_session.run_compare(
+            session,
+            names,
+            task,
+            on_progress=lambda line: console.print(f"[dim]{line}[/dim]"),
+            **options,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return
+    except Exception as exc:
+        console.print(f"[red]Comparison failed:[/red] {exc}")
+        return
+    _print_compare_report(console, report)
+
+
+def _print_compare_report(console, report) -> None:
+    from rich.markup import escape
+    from rich.table import Table
+
+    table = Table(title=f"Comparison {report['workflow_id']} · {report.get('status')}")
+    table.add_column("Harness", style="cyan", no_wrap=True)
+    table.add_column("Status")
+    table.add_column("Verified")
+    table.add_column("Cost", justify="right")
+    table.add_column("Time", justify="right")
+    table.add_column("Answer")
+    for row in report.get("rows") or []:
+        cost = row.get("cost_usd")
+        latency = row.get("latency_ms")
+        answer = " ".join(str(row.get("answer") or "").split())
+        if row.get("error") and not answer:
+            answer = f"error: {row['error']}"
+        if len(answer) > 220:
+            answer = answer[:217] + "…"
+        table.add_row(
+            str(row.get("harness")),
+            str(row.get("status")),
+            "yes" if row.get("verified") else "-",
+            f"${cost:.4f}" if isinstance(cost, (int, float)) else "-",
+            f"{latency / 1000:.1f}s" if isinstance(latency, (int, float)) else "-",
+            escape(answer) or "-",
+        )
+    console.print(table)
+    console.print(
+        f"Saved as workflow [cyan]{report['workflow_id']}[/cyan]: "
+        f"[dim]memorizz harness show-workflow {report['workflow_id']}[/dim] "
+        "or the Agent Harnesses page."
+    )
+
+
 def cmd_help(session, args: str):
+    from rich.markup import escape
+
     console = _con(session)
     console.print("[bold]Slash commands[/bold]")
     for name in sorted(COMMANDS):
         cmd = COMMANDS[name]
         usage = cmd.usage or f"/{name}"
-        console.print(f"  [cyan]{usage:<26}[/cyan] {cmd.help}")
+        console.print(f"  [cyan]{escape(usage.ljust(26))}[/cyan] {cmd.help}")
     console.print(
         "\nType plain text to chat. Ctrl-C / Ctrl-D / /exit quits; "
         "Ctrl-C during a reply aborts just that reply."
@@ -1310,7 +1507,11 @@ def cmd_automation(session, args: str):
 
 COMMANDS: Dict[str, Command] = {
     "help": Command(cmd_help, "Show this help.", "/help"),
-    "model": Command(cmd_model, "Show or switch the chat model.", "/model [name]"),
+    "models": Command(
+        cmd_model,
+        "Show the current model, list installed Ollama models, or switch models.",
+        "/models [name]",
+    ),
     "provider": Command(cmd_provider, "Switch the LLM provider.", "/provider [name]"),
     "ollama": Command(
         cmd_ollama,
@@ -1395,6 +1596,22 @@ COMMANDS: Dict[str, Command] = {
         "Erase the agent's stored memory (asks to confirm).",
         "/clear",
     ),
+    "harnesses": Command(
+        cmd_harnesses,
+        "List external harnesses (Codex, Claude Code, ...) and readiness.",
+        "/harnesses",
+    ),
+    "harness": Command(
+        cmd_harness,
+        "Run the next turns on a harness with MemoRizz memory; delegate keeps your "
+        "model in charge; off returns to native.",
+        "/harness <name|auto|delegate|off>",
+    ),
+    "compare": Command(
+        cmd_compare,
+        "Run one read-only task on two or more harnesses side by side.",
+        "/compare <harness> <harness> <task>",
+    ),
     "cls": Command(cmd_cls, "Clear the terminal screen.", "/cls"),
     "exit": Command(cmd_exit, "Save and quit.", "/exit"),
 }
@@ -1408,7 +1625,7 @@ ALIASES: Dict[str, str] = {
     "q": "exit",
     "h": "help",
     "?": "help",
-    "models": "model",
+    "model": "models",
     "conversation": "conversations",
     "converstations": "conversations",
     "convos": "conversations",
@@ -1450,7 +1667,7 @@ def dispatch(line: str, session) -> bool:
 
     cmd = COMMANDS.get(name)
     if cmd is None:
-        # Resolve unambiguous abbreviations: /lo -> /login, /mo -> /model.
+        # Resolve unambiguous abbreviations: /lo -> /login, /mo -> /models.
         matches = sorted(n for n in COMMANDS if n.startswith(name))
         if len(matches) == 1:
             name = matches[0]

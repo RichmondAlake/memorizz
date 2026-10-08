@@ -37,6 +37,27 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
         )  # e.g. "cpu", "cuda", "mps", or int gpu id
         self.batch_size = self.config.get("batch_size", 32)
         self.normalize_embeddings = self.config.get("normalize_embeddings", False)
+        self.config_kwargs = dict(self.config.get("config_kwargs") or {})
+        self.prompt_name = self.config.get("prompt_name")
+        self.truncate_dim = self.config.get("truncate_dim")
+        if self.model_name == "google/embeddinggemma-2":
+            # MemoRizz's memory stores embed text; skip unused media encoders.
+            self.config_kwargs = {
+                "vision_config": None,
+                "audio_config": None,
+                **self.config_kwargs,
+            }
+            self.normalize_embeddings = self.config.get("normalize_embeddings", True)
+            self.truncate_dim = self.truncate_dim or self.config.get("dimensions")
+            if self.truncate_dim is not None and self.truncate_dim not in {
+                128,
+                256,
+                512,
+                768,
+            }:
+                raise ValueError(
+                    "EmbeddingGemma 2 dimensions must be 128, 256, 512 or 768"
+                )
         self.cache_folder = self.config.get("cache_folder")
         self.revision = self.config.get("revision")
         self.trust_remote_code = self.config.get("trust_remote_code", False)
@@ -86,6 +107,10 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
             kwargs["use_auth_token"] = self.auth_token
         if self.local_files_only:
             kwargs["local_files_only"] = True
+        if self.config_kwargs:
+            kwargs["config_kwargs"] = self.config_kwargs
+        if self.truncate_dim:
+            kwargs["truncate_dim"] = self.truncate_dim
 
         try:
             model = SentenceTransformer(model_name, **kwargs)
@@ -117,7 +142,12 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
             self._model_cache[model_name] = model
 
         try:
-            dims = int(model.get_sentence_embedding_dimension())
+            getter = getattr(model, "get_embedding_dimension", None)
+            dims = int(
+                getter()
+                if callable(getter)
+                else model.get_sentence_embedding_dimension()
+            )
             self._dimensions_cache[model_name] = dims
             return dims
         except Exception as exc:
@@ -143,6 +173,16 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
         model = self._get_model(model_name)
 
         normalize = kwargs.get("normalize_embeddings", self.normalize_embeddings)
+        encode_options = {}
+        prompt_name = kwargs.get("prompt_name", self.prompt_name)
+        if model_name == "google/embeddinggemma-2" and not prompt_name:
+            prompt_name = (
+                "SearchQuery" if kwargs.get("input_type") == "query" else "Document"
+            )
+        if prompt_name:
+            encode_options["prompt_name"] = prompt_name
+        if kwargs.get("truncate_dim") is not None:
+            encode_options["truncate_dim"] = kwargs["truncate_dim"]
 
         try:
             embedding = model.encode(
@@ -151,6 +191,7 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
                 convert_to_numpy=True,
                 normalize_embeddings=normalize,
                 show_progress_bar=False,
+                **encode_options,
             )
             return embedding.tolist()
         except Exception as exc:

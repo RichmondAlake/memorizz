@@ -287,7 +287,7 @@ def _retrieve_conversation_history(
     try:
         rows = (
             provider.retrieve_conversation_history_ordered_by_timestamp(
-                memory_id=memory_id_value, limit=None
+                memory_id=memory_id_value, limit=limit
             )
             or []
         )
@@ -311,7 +311,7 @@ def _retrieve_conversation_history(
             if conversation_store is not None:
                 rows = (
                     conversation_store.retrieve_conversation_history_ordered_by_timestamp(
-                        memory_id=memory_id_value, limit=None
+                        memory_id=memory_id_value, limit=limit
                     )
                     or []
                 )
@@ -388,7 +388,9 @@ def _load_agent_last_run_map(agents: Optional[List[Any]] = None) -> Dict[str, fl
 
         latest_timestamp = 0.0
         for memory_id in _extract_agent_memory_ids(agent):
-            history = _retrieve_conversation_history(memory_id=memory_id, limit=None)
+            # Providers return the newest rows when limited; one row per
+            # conversation is enough for a last-run timestamp.
+            history = _retrieve_conversation_history(memory_id=memory_id, limit=1)
 
             for message in history:
                 timestamp = _extract_message_timestamp(message)
@@ -459,28 +461,32 @@ def _load_toolbox_documents() -> List[Dict[str, Any]]:
 
 
 def _count_runtime_tools_for_agent(agent_id: str) -> int:
-    """Best-effort runtime tool count by loading the agent tool manager."""
+    """Best-effort tool count from the stored agent record.
+
+    Fleet pages call this once per agent per page view, so it must not build
+    a full ``MemAgent`` (LLM client, tool manager, sandbox and MCP setup).
+    The persisted record already lists the agent's configured tools.
+    """
     provider = _state.get("provider")
     agent_id_value = _to_text(agent_id).strip()
     if not provider or not agent_id_value:
         return 0
 
     try:
-        from ..memagent import MemAgent
-
-        agent_instance = MemAgent.load(agent_id_value, memory_provider=provider)
-        tool_manager = getattr(agent_instance, "tool_manager", None)
-        if not tool_manager:
-            return 0
-        tool_names = tool_manager.list_tools() or []
-        return len(tool_names)
+        stored = provider.retrieve_memagent(agent_id_value)
     except Exception as exc:
-        logger.debug(
-            "Could not compute runtime tool count for %s: %s",
-            agent_id_value,
-            exc,
-        )
+        logger.debug("Could not read stored tools for %s: %s", agent_id_value, exc)
         return 0
+    if stored is None:
+        return 0
+    tools = getattr(stored, "tools", None)
+    if tools is None and isinstance(stored, dict):
+        tools = stored.get("tools")
+    if isinstance(tools, dict):
+        return len(tools)
+    if isinstance(tools, (list, tuple, set)):
+        return len(tools)
+    return 0
 
 
 def _normalize_internet_provider_name(value: Any) -> str:
@@ -1426,13 +1432,13 @@ def _build_internet_provider_config(
                 continue
             config[key] = value
 
-    if "api_key" not in config:
-        default_key = _to_text(
-            os.environ.get("MEMORIZZ_DEFAULT_INTERNET_PROVIDER_API_KEY", "")
-        ).strip()
-        if default_key:
-            config["api_key"] = default_key
+    # Credentials never belong in the agent record: the provider resolves its
+    # key from the environment (TAVILY_API_KEY, FIRECRAWL_API_KEY or
+    # MEMORIZZ_DEFAULT_INTERNET_PROVIDER_API_KEY) when it is created.
+    from ..internet_access.base import scrub_secret_config
 
+    config = scrub_secret_config(config)
+    config.pop("api_key_set", None)
     return config or None
 
 

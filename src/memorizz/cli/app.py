@@ -109,12 +109,18 @@ def chat(
         "--browser-control/--no-browser-control",
         help="Enable or disable the governed Browser Use tool.",
     ),
+    harness: Optional[str] = typer.Option(
+        None,
+        "--harness",
+        help="Run turns on an external harness (codex, claude-code, auto) with MemoRizz memory; session only.",
+    ),
 ):
     _launch_repl(
         code_mode=code,
         provider=provider,
         model=model,
         browser_control=browser_control,
+        harness=harness,
     )
 
 
@@ -137,6 +143,11 @@ def run(
         "--browser-control/--no-browser-control",
         help="Enable or disable the governed Browser Use tool.",
     ),
+    harness: Optional[str] = typer.Option(
+        None,
+        "--harness",
+        help="Run the turn on an external harness (codex, claude-code, auto) with MemoRizz memory.",
+    ),
 ):
     if not prompt:
         _eprint('Usage: memorizz run "<prompt>"')
@@ -151,12 +162,14 @@ def run(
             browser_control=browser_control,
             stream=True,
             output=output,
+            harness=harness,
         )
         return
     _run_oneshot(
         " ".join(prompt),
         code_mode=code,
         browser_control=browser_control,
+        harness=harness,
     )
 
 
@@ -165,7 +178,7 @@ def ui(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8765, "--port"),
 ):
-    from .legacy import run_local
+    from .operations import run_local
 
     ok = run_local(host=host, port=port)
     raise typer.Exit(0 if ok else 1)
@@ -205,21 +218,21 @@ app.add_typer(oracle_app, name="oracle")
 
 @oracle_app.command("install", help="Install the Oracle container.")
 def oracle_install(image: Optional[str] = typer.Option(None, "--image", "-i")):
-    from .legacy import install_oracle
+    from .operations import install_oracle
 
     raise typer.Exit(0 if install_oracle(image=image) else 1)
 
 
 @oracle_app.command("setup", help="Set up the Oracle user/schema.")
 def oracle_setup():
-    from .legacy import setup_oracle
+    from .operations import setup_oracle
 
     raise typer.Exit(0 if setup_oracle() else 1)
 
 
 @oracle_app.command("setup-schema", help="Apply Oracle schema updates (no user drop).")
 def oracle_setup_schema():
-    from .legacy import setup_oracle_schema
+    from .operations import setup_oracle_schema
 
     raise typer.Exit(0 if setup_oracle_schema() else 1)
 
@@ -231,7 +244,7 @@ def oracle_teardown(
     ),
     force: bool = typer.Option(False, "--force"),
 ):
-    from .legacy import teardown_oracle
+    from .operations import teardown_oracle
 
     raise typer.Exit(0 if teardown_oracle(mode=mode, force=force) else 1)
 
@@ -278,7 +291,7 @@ def automations_run(
     lease_seconds: int = typer.Option(120, "--lease-seconds"),
     concurrency: int = typer.Option(2, "--concurrency"),
 ):
-    from .legacy import run_automations
+    from .operations import run_automations
 
     ok = run_automations(
         poll_interval=poll_interval,
@@ -429,11 +442,27 @@ def _wizard(console, code_mode, depth: int = 0, browser_control=None):
         return None
 
 
+def _apply_session_harness(session, harness, console) -> None:
+    """Honour ``--harness`` exactly like ``/harness <name>`` would."""
+    from . import harness_session
+
+    try:
+        result = harness_session.apply_harness(session, harness)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    console.print(
+        f"[green]Harness →[/green] {result['harness']} "
+        "[dim](session only; memory, traces and approvals stay in MemoRizz)[/dim]"
+    )
+
+
 def _launch_repl(
     code_mode=False,
     provider=None,
     model=None,
     browser_control=None,
+    harness=None,
 ):
     _load_env()
     console = _make_console()
@@ -446,13 +475,21 @@ def _launch_repl(
     )
     if session is None:
         raise typer.Exit(1)
+    if harness:
+        _apply_session_harness(session, harness, console)
     from .repl import run_repl
 
     run_repl(session)
 
 
 def _run_oneshot(
-    text, code_mode=False, browser_control=None, *, stream=False, output="text"
+    text,
+    code_mode=False,
+    browser_control=None,
+    *,
+    stream=False,
+    output="text",
+    harness=None,
 ):
     if stream:
         from contextlib import redirect_stdout
@@ -464,11 +501,14 @@ def _run_oneshot(
         destination = sys.stdout
         with redirect_stdout(sys.stderr):
             _load_env()
+            err_console = Console(stderr=True)
             session = _build_or_wizard(
-                code_mode, console=Console(stderr=True), browser_control=browser_control
+                code_mode, console=err_console, browser_control=browser_control
             )
             if session is None:
                 raise typer.Exit(1)
+            if harness:
+                _apply_session_harness(session, harness, err_console)
             code = consume_stream(session, text, output=output, stdout=destination)
         if code:
             raise typer.Exit(code)
@@ -482,6 +522,8 @@ def _run_oneshot(
     )
     if session is None:
         raise typer.Exit(1)
+    if harness:
+        _apply_session_harness(session, harness, console)
     from ..llms.streaming import ProviderStreamError
 
     try:

@@ -410,7 +410,7 @@ Native SQLite, MongoDB and Oracle span indexes, explicit migrations, backfill,
 parity checks, retention, account-resolution hooks, role-gated reveals and inert
 Evalground replay drafts are implemented. The compatibility path remains the
 default rollback path and can scan stored rows. See the
-[rollout and operator guide](observability-rollout.md) for provisioning, cutover,
+[production governance guide](guides/production-governance.md) for provisioning, cutover,
 privacy policy, permissions, endpoint contracts and deployment validation.
 
 The Incident Finder searches opaque user/thread/root/job/source/artifact/error

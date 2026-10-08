@@ -37,6 +37,9 @@ def _manager(tmp_path, monkeypatch, **overrides):
         "command": sys.executable,
         "args": [str(SERVER)],
         "timeout": 10,
+        # The fixture's tools carry no annotations and "echo" is not a read
+        # verb, so the host allowlist is what makes it callable without approval.
+        "read_only_tools": ["echo"],
         **overrides,
     }
     return MCPClientManager(owner_id="agent-1", servers=[config])

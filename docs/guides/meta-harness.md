@@ -880,6 +880,23 @@ CI, and production hosts. `memorizz harness doctor` reports host readiness, and
 every execution still fails closed with the structured remediation above when
 the executable or authentication is unavailable.
 
+### Interactive chat
+
+The `memorizz` chat routes turns through a harness without editing the saved
+agent. `/harnesses` lists readiness; `/harness codex` (or `claude-code`,
+`openhands`, `pi`, `hermes`, `auto`) attaches the agent's meta-harness in
+`runtime` mode for this session, so every following turn is a governed run
+with MemoRizz retrieval, MCP access, tracing and approvals; `/harness off`
+restores the agent's own configuration. The prompt shows the active harness
+(`memorizz·codex>`), and pending approvals raised by a harness turn are
+printed after the reply with the `/approvals` commands to decide them.
+`memorizz chat --harness codex` and `memorizz run "..." --harness codex` do
+the same from the launch command. `/harness delegate` is the coordinator
+pattern instead: the agent's model keeps the turn, hands parts to its harness
+delegates and gets `run_harness_task` to call any harness directly;
+`/compare codex claude-code <task>` runs a read-only comparison from the
+prompt and keeps it as a workflow.
+
 ## Local UI
 
 Starting a comparison scrolls to its approval cards once they appear, or to

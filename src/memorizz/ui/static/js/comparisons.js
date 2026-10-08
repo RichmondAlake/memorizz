@@ -19,8 +19,10 @@
     "cohere",
     "voyage",
     "jev",
+    "openai_decisions",
   ];
   const labels = {
+    openai_decisions: "OpenAI Decisions",
     openai: "OpenAI",
     anthropic: "Anthropic",
     ollama: "Ollama (local)",
@@ -302,7 +304,7 @@
       discovery.hidden = simple;
       refresh.hidden = simple;
       llmProvider.parentElement.hidden = provider.value !== "llm";
-      jevMethod.parentElement.hidden = provider.value !== "jev";
+      jevMethod.parentElement.hidden = !["jev", "openai_decisions"].includes(provider.value);
       details.hidden = simple;
       unit.parentElement.hidden = provider.value !== "cohere";
       stream.parentElement.hidden =
