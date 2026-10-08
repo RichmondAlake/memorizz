@@ -956,3 +956,202 @@ def test_memory_project_switches_to_the_folder_memory(session, monkeypatch, tmp_
     assert seen["path"] == "/some/where"
     commands.dispatch("/memory", sess)
     assert "/memory project [path]" in output.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# /session and short run ids
+# --------------------------------------------------------------------------- #
+
+
+SESSION_EVENTS = [
+    {
+        "sequence": 1,
+        "type": "status",
+        "timestamp": "2026-10-07T19:14:57",
+        "data": {"source": "plugin"},
+    },
+    {
+        "sequence": 2,
+        "type": "message",
+        "timestamp": "2026-10-07T19:15:03",
+        "data": {
+            "role": "user",
+            "text": "<command-name>/model</command-name><command-args>gemma4</command-args>",
+        },
+    },
+    {
+        "sequence": 3,
+        "type": "message",
+        "timestamp": "2026-10-07T19:15:10",
+        "data": {"role": "user", "text": "can you see what codex is doing"},
+    },
+    {
+        "sequence": 4,
+        "type": "reasoning",
+        "timestamp": "2026-10-07T19:15:18",
+        "data": {"text": ""},
+    },
+    {
+        "sequence": 5,
+        "type": "tool_call",
+        "timestamp": "2026-10-07T19:15:19",
+        "data": {"name": "Bash"},
+    },
+    {
+        "sequence": 6,
+        "type": "tool_result",
+        "timestamp": "2026-10-07T19:15:20",
+        "data": {},
+    },
+    {
+        "sequence": 7,
+        "type": "tool_call",
+        "timestamp": "2026-10-07T19:15:21",
+        "data": {"name": "Read"},
+    },
+    {
+        "sequence": 8,
+        "type": "tool_result",
+        "timestamp": "2026-10-07T19:15:22",
+        "data": {},
+    },
+    {
+        "sequence": 9,
+        "type": "message",
+        "timestamp": "2026-10-07T19:15:30",
+        "data": {
+            "role": "assistant",
+            "text": "Codex is editing the\nmemory evolution page.",
+        },
+    },
+    {
+        "sequence": 9.5,
+        "type": "message",
+        "timestamp": "2026-10-07T19:15:40",
+        "data": {
+            "role": "user",
+            "text": "<task-notification><task-id>t1</task-id><summary>Background command finished</summary></task-notification>",
+        },
+    },
+    {
+        "sequence": 10,
+        "type": "tool_call",
+        "timestamp": "2026-10-07T19:16:00",
+        "data": {"name": "Bash"},
+    },
+    {
+        "sequence": 11,
+        "type": "complete",
+        "timestamp": "2026-10-07T19:16:05",
+        "data": {},
+    },
+]
+
+
+def _session_service(rows=None):
+    service = FakeService(READY)
+    runs = rows or [
+        _plugin_run(
+            "6e07d725-b199-5730-be90-e838a3faa444",
+            "claude-code",
+            "2026-10-07T19:14:57+00:00",
+            "x",
+            turns="50",
+        ),
+        _plugin_run(
+            "6e07aaaa-0000-0000-0000-000000000000",
+            "codex",
+            "2026-10-06T09:00:00+00:00",
+            "y",
+        ),
+    ]
+    service.list_runs = lambda limit=100: list(runs)
+    service.get_run = lambda run_id: next(
+        (r for r in runs if r["run_id"] == run_id), None
+    )
+    service.events = (
+        lambda run_id, limit=1000, **k: list(SESSION_EVENTS)
+        if run_id.startswith("6e07d725")
+        else []
+    )
+    return service
+
+
+def test_resolve_run_id_accepts_a_unique_prefix(session):
+    sess, _ = session
+    sess.agent.meta_harness = _session_service()
+    assert (
+        harness_session.resolve_run_id(sess, "6e07d725")
+        == "6e07d725-b199-5730-be90-e838a3faa444"
+    )
+    assert harness_session.resolve_run_id(
+        sess, "6e07d725-b199-5730-be90-e838a3faa444"
+    ).startswith("6e07d725")
+    with pytest.raises(ValueError, match="matches 2 runs"):
+        harness_session.resolve_run_id(sess, "6e07")
+    with pytest.raises(ValueError, match="No run starts with 'zzz'"):
+        harness_session.resolve_run_id(sess, "zzz")
+
+
+def test_session_turns_collapses_tools_and_cleans_slash_commands(session):
+    sess, _ = session
+    sess.agent.meta_harness = _session_service()
+    view = harness_session.session_turns(sess, "6e07d725")
+    assert view["harness"] == "claude-code" and view["status"] == "succeeded"
+    assert (
+        view["memory_id"] == "project-memorizz-521ff6"
+        and view["workspace_name"] == "memorizz"
+    )
+    assert view["turns_recorded"] == "50" and view["tool_calls"] == 3
+    assert [t["text"] for t in view["turns"]] == [
+        "/model gemma4",
+        "can you see what codex is doing",
+        "Codex is editing the memory evolution page.",
+        "Background command finished",
+    ]
+    assert [t["role"] for t in view["turns"]] == ["user", "user", "assistant", "host"]
+    assert [t["tools_before"] for t in view["turns"]] == [0, 0, 2, 0]
+    assert view["trailing_tools"] == 1 and view["omitted"] == 0
+    short = harness_session.session_turns(sess, "6e07d725", last=1)
+    assert len(short["turns"]) == 1 and short["omitted"] == 3
+
+
+def test_session_command_renders_turns(session):
+    sess, output = session
+    sess.agent.meta_harness = _session_service()
+    assert commands.dispatch("/session 6e07d725", sess) is True
+    text = output.getvalue()
+    assert "claude-code session 6e07d725" in text and "4 turns, 3 tool calls" in text
+    assert "host" in text and "Background command finished" in text
+    assert "you" in text and "can you see what codex is doing" in text
+    assert (
+        "· 2 tool call(s)" in text
+        and "assistant" in text
+        and "memory evolution page" in text
+    )
+    assert "/memory project-memorizz-521ff6" in text
+    commands.dispatch("/session", sess)
+    assert "Usage: /session <run>" in output.getvalue()
+    commands.dispatch("/session zzz", sess)
+    assert "No run starts with 'zzz'" in output.getvalue()
+    assert "/session" in commands.command_completions()
+
+
+def test_sessions_table_drops_the_folder_column_on_narrow_terminals():
+    narrow_out, wide_out = StringIO(), StringIO()
+    agent = FakeAgent(service=FakeService(READY))
+    agent.meta_harness.list_runs = lambda limit=100: list(PLUGIN_RUNS)
+    for out, width in ((narrow_out, 100), (wide_out, 160)):
+        sess = Session(
+            agent=agent,
+            provider=object(),
+            llm_config={},
+            console=Console(file=out, color_system=None, width=width),
+        )
+        commands.dispatch("/sessions", sess)
+    assert (
+        "Folder" not in narrow_out.getvalue()
+        and "Started with" in narrow_out.getvalue()
+    )
+    assert "Folder" in wide_out.getvalue()
+    assert "/session <run>" in narrow_out.getvalue()

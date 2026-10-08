@@ -101,6 +101,31 @@ def _session(*, require_memory: bool = True) -> Iterator[tuple[Any, List[str]]]:
             close()
 
 
+def _run_id(service: Any, value: str) -> str:
+    """Accept a full run id or a unique prefix (the ids the chat and the UI
+    show are shortened). Raises KeyError with a clear message otherwise."""
+    value = str(value or "").strip()
+    if not value:
+        raise KeyError("Harness run not found: (empty id)")
+    if service.get_run(value) is not None:
+        return value
+    matches = sorted(
+        {
+            str(run.get("run_id"))
+            for run in service.list_runs(limit=1000) or []
+            if str(run.get("run_id") or "").startswith(value)
+        }
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise KeyError(f"Harness run not found: {value}")
+    raise KeyError(
+        f"Run id prefix {value} matches {len(matches)} runs; give more characters: "
+        + ", ".join(m[:12] for m in matches[:6])
+    )
+
+
 def _canonical(name: Optional[str]) -> str:
     from ..metaharness.service import HARNESS_ALIASES
 
@@ -774,9 +799,8 @@ def show_run(
 ):
     """Show one run: its task, status, result, cost and approval."""
     with _session(require_memory=False) as (service, _warnings):
+        run_id = _run_id(service, run_id)
         run = service.get_run(run_id)
-        if run is None:
-            raise KeyError(f"Harness run not found: {run_id}")
         if include_events:
             run["events"] = service.events(run_id)
         _print({"ok": True, "run": run}, raw_json)
@@ -824,8 +848,7 @@ def events(
 ):
     """Print a run's events: messages, commands, tool calls, usage, errors."""
     with _session(require_memory=False) as (service, _warnings):
-        if service.get_run(run_id) is None:
-            raise KeyError(f"Harness run not found: {run_id}")
+        run_id = _run_id(service, run_id)
         if follow:
             try:
                 for event in service.stream(run_id, after=after, poll_seconds=0.5):

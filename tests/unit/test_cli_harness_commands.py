@@ -345,3 +345,37 @@ def test_harness_delegates_can_be_created_and_attached(tmp_path: Path, monkeypat
     )
     assert lonely.exit_code != 0 and "--coordinator" in plain(lonely.output)
     provider.close()
+
+
+def test_show_and_events_accept_a_unique_run_id_prefix(tmp_path: Path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    runner = _cli(lambda: _meta(tmp_path, "alpha", "beta"), monkeypatch)
+    started = runner.invoke(
+        app,
+        [
+            "harness",
+            "run",
+            "Start",
+            "--harness",
+            "alpha",
+            "--mcp-access",
+            "none",
+            "-C",
+            str(workspace),
+            "--json",
+        ],
+    )
+    assert started.exit_code == 0, started.output
+    run_id = _last_json(started)["run_id"]
+
+    shown = runner.invoke(app, ["harness", "show", run_id[:8], "--json"])
+    assert shown.exit_code == 0, shown.output
+    assert _last_json(shown)["run"]["run_id"] == run_id
+    events = runner.invoke(app, ["harness", "events", run_id[:8], "--json"])
+    assert events.exit_code == 0, events.output
+    assert _last_json(events)["ok"] is True
+
+    missing = runner.invoke(app, ["harness", "show", "zzzz"])
+    assert missing.exit_code == 1 and "Harness run not found: zzzz" in plain(
+        missing.output
+    )

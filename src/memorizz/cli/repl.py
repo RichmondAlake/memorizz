@@ -30,7 +30,7 @@ from .. import __version__
 from . import commands
 from . import config as cfg
 from . import harness_session, ui
-from .updates import update_notifier
+from .updates import known_update, update_notifier
 
 
 class SlashCompleter(Completer):
@@ -118,6 +118,13 @@ def _banner(console: Console, session) -> None:
         f"/memory-provider for memory setup · "
         f"/exit to quit[/dim]"
     )
+    update = known_update()
+    if update:
+        session.update_notice = update
+        body += (
+            f"\n[bold yellow]⬆ Update available:[/bold yellow] {__version__} → "
+            f"{update['latest']}   [yellow]{update['command']}[/yellow]"
+        )
     panel = Panel(body, expand=False, border_style="green")
     if ui.should_animate(console):
         console.print(Columns([ui.crest_text(), panel], padding=(0, 2)))
@@ -228,7 +235,7 @@ def run_repl(session) -> None:
     ui.animate_crest(console)
     _banner(console, session)
 
-    with patch_stdout(raw=True), update_notifier(console):
+    with patch_stdout(raw=True), update_notifier(console, session):
         while True:
             try:
                 line = ptk.prompt(ui.prompt_fragments(session))

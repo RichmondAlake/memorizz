@@ -230,12 +230,12 @@ def test_slow_lookup_does_not_block_session_or_exit(release_api, workers, monkey
     started, release = Event(), Event()
     console = SimpleNamespace(is_terminal=True, is_dumb_terminal=False, print=Mock())
 
-    def slow_check():
+    def slow_check(*args, **kwargs):
         started.set()
         release.wait(timeout=2)
-        return "Update available"
+        return {"latest": "9.9.9", "command": "x"}
 
-    monkeypatch.setattr(updates, "check_for_update", slow_check)
+    monkeypatch.setattr(updates, "latest_update", slow_check)
     try:
         with updates.update_notifier(console):
             assert started.wait(timeout=1)
@@ -311,3 +311,105 @@ def test_machine_and_metadata_commands_never_check_for_updates(release_api, args
     assert result.exit_code == 0, result.output
     assert "Update available" not in result.output
     get.assert_not_called()
+
+
+def test_known_update_reads_the_cache_without_network(release_api, tmp_path):
+    get, _ = release_api
+    assert updates.known_update("0.9.0") is None  # empty cache, no request
+    get.assert_not_called()
+    assert updates.check_for_update("0.9.0")  # fills the cache with 0.10.0
+    assert updates.known_update("0.9.0") == {
+        "latest": "0.10.0",
+        "command": updates.upgrade_command(),
+    }
+    assert updates.known_update("0.10.0") is None
+    assert get.call_count == 1
+
+
+def test_latest_update_force_bypasses_a_fresh_cache(release_api):
+    get, response = release_api
+    assert updates.latest_update("0.9.0")["latest"] == "0.10.0"
+    response.json.return_value["info"]["version"] = "0.11.0"
+    assert updates.latest_update("0.9.0")["latest"] == "0.10.0"  # cached
+    assert updates.latest_update("0.9.0", force=True)["latest"] == "0.11.0"
+    assert get.call_count == 2
+
+
+def test_cache_expires_after_the_check_interval_not_a_day(release_api, tmp_path):
+    get, response = release_api
+    assert updates.latest_update("0.9.0")
+    cache_path = tmp_path / "update-check.json"
+    cache = json.loads(cache_path.read_text())
+    cache["checked_at"] -= updates.CHECK_INTERVAL_SECONDS + 1
+    cache_path.write_text(json.dumps(cache))
+    response.json.return_value["info"]["version"] = "0.12.0"
+    assert updates.latest_update("0.9.0")["latest"] == "0.12.0"
+    assert get.call_count == 2
+    assert updates.CHECK_INTERVAL_SECONDS <= 60 * 60
+
+
+def test_notifier_pins_the_update_on_the_session(release_api, monkeypatch):
+    from memorizz.cli.agent_factory import Session
+
+    monkeypatch.setattr(updates, "__version__", "0.9.0")
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, width=120)
+    session = Session(agent=object(), provider=object(), llm_config={}, console=console)
+    finished = Event()
+    real = updates.latest_update
+
+    def tracked(*args, **kwargs):
+        try:
+            return real(*args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(updates, "latest_update", tracked)
+    with updates.update_notifier(console, session):
+        assert finished.wait(5)
+    assert session.update_notice == {
+        "latest": "0.10.0",
+        "command": updates.upgrade_command(),
+    }
+    assert "0.9.0 → 0.10.0" in output.getvalue() and "/update" in output.getvalue()
+
+
+def test_update_command_checks_now_and_reports(release_api, monkeypatch):
+    import memorizz
+    from memorizz.cli import commands
+    from memorizz.cli.agent_factory import Session
+
+    monkeypatch.setattr(memorizz, "__version__", "0.9.0")
+    output = StringIO()
+    session = Session(
+        agent=SimpleNamespace(),
+        provider=object(),
+        llm_config={"provider": "ollama", "model": "m"},
+        console=Console(file=output, color_system=None, width=120),
+    )
+    assert commands.dispatch("/update", session) is True
+    assert "Update available" in output.getvalue() and "0.10.0" in output.getvalue()
+    assert session.update_notice["latest"] == "0.10.0"
+    get, response = release_api
+    response.json.return_value["info"]["version"] = "0.9.0"
+    commands.dispatch("/update", session)
+    assert "is the latest release" in output.getvalue()
+    assert session.update_notice is None
+    assert get.call_count == 2  # force bypasses the cache
+
+
+def test_status_bar_shows_the_update_pill():
+    from prompt_toolkit.formatted_text import to_plain_text
+
+    from memorizz.cli import ui
+    from memorizz.cli.agent_factory import Session
+
+    session = Session(
+        agent=SimpleNamespace(meta_harness=None),
+        provider=object(),
+        llm_config={"provider": "ollama", "model": "m"},
+    )
+    assert "available" not in to_plain_text(ui.toolbar(session))
+    session.update_notice = {"latest": "0.17.0", "command": "uv tool upgrade memorizz"}
+    text = to_plain_text(ui.toolbar(session))
+    assert "⬆ 0.17.0 available · /update" in text

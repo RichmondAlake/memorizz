@@ -52,6 +52,8 @@ class Session:
     # Session-scoped harness routing (``/harness``); never saved on the agent.
     harness: Optional[str] = None
     harness_backup: Optional[Dict[str, Any]] = None
+    # A newer release found by the update check: {latest, command}.
+    update_notice: Optional[Dict[str, Any]] = None
 
     @property
     def provider_name(self) -> str:

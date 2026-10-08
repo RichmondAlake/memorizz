@@ -67,6 +67,7 @@ STYLE = Style.from_dict(
         "bottom-toolbar.dim": "#8a93a6",
         "bottom-toolbar.model": "#7dd3fc",
         "bottom-toolbar.harness": "bold #86efac",
+        "bottom-toolbar.update": "bold #fbbf24 bg:#3b2f0b",
     }
 )
 
@@ -170,6 +171,19 @@ def toolbar(session: Any) -> HTML:
         f"<{harness_class}>{_escape(harness)}</{harness_class}>  "
         f"<bottom-toolbar.dim>│</bottom-toolbar.dim>  {keys}  "
         f"<bottom-toolbar.key>Tab</bottom-toolbar.key> commands"
+        + update_fragment(session)
+    )
+
+
+def update_fragment(session: Any) -> str:
+    """The status bar's update pill: '⬆ 0.17.0 available · /update'."""
+    notice = getattr(session, "update_notice", None) or {}
+    latest = notice.get("latest") if isinstance(notice, dict) else None
+    if not latest:
+        return ""
+    return (
+        "  <bottom-toolbar.update> ⬆ "
+        f"{_escape(str(latest))} available · /update </bottom-toolbar.update>"
     )
 
 
@@ -245,4 +259,5 @@ __all__ = [
     "prompt_fragments",
     "should_animate",
     "toolbar",
+    "update_fragment",
 ]

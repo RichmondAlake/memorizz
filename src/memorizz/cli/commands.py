@@ -88,6 +88,21 @@ def cmd_model(session, args: str):
         )
         if session.provider_name == "ollama":
             models = ollama_probe.list_models() or []
+            from . import picker
+
+            if models and picker.picker_available(console):
+                chosen = picker.pick(
+                    list(models),
+                    title="Switch model (installed Ollama models)",
+                    render=lambda m: str(m),
+                    is_current=lambda m: str(m) == session.model_name,
+                    verb="use",
+                )
+                if chosen is None or str(chosen) == session.model_name:
+                    console.print("[dim]No change.[/dim]")
+                    return
+                cmd_model(session, str(chosen))
+                return
             if models:
                 console.print("Available Ollama models:")
                 for m in models:
@@ -607,6 +622,8 @@ def cmd_forget(session, args: str):
 
 
 def cmd_agents(session, args: str):
+    from . import picker
+
     console = _con(session)
     try:
         agents = session.provider.list_memagents() or []
@@ -615,6 +632,33 @@ def cmd_agents(session, args: str):
         return
     if not agents:
         console.print("[dim]No saved agents.[/dim]")
+        return
+    if args.strip() != "list" and picker.picker_available(console):
+        current = getattr(session.agent, "agent_id", None)
+
+        def _id(a):
+            return str(getattr(a, "agent_id", None) or getattr(a, "id", "") or "")
+
+        chosen = picker.pick(
+            list(agents),
+            title="Switch agent",
+            render=lambda a: (
+                f"{'★ ' if getattr(a, 'is_favorite', False) else ''}"
+                f"{getattr(a, 'name', None) or '(unnamed)'}  {_id(a)[:8]}  "
+                f"{getattr(a, 'application_mode', None) or ''}"
+            ),
+            detail=lambda a: f"agent {_id(a)}",
+            search_text=lambda a: f"{getattr(a, 'name', '') or ''} {_id(a)}",
+            is_current=lambda a: _id(a) == current,
+            verb="load",
+        )
+        if chosen is None:
+            console.print("[dim]No change.[/dim]")
+            return
+        if _id(chosen) == current:
+            console.print(f"[dim]Already on[/dim] {_id(chosen)}")
+            return
+        cmd_agent(session, _id(chosen))
         return
     console.print(f"[bold]Saved agents[/bold] ({len(agents)}):")
     for a in agents:
@@ -1200,6 +1244,40 @@ def cmd_harnesses(session, args: str):
         )
         return
     active = harness_session.active_harness(session)
+    from . import picker
+
+    if args.strip() != "list" and picker.picker_available(console):
+        choices = list(rows) + [
+            {
+                "name": "delegate",
+                "ready": True,
+                "reason": "your model stays in charge; harness delegates do the parts",
+            },
+            {"name": "off", "ready": True, "reason": "native execution"},
+        ]
+
+        def _state(row):
+            if row["name"] in {"delegate", "off"}:
+                return row.get("reason") or ""
+            if row["ready"] is True:
+                return "ready"
+            if row["ready"] is False:
+                return f"not ready · {row.get('reason') or ''}"
+            return "unknown"
+
+        chosen = picker.pick(
+            choices,
+            title="Run the next turns on",
+            render=lambda r: f"{r['name']:<12} {(r.get('version') or ''):<30} {_state(r)}",
+            search_text=lambda r: f"{r['name']} {_state(r)}",
+            is_current=lambda r: r["name"] == (active or "off"),
+            verb="choose",
+        )
+        if chosen is None:
+            console.print("[dim]No change.[/dim]")
+            return
+        cmd_harness(session, chosen["name"])
+        return
     console.print(f"[bold]Harnesses[/bold] (active: {active or 'off'})")
     for row in rows:
         if row["ready"] is True:
@@ -1385,7 +1463,9 @@ def cmd_sessions(session, args: str):
 
     console = _con(session)
     try:
-        harness, limit = harness_session.parse_sessions_args(args)
+        harness, limit = harness_session.parse_sessions_args(
+            args.replace("list", "", 1) if args.strip().startswith("list") else args
+        )
         rows = harness_session.plugin_sessions(session, harness=harness, limit=limit)
     except ValueError as exc:
         console.print(str(exc))
@@ -1404,31 +1484,134 @@ def cmd_sessions(session, args: str):
     from rich.markup import escape
     from rich.table import Table
 
-    table = Table(title=f"Coding-agent sessions ({len(rows)} newest)")
+    from . import picker
+
+    if not args.strip().startswith("list") and picker.picker_available(console):
+        chosen = picker.pick(
+            rows,
+            title="Coding-agent sessions (newest first)",
+            render=lambda r: (
+                f"{str(r['created_at'])[:16].replace('T', ' ')}  {r['harness']:<12} "
+                f"{str(r['memory_id'] or '-'):<32} {r['title'] or '-'}"
+            ),
+            detail=lambda r: f"run {r['run_id']} · {r['turns'] or '?'} turns · {r['workspace'] or ''}",
+            search_text=lambda r: f"{r['harness']} {r['memory_id']} {r['title']} {r['workspace_name']}",
+            verb="open",
+        )
+        if chosen is None:
+            console.print("[dim]Nothing opened.[/dim]")
+            return
+        cmd_session(session, str(chosen["run_id"])[:8])
+        return
+    compact = int(getattr(console, "width", 120) or 120) < 130
+    table = Table(title=f"Coding-agent sessions ({len(rows)} newest)", expand=False)
     table.add_column("When", no_wrap=True)
     table.add_column("Agent", style="cyan", no_wrap=True)
-    table.add_column("Project memory", no_wrap=True)
-    table.add_column("Turns", justify="right")
-    table.add_column("Folder")
-    table.add_column("Started with")
+    table.add_column("Project memory", overflow="fold", min_width=16)
+    table.add_column("Turns", justify="right", no_wrap=True)
+    if not compact:
+        table.add_column("Folder", overflow="ellipsis", max_width=22)
+    table.add_column(
+        "Started with", overflow="ellipsis", max_width=36 if compact else 48
+    )
     table.add_column("Run", no_wrap=True)
     for row in rows:
         when = str(row["created_at"])[:16].replace("T", " ")
-        table.add_row(
+        cells = [
             when,
             row["harness"] or "?",
             escape(str(row["memory_id"] or "-")),
             str(row["turns"] or "-"),
-            escape(row["workspace_name"] or "-"),
-            escape(row["title"] or "-"),
-            str(row["run_id"] or "")[:8],
-        )
+        ]
+        if not compact:
+            cells.append(escape(row["workspace_name"] or "-"))
+        cells.extend([escape(row["title"] or "-"), str(row["run_id"] or "")[:8]])
+        table.add_row(*cells)
     console.print(table)
     console.print(
-        "[dim]Chat over a session's memory with /memory <project memory>; see its "
-        "turns with `memorizz harness show <run> --events` or on the Observability "
-        "page.[/dim]"
+        "[dim]Open one here with [cyan]/session <run>[/cyan] (its turns) or "
+        "[cyan]/memory <project memory>[/cyan] (chat over it); in a shell, "
+        "`memorizz harness show <run> --events` takes the same short run id.[/dim]"
     )
+
+
+def cmd_session(session, args: str):
+    """Show one recorded coding-agent session: header and its last turns."""
+    from rich.markup import escape
+
+    from . import harness_session
+
+    console = _con(session)
+    parts = args.split()
+    if not parts:
+        console.print(
+            "Usage: /session <run> [N]   (run ids from /sessions; N = last turns, default 20)"
+        )
+        return
+    last = 20
+    if len(parts) > 1 and parts[1].isdigit():
+        last = int(parts[1])
+    try:
+        view = harness_session.session_turns(session, parts[0], last=last)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return
+    except Exception as exc:
+        console.print(f"[red]Could not read the session:[/red] {exc}")
+        return
+    console.print(
+        f"[bold]{view['harness']}[/bold] session [cyan]{view['run_id'][:8]}[/cyan] · "
+        f"{view['created_at']} · {view['status']} · memory "
+        f"{escape(str(view['memory_id'] or '-'))} · folder {escape(view['workspace_name'] or '-')} · "
+        f"{view['total_turns']} turns, {view['tool_calls']} tool calls"
+    )
+    if view["omitted"]:
+        console.print(
+            f"[dim]… {view['omitted']} earlier turn(s) omitted; /session {view['run_id'][:8]} {view['total_turns']} shows all[/dim]"
+        )
+    for turn in view["turns"]:
+        if turn["tools_before"]:
+            console.print(f"[dim]   · {turn['tools_before']} tool call(s)[/dim]")
+        text = turn["text"]
+        if len(text) > 400:
+            text = text[:397] + "…"
+        if turn["role"] == "user":
+            label = "[bold green]you[/bold green]"
+        elif turn["role"] == "host":
+            label = "[dim]host[/dim]"
+        else:
+            label = f"[bold cyan]{escape(turn['role'])}[/bold cyan]"
+        console.print(f"{label} [dim]{turn['at'][11:16]}[/dim]  {escape(text)}")
+    if view["trailing_tools"]:
+        console.print(f"[dim]   · {view['trailing_tools']} tool call(s)[/dim]")
+    console.print(
+        f"[dim]Chat over this memory: /memory {escape(str(view['memory_id'] or ''))} · full record: "
+        f"memorizz harness show {view['run_id'][:8]} --events[/dim]"
+    )
+
+
+def cmd_update(session, args: str):
+    """Check PyPI now and show how to upgrade; never installs anything."""
+    from .. import __version__
+    from . import updates
+
+    console = _con(session)
+    if updates._disabled():
+        console.print(
+            "[dim]Update checks are off (MEMORIZZ_NO_UPDATE_CHECK or CI is set).[/dim]"
+        )
+        return
+    with console.status("Checking PyPI…", spinner="dots"):
+        update = updates.latest_update(__version__, force=True)
+    if update:
+        session.update_notice = update
+        console.print(
+            f"[bold yellow]⬆ Update available:[/bold yellow] memorizz {__version__} → "
+            f"{update['latest']}\n  Upgrade: [cyan]{update['command']}[/cyan]"
+        )
+        return
+    session.update_notice = None
+    console.print(f"[green]memorizz {__version__} is the latest release.[/green]")
 
 
 def cmd_menu(session, args: str):
@@ -1439,6 +1622,31 @@ def cmd_menu(session, args: str):
     from . import harness_session, ui
 
     console = _con(session)
+    from . import picker
+
+    actions = [
+        ("/agents", "switch agent", "←"),
+        ("/harnesses", "run turns on a harness", "→"),
+        ("/sessions", "what Codex and Claude Code did (plugin sessions)", ""),
+        ("/memory project", "chat over this folder's project memory", ""),
+        ("/models", "show or switch the model", ""),
+        ("/conversations", "resume a saved conversation", ""),
+        ("/update", "check for a newer release", ""),
+        ("/help", "every command", ""),
+    ]
+    if args.strip() != "list" and picker.picker_available(console):
+        chosen = picker.pick(
+            actions,
+            title="Quick actions",
+            render=lambda a: f"{a[0]:<18} {a[1]}"
+            + (f"   ({a[2]} on an empty line)" if a[2] else ""),
+            search_text=lambda a: f"{a[0]} {a[1]}",
+            verb="run",
+        )
+        if chosen is None:
+            return
+        dispatch(chosen[0], session)
+        return
     table = Table(title="Quick actions", show_header=False, box=None, padding=(0, 2))
     table.add_column(style="bold yellow", no_wrap=True)
     table.add_column(style="cyan", no_wrap=True)
@@ -1458,6 +1666,7 @@ def cmd_menu(session, args: str):
         "", escape("/compare <a> <b> <task>"), "one task on several harnesses"
     )
     table.add_row("", "/conversations", "resume a saved conversation")
+    table.add_row("", "/update", "check for a newer release")
     table.add_row("", "/help", "every command")
     console.print(table)
     harness = harness_session.active_harness(session) or "off"
@@ -1702,6 +1911,14 @@ COMMANDS: Dict[str, Command] = {
     ),
     "menu": Command(
         cmd_menu, "Quick actions: hotkeys and the most used commands.", "/menu"
+    ),
+    "update": Command(
+        cmd_update, "Check for a newer release and show the upgrade command.", "/update"
+    ),
+    "session": Command(
+        cmd_session,
+        "Show one recorded Codex or Claude Code session: header and last turns.",
+        "/session <run> [N]",
     ),
     "sessions": Command(
         cmd_sessions,

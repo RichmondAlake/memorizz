@@ -399,9 +399,13 @@ def enable_memory_history(provider):
                                             message_id,
                                             MemoryType.CONVERSATION_MEMORY,
                                         )
-                            except Exception:
+                            except Exception as exc:
                                 logger.warning(
-                                    "Memory history preparation failed; proceeding with the write"
+                                    "Memory history preparation failed; proceeding with "
+                                    "the write (%s: %s)",
+                                    type(exc).__name__,
+                                    exc,
+                                    exc_info=logger.isEnabledFor(logging.DEBUG),
                                 )
                                 return method(*args, **kwargs)
                             result = method(*args, **kwargs)

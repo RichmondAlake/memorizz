@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Interactive CLI: `/session <run> [N]` shows one recorded Codex or Claude
+  Code session inside the chat (header, last N turns, tool activity counted
+  between turns), taking the short run id `/sessions` prints. The sessions
+  table fits narrow terminals. `memorizz harness show` and `harness events`
+  accept a unique run-id prefix.
+
+- Interactive CLI pickers: `/agents`, `/harnesses`, `/sessions`, `/models`
+  and `/menu` open an arrow-key list (type to filter, Enter to choose, Esc to
+  cancel) and act on the choice; `list` after the command, no terminal, or
+  `MEMORIZZ_NO_PICKER=1` prints the plain list.
+- The memory history warning "preparation failed; proceeding with the write"
+  now names the exception.
+
+### Changed
+
+- Update notices: the chat re-checks PyPI every ten minutes instead of once
+  a day (a same-day release could go unannounced until the next day), shows
+  a found update in the banner and in the status bar under the prompt until
+  you upgrade, and `/update` checks right away and prints the upgrade
+  command for your installer.
+
 ## 0.16.1 — 2026-10-08
 
 ### Added

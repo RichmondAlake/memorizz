@@ -477,7 +477,8 @@ def run_compare(
 
 
 _TAG = re.compile(r"<[^>]+>")
-_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+_REMINDER = re.compile(r"<(system-reminder|task-notification)>.*?</\1>", re.S)
+_SUMMARY = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.S)
 
 
 def session_title(text: Any, width: int = 80) -> str:
@@ -542,6 +543,95 @@ def plugin_sessions(
     return rows[: max(1, int(limit))]
 
 
+def resolve_run_id(session, value: str) -> str:
+    """A full run id or a unique prefix, as the sessions table shows them."""
+    service = _service(session)
+    value = str(value or "").strip()
+    if value and service.get_run(value) is not None:
+        return value
+    matches = sorted(
+        {
+            str(run.get("run_id"))
+            for run in service.list_runs(limit=1000) or []
+            if value and str(run.get("run_id") or "").startswith(value)
+        }
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ValueError(f"No run starts with '{value}' (see /sessions).")
+    raise ValueError(
+        f"'{value}' matches {len(matches)} runs; give more characters: "
+        + ", ".join(m[:12] for m in matches[:6])
+    )
+
+
+def session_turns(session, value: str, *, last: int = 20) -> Dict[str, Any]:
+    """One recorded session: its header and the last ``last`` conversation
+    turns, with the tool activity between them counted rather than listed."""
+    service = _service(session)
+    run_id = resolve_run_id(session, value)
+    run = service.get_run(run_id) or {}
+    task = run.get("task") or {}
+    meta = task.get("metadata") or {}
+    events = service.events(run_id, limit=10_000) or []
+    turns: List[Dict[str, Any]] = []
+    pending_tools = 0
+    for event in events:
+        kind = event.get("type")
+        data = event.get("data") or {}
+        if kind == "tool_call":
+            pending_tools += 1
+        elif kind == "message":
+            role = str(data.get("role") or "")
+            text = str(data.get("text") or data.get("content") or "")
+            if role == "user":
+                if "<command-name>" in text:
+                    text = session_title(text, width=400)
+                else:
+                    # Host-injected blocks (reminders, task notifications) are
+                    # not the person's words: keep a one-line summary, dimmed.
+                    summaries = _SUMMARY.findall(text)
+                    spoken = _TAG.sub(" ", _REMINDER.sub(" ", text))
+                    if not spoken.strip():
+                        role = "host"
+                        text = (
+                            "; ".join(" ".join(x.split()) for x in summaries)
+                            or "host message"
+                        )
+                    else:
+                        text = spoken
+            if not text.strip():
+                continue
+            turns.append(
+                {
+                    "role": role or "message",
+                    "text": " ".join(text.split()),
+                    "at": str(event.get("timestamp") or "")[:19],
+                    "tools_before": pending_tools,
+                }
+            )
+            pending_tools = 0
+    total = len(turns)
+    shown = turns[-max(1, int(last)) :] if total else []
+    workspace = str(task.get("workspace") or "")
+    return {
+        "run_id": run_id,
+        "harness": canonical_harness(run.get("harness") or task.get("harness")),
+        "status": run.get("status"),
+        "created_at": str(run.get("created_at") or "")[:16].replace("T", " "),
+        "memory_id": task.get("memory_id"),
+        "workspace": workspace,
+        "workspace_name": Path(workspace).name if workspace else "",
+        "turns_recorded": meta.get("turns"),
+        "tool_calls": sum(1 for e in events if e.get("type") == "tool_call"),
+        "total_turns": total,
+        "omitted": total - len(shown),
+        "turns": shown,
+        "trailing_tools": pending_tools,
+    }
+
+
 def parse_sessions_args(args: str) -> tuple:
     """``/sessions [codex|claude-code] [N]`` -> (harness or None, limit)."""
     harness: Optional[str] = None
@@ -568,6 +658,8 @@ __all__ = [
     "parse_compare_args",
     "parse_sessions_args",
     "plugin_sessions",
+    "resolve_run_id",
+    "session_turns",
     "session_title",
     "run_compare",
     "canonical_harness",

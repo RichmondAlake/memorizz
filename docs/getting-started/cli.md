@@ -49,11 +49,15 @@ When one is available, a notice above the prompt shows the installed and
 latest versions and an upgrade command for your installer (pip, uv, pipx,
 npm, or Homebrew). The CLI never installs updates automatically.
 
-Successful checks are cached for 24 hours in
-`~/.memorizz/update-check.json` (or under `MEMORIZZ_HOME`). An available update
-is shown on each launch until you upgrade. Network failures stay quiet and
-the check never holds up startup or exit. One-shot commands, JSON output, MCP
-stdio, help, and version output do not perform update checks.
+Successful checks are cached for ten minutes in
+`~/.memorizz/update-check.json` (or under `MEMORIZZ_HOME`), so a release
+published while you work shows up on your next launch. An available update
+is shown in the banner, in the status bar under the prompt (`⬆ 0.17.0
+available · /update`) and above the prompt on each launch until you upgrade.
+`/update` checks PyPI right away and prints the upgrade command. Network
+failures stay quiet and the check never holds up startup or exit. One-shot
+commands, JSON output, MCP stdio, help, and version output do not perform
+update checks.
 
 To disable the check, including its network request:
 
@@ -193,7 +197,7 @@ A write run returns `pending_approval` before the external process starts:
 memorizz harness run "Implement the verified fix" --workspace "$PWD" --write --json
 memorizz harness approvals --status pending --json
 memorizz harness approve PROPOSAL_ID --approver operator@example.com
-memorizz harness show RUN_ID --events --json
+memorizz harness show RUN_ID --events --json   # RUN_ID may be a unique prefix
 ```
 
 Initialize the secret-free adapter allowlist with `memorizz harness init`.
@@ -297,10 +301,15 @@ Running `memorizz` with no arguments launches the interactive loop:
 - **Ctrl-C** during a reply aborts just that reply (you stay in the REPL).
 - **Ctrl-C** at the prompt, **Ctrl-D**, or `/exit` saves the agent and quits.
 - Press **Tab** to autocomplete slash commands.
-- **Arrow keys on an empty line** are shortcuts: **←** lists your agents
-  (`/agents`), **→** lists the harnesses (`/harnesses`), **↓** opens the quick
+- **Arrow keys on an empty line** are shortcuts: **←** opens the agent
+  picker (`/agents`), **→** the harness picker (`/harnesses`), **↓** the quick
   actions menu (`/menu`). With text in the line they edit as usual, and **↑**
   always walks history.
+- **Pickers**: `/agents`, `/harnesses`, `/sessions`, `/models` and `/menu`
+  open a list you move through with **↑/↓** (type to filter, **Enter** to
+  choose, **Esc** to cancel), the same widget as `/conversations`. Add `list`
+  (`/agents list`) to print the plain list instead; without a terminal, or
+  with `MEMORIZZ_NO_PICKER=1`, the plain list is printed.
 - A **status bar** under the prompt shows the provider and model, the active
   memory (project ids in full), the active harness and the hotkeys.
 - Startup plays a short crest animation on a colour terminal. Set
@@ -312,6 +321,7 @@ Running `memorizz` with no arguments launches the interactive loop:
 | Command | Description |
 |---|---|
 | `/help` | List all commands + the current mode/model. |
+| `/update` | Check PyPI now for a newer release and show the upgrade command for your installer. |
 | `/menu` | Quick actions: the arrow-key shortcuts and the most used commands, plus the current model, memory and harness. |
 | `/models [name]` | Show the current model, list installed Ollama models, or switch models (keeps the provider). |
 | `/provider [name]` | Switch provider: `openai`/`anthropic`/`ollama`/`azure`/`huggingface`/`mlx`. |
@@ -321,6 +331,7 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/browser [status\|on\|off\|run <task>]` | Inspect/configure Browser Use or run an explicit host browser task. |
 | `/approvals [status/action]` | List, approve, reject, cancel, or resume durable generic tool proposals. |
 | `/memory [id\|project [path]]` | Show or switch the active memory id. `project` resolves the folder's project memory, the one the Codex and Claude Code plugins write to. |
+| `/session <run> [N]` | Show one recorded session inside the chat: its header and the last N turns (default 20), with tool activity counted between turns. Takes the short run id from `/sessions`. |
 | `/sessions [codex\|claude-code] [N]` | List the Codex and Claude Code sessions the MemoRizz plugins recorded: when, agent, project memory, turns, folder, opening prompt and run id. |
 | `/history` | Print the current conversation history. |
 | `/conversations [search]` | Open a searchable picker and resume a saved conversation thread. |
@@ -361,10 +372,14 @@ Switched to memory project-app-9e4ce2
 memorizz> what has Claude Code been working on here lately?
 ```
 
-`/sessions codex 5` filters by agent and count. `/memory project some/path`
-resolves another folder. The same sessions appear on the Observability page
-as **Codex sessions** and **Claude Code sessions**, and
-`memorizz harness show <run> --events` prints one session's turns.
+`/sessions codex 5` filters by agent and count; on a narrow terminal the
+table drops the folder column. `/session 6e07d725` shows that session's
+turns right here (the short run id from the table is enough), and
+`/memory project some/path` resolves another folder. The same sessions
+appear on the Observability page as **Codex sessions** and **Claude Code
+sessions**, and in a shell `memorizz harness show 6e07d725 --events` prints
+the full record. Shell commands go in a shell: typed at the `memorizz>`
+prompt they are sent to the model as a message.
 
 ### Switch harnesses
 
