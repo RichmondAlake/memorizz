@@ -49,9 +49,14 @@ pytestmark = pytest.mark.unit
 _UNSET = object()
 
 
+# macOS resolves /tmp through /private/tmp; the sandbox profile allow-lists the
+# resolved path, so use it where it exists and the platform temp dir elsewhere.
+_SCRATCH_PARENT = "/private/tmp" if Path("/private/tmp").is_dir() else None
+
+
 @pytest.fixture()
 def scratch_dir():
-    root = Path(tempfile.mkdtemp(prefix="memorizz-peripheral-", dir="/private/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="memorizz-peripheral-", dir=_SCRATCH_PARENT))
     yield root
     shutil.rmtree(root, ignore_errors=True)
 
