@@ -310,7 +310,8 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/code [on\|off]` | Toggle coding tools (file read/write + bounded commands, scoped to cwd). |
 | `/browser [status\|on\|off\|run <task>]` | Inspect/configure Browser Use or run an explicit host browser task. |
 | `/approvals [status/action]` | List, approve, reject, cancel, or resume durable generic tool proposals. |
-| `/memory [id]` | Show or switch the active memory id. |
+| `/memory [id\|project [path]]` | Show or switch the active memory id. `project` resolves the folder's project memory, the one the Codex and Claude Code plugins write to. |
+| `/sessions [codex\|claude-code] [N]` | List the Codex and Claude Code sessions the MemoRizz plugins recorded: when, agent, project memory, turns, folder, opening prompt and run id. |
 | `/history` | Print the current conversation history. |
 | `/conversations [search]` | Open a searchable picker and resume a saved conversation thread. |
 | `/forget <id>` | Delete a single stored memory by id. |
@@ -332,6 +333,28 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/memory-provider [filesystem\|mongodb\|oracle\|notion]` | Guided memory setup for the next launch; add `--project` for this project's `.env`. |
 | `/docs [cli\|ui]` | Open the documentation in your browser. |
 | `/exit` | Save the agent and quit. |
+
+### See what the coding agents did
+
+The Codex and Claude Code plugins record each session in the harness ledger
+and store its turns under the folder's *project memory*
+(`project-<folder>-<hash>`), while the chat starts in a memory of its own, so
+a plain question about "what Codex did" finds nothing. Two commands bridge
+that:
+
+```text
+memorizz> /sessions
+  Coding-agent sessions (10 newest): when · agent · project memory · turns · folder · started with · run
+memorizz> /memory project
+Project memory for /Users/you/code/app: project-app-9e4ce2  (shared with the coding-agent plugins)
+Switched to memory project-app-9e4ce2
+memorizz> what has Claude Code been working on here lately?
+```
+
+`/sessions codex 5` filters by agent and count. `/memory project some/path`
+resolves another folder. The same sessions appear on the Observability page
+as **Codex sessions** and **Claude Code sessions**, and
+`memorizz harness show <run> --events` prints one session's turns.
 
 ### Switch harnesses
 

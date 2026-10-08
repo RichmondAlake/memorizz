@@ -423,7 +423,21 @@ def cmd_memory(session, args: str):
         console.print(
             f"thread_id: [cyan]{session.thread_id or '(new on first turn)'}[/cyan]"
         )
+        console.print(
+            "[dim]Usage: /memory <id> · /memory project \\[path] uses the folder's "
+            "project memory, the one the Codex and Claude Code plugins write to[/dim]"
+        )
         return
+    parts = mid.split(None, 1)
+    if parts[0].lower() == "project":
+        from .plugin_commands import project_memory_id
+
+        target = parts[1].strip() if len(parts) > 1 else os.getcwd()
+        mid = project_memory_id(target)
+        console.print(
+            f"Project memory for [cyan]{os.path.abspath(os.path.expanduser(target))}"
+            f"[/cyan]: {mid}  [dim](shared with the coding-agent plugins)[/dim]"
+        )
     session.memory_id = mid
     session.thread_id = conversations.latest_thread_id(
         session.provider,
@@ -1365,6 +1379,58 @@ def _print_compare_report(console, report) -> None:
     )
 
 
+def cmd_sessions(session, args: str):
+    """List the Codex and Claude Code sessions the MemoRizz plugins recorded."""
+    from . import harness_session
+
+    console = _con(session)
+    try:
+        harness, limit = harness_session.parse_sessions_args(args)
+        rows = harness_session.plugin_sessions(session, harness=harness, limit=limit)
+    except ValueError as exc:
+        console.print(str(exc))
+        return
+    except Exception as exc:
+        console.print(f"[red]Could not read the harness ledger:[/red] {exc}")
+        return
+    if not rows:
+        what = f"{harness} " if harness else ""
+        console.print(
+            f"[dim]No {what}plugin sessions recorded yet. Install the plugin with "
+            "`memorizz plugin install codex|claude-code`; each session is recorded "
+            "as it runs.[/dim]"
+        )
+        return
+    from rich.markup import escape
+    from rich.table import Table
+
+    table = Table(title=f"Coding-agent sessions ({len(rows)} newest)")
+    table.add_column("When", no_wrap=True)
+    table.add_column("Agent", style="cyan", no_wrap=True)
+    table.add_column("Project memory", no_wrap=True)
+    table.add_column("Turns", justify="right")
+    table.add_column("Folder")
+    table.add_column("Started with")
+    table.add_column("Run", no_wrap=True)
+    for row in rows:
+        when = str(row["created_at"])[:16].replace("T", " ")
+        table.add_row(
+            when,
+            row["harness"] or "?",
+            escape(str(row["memory_id"] or "-")),
+            str(row["turns"] or "-"),
+            escape(row["workspace_name"] or "-"),
+            escape(row["title"] or "-"),
+            str(row["run_id"] or "")[:8],
+        )
+    console.print(table)
+    console.print(
+        "[dim]Chat over a session's memory with /memory <project memory>; see its "
+        "turns with `memorizz harness show <run> --events` or on the Observability "
+        "page.[/dim]"
+    )
+
+
 def cmd_help(session, args: str):
     from rich.markup import escape
 
@@ -1537,7 +1603,9 @@ COMMANDS: Dict[str, Command] = {
         cmd_code, "Toggle coding tools (file edits + commands).", "/code [on|off]"
     ),
     "memory": Command(
-        cmd_memory, "Show or switch the active memory id.", "/memory [id]"
+        cmd_memory,
+        "Show or switch the active memory id; project = this folder's plugin memory.",
+        "/memory [id|project [path]]",
     ),
     "memory-provider": Command(
         cmd_memory_provider,
@@ -1595,6 +1663,11 @@ COMMANDS: Dict[str, Command] = {
         cmd_clear,
         "Erase the agent's stored memory (asks to confirm).",
         "/clear",
+    ),
+    "sessions": Command(
+        cmd_sessions,
+        "List the Codex and Claude Code sessions the MemoRizz plugins recorded.",
+        "/sessions [codex|claude-code] [N]",
     ),
     "harnesses": Command(
         cmd_harnesses,

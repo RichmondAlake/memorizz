@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Interactive CLI: `/sessions [codex|claude-code] [N]` lists the Codex and
+  Claude Code sessions the MemoRizz plugins recorded (agent, project memory,
+  turns, folder, opening prompt, run id), and `/memory project [path]`
+  switches the chat to a folder's project memory, the one the plugins write
+  to, so questions about recent coding-agent work retrieve their turns.
+
+### Fixed
+
+- Filesystem provider: a store written by two embedding models (a plugin's
+  MCP server and the chat, for example) no longer aborts vector search with
+  "all input arrays must have the same shape"; the FAISS index is kept per
+  embedding size and a query searches the rows embedded at its own size.
+
 ## 0.16.0 — 2026-10-08
 
 ### Added

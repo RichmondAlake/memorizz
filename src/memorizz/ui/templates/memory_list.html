@@ -33,7 +33,7 @@
 <p class="error-message" role="alert">{{ action_error }}</p>
 {% elif view.records %}
 {% set records = view.records %}
-<div class="fleet-tape" role="list" aria-label="{{ page_info[0] }} summary">
+<div class="fleet-tape mem-tape" role="list" aria-label="{{ page_info[0] }} summary">
     <div role="listitem"><span>Records</span><strong>{% if view.has_more and not total_known %}{{ records|length }}+{% else %}{{ '{:,}'.format(view.total) }}{% endif %}</strong></div>
     <div role="listitem"><span>Shown</span><strong>{{ records|length }}{% if view.has_more %}<small> newest</small>{% endif %}</strong></div>
     {% if view.memory_ids %}<div role="listitem"><span>Memory IDs</span><strong>{{ view.memory_ids|length }}</strong></div>{% endif %}

@@ -782,3 +782,177 @@ def test_compare_memagent_equals_picks_a_saved_agent_by_id_prefix(session, monke
         harness_session.run_compare(sess, names, task, memagent_id="agent-1")
     with pytest.raises(ValueError, match="only memagent takes"):
         harness_session.parse_compare_args(sess, "codex=x claude-code task")
+
+
+# --------------------------------------------------------------------------- #
+# /sessions and /memory project
+# --------------------------------------------------------------------------- #
+
+
+def _plugin_run(
+    run_id,
+    harness,
+    created,
+    task,
+    memory_id="project-memorizz-521ff6",
+    turns="12",
+    workspace="/Users/me/Desktop/memorizz",
+    source="plugin",
+):
+    return {
+        "run_id": run_id,
+        "harness": harness,
+        "created_at": created,
+        "status": "succeeded",
+        "task": {
+            "task": task,
+            "workspace": workspace,
+            "memory_id": memory_id,
+            "metadata": {
+                "source": source,
+                "turns": turns,
+                "session_id": f"sess-{run_id}",
+            },
+        },
+    }
+
+
+PLUGIN_RUNS = [
+    _plugin_run(
+        "run-old", "claude-code", "2026-10-06T09:00:00+00:00", "Review the auth module"
+    ),
+    _plugin_run("run-ui", "codex", "2026-10-07T10:00:00+00:00", "ui task", source="ui"),
+    _plugin_run(
+        "run-new",
+        "codex",
+        "2026-10-08T12:00:00+00:00",
+        "<command-name>/model</command-name><command-message>model</command-message><command-args>gemma4</command-args>",
+        turns="3",
+    ),
+    _plugin_run(
+        "run-mid",
+        "claude-code",
+        "2026-10-07T11:30:00+00:00",
+        "Fix the failing tests\nand explain",
+        workspace="/tmp/other",
+    ),
+]
+
+
+def test_session_title_cleans_slash_commands_and_markup():
+    assert (
+        harness_session.session_title(
+            "<command-name>/model</command-name> <command-args>gemma4</command-args>"
+        )
+        == "/model gemma4"
+    )
+    assert (
+        harness_session.session_title("Fix the failing tests\nand explain")
+        == "Fix the failing tests"
+    )
+    assert (
+        harness_session.session_title(
+            "<system-reminder>x</system-reminder>\n\n  Hello   world "
+        )
+        == "Hello world"
+    )
+    assert harness_session.session_title("a" * 100, width=20) == "a" * 19 + "…"
+    assert harness_session.session_title(None) == ""
+
+
+def test_plugin_sessions_filters_sorts_and_limits(session):
+    sess, _ = session
+    service = FakeService(READY)
+    service.list_runs = lambda limit=100: list(PLUGIN_RUNS)
+    sess.agent.meta_harness = service
+    rows = harness_session.plugin_sessions(sess)
+    assert [r["run_id"] for r in rows] == [
+        "run-new",
+        "run-mid",
+        "run-old",
+    ]  # ui run excluded
+    assert rows[0] == {
+        "run_id": "run-new",
+        "harness": "codex",
+        "created_at": "2026-10-08T12:00:00+00:00",
+        "status": "succeeded",
+        "memory_id": "project-memorizz-521ff6",
+        "workspace": "/Users/me/Desktop/memorizz",
+        "workspace_name": "memorizz",
+        "turns": "3",
+        "session_id": "sess-run-new",
+        "title": "/model gemma4",
+    }
+    assert [
+        r["run_id"] for r in harness_session.plugin_sessions(sess, harness="cc")
+    ] == ["run-mid", "run-old"]
+    assert [r["run_id"] for r in harness_session.plugin_sessions(sess, limit=1)] == [
+        "run-new"
+    ]
+
+
+def test_parse_sessions_args():
+    assert harness_session.parse_sessions_args("") == (None, 10)
+    assert harness_session.parse_sessions_args("codex 3") == ("codex", 3)
+    assert harness_session.parse_sessions_args("5 claude") == ("claude-code", 5)
+    with pytest.raises(ValueError, match="Usage: /sessions"):
+        harness_session.parse_sessions_args("codex claude-code")
+
+
+def test_sessions_command_lists_plugin_sessions(session):
+    sess, output = session
+    service = FakeService(READY)
+    service.list_runs = lambda limit=100: list(PLUGIN_RUNS)
+    sess.agent.meta_harness = service
+    assert commands.dispatch("/sessions", sess) is True
+    text = output.getvalue()
+    assert "Coding-agent sessions (3 newest)" in text
+    assert (
+        "project-memorizz-521ff6" in text
+        and "/model gemma4" in text
+        and "Fix the failing tests" in text
+    )
+    assert "run-new"[:8] in text and "ui task" not in text
+    assert "/memory <project memory>" in text
+    commands.dispatch("/sessions codex 1", sess)
+    assert "Coding-agent sessions (1 newest)" in output.getvalue()
+    assert "/sessions" in commands.command_completions()
+
+
+def test_sessions_command_explains_when_nothing_is_recorded(session):
+    sess, output = session
+    service = FakeService(READY)
+    service.list_runs = lambda limit=100: [PLUGIN_RUNS[1]]
+    sess.agent.meta_harness = service
+    commands.dispatch("/sessions codex", sess)
+    assert "No codex plugin sessions recorded yet" in output.getvalue()
+    assert "memorizz plugin install" in output.getvalue()
+
+
+def test_memory_project_switches_to_the_folder_memory(session, monkeypatch, tmp_path):
+    sess, output = session
+    from memorizz.cli import plugin_commands
+
+    seen = {}
+
+    def fake_id(path):
+        seen["path"] = str(path)
+        return "project-memorizz-521ff6"
+
+    monkeypatch.setattr(plugin_commands, "project_memory_id", fake_id)
+    monkeypatch.setattr(
+        commands.conversations, "latest_thread_id", lambda *a, **k: None
+    )
+    monkeypatch.setattr(commands.cfg, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(commands.cfg, "clear_state", lambda *a, **k: None)
+    monkeypatch.chdir(tmp_path)
+    assert commands.dispatch("/memory project", sess) is True
+    assert seen["path"] == str(tmp_path)
+    assert sess.memory_id == "project-memorizz-521ff6"
+    text = output.getvalue()
+    assert "Project memory for" in text and "project-memorizz-521ff6" in text
+    assert "Switched to memory project-memorizz-521ff6" in text
+    commands.dispatch("/memory project /some/where", sess)
+    assert seen["path"] == "/some/where"
+    commands.dispatch("/memory", sess)
+    assert "/memory project [path]" in output.getvalue()

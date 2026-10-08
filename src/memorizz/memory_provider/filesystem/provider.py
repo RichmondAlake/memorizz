@@ -1408,7 +1408,9 @@ class FileSystemProvider(MemoryProvider):
             np.array(query_embedding, dtype="float32")
         )
 
-        index, doc_ids = self._ensure_vector_index(memory_type)
+        index, doc_ids = self._ensure_vector_index(
+            memory_type, dimension=int(query_vector.shape[0])
+        )
         if index is None or not doc_ids:
             return self._keyword_search(
                 memory_type,
@@ -1597,47 +1599,71 @@ class FileSystemProvider(MemoryProvider):
         return [document for _, document in scored[: max(int(limit or 1), 1)]]
 
     def _ensure_vector_index(
-        self, memory_type: MemoryType
+        self, memory_type: MemoryType, dimension: Optional[int] = None
     ) -> Tuple[Optional[Any], List[str]]:
+        """The FAISS index (and its document ids) for one embedding size.
+
+        A store can hold embeddings of several sizes when more than one
+        embedding model wrote to it (a plugin's MCP server and the chat, say).
+        Vectors of different sizes cannot be compared, so each size gets its
+        own index and a query searches the one matching its own size;
+        ``dimension=None`` returns the largest group.
+        """
         if np is None or self._faiss is None:
             return None, []
         state = self._vector_state[memory_type]
-        if state["index"] is not None and not state.get("dirty"):
-            return state["index"], state["doc_ids"]
+        if state["index"] is None or state.get("dirty"):
+            grouped: Dict[int, Tuple[List[str], List[Any]]] = {}
+            with self._locks[memory_type]:
+                generation = state.get("generation", 0)
+                for doc_id in self._indexes[memory_type]:
+                    document = self._read_document(memory_type, doc_id)
+                    if not document:
+                        continue
+                    embedding = document.get("embedding")
+                    if not embedding:
+                        continue
+                    vector = self._normalize_vector(
+                        np.array(flatten_vector(embedding), dtype="float32")
+                    )
+                    ids, vectors = grouped.setdefault(int(vector.shape[0]), ([], []))
+                    ids.append(doc_id)
+                    vectors.append(vector)
 
-        doc_ids: List[str] = []
-        vectors: List[np.ndarray] = []
-        with self._locks[memory_type]:
-            generation = state.get("generation", 0)
-            for doc_id in self._indexes[memory_type]:
-                document = self._read_document(memory_type, doc_id)
-                if not document:
-                    continue
-                embedding = document.get("embedding")
-                if not embedding:
-                    continue
-                vector = self._normalize_vector(np.array(embedding, dtype="float32"))
-                doc_ids.append(doc_id)
-                vectors.append(vector)
+            indexes: Dict[int, Tuple[Any, List[str]]] = {}
+            for size, (ids, vectors) in grouped.items():
+                index = self._faiss.IndexFlatIP(size)
+                index.add(np.stack(vectors, axis=0))
+                indexes[size] = (index, ids)
+            if len(indexes) > 1:
+                logger.info(
+                    "%s store for %s holds embeddings of %d sizes (%s); a query "
+                    "only searches rows embedded at its own size",
+                    self.__class__.__name__,
+                    memory_type.value,
+                    len(indexes),
+                    ", ".join(
+                        f"{size}: {len(ids)}"
+                        for size, (_, ids) in sorted(indexes.items())
+                    ),
+                )
 
-        if not vectors:
-            index = None
-            doc_ids = []
-        else:
-            dimension = vectors[0].shape[0]
-            index = self._faiss.IndexFlatIP(dimension)
-            stacked = np.stack(vectors, axis=0)
-            index.add(stacked)
+            with self._locks[memory_type]:
+                state["index"] = indexes or None
+                state["doc_ids"] = []
+                # A write that landed after the read phase bumped the generation;
+                # leave ``dirty`` set so the next search rebuilds instead of
+                # hiding that record until some later write.
+                if state.get("generation", 0) == generation:
+                    state["dirty"] = False
 
-        with self._locks[memory_type]:
-            state["index"] = index
-            state["doc_ids"] = doc_ids
-            # A write that landed after the read phase bumped the generation;
-            # leave ``dirty`` set so the next search rebuilds instead of
-            # hiding that record until some later write.
-            if state.get("generation", 0) == generation:
-                state["dirty"] = False
-        return index, doc_ids
+        indexes = state["index"] or {}
+        if not indexes:
+            return None, []
+        if dimension is None:
+            dimension = max(indexes, key=lambda size: len(indexes[size][1]))
+        index, doc_ids = indexes.get(int(dimension), (None, []))
+        return index, list(doc_ids)
 
     def _mark_vector_index_dirty(self, memory_type: MemoryType) -> None:
         if memory_type == MemoryType.KNOWLEDGE_BASE:

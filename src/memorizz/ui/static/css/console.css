@@ -1876,6 +1876,15 @@ kbd {
 
 /* ---------- Memory explorer (reuses the fleet monitor layout) ---------- */
 
+.mem-tape {
+    /* Keep dates and variable role labels inside their own cells. */
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(max-content, 1fr);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+}
+
 .fleet-tape small {
     margin-left: 3px;
     color: var(--text-muted);

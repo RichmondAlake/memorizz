@@ -432,3 +432,48 @@ def test_read_paths_see_records_written_by_another_instance_without_restart(tmp_
         "written by second", MemoryType.KNOWLEDGE_BASE, limit=5
     )
     assert any(row.get("_id") == "b" for row in hits)
+
+
+def _seed_mixed_embedding_sizes(provider: FileSystemProvider) -> None:
+    """Rows written by two embedding models: three 3-d, one 4-d."""
+    for content, embedding in (
+        ("exact match", [1.0, 0.0, 0.0]),
+        ("orthogonal", [0.0, 1.0, 0.0]),
+        ("close", [0.9, 0.1, 0.0]),
+        ("other model", [1.0, 0.0, 0.0, 0.0]),
+    ):
+        provider.store(
+            {"content": content, "memory_id": "shared", "embedding": embedding},
+            MemoryType.KNOWLEDGE_BASE,
+        )
+
+
+def test_faiss_search_only_compares_rows_embedded_at_the_querys_size(tmp_path):
+    """A store written by two embedding models (a plugin's MCP server and the
+    chat, say) must not abort vector search with a shape error; the query
+    searches the rows it can compare with."""
+    embeddings = MappedEmbeddingProvider({}, default=[1.0, 0.0, 0.0])
+    provider = _make_provider(tmp_path / "fs-memory", embedding_provider=embeddings)
+    provider._faiss = _FakeFaiss()
+    _seed_mixed_embedding_sizes(provider)
+
+    results = provider.retrieve_by_query("probe", MemoryType.KNOWLEDGE_BASE, limit=5)
+
+    assert [row["content"] for row in results] == ["exact match", "close", "orthogonal"]
+    index, doc_ids = provider._ensure_vector_index(MemoryType.KNOWLEDGE_BASE)
+    assert index.dimension == 3 and len(doc_ids) == 3  # largest group by default
+    index4, ids4 = provider._ensure_vector_index(MemoryType.KNOWLEDGE_BASE, dimension=4)
+    assert index4.dimension == 4 and len(ids4) == 1
+    assert provider._ensure_vector_index(MemoryType.KNOWLEDGE_BASE, dimension=5) == (
+        None,
+        [],
+    )
+
+
+def test_brute_force_search_skips_rows_of_another_embedding_size(tmp_path):
+    embeddings = MappedEmbeddingProvider({}, default=[1.0, 0.0, 0.0])
+    provider = _make_provider(tmp_path / "fs-memory", embedding_provider=embeddings)
+    provider._faiss = None
+    _seed_mixed_embedding_sizes(provider)
+    results = provider.retrieve_by_query("probe", MemoryType.KNOWLEDGE_BASE, limit=5)
+    assert [row["content"] for row in results] == ["exact match", "close", "orthogonal"]

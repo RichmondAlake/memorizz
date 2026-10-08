@@ -265,3 +265,11 @@ Both plugins pass their agents' validators:
   status. Ask the agent for `memorizz_memory_status`.
 - **Codex in `codex exec` can't save.** The plugin auto-approves reading and
   saving memories; other write tools need an interactive session.
+
+## From the terminal chat
+
+The `memorizz` chat can read what the plugins recorded. `/sessions` lists the
+Codex and Claude Code sessions in the harness ledger (newest first, with the
+project memory each one wrote to), and `/memory project` switches the chat to
+the current folder's project memory so questions about recent work retrieve
+those turns and facts. See the CLI guide's *See what the coding agents did*.

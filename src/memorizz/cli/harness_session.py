@@ -16,6 +16,7 @@ record, so ``/harness off`` restores exactly what the agent had before.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -475,6 +476,86 @@ def run_compare(
     }
 
 
+_TAG = re.compile(r"<[^>]+>")
+_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+
+
+def session_title(text: Any, width: int = 80) -> str:
+    """The first meaningful line of a recorded session's opening prompt.
+
+    Slash commands arrive wrapped in ``<command-name>`` markup; show the
+    command itself. Everything else is the first non-empty line, clipped.
+    """
+    raw = str(text or "")
+    match = re.search(r"<command-name>\s*(.*?)\s*</command-name>", raw, re.S)
+    if match:
+        command = match.group(1).strip()
+        args = re.search(r"<command-args>\s*(.*?)\s*</command-args>", raw, re.S)
+        extra = args.group(1).strip() if args else ""
+        title = f"{command} {extra}".strip()
+    else:
+        # Host reminders are wrapped in <system-reminder> blocks; the person's
+        # own words follow them.
+        cleaned = _REMINDER.sub(" ", raw)
+        lines = [ln.strip() for ln in _TAG.sub(" ", cleaned).splitlines()]
+        title = next((ln for ln in lines if ln), "")
+    title = " ".join(title.split())
+    return title if len(title) <= width else title[: width - 1] + "…"
+
+
+def plugin_sessions(
+    session, *, harness: Optional[str] = None, limit: int = 10
+) -> List[Dict[str, Any]]:
+    """Codex and Claude Code sessions the MemoRizz plugins recorded, newest first.
+
+    They live in the harness ledger as runs whose task metadata says
+    ``source: plugin`` (the Observability page's "Codex sessions" and
+    "Claude Code sessions").
+    """
+    wanted = canonical_harness(harness) if harness else None
+    runs = _service(session).list_runs(limit=500) or []
+    rows: List[Dict[str, Any]] = []
+    for run in runs:
+        task = run.get("task") or {}
+        meta = task.get("metadata") or {}
+        if meta.get("source") != "plugin":
+            continue
+        name = canonical_harness(run.get("harness") or task.get("harness"))
+        if wanted and name != wanted:
+            continue
+        workspace = str(task.get("workspace") or "")
+        rows.append(
+            {
+                "run_id": run.get("run_id"),
+                "harness": name,
+                "created_at": run.get("created_at") or run.get("started_at") or "",
+                "status": run.get("status"),
+                "memory_id": task.get("memory_id"),
+                "workspace": workspace,
+                "workspace_name": Path(workspace).name if workspace else "",
+                "turns": meta.get("turns"),
+                "session_id": meta.get("session_id"),
+                "title": session_title(task.get("task")),
+            }
+        )
+    rows.sort(key=lambda row: str(row["created_at"]), reverse=True)
+    return rows[: max(1, int(limit))]
+
+
+def parse_sessions_args(args: str) -> tuple:
+    """``/sessions [codex|claude-code] [N]`` -> (harness or None, limit)."""
+    harness: Optional[str] = None
+    limit = 10
+    for token in args.split():
+        if token.isdigit():
+            limit = int(token)
+        elif harness is None:
+            harness = canonical_harness(token)
+        else:
+            raise ValueError("Usage: /sessions [codex|claude-code] [N]")
+    return harness, limit
+
+
 __all__ = [
     "HARNESS_ALIASES",
     "DELEGATE",
@@ -485,6 +566,9 @@ __all__ = [
     "harness_delegates",
     "memagent_for_compare",
     "parse_compare_args",
+    "parse_sessions_args",
+    "plugin_sessions",
+    "session_title",
     "run_compare",
     "canonical_harness",
     "clear_harness",
