@@ -380,6 +380,105 @@ class _Session:
             )
 
 
+def _harness_activity(event):
+    """Plain words for one harness ledger event, or None to stay quiet.
+
+    Like the rest of the stream, this carries no tool arguments, command
+    text, reasoning or draft text: only what kind of work is happening.
+    """
+    kind = event.get("type")
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    if kind == "tool_call":
+        if data.get("status") not in {None, "", "in_progress", "started"}:
+            return None
+        name = str(data.get("name") or data.get("tool") or data.get("type") or "")
+        name = name[:80] or "a tool"
+        return {"activity": f"calling {name}", "tool_name": name}
+    if kind == "command":
+        if data.get("status") not in {None, "", "in_progress", "started"}:
+            return None
+        return {"activity": "running a command"}
+    if kind == "file_change":
+        return {"activity": "editing files"}
+    if kind == "reasoning":
+        return {"activity": "thinking"}
+    if kind == "message":
+        return {"activity": "writing"}
+    return None
+
+
+class HarnessProgress:
+    """Relay a runtime harness run's progress into the open stream.
+
+    A turn on a harness is one opaque subprocess call, so without this the
+    stream says nothing between "agent ready" and the answer, however long
+    the harness takes. ``start`` is the run's ``on_start`` callback; it
+    follows the run's ledger on a daemon thread until ``stop``.
+    """
+
+    def __init__(self, session, service, harness, *, poll_seconds=0.25):
+        from .metaharness.catalog import HARNESS_LABELS
+
+        self.session, self.service = session, service
+        self.harness = str(harness or "harness")
+        self.label = HARNESS_LABELS.get(self.harness, self.harness)
+        self.poll_seconds = poll_seconds
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _emit(self, stage, message, **fields):
+        try:
+            self.session.emit(
+                "status", stage=stage, harness=self.harness, message=message, **fields
+            )
+        except Exception:
+            self._stop.set()
+
+    def start(self, run_id):
+        self._emit("harness_running", f"{self.label} is working", harness_run_id=run_id)
+        self._thread = threading.Thread(
+            target=self._follow,
+            args=(run_id,),
+            name="memorizz-harness-progress",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _follow(self, run_id):
+        cursor, last = 0, None
+        while not self._stop.wait(self.poll_seconds):
+            try:
+                events = self.service.events(run_id, after=cursor, limit=200)
+            except Exception:
+                return
+            for event in events:
+                cursor = max(cursor, int(event.get("sequence") or 0))
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                if event.get("type") == "status" and data.get("model"):
+                    model = str(data["model"])[:80]
+                    self._emit(
+                        "harness_running",
+                        f"{self.label} is working ({model})",
+                        harness_run_id=run_id,
+                        model=model,
+                    )
+                    continue
+                activity = _harness_activity(event)
+                if activity and activity != last:
+                    last = activity
+                    self._emit(
+                        "harness_activity",
+                        f"{self.label}: {activity['activity']}",
+                        harness_run_id=run_id,
+                        **activity,
+                    )
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+
 def agent_event_stream(
     agent,
     query,

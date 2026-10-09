@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Interactive CLI: a turn on a harness shows what the harness is doing while
+  it works, with a running clock (`Codex is working (gpt-6.1-sol) · 4s`,
+  `Codex: running a command`, `Codex: calling <tool>`, `Codex: writing`)
+  instead of "preparing" until the answer arrives. Streams from a runtime
+  harness carry the same progress as `harness_running` and `harness_activity`
+  status events (kind of work only, no command text or reasoning).
+
+### Fixed
+
+- Interactive CLI: keys pressed while a turn streams or a command loads (an
+  arrow while `/harnesses` checks the harnesses, say) no longer echo as
+  `^[[B` over the output; they wait for the next prompt or picker.
+
 ## 0.16.3 — 2026-10-09
 
 ### Added

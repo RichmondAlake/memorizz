@@ -43,6 +43,15 @@ Deferred UI/service loading starts with `delivery_mode=initializing`; its
 arguments, results, provider reasoning and rejected candidate text are
 excluded.
 
+A turn on a runtime harness (`with_meta_harness(..., mode="runtime")`) streams
+its progress as `status` events with a plain-words `message`:
+`harness_running` (with `harness`, `harness_run_id` and, once the harness
+reports it, `model`) and `harness_activity` (with `activity`, such as
+`running a command`, `calling <tool>`, `editing files`, `thinking` or
+`writing`, plus `tool_name` for tool calls). They name the kind of work only,
+never command text, tool input or reasoning, and all arrive before the
+buffered answer.
+
 `capability.requested` (with `capability`, `title`, `status` and `reason`)
 means the model called `request_capability` because the request needs
 something this agent lacks, such as `web_search`, `email`, `calendar`, `notes`,

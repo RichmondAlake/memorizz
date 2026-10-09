@@ -56,7 +56,13 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
                 stdout.write(event["delta"])
                 stdout.flush()
             elif kind == "status":
-                stderr.write(event.get("stage", "working").replace("_", " ") + "\n")
+                stderr.write(
+                    (
+                        event.get("message")
+                        or event.get("stage", "working").replace("_", " ")
+                    )
+                    + "\n"
+                )
                 stderr.flush()
         if output == "text":
             stdout.write("\n")

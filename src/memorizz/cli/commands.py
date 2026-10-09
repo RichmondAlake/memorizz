@@ -1230,11 +1230,13 @@ def cmd_exit(session, args: str):
 
 def cmd_harnesses(session, args: str):
     """List configured harnesses and whether each is ready to run."""
-    from . import harness_session
+    from . import harness_session, ui
 
     console = _con(session)
     try:
-        rows = harness_session.list_harness_status(session)
+        with ui.quiet_keys():
+            rows = harness_session.list_harness_status(session)
+            defaults = _harness_defaults(session, rows)
     except Exception as exc:
         console.print(f"[red]Could not list harnesses:[/red] {exc}")
         return
@@ -1265,8 +1267,6 @@ def cmd_harnesses(session, args: str):
                 return f"not ready · {row.get('reason') or ''}"
             return "unknown"
 
-        defaults = _harness_defaults(session, rows)
-
         chosen = picker.pick(
             choices,
             title="Run the next turns on",
@@ -1283,7 +1283,6 @@ def cmd_harnesses(session, args: str):
             return
         cmd_harness(session, chosen["name"])
         return
-    defaults = _harness_defaults(session, rows)
     console.print(f"[bold]Harnesses[/bold] (active: {active or 'off'})")
     for row in rows:
         if row["ready"] is True:
@@ -1317,7 +1316,7 @@ def _harness_defaults(session, rows) -> dict:
 
 def cmd_harness(session, args: str):
     """Route the following turns through an external harness, or back to native."""
-    from . import harness_session
+    from . import harness_session, ui
 
     console = _con(session)
     parts = args.strip().split()
@@ -1363,7 +1362,8 @@ def cmd_harness(session, args: str):
         )
         return
     try:
-        result = harness_session.apply_harness(session, name, model=model)
+        with ui.quiet_keys():
+            result = harness_session.apply_harness(session, name, model=model)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         return
@@ -1500,7 +1500,7 @@ def _print_delegate_mode(console, session, result) -> None:
 
 def cmd_compare(session, args: str):
     """Run one read-only task on two or more harnesses side by side."""
-    from . import harness_session
+    from . import harness_session, ui
 
     console = _con(session)
     try:
@@ -1516,13 +1516,14 @@ def cmd_compare(session, args: str):
         "[dim]Read-only, in the current folder. Ctrl-C cancels.[/dim]"
     )
     try:
-        report = harness_session.run_compare(
-            session,
-            names,
-            task,
-            on_progress=lambda line: console.print(f"[dim]{line}[/dim]"),
-            **options,
-        )
+        with ui.quiet_keys():
+            report = harness_session.run_compare(
+                session,
+                names,
+                task,
+                on_progress=lambda line: console.print(f"[dim]{line}[/dim]"),
+                **options,
+            )
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         return

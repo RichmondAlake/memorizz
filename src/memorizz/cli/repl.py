@@ -151,14 +151,20 @@ def _stream_turn(session, query: str) -> None:
     answer, status, tools = "", "preparing", []
     stream = None
     last_refresh = 0.0
-    with Live(console=console, refresh_per_second=12, auto_refresh=False) as live:
+    started, finished = time.monotonic(), False
+    with ui.quiet_keys(), Live(
+        console=console, refresh_per_second=12, auto_refresh=False
+    ) as live:
 
         def refresh(force=False):
             nonlocal last_refresh
             now = time.monotonic()
             if not force and now - last_refresh < 1 / 12:
                 return
-            parts = [Text(status, style="dim")]
+            line = status
+            if not answer and not finished:
+                line += ui.elapsed_suffix(now - started)
+            parts = [Text(line, style="dim")]
             if tools:
                 parts.append(
                     Text("Tools: " + ", ".join(dict.fromkeys(tools)), style="dim cyan")
@@ -190,23 +196,30 @@ def _stream_turn(session, query: str) -> None:
                 if kind == "answer.delta":
                     answer += event["delta"]
                 elif kind == "status":
-                    status = event.get("stage", "working").replace("_", " ")
+                    status = event.get("message") or event.get(
+                        "stage", "working"
+                    ).replace("_", " ")
+                    if event.get("stage") == "harness_activity" and event.get(
+                        "tool_name"
+                    ):
+                        tools.append(event["tool_name"])
                 elif kind == "tool.started":
                     tools.append(event.get("tool_name", "tool"))
                 elif kind == "approval.required":
                     status = "paused for approval"
                 elif kind == "answer.done":
-                    status = "answer complete; saving"
+                    status, finished = "answer complete; saving", True
                 elif kind == "run.done":
+                    finished = True
                     status = (
                         provider_error_message(event.get("error_code"))
                         or event["status"]
                     )
                 refresh(force=kind in {"answer.done", "run.done"})
         except KeyboardInterrupt:
-            status = "interrupted; partial answer retained"
+            status, finished = "interrupted; partial answer retained", True
         except Exception:
-            status = "stream failed; partial answer retained"
+            status, finished = "stream failed; partial answer retained", True
         finally:
             if stream is not None:
                 stream.close()

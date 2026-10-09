@@ -14,7 +14,9 @@ matching it.
 from __future__ import annotations
 
 import os
+import sys
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, List, Tuple
 
 from prompt_toolkit.application import get_app
@@ -90,6 +92,44 @@ def ignore_focus_reports() -> None:
 
     for sequence in FOCUS_REPORTS:
         ANSI_SEQUENCES.setdefault(sequence, Keys.Ignore)
+
+
+@contextmanager
+def quiet_keys(stream: Any = None):
+    """Stop keys typed while the CLI works from echoing as ^[[B and the like.
+
+    Between prompts the terminal is in line mode with echo on, so an arrow
+    key pressed while a turn streams or a command loads is printed raw over
+    the output. Echo is off inside the block; the keys stay queued for the
+    next prompt or picker. A no-op when the stream is not a terminal.
+    """
+    try:
+        import termios
+
+        fd = (stream or sys.stdin).fileno()
+        saved = termios.tcgetattr(fd)
+        quiet = list(saved)
+        quiet[3] &= ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSANOW, quiet)
+    except Exception:
+        saved = None
+    try:
+        yield
+    finally:
+        if saved is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSANOW, saved)
+            except Exception:
+                pass
+
+
+def elapsed_suffix(seconds: float) -> str:
+    """ " · 12s" for a turn still working, with the way out once it runs long."""
+    whole = int(seconds)
+    if whole < 1:
+        return ""
+    text = f"{whole}s" if whole < 60 else f"{whole // 60}m {whole % 60:02d}s"
+    return f" · {text}" + (" · ctrl-c to stop" if whole >= 10 else "")
 
 
 def should_animate(console: Console, environ: Any = None) -> bool:
