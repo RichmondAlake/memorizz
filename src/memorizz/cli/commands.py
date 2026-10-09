@@ -1265,10 +1265,15 @@ def cmd_harnesses(session, args: str):
                 return f"not ready · {row.get('reason') or ''}"
             return "unknown"
 
+        defaults = _harness_defaults(session, rows)
+
         chosen = picker.pick(
             choices,
             title="Run the next turns on",
-            render=lambda r: f"{r['name']:<12} {(r.get('version') or ''):<30} {_state(r)}",
+            render=lambda r: (
+                f"{r['name']:<12} {(defaults.get(r['name']) or ''):<22} "
+                f"{(r.get('version') or ''):<28} {_state(r)}"
+            ),
             search_text=lambda r: f"{r['name']} {_state(r)}",
             is_current=lambda r: r["name"] == (active or "off"),
             verb="choose",
@@ -1278,6 +1283,7 @@ def cmd_harnesses(session, args: str):
             return
         cmd_harness(session, chosen["name"])
         return
+    defaults = _harness_defaults(session, rows)
     console.print(f"[bold]Harnesses[/bold] (active: {active or 'off'})")
     for row in rows:
         if row["ready"] is True:
@@ -1288,8 +1294,25 @@ def cmd_harnesses(session, args: str):
             state = "[dim]unknown[/dim]"
         marker = "▶ " if row["name"] == active else "  "
         version = f" [dim]{row['version']}[/dim]" if row.get("version") else ""
-        console.print(f"{marker}[cyan]{row['name']}[/cyan]{version}  {state}")
+        default = defaults.get(row["name"])
+        model = f"  [dim]model {default}[/dim]" if default else ""
+        console.print(f"{marker}[cyan]{row['name']}[/cyan]{version}{model}  {state}")
     console.print("Usage: /harness <name|auto|off>")
+
+
+def _harness_defaults(session, rows) -> dict:
+    """Each harness's default model, for the list and the picker; quiet on failure."""
+    from . import harness_session
+
+    defaults = {}
+    for row in rows:
+        try:
+            defaults[row["name"]] = harness_session.harness_model_choices(
+                session, row["name"]
+            )["default"]
+        except Exception:
+            defaults[row["name"]] = None
+    return defaults
 
 
 def cmd_harness(session, args: str):
@@ -1297,7 +1320,12 @@ def cmd_harness(session, args: str):
     from . import harness_session
 
     console = _con(session)
-    name = args.strip().lower()
+    parts = args.strip().split()
+    name = parts[0].lower() if parts else ""
+    model = parts[1] if len(parts) > 1 else None
+    if name == "model":
+        _harness_model(session, console, model)
+        return
     if not name:
         active = harness_session.active_harness(session)
         mode = getattr(session.agent, "meta_harness_mode", None)
@@ -1312,6 +1340,7 @@ def cmd_harness(session, args: str):
                 f"Harness: [cyan]{active}[/cyan] (runtime mode, session only; "
                 "memory, traces and approvals stay in MemoRizz)"
             )
+            console.print(_harness_model_line(session))
         elif mode:
             console.print(
                 f"Harness: [dim]off for this session[/dim]; the saved agent uses "
@@ -1320,7 +1349,8 @@ def cmd_harness(session, args: str):
         else:
             console.print("Harness: [dim]off[/dim] (native MemAgent execution)")
         console.print(
-            "Usage: /harness <codex|claude-code|auto|delegate|off>   (see /harnesses)"
+            "Usage: /harness <name> [model] · /harness model [name] · "
+            "/harness auto|delegate|off   (see /harnesses)"
         )
         return
     if name in {"off", "none", "native"}:
@@ -1333,7 +1363,7 @@ def cmd_harness(session, args: str):
         )
         return
     try:
-        result = harness_session.apply_harness(session, name)
+        result = harness_session.apply_harness(session, name, model=model)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         return
@@ -1349,6 +1379,86 @@ def cmd_harness(session, args: str):
     )
     if result["harness"] == "auto":
         console.print("[dim]MemoRizz picks a ready harness per turn.[/dim]")
+    else:
+        console.print(_harness_model_line(session))
+
+
+_MODEL_SOURCES = {
+    "chosen": "chosen for this session",
+    "carried": "carried over from the chat",
+    "agent": "from the agent's harness settings",
+    "default": "the harness's default",
+}
+
+
+def _harness_model_line(session) -> str:
+    from . import harness_session
+
+    model = harness_session.harness_model_label(session)
+    source = _MODEL_SOURCES.get(
+        getattr(session, "harness_model_source", None) or "", ""
+    )
+    if not model:
+        return "[dim]model: the harness's own default[/dim]"
+    return f"model: [cyan]{model}[/cyan] [dim]({source}; /harness model <name> to change)[/dim]"
+
+
+def _harness_model(session, console, name) -> None:
+    """``/harness model [name]``: show, pick or set the active harness's model."""
+    from . import harness_session, picker
+
+    active = harness_session.active_harness(session)
+    if not active or active in {harness_session.DELEGATE, "auto"}:
+        console.print(
+            "[red]Pick a harness first:[/red] /harness <codex|claude-code|...> [model]"
+        )
+        return
+    if name:
+        try:
+            result = harness_session.set_harness_model(session, name)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return
+        console.print(
+            f"[green]Model →[/green] {result['model']} on {result['harness']}"
+        )
+        return
+    try:
+        choices = harness_session.harness_model_choices(session, active)
+    except Exception as exc:
+        console.print(f"[red]Could not read {active}'s models:[/red] {exc}")
+        return
+    models = list(choices.get("models") or [])
+    current = harness_session.harness_model_label(session)
+    if models and picker.picker_available(console):
+        chosen = picker.pick(
+            models,
+            title=f"Model for {active} (default {choices.get('default') or '-'})",
+            render=lambda m: str(m),
+            is_current=lambda m: str(m) == current,
+            verb="use",
+        )
+        if chosen is None or str(chosen) == current:
+            console.print("[dim]No change.[/dim]")
+            return
+        result = harness_session.set_harness_model(session, str(chosen))
+        console.print(
+            f"[green]Model →[/green] {result['model']} on {result['harness']}"
+        )
+        return
+    console.print(_harness_model_line(session))
+    if models:
+        console.print(
+            f"Models {active} can run (default {choices.get('default') or '-'}):"
+        )
+        for m in models:
+            marker = "▶ " if str(m) == current else "  "
+            console.print(f"{marker}{m}")
+    else:
+        console.print(
+            f"[dim]{active} publishes no model list; it runs its own default.[/dim]"
+        )
+    console.print("Usage: /harness model <name>")
 
 
 def _print_delegate_mode(console, session, result) -> None:
@@ -1932,9 +2042,9 @@ COMMANDS: Dict[str, Command] = {
     ),
     "harness": Command(
         cmd_harness,
-        "Run the next turns on a harness with MemoRizz memory; delegate keeps your "
-        "model in charge; off returns to native.",
-        "/harness <name|auto|delegate|off>",
+        "Run the next turns on a harness with MemoRizz memory (optionally on a "
+        "model); delegate keeps your model in charge; off returns to native.",
+        "/harness <name [model]|model [name]|auto|delegate|off>",
     ),
     "compare": Command(
         cmd_compare,

@@ -340,7 +340,7 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/clear` | **Erase the agent's entire stored memory** (asks to confirm). |
 | `/cls` | Clear the terminal screen. |
 | `/harnesses` | List the external harnesses (Codex, Claude Code, OpenHands, pi, Hermes, ...) and whether each is ready. |
-| `/harness <name\|auto\|delegate\|off>` | Run the following turns on that harness with MemoRizz memory, traces and approvals; `auto` lets MemoRizz pick, `delegate` keeps your model in charge and lets it hand parts to its harness delegates, `off` returns to native execution. Session only. |
+| `/harness <name [model]\|model [name]\|auto\|delegate\|off>` | Run the following turns on that harness with MemoRizz memory, traces and approvals; `auto` lets MemoRizz pick, `delegate` keeps your model in charge and lets it hand parts to its harness delegates, `off` returns to native execution. Session only. |
 | `/compare <harness> <harness> <task>` | Run one read-only task on two or more harnesses side by side and print each verdict; saved as a workflow. |
 | `/agents` | List saved agents. |
 | `/agent <id>` | Load a saved agent by id. |
@@ -399,6 +399,17 @@ memorizz·codex> summarise what this repository does
 memorizz·codex> /harness off
 Harness off (was codex); turns run natively again.
 ```
+
+**Which model answers.** A harness runs its own model, not the chat's,
+because the models are not portable: Codex only runs OpenAI models through
+your login, Claude Code only Anthropic models, and neither can run an Ollama
+model. When the chat's model *is* one the harness can run (the chat on
+`openai/gpt-6-luna` and the harness Codex, say) it is carried over
+automatically; otherwise the agent's harness setting applies, else the
+harness's default. The switch message and the status bar always say which
+model will answer (`harness codex · gpt-6.1-sol`). `/harness codex gpt-6-sol`
+picks one, `/harness model` opens the harness's model list, and
+`/harness memagent` runs MemoRizz's own model as the harness.
 
 Each turn is a governed harness run: MemoRizz retrieves the relevant memories
 for the harness, exposes the permitted MCP access, records the run with its

@@ -52,6 +52,9 @@ class Session:
     # Session-scoped harness routing (``/harness``); never saved on the agent.
     harness: Optional[str] = None
     harness_backup: Optional[Dict[str, Any]] = None
+    harness_model: Optional[str] = None
+    harness_model_source: Optional[str] = None
+    harness_models_cache: Optional[Dict[str, Any]] = None
     # A newer release found by the update check: {latest, command}.
     update_notice: Optional[Dict[str, Any]] = None
 

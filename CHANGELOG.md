@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Interactive CLI: the chat's model is carried over to a harness when the
+  harness can run it; `/harness <name> <model>` and `/harness model [name]`
+  choose the model (with a picker over the harness's catalogue), the switch
+  message and the status bar show the model that will answer, and
+  `/harnesses` lists each harness's default model.
+
 ## 0.16.2 — 2026-10-08
 
 ### Added

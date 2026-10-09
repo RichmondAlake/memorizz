@@ -133,7 +133,71 @@ def prompt_label(session) -> str:
     return f"{base}·{harness}> " if harness else f"{base}> "
 
 
-def apply_harness(session, name: Any) -> Dict[str, Any]:
+def harness_model_choices(session, name: str) -> Dict[str, Any]:
+    """The models one harness can run and its default, as the UI's pickers
+    offer them. Cached on the session: the catalogue is read from the
+    harness's own CLI and login."""
+    cache = getattr(session, "harness_models_cache", None)
+    if cache is None:
+        cache = {}
+        session.harness_models_cache = cache
+    name = canonical_harness(name)
+    if name in cache:
+        return cache[name]
+    from ..metaharness import catalog
+
+    service = _service(session)
+    rows = [
+        r
+        for r in (service.list_harnesses() or [])
+        if canonical_harness(r.get("name")) == name
+    ]
+    choices = catalog.model_choices(service, rows or [{"name": name}]) or {}
+    entry = choices.get(name) or {}
+    models: List[str] = []
+    for group in entry.get("groups") or []:
+        for model in group.get("models") or []:
+            if model and model not in models:
+                models.append(str(model))
+    result = {"default": entry.get("default") or None, "models": models}
+    cache[name] = result
+    return result
+
+
+def carried_model(session, name: str) -> Optional[str]:
+    """The chat's own model when the harness can run it (openai/gpt-6 on
+    Codex, say); None when it cannot (an Ollama model on Codex)."""
+    model = str(getattr(session, "model_name", "") or "")
+    if not model or model == "?":
+        return None
+    try:
+        choices = harness_model_choices(session, name)
+    except Exception:
+        return None
+    return model if model in choices["models"] else None
+
+
+def harness_model_label(session) -> str:
+    """What the status bar shows after the harness name: the model that will run."""
+    return str(getattr(session, "harness_model", None) or "")
+
+
+def set_harness_model(session, model: Any) -> Dict[str, Any]:
+    """Change the model the active harness runs for this session."""
+    harness = active_harness(session)
+    if not harness or harness == DELEGATE:
+        raise ValueError(
+            "Pick a harness first: /harness <codex|claude-code|...> [model]"
+        )
+    model = str(model or "").strip()
+    if not model:
+        raise ValueError(
+            "Usage: /harness model <model>   (/harness model lists the choices)"
+        )
+    return apply_harness(session, harness, model=model)
+
+
+def apply_harness(session, name: Any, model: Optional[str] = None) -> Dict[str, Any]:
     """Route this session's turns through ``name`` (``auto`` lets MemoRizz pick).
 
     Returns a summary dict. Raises ValueError for an unknown harness or one
@@ -162,18 +226,42 @@ def apply_harness(session, name: Any) -> Dict[str, Any]:
                 f"Run `memorizz harness doctor {harness}`."
             )
     _remember_agent_state(session)
+    config = dict(session.harness_backup["harness_config"] or {})
+    source = "default"
+    chosen = str(model or "").strip() or None
+    if chosen:
+        source = "chosen"
+    elif harness != "auto":
+        chosen = carried_model(session, harness)
+        if chosen:
+            source = "carried"
+        elif config.get("model"):
+            chosen = str(config["model"])
+            source = "agent"
+    if chosen:
+        config["model"] = chosen
     agent.with_meta_harness(
         getattr(agent, "meta_harness", None),
         mode="runtime",
         default_harness=harness,
-        config=session.harness_backup["harness_config"] or None,
+        config=config or None,
     )
     session.harness = harness
+    shown = chosen
+    if not shown and harness != "auto":
+        try:
+            shown = harness_model_choices(session, harness)["default"]
+        except Exception:
+            shown = None
+    session.harness_model = shown
+    session.harness_model_source = source
     return {
         "harness": harness,
         "mode": "runtime",
         "ready": True if harness == "auto" else known[harness].get("ready"),
         "memory_id": getattr(session, "memory_id", None),
+        "model": shown,
+        "model_source": source,
     }
 
 
@@ -207,6 +295,8 @@ def _apply_delegate_mode(session) -> Dict[str, Any]:
         config=backup["harness_config"] or None,
     )
     session.harness = DELEGATE
+    session.harness_model = None
+    session.harness_model_source = None
     return {
         "harness": DELEGATE,
         "mode": DELEGATE,
@@ -243,6 +333,8 @@ def clear_harness(session) -> Dict[str, Any]:
         agent._owns_meta_harness = backup["owns_meta_harness"]
         session.harness_backup = None
     session.harness = None
+    session.harness_model = None
+    session.harness_model_source = None
     return {
         "harness": None,
         "previous": previous,
@@ -652,6 +744,10 @@ __all__ = [
     "META_HARNESS_TOOL_NAMES",
     "active_harness",
     "apply_harness",
+    "carried_model",
+    "harness_model_choices",
+    "harness_model_label",
+    "set_harness_model",
     "delegation_enabled",
     "harness_delegates",
     "memagent_for_compare",

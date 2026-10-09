@@ -155,6 +155,9 @@ def memory_label(session: Any) -> str:
 def toolbar(session: Any) -> HTML:
     """The status line under the prompt: model, memory, harness and the hotkeys."""
     harness = harness_session.active_harness(session) or "off"
+    harness_model = harness_session.harness_model_label(session)
+    if harness_model and harness not in {"off", harness_session.DELEGATE}:
+        harness = f"{harness} · {harness_model}"
     harness_class = (
         "bottom-toolbar.harness" if harness != "off" else "bottom-toolbar.dim"
     )

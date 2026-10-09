@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from rich.console import Console
 
-from memorizz.cli import commands, harness_session
+from memorizz.cli import commands, harness_session, ui
 from memorizz.cli.agent_factory import Session
 
 pytestmark = pytest.mark.unit
@@ -182,6 +182,8 @@ def test_apply_harness_attaches_runtime_mode_for_the_session_only(session):
         "mode": "runtime",
         "ready": True,
         "memory_id": "mem-1",
+        "model": None,
+        "model_source": "default",
     }
     assert sess.harness == "codex"
     assert agent.meta_harness_mode == "runtime"
@@ -349,7 +351,7 @@ def test_harness_commands_are_completable_and_listed_in_help(session):
     names = commands.command_completions()
     assert "/harness" in names and "/harnesses" in names
     commands.dispatch("/help", sess)
-    assert "/harness <name|auto|delegate|off>" in output.getvalue()
+    assert "/harness <name [model]|model [name]|auto|delegate|off>" in output.getvalue()
     assert "/compare <harness> <harness> <task>" in output.getvalue()
 
 
@@ -1155,3 +1157,122 @@ def test_sessions_table_drops_the_folder_column_on_narrow_terminals():
     )
     assert "Folder" in wide_out.getvalue()
     assert "/session <run>" in narrow_out.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# harness models: carry-over, explicit choice, status bar
+# --------------------------------------------------------------------------- #
+
+CODEX_MODELS = {
+    "default": "gpt-6.1-sol",
+    "models": ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-sol"],
+}
+
+
+@pytest.fixture
+def codex_catalogue(monkeypatch):
+    calls = []
+
+    def choices(session, name):
+        calls.append(name)
+        return (
+            dict(CODEX_MODELS) if name == "codex" else {"default": None, "models": []}
+        )
+
+    monkeypatch.setattr(harness_session, "harness_model_choices", choices)
+    return calls
+
+
+def test_harness_uses_its_default_when_the_chat_model_is_not_runnable(
+    session, codex_catalogue
+):
+    sess, _ = session  # chat on ollama/qwen3.5:latest
+    result = harness_session.apply_harness(sess, "codex")
+    assert result["model"] == "gpt-6.1-sol" and result["model_source"] == "default"
+    assert (
+        sess.agent.attach_calls[-1]["config"] is None
+    )  # nothing forced on the harness
+    assert sess.harness_model == "gpt-6.1-sol"
+
+
+def test_chat_model_is_carried_over_when_the_harness_can_run_it(
+    session, codex_catalogue
+):
+    sess, _ = session
+    sess.llm_config = {"provider": "openai", "model": "gpt-6-luna"}
+    result = harness_session.apply_harness(sess, "codex")
+    assert result["model"] == "gpt-6-luna" and result["model_source"] == "carried"
+    assert sess.agent.attach_calls[-1]["config"] == {"model": "gpt-6-luna"}
+    assert sess.agent.harness_config == {"model": "gpt-6-luna"}
+
+
+def test_explicit_model_wins_and_can_be_changed(session, codex_catalogue):
+    sess, _ = session
+    sess.llm_config = {"provider": "openai", "model": "gpt-6-luna"}
+    result = harness_session.apply_harness(sess, "codex", model="gpt-6-sol")
+    assert result["model"] == "gpt-6-sol" and result["model_source"] == "chosen"
+    changed = harness_session.set_harness_model(sess, "gpt-6.1-sol")
+    assert (
+        changed["model"] == "gpt-6.1-sol"
+        and sess.agent.harness_config["model"] == "gpt-6.1-sol"
+    )
+    with pytest.raises(ValueError, match="Usage: /harness model"):
+        harness_session.set_harness_model(sess, "")
+    harness_session.clear_harness(sess)
+    assert sess.harness_model is None and sess.agent.harness_config == {}
+    with pytest.raises(ValueError, match="Pick a harness first"):
+        harness_session.set_harness_model(sess, "gpt-6-sol")
+
+
+def test_agent_harness_model_is_kept_when_nothing_else_applies(codex_catalogue):
+    output = StringIO()
+    agent = FakeAgent(
+        service=FakeService(READY),
+        config={"model": "gpt-6-sol", "budget": {"max_steps": 5}},
+    )
+    sess = Session(
+        agent=agent,
+        provider=object(),
+        llm_config={"provider": "ollama", "model": "qwen"},
+        console=Console(file=output),
+    )
+    result = harness_session.apply_harness(sess, "codex")
+    assert result["model"] == "gpt-6-sol" and result["model_source"] == "agent"
+    assert agent.harness_config == {"model": "gpt-6-sol", "budget": {"max_steps": 5}}
+
+
+def test_harness_command_takes_a_model_and_shows_it(session, codex_catalogue):
+    sess, output = session
+    commands.dispatch("/harness codex gpt-6-luna", sess)
+    text = output.getvalue()
+    assert (
+        "Harness → codex" in text
+        and "model: gpt-6-luna" in text
+        and "chosen for this session" in text
+    )
+    commands.dispatch("/harness model gpt-6-sol", sess)
+    assert "Model → gpt-6-sol on codex" in output.getvalue()
+    commands.dispatch("/harness", sess)
+    assert "model: gpt-6-sol" in output.getvalue()
+    commands.dispatch("/harness model", sess)  # non-terminal console: list
+    assert "Models codex can run (default gpt-6.1-sol)" in output.getvalue()
+    assert "▶ gpt-6-sol" in output.getvalue()
+    commands.dispatch("/harness off", sess)
+    commands.dispatch("/harness model gpt-6-sol", sess)
+    assert "Pick a harness first" in output.getvalue()
+
+
+def test_status_bar_shows_the_harness_model(session, codex_catalogue):
+    from prompt_toolkit.formatted_text import to_plain_text
+
+    sess, _ = session
+    harness_session.apply_harness(sess, "codex", model="gpt-6-luna")
+    assert "harness codex · gpt-6-luna" in to_plain_text(ui.toolbar(sess))
+    harness_session.clear_harness(sess)
+    assert "harness off" in to_plain_text(ui.toolbar(sess))
+
+
+def test_harnesses_list_shows_each_default_model(session, codex_catalogue):
+    sess, output = session
+    commands.dispatch("/harnesses list", sess)
+    assert "model gpt-6.1-sol" in output.getvalue()

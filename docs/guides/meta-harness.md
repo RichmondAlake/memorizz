@@ -896,6 +896,10 @@ pattern instead: the agent's model keeps the turn, hands parts to its harness
 delegates and gets `run_harness_task` to call any harness directly;
 `/compare codex claude-code <task>` runs a read-only comparison from the
 prompt and keeps it as a workflow.
+The chat's own model is carried over to the harness when the harness can
+run it; otherwise the agent's harness model or the harness default applies,
+and `/harness <name> <model>` or `/harness model` choose one. The status
+bar shows the model that will answer.
 
 ## Local UI
 
