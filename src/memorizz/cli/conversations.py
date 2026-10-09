@@ -265,6 +265,9 @@ def pick_conversation(
     if not conversations:
         return None
 
+    from .ui import ignore_focus_reports
+
+    ignore_focus_reports()
     from prompt_toolkit.application import Application, get_app
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.formatted_text import FormattedText

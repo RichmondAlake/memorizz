@@ -10,6 +10,18 @@
   message and the status bar show the model that will answer, and
   `/harnesses` lists each harness's default model.
 
+### Fixed
+
+- Memory history: saving an agent that has a persona logged "Memory history
+  preparation failed ... Unable to serialize unknown type: Persona" and
+  skipped the journal entry (it also lost the agent's previous version, so
+  updates were journalled as creations). The journal now stores the persona
+  as the providers do. It surfaced in the chat after `/harnesses`, which
+  switches on history recording.
+- Interactive CLI: terminal focus reports (sent when you click back into the
+  window) were read as the Esc key, so pickers closed with "No change." on
+  their own and the prompt could gain a stray "[I". They are now ignored.
+
 ## 0.16.2 — 2026-10-08
 
 ### Added

@@ -567,3 +567,51 @@ def test_specialized_agent_namespace_setters_are_updates(history_provider):
     events = history.timeline(agent_id="a")["events"]
     assert [e["action"] for e in events] == ["created", "updated", "updated"]
     assert events[-1]["changed_fields"] == ["memory_ids"]
+
+
+def _persona(monkeypatch, name="Ada"):
+    from memorizz.long_term.semantic.persona.persona import Persona
+
+    monkeypatch.setattr(Persona, "_generate_embedding", lambda self: [0.1, 0.2, 0.3])
+    return Persona(name=name, role="Assistant", goals="Help.", background="Tests.")
+
+
+def test_json_serialises_an_agent_that_holds_a_persona_object(monkeypatch):
+    """Regression: 'Unable to serialize unknown type: Persona' skipped the
+    journal entry for every agent save made by the CLI."""
+    from memorizz.memagent.models import MemAgentModel
+    from memorizz.memory_history import _json
+
+    agent = MemAgentModel(agent_id="agent-p", persona=_persona(monkeypatch))
+    data = _json(agent)
+    assert data["agent_id"] == "agent-p"
+    assert data["persona"]["name"] == "Ada" and data["persona"]["role"] == "Assistant"
+    assert data["persona"]["embedding"] == [0.1, 0.2, 0.3]
+    assert _json(agent) == data  # stable: no object repr in the record
+
+
+def test_agent_saves_with_a_persona_are_journalled_as_create_then_update(
+    history_provider, monkeypatch, caplog
+):
+    from memorizz.memagent.models import MemAgentModel
+
+    provider = history_provider
+    history = MemoryHistory(provider)
+    persona = _persona(monkeypatch)
+    with caplog.at_level("WARNING", logger="memorizz.memory_history"):
+        with history.recording(actor="cli", source="sdk", agent_id="agent-p"):
+            agent_id = provider.store_memagent(
+                MemAgentModel(agent_id="agent-p", instruction="v1", persona=persona)
+            )
+            saved = provider.retrieve_memagent(agent_id)
+            saved.instruction = "v2"
+            provider.store_memagent(saved)  # agent saves are upserts
+    assert "preparation failed" not in caplog.text
+    events = [
+        e
+        for e in history.timeline(agent_id="agent-p")["events"]
+        if e.get("memory_type") in (None, MemoryType.MEMAGENT.value, "memagent")
+    ]
+    assert [e["action"] for e in events][-2:] == ["created", "updated"]
+    assert "instruction" in events[-1]["changed_fields"]
+    assert "persona" not in events[-1]["changed_fields"]

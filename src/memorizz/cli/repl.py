@@ -222,6 +222,7 @@ def run_repl(session) -> None:
     session.console = console
 
     cfg.ensure_home()
+    ui.ignore_focus_reports()
     ptk = PromptSession(
         history=SafeFileHistory(str(cfg.history_file())),
         completer=SlashCompleter(commands.command_completions()),

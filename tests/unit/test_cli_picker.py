@@ -157,3 +157,44 @@ def test_sessions_and_menu_open_the_picker(tty_session, monkeypatch):
     assert "Slash commands" in output.getvalue()
     commands.dispatch("/sessions list", sess)
     assert "Coding-agent sessions (1 newest)" in output.getvalue()
+
+
+@pytest.mark.parametrize("focus", ["\x1b[I", "\x1b[O"])
+def test_terminal_focus_reports_do_not_cancel_the_picker(focus):
+    """Regression: clicking back into the terminal sent ESC [ I, which
+    prompt_toolkit read as Esc and the picker closed with 'No change.'"""
+    assert _run_picker(focus + "\r", ["alpha", "beta"]) == "alpha"
+    assert _run_picker(focus + "\x1b[B" + focus + "\r", ["alpha", "beta"]) == "beta"
+
+
+def test_focus_reports_do_not_type_into_the_prompt():
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.application import create_app_session
+
+    from memorizz.cli import ui
+
+    ui.ignore_focus_reports()
+    with create_pipe_input() as pipe:
+        pipe.send_text("\x1b[Ihello\x1b[O\r")
+        with create_app_session(input=pipe, output=DummyOutput()):
+            assert PromptSession().prompt("> ") == "hello"
+
+
+def test_conversations_picker_survives_focus_reports(tmp_path):
+    from prompt_toolkit.application import create_app_session
+
+    from memorizz.cli import conversations
+
+    summary = conversations.ConversationSummary(
+        memory_id="m",
+        thread_id="t",
+        title="hello",
+        preview="hello",
+        created_at=None,
+        updated_at=None,
+        message_count=2,
+    )
+    with create_pipe_input() as pipe:
+        pipe.send_text("\x1b[I\r")
+        with create_app_session(input=pipe, output=DummyOutput()):
+            assert conversations.pick_conversation([summary]) == summary

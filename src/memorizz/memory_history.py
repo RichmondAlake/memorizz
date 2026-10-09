@@ -48,10 +48,38 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _plain(value):
+    """``json.dumps`` fallback for objects records may hold.
+
+    An agent record keeps its ``Persona`` as an object; store it the way the
+    providers do (``to_dict``), not as a ``repr`` that changes every run.
+    """
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="python")
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return tolist()
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=str)
+    return str(value)
+
+
 def _json(value):
     if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")
-    return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+        try:
+            value = value.model_dump(mode="json")
+        except Exception:
+            # A field holding a non-pydantic object (MemAgentModel.persona is a
+            # Persona) cannot be JSON-dumped by pydantic; dump in python mode
+            # and let _plain convert what remains.
+            value = value.model_dump(mode="python")
+    return json.loads(json.dumps(value, default=_plain, ensure_ascii=False))
 
 
 def _hash(value):
@@ -143,7 +171,7 @@ def _lookup(provider, record_id, kind):
     row = provider.retrieve_by_id(str(record_id), kind)
     if not isinstance(row, dict) and kind == MemoryType.MEMAGENT:
         model = provider.retrieve_memagent(str(record_id))
-        row = model.model_dump(mode="json") if hasattr(model, "model_dump") else None
+        row = _json(model) if hasattr(model, "model_dump") else None
     if not isinstance(row, dict) and kind == MemoryType.SHARED_MEMORY:
         row = provider.retrieve_by_name(str(record_id), kind)
     return _json(row) if isinstance(row, dict) else None
@@ -327,7 +355,7 @@ def enable_memory_history(provider):
                                     if isinstance(unit, dict):
                                         data = unit
                                     elif hasattr(unit, "model_dump"):
-                                        data = unit.model_dump(mode="json")
+                                        data = _json(unit)
                                     elif callable(getattr(unit, "dict", None)):
                                         data = unit.dict()
                                     elif hasattr(unit, "__dict__"):

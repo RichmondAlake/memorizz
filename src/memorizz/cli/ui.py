@@ -72,6 +72,26 @@ STYLE = Style.from_dict(
 )
 
 
+FOCUS_REPORTS = ("\x1b[I", "\x1b[O")
+
+
+def ignore_focus_reports() -> None:
+    """Treat terminal focus reports as no-ops.
+
+    A terminal with focus reporting on sends ESC [ I / ESC [ O when the
+    window gains or loses focus. prompt_toolkit does not know these
+    sequences, so it reads them as the Esc key plus two characters: pickers
+    cancel themselves when you click back into the window, and the prompt
+    gains a stray "[I". Registering them as ignored keys fixes both.
+    Idempotent; the CLI owns the terminal, so changing the shared table is safe.
+    """
+    from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+    from prompt_toolkit.keys import Keys
+
+    for sequence in FOCUS_REPORTS:
+        ANSI_SEQUENCES.setdefault(sequence, Keys.Ignore)
+
+
 def should_animate(console: Console, environ: Any = None) -> bool:
     """Animate only on a real colour terminal and when nobody asked for quiet."""
     env = os.environ if environ is None else environ
@@ -255,6 +275,7 @@ __all__ = [
     "HOTKEYS",
     "STYLE",
     "animate_crest",
+    "ignore_focus_reports",
     "color_depth",
     "crest_text",
     "key_bindings",

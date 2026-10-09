@@ -49,6 +49,9 @@ def pick(
     from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import TextArea
 
+    from .ui import ignore_focus_reports
+
+    ignore_focus_reports()
     searchable = search_text or render
     selected = [0]
     search = TextArea(
