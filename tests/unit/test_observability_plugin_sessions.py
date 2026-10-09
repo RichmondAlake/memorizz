@@ -121,7 +121,34 @@ def test_a_session_without_a_run_says_how_to_add_it(console):
     assert "/harnesses?run=" not in page.text
 
 
-def test_the_dashboard_and_usage_report_coding_agent_sessions(console):
+@pytest.fixture
+def clock_near_the_fixtures(monkeypatch):
+    """The transcripts are dated 2026-10-02; the dashboard and usage pages
+    look back over a window, so pin "now" a day later instead of letting
+    the test age out of the window."""
+    from datetime import datetime as real_datetime
+    from datetime import timezone
+
+    frozen = real_datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
+
+    class FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen if tz is None else frozen.astimezone(tz)
+
+    from memorizz.observability import overview
+    from memorizz.ui import dashboard
+    from memorizz.ui.routers import traces
+
+    monkeypatch.setattr(dashboard, "datetime", FrozenDatetime)
+    monkeypatch.setattr(overview, "datetime", FrozenDatetime)
+    monkeypatch.setattr(traces.time, "time", lambda: frozen.timestamp())
+    return frozen
+
+
+def test_the_dashboard_and_usage_report_coding_agent_sessions(
+    console, clock_near_the_fixtures
+):
     client, tmp_path, store = console
     record_session(
         claude_transcript(tmp_path / "claude.jsonl", tmp_path / "shop"), store=store
