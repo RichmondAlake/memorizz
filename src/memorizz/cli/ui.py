@@ -61,6 +61,74 @@ HOTKEYS: Tuple[Tuple[str, str, str], ...] = (
     ("↓", "/menu", "quick actions"),
 )
 
+# One colour per kind of command, the same in the status bar, the completion
+# menu, /menu and /help. Anything not listed is an app command (help, menu,
+# update, docs, ui, exit, cls).
+KIND_COLOURS = {
+    "agents": "#7dd3fc",
+    "harness": "#86efac",
+    "memory": "#fcd34d",
+    "model": "#c4b5fd",
+    "app": "#f9a8d4",
+}
+COMMAND_KINDS = {
+    **dict.fromkeys(
+        (
+            "agent",
+            "agents",
+            "persona",
+            "persona-reset",
+            "tools",
+            "automation",
+            "approvals",
+            "browser",
+            "web",
+            "code",
+        ),
+        "agents",
+    ),
+    **dict.fromkeys(
+        ("harness", "harnesses", "compare", "sessions", "session"), "harness"
+    ),
+    **dict.fromkeys(
+        (
+            "memory",
+            "memory-provider",
+            "conversations",
+            "history",
+            "new",
+            "forget",
+            "clear",
+            "ingest",
+        ),
+        "memory",
+    ),
+    **dict.fromkeys(("models", "provider", "ollama", "login", "config"), "model"),
+}
+# The model in use is coloured by its provider, so a switch shows at a glance.
+PROVIDER_COLOURS = {
+    "openai": "#5eead4",
+    "azure": "#60a5fa",
+    "anthropic": "#f4a27a",
+    "ollama": "#bef264",
+    "deepseek": "#818cf8",
+    "gemini": "#93c5fd",
+    "google": "#93c5fd",
+    "huggingface": "#fde047",
+}
+OTHER_PROVIDER_COLOUR = "#e2e8f0"
+
+
+def command_colour(command: str) -> str:
+    """The colour of a command's kind: ``/compare codex x`` is a harness one."""
+    name = str(command or "").strip().lstrip("/").split(" ", 1)[0].lower()
+    return KIND_COLOURS[COMMAND_KINDS.get(name, "app")]
+
+
+def provider_colour(provider: Any) -> str:
+    return PROVIDER_COLOURS.get(str(provider or "").lower(), OTHER_PROVIDER_COLOUR)
+
+
 STYLE = Style.from_dict(
     {
         "prompt": "bold #7dd3fc",
@@ -69,11 +137,18 @@ STYLE = Style.from_dict(
         "frame": "#4b5563",
         "frame.harness": "#3f8f63",
         "bottom-toolbar": "noreverse #c8d0e0",
-        "bottom-toolbar.key": "bold #fbbf24",
+        "bottom-toolbar.brand": "bold #ff6b6b",
+        "bottom-toolbar.key": "bold #e5e7eb",
         "bottom-toolbar.dim": "#8a93a6",
-        "bottom-toolbar.model": "#7dd3fc",
-        "bottom-toolbar.harness": "bold #86efac",
+        "bottom-toolbar.memory": KIND_COLOURS["memory"],
+        "bottom-toolbar.harness": f"bold {KIND_COLOURS['harness']}",
         "bottom-toolbar.update": "bold #fbbf24 bg:#3b2f0b",
+        # The / completion menu: dark, each command in its kind's colour.
+        "completion-menu": "bg:#1f2430 #c8d0e0",
+        "completion-menu.completion": "bg:#1f2430",
+        "completion-menu.completion.current": "bold",
+        "scrollbar.background": "bg:#2a3040",
+        "scrollbar.button": "bg:#8a93a6",
     }
 )
 
@@ -297,15 +372,22 @@ def toolbar(session: Any) -> List[Tuple[str, str]]:
     harness_class = (
         "bottom-toolbar.harness" if harness != "off" else "bottom-toolbar.dim"
     )
-    model = f"{session.provider_name}/{session.model_name}"
+    colour = provider_colour(session.provider_name)
+    model = (
+        f'<style fg="{colour}">{_escape(session.provider_name)}</style>'
+        f"<bottom-toolbar.dim>/</bottom-toolbar.dim>"
+        f'<style fg="{colour}"><b>{_escape(session.model_name)}</b></style>'
+    )
     keys = "  ".join(
-        f"<bottom-toolbar.key>{key}</bottom-toolbar.key> {command.lstrip('/')}"
+        f'<style fg="{command_colour(command)}"><b>{key}</b> '
+        f"{command.lstrip('/')}</style>"
         for key, command, _ in HOTKEYS
     )
     status = HTML(
-        f" <b>memorizz</b> <bottom-toolbar.dim>·</bottom-toolbar.dim> "
-        f"<bottom-toolbar.model>{_escape(model)}</bottom-toolbar.model> "
-        f"<bottom-toolbar.dim>· memory</bottom-toolbar.dim> {_escape(memory_label(session))} "
+        f" <bottom-toolbar.brand>memorizz</bottom-toolbar.brand> "
+        f"<bottom-toolbar.dim>·</bottom-toolbar.dim> {model} "
+        f"<bottom-toolbar.dim>· memory</bottom-toolbar.dim> "
+        f"<bottom-toolbar.memory>{_escape(memory_label(session))}</bottom-toolbar.memory> "
         f"<bottom-toolbar.dim>· harness</bottom-toolbar.dim> "
         f"<{harness_class}>{_escape(harness)}</{harness_class}>  "
         f"<bottom-toolbar.dim>│</bottom-toolbar.dim>  {keys}  "
@@ -394,6 +476,7 @@ __all__ = [
     "HOTKEYS",
     "STYLE",
     "animate_crest",
+    "command_colour",
     "framed",
     "frame_rule",
     "ignore_focus_reports",
@@ -403,6 +486,7 @@ __all__ = [
     "memory_label",
     "prompt_fragments",
     "prompt_message",
+    "provider_colour",
     "should_animate",
     "toolbar",
     "update_fragment",

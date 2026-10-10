@@ -9,6 +9,12 @@
   instead of pinned to the bottom of the terminal and the completion menu
   opening inside the frame. Sent lines stay in the scrollback as
   `memorizz> <line>`; no frame on a dumb terminal.
+- Interactive CLI: colour by kind of command (agents blue, harnesses green,
+  memory amber, models violet, the rest pink) in the status bar, the `/`
+  completion menu (now dark, the selected command in its colour), `/menu`
+  and `/help`; the model in use is coloured by its provider in the status
+  bar, the banner and `/menu`. Pickers render in true colour when the
+  terminal supports it.
 - Interactive CLI: a turn on a harness shows the harness's own output as it
   works (its messages, each command with the first lines of its output and a
   failing exit code, tool calls with their arguments, file edits) above a

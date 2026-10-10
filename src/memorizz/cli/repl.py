@@ -44,7 +44,13 @@ class SlashCompleter(Completer):
             return
         for name in self.names:
             if name.startswith(text):
-                yield Completion(name, start_position=-len(text))
+                colour = ui.command_colour(name)
+                yield Completion(
+                    name,
+                    start_position=-len(text),
+                    style=f"fg:{colour}",
+                    selected_style=f"bg:{colour} fg:#111827",
+                )
 
 
 class SafeFileHistory(FileHistory):
@@ -88,6 +94,7 @@ def _quiet_logging() -> None:
 
 def _banner(console: Console, session) -> None:
     mode = "coding" if session.code_mode else "memory assistant"
+    colour = ui.provider_colour(session.provider_name)
     store = type(session.provider).__name__ if session.provider else "(none)"
     root = getattr(session.provider, "root_path", None)
     store_line = f"{store}" + (f"  [dim]{root}[/dim]" if root else "")
@@ -108,8 +115,8 @@ def _banner(console: Console, session) -> None:
     )
     body = (
         f"[bold]memorizz {__version__}[/bold] — {mode}\n"
-        f"provider: [cyan]{session.provider_name}[/cyan]   "
-        f"model: [cyan]{session.model_name}[/cyan]\n"
+        f"provider: [{colour}]{session.provider_name}[/]   "
+        f"model: [bold {colour}]{session.model_name}[/]\n"
         f"memory:   {store_line}\n"
         f"learning: continual {learning_status}\n"
         f"browser:  {browser_status}\n"

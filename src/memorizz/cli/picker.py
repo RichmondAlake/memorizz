@@ -29,14 +29,17 @@ def pick(
     items: Sequence[Any],
     *,
     title: str,
-    render: Callable[[Any], str],
+    render: Callable[[Any], Any],
     detail: Optional[Callable[[Any], str]] = None,
     search_text: Optional[Callable[[Any], str]] = None,
     is_current: Optional[Callable[[Any], bool]] = None,
     verb: str = "select",
     initial_query: str = "",
 ) -> Optional[Any]:
-    """Open the picker over ``items`` and return the chosen one, or None."""
+    """Open the picker over ``items`` and return the chosen one, or None.
+
+    ``render`` gives a row's text, or (style, text) pieces to colour it.
+    """
     if not items:
         return None
     from prompt_toolkit.application import Application, get_app
@@ -49,10 +52,10 @@ def pick(
     from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import TextArea
 
-    from .ui import ignore_focus_reports
+    from .ui import color_depth, ignore_focus_reports
 
     ignore_focus_reports()
-    searchable = search_text or render
+    searchable = search_text or (lambda item: _plain(render(item)))
     selected = [0]
     search = TextArea(
         text=initial_query,
@@ -89,15 +92,16 @@ def pick(
         fragments = []
         for index, item in enumerate(values):
             chosen = index == selected[0]
+            row = "class:selected" if chosen else "class:row"
             marker = "›" if chosen else " "
             current = "●" if is_current and is_current(item) else " "
-            line = render(item).replace("\n", " ")[: max(10, width - 6)]
-            fragments.append(
-                (
-                    "class:selected" if chosen else "class:row",
-                    f"{marker} {current} {line}\n",
-                )
-            )
+            fragments.append((row, f"{marker} {current} "))
+            room = max(10, width - 6)
+            for style, text in _pieces(render(item)):
+                text = text.replace("\n", " ")[:room]
+                room -= len(text)
+                fragments.append((f"{row} {style}".rstrip(), text))
+            fragments.append((row, "\n"))
         return fragments
 
     def render_details():
@@ -200,7 +204,7 @@ def pick(
             "search": "bg:#1f2430 #e5e7eb",
             "search-label": "bold #fbbf24",
             "row": "",
-            "selected": "reverse bold",
+            "selected": "bg:#2b3245 #f1f5f9 bold",
             "details": "#8a93a6",
             "empty": "#8a93a6 italic",
             "key": "bold #fbbf24",
@@ -213,10 +217,19 @@ def pick(
         ),
         key_bindings=bindings,
         style=style,
+        color_depth=color_depth(),
         full_screen=True,
         mouse_support=False,
     )
     return app.run()
+
+
+def _pieces(rendered: Any) -> List[Any]:
+    return [("", rendered)] if isinstance(rendered, str) else list(rendered)
+
+
+def _plain(rendered: Any) -> str:
+    return "".join(text for _, text in _pieces(rendered))
 
 
 __all__ = ["pick", "picker_available"]

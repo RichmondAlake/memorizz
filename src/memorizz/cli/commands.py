@@ -1781,8 +1781,11 @@ def cmd_menu(session, args: str):
         chosen = picker.pick(
             actions,
             title="Quick actions",
-            render=lambda a: f"{a[0]:<18} {a[1]}"
-            + (f"   ({a[2]} on an empty line)" if a[2] else ""),
+            render=lambda a: [
+                (f"fg:{ui.command_colour(a[0])} bold", f"{a[0]:<18} "),
+                ("", a[1]),
+                ("class:meta", f"   ({a[2]} on an empty line)" if a[2] else ""),
+            ],
             search_text=lambda a: f"{a[0]} {a[1]}",
             verb="run",
         )
@@ -1791,43 +1794,50 @@ def cmd_menu(session, args: str):
         dispatch(chosen[0], session)
         return
     table = Table(title="Quick actions", show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="bold yellow", no_wrap=True)
-    table.add_column(style="cyan", no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_column(no_wrap=True)
     table.add_column()
-    for key, command, what in ui.HOTKEYS:
-        table.add_row(key, command, what)
-    table.add_row("Tab", "/…", "complete a command")
-    table.add_row("", "/sessions", "what Codex and Claude Code did (plugin sessions)")
-    table.add_row(
-        "", escape("/memory project"), "chat over this folder's project memory"
-    )
-    table.add_row("", "/models", "show or switch the model")
-    table.add_row(
-        "", escape("/harness <name|auto|delegate|off>"), "route turns through a harness"
-    )
-    table.add_row(
-        "", escape("/compare <a> <b> <task>"), "one task on several harnesses"
-    )
-    table.add_row("", "/conversations", "resume a saved conversation")
-    table.add_row("", "/update", "check for a newer release")
-    table.add_row("", "/help", "every command")
+    rows = [(key, command, what) for key, command, what in ui.HOTKEYS]
+    rows.append(("Tab", "/…", "complete a command"))
+    rows += [
+        ("", "/sessions", "what Codex and Claude Code did (plugin sessions)"),
+        ("", "/memory project", "chat over this folder's project memory"),
+        ("", "/models", "show or switch the model"),
+        ("", "/harness <name|auto|delegate|off>", "route turns through a harness"),
+        ("", "/compare <a> <b> <task>", "one task on several harnesses"),
+        ("", "/conversations", "resume a saved conversation"),
+        ("", "/update", "check for a newer release"),
+        ("", "/help", "every command"),
+    ]
+    for key, command, what in rows:
+        colour = "bold" if command == "/…" else ui.command_colour(command)
+        table.add_row(
+            f"[bold {colour}]{key}[/]" if key else "",
+            f"[{colour}]{escape(command)}[/]",
+            what,
+        )
     console.print(table)
     harness = harness_session.active_harness(session) or "off"
+    colour = ui.provider_colour(session.provider_name)
     console.print(
-        f"[dim]now: {session.provider_name}/{session.model_name} · memory "
-        f"{ui.memory_label(session)} · harness {harness}[/dim]"
+        f"[dim]now:[/dim] [{colour}]{session.provider_name}/{session.model_name}[/] "
+        f"[dim]· memory {ui.memory_label(session)} · harness {harness}[/dim]",
+        highlight=False,
     )
 
 
 def cmd_help(session, args: str):
     from rich.markup import escape
 
+    from . import ui
+
     console = _con(session)
     console.print("[bold]Slash commands[/bold]")
     for name in sorted(COMMANDS):
         cmd = COMMANDS[name]
         usage = cmd.usage or f"/{name}"
-        console.print(f"  [cyan]{escape(usage.ljust(26))}[/cyan] {cmd.help}")
+        colour = ui.command_colour(name)
+        console.print(f"  [{colour}]{escape(usage.ljust(26))}[/] {cmd.help}")
     console.print(
         "\nType plain text to chat. Ctrl-C / Ctrl-D / /exit quits; "
         "Ctrl-C during a reply aborts just that reply."

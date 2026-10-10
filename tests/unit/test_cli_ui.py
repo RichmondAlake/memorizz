@@ -185,3 +185,53 @@ def test_framed_prompt_keeps_the_input_to_its_own_lines(session):
         pipe.send_text("hello\r")
         ptk.default_buffer.complete_state = None
         assert ptk.prompt(lambda: ui.prompt_message(sess)) == "hello"
+
+
+def test_each_kind_of_command_has_its_own_colour():
+    kinds = ui.KIND_COLOURS
+    assert ui.command_colour("/agents") == kinds["agents"]
+    assert ui.command_colour("/compare codex claude-code task") == kinds["harness"]
+    assert ui.command_colour("/memory project") == kinds["memory"]
+    assert ui.command_colour("/config get MEMORIZZ_BACKEND") == kinds["model"]
+    assert ui.command_colour("/help") == ui.command_colour("/exit") == kinds["app"]
+    assert len(set(kinds.values())) == len(kinds)
+    assert ui.provider_colour("Anthropic") == ui.PROVIDER_COLOURS["anthropic"]
+    assert ui.provider_colour("someone-new") == ui.OTHER_PROVIDER_COLOUR
+
+
+def test_status_bar_colours_the_model_by_provider_and_each_hotkey(session):
+    sess, _ = session
+    fragments = ui.toolbar(sess)
+    styles = {text: style for style, text in fragments}
+    model_colour = ui.provider_colour(sess.provider_name)
+    assert model_colour in styles[sess.model_name]
+    assert model_colour in styles[sess.provider_name]
+    assert ui.command_colour("/agents") in styles["←"]
+    assert ui.command_colour("/harnesses") in styles["→"]
+    assert ui.command_colour("/menu") in styles["↓"]
+
+
+def test_completion_menu_colours_each_command_by_kind():
+    from prompt_toolkit.document import Document
+
+    from memorizz.cli.repl import SlashCompleter
+
+    completions = list(
+        SlashCompleter(["/harness", "/help", "/history"]).get_completions(
+            Document("/h"), None
+        )
+    )
+    assert [c.text for c in completions] == ["/harness", "/help", "/history"]
+    harness = ui.command_colour("/harness")
+    assert completions[0].style == f"fg:{harness}"
+    assert completions[0].selected_style == f"bg:{harness} fg:#111827"
+    assert completions[1].style == f"fg:{ui.command_colour('/help')}"
+
+
+def test_picker_rows_can_be_coloured_pieces():
+    from memorizz.cli import picker
+
+    pieces = [("fg:#7dd3fc bold", "/agents  "), ("", "switch agent")]
+    assert picker._plain(pieces) == "/agents  switch agent"
+    assert picker._plain("plain row") == "plain row"
+    assert picker._pieces("plain row") == [("", "plain row")]

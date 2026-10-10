@@ -315,6 +315,11 @@ Running `memorizz` with no arguments launches the interactive loop:
   bottom rule shows the provider and model, the active memory (project ids in
   full), the active harness and the hotkeys. Once a line is sent, the
   scrollback keeps only `memorizz> <your line>`.
+- Each kind of command has its own colour, the same in the status bar, the
+  `/` completion menu, `/menu` and `/help`: agents blue, harnesses green,
+  memory amber, models and settings violet, everything else pink. The model
+  in use is coloured by its provider (Ollama lime, OpenAI teal, Anthropic
+  coral, ...), so a switch shows at a glance.
 - Startup plays a short crest animation on a colour terminal. Set
   `MEMORIZZ_NO_ANIMATION=1` (or `NO_COLOR`) to skip it; it never runs when the
   output is not a terminal.
