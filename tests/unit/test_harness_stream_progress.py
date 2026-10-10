@@ -463,3 +463,60 @@ def test_busy_spins_on_a_terminal_and_stays_quiet_elsewhere():
 
         _t.sleep(0.2)
     assert "Checking which harnesses are ready" in term.file.getvalue()
+
+
+def test_a_comparison_feed_names_every_line_and_prints_each_answer_as_it_ends():
+    from memorizz.cli.harness_feed import HarnessFeed
+
+    feed = HarnessFeed(label_every_line=True, show_answers=True)
+    feed.listener("a", "codex", {"type": "run.started"})
+    feed.listener(
+        "a",
+        "codex",
+        {"type": "command", "data": {"command": "ls", "status": "in_progress"}},
+    )
+    feed.listener("a", "codex", {"type": "message", "data": {"text": "Answer A"}})
+    assert _feed_lines(feed) == ["● Codex", "  Codex · $ ls"]
+    feed.listener("a", "codex", {"type": "run.finished"})
+    # No chat answer follows a comparison: each harness's answer is shown.
+    assert _feed_lines(feed) == ["  Codex · Answer A"]
+    assert _feed_lines(feed, answer="") == []
+
+
+class _FeedService:
+    def __init__(self, events):
+        self._events = events  # run_id -> ledger events
+
+    def events(self, run_id, *, after=0, limit=1000):
+        return [e for e in self._events.get(run_id, []) if e["sequence"] > after]
+
+
+def test_feed_follower_relays_several_runs_and_stops_each_once():
+    from memorizz.cli.harness_feed import FeedFollower
+
+    service = _FeedService(
+        {
+            "a": [
+                {"sequence": 1, "type": "command", "data": {"command": "ls"}},
+                {"sequence": 2, "type": "message", "data": {"text": "A done"}},
+            ],
+            "b": [{"sequence": 1, "type": "error", "data": {"error": "login expired"}}],
+        }
+    )
+    batches = []
+    follower = FeedFollower(
+        service,
+        lambda lines: batches.append([line.plain for line in lines]),
+        label_every_line=True,
+        show_answers=True,
+    )
+    follower.follow("a", "codex")
+    follower.follow("a", "codex")  # already followed
+    follower.follow("b", "claude-code")
+    follower.done("a")
+    follower.close()
+    follower.close()
+    lines = [line for batch in batches for line in batch]
+    assert lines.count("● Codex") == 1 and lines.count("● Claude Code") == 1
+    assert "  Codex · $ ls" in lines and "  Claude Code · ✗ login expired" in lines
+    assert lines.count("  Codex · A done") == 1

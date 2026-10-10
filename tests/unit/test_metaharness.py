@@ -1543,6 +1543,50 @@ def test_native_adapter_reports_memagent_model_usage(tmp_path: Path) -> None:
         service.close()
 
 
+def test_native_adapter_runs_the_saved_agent_a_task_names(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from memorizz.metaharness.adapters import PersistedMemAgentHarness
+
+    class Provider:
+        def retrieve_memagent(self, agent_id):  # pragma: no cover - patched run
+            raise AssertionError("not reached")
+
+    class ChatAgent:
+        agent_id = "chat-agent"
+        memory_provider = Provider()
+        model = None
+
+        def run(self, *args, **kwargs):
+            return "the chat agent answered"
+
+    ran = []
+
+    def saved_run(self, task, **kwargs):
+        ran.append((self.memory_provider, task.agent_id))
+        return SimpleNamespace(final_response="the saved agent answered")
+
+    adapter = NativeMemAgentHarness(ChatAgent())
+    kwargs = dict(
+        workspace=tmp_path,
+        context_pack=SimpleNamespace(rendered="", source_ids=[]),
+        emit=lambda event: None,
+        cancel_event=SimpleNamespace(is_set=lambda: False),
+    )
+    with patch.object(PersistedMemAgentHarness, "run", saved_run):
+        # /compare codex memagent=<id> in the chat: that agent runs.
+        outcome = adapter.run(
+            HarnessTask(task="t", workspace=str(tmp_path), agent_id="other"), **kwargs
+        )
+        assert outcome.final_response == "the saved agent answered"
+        assert ran == [(ChatAgent.memory_provider, "other")]
+        # No agent named: the attached agent runs, as before.
+        outcome = adapter.run(HarnessTask(task="t", workspace=str(tmp_path)), **kwargs)
+        assert outcome.final_response == "the chat agent answered"
+        assert len(ran) == 1
+
+
 def test_provider_backed_service_exposes_explicit_native_agent_adapter(
     tmp_path: Path,
 ) -> None:

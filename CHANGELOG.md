@@ -12,6 +12,11 @@
   and the `run_harness_task` tool show it too, each line naming its harness.
   `memorizz run --harness ...` and `memorizz harness run` print the same feed
   to stderr (not with `--json`).
+- Interactive CLI: `/compare` shows each harness's own output while the
+  harnesses work, every line naming its harness, and each harness's answer
+  in full when it finishes (the verdict table clips long answers).
+  `memorizz harness compare` and `memorizz harness plan` print the same
+  output to stderr (not with `--json`).
 - Streams: every harness run inside a streamed reply reports its progress as
   `harness_running` and `harness_activity` status events (kind of work only,
   no command text or reasoning). In-process consumers can receive the run's
@@ -29,6 +34,11 @@
   the picker searching for the word "list". It now prints the list, like
   `/agents list` and `/sessions list`, as does `/conversations` without a
   terminal or with `MEMORIZZ_NO_PICKER=1`.
+- Interactive CLI: `/compare ... memagent=<agent-id>` announced the saved
+  agent it would run but ran the chat's own agent instead (which could then
+  hand the task to its own Codex delegate, so a "codex vs memagent"
+  comparison was really codex vs codex). The memagent step now runs the
+  agent the comparison names.
 - Delegation: a harness-backed delegate's run reported nothing to the reply
   stream while it worked (its worker hides the stream so its text cannot
   leak into the answer). Its progress now reaches the user through a

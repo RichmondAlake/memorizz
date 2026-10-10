@@ -42,6 +42,7 @@ class FakeService:
         self.compare_calls = []
         self.canceled = []
         self.runs = dict(runs or {})
+        self.run_events = {}
         self.polls = 0
 
     memory_provider = None
@@ -73,6 +74,10 @@ class FakeService:
 
     def get_run(self, run_id):
         return self.runs.get(run_id)
+
+    def events(self, run_id, *, after=0, limit=1000):
+        rows = self.run_events.get(run_id, [])
+        return [e for e in rows if e["sequence"] > after][:limit]
 
     def cancel_orchestration(self, workflow_id):
         self.canceled.append(workflow_id)
@@ -602,6 +607,88 @@ def test_run_compare_builds_the_task_from_the_session_and_reports_each_harness(
     )
     assert lines[0] == "Comparison wf-1 started."
     assert "[1/2] codex: succeeded" in lines and "[2/2] claude-code: failed" in lines
+
+
+def test_run_compare_shows_each_harness_output_before_its_status(session, monkeypatch):
+    sess, _ = session
+    service = FakeService(
+        READY,
+        runs={
+            "run-codex": {
+                "harness": "codex",
+                "status": "succeeded",
+                "result": {"final_response": "Totals round early."},
+            },
+            "run-claude-code": {"harness": "claude-code", "status": "failed"},
+        },
+    )
+    service.run_events = {
+        "run-codex": [
+            {
+                "sequence": 1,
+                "type": "command",
+                "data": {
+                    "command": "/bin/zsh -lc 'rg -n sum src'",
+                    "exit_code": 0,
+                    "aggregated_output": "src/totals.py:12: round(sum(x), 2)",
+                },
+            },
+            {
+                "sequence": 2,
+                "type": "message",
+                "data": {"role": "assistant", "text": "Totals round early."},
+            },
+        ],
+        "run-claude-code": [
+            {"sequence": 1, "type": "error", "data": {"error": "login expired"}}
+        ],
+    }
+    sess.agent.meta_harness = service
+    monkeypatch.setattr(harness_session.time, "sleep", lambda s: None)
+    out = []
+    harness_session.run_compare(
+        sess,
+        ["codex", "claude-code"],
+        "where do totals lose precision?",
+        on_progress=out.append,
+        on_output=lambda lines: out.extend(line.plain for line in lines),
+    )
+    codex = [
+        "● Codex",
+        "  Codex · $ rg -n sum src",
+        "  Codex ·   src/totals.py:12: round(sum(x), 2)",
+        "  Codex · Totals round early.",
+        "[1/2] codex: succeeded",
+    ]
+    assert [line for line in out if "odex" in line] == codex
+    assert out.index("  Claude Code · ✗ login expired") < out.index(
+        "[2/2] claude-code: failed"
+    )
+
+
+def test_workflow_follow_prints_harness_output_to_stderr_but_not_with_json(
+    session, monkeypatch, capsys
+):
+    from memorizz.cli import harness_commands
+
+    sess, _ = session
+    monkeypatch.setattr(harness_commands.time, "sleep", lambda s: None)
+    for raw_json in (False, True):
+        service = FakeService(
+            READY, runs={"run-codex": {"harness": "codex", "status": "succeeded"}}
+        )
+        service.start_compare(None, ["codex"])
+        service.run_events = {
+            "run-codex": [
+                {"sequence": 1, "type": "command", "data": {"command": "ls"}},
+            ]
+        }
+        value = harness_commands._follow(service, "wf-1", raw_json)
+        assert value["status"] == "succeeded"
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert ("  Codex · $ ls" in captured.err) is not raw_json
+        assert "[1/1] codex (codex): succeeded" in captured.err
 
 
 def test_run_compare_refuses_a_harness_that_is_not_ready(session):

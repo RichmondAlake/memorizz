@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import typer
 
 from . import config as cli_config
-from .harness_feed import RunFollower
+from .harness_feed import FeedFollower, RunFollower, write_plain
 
 harness_app = typer.Typer(
     help=(
@@ -452,12 +452,23 @@ def run_harness(
             raise typer.Exit(1)
 
 
-def _follow(service: Any, workflow_id: str) -> dict:
+def _follow(service: Any, workflow_id: str, raw_json: bool = False) -> dict:
     """Drive a plan or comparison in this process until it finishes.
 
-    Progress goes to stderr; approve edit stages from another terminal or the
-    UI. Ctrl+C cancels the workflow.
+    Progress and each harness's own output go to stderr (the output not with
+    --json); approve edit stages from another terminal or the UI. Ctrl+C
+    cancels the workflow.
     """
+    follower = (
+        None
+        if raw_json
+        else FeedFollower(
+            service,
+            lambda lines: write_plain(sys.stderr, lines),
+            label_every_line=True,
+            show_answers=True,
+        )
+    )
     seen: dict = {}
     try:
         while True:
@@ -465,6 +476,13 @@ def _follow(service: Any, workflow_id: str) -> dict:
             for index, step in enumerate(value.get("steps") or []):
                 run = service.get_run(step["run_id"]) if step.get("run_id") else None
                 status = (run or {}).get("status")
+                if follower is not None and step.get("run_id"):
+                    follower.follow(
+                        step["run_id"],
+                        (run or {}).get("harness") or step.get("harness"),
+                    )
+                    if status in FINAL_STATES:
+                        follower.done(step["run_id"])
                 if status and seen.get(index) != status:
                     seen[index] = status
                     line = f"[{index + 1}/{len(value['steps'])}] {step.get('name')}"
@@ -487,6 +505,9 @@ def _follow(service: Any, workflow_id: str) -> dict:
         ) not in FINAL_STATES:
             time.sleep(0.2)
         return service.get_orchestration(workflow_id) or {}
+    finally:
+        if follower is not None:
+            follower.close()
 
 
 def _finish_workflow(service: Any, value: dict, raw_json: bool) -> None:
@@ -622,7 +643,7 @@ def plan(
         started = service.start_plan(base, plan_stages(rows, base.task))
         typer.echo(f"Plan {started['orchestration_id']} started.", err=True)
         _finish_workflow(
-            service, _follow(service, started["orchestration_id"]), raw_json
+            service, _follow(service, started["orchestration_id"], raw_json), raw_json
         )
 
 
@@ -708,7 +729,7 @@ def compare(
         started = service.start_compare(base, harnesses, models=models or None)
         typer.echo(f"Comparison {started['orchestration_id']} started.", err=True)
         _finish_workflow(
-            service, _follow(service, started["orchestration_id"]), raw_json
+            service, _follow(service, started["orchestration_id"], raw_json), raw_json
         )
 
 
@@ -780,7 +801,7 @@ def rerun_workflow(
         started = service.rerun_orchestration(workflow_id, agent_id=agent_id)
         typer.echo(f"Workflow {started['orchestration_id']} started.", err=True)
         _finish_workflow(
-            service, _follow(service, started["orchestration_id"]), raw_json
+            service, _follow(service, started["orchestration_id"], raw_json), raw_json
         )
 
 

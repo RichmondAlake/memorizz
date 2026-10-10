@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import queue
 import re
+import threading
 from typing import Any, Dict, List, Optional
 
 from rich.text import Text
@@ -93,11 +94,19 @@ class HarnessFeed:
 
     ``listener`` is handed to ``harness_event_listener`` and may be called
     from any thread; ``drain`` and ``finish`` run on the terminal's thread.
+
+    A comparison or plan wants every line named (``label_every_line``), and
+    prints each harness's answer when its run ends (``show_answers``): no
+    single chat answer follows it there.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, label_every_line: bool = False, show_answers: bool = False
+    ) -> None:
         self._queue: "queue.SimpleQueue" = queue.SimpleQueue()
         self._runs: Dict[str, _Run] = {}
+        self.label_every_line = label_every_line
+        self.show_answers = show_answers
 
     def listener(self, run_id: str, harness: str, event: Dict[str, Any]) -> None:
         self._queue.put((run_id, harness, event))
@@ -136,7 +145,9 @@ class HarnessFeed:
 
     def _line(self, run: _Run, *parts: Any) -> Text:
         prefix = []
-        if len([r for r in self._runs.values() if not r.finished]) > 1:
+        if self.label_every_line or (
+            len([r for r in self._runs.values() if not r.finished]) > 1
+        ):
             prefix = [(f"{self._label(run)} · ", "dim magenta")]
         return Text.assemble("  ", *prefix, *parts)
 
@@ -163,8 +174,9 @@ class HarnessFeed:
         if kind == "run.started":
             return []
         if kind == "run.finished":
+            out = self._flush_held(run) if self.show_answers else []
             run.finished = True
-            return []
+            return out
         if kind == "message":
             if data.get("role") not in (None, "", "assistant"):
                 return []
@@ -284,7 +296,58 @@ class _NoStream:
         pass
 
 
-class RunFollower:
+class FeedFollower:
+    """Print the feed of one or more harness runs while they run.
+
+    For code that waits on runs itself: ``follow`` each run once its id is
+    known (a comparison starts its runs together, a plan one stage at a
+    time), ``done`` when it ends, ``close`` at the end. ``write`` gets each
+    batch of lines from the relay threads, one batch at a time.
+    """
+
+    def __init__(self, service: Any, write: Any, **feed_options: Any) -> None:
+        self.service, self._write = service, write
+        self.feed = HarnessFeed(**feed_options)
+        self._lock = threading.Lock()
+        self._following: Dict[str, Any] = {}
+        self._done: set = set()
+
+    def follow(self, run_id: Any, harness: Any) -> None:
+        from ..streaming import HarnessProgress, harness_event_listener
+
+        if not run_id or run_id in self._following:
+            return
+        token = harness_event_listener.set(self._listen)
+        try:
+            progress = HarnessProgress(_NoStream(), self.service, harness)
+        finally:
+            harness_event_listener.reset(token)
+        self._following[run_id] = progress
+        progress.start(run_id)
+
+    def _emit(self, lines: List[Text]) -> None:
+        if lines:
+            self._write(lines)
+
+    def _listen(self, run_id: str, harness: str, event: Dict[str, Any]) -> None:
+        with self._lock:
+            self.feed.listener(run_id, harness, event)
+            self._emit(self.feed.drain())
+
+    def done(self, run_id: Any) -> None:
+        progress = self._following.get(run_id)
+        if progress is not None and run_id not in self._done:
+            self._done.add(run_id)
+            progress.stop()
+
+    def close(self, answer: str = "") -> None:
+        for run_id in list(self._following):
+            self.done(run_id)
+        with self._lock:
+            self._emit(self.feed.finish(answer))
+
+
+class RunFollower(FeedFollower):
     """Print one harness run's feed to ``stream`` while it runs.
 
     For commands that wait on a run themselves (``memorizz harness run``):
@@ -293,25 +356,11 @@ class RunFollower:
     """
 
     def __init__(self, service: Any, run_id: str, harness: Any, stream: Any) -> None:
-        from ..streaming import HarnessProgress, harness_event_listener
+        super().__init__(service, lambda lines: write_plain(stream, lines))
+        self.stream = stream
+        self.follow(run_id, harness)
 
-        self.feed, self.stream = HarnessFeed(), stream
-        token = harness_event_listener.set(self._listen)
-        try:
-            self._progress = HarnessProgress(_NoStream(), service, harness)
-        finally:
-            harness_event_listener.reset(token)
-        self._progress.start(run_id)
 
-    def _write(self, lines: List[Text]) -> None:
-        if lines:
-            self.stream.write(plain(lines))
-            self.stream.flush()
-
-    def _listen(self, run_id: str, harness: str, event: Dict[str, Any]) -> None:
-        self.feed.listener(run_id, harness, event)
-        self._write(self.feed.drain())
-
-    def close(self, answer: str = "") -> None:
-        self._progress.stop()
-        self._write(self.feed.finish(answer))
+def write_plain(stream: Any, lines: List[Text]) -> None:
+    stream.write(plain(lines))
+    stream.flush()

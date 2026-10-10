@@ -483,6 +483,25 @@ class NativeMemAgentHarness(AgentHarness):
             return AdapterOutcome(
                 error_code="canceled", error="Harness run was canceled"
             )
+        provider = getattr(self.agent, "memory_provider", None)
+        own_id = getattr(self.agent, "agent_id", None)
+        wanted = getattr(task, "agent_id", None)
+        if (
+            wanted
+            and own_id
+            and str(wanted) != str(own_id)
+            and callable(getattr(provider, "retrieve_memagent", None))
+        ):
+            # The task names another saved agent (a chat's /compare memagent
+            # step): run that one, as a standalone run would, not the agent
+            # this harness happens to be attached to.
+            return PersistedMemAgentHarness(provider).run(
+                task,
+                workspace=workspace,
+                context_pack=context_pack,
+                emit=emit,
+                cancel_event=cancel_event,
+            )
         refused = _cost_limit_problem(task, _agent_model(self.agent))
         if refused is not None:
             return refused

@@ -475,6 +475,7 @@ def run_compare(
     *,
     workspace: Optional[str] = None,
     on_progress: Optional[Callable[[str], None]] = None,
+    on_output: Optional[Callable[[List[Any]], None]] = None,
     poll_seconds: float = 1.0,
     memagent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -482,9 +483,12 @@ def run_compare(
 
     The comparison is a durable workflow in the harness ledger (the Agent
     Harnesses page shows it). Ctrl-C cancels it. Returns the workflow with one
-    verdict row per harness.
+    verdict row per harness. ``on_output`` gets each harness's own output
+    (messages, commands, tool calls) as Rich lines while it works, from a
+    relay thread.
     """
     from ..metaharness.requests import harness_task
+    from .harness_feed import FeedFollower
 
     names = [canonical_harness(name) for name in harnesses]
     status = {row["name"]: row for row in list_harness_status(session)}
@@ -519,6 +523,11 @@ def run_compare(
     started = service.start_compare(request, names)
     workflow_id = started["orchestration_id"]
     report(f"Comparison {workflow_id} started.")
+    follower = (
+        FeedFollower(service, on_output, label_every_line=True, show_answers=True)
+        if on_output is not None
+        else None
+    )
     seen: Dict[int, str] = {}
     try:
         while True:
@@ -527,12 +536,14 @@ def run_compare(
             for index, step in enumerate(steps):
                 run = service.get_run(step["run_id"]) if step.get("run_id") else None
                 state = (run or {}).get("status")
+                harness = (run or {}).get("harness") or step.get("harness")
+                if follower is not None and step.get("run_id"):
+                    follower.follow(step["run_id"], harness)
+                    if state in FINAL_STATES:
+                        follower.done(step["run_id"])
                 if state and seen.get(index) != state:
                     seen[index] = state
-                    report(
-                        f"[{index + 1}/{len(steps)}] "
-                        f"{(run or {}).get('harness') or step.get('harness')}: {state}"
-                    )
+                    report(f"[{index + 1}/{len(steps)}] {harness}: {state}")
             if value.get("status") in FINAL_STATES:
                 break
             time.sleep(poll_seconds)
@@ -544,6 +555,9 @@ def run_compare(
         ) not in FINAL_STATES:
             time.sleep(0.2)
         value = service.get_orchestration(workflow_id) or {}
+    finally:
+        if follower is not None:
+            follower.close()
     rows: List[Dict[str, Any]] = []
     for step in value.get("steps") or []:
         run = service.get_run(step["run_id"]) if step.get("run_id") else None

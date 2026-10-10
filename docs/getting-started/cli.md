@@ -458,9 +458,16 @@ memorizz·delegate> review mathlib.py for bugs and summarise README.md
 
 memorizz> /compare codex claude-code where can totals lose precision in billing.py?
 Comparing codex vs claude-code on: where can totals lose precision in billing.py?
+● Codex
 [1/2] codex: running
+● Claude Code
 [2/2] claude-code: running
-...
+  Codex · $ rg -n "round|sum" billing.py
+  Codex ·   12:    return round(sum(items), 2)
+  Claude Code · ⚙ Read  file_path=billing.py
+  ...
+  Codex · Totals round each line before summing (billing.py:12).
+[1/2] codex: succeeded
 ┌ Comparison 3c2e… · succeeded ───────────────────────────────┐
 │ Harness      Status     Verified  Cost     Time   Answer      │
 │ codex        succeeded  -         $0.0000  14.2s  Totals …   │
@@ -475,7 +482,11 @@ the turn, splits the work across its harness delegates (create one with
 --attach`) and can call any harness directly through `run_harness_task`.
 `/compare` takes the leading words that name configured harnesses and treats
 the rest as the task; it is read-only, runs in the current folder, Ctrl-C
-cancels it, and the comparison is kept as a workflow. A compared `memagent`
+cancels it, and the comparison is kept as a workflow. While the harnesses
+work, each one's output prints as it happens, every line naming its harness,
+and each harness's answer prints in full when it finishes (the table clips
+long answers). `memorizz harness compare` and `memorizz harness plan` print
+the same output to stderr (not with `--json`). A compared `memagent`
 runs another saved agent (the chat's own agent cannot hand a task to itself):
 `memagent=<agent-id>` names it, otherwise the agent last used with a harness,
 else the newest, is picked and announced.

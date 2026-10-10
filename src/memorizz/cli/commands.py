@@ -1526,6 +1526,8 @@ def _print_delegate_mode(console, session, result) -> None:
 
 def cmd_compare(session, args: str):
     """Run one read-only task on two or more harnesses side by side."""
+    from rich.text import Text
+
     from . import harness_session, ui
 
     console = _con(session)
@@ -1548,6 +1550,10 @@ def cmd_compare(session, args: str):
                 names,
                 task,
                 on_progress=lambda line: console.print(f"[dim]{line}[/dim]"),
+                # Each harness's own output, every line named, as it works.
+                on_output=lambda lines: console.print(
+                    Text("\n").join(lines), overflow="fold"
+                ),
                 **options,
             )
     except ValueError as exc:
