@@ -4,6 +4,11 @@
 
 ### Added
 
+- Interactive CLI: the input sits between two rules, Claude Code style
+  (green while turns run on a harness), with the status bar right under it
+  instead of pinned to the bottom of the terminal and the completion menu
+  opening inside the frame. Sent lines stay in the scrollback as
+  `memorizz> <line>`; no frame on a dumb terminal.
 - Interactive CLI: a turn on a harness shows the harness's own output as it
   works (its messages, each command with the first lines of its output and a
   failing exit code, tool calls with their arguments, file edits) above a

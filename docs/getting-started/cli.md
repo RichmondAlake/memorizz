@@ -310,8 +310,11 @@ Running `memorizz` with no arguments launches the interactive loop:
   choose, **Esc** to cancel), the same widget as `/conversations`. Add `list`
   (`/agents list`) to print the plain list instead; without a terminal, or
   with `MEMORIZZ_NO_PICKER=1`, the plain list is printed.
-- A **status bar** under the prompt shows the provider and model, the active
-  memory (project ids in full), the active harness and the hotkeys.
+- The input sits between two rules (green while turns run on a harness),
+  with the completion menu opening inside them. A **status bar** under the
+  bottom rule shows the provider and model, the active memory (project ids in
+  full), the active harness and the hotkeys. Once a line is sent, the
+  scrollback keeps only `memorizz> <your line>`.
 - Startup plays a short crest animation on a colour terminal. Set
   `MEMORIZZ_NO_ANIMATION=1` (or `NO_COLOR`) to skip it; it never runs when the
   output is not a terminal.

@@ -282,7 +282,9 @@ def test_repl_shows_notice_while_waiting_for_input(release_api, workers, monkeyp
         return "/exit"
 
     monkeypatch.setattr(
-        repl, "PromptSession", Mock(return_value=SimpleNamespace(prompt=prompt))
+        repl.ui,
+        "FramedPromptSession",
+        Mock(return_value=SimpleNamespace(prompt=prompt)),
     )
     monkeypatch.setattr(repl.commands, "dispatch", Mock(return_value=False))
     session = SimpleNamespace(

@@ -137,3 +137,51 @@ def test_color_depth_follows_colorterm():
     assert ui.color_depth({"COLORTERM": "24bit"}) is ColorDepth.TRUE_COLOR
     assert ui.color_depth({}) is None
     assert ui.color_depth({"COLORTERM": "yes"}) is None
+
+
+def test_the_input_sits_between_two_rules_and_the_prompt_line_is_unchanged(
+    session, monkeypatch
+):
+    sess, _ = session
+    monkeypatch.setenv("TERM", "xterm-256color")
+    message = ui.prompt_message(sess)
+    rule, newline, *prompt = message
+    assert rule == ("class:frame", "─" * 80) and newline == ("", "\n")
+    assert to_plain_text(prompt) == "memorizz> "  # scripts still match it
+    status = to_plain_text(ui.toolbar(sess))
+    assert status.startswith("─" * 80 + "\n") and "harness off" in status
+    sess.harness = "codex"
+    assert ui.prompt_message(sess)[0][0] == "class:frame.harness"
+    assert ui.toolbar(sess)[0][0] == "class:frame.harness"
+
+
+def test_no_frame_on_a_dumb_terminal(session, monkeypatch):
+    sess, _ = session
+    monkeypatch.setenv("TERM", "dumb")
+    assert ui.framed() is False
+    assert to_plain_text(ui.prompt_message(sess)) == "memorizz> "
+    assert not to_plain_text(ui.toolbar(sess)).startswith("─")
+
+
+def test_framed_prompt_keeps_the_input_to_its_own_lines(session):
+    from prompt_toolkit.buffer import CompletionState
+    from prompt_toolkit.document import Document
+
+    sess, _ = session
+    with create_pipe_input() as pipe:
+        ptk = ui.FramedPromptSession(
+            input=pipe, output=DummyOutput(), reserve_space_for_menu=8
+        )
+        window = next(
+            w
+            for w in ptk.layout.find_all_windows()
+            if getattr(w.content, "buffer", None) is ptk.default_buffer
+        )
+        assert window.dont_extend_height() is True
+        # Room for the completion menu only while it is open.
+        assert ptk.reserve_space_for_menu == 0
+        ptk.default_buffer.complete_state = CompletionState(Document("/co"), [])
+        assert ptk.reserve_space_for_menu == ui.MENU_SPACE
+        pipe.send_text("hello\r")
+        ptk.default_buffer.complete_state = None
+        assert ptk.prompt(lambda: ui.prompt_message(sess)) == "hello"

@@ -15,7 +15,6 @@ Design notes:
 
 import logging
 
-from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -246,7 +245,7 @@ def run_repl(session) -> None:
 
     cfg.ensure_home()
     ui.ignore_focus_reports()
-    ptk = PromptSession(
+    ptk = ui.FramedPromptSession(
         history=SafeFileHistory(str(cfg.history_file())),
         completer=SlashCompleter(commands.command_completions()),
         complete_while_typing=True,
@@ -262,7 +261,7 @@ def run_repl(session) -> None:
     with patch_stdout(raw=True), update_notifier(console, session):
         while True:
             try:
-                line = ptk.prompt(ui.prompt_fragments(session))
+                line = ptk.prompt(lambda: ui.prompt_message(session))
             except (KeyboardInterrupt, EOFError):
                 # Ctrl-C or Ctrl-D at the prompt exits; _stream_turn handles
                 # interrupts during a reply without ending the session.

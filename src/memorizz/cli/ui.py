@@ -2,13 +2,14 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-"""Look and feel of the interactive chat: the crest animation, the status bar
-under the prompt, the coloured prompt and the arrow-key actions.
+"""Look and feel of the interactive chat: the crest animation, the frame
+around the input, the status bar under it, the coloured prompt and the
+arrow-key actions.
 
 Everything here degrades to plain text: no animation on a non-terminal, a
-dumb terminal, ``NO_COLOR`` or ``MEMORIZZ_NO_ANIMATION``; the prompt text
-itself never changes (``memorizz> ``), so scripts that drive the chat keep
-matching it.
+dumb terminal, ``NO_COLOR`` or ``MEMORIZZ_NO_ANIMATION``; no frame on a dumb
+terminal. The prompt's own line never changes (``memorizz> ``), so scripts
+that drive the chat keep matching it.
 """
 
 from __future__ import annotations
@@ -19,9 +20,10 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, List, Tuple
 
+from prompt_toolkit import PromptSession
 from prompt_toolkit.application import get_app
-from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.filters import Condition, to_filter
+from prompt_toolkit.formatted_text import HTML, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from rich.console import Console
@@ -64,7 +66,9 @@ STYLE = Style.from_dict(
         "prompt": "bold #7dd3fc",
         "prompt.scope": "bold #fbbf24",
         "prompt.arrow": "#9ca3af",
-        "bottom-toolbar": "noreverse bg:#1f2430 #c8d0e0",
+        "frame": "#4b5563",
+        "frame.harness": "#3f8f63",
+        "bottom-toolbar": "noreverse #c8d0e0",
         "bottom-toolbar.key": "bold #fbbf24",
         "bottom-toolbar.dim": "#8a93a6",
         "bottom-toolbar.model": "#7dd3fc",
@@ -213,6 +217,65 @@ def color_depth(environ: Any = None):
     return None
 
 
+# Lines the completion menu gets under the input while it is open.
+MENU_SPACE = 8
+
+
+class FramedPromptSession(PromptSession):
+    """The chat's prompt: the input sits between two rules.
+
+    prompt_toolkit lets the input grow to push the status bar to the bottom
+    of the terminal, and keeps ``reserve_space_for_menu`` blank lines under
+    it whenever completion is on; either would stretch the frame. The input
+    keeps to its own lines, with room for the menu only while it is open.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        for window in self.layout.find_all_windows():
+            if getattr(window.content, "buffer", None) is self.default_buffer:
+                window.dont_extend_height = to_filter(True)
+
+    @property
+    def reserve_space_for_menu(self) -> int:
+        buffer = getattr(self, "default_buffer", None)
+        return MENU_SPACE if buffer is not None and buffer.complete_state else 0
+
+    @reserve_space_for_menu.setter
+    def reserve_space_for_menu(self, value: int) -> None:
+        pass  # decided per render above
+
+
+def framed(environ: Any = None) -> bool:
+    """Draw the frame anywhere but a dumb terminal, which shows no status bar
+    either and would print the rule as text before every prompt."""
+    env = os.environ if environ is None else environ
+    return str(env.get("TERM", "")).lower() != "dumb"
+
+
+def frame_rule(session: Any) -> Tuple[str, str]:
+    """One rule across the terminal, green while turns run on a harness."""
+    try:
+        width = get_app().output.get_size().columns
+    except Exception:
+        width = 80
+    harness = harness_session.active_harness(session)
+    style = "class:frame.harness" if harness else "class:frame"
+    return (style, "─" * max(1, width))
+
+
+def prompt_message(session: Any) -> List[Tuple[str, str]]:
+    """The prompt with the frame's top rule above it while typing.
+
+    Once the line is submitted only the prompt stays, so the scrollback
+    reads ``memorizz> question``.
+    """
+    fragments = prompt_fragments(session)
+    if not framed() or get_app().is_done:
+        return fragments
+    return [frame_rule(session), ("", "\n"), *fragments]
+
+
 def memory_label(session: Any) -> str:
     """How the status bar names the active memory: a project id in full,
     otherwise the first eight characters, or 'new' before the first turn."""
@@ -224,8 +287,9 @@ def memory_label(session: Any) -> str:
     return memory_id[:8]
 
 
-def toolbar(session: Any) -> HTML:
-    """The status line under the prompt: model, memory, harness and the hotkeys."""
+def toolbar(session: Any) -> List[Tuple[str, str]]:
+    """Under the prompt: the frame's bottom rule, then the status line
+    (model, memory, harness and the hotkeys)."""
     harness = harness_session.active_harness(session) or "off"
     harness_model = harness_session.harness_model_label(session)
     if harness_model and harness not in {"off", harness_session.DELEGATE}:
@@ -238,7 +302,7 @@ def toolbar(session: Any) -> HTML:
         f"<bottom-toolbar.key>{key}</bottom-toolbar.key> {command.lstrip('/')}"
         for key, command, _ in HOTKEYS
     )
-    return HTML(
+    status = HTML(
         f" <b>memorizz</b> <bottom-toolbar.dim>·</bottom-toolbar.dim> "
         f"<bottom-toolbar.model>{_escape(model)}</bottom-toolbar.model> "
         f"<bottom-toolbar.dim>· memory</bottom-toolbar.dim> {_escape(memory_label(session))} "
@@ -248,6 +312,8 @@ def toolbar(session: Any) -> HTML:
         f"<bottom-toolbar.key>Tab</bottom-toolbar.key> commands"
         + update_fragment(session)
     )
+    rule = [frame_rule(session), ("", "\n")] if framed() else []
+    return rule + to_formatted_text(status)
 
 
 def update_fragment(session: Any) -> str:
@@ -324,15 +390,19 @@ def _escape(value: str) -> str:
 
 __all__ = [
     "CREST_ROWS",
+    "FramedPromptSession",
     "HOTKEYS",
     "STYLE",
     "animate_crest",
+    "framed",
+    "frame_rule",
     "ignore_focus_reports",
     "color_depth",
     "crest_text",
     "key_bindings",
     "memory_label",
     "prompt_fragments",
+    "prompt_message",
     "should_animate",
     "toolbar",
     "update_fragment",
