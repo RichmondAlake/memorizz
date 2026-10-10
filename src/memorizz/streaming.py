@@ -22,6 +22,14 @@ EVENT_VERSION = 1
 MAX_EVENT_BYTES = 65536
 current_cancellation = ContextVar("memorizz_stream_cancellation", default=None)
 current_stream = ContextVar("memorizz_ordered_stream", default=None)
+# The reply stream a delegate's worker may report progress to (status events
+# only). Workers clear current_stream so their text never joins the reply;
+# this keeps the user able to see that work happening.
+progress_stream = ContextVar("memorizz_progress_stream", default=None)
+# An in-process consumer (the terminal chat) that wants a harness run's full
+# ledger events, not just the content-free progress the stream carries.
+# Called as listener(run_id, harness, event) from the relay thread.
+harness_event_listener = ContextVar("memorizz_harness_event_listener", default=None)
 _workers = set()
 _workers_lock = threading.Lock()
 _worker_slots = threading.BoundedSemaphore(32)
@@ -408,75 +416,114 @@ def _harness_activity(event):
 
 
 class HarnessProgress:
-    """Relay a runtime harness run's progress into the open stream.
+    """Relay a harness run's progress into the open stream.
 
-    A turn on a harness is one opaque subprocess call, so without this the
-    stream says nothing between "agent ready" and the answer, however long
-    the harness takes. ``start`` is the run's ``on_start`` callback; it
-    follows the run's ledger on a daemon thread until ``stop``.
+    A harness run is one opaque subprocess call, so without this the stream
+    says nothing until it returns, however long the harness takes. ``start``
+    is the run's ``on_start`` callback; it follows the run's ledger on a
+    daemon thread until ``stop``, which relays whatever arrived last. A
+    ``harness_event_listener`` set by the caller also receives every ledger
+    event in full; the stream itself only carries the kind of work.
     """
 
     def __init__(self, session, service, harness, *, poll_seconds=0.25):
-        from .metaharness.catalog import HARNESS_LABELS
-
         self.session, self.service = session, service
-        self.harness = str(harness or "harness")
-        self.label = HARNESS_LABELS.get(self.harness, self.harness)
+        self.harness = str(harness or "")
         self.poll_seconds = poll_seconds
+        self.listener = harness_event_listener.get()
+        self.run_id = None
+        self._cursor, self._last, self._lock = 0, None, threading.Lock()
         self._stop = threading.Event()
         self._thread = None
+
+    @property
+    def label(self):
+        from .metaharness.catalog import HARNESS_LABELS
+
+        return HARNESS_LABELS.get(self.harness, self.harness or "The harness")
 
     def _emit(self, stage, message, **fields):
         try:
             self.session.emit(
-                "status", stage=stage, harness=self.harness, message=message, **fields
+                "status",
+                stage=stage,
+                harness=self.harness or None,
+                harness_run_id=self.run_id,
+                message=message,
+                **fields,
             )
         except Exception:
             self._stop.set()
 
+    def _notify(self, event):
+        if self.listener is None:
+            return
+        try:
+            self.listener(self.run_id, self.harness, event)
+        except Exception:
+            self.listener = None
+
     def start(self, run_id):
-        self._emit("harness_running", f"{self.label} is working", harness_run_id=run_id)
+        self.run_id = run_id
+        if self.harness in {"", "auto"}:
+            self._resolve_harness()
+        self._emit("harness_running", f"{self.label} is working")
+        self._notify({"type": "run.started"})
         self._thread = threading.Thread(
-            target=self._follow,
-            args=(run_id,),
-            name="memorizz-harness-progress",
-            daemon=True,
+            target=self._follow, name="memorizz-harness-progress", daemon=True
         )
         self._thread.start()
 
-    def _follow(self, run_id):
-        cursor, last = 0, None
+    def _resolve_harness(self):
+        """The router's pick for an "auto" run, once the ledger has it."""
+        try:
+            run = self.service.get_run(self.run_id) or {}
+        except Exception:
+            return
+        if run.get("harness"):
+            self.harness = str(run["harness"])
+
+    def _follow(self):
         while not self._stop.wait(self.poll_seconds):
-            try:
-                events = self.service.events(run_id, after=cursor, limit=200)
-            except Exception:
+            if not self._drain():
                 return
+
+    def _drain(self):
+        with self._lock:
+            try:
+                events = self.service.events(self.run_id, after=self._cursor, limit=200)
+            except Exception:
+                return False
+            if events and self.harness in {"", "auto"}:
+                self._resolve_harness()
             for event in events:
-                cursor = max(cursor, int(event.get("sequence") or 0))
+                self._cursor = max(self._cursor, int(event.get("sequence") or 0))
+                self._notify(event)
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}
                 if event.get("type") == "status" and data.get("model"):
                     model = str(data["model"])[:80]
                     self._emit(
                         "harness_running",
                         f"{self.label} is working ({model})",
-                        harness_run_id=run_id,
                         model=model,
                     )
                     continue
                 activity = _harness_activity(event)
-                if activity and activity != last:
-                    last = activity
+                if activity and activity != self._last:
+                    self._last = activity
                     self._emit(
                         "harness_activity",
                         f"{self.label}: {activity['activity']}",
-                        harness_run_id=run_id,
                         **activity,
                     )
+            return True
 
     def stop(self):
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2)
+            self._drain()
+            self._notify({"type": "run.finished"})
 
 
 def agent_event_stream(

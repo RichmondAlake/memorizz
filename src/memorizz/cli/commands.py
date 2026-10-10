@@ -560,11 +560,36 @@ def cmd_conversations(session, args: str):
         console.print("[dim]No saved conversations yet.[/dim]")
         return
 
+    from . import picker
+
+    query = args.strip()
+    if query == "list" or not picker.picker_available(console):
+        # Like /agents list and /sessions list: a plain list, no picker.
+        shown = conversations.filter_conversations(
+            available, "" if query == "list" else query
+        )
+        console.print(f"[bold]Conversations[/bold] ({len(shown)} of {len(available)})")
+        for item in shown[:30]:
+            current = (item.memory_id, item.thread_id) == (
+                session.memory_id,
+                session.thread_id,
+            )
+            when = item.updated_at.strftime("%Y-%m-%d %H:%M") if item.updated_at else ""
+            console.print(
+                f"{'▶ ' if current else '  '}[cyan]{escape(item.title[:60])}[/cyan]  "
+                f"[dim]{item.message_count} messages · {when} · "
+                f"thread {escape(item.thread_id[:8])}[/dim]"
+            )
+        console.print(
+            "[dim]Resume one with /conversations <search> in a terminal.[/dim]"
+        )
+        return
+
     selected = conversations.pick_conversation(
         available,
         current_memory_id=session.memory_id,
         current_thread_id=session.thread_id,
-        initial_query=args.strip(),
+        initial_query=query,
     )
     if selected is None:
         console.print("[dim]Conversation selection cancelled.[/dim]")
@@ -1234,7 +1259,7 @@ def cmd_harnesses(session, args: str):
 
     console = _con(session)
     try:
-        with ui.quiet_keys():
+        with ui.busy(console, "Checking which harnesses are ready…"):
             rows = harness_session.list_harness_status(session)
             defaults = _harness_defaults(session, rows)
     except Exception as exc:
@@ -1362,7 +1387,7 @@ def cmd_harness(session, args: str):
         )
         return
     try:
-        with ui.quiet_keys():
+        with ui.busy(console, f"Starting {name}…"):
             result = harness_session.apply_harness(session, name, model=model)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -1405,7 +1430,7 @@ def _harness_model_line(session) -> str:
 
 def _harness_model(session, console, name) -> None:
     """``/harness model [name]``: show, pick or set the active harness's model."""
-    from . import harness_session, picker
+    from . import harness_session, picker, ui
 
     active = harness_session.active_harness(session)
     if not active or active in {harness_session.DELEGATE, "auto"}:
@@ -1424,7 +1449,8 @@ def _harness_model(session, console, name) -> None:
         )
         return
     try:
-        choices = harness_session.harness_model_choices(session, active)
+        with ui.busy(console, f"Reading {active}'s models…"):
+            choices = harness_session.harness_model_choices(session, active)
     except Exception as exc:
         console.print(f"[red]Could not read {active}'s models:[/red] {exc}")
         return

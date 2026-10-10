@@ -139,6 +139,8 @@ def _stream_turn(session, query: str) -> None:
     import time
 
     from ..llms.streaming import provider_error_message
+    from ..streaming import harness_event_listener
+    from .harness_feed import HarnessFeed
     from .streaming import consume_stream, save_stream_session
 
     console = session.console or Console()
@@ -152,9 +154,17 @@ def _stream_turn(session, query: str) -> None:
     stream = None
     last_refresh = 0.0
     started, finished = time.monotonic(), False
+    # A harness's own output (messages, commands, tool calls) prints above
+    # the live status as it happens.
+    feed = HarnessFeed()
+    listening = harness_event_listener.set(feed.listener)
     with ui.quiet_keys(), Live(
         console=console, refresh_per_second=12, auto_refresh=False
     ) as live:
+
+        def show_feed(lines):
+            for line in lines:
+                live.console.print(line, overflow="fold")
 
         def refresh(force=False):
             nonlocal last_refresh
@@ -186,6 +196,7 @@ def _stream_turn(session, query: str) -> None:
                     event = stream.poll(timeout=1 / 12)
                 except StopIteration:
                     break
+                show_feed(feed.drain())
                 if event is None:
                     refresh()
                     continue
@@ -199,18 +210,16 @@ def _stream_turn(session, query: str) -> None:
                     status = event.get("message") or event.get(
                         "stage", "working"
                     ).replace("_", " ")
-                    if event.get("stage") == "harness_activity" and event.get(
-                        "tool_name"
-                    ):
-                        tools.append(event["tool_name"])
                 elif kind == "tool.started":
                     tools.append(event.get("tool_name", "tool"))
                 elif kind == "approval.required":
                     status = "paused for approval"
                 elif kind == "answer.done":
                     status, finished = "answer complete; saving", True
+                    show_feed(feed.finish(answer))
                 elif kind == "run.done":
                     finished = True
+                    show_feed(feed.finish(answer))
                     status = (
                         provider_error_message(event.get("error_code"))
                         or event["status"]
@@ -223,6 +232,7 @@ def _stream_turn(session, query: str) -> None:
         finally:
             if stream is not None:
                 stream.close()
+            harness_event_listener.reset(listening)
             refresh(force=True)
     if save_stream_session(session) == "failed":
         session.console.print("[yellow]Session state could not be saved.[/yellow]")

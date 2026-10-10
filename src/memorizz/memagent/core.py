@@ -73,6 +73,8 @@ from ..streaming import (
     StreamCancelled,
     check_cancelled,
     current_cancellation,
+    current_stream,
+    progress_stream,
     session_for,
 )
 from ..task_decomposition import normalize_delegation_config
@@ -3965,14 +3967,26 @@ class MemAgent:
             context=dict(context or {}),
             metadata=metadata,
         )
-        if on_start is not None:
+        meta_harness = self.meta_harness
+        # The run is one opaque call; when it belongs to a streamed reply (a
+        # harness turn, a delegate's share, or the run_harness_task tool),
+        # relay its progress so the stream says more than "working" until it
+        # returns.
+        stream_session = current_stream.get() or progress_stream.get()
+        progress = (
+            HarnessProgress(stream_session, meta_harness, task.harness)
+            if stream_session is not None
+            else None
+        )
+        for callback in (on_start, progress.start if progress else None):
+            if callback is None:
+                continue
             try:
-                on_start(task.run_id)
+                callback(task.run_id)
             except Exception:
                 logger.debug("Harness run start callback failed", exc_info=True)
         check_cancelled()
         token = current_cancellation.get()
-        meta_harness = self.meta_harness
 
         def stop_run() -> None:
             try:
@@ -3988,6 +4002,8 @@ class MemAgent:
         finally:
             if unregister is not None:
                 unregister()
+            if progress is not None:
+                progress.stop()
         if result.status.value == "succeeded" and result.final_response:
             self._record_interaction(
                 query,
@@ -5965,36 +5981,21 @@ class MemAgent:
             and self.meta_harness_mode == "runtime"
             and not (tool_context or {}).get("_memorizz_harness_native")
         ):
-            session = session_for(self)
-            # The harness answers in one opaque call; relay its progress so a
-            # streaming caller sees more than "agent ready" until it finishes.
-            progress = (
-                HarnessProgress(session, self.meta_harness, self.default_harness)
-                if session is not None
-                else None
+            result = self.run_on_harness(
+                query,
+                workspace=(tool_context or {}).get("workspace")
+                or (context or {}).get("workspace"),
+                memory_id=memory_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                context=context,
+                write=(tool_context or {}).get("harness_write"),
+                verification_command=(tool_context or {}).get(
+                    "harness_verification_command"
+                ),
+                execution_backend=(tool_context or {}).get("harness_execution_backend"),
             )
-            try:
-                result = self.run_on_harness(
-                    query,
-                    workspace=(tool_context or {}).get("workspace")
-                    or (context or {}).get("workspace"),
-                    memory_id=memory_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    context=context,
-                    write=(tool_context or {}).get("harness_write"),
-                    verification_command=(tool_context or {}).get(
-                        "harness_verification_command"
-                    ),
-                    execution_backend=(tool_context or {}).get(
-                        "harness_execution_backend"
-                    ),
-                    on_start=progress.start if progress is not None else None,
-                )
-            finally:
-                if progress is not None:
-                    progress.stop()
-            if session is not None and result.status.value != "succeeded":
+            if session_for(self) is not None and result.status.value != "succeeded":
                 raise ProviderStreamError("harness_" + str(result.status.value))
             return (
                 result.final_response

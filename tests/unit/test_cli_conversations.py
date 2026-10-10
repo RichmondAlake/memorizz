@@ -218,6 +218,9 @@ def test_cmd_conversations_resumes_and_persists_selected_pair(monkeypatch):
         commands.conversations, "pick_conversation", lambda *a, **k: selected
     )
     monkeypatch.setattr(commands.cfg, "save_state", lambda state: saved.append(state))
+    from memorizz.cli import picker
+
+    monkeypatch.setattr(picker, "picker_available", lambda console: True)
 
     commands.cmd_conversations(session, "")
 
@@ -226,6 +229,56 @@ def test_cmd_conversations_resumes_and_persists_selected_pair(monkeypatch):
     assert session.thread_id == "thread-2"
     assert saved == [{"memory_id": "memory-2", "thread_id": "thread-2"}]
     assert "Resumed conversation Resume [this] conversation" in output.getvalue()
+
+
+@pytest.mark.unit
+def test_cmd_conversations_list_prints_without_opening_the_picker(monkeypatch):
+    from datetime import datetime
+
+    from memorizz.cli import picker
+
+    rows = [
+        ConversationSummary(
+            memory_id="memory-1",
+            thread_id=f"thread-{n}",
+            title=title,
+            preview="",
+            created_at=None,
+            updated_at=datetime(2026, 10, 9, 12, n),
+            message_count=n * 2,
+        )
+        for n, title in [(1, "Release notes"), (2, "Harness progress")]
+    ]
+    output = StringIO()
+    session = SimpleNamespace(
+        agent=SimpleNamespace(agent_id="a", memory_ids=["memory-1"]),
+        provider=object(),
+        memory_id="memory-1",
+        thread_id="thread-2",
+        user_id=None,
+        console=Console(file=output, color_system=None, width=120),
+    )
+    monkeypatch.setattr(
+        commands.conversations, "discover_conversations", lambda *a, **k: rows
+    )
+
+    def no_picker(*args, **kwargs):
+        raise AssertionError("the picker must not open")
+
+    monkeypatch.setattr(commands.conversations, "pick_conversation", no_picker)
+    monkeypatch.setattr(picker, "picker_available", lambda console: True)
+    commands.cmd_conversations(session, "list")
+    text = output.getvalue()
+    assert "Conversations (2 of 2)" in text
+    assert "▶ Harness progress" in text and "4 messages" in text
+    assert "  Release notes" in text
+
+    # Without a terminal a search prints the matches instead of a picker.
+    output.truncate(0)
+    output.seek(0)
+    monkeypatch.setattr(picker, "picker_available", lambda console: False)
+    commands.cmd_conversations(session, "release")
+    assert "Conversations (1 of 2)" in output.getvalue()
 
 
 @pytest.mark.unit

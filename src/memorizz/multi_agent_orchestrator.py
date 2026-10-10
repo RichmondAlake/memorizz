@@ -26,6 +26,7 @@ from .streaming import (
     StreamCancelled,
     current_cancellation,
     current_stream,
+    progress_stream,
 )
 from .task_decomposition import SubTask, TaskDecomposer, _count_call
 from .tool_context import reset_tool_context, set_tool_context
@@ -647,6 +648,9 @@ class MultiAgentOrchestrator:
     def _run_task(self, task, agent, memory_id, thread_id, dependency_results):
         """Worker boundary: propagate cancellation, but isolate answer streaming."""
         strict_token = delegated_execution.set(True)
+        progress_token = progress_stream.set(
+            current_stream.get() or progress_stream.get()
+        )
         stream_token = current_stream.set(None)
         cancel_token = current_cancellation.set(self.cancellation)
         warning_token = recording_warning.set(
@@ -756,6 +760,7 @@ class MultiAgentOrchestrator:
             )
             current_cancellation.reset(cancel_token)
             current_stream.reset(stream_token)
+            progress_stream.reset(progress_token)
             delegated_execution.reset(strict_token)
             recording_warning.reset(warning_token)
             if tool_token is not None:

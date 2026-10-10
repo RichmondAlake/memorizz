@@ -22,17 +22,39 @@ def save_stream_session(session):
 def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
     if output not in {"text", "jsonl"}:
         raise ValueError("output must be text or jsonl")
+    from ..streaming import harness_event_listener
+    from .harness_feed import HarnessFeed, plain
+
     stdout, stderr = stdout or sys.stdout, stderr or sys.stderr
-    stream = session.agent.run_stream_events(
-        prompt,
-        memory_id=session.memory_id,
-        thread_id=session.thread_id,
-        user_id=session.user_id,
-    )
+    # In text mode a harness's own output goes to stderr as it happens.
+    feed = HarnessFeed() if output == "text" else None
+    listening = harness_event_listener.set(feed.listener if feed else None)
+    try:
+        stream = session.agent.run_stream_events(
+            prompt,
+            memory_id=session.memory_id,
+            thread_id=session.thread_id,
+            user_id=session.user_id,
+        )
+    except BaseException:
+        harness_event_listener.reset(listening)
+        raise
     status, state_saved, failure_message = "error", "unknown", None
+    answer = ""
     try:
         for event in stream:
             kind = event["type"]
+            if feed is not None:
+                if kind == "answer.delta":
+                    answer += event["delta"]
+                lines = (
+                    feed.finish(answer)
+                    if kind in {"answer.done", "run.done"}
+                    else feed.drain()
+                )
+                if lines:
+                    stderr.write(plain(lines))
+                    stderr.flush()
             if kind in {"run.started", "run.done"}:
                 session.memory_id = event.get("memory_id") or session.memory_id
                 session.thread_id = event.get("thread_id") or session.thread_id
@@ -93,3 +115,4 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
         return 141
     finally:
         stream.close()
+        harness_event_listener.reset(listening)

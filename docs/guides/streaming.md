@@ -50,7 +50,12 @@ reports it, `model`) and `harness_activity` (with `activity`, such as
 `running a command`, `calling <tool>`, `editing files`, `thinking` or
 `writing`, plus `tool_name` for tool calls). They name the kind of work only,
 never command text, tool input or reasoning, and all arrive before the
-buffered answer.
+buffered answer. This covers every harness run inside a streamed reply: a
+runtime turn, a delegate's share and the `run_harness_task` tool. An
+in-process consumer that wants the run's full (redacted) ledger events, as the
+terminal chat does, sets `memorizz.streaming.harness_event_listener` to a
+`listener(run_id, harness, event)` callable before starting the stream; those
+events never enter the stream.
 
 `capability.requested` (with `capability`, `title`, `status` and `reason`)
 means the model called `request_capability` because the request needs

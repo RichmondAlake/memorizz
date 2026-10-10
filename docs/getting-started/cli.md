@@ -421,11 +421,26 @@ agent: `/harness off` restores exactly what the agent had. Launch straight
 into a harness with `memorizz chat --harness codex`, or run one turn with
 `memorizz run "..." --harness codex`.
 
-While a harness works, the status line follows it with a running clock:
-`Codex is working (gpt-6.1-sol) · 4s`, then `Codex: running a command`,
-`Codex: calling memorizz_search_memories`, `Codex: writing`. It names the kind
-of work, never the command text or the model's reasoning. Most of a long wait
-with no activity is the harness's own model call. **Ctrl-C** stops the run.
+While a harness works, the chat shows what it does as it happens: its
+messages, each command with the first lines of its output (and the exit code
+when one fails), tool calls with their arguments, and file edits. The status
+line below keeps a running clock (`Codex is working (gpt-6.1-sol) · 4s`):
+
+```text
+memorizz·codex> Count the lines in README.md
+● Codex
+  I'll count the lines with `wc`.
+  $ wc -l README.md
+    3 README.md
+Codex: writing · 5s
+```
+
+The harness's last message is its answer, which prints in full below. When
+several harnesses work at once (delegates), each line names its harness. The
+same feed goes to stderr for `memorizz run --harness ...` and
+`memorizz harness run` (not with `--json`), and the whole run stays in
+`memorizz harness show <run>`. A long wait with nothing printed is the
+harness's own model call. **Ctrl-C** stops the run.
 Inside MemoRizz a harness has no web search or network unless its
 permissions grant Network Full (`memorizz harness run --network full`);
 the chat's own internet tools are under [Internet access](#internet-access).

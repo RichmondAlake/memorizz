@@ -123,6 +123,18 @@ def quiet_keys(stream: Any = None):
                 pass
 
 
+@contextmanager
+def busy(console: Console, message: str):
+    """A spinner for work that takes a moment before anything prints, with
+    keys kept from echoing over it. Plain (no spinner) off a terminal."""
+    with quiet_keys():
+        if console.is_terminal and not console.is_dumb_terminal:
+            with console.status(f"[dim]{message}[/dim]", spinner="dots"):
+                yield
+        else:
+            yield
+
+
 def elapsed_suffix(seconds: float) -> str:
     """ " · 12s" for a turn still working, with the way out once it runs long."""
     whole = int(seconds)

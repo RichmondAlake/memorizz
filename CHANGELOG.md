@@ -4,18 +4,35 @@
 
 ### Added
 
-- Interactive CLI: a turn on a harness shows what the harness is doing while
-  it works, with a running clock (`Codex is working (gpt-6.1-sol) · 4s`,
-  `Codex: running a command`, `Codex: calling <tool>`, `Codex: writing`)
-  instead of "preparing" until the answer arrives. Streams from a runtime
-  harness carry the same progress as `harness_running` and `harness_activity`
-  status events (kind of work only, no command text or reasoning).
+- Interactive CLI: a turn on a harness shows the harness's own output as it
+  works (its messages, each command with the first lines of its output and a
+  failing exit code, tool calls with their arguments, file edits) above a
+  status line with a running clock (`Codex is working (gpt-6.1-sol) · 4s`),
+  instead of "preparing" until the answer arrives. Delegates' harness runs
+  and the `run_harness_task` tool show it too, each line naming its harness.
+  `memorizz run --harness ...` and `memorizz harness run` print the same feed
+  to stderr (not with `--json`).
+- Streams: every harness run inside a streamed reply reports its progress as
+  `harness_running` and `harness_activity` status events (kind of work only,
+  no command text or reasoning). In-process consumers can receive the run's
+  full redacted ledger events through `harness_event_listener`.
 
 ### Fixed
 
 - Interactive CLI: keys pressed while a turn streams or a command loads (an
   arrow while `/harnesses` checks the harnesses, say) no longer echo as
   `^[[B` over the output; they wait for the next prompt or picker.
+- Interactive CLI: `/harnesses`, `/harness <name>` and `/harness model` show a
+  spinner while they check the harness CLIs (2–3 s) instead of a silent
+  pause.
+- Interactive CLI: `/conversations list` printed nothing useful: it opened
+  the picker searching for the word "list". It now prints the list, like
+  `/agents list` and `/sessions list`, as does `/conversations` without a
+  terminal or with `MEMORIZZ_NO_PICKER=1`.
+- Delegation: a harness-backed delegate's run reported nothing to the reply
+  stream while it worked (its worker hides the stream so its text cannot
+  leak into the answer). Its progress now reaches the user through a
+  status-only `progress_stream`.
 
 ## 0.16.3 — 2026-10-09
 

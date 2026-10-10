@@ -4,6 +4,7 @@ approvals, deletion, model choices and harness delegates."""
 from __future__ import annotations
 
 import json
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import typer
 
 from . import config as cli_config
+from .harness_feed import RunFollower
 
 harness_app = typer.Typer(
     help=(
@@ -403,36 +405,46 @@ def run_harness(
     approved for.
     """
     with _session() as (service, warnings):
-        result = service.run(
-            _task_options(
-                task,
-                workspace,
-                scratch,
-                service,
-                harness=harness,
-                model=model,
-                agent_id=_saved_agent(service, agent_id, [harness]),
-                memory_id=memory_id,
-                user_id=user_id,
-                thread_id=thread_id,
-                write=write,
-                allow_dirty_workspace=allow_dirty,
-                network=network,
-                mcp_access=mcp_access,
-                allowed_env=allowed_env,
-                allowed_tools=allowed_tools,
-                denied_tools=denied_tools,
-                allow_subagents=allow_subagents,
-                timeout_seconds=timeout,
-                max_steps=max_steps,
-                max_cost_usd=max_cost_usd,
-                max_input_tokens=max_input_tokens,
-                max_output_tokens=max_output_tokens,
-                verification_command=verify,
-                output_schema_path=output_schema,
-                execution_backend=execution_backend,
-            )
+        request = _task_options(
+            task,
+            workspace,
+            scratch,
+            service,
+            harness=harness,
+            model=model,
+            agent_id=_saved_agent(service, agent_id, [harness]),
+            memory_id=memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            write=write,
+            allow_dirty_workspace=allow_dirty,
+            network=network,
+            mcp_access=mcp_access,
+            allowed_env=allowed_env,
+            allowed_tools=allowed_tools,
+            denied_tools=denied_tools,
+            allow_subagents=allow_subagents,
+            timeout_seconds=timeout,
+            max_steps=max_steps,
+            max_cost_usd=max_cost_usd,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
+            verification_command=verify,
+            output_schema_path=output_schema,
+            execution_backend=execution_backend,
         )
+        # Show what the harness does while it works (stderr; --json stays clean).
+        follower = (
+            None
+            if raw_json
+            else RunFollower(service, request.run_id, request.harness, sys.stderr)
+        )
+        result = None
+        try:
+            result = service.run(request)
+        finally:
+            if follower is not None:
+                follower.close(getattr(result, "final_response", None) or "")
         payload = result.to_dict()
         payload["warnings"] = warnings
         _print(payload, raw_json)
