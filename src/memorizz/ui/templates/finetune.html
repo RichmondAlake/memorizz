@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% from '_ui.html' import page_header %}
+{% block title %}Fine-tuning - MemoRizz{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/pages/finetune.css?v=3">
+<script src="/static/js/finetune.js?v=2" defer></script>
+{% endblock %}
+{% block content %}
+{{ page_header('Fine-tuning', 'Train decision models, embedding models and rerankers on your memory. Generate or mark data, check it, see it in each model\'s input format, then train and compare against the base model.', 'Continual learning') }}
+<div id="ft-app" data-dataset="{{ dataset_id }}" data-read-only="{{ 'true' if read_only else 'false' }}">
+    <div class="ft-env" id="ft-env" role="status">Checking what this machine can train with…</div>
+    <div class="ft-layout">
+        <aside class="ft-side" aria-label="Datasets">
+            <section class="ft-panel">
+                <div class="ft-panel-head"><h2>Datasets</h2><span class="ft-muted">in the {{ provider_type or 'connected' }} memory provider</span></div>
+                <div id="ft-datasets" class="ft-dataset-list"><p class="ft-muted">Loading…</p></div>
+            </section>
+            <section class="ft-panel">
+                <h2>New dataset</h2>
+                <form id="ft-new">
+                    <label class="form-group">Model type
+                        <select name="kind">
+                            <option value="decision">Decision model (System One)</option>
+                            <option value="embedding">Embedding model</option>
+                            <option value="reranker">Reranker</option>
+                        </select>
+                    </label>
+                    <label class="form-group">Task<select name="task"></select></label>
+                    <p class="form-note" id="ft-task-note"></p>
+                    <label class="form-group">Name<input name="name" placeholder="Memory routing" maxlength="120"></label>
+                    <button class="btn btn-primary" type="submit" {% if read_only %}disabled{% endif %}>Create dataset</button>
+                </form>
+            </section>
+            <section class="ft-panel">
+                <h2>Active models</h2>
+                <div id="ft-active" class="ft-active"><p class="ft-muted">None yet.</p></div>
+            </section>
+        </aside>
+        <div class="ft-main" id="ft-main">
+            <div class="empty-state"><strong>Choose or create a dataset</strong><p>A dataset holds the examples for one task: memory routing, relevance, retrieval or reranking.</p></div>
+        </div>
+    </div>
+</div>
+<details class="ft-help">
+    <summary>How fine-tuning works in MemoRizz</summary>
+    <p><strong>Decision models</strong> follow the System One contract (Jev, Clef, pplx-decider): a state plus a question with named options, answered with a calibrated probability per option. MemoRizz trains them on an embedding model (JevEmbed style: the state as a query, each option as a document) or a small LM that reads lettered options. Memory routing asks which memory store a piece of state belongs in; relevance decides whether a candidate memory helps answer a query.</p>
+    <p><strong>Embedding models</strong> learn to put each query near the memory that answers it; <strong>rerankers</strong> score (query, memory) pairs so the best evidence ranks first.</p>
+    <p>Synthetic examples are written by a teacher LLM and kept only when a blind second check (the teacher again, another LLM, or Jev) agrees. Training runs on this machine (Apple GPU, CUDA or CPU) with LoRA, or with Unsloth on an NVIDIA GPU; every run is scored on held-out examples before and after.</p>
+    <p>SDK: <code>FineTuning(provider)</code> · CLI: <code>memorizz finetune</code> · MCP: <code>memorizz_*_finetune_*</code></p>
+</details>
+{% endblock %}

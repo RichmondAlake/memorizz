@@ -47,6 +47,7 @@ PAGES = [
     "/vercel-skills",
     "/evalground",
     "/learning-control-plane",
+    "/fine-tuning",
     "/harnesses",
     "/api/status",
     "/api/personas",

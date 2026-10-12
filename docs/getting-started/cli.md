@@ -777,6 +777,10 @@ memorizz learning compile --agent-id AGENT --memory-id ID --user-id USER
 memorizz learning forget-plan --agent-id AGENT --memory-id ID --user-id USER
 memorizz learning forget-apply PLAN_ID --agent-id AGENT --approved-by OPERATOR
 memorizz capabilities [--json]
+memorizz finetune doctor|tasks|datasets|create|show|generate|import-memories|import
+memorizz finetune examples|review|add|preview|export [--unsloth-bundle DIR]
+memorizz finetune train [--from-run RUN] [--replay DATASET:SHARE]|runs|status [--follow]|cancel
+memorizz finetune evaluate|history|decide|rank|activate|route|delete
 memorizz config path|keys|set|get
 memorizz memory configure
 memorizz notion connect|init|status|sync|repair

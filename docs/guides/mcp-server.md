@@ -187,6 +187,14 @@ external origin, not the internal bind address.
 | Save one turn of a session (secrets removed) | `memorizz_record_turn` | `memorizz:write` |
 | Summarize a session's turns with the server's model | `memorizz_summarize_session` | `memorizz:write` |
 | List/read conversations | `memorizz_list_conversations`, `memorizz_get_conversation` | `memorizz:read` |
+| List fine-tuning datasets, tasks, base models and active trained models | `memorizz_list_finetune_datasets` | `memorizz:read`; over HTTP only the caller's own datasets |
+| Read a fine-tuning dataset, its examples and runs | `memorizz_get_finetune_dataset` | `memorizz:read` |
+| Create a dataset (decision, embedding or reranker task) | `memorizz_create_finetune_dataset` | `memorizz:write` |
+| Add labelled examples / accept or reject examples | `memorizz_add_finetune_examples`, `memorizz_review_finetune_examples` | `memorizz:write` |
+| Write synthetic examples with a teacher LLM, checked blind | `memorizz_generate_finetune_data` | `memorizz:execute` + `memorizz:write` |
+| Start a local training run | `memorizz_start_finetune_run` | `memorizz:execute`; the server must allow training |
+| Follow a training run (status, metrics, events) | `memorizz_get_finetune_run` | `memorizz:read` |
+| Ask a trained decision model (e.g. route a memory) | `memorizz_finetune_decide` | `memorizz:read` |
 
 `memorizz_preview_personalization` never performs cross-thread recall unless
 `include_conversation_recall=true`. The authenticated principal is always used
@@ -395,6 +403,7 @@ Every CLI option has a deployment-friendly environment equivalent:
 | `MEMORIZZ_MCP_SERVER_ALLOW_WRITES` | Enable direct writes (`true`/`false`) |
 | `MEMORIZZ_MCP_SERVER_ALLOW_AGENT_EXECUTION` | Enable agent turns |
 | `MEMORIZZ_MCP_SERVER_ALLOW_HARNESS_EXECUTION` | Enable governed external harness runs |
+| `MEMORIZZ_MCP_SERVER_ALLOW_TRAINING` | Allow `memorizz_start_finetune_run` to start local fine-tuning runs (default: on for local `stdio` with agent execution, off over HTTP) |
 | `MEMORIZZ_MCP_SERVER_HARNESS_WORKSPACE_ROOTS` | Comma-separated allowed workspace roots |
 | `MEMORIZZ_MCP_SERVER_INGEST_ROOTS` | Comma-separated folders `memorizz_ingest` may read (`--ingest-root`); default: home folder for stdio, none for HTTP |
 | `MEMORIZZ_MCP_SERVER_AGENT_IDS` | Comma-separated remote agent allowlist |

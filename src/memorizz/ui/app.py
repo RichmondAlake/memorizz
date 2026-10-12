@@ -53,6 +53,7 @@ from .routers.comparisons import stop_comparison_workers
 from .routers.continual_learning import router as continual_learning_router
 from .routers.evalground import router as evalground_router
 from .routers.evalground import stop_active_eval_run_processes
+from .routers.finetune import router as finetune_router
 from .routers.harnesses import router as harnesses_router
 from .routers.huggingface import router as huggingface_router
 from .routers.knowledge_base import router as knowledge_base_router
@@ -1049,6 +1050,7 @@ def create_app(
     app.include_router(persona_evolution_router)
     app.include_router(continual_learning_router)
     app.include_router(learning_control_plane_router)
+    app.include_router(finetune_router)
     app.include_router(harnesses_router)
     app.include_router(capabilities_router)
     app.include_router(memory_pages_router)

@@ -750,7 +750,7 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
     tools = manager.list_tools("memorizz-server")
     names = {tool["name"] for tool in tools["tools"]}
     assert tools["ok"] is True
-    assert len(names) == 49
+    assert len(names) == 58
     assert "memorizz_get_memory_timeline" in names
     assert {
         "memorizz_ingest",
@@ -797,6 +797,15 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
         "memorizz_continue_harness_conversation",
         "memorizz_record_turn",
         "memorizz_summarize_session",
+        "memorizz_list_finetune_datasets",
+        "memorizz_get_finetune_dataset",
+        "memorizz_create_finetune_dataset",
+        "memorizz_add_finetune_examples",
+        "memorizz_review_finetune_examples",
+        "memorizz_generate_finetune_data",
+        "memorizz_start_finetune_run",
+        "memorizz_get_finetune_run",
+        "memorizz_finetune_decide",
     }.issubset(names)
     strict_rejection = manager.call_tool(
         "memorizz-server", "memorizz_server_info", {"unknown_argument": True}

@@ -21,6 +21,7 @@ from .._env_io import env_bool, resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
 from .agent_commands import agents_app
 from .eval_commands import eval_app
+from .finetune_commands import finetune_app
 from .harness_commands import harness_app
 from .learning_commands import learning_app
 from .mcp_commands import mcp_app
@@ -42,6 +43,7 @@ app.add_typer(notion_app, name="notion")
 app.add_typer(memory_app, name="memory")
 app.add_typer(config_app, name="config")
 app.add_typer(learning_app, name="learning")
+app.add_typer(finetune_app, name="finetune")
 app.add_typer(agents_app, name="agents")
 app.add_typer(harness_app, name="harness")
 app.add_typer(eval_app, name="eval")

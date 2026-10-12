@@ -82,6 +82,20 @@ anthropic = ["anthropic>=0.26.0"]
 ollama = ["ollama>=0.6.0"]
 voyageai = ["voyageai"]
 rerank = ["sentence-transformers>=5.0.0"]
+# Fine-tune decision models, embedding models and rerankers locally
+# (Apple GPU, CUDA or CPU). Unsloth is optional and needs an NVIDIA GPU.
+finetune = [
+    "torch>=2.4.0",
+    "sentence-transformers>=6.1.0",
+    "transformers>=5.19.0",
+    "huggingface-hub>=1.0.0",
+    "accelerate>=1.0.0",
+    "peft>=0.17.0",
+    "datasets>=3.0.0",
+    # EmbeddingGemma 2's processor needs the vision stack even for text.
+    "pillow>=10.0.0",
+    "torchvision>=0.19.0",
+]
 huggingface = [
     "numpy>=1.21,<2",
     "sentence-transformers>=6.1.0",
@@ -172,6 +186,9 @@ all = [
     "transformers>=5.19.0",
     "huggingface-hub>=1.0.0",
     "accelerate>=1.0.0",
+    "torch>=2.4.0",
+    "peft>=0.17.0",
+    "datasets>=3.0.0",
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "jinja2>=3.1.0",

@@ -1136,6 +1136,140 @@ def create_memorizz_mcp_server(
         )
         return json.dumps(value, ensure_ascii=False, indent=2)
 
+    # -- fine-tuning: decision models, embedding models and rerankers -------
+    from .finetune_tools import FineTuneTools
+
+    finetune = FineTuneTools(service)
+
+    @server.tool(annotations=read_only)
+    async def memorizz_list_finetune_datasets(
+        include_catalog: bool = False,
+    ) -> Dict[str, Any]:
+        """List fine-tuning datasets held in the memory provider and the active trained models. include_catalog adds the tasks (memory routing, relevance, retrieval…), base models and what this machine can train with."""
+        return await _tool_call(
+            finetune.list_datasets, current_identity(), include_catalog=include_catalog
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_get_finetune_dataset(
+        dataset_id: str,
+        status: Optional[str] = None,
+        split: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Return a fine-tuning dataset: its task definition, label balance, a page of examples and its training runs."""
+        return await _tool_call(
+            finetune.get_dataset,
+            dataset_id,
+            current_identity(),
+            status=status,
+            split=split,
+            limit=limit,
+            offset=offset,
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_create_finetune_dataset(
+        kind: str,
+        task: str,
+        name: str = "",
+        spec: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a dataset: kind decision (task memory_routing, relevance or custom), embedding (retrieval) or reranker (relevance). spec overrides the task's question and options."""
+        return await _tool_call(
+            finetune.create_dataset,
+            current_identity(),
+            kind=kind,
+            task=task,
+            name=name,
+            spec=spec,
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_add_finetune_examples(
+        dataset_id: str, examples: list[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Add labelled examples. Decision: {"input": {"state": ...}, "label": {question_id: {"choice": key}}}; retrieval: {"input": {"query", "positive", "negatives"}}."""
+        return await _tool_call(
+            finetune.add_examples, dataset_id, examples, current_identity()
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_review_finetune_examples(
+        dataset_id: str,
+        accept: Optional[list[str]] = None,
+        reject: Optional[list[str]] = None,
+        accept_verified: bool = False,
+    ) -> Dict[str, Any]:
+        """Mark examples for training (accept) or leave them out (reject); accept_verified accepts every pending example a blind check agreed with."""
+        return await _tool_call(
+            finetune.review_examples,
+            dataset_id,
+            current_identity(),
+            accept=accept,
+            reject=reject,
+            accept_verified=accept_verified,
+        )
+
+    @server.tool(annotations=execute)
+    async def memorizz_generate_finetune_data(
+        dataset_id: str,
+        count: int = 40,
+        teacher: Optional[str] = None,
+        verifier: Optional[str] = None,
+        context: str = "",
+        topic: str = "",
+        from_memory: bool = False,
+    ) -> Dict[str, Any]:
+        """Write synthetic examples with a teacher LLM (provider/model) and check each blind (verifier, e.g. typesafe/jev-latest). Left pending for review."""
+        return await _tool_call(
+            finetune.generate,
+            dataset_id,
+            current_identity(),
+            count=count,
+            teacher=teacher,
+            verifier=verifier,
+            context=context,
+            topic=topic,
+            from_memory=from_memory,
+        )
+
+    @server.tool(annotations=execute)
+    async def memorizz_start_finetune_run(
+        dataset_id: str,
+        base_model: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        from_run: Optional[str] = None,
+        replay: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Start training on the accepted examples in the background; from_run continues an earlier run's model, replay mixes in earlier datasets' examples ([{"dataset_id", "fraction"}]). Follow it with memorizz_get_finetune_run."""
+        return await _tool_call(
+            finetune.start_training,
+            dataset_id,
+            current_identity(),
+            base_model=base_model,
+            params=params,
+            from_run=from_run,
+            replay=replay,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_get_finetune_run(run_id: str, after: int = 0) -> Dict[str, Any]:
+        """Return a training run's status, metrics before and after, and its events after the cursor."""
+        return await _tool_call(
+            finetune.get_run, run_id, current_identity(), after=after
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_finetune_decide(
+        state: Any, run_id: Optional[str] = None, use: str = "memory_routing"
+    ) -> Dict[str, Any]:
+        """Ask a trained decision model about a state (default: the active memory-routing model, which picks the memory type to store it in)."""
+        return await _tool_call(
+            finetune.decide, current_identity(), state, run_id=run_id, use=use
+        )
+
     @server.prompt()
     def memorizz_memory_assistant(objective: str) -> str:
         """Guide an MCP client through safe recall, agent execution, and storage."""

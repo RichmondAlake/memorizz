@@ -71,7 +71,7 @@
 
             <nav class="sidebar-nav">
                 {% set memory_pages = ['personas', 'toolbox', 'conversations', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache', 'memory-transfer'] %}
-                {% set continual_learning_pages = ['workflows', 'skills', 'learning-control-plane', 'persona-evolution'] %}
+                {% set continual_learning_pages = ['workflows', 'skills', 'learning-control-plane', 'persona-evolution', 'fine-tuning'] %}
                 <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -265,6 +265,16 @@
                         <a href="/persona-evolution" class="nav-item nav-item--sub {% if active_page == 'persona-evolution' %}active{% endif %}">
                             <span class="nav-icon" aria-hidden="true">↗</span>
                             <span>Persona evolution</span>
+                        </a>
+                        <a href="/fine-tuning" class="nav-item nav-item--sub {% if active_page == 'fine-tuning' %}active{% endif %}">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M4 20h16"/>
+                                    <path d="M6 16l4-6 4 3 4-7"/>
+                                    <circle cx="18" cy="6" r="1.5"/>
+                                </svg>
+                            </span>
+                            <span>Fine-tuning</span>
                         </a>
                     </div>
                 </details>

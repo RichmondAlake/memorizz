@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Fine-tuning (`memorizz.finetune`, `memorizz finetune`, nine MCP tools, and
+  the UI's Continual learning → Fine-tuning page): train **decision
+  models** (the System One contract of Jev, Clef and pplx-decider: a state
+  plus typed choice/noul/score questions, answered with calibrated
+  probabilities), **embedding models** and **rerankers** on your memory.
+  Tasks: memory routing (which memory store a piece of state belongs in, or
+  none), relevance (rerank by P(true)), custom decisions, memory retrieval
+  and memory reranking. Datasets, examples and run records are held in the
+  connected memory provider (filesystem, MongoDB, Oracle).
+- Synthetic training data written by a teacher LLM on a balanced plan of
+  labels, case types and hard phenomena, kept only when a blind second check
+  agrees (the teacher, another LLM, or Jev via `TYPESAFE_API_KEY`, eight
+  items per request); short labels are topped up; retrieval pairs with hard
+  negatives from your memories or a topic. Stored memories import as routing
+  examples labelled by store. Everything is reviewed before training.
+- Training on this machine (Apple GPU in bf16, CUDA or CPU) with LoRA:
+  decision models on an embedding backbone (JevEmbed: EmbeddingGemma 2,
+  Qwen3-Embedding) or a small LM reading option letters (Qwen3-0.6B),
+  embeddings with MultipleNegativesRankingLoss (+ Matryoshka for
+  EmbeddingGemma), rerankers with binary cross-entropy. Every run is scored
+  on held-out examples before and after, calibrated, and streams its loss
+  and validation metrics live. Unsloth trains small-LM decision models on
+  NVIDIA GPUs; elsewhere an Unsloth bundle (typed-decisions data + script)
+  runs on Colab. New extra: `memorizz[finetune]`.
+- Continual training: a run can continue from an earlier run's model
+  (`from_run`), replay a share of earlier datasets' training examples
+  (`replay`), and generation can target the options a model gets wrong
+  (`labels`). `evaluate` scores any version (a run, an untrained base model,
+  or Jev zero-shot) on any decision dataset's frozen examples and keeps the
+  result in the memory provider; the UI's "Across versions" table and
+  `memorizz finetune history` show what each round gained and kept.
+
 ## 0.16.5 — 2026-10-12
 
 ### Added

@@ -41,6 +41,7 @@ CONSOLE_PAGES = [
     "/vercel-skills",
     "/learning-control-plane",
     "/persona-evolution",
+    "/fine-tuning",
     "/memory/conversations",
     "/memory/workflows",
     "/memory/skills",
