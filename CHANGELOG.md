@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Interactive CLI: Claude Code, DeepSeek, pi and Hermes stream their answer
+  and reasoning into the chat word by word while they write (Claude Code now
+  runs with `--include-partial-messages`), and a harness's latest message
+  shows the moment it is complete instead of waiting for its next step. Codex
+  delivers whole messages (`codex exec` streams nothing in between) and stays
+  on `exec` for its isolation. The pieces reach the terminal through an
+  in-process channel (`memorizz.metaharness.live`) and are never stored; the
+  run's record keeps whole messages as before.
+- Interactive CLI: a command's output shows its first and last lines (`… N
+  more lines` between) instead of only the first three, and messages up to
+  20 lines print whole.
+
+### Fixed
+
+- Interactive CLI: output of commands a harness runs in parallel printed
+  under whichever command started last; each command's line is repeated
+  above its output when other lines came between.
+- Interactive CLI: a Claude Code tool result showed its raw record
+  (`{"type": "text", "file": ...}`) instead of the tool's output.
+
 ## 0.16.4 — 2026-10-10
 
 ### Added

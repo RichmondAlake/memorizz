@@ -430,9 +430,10 @@ into a harness with `memorizz chat --harness codex`, or run one turn with
 `memorizz run "..." --harness codex`.
 
 While a harness works, the chat shows what it does as it happens: its
-messages, each command with the first lines of its output (and the exit code
-when one fails), tool calls with their arguments, and file edits. The status
-line below keeps a running clock (`Codex is working (gpt-6.1-sol) · 4s`):
+messages, each command with the first and last lines of its output (and the
+exit code when one fails), tool calls with their arguments and the first line
+of what they returned, and file edits. The status line below keeps a running
+clock (`Codex is working (gpt-6.1-sol) · 4s`):
 
 ```text
 memorizz·codex> Count the lines in README.md
@@ -442,6 +443,13 @@ memorizz·codex> Count the lines in README.md
     3 README.md
 Codex: writing · 5s
 ```
+
+Claude Code, DeepSeek, pi and Hermes report their text as they write it, so
+their answer and reasoning stream into the live area above the status line
+word by word. Codex reports each message once it is complete (`codex exec`
+streams nothing in between), so its messages appear the moment each one is
+done. MemoRizz keeps only whole messages in the run's record; the pieces are
+shown, never stored.
 
 The harness's last message is its answer, which prints in full below. When
 several harnesses work at once (delegates), each line names its harness. The

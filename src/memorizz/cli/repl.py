@@ -161,7 +161,8 @@ def _stream_turn(session, query: str) -> None:
     last_refresh = 0.0
     started, finished = time.monotonic(), False
     # A harness's own output (messages, commands, tool calls) prints above
-    # the live status as it happens.
+    # the live status as it happens; the text it is still writing shows in
+    # the live area until the answer replaces it.
     feed = HarnessFeed()
     listening = harness_event_listener.set(feed.listener)
     with ui.quiet_keys(), Live(
@@ -180,7 +181,8 @@ def _stream_turn(session, query: str) -> None:
             line = status
             if not answer and not finished:
                 line += ui.elapsed_suffix(now - started)
-            parts = [Text(line, style="dim")]
+            parts = [] if answer else feed.preview(live.console.width)
+            parts.append(Text(line, style="dim"))
             if tools:
                 parts.append(
                     Text("Tools: " + ", ".join(dict.fromkeys(tools)), style="dim cyan")

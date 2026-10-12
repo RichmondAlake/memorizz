@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from . import live
 from .base import AdapterOutcome, AgentHarness, EventSink, SubprocessHarness
 from .models import (
     HarnessCapabilities,
@@ -1379,6 +1380,8 @@ class ClaudeCodeHarness(SubprocessHarness):
     )
     # Flags whose presence selects restricted mode (see _restricted_mode).
     _RESTRICTED_FLAGS = ("--restricted", "--tools", "--strict-mcp-config")
+    # Reports the answer and reasoning as they are written (see live).
+    _PARTIAL_FLAG = "--include-partial-messages"
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -1404,7 +1407,9 @@ class ClaudeCodeHarness(SubprocessHarness):
             return frozenset()
         text = f"{result.stdout}\n{result.stderr}"
         return frozenset(
-            flag for flag in self._RESTRICTED_FLAGS if re.search(rf"{flag}\b", text)
+            flag
+            for flag in (*self._RESTRICTED_FLAGS, self._PARTIAL_FLAG)
+            if re.search(rf"{flag}\b", text)
         )
 
     def _restricted_mode(self) -> bool:
@@ -1515,6 +1520,11 @@ class ClaudeCodeHarness(SubprocessHarness):
             "--output-format",
             "stream-json",
             "--verbose",
+            *(
+                [self._PARTIAL_FLAG]
+                if self._PARTIAL_FLAG in (self._cli_flags or ())
+                else []
+            ),
             "--permission-mode",
             "acceptEdits" if task.writes_workspace else "dontAsk",
         ]
@@ -1713,6 +1723,21 @@ class ClaudeCodeHarness(SubprocessHarness):
             events.append(HarnessEvent(run_id, HarnessEventType.COMPLETE, payload))
         elif kind == "system" and subtype == "api_retry":
             events.append(HarnessEvent(run_id, HarnessEventType.STATUS, payload))
+        elif kind == "stream_event":
+            # The answer and reasoning as they are written: shown to whoever
+            # watches the run, never stored (the whole message follows).
+            event = payload.get("event")
+            event = event if isinstance(event, dict) else {}
+            delta = event.get("delta")
+            delta = delta if isinstance(delta, dict) else {}
+            if payload.get("parent_tool_use_id"):
+                pass  # a subagent's text; its messages arrive whole
+            elif event.get("type") == "content_block_start":
+                live.new_block(run_id)
+            elif delta.get("type") == "text_delta":
+                live.publish(run_id, "message", delta.get("text"))
+            elif delta.get("type") == "thinking_delta":
+                live.publish(run_id, "reasoning", delta.get("thinking"))
         else:
             events.append(HarnessEvent(run_id, HarnessEventType.LOG, payload))
         return events, updates
@@ -2673,8 +2698,19 @@ class PiHarness(SubprocessHarness):
                 events.append(
                     HarnessEvent(run_id, HarnessEventType.ERROR, {"error": error})
                 )
-        # Streaming deltas (message_update) and lifecycle records (turn_*,
-        # agent_*, message_start) duplicate the content above and are skipped.
+        elif kind == "message_update":
+            # The answer and reasoning as they are written: shown to whoever
+            # watches the run, never stored (message_end has the whole text).
+            update = payload.get("assistantMessageEvent")
+            update = update if isinstance(update, dict) else {}
+            if update.get("type") in {"text_start", "thinking_start"}:
+                live.new_block(run_id)
+            elif update.get("type") == "text_delta":
+                live.publish(run_id, "message", update.get("delta"))
+            elif update.get("type") == "thinking_delta":
+                live.publish(run_id, "reasoning", update.get("delta"))
+        # Lifecycle records (turn_*, agent_*, message_start) duplicate the
+        # content above and are skipped.
         return events, updates
 
 
@@ -3055,10 +3091,13 @@ class HermesHarness(SubprocessHarness):
             )
         elif kind == "text":
             # Text streams in chunks; it becomes one message per tool turn.
+            chunk = str(payload.get("text") or "")
             with self._state_lock:
-                self._state.setdefault(run_id, {"text": []})["text"].append(
-                    str(payload.get("text") or "")
-                )
+                pieces = self._state.setdefault(run_id, {"text": []})["text"]
+                if not pieces:
+                    live.new_block(run_id)
+                pieces.append(chunk)
+            live.publish(run_id, "message", chunk)
         elif kind == "tool_use":
             events.extend(self._flush_text(run_id))
             name = str(payload.get("name") or "")

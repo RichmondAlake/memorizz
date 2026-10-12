@@ -350,7 +350,7 @@ def test_feed_prints_commands_tools_edits_and_holds_back_the_answer():
         "    README.md",
         "    src",
         "    tests",
-        "    … 1 more lines",
+        "    setup.py",
         "  ⚙ memorizz_search_memories  query=release steps, limit=5",
         '    ↳ {"ok": true, "count": 2}',
         "  ✎ update src/app.py",

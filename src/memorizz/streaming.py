@@ -423,7 +423,9 @@ class HarnessProgress:
     is the run's ``on_start`` callback; it follows the run's ledger on a
     daemon thread until ``stop``, which relays whatever arrived last. A
     ``harness_event_listener`` set by the caller also receives every ledger
-    event in full; the stream itself only carries the kind of work.
+    event in full, and the text the harness streams as it writes (never
+    stored; see ``metaharness.live``); the stream itself only carries the
+    kind of work.
     """
 
     def __init__(self, session, service, harness, *, poll_seconds=0.25):
@@ -435,6 +437,7 @@ class HarnessProgress:
         self._cursor, self._last, self._lock = 0, None, threading.Lock()
         self._stop = threading.Event()
         self._thread = None
+        self._unsubscribe = None
 
     @property
     def label(self):
@@ -469,6 +472,10 @@ class HarnessProgress:
             self._resolve_harness()
         self._emit("harness_running", f"{self.label} is working")
         self._notify({"type": "run.started"})
+        if self.listener is not None:
+            from .metaharness import live
+
+            self._unsubscribe = live.subscribe(run_id, self._notify)
         self._thread = threading.Thread(
             target=self._follow, name="memorizz-harness-progress", daemon=True
         )
@@ -520,6 +527,9 @@ class HarnessProgress:
 
     def stop(self):
         self._stop.set()
+        if self._unsubscribe is not None:
+            self._unsubscribe()
+            self._unsubscribe = None
         if self._thread is not None:
             self._thread.join(timeout=2)
             self._drain()

@@ -5,6 +5,8 @@ The reply stream only says what kind of work a harness is doing. The terminal
 is the user's own, so it also asks for the harness run's ledger events (which
 MemoRizz has already redacted) through ``harness_event_listener`` and prints
 them above the live status, the way a coding agent's own terminal would.
+Text the harness is still writing, and its latest message (which may turn
+out to be the answer), show in the live area below them (``preview``).
 """
 
 from __future__ import annotations
@@ -12,17 +14,21 @@ from __future__ import annotations
 import json
 import queue
 import re
+import textwrap
 import threading
 from typing import Any, Dict, List, Optional
 
 from rich.text import Text
 
 from ..metaharness.catalog import HARNESS_LABELS
+from ..metaharness.security import redact
 
 # Enough to follow along; the whole run stays in `memorizz harness show`.
-MAX_MESSAGE_LINES = 8
-MAX_OUTPUT_LINES = 3
+MAX_MESSAGE_LINES = 20
+OUTPUT_HEAD_LINES = 4  # a command's first lines and its last ones
+OUTPUT_TAIL_LINES = 4
 MAX_LINE = 160
+PREVIEW_ROWS = 10
 
 _SHELL_WRAPPER = re.compile(
     r"^(?:/\S+/)?(?:ba|z)?sh -l?c (?:(['\"])(.*)\1|([^'\"].*))$", re.S
@@ -37,6 +43,25 @@ def _clip(text: Any, limit: int = MAX_LINE) -> str:
 
 def _lines(text: Any) -> List[str]:
     return [line.rstrip() for line in str(text or "").splitlines() if line.strip()]
+
+
+def _excerpt(lines: List[str]) -> List[str]:
+    """A command's output: its first lines and last lines, like a terminal."""
+    if len(lines) <= OUTPUT_HEAD_LINES + OUTPUT_TAIL_LINES + 1:
+        return lines
+    more = len(lines) - OUTPUT_HEAD_LINES - OUTPUT_TAIL_LINES
+    return [
+        *lines[:OUTPUT_HEAD_LINES],
+        f"… {more} more lines",
+        *lines[-OUTPUT_TAIL_LINES:],
+    ]
+
+
+def _same_text(complete: str, partial: str) -> bool:
+    """Whether a finished message is the one whose pieces streamed in."""
+    whole = " ".join(str(redact(complete)).split())
+    start = " ".join(str(redact(partial)).split())[:200]
+    return bool(start) and whole.startswith(start)
 
 
 def command_text(command: Any) -> str:
@@ -72,6 +97,23 @@ def _arguments(value: Any) -> str:
 
 
 def _result_text(data: Dict[str, Any]) -> str:
+    message = data.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
+    if isinstance(blocks, list):
+        # Claude Code: the user turn that carries each tool's output.
+        parts = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                content = block.get("content")
+                if isinstance(content, list):
+                    content = "\n".join(
+                        str(item.get("text") or "")
+                        for item in content
+                        if isinstance(item, dict)
+                    )
+                parts.append(str(content or ""))
+        if any(part.strip() for part in parts):
+            return "\n".join(parts)
     for key in ("content", "text", "tool_use_result", "output"):
         value = data.get(key)
         if value:
@@ -85,7 +127,11 @@ class _Run:
     def __init__(self, harness: str) -> None:
         self.harness = harness
         self.held: Optional[str] = None  # latest message: may be the answer
+        # Text still being written: {"kind", "id", "text"} (see metaharness.live).
+        self.partial: Optional[Dict[str, str]] = None
         self.seen: set = set()
+        # The command whose line printed last, so its output follows it.
+        self.last_command: Optional[str] = None
         self.finished = False
 
 
@@ -132,8 +178,32 @@ class HarnessFeed:
         for run in self._runs.values():
             if run.held and run.held.strip() != (answer or "").strip():
                 out.extend(self._message(run, run.held))
-            run.held = None
+            run.held = run.partial = None
         return out
+
+    def preview(self, width: int, rows: int = PREVIEW_ROWS) -> List[Text]:
+        """The live area: each run's latest message and the text it is still
+        writing, its last ``rows`` rows at ``width`` (call after ``drain``)."""
+        out: List[Text] = []
+        for run in self._runs.values():
+            pieces = []
+            if run.held:
+                pieces.append((run.held, ""))
+            if run.partial and run.partial["text"].strip():
+                reasoning = run.partial["kind"] == "reasoning"
+                pieces.append(
+                    (
+                        ("∴ " if reasoning else "") + run.partial["text"],
+                        "dim italic" if reasoning else "",
+                    )
+                )
+            for text, style in pieces:
+                prefix = self._prefix(run)
+                room = max(20, width - 2 - len(prefix[0][0] if prefix else ""))
+                for line in str(redact(text[-4_000:])).splitlines():
+                    for row in textwrap.wrap(line, room) or [""]:
+                        out.append(Text.assemble("  ", *prefix, (row, style)))
+        return out[-rows:] if rows else out
 
     # -- rendering -----------------------------------------------------------
 
@@ -143,13 +213,15 @@ class HarnessFeed:
     def _header(self, run: _Run) -> Text:
         return Text.assemble(("● ", "bold magenta"), (self._label(run), "bold"))
 
-    def _line(self, run: _Run, *parts: Any) -> Text:
-        prefix = []
+    def _prefix(self, run: _Run) -> List[tuple]:
         if self.label_every_line or (
             len([r for r in self._runs.values() if not r.finished]) > 1
         ):
-            prefix = [(f"{self._label(run)} · ", "dim magenta")]
-        return Text.assemble("  ", *prefix, *parts)
+            return [(f"{self._label(run)} · ", "dim magenta")]
+        return []
+
+    def _line(self, run: _Run, *parts: Any) -> Text:
+        return Text.assemble("  ", *self._prefix(run), *parts)
 
     def _message(self, run: _Run, text: str) -> List[Text]:
         lines = _lines(text)
@@ -173,21 +245,43 @@ class HarnessFeed:
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
         if kind == "run.started":
             return []
+        if kind == "partial":
+            if run.partial is None or run.partial["id"] != str(data.get("id")):
+                run.partial = {
+                    "kind": str(data.get("kind") or "message"),
+                    "id": str(data.get("id")),
+                    "text": "",
+                }
+            run.partial["text"] += str(data.get("delta") or "")
+            return []
         if kind == "run.finished":
             out = self._flush_held(run) if self.show_answers else []
-            run.finished = True
+            run.finished, run.partial = True, None
             return out
         if kind == "message":
             if data.get("role") not in (None, "", "assistant"):
                 return []
+            text = str(data.get("text") or "")
+            if run.partial and run.partial["kind"] == "message":
+                if _same_text(text, run.partial["text"]):
+                    run.partial = None  # it streamed in; here it is whole
             # Hold the latest message back: if nothing follows it, it is the
-            # harness's answer, which the chat prints in full anyway.
+            # harness's answer, which the chat prints in full anyway. Until
+            # then it shows in the live area (``preview``).
             out = self._flush_held(run)
-            run.held = str(data.get("text") or "") or None
+            run.held = text or None
             return out
+        if kind == "reasoning" and run.partial and run.partial["kind"] == "reasoning":
+            run.partial = None
+        previous = run.last_command
+        if run.held:
+            run.last_command = None  # the held message prints first
         rendered = self._activity(run, kind, data)
         if not rendered:
+            run.last_command = previous
             return []
+        if kind != "command":
+            run.last_command = None
         return self._flush_held(run) + rendered
 
     def _activity(self, run: _Run, kind: Any, data: Dict[str, Any]) -> List[Text]:
@@ -198,12 +292,16 @@ class HarnessFeed:
                 data.get("exit_code") is not None
             )
             out: List[Text] = []
+            line = self._line(run, ("$ ", "bold cyan"), (_clip(command), "cyan"))
             if not key or key not in run.seen:
                 if key:
                     run.seen.add(key)
-                out.append(
-                    self._line(run, ("$ ", "bold cyan"), (_clip(command), "cyan"))
-                )
+                out.append(line)
+            elif done and run.last_command != key:
+                # Other lines printed since it started (commands run in
+                # parallel): name it again above its output.
+                out.append(line)
+            run.last_command = key or None
             if done:
                 output = _lines(
                     data.get("aggregated_output")
@@ -211,11 +309,8 @@ class HarnessFeed:
                     or data.get("stdout")
                     or ""
                 )
-                for line in output[:MAX_OUTPUT_LINES]:
+                for line in _excerpt(output):
                     out.append(self._line(run, ("  " + _clip(line), "dim")))
-                if len(output) > MAX_OUTPUT_LINES:
-                    more = len(output) - MAX_OUTPUT_LINES
-                    out.append(self._line(run, (f"  … {more} more lines", "dim")))
                 code = data.get("exit_code")
                 if code not in (None, 0, "0"):
                     out.append(self._line(run, (f"  exit {code}", "red")))
@@ -252,7 +347,12 @@ class HarnessFeed:
             text = _lines(_result_text(data))
             if not text:
                 return []
-            error = data.get("is_error") in (True, "true", "True")
+            message = data.get("message")
+            blocks = message.get("content") if isinstance(message, dict) else None
+            error = data.get("is_error") in (True, "true", "True") or any(
+                isinstance(block, dict) and block.get("is_error") is True
+                for block in (blocks if isinstance(blocks, list) else [])
+            )
             return [
                 self._line(
                     run, ("  ↳ " + _clip(text[0], 120), "red" if error else "dim")
