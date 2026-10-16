@@ -684,7 +684,7 @@ def test_a_card_is_scored_at_the_size_the_swap_would_store(ft, tmp_path, monkeyp
 
 @pytest.mark.unit
 def test_embedding_scores_cut_vectors_and_normalise_them_again():
-    import torch
+    torch = pytest.importorskip("torch")  # the finetune extra
 
     from memorizz.finetune.scoring import embedding_scorer
 
