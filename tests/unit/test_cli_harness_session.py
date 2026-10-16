@@ -204,6 +204,13 @@ def test_apply_harness_attaches_runtime_mode_for_the_session_only(session):
         "owns_meta_harness": False,
         "tools_registered": False,
     }
+    # ...and is what saving the agent keeps
+    assert agent._pinned_harness == {
+        "meta_harness": True,
+        "meta_harness_mode": None,
+        "default_harness": "auto",
+        "harness_config": {},
+    }
 
 
 def test_apply_harness_rejects_unknown_and_not_ready(session):
@@ -252,8 +259,14 @@ def test_clear_harness_restores_the_saved_agent_configuration():
 
     result = harness_session.clear_harness(sess)
 
-    assert result == {"harness": None, "previous": "codex", "mode": "delegate"}
+    assert result == {
+        "harness": None,
+        "previous": "codex",
+        "mode": "delegate",
+        "saved_harness": None,
+    }
     assert sess.harness is None and sess.harness_backup is None
+    assert agent._pinned_harness is None
     assert agent.meta_harness is service
     assert agent.meta_harness_mode == "delegate"
     assert agent.default_harness == "claude-code"
@@ -267,6 +280,7 @@ def test_clear_harness_without_an_active_one_is_a_no_op(session):
         "harness": None,
         "previous": None,
         "mode": None,
+        "saved_harness": None,
     }
 
 
@@ -289,6 +303,137 @@ def test_apply_harness_creates_a_service_when_the_agent_has_none(monkeypatch):
     assert agent._owns_meta_harness is True
     harness_session.clear_harness(sess)
     assert agent.meta_harness is None and agent._owns_meta_harness is False
+
+
+def _runtime_session(default="codex"):
+    output = StringIO()
+    agent = FakeAgent(service=FakeService(READY), mode="runtime", default=default)
+    sess = Session(
+        agent=agent,
+        provider=object(),
+        llm_config={},
+        console=Console(file=output, color_system=None, width=200),
+    )
+    return sess, output
+
+
+def test_a_saved_runtime_harness_shows_as_active():
+    sess, output = _runtime_session()
+    assert harness_session.active_harness(sess) == "codex"
+    assert harness_session.prompt_label(sess) == "memorizz·codex> "
+    assert commands.dispatch("/harness", sess) is True
+    assert "Harness: codex (the saved agent runs turns on it" in output.getvalue()
+
+
+def test_off_runs_natively_when_the_saved_agent_uses_a_harness():
+    sess, output = _runtime_session()
+    agent = sess.agent
+
+    assert commands.dispatch("/harness off", sess) is True
+    text = output.getvalue()
+    assert "Harness off (was codex); turns run natively for this session." in text
+    assert "memorizz agents update agent-1 --harness-mode off" in text
+    assert agent.meta_harness_mode is None
+    assert harness_session.active_harness(sess) is None
+    assert harness_session.prompt_label(sess) == "memorizz> "
+    # the saved record keeps its harness
+    assert agent._pinned_harness["meta_harness_mode"] == "runtime"
+    assert agent._pinned_harness["default_harness"] == "codex"
+
+    assert commands.dispatch("/harness", sess) is True
+    assert "off for this session (turns run natively); the saved agent runs" in (
+        output.getvalue()
+    )
+
+    # picking a harness and turning it off again still lands on native
+    harness_session.apply_harness(sess, "claude-code")
+    assert agent.meta_harness_mode == "runtime"
+    assert agent._pinned_harness["default_harness"] == "codex"
+    result = harness_session.clear_harness(sess)
+    assert result["previous"] == "claude-code"
+    assert result["saved_harness"] == "codex"
+    assert agent.meta_harness_mode is None
+
+
+def test_off_keeps_saved_delegate_mode():
+    output = StringIO()
+    agent = FakeAgent(service=FakeService(READY), mode="delegate")
+    sess = Session(
+        agent=agent, provider=object(), llm_config={}, console=Console(file=output)
+    )
+    assert harness_session.active_harness(sess) is None
+    assert commands.dispatch("/harness off", sess) is True
+    assert agent.meta_harness_mode == "delegate"
+    assert "your model runs turns" in output.getvalue()
+
+
+def test_a_session_harness_is_never_saved_on_the_agent(tmp_path, monkeypatch):
+    """Saving after every turn keeps the agent's own harness settings: a
+    harness picked for one session must not become the agent's default."""
+    from memorizz import MemAgent, metaharness
+    from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+
+    monkeypatch.setattr(
+        metaharness.MetaHarness,
+        "from_env",
+        staticmethod(lambda **k: FakeService(READY)),
+    )
+    monkeypatch.setattr(
+        harness_session,
+        "harness_model_choices",
+        lambda session, name: {"default": None, "models": []},
+    )
+    provider = FileSystemProvider(
+        FileSystemConfig(root_path=tmp_path / "memory", lazy_vector_indexes=True)
+    )
+
+    def session_for(agent):
+        return Session(
+            agent=agent,
+            provider=provider,
+            llm_config={},
+            console=Console(file=StringIO()),
+        )
+
+    def saved(agent_id):
+        record = provider.retrieve_memagent(agent_id)
+        return record.meta_harness_mode, record.default_harness
+
+    try:
+        native = MemAgent(
+            llm_config={"provider": "openai", "model": "gpt-5"},
+            memory_provider=provider,
+            instruction="x",
+        )
+        native.save()
+        sess = session_for(native)
+        harness_session.apply_harness(sess, "codex")
+        native.save()
+        assert saved(native.agent_id) == (None, "auto")
+        harness_session.clear_harness(sess)
+        native.save()
+        assert saved(native.agent_id) == (None, "auto")
+
+        runtime = MemAgent(
+            llm_config={"provider": "openai", "model": "gpt-5"},
+            memory_provider=provider,
+            instruction="x",
+        )
+        runtime.with_meta_harness(
+            FakeService(READY), mode="runtime", default_harness="codex"
+        )
+        runtime.save()
+        loaded = MemAgent.load(
+            runtime.agent_id, memory_provider=provider, auto_register=False
+        )
+        sess = session_for(loaded)
+        assert harness_session.active_harness(sess) == "codex"
+        harness_session.clear_harness(sess)
+        assert loaded.meta_harness_mode is None
+        loaded.save()
+        assert saved(runtime.agent_id) == ("runtime", "codex")
+    finally:
+        provider.close()
 
 
 def test_report_pending_approvals_only_when_a_harness_is_active(session):

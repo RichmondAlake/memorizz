@@ -116,6 +116,18 @@ def save_agent(agent):
             if isinstance(candidate_llm_config, dict):
                 llm_config_to_save = candidate_llm_config
 
+        # A harness picked for one CLI session (/harness codex) runs on a
+        # pinned copy of the agent's own harness settings, which is what
+        # the saved record keeps.
+        harness = getattr(agent, "_pinned_harness", None)
+        if not isinstance(harness, dict):
+            harness = {
+                "meta_harness": bool(getattr(agent, "meta_harness", None)),
+                "meta_harness_mode": getattr(agent, "meta_harness_mode", None),
+                "default_harness": getattr(agent, "default_harness", "auto"),
+                "harness_config": getattr(agent, "harness_config", None),
+            }
+
         # Create MemAgentModel with current configuration
         from .models import MemAgentModel
 
@@ -191,10 +203,10 @@ def save_agent(agent):
                 if agent.has_browser_control()
                 else getattr(agent, "browser_control_config", None)
             ),
-            meta_harness=bool(getattr(agent, "meta_harness", None)),
-            meta_harness_mode=getattr(agent, "meta_harness_mode", None),
-            default_harness=getattr(agent, "default_harness", "auto"),
-            harness_config=dict(getattr(agent, "harness_config", None) or {}),
+            meta_harness=bool(harness["meta_harness"]),
+            meta_harness_mode=harness["meta_harness_mode"],
+            default_harness=harness["default_harness"],
+            harness_config=dict(harness["harness_config"] or {}),
             skill_paths=agent.skill_paths or None,
             mcp_servers=agent.mcp_servers or None,
             self_aware=bool(agent.self_aware),

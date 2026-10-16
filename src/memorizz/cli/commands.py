@@ -1352,23 +1352,33 @@ def cmd_harness(session, args: str):
         return
     if not name:
         active = harness_session.active_harness(session)
-        mode = getattr(session.agent, "meta_harness_mode", None)
+        saved = harness_session.saved_harness(session)
         if active == harness_session.DELEGATE:
             rows = harness_session.harness_delegates(session)
             console.print(
                 "Harness: [cyan]delegate[/cyan] (your model stays in charge; it can "
                 f"hand work to {len(rows)} harness delegate(s) and call harnesses as tools)"
             )
-        elif active:
+        elif getattr(session, "harness", None):
             console.print(
                 f"Harness: [cyan]{active}[/cyan] (runtime mode, session only; "
                 "memory, traces and approvals stay in MemoRizz)"
             )
             console.print(_harness_model_line(session))
-        elif mode:
+        elif active:
             console.print(
-                f"Harness: [dim]off for this session[/dim]; the saved agent uses "
-                f"{mode} mode with default '{getattr(session.agent, 'default_harness', 'auto')}'."
+                f"Harness: [cyan]{active}[/cyan] (the saved agent runs turns on it; "
+                "/harness off runs this session natively)"
+            )
+        elif saved["mode"] == "runtime":
+            console.print(
+                "Harness: [dim]off for this session[/dim] (turns run natively); "
+                f"the saved agent runs turns on '{saved['harness']}'."
+            )
+        elif saved["mode"] == "delegate":
+            console.print(
+                "Harness: [dim]off[/dim] (your model runs turns; the saved agent "
+                "can hand work to harness delegates)"
             )
         else:
             console.print("Harness: [dim]off[/dim] (native MemAgent execution)")
@@ -1380,11 +1390,23 @@ def cmd_harness(session, args: str):
     if name in {"off", "none", "native"}:
         result = harness_session.clear_harness(session)
         previous = result.get("previous")
-        console.print(
-            "[green]Harness off[/green]"
-            + (f" (was {previous})" if previous else "")
-            + "; turns run natively again."
-        )
+        line = "[green]Harness off[/green]" + (f" (was {previous})" if previous else "")
+        kept = result.get("saved_harness")
+        if kept:
+            console.print(line + "; turns run natively for this session.")
+            agent_id = getattr(session.agent, "agent_id", None) or "<agent-id>"
+            console.print(
+                f"[dim]The saved agent still runs turns on {kept} in new sessions. "
+                "To turn that off, leave this session and run "
+                f"`memorizz agents update {agent_id} --harness-mode off`.[/dim]"
+            )
+        elif result.get("mode") == harness_session.DELEGATE:
+            console.print(
+                line + "; your model runs turns (the saved agent can still hand "
+                "work to harness delegates)."
+            )
+        else:
+            console.print(line + "; turns run natively again.")
         return
     try:
         with ui.busy(console, f"Starting {name}…"):

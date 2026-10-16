@@ -887,7 +887,9 @@ agent. `/harnesses` lists readiness; `/harness codex` (or `claude-code`,
 `openhands`, `pi`, `hermes`, `auto`) attaches the agent's meta-harness in
 `runtime` mode for this session, so every following turn is a governed run
 with MemoRizz retrieval, MCP access, tracing and approvals; `/harness off`
-restores the agent's own configuration. The prompt shows the active harness
+runs the rest of the session natively, even when the saved agent itself is
+in `runtime` mode (that saved setting is kept; `memorizz agents update <id>
+--harness-mode off` changes it). The prompt shows the active harness
 (`memorizz·codex>`), and pending approvals raised by a harness turn are
 printed after the reply with the `/approvals` commands to decide them.
 `memorizz chat --harness codex` and `memorizz run "..." --harness codex` do

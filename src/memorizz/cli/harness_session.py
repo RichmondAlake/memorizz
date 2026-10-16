@@ -123,7 +123,30 @@ def delegation_enabled(session) -> bool:
 
 
 def active_harness(session) -> Optional[str]:
-    return getattr(session, "harness", None) or None
+    """The harness this session's turns run on: one picked with ``/harness``,
+    else the saved agent's own runtime harness; None when turns run natively."""
+    picked = getattr(session, "harness", None)
+    if picked:
+        return picked
+    agent = getattr(session, "agent", None)
+    if getattr(agent, "meta_harness_mode", None) == "runtime":
+        return canonical_harness(getattr(agent, "default_harness", None)) or "auto"
+    return None
+
+
+def saved_harness(session) -> Dict[str, Any]:
+    """The saved agent's own harness settings, whatever this session picked."""
+    agent = session.agent
+    backup = getattr(session, "harness_backup", None)
+    if backup is None:
+        backup = {
+            "meta_harness_mode": getattr(agent, "meta_harness_mode", None),
+            "default_harness": getattr(agent, "default_harness", "auto"),
+        }
+    return {
+        "mode": backup.get("meta_harness_mode"),
+        "harness": canonical_harness(backup.get("default_harness")) or "auto",
+    }
 
 
 def prompt_label(session) -> str:
@@ -179,7 +202,13 @@ def carried_model(session, name: str) -> Optional[str]:
 
 def harness_model_label(session) -> str:
     """What the status bar shows after the harness name: the model that will run."""
-    return str(getattr(session, "harness_model", None) or "")
+    picked = getattr(session, "harness_model", None)
+    if picked or getattr(session, "harness", None):
+        return str(picked or "")
+    agent = getattr(session, "agent", None)
+    if getattr(agent, "meta_harness_mode", None) != "runtime":
+        return ""
+    return str((getattr(agent, "harness_config", None) or {}).get("model") or "")
 
 
 def set_harness_model(session, model: Any) -> Dict[str, Any]:
@@ -280,6 +309,13 @@ def _remember_agent_state(session) -> None:
             getattr(agent, "_meta_harness_tools_registered", False)
         ),
     }
+    # Saving the agent (after every turn) keeps these, not the session's pick.
+    agent._pinned_harness = {
+        "meta_harness": bool(session.harness_backup["meta_harness"]),
+        "meta_harness_mode": session.harness_backup["meta_harness_mode"],
+        "default_harness": session.harness_backup["default_harness"],
+        "harness_config": dict(session.harness_backup["harness_config"]),
+    }
 
 
 def _apply_delegate_mode(session) -> Dict[str, Any]:
@@ -309,7 +345,12 @@ def _apply_delegate_mode(session) -> Dict[str, Any]:
 
 
 def clear_harness(session) -> Dict[str, Any]:
-    """Return the agent to native execution, restoring its saved configuration."""
+    """Run this session's turns natively.
+
+    Restores the saved agent's configuration. When that routes turns to a
+    harness (runtime mode), this session still runs natively and the saved
+    record keeps its harness (``saved_harness`` in the result). Saved
+    delegate mode stays: the agent's own model runs turns there."""
     agent = session.agent
     backup = getattr(session, "harness_backup", None)
     previous = active_harness(session)
@@ -331,14 +372,21 @@ def clear_harness(session) -> Dict[str, Any]:
         agent.default_harness = backup["default_harness"]
         agent.harness_config = dict(backup["harness_config"])
         agent._owns_meta_harness = backup["owns_meta_harness"]
+        agent._pinned_harness = None
         session.harness_backup = None
     session.harness = None
     session.harness_model = None
     session.harness_model_source = None
+    kept = None
+    if getattr(agent, "meta_harness_mode", None) == "runtime":
+        kept = canonical_harness(getattr(agent, "default_harness", None)) or "auto"
+        _remember_agent_state(session)
+        agent.meta_harness_mode = None
     return {
         "harness": None,
         "previous": previous,
         "mode": getattr(agent, "meta_harness_mode", None),
+        "saved_harness": kept,
     }
 
 
@@ -757,6 +805,7 @@ __all__ = [
     "DELEGATE",
     "META_HARNESS_TOOL_NAMES",
     "active_harness",
+    "saved_harness",
     "apply_harness",
     "carried_model",
     "harness_model_choices",
