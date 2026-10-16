@@ -424,8 +424,12 @@ for the harness, exposes the permitted MCP access, records the run with its
 events, and saves the answer to the conversation. A turn that needs a write is
 held as an approval; the chat prints the waiting proposal ids after the turn
 so you can `/approvals approve <id> <name>` and `/approvals resume <id>`
-without leaving the terminal. The choice lives on the session, not the saved
-agent: `/harness off` restores exactly what the agent had. Launch straight
+without leaving the terminal. The choice lives on the session and is never
+saved on the agent. An agent can also be saved to run every turn on a harness
+(`memorizz agents update <id> --harness-mode runtime --default-harness codex`):
+the prompt then shows it from the start (`memorizz·codex>`), `/harness off`
+still runs that session natively, and `--harness-mode off` changes the saved
+agent (run it after leaving the chat, which saves the agent as it goes). Launch straight
 into a harness with `memorizz chat --harness codex`, or run one turn with
 `memorizz run "..." --harness codex`.
 
@@ -780,7 +784,8 @@ memorizz capabilities [--json]
 memorizz finetune doctor|tasks|datasets|create|show|generate|import-memories|import
 memorizz finetune examples|review|add|preview|export [--unsloth-bundle DIR]
 memorizz finetune train [--from-run RUN] [--replay DATASET:SHARE]|runs|status [--follow]|cancel
-memorizz finetune evaluate|history|decide|rank|activate|route|delete
+memorizz finetune evaluate [--in-use]|history|decide|rank|activate|route|delete
+memorizz finetune models|compare RUN|swap JOB RUN|swap-back JOB
 memorizz config path|keys|set|get
 memorizz memory configure
 memorizz notion connect|init|status|sync|repair

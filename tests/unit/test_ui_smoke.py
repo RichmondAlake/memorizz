@@ -48,6 +48,7 @@ PAGES = [
     "/evalground",
     "/learning-control-plane",
     "/fine-tuning",
+    "/fine-tuning/models",
     "/harnesses",
     "/api/status",
     "/api/personas",

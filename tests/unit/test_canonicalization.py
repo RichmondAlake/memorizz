@@ -224,3 +224,54 @@ class TestAggregateTrajectoryStats:
         docs = [_wf_doc(1, "h1")]
         stats = aggregate_trajectory_stats(_ListProvider(docs), "agent-1")
         assert stats[0].runs[0].record_id == "rec-1"
+
+
+def test_list_shaped_steps_canonicalize_like_the_dict_form():
+    """Some writers store steps as a list (an Oracle-held workflow, say):
+    the workflows page must not fail on them."""
+    as_list = [
+        {"tool": "lookup_launch", "status": "complete"},
+        {"tool_name": "notify", "arguments": {"to": "ops", "body": "x"}},
+    ]
+    as_dict = {
+        "Step 1: lookup_launch": {"status": "complete"},
+        "Step 2: notify": {"arguments": {"to": "ops", "body": "x"}},
+    }
+    assert canonical_signature(as_list) == canonical_signature(as_dict)
+    assert [u["tool"] for u in canonical_signature(as_list)] == [
+        "lookup_launch",
+        "notify",
+    ]
+    assert canonical_hash(canonical_signature(as_list)) == canonical_hash(
+        canonical_signature(as_dict)
+    )
+    assert canonical_signature("not steps") == []
+
+
+def test_workflows_page_reads_signatures_stored_as_tool_names():
+    from types import SimpleNamespace
+
+    from memorizz.ui.routers.continual_learning import _tool_sequence
+
+    class _Provider:
+        def retrieve_by_id(self, record_id, memory_store_type=None):
+            return {"canonical_signature": ["lookup_launch", "notify"], "steps": []}
+
+    stat = SimpleNamespace(runs=[SimpleNamespace(record_id="w1")])
+    assert _tool_sequence(_Provider(), stat) == "lookup_launch → notify"
+
+
+def test_outcomes_stored_as_a_status_dict_count_as_success():
+    docs = [
+        {"steps": {"Step 1: lookup": {}}, "outcome": {"status": "success"}},
+        {"steps": {"Step 1: lookup": {}}, "outcome": "success"},
+        {"steps": {"Step 1: lookup": {}}, "outcome": {"status": "failure"}},
+    ]
+
+    class _Provider:
+        def list_all(self, *args, **kwargs):
+            return docs
+
+    (stat,) = aggregate_trajectory_stats(_Provider())
+    assert stat.executions == 3 and stat.successes == 2
+    assert len(stat.failure_workflow_ids) == 0  # these docs have no workflow_id

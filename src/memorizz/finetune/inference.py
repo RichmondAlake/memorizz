@@ -57,6 +57,7 @@ class DecisionModel:
         self.question = self.meta["question"]
         self.temperature = float(self.meta.get("temperature") or 1.0)
         self.device = pick_device(device)
+        self._scorers: Dict[str, Any] = {}
         if self.backbone == "embedding":
             from sentence_transformers import SentenceTransformer
 
@@ -71,13 +72,28 @@ class DecisionModel:
                 f"MemoRizz cannot run a {self.backbone} decision model in-process yet"
             )
 
+    def _scorer(self, question: Dict[str, Any]):
+        """One scorer per question, its option embeddings computed once:
+        options do not change between calls, so routing a memory embeds only
+        the memory."""
+        from .training.decision_embed import DecisionScorer
+
+        key = json.dumps(question, sort_keys=True)
+        scorer = self._scorers.get(key)
+        if scorer is None:
+            tau = float(self.meta.get("tau") or 0.1)
+            scorer = DecisionScorer(
+                self.encoder, self.meta["family"], question, tau, cache_options=True
+            )
+            if len(self._scorers) >= 8:
+                self._scorers.pop(next(iter(self._scorers)))
+            self._scorers[key] = scorer
+        return scorer
+
     def _logits(self, state: Any, question: Dict[str, Any]) -> List[float]:
         if self.backbone == "embedding":
-            from .training.decision_embed import DecisionScorer
-
-            tau = float(self.meta.get("tau") or 0.1)
-            scorer = DecisionScorer(self.encoder, self.meta["family"], question, tau)
-            return [c / tau for c in scorer.cosines([state])[0]]
+            scorer = self._scorer(question)
+            return [c / scorer.tau for c in scorer.cosines([state])[0]]
         from .training.decision_lm import LMScorer
 
         scorer = LMScorer(
@@ -101,11 +117,8 @@ class DecisionModel:
         self, states: List[Any], question: Dict[str, Any]
     ) -> List[List[float]]:
         if self.backbone == "embedding":
-            from .training.decision_embed import DecisionScorer
-
-            tau = float(self.meta.get("tau") or 0.1)
-            scorer = DecisionScorer(self.encoder, self.meta["family"], question, tau)
-            return [[c / tau for c in row] for row in scorer.cosines(states)]
+            scorer = self._scorer(question)
+            return [[c / scorer.tau for c in row] for row in scorer.cosines(states)]
         from .training.decision_lm import LMScorer
 
         scorer = LMScorer(
@@ -175,24 +188,29 @@ def base_decision_logits(
     states: List[Any],
     *,
     device: Optional[str] = None,
+    max_length: Optional[int] = None,
 ) -> List[List[float]]:
     """Zero-shot option logits from an untrained base model, scored exactly
-    the way training scores it (the "before" of every comparison)."""
+    the way training scores it (the "before" of every comparison); it reads
+    at most ``max_length`` tokens, the trainer's default unless given."""
     from .training.common import pick_device
 
     device = pick_device(device)
     if backbone == "embedding":
-        from .training.decision_embed import DecisionScorer, load_encoder
+        from .training.decision_embed import DEFAULTS, DecisionScorer, load_encoder
 
         encoder = load_encoder(base_model, family, device)
-        encoder.max_seq_length = 256
-        scorer = DecisionScorer(encoder, family, question, 0.1)
-        return [[c / 0.1 for c in row] for row in scorer.cosines(states)]
+        encoder.max_seq_length = int(max_length or DEFAULTS["max_length"])
+        tau = float(DEFAULTS["tau"])
+        scorer = DecisionScorer(encoder, family, question, tau)
+        return [[c / tau for c in row] for row in scorer.cosines(states)]
+    from .training.decision_lm import DEFAULTS as LM_DEFAULTS
     from .training.decision_lm import LMScorer, load_lm
 
     tokenizer, model = load_lm(base_model, device)
     model.eval()
-    return LMScorer(tokenizer, model, question, device, 1024).logits(states)
+    length = int(max_length or LM_DEFAULTS["max_length"])
+    return LMScorer(tokenizer, model, question, device, length).logits(states)
 
 
 __all__ = [

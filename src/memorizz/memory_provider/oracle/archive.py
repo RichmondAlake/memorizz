@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from ...enums.memory_type import MemoryType
 from ...memory_archive import ID_FIELDS, MemoryArchiveError
+from .vector_staging import SHADOW_COLUMNS
 
 _RAW_TYPES = {
     MemoryType.CONVERSATION_MEMORY,
@@ -90,6 +91,7 @@ def columns(provider, kind):
                 length,
             )
             for name, data_type, nullable, default, length in cursor
+            if name.lower() not in SHADOW_COLUMNS  # a swap's staged vectors
         }
     return cache[kind]
 
@@ -146,6 +148,8 @@ def _decode(provider, kind, cursor, *, parse_content=True):
     for raw in cursor:
         data = {}
         for key, item in zip(names, raw):
+            if key in SHADOW_COLUMNS:
+                continue
             item = provider._read_lob_value(item)
             if isinstance(item, bytes):
                 item = str(uuid.UUID(bytes=item))

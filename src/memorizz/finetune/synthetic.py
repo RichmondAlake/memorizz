@@ -214,8 +214,9 @@ def stratified_splits(
     examples: List[Example], key_of: Callable[[Example], str]
 ) -> None:
     """Give every label its share of held-out examples: about 15% test and
-    10% validation, taken from the end of each label's list so examples
-    written together mostly stay together."""
+    10% validation, taken as whole groups (examples written together, such
+    as one generation call's paraphrases) from the end of each label's list,
+    so related examples never land on both sides of a split."""
     by_label: Dict[str, List[Example]] = {}
     for example in examples:
         by_label.setdefault(key_of(example), []).append(example)
@@ -223,13 +224,24 @@ def stratified_splits(
         n = len(rows)
         n_test = max(1, round(0.15 * n)) if n >= 3 else 0
         n_val = max(1, round(0.10 * n)) if n >= 6 else 0
-        for i, example in enumerate(rows):
-            if i >= n - n_test:
-                example.split = "test"
-            elif i >= n - n_test - n_val:
-                example.split = "validation"
+        groups: Dict[str, List[Example]] = {}
+        for example in rows:
+            groups.setdefault(example.group or example.example_id, []).append(example)
+        for example in rows:
+            example.split = "train"
+        test = validation = 0
+        for members in reversed(list(groups.values())):
+            # Keep at least one group (and most examples) for training.
+            if test < n_test and n - test - validation - len(members) > 0:
+                split = "test"
+                test += len(members)
+            elif validation < n_val and n - test - validation - len(members) > 0:
+                split = "validation"
+                validation += len(members)
             else:
-                example.split = "train"
+                continue
+            for example in members:
+                example.split = split
 
 
 def generate_decision_examples(
@@ -653,6 +665,11 @@ def generate_pairs(
                 by_id[int(item.get("id"))] = item
             except (TypeError, ValueError, AttributeError):
                 continue
+        if not by_id and len(items) == len(batch):
+            # No usable ids: the teacher answered in order.
+            by_id = {
+                i + 1: item for i, item in enumerate(items) if isinstance(item, dict)
+            }
         for i, passage in enumerate(batch):
             item = by_id.get(i + 1) or {}
             query = str(item.get("query") or "").strip()

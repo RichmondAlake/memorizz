@@ -61,6 +61,9 @@ class Dataset:
     spec: Dict[str, Any] = field(default_factory=dict)
     description: str = ""
     owner: str = ""  # the MCP principal that created it over HTTP; "" for local use
+    # A frozen test set: only scored on (to compare versions), never trained
+    # on or replayed.
+    test_set: bool = False
     dataset_id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=utcnow)
     updated_at: str = field(default_factory=utcnow)
@@ -108,6 +111,7 @@ class TrainingRun:
     backend: str = "local"  # local (sentence-transformers / PEFT) | unsloth
     params: Dict[str, Any] = field(default_factory=dict)
     name: str = ""
+    label: str = ""  # a short name people give a version; shown instead of "v3"
     status: str = RunStatus.QUEUED.value
     device: str = ""
     output_dir: str = ""

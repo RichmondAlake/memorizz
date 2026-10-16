@@ -1301,6 +1301,10 @@ def create_app(
             _state["provider_type"] = provider_type
             _state["read_only"] = read_only_mode
             logger.info(f"Connected to {provider_type} provider")
+            # Other MemoRizz processes can then see this UI uses the store.
+            from ..finetune import clients
+
+            clients.register("ui", provider, port=request.url.port)
 
             return RedirectResponse(url="/dashboard", status_code=302)
 

@@ -3,11 +3,13 @@
 # See LICENSE file in the project root for full license information.
 
 import importlib
+import importlib.util
 import json
 import logging
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -25,10 +27,12 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     np = None
 
+from ...embeddings import embed_as_query
 from ...enums.memory_type import MemoryType
 from ..base import _UNSET as _ANY_USER
 from ..base import MemoryProvider, MemoryProviderCapabilities, filter_tool_log_rows
 from ..vectors import cosine, flatten_vector
+from .vector_staging import FileSystemVectorStaging
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +107,7 @@ class FileSystemConfig:
         self.embedding_config = self.embedding_config or {}
 
 
-class FileSystemProvider(MemoryProvider):
+class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
     """
     Filesystem-backed implementation of the MemoryProvider interface.
 
@@ -241,10 +245,27 @@ class FileSystemProvider(MemoryProvider):
 
     @staticmethod
     def _load_faiss() -> Optional[Any]:
+        if sys.platform == "darwin":
+            # FAISS and PyTorch (local embedding models, fine-tuning) each ship
+            # an OpenMP runtime; on macOS the second one aborts the process.
+            # Let both load and keep FAISS on one thread. That is not enough
+            # when FAISS's runtime starts first: loading a second language
+            # model later crashed in transformers (tie_weights). PyTorch's
+            # runtime starting first is stable, so when PyTorch is installed
+            # it is loaded before FAISS.
+            os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+            if "torch" not in sys.modules and importlib.util.find_spec("torch"):
+                try:
+                    importlib.import_module("torch")
+                except Exception:  # a broken torch install must not stop the store
+                    pass
         try:
-            return importlib.import_module("faiss")
+            faiss = importlib.import_module("faiss")
         except ImportError:  # pragma: no cover - optional dependency
             return None
+        if sys.platform == "darwin" and hasattr(faiss, "omp_set_num_threads"):
+            faiss.omp_set_num_threads(1)
+        return faiss
 
     # ---------------------------------------------------------------------
     # Public API - Required by MemoryProvider
@@ -442,7 +463,7 @@ class FileSystemProvider(MemoryProvider):
         embedding_provider = self._get_embedding_provider()
         scored: List[Tuple[float, Dict[str, Any]]] = []
         if embedding_provider is not None:
-            query_embedding = embedding_provider.get_embedding(query)
+            query_embedding = embed_as_query(embedding_provider.get_embedding, query)
             for document in candidates:
                 target = document.get("embedding")
                 if not target:
@@ -1403,7 +1424,7 @@ class FileSystemProvider(MemoryProvider):
                 namespace=namespace,
             )
 
-        query_embedding = embedding_provider.get_embedding(query)
+        query_embedding = embed_as_query(embedding_provider.get_embedding, query)
         query_vector = self._normalize_vector(
             np.array(query_embedding, dtype="float32")
         )
@@ -1509,7 +1530,7 @@ class FileSystemProvider(MemoryProvider):
                 namespace=namespace,
             )
 
-        query_embedding = embedding_provider.get_embedding(query)
+        query_embedding = embed_as_query(embedding_provider.get_embedding, query)
         query_vector = (
             np.array(query_embedding, dtype="float32") if np else query_embedding
         )

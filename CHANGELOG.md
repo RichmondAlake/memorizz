@@ -4,6 +4,12 @@
 
 ### Added
 
+- Memory types lists Workflows (`/memory/workflow-memory`) and Skillbox
+  (`/memory/skillbox`): the stored workflow and skill records, browsed like
+  every other memory type. Continual learning keeps its trajectory and
+  learned-skill views. The trajectory view no longer fails on workflows
+  stored with list-shaped steps, tool-name signatures or a
+  `{"status": ...}` outcome (which counted as a failure).
 - Fine-tuning (`memorizz.finetune`, `memorizz finetune`, nine MCP tools, and
   the UI's Continual learning → Fine-tuning page): train **decision
   models** (the System One contract of Jev, Clef and pplx-decider: a state
@@ -32,9 +38,144 @@
   (`from_run`), replay a share of earlier datasets' training examples
   (`replay`), and generation can target the options a model gets wrong
   (`labels`). `evaluate` scores any version (a run, an untrained base model,
-  or Jev zero-shot) on any decision dataset's frozen examples and keeps the
-  result in the memory provider; the UI's "Across versions" table and
-  `memorizz finetune history` show what each round gained and kept.
+  or Jev zero-shot) on any dataset's examples and keeps the result in the
+  memory provider; the UI's "Across versions" table and
+  `memorizz finetune history` show what each round gained and kept. A
+  dataset can be marked a test set (`update_dataset(test_set=True)`): it is
+  then only scored on, never trained on or replayed. Runs are numbered per
+  job (v1, v2, …, with "from v1 + replay"), and can be named
+  (`rename_run`).
+- Putting fine-tuned models to work: the Fine-tuning page opens on **Models
+  in use** cards that compare the best fine-tuned version with what is in
+  use now and its untrained base on the same test examples, scored exactly
+  as training scores a run (so a card and the run's own before/after
+  agree), say whether fine-tuning helped, and swap it in or back with one
+  click (also `ft.overview()`, `ft.compare()`, `ft.verdict()`, `ft.swap()`,
+  `ft.swap_back()`, `memorizz finetune models | compare | swap |
+  swap-back`). When another fine-tuned version is in use, a version is
+  compared with it. Embedding models and rerankers are put to work only by
+  swapping; `activate` records decision models (routing, relevance).
+  - A verdict says "helped" (or "worse") only when a paired test says the
+    difference is unlikely to be chance (p < 0.05: McNemar's exact test on
+    right/wrong answers, a sign-flip randomisation test on nDCG per
+    question); otherwise it says the difference could be chance. Every
+    score keeps each example's result for this. Training and the UI's
+    comparisons share one scoring module, and the base model's "before" is
+    calibrated like the trained model's "after". A comparison pools every
+    fixed test set both models were scored on (never examples they trained
+    on), so a gain on one set and a loss on another both show.
+  - A **Model registry** page (`/fine-tuning/models`, `ft.registry()`)
+    lists every model per job: what runs now, each fine-tuned version as a
+    family tree with its data, training result, fixed-set scores and size,
+    failed runs with their errors, and the base models to start from (and
+    whether they are downloaded). A version in use cannot be deleted.
+  - Every finished run shows **how it trained**: its loss per step (raw and
+    smoothed, log scale, epoch boundaries), its validation score each epoch,
+    its test score before and after, and plain-words convergence notes
+    (still falling, levelled off, validation peaked: may be overfitting)
+    (`ft.curves(run_id)`). Embedding and reranker runs now score validation
+    each epoch too. The registry overlays versions of one job (loss by % of
+    training, validation by epoch).
+  - **The data it trained on**: each run's own snapshot by split and label,
+    what was replayed from which dataset, what has changed in the dataset
+    since, filterable and paged (`ft.run_data(run_id)`).
+  - **Speed**: Measure speed times a version doing what it does in use
+    (route one memory, embed one query, rerank one query's 10 memories)
+    next to what it would replace, each loaded the way the store loads it,
+    without the result cache, after a warm-up pass: median and p95 per call,
+    kept with the run and shown on its card and in the registry
+    (`ft.speed(run_id)`). A fine-tuned version is the size of its base, so
+    only what runs changes speed.
+  - Routers embed their options once per model instead of on every memory
+    routed (about 3x faster per memory on Qwen3-Embedding-0.6B).
+  - **Swap in** first shows what the swap touches: the memory store, its
+    agents, where the setting is saved, and the other MemoRizz processes on
+    the same store, which must restart (or, for embeddings, use the same
+    model) to stay correct. Processes record their store and models in a
+    temp-folder registry; older ones connected to the same database server
+    are flagged (`ft.swap_impact()`).
+  - Per-agent routers and rerankers: an agent can use its own fine-tuned
+    version, or none, while others follow the store's choice
+    (`ft.set_agent_model()`, Model registry → Per-agent choices). Embeddings
+    stay one model per store.
+  - The page groups datasets by job and walks each through Data, Train and
+    Results (the card's verdict with Swap in, a plain-words training report,
+    where the model goes wrong with a button to generate more for those
+    options, and every version on the same sets), with the question and
+    model input format under Advanced.
+  - Memory routing: `memorizz_store_memory` accepts `memory_type: "auto"`
+    and files the memory where the active router says (or skips it as
+    `do_not_store`), recording the router's answer;
+    `MEMORIZZ_ROUTING_MIN_CONFIDENCE` sets the confidence below which it
+    uses the default store.
+  - Embeddings: a swap re-embeds every store **beside its live vectors**
+    (Oracle shadow columns renamed into place, filesystem sidecar files, a
+    MongoDB staging collection), catches up with memories written or edited
+    meanwhile, then switches at once; a failure before the switch changes
+    nothing. The replaced vectors are kept, so swap back reuses them and
+    re-embeds only what changed. A fixed-size store keeps its size by
+    default (Matryoshka cut for EmbeddingGemma and Qwen3-Embedding); an
+    Oracle store can change to the model's full size
+    (`ft.embedding_plan()`, `ft.swap(..., dimensions=)`, `memorizz finetune
+    plan`, `--dimensions`, a size choice in the swap dialog). An Oracle vector
+    index is rebuilt on the new vectors before the switch. Cards and Compare
+    score an embedding model at the size the swap would store.
+  - Reranking: `MEMORIZZ_RERANKER_MODEL` (a cross-encoder or a relevance
+    decision model) rescores the candidates an agent's recall and
+    `memorizz_search_memories` find.
+  - `evaluate` scores embedding and reranker models too, including the
+    embedding model in use now (`in_use=True`, `--in-use`).
+
+### Fixed
+
+- Chat: a harness picked for one session (`/harness codex`) was saved on the
+  agent after the first turn, so every later session ran on that harness and
+  `/harness off` could not undo it. Saves now keep the agent's own harness
+  settings. `/harness off` runs the session natively even when the saved
+  agent itself uses a harness (and says how to change the saved agent), and
+  the prompt shows a saved agent's harness from the start
+  (`memorizz·codex>`).
+- Fine-tuning: listing datasets read every example on each page load;
+  listings are now cached (cleared by any write of the same kind, and
+  refreshed in the background), so the page stays fast with tens of
+  thousands of examples.
+- Fine-tuning metrics: tied ranking scores were credited to the right
+  answer (they now count at their expected value), queries with no wrong
+  candidate counted as perfect (they are now left out), and a Jev call that
+  returned nothing counted as choosing the first option (it now counts as
+  wrong).
+- Fine-tuning: a small-LM decision model cut long prompts from the end,
+  where the options and the answer slot are; long states are now shortened
+  instead. Examples written together could straddle train and test; they
+  now stay in one split.
+- Oracle: requests could freeze the UI for good (0% CPU, every request
+  waiting). Rows were decoded after their pooled connection was released,
+  and reading a CLOB then waited for that connection while another request
+  held it. Pooled connections now fetch CLOBs as text and BLOBs as bytes
+  with the rows, which also saves a round trip per value.
+- Searches embed the query as a query: asymmetric embedding models
+  (EmbeddingGemma, Qwen3-Embedding, Voyage, fine-tuned models) used their
+  document prompt for queries. Query and document vectors are cached apart.
+- The CLI and MCP server kept only the embedding provider from
+  `MEMORIZZ_DEFAULT_EMBEDDING_*` and used its default model; they now use
+  the configured model and size.
+- Oracle: deleting a shared-memory row by its id (fine-tuning and learning
+  records) removed nothing.
+- Fine-tuning: examples made from a conversation's memories all shared one
+  group, so nearly all landed in training; runs now hold out at least a
+  tenth of a dataset.
+- Fine-tuning: `start_run(detach=False)` trained inside the calling process,
+  where FAISS's OpenMP crashes PyTorch on macOS; it now waits for the worker
+  process (`in_process=True` keeps the old behaviour). Deleting a dataset
+  also deletes its evaluations.
+- Oracle: re-embedding skills (`update_by_id` with an embedding) was
+  silently ignored.
+- macOS: the FileSystem store's FAISS and PyTorch (local Hugging Face
+  embedding models, fine-tuning) each load an OpenMP runtime, and a process
+  using both aborted. MemoRizz now lets both load
+  (`KMP_DUPLICATE_LIB_OK`, unless you set it) and keeps FAISS on one thread.
+- Fine-tuning: holding out examples from a dataset marked all "train" could
+  leave fewer than eight to train on; it now falls back to a per-label split.
 
 ## 0.16.5 — 2026-10-12
 

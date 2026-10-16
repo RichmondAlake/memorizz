@@ -35,7 +35,7 @@ import os
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...memory_provider.vectors import cosine
 
@@ -579,6 +579,7 @@ def dedupe_and_select(
     max_chars_per_item: int = 600,
     dedupe_parent_sources: bool = False,
     selection_ledger: Optional[List[Dict[str, Any]]] = None,
+    rerank: Optional[Callable[[List[str]], List[float]]] = None,
 ) -> List[Dict[str, Any]]:
     """Dedupe retrieved memory rows and select a diverse, budgeted subset.
 
@@ -607,6 +608,10 @@ def dedupe_and_select(
         This is useful when an original record and a derived semantic record
         are retrieved together. It is opt-in because independent chunks from
         one long source can both be useful in general agent workloads.
+    rerank : callable, optional
+        Scores the surviving candidates' texts against the query (0-1, e.g. a
+        fine-tuned reranker or relevance decision model). Its score replaces
+        cosine/provider relevance; recency, importance and MMR still apply.
 
     Returns
     -------
@@ -761,6 +766,15 @@ def dedupe_and_select(
     # provider score order already established above.
     now = datetime.now(timezone.utc).timestamp()
     resolved_scoring = scoring or RetrievalScoring.from_env()
+    reranked: Optional[List[float]] = None
+    if rerank is not None and kept:
+        try:
+            reranked = [float(v) for v in rerank([c["text"] for c in kept])]
+            if len(reranked) != len(kept):
+                reranked = None
+        except Exception as exc:  # a broken reranker must not break recall
+            logger.warning("Reranker failed; keeping retrieval order: %s", exc)
+            reranked = None
     if query_embedding is not None:
         query_vec = list(query_embedding)
         for cand in kept:
@@ -775,6 +789,9 @@ def dedupe_and_select(
                 # only against the less-specific original query.
                 relevance = max(relevance, cand["score"])
             cand["_raw_relevance"] = relevance
+        if reranked is not None:
+            for cand, value in zip(kept, reranked):
+                cand["_raw_relevance"] = value
         score_candidates(kept, scoring=resolved_scoring, now=now)
 
         selected: List[Dict[str, Any]] = []
@@ -807,6 +824,9 @@ def dedupe_and_select(
         # recency/importance still apply (Generative Agents always blends all three).
         for cand in kept:
             cand["_raw_relevance"] = cand["score"]
+        if reranked is not None:
+            for cand, value in zip(kept, reranked):
+                cand["_raw_relevance"] = value
         score_candidates(kept, scoring=resolved_scoring, now=now)
         ranked = sorted(kept, key=lambda c: (-c["_relevance"], c["id"]))
         selected = ranked[:max_items]

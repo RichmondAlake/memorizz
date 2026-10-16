@@ -2,7 +2,9 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from ...llms._hf_offline import enable_hf_offline_env, is_hf_offline
@@ -40,7 +42,12 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
         self.config_kwargs = dict(self.config.get("config_kwargs") or {})
         self.prompt_name = self.config.get("prompt_name")
         self.truncate_dim = self.config.get("truncate_dim")
-        if self.model_name == "google/embeddinggemma-2":
+        # A model fine-tuned in MemoRizz (memorizz.finetune) records its
+        # family and the query/document prompts it was trained with.
+        self.finetuned = self._finetuned_meta(self.model_name)
+        if self.model_name == "google/embeddinggemma-2" or (
+            self.finetuned.get("family") == "embeddinggemma"
+        ):
             # MemoRizz's memory stores embed text; skip unused media encoders.
             self.config_kwargs = {
                 "vision_config": None,
@@ -84,6 +91,30 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
             self.model_name,
             self._dimensions_cache[self.model_name],
         )
+
+    @staticmethod
+    def _finetuned_meta(model_name: str) -> Dict[str, Any]:
+        path = os.path.join(str(model_name), "memorizz_model.json")
+        if not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as handle:
+                meta = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        return meta if isinstance(meta, dict) else {}
+
+    def _default_prompt(
+        self, model_name: str, input_type: Optional[str]
+    ) -> Optional[str]:
+        """The prompt a model expects for a query or a stored document."""
+        if model_name == "google/embeddinggemma-2":
+            return "SearchQuery" if input_type == "query" else "Document"
+        if model_name == self.model_name and self.finetuned.get("prompts"):
+            prompts = self.finetuned["prompts"]
+            name = "query" if input_type == "query" else "document"
+            return name if prompts.get(name) else None
+        return None
 
     def _load_model(self, model_name: str):
         """Instantiate a SentenceTransformer model."""
@@ -175,10 +206,8 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
         normalize = kwargs.get("normalize_embeddings", self.normalize_embeddings)
         encode_options = {}
         prompt_name = kwargs.get("prompt_name", self.prompt_name)
-        if model_name == "google/embeddinggemma-2" and not prompt_name:
-            prompt_name = (
-                "SearchQuery" if kwargs.get("input_type") == "query" else "Document"
-            )
+        if not prompt_name:
+            prompt_name = self._default_prompt(model_name, kwargs.get("input_type"))
         if prompt_name:
             encode_options["prompt_name"] = prompt_name
         if kwargs.get("truncate_dim") is not None:
@@ -201,6 +230,33 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
                 exc,
             )
             raise
+
+    def get_embeddings(self, texts: List[str], **kwargs) -> List[List[float]]:
+        """Embed many texts in one batched pass (stored memories by default)."""
+        values = [str(text).replace("\n", " ") for text in texts]
+        if not values:
+            return []
+        model_name = kwargs.get("model", self.model_name)
+        model = self._get_model(model_name)
+        options: Dict[str, Any] = {}
+        prompt_name = kwargs.get(
+            "prompt_name", self.prompt_name
+        ) or self._default_prompt(model_name, kwargs.get("input_type"))
+        if prompt_name:
+            options["prompt_name"] = prompt_name
+        if kwargs.get("truncate_dim") is not None:
+            options["truncate_dim"] = kwargs["truncate_dim"]
+        vectors = model.encode(
+            values,
+            batch_size=self.batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=kwargs.get(
+                "normalize_embeddings", self.normalize_embeddings
+            ),
+            show_progress_bar=False,
+            **options,
+        )
+        return [vector.tolist() for vector in vectors]
 
     def get_dimensions(self) -> int:
         """Return the embedding dimension for the configured model."""

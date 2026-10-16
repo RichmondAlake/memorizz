@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% from '_ui.html' import page_header %}
+{% block title %}Model registry - MemoRizz{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/pages/finetune.css?v=13">
+<script src="/static/js/finetune_charts.js?v=2" defer></script>
+<script src="/static/js/finetune_swap.js?v=5" defer></script>
+<script src="/static/js/finetune_models.js?v=6" defer></script>
+{% endblock %}
+{% block content %}
+{{ page_header('Model registry', 'Every model behind your memory: what runs now, each fine-tuned version with how it was trained and how it scores, and the base models to start from.', 'Continual learning') }}
+<div id="mr-app" data-read-only="{{ 'true' if read_only else 'false' }}">
+    <div class="mr-summary" id="mr-summary" role="status"><span class="ft-muted">Loading…</span></div>
+    <div class="mr-jobs" id="mr-jobs"></div>
+    <p class="ft-muted mr-footnote">Kept in the {{ provider_type or 'connected' }} memory provider with your datasets: each version's lineage, the data it trained on, its settings and every score. Model files stay in this machine's MemoRizz home. Train new versions on the <a href="/fine-tuning">Fine-tuning</a> page.</p>
+</div>
+{% endblock %}

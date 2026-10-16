@@ -16,8 +16,9 @@ import random
 from pathlib import Path
 from typing import Any, Dict, List
 
-from ..bases import LETTERS, lm_messages
-from ..evaluate import classification_metrics, fit_temperature, ranking_metrics, softmax
+from ..bases import LETTERS, lm_messages, render_state
+from ..evaluate import fit_temperature, softmax
+from ..scoring import decision_metrics
 from ..tasks import gold_key, only_question, options
 from .common import (
     Reporter,
@@ -50,6 +51,9 @@ def load_lm(base_model: str, device: str, precision: str = "auto"):
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     tokenizer.padding_side = "left"  # the answer slot is the last position
+    # Never cut the end of a prompt: that is where the answer slot is. Long
+    # states are shortened before this (LMScorer.prompt); this is a backstop.
+    tokenizer.truncation_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
@@ -87,12 +91,30 @@ class LMScorer:
         self.keys = [key for key, _ in options(question)]
         self.ids = letter_ids(tokenizer, len(self.keys))
 
+    def _length(self, text: str) -> int:
+        return len(self.tokenizer(text, add_special_tokens=False)["input_ids"])
+
+    def prompt(self, state: Any, order: List[int]) -> tuple[str, List[str]]:
+        """The prompt for one state, its state shortened (head kept) when the
+        whole prompt would not fit in ``max_length`` tokens: the question,
+        the options and the answer slot always stay."""
+        messages, keys = lm_messages(self.question, state, order)
+        text = prompt_text(self.tokenizer, messages)
+        if self._length(text) <= self.max_length:
+            return text, keys
+        empty, _ = lm_messages(self.question, "", order)
+        budget = self.max_length - self._length(prompt_text(self.tokenizer, empty)) - 4
+        ids = self.tokenizer(render_state(state), add_special_tokens=False)["input_ids"]
+        short = self.tokenizer.decode(ids[: max(0, budget)]) + " …"
+        messages, keys = lm_messages(self.question, short, order)
+        return prompt_text(self.tokenizer, messages), keys
+
     def forward(self, states: List[Any], orders: List[List[int]]):
         """Letter logits [B, K] (in shown order) and each row's shown keys."""
         texts, shown = [], []
         for state, order in zip(states, orders):
-            messages, keys = lm_messages(self.question, state, order)
-            texts.append(prompt_text(self.tokenizer, messages))
+            text, keys = self.prompt(state, order)
+            texts.append(text)
             shown.append(keys)
         encoded = self.tokenizer(
             texts,
@@ -137,7 +159,10 @@ def evaluate_rows(
     logits = scorer.logits(states)
     gold = [scorer.keys.index(gold_key(scorer.question, r["label"][qid])) for r in rows]
     probabilities = [softmax(row, temperature) for row in logits]
-    metrics = classification_metrics(probabilities, gold, scorer.keys)
+    metrics = decision_metrics(
+        rows, probabilities, gold, scorer.keys, scorer.question["type"]
+    )
+    metrics["temperature"] = temperature
     if flips:
         reversed_logits = scorer.logits(states, reverse=True)
         changed = sum(
@@ -147,14 +172,16 @@ def evaluate_rows(
             != max(range(len(b)), key=b.__getitem__)
         )
         metrics["order_flip_rate"] = round(changed / len(rows), 4)
-    if scorer.question["type"] == "noul":
-        groups: Dict[str, List[tuple]] = {}
-        for row, probs, g in zip(rows, probabilities, gold):
-            state = row["input"]["state"]
-            query = state.get("query") if isinstance(state, dict) else row.get("group")
-            groups.setdefault(str(query), []).append((probs[1], float(g)))
-        metrics.update(ranking_metrics(list(groups.values())))
     return metrics
+
+
+def validation_temperature(scorer: LMScorer, qid: str, rows) -> float:
+    """The temperature that calibrates ``scorer`` on the validation rows."""
+    if not rows:
+        return 1.0
+    logits = scorer.logits([r["input"]["state"] for r in rows])
+    gold = [scorer.keys.index(gold_key(scorer.question, r["label"][qid])) for r in rows]
+    return fit_temperature(logits, gold)
 
 
 def train(
@@ -177,8 +204,14 @@ def train(
     scorer = LMScorer(tokenizer, model, question, device, int(params["max_length"]))
     evaluation_rows = data.get("test") or data.get("validation") or []
 
+    # Calibrated on validation like the trained model (see decision_embed).
     report.status("Scoring the base model on held-out examples")
-    before = evaluate_rows(scorer, qid, evaluation_rows)
+    before = evaluate_rows(
+        scorer,
+        qid,
+        evaluation_rows,
+        temperature=validation_temperature(scorer, qid, data.get("validation")),
+    )
     report.evaluation("before", before)
 
     if params["gradient_checkpointing"]:
@@ -268,20 +301,18 @@ def train(
             report.evaluation("validation", metrics, epoch=epoch + 1, step=step)
 
     model.eval()
-    temperature = 1.0
+    # Merge first: calibration and the "after" score are then those of the
+    # model as saved and used (see decision_embed).
+    merged = model.merge_and_unload()
+    merged.eval()
+    scorer.model = merged
+    temperature = validation_temperature(scorer, qid, data.get("validation"))
     if data.get("validation"):
-        logits = scorer.logits([r["input"]["state"] for r in data["validation"]])
-        gold = [
-            scorer.keys.index(gold_key(question, r["label"][qid]))
-            for r in data["validation"]
-        ]
-        temperature = fit_temperature(logits, gold)
         report.status(f"Calibrated: temperature {temperature}")
     after = evaluate_rows(scorer, qid, evaluation_rows, temperature=temperature)
     report.evaluation("after", after)
 
     report.status("Saving the model")
-    merged = model.merge_and_unload()
     model_dir = out_dir / "model"
     merged.save_pretrained(str(model_dir))
     tokenizer.save_pretrained(str(model_dir))

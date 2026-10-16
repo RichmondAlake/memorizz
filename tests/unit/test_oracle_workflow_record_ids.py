@@ -205,3 +205,29 @@ def test_store_workflow_includes_original_user_query(monkeypatch):
     assert inserted["memory_type"] == MemoryType.WORKFLOW_MEMORY
     assert inserted["optional"]["user_id"] == "user-1"
     assert inserted["optional"]["user_query"] == "Refund order R-1001"
+
+
+@pytest.mark.unit
+def test_skill_embeddings_can_be_rewritten(monkeypatch):
+    """Re-embedding after an embedding-model swap updates skills too."""
+    cursor = _Cursor()
+    provider, connection = _provider(monkeypatch, cursor)
+    monkeypatch.setattr(provider, "_get_table_name", lambda _memory_type: "skillbox")
+    monkeypatch.setattr(
+        provider,
+        "_prepare_vector_value",
+        lambda value: ("vector", len(value)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        provider, "_set_vector_input_size", lambda *_args: None, raising=False
+    )
+
+    updated = provider.update_by_id(
+        "skill-1", {"embedding": [0.1, 0.2, 0.3]}, MemoryType.SKILLBOX
+    )
+
+    sql, params = cursor.executions[-1]
+    assert updated is True and "embedding" in sql and "skill_id = :skill_id" in sql
+    assert params["skill_id"] == "skill-1"
+    assert connection.commits == 1

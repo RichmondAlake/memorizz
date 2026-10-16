@@ -14,8 +14,11 @@ data the run trained on, the model it produced, its live metrics
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -37,13 +40,33 @@ def finetune_home() -> Path:
 
 
 class FineTuneStore:
-    """Fine-tuning records in a MemoRizz memory provider."""
+    """Fine-tuning records in a MemoRizz memory provider.
+
+    Listings are kept in memory: a page that shows every dataset's counts
+    would otherwise read every example on each load. Any write through this
+    store clears them at once, so its own changes show immediately. A
+    listing older than ``LIST_TTL`` seconds is still served while it is read
+    again in the background, so another process's writes show on a later
+    load."""
+
+    LIST_TTL = 30.0
 
     def __init__(self, provider: Any, *, home: Optional[str | Path] = None):
         if provider is None:
             raise ValueError("Fine-tuning needs a memory provider to hold its data")
         self.provider = provider
         self.home = Path(home).expanduser() if home else finetune_home()
+        self._cache: Dict[tuple, tuple] = {}
+        self._refreshing: set = set()
+        self._cache_lock = threading.Lock()
+
+    def _forget(self, record_type: Optional[str] = None) -> None:
+        """Drop cached listings of ``record_type`` (all when None): a run's
+        progress, saved while it trains, keeps the examples cached."""
+        with self._cache_lock:
+            for key in list(self._cache):
+                if record_type is None or key[0] == record_type:
+                    del self._cache[key]
 
     # -- provider rows ------------------------------------------------------
 
@@ -58,6 +81,7 @@ class FineTuneStore:
             "trace_memory_id": scope,
             "timestamp": value.get("updated_at") or utcnow(),
         }
+        self._forget(record_type)
         document = {
             "_id": record_id,
             "memory_id": record_id,
@@ -109,6 +133,38 @@ class FineTuneStore:
         self, record_type: str, scope: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Every record of one type (in one dataset when ``scope`` is set)."""
+        key = (record_type, scope)
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            stale = cached is not None and time.monotonic() - cached[0] >= self.LIST_TTL
+            refresh = stale and key not in self._refreshing
+            if refresh:
+                self._refreshing.add(key)
+        if cached is not None:
+            if refresh:
+                # Serve what we have; read it again in the background.
+                threading.Thread(target=self._refresh, args=(key,), daemon=True).start()
+            return copy.deepcopy(cached[1])
+        out = self._list_uncached(record_type, scope)
+        with self._cache_lock:
+            self._cache[key] = (time.monotonic(), out)
+        return copy.deepcopy(out)
+
+    def _refresh(self, key: tuple) -> None:
+        try:
+            out = self._list_uncached(*key)
+            with self._cache_lock:
+                if key in self._cache:  # not cleared by a write meanwhile
+                    self._cache[key] = (time.monotonic(), out)
+        except Exception:  # the next read tries again
+            pass
+        finally:
+            with self._cache_lock:
+                self._refreshing.discard(key)
+
+    def _list_uncached(
+        self, record_type: str, scope: Optional[str]
+    ) -> List[Dict[str, Any]]:
         rows: List[Mapping[str, Any]] = []
         if self._indexed():
             cursor = None
@@ -137,6 +193,7 @@ class FineTuneStore:
         return out
 
     def _delete(self, record_id: str) -> bool:
+        self._forget()
         try:
             return bool(
                 self.provider.delete_by_id(str(record_id), MemoryType.SHARED_MEMORY)
@@ -172,12 +229,27 @@ class FineTuneStore:
             self._delete(example.example_id)
         for run in self.list_runs(dataset_id):
             self._delete(run.run_id)
+        for result in self.list_evals(dataset_id):
+            self.delete_eval(result["eval_id"])
         return self._delete(dataset_id)
 
     def counts(
         self, dataset_id: str, examples: Optional[List[Example]] = None
     ) -> Dict[str, Any]:
         examples = self.examples(dataset_id) if examples is None else examples
+        return self._tally(examples)
+
+    def all_counts(self) -> Dict[str, Dict[str, Any]]:
+        """Counts for every dataset from one listing of the examples (not one
+        per dataset)."""
+        grouped: Dict[str, List[Example]] = {}
+        for row in self._list(EXAMPLE_RECORD):
+            example = Example(**self._fields(row, Example))
+            grouped.setdefault(example.dataset_id, []).append(example)
+        return {key: self._tally(rows) for key, rows in grouped.items()}
+
+    @staticmethod
+    def _tally(examples: List[Example]) -> Dict[str, Any]:
         out: Dict[str, Any] = {"total": len(examples), "status": {}, "split": {}}
         for e in examples:
             out["status"][e.status] = out["status"].get(e.status, 0) + 1

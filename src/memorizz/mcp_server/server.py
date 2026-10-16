@@ -909,7 +909,13 @@ def create_memorizz_mcp_server(
         memory_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Store a tenant-scoped knowledge-base or short-term memory record."""
+        """Store a tenant-scoped knowledge-base or short-term memory record.
+
+        memory_type "auto" asks the active fine-tuned memory-routing model
+        where it belongs (knowledge_base, short_term_memory, or not stored);
+        the result's ``routing`` says what it decided and, when the memory
+        belongs elsewhere (an entity, a conversation turn), which tool files it.
+        """
         return await _tool_call(
             service.remember,
             content,

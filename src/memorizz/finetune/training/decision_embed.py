@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ..bases import decision_options, decision_query
-from ..evaluate import classification_metrics, fit_temperature, ranking_metrics, softmax
+from ..evaluate import fit_temperature, softmax
+from ..scoring import decision_metrics
 from ..tasks import gold_key, only_question, options
 from .common import (
     Reporter,
@@ -94,9 +95,21 @@ def merge_lora(model) -> None:
 class DecisionScorer:
     """Scores states against one question's options with an encoder."""
 
-    def __init__(self, model, family: str, question: Dict[str, Any], tau: float):
+    def __init__(
+        self,
+        model,
+        family: str,
+        question: Dict[str, Any],
+        tau: float,
+        *,
+        cache_options: bool = False,
+    ):
+        """``cache_options`` embeds the options once and reuses them (a model
+        in use; never while training, when the model changes each step)."""
         self.model, self.family, self.question, self.tau = model, family, question, tau
         self.keys = [key for key, _ in options(question)]
+        self.cache_options = cache_options
+        self._options = None
 
     def cosines(self, states: List[Any], batch_size: int = 16) -> List[List[float]]:
         import torch
@@ -110,13 +123,17 @@ class DecisionScorer:
                 normalize_embeddings=True,
                 show_progress_bar=False,
             )
-            o = self.model.encode(
-                decision_options(self.family, self.question),
-                batch_size=batch_size,
-                convert_to_tensor=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
+            o = self._options
+            if o is None:
+                o = self.model.encode(
+                    decision_options(self.family, self.question),
+                    batch_size=batch_size,
+                    convert_to_tensor=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                if self.cache_options:
+                    self._options = o
         return (q @ o.T).float().cpu().tolist()
 
 
@@ -133,20 +150,20 @@ def evaluate_rows(
     logits = [[c / scorer.tau for c in row] for row in cosines]
     gold = [scorer.keys.index(gold_key(scorer.question, r["label"][qid])) for r in rows]
     probabilities = [softmax(row, temperature) for row in logits]
-    metrics = classification_metrics(probabilities, gold, scorer.keys)
-    if scorer.question["type"] == "noul":
-        metrics.update(ranking_metrics(_relevance_groups(rows, probabilities, gold)))
+    metrics = decision_metrics(
+        rows, probabilities, gold, scorer.keys, scorer.question["type"]
+    )
+    metrics["temperature"] = temperature
     return metrics
 
 
-def _relevance_groups(rows, probabilities, gold) -> List[List[tuple]]:
-    """Group pointwise relevance decisions by query to rank candidates."""
-    groups: Dict[str, List[tuple]] = {}
-    for row, probs, g in zip(rows, probabilities, gold):
-        state = row["input"]["state"]
-        query = state.get("query") if isinstance(state, dict) else row.get("group")
-        groups.setdefault(str(query), []).append((probs[1], float(g)))
-    return list(groups.values())
+def validation_temperature(scorer: DecisionScorer, qid: str, rows) -> float:
+    """The temperature that calibrates ``scorer`` on the validation rows."""
+    if not rows:
+        return 1.0
+    cosines = scorer.cosines([r["input"]["state"] for r in rows])
+    gold = [scorer.keys.index(gold_key(scorer.question, r["label"][qid])) for r in rows]
+    return fit_temperature([[c / scorer.tau for c in row] for row in cosines], gold)
 
 
 def train(
@@ -169,8 +186,16 @@ def train(
     scorer = DecisionScorer(model, family, question, float(params["tau"]))
     evaluation_rows = data.get("test") or data.get("validation") or []
 
+    # The base model is calibrated on validation exactly as the trained one
+    # will be, so the before/after change in log loss, Brier and ECE comes
+    # from training, not from calibrating only one side.
     report.status("Scoring the base model on held-out examples")
-    before = evaluate_rows(scorer, qid, evaluation_rows)
+    before = evaluate_rows(
+        scorer,
+        qid,
+        evaluation_rows,
+        temperature=validation_temperature(scorer, qid, data.get("validation")),
+    )
     report.evaluation("before", before)
 
     if params["lora"]:
@@ -248,20 +273,16 @@ def train(
             report.evaluation("validation", metrics, epoch=epoch + 1, step=step)
 
     model.eval()
-    temperature = 1.0
+    # Merge first: calibration and the "after" score are then those of the
+    # model as saved and used, not of the adapter before merging.
+    merge_lora(model)
+    temperature = validation_temperature(scorer, qid, data.get("validation"))
     if data.get("validation"):
-        cos = scorer.cosines([r["input"]["state"] for r in data["validation"]])
-        gold = [
-            scorer.keys.index(gold_key(question, r["label"][qid]))
-            for r in data["validation"]
-        ]
-        temperature = fit_temperature([[c / tau for c in row] for row in cos], gold)
         report.status(f"Calibrated: temperature {temperature}")
     after = evaluate_rows(scorer, qid, evaluation_rows, temperature=temperature)
     report.evaluation("after", after)
 
     report.status("Saving the model")
-    merge_lora(model)
     model_dir = out_dir / "model"
     model.save(str(model_dir))
     decision = {
@@ -294,6 +315,7 @@ __all__ = [
     "add_lora",
     "evaluate_rows",
     "load_encoder",
+    "validation_temperature",
     "merge_lora",
     "train",
 ]

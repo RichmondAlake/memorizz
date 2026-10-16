@@ -42,6 +42,7 @@ CONSOLE_PAGES = [
     "/learning-control-plane",
     "/persona-evolution",
     "/fine-tuning",
+    "/fine-tuning/models",
     "/memory/conversations",
     "/memory/workflows",
     "/memory/skills",

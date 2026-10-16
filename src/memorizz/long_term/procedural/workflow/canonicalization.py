@@ -45,8 +45,9 @@ def _tool_name_from_step_key(step_key: str) -> str:
     return str(step_key).strip()
 
 
-def canonical_signature(steps: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Ordered canonical units from a ``Workflow.steps`` dict.
+def canonical_signature(steps: Any) -> List[Dict[str, Any]]:
+    """Ordered canonical units from a ``Workflow.steps`` dict (or a list of
+    ``{"tool", "arguments", ...}`` steps, in list order).
 
     Rules (each unit-tested in ``tests/unit/test_canonicalization.py``):
 
@@ -71,9 +72,21 @@ def canonical_signature(steps: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     if not steps:
         return []
+    if isinstance(steps, dict):
+        items = list(steps.items())
+    elif isinstance(steps, (list, tuple)):
+        # Some writers store a list of {"tool", "arguments", ...} steps:
+        # number them in list order, as the dict form's keys would.
+        items = []
+        for position, data in enumerate(steps):
+            data = data if isinstance(data, dict) else {}
+            name = data.get("tool") or data.get("tool_name") or data.get("name") or ""
+            items.append((f"Step {position + 1}: {name}", data))
+    else:
+        return []
 
     entries = []
-    for index, (step_key, step_data) in enumerate(steps.items()):
+    for index, (step_key, step_data) in enumerate(items):
         data = step_data if isinstance(step_data, dict) else {}
         arguments = data.get("arguments")
         arg_keys = (
@@ -205,6 +218,16 @@ class TrajectoryStats:
         }
 
 
+def _outcome(value: Any) -> str:
+    """A run's outcome as "success" or another word; some writers store
+    ``{"status": "success"}`` instead of the bare word."""
+    if isinstance(value, dict):
+        value = value.get("status") or value.get("outcome") or value.get("result")
+    if hasattr(value, "value"):  # WorkflowOutcome
+        value = value.value
+    return str(value or "success").strip().lower()
+
+
 def aggregate_trajectory_stats(
     provider,
     agent_id: Optional[str] = None,
@@ -250,7 +273,7 @@ def aggregate_trajectory_stats(
             runs.append(
                 RunRef(
                     workflow_id=doc.get("workflow_id"),
-                    outcome=str(doc.get("outcome") or "success"),
+                    outcome=_outcome(doc.get("outcome")),
                     created_at=parse_iso_datetime(doc.get("created_at")),
                     user_query=doc.get("user_query"),
                     promoted_skill_id=doc.get("promoted_skill_id"),

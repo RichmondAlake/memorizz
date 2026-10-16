@@ -9,6 +9,9 @@ Active skills are monitored and demoted when they stop working. Shadow skills
 can instead be evaluated passively on later production workflows without
 being injected or executing anything again.
 
+To train the models behind memory instead (memory routing, embeddings,
+reranking), see [Fine-tuning](fine-tuning.md).
+
 When the [memory-first learning control plane](learning-control-plane.md) is
 enabled (the default alongside continual learning), workflow and skill
 lifecycle transitions are also captured as immutable events. The control

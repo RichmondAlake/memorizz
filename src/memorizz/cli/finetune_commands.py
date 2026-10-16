@@ -528,6 +528,11 @@ def evaluate(
     jev: Optional[str] = typer.Option(
         None, "--jev", help="Jev model, e.g. jev-latest (needs TYPESAFE_API_KEY)."
     ),
+    in_use: bool = typer.Option(
+        False,
+        "--in-use",
+        help="The embedding model in use now (retrieval and reranking datasets).",
+    ),
     split: str = typer.Option(
         "test", "--split", help="test, validation, held_out or all."
     ),
@@ -535,19 +540,28 @@ def evaluate(
     raw_json: bool = JSON_OUT,
 ):
     """Score a model on a dataset's frozen examples; kept for the history."""
-    if sum(bool(x) for x in (run_id, base_model, jev)) != 1:
-        raise typer.BadParameter("Give exactly one of --run, --base or --jev")
+    if sum(bool(x) for x in (run_id, base_model, jev, in_use)) != 1:
+        raise typer.BadParameter("Give exactly one of --run, --base, --jev or --in-use")
     with _finetuning(backend) as ft:
         result = ft.evaluate(
-            dataset_id, run_id=run_id, base_model=base_model, jev_model=jev, split=split
+            dataset_id,
+            run_id=run_id,
+            base_model=base_model,
+            jev_model=jev,
+            in_use=in_use,
+            split=split,
         )
     if raw_json:
         _print(result, True)
         return
-    m = result["metrics"]
     print(
-        f"{result['model']['label']} on {result['dataset_name']} ({split}, n={result['count']}): accuracy {m['accuracy']}, macro-F1 {m['macro_f1']}, ECE {m['ece']}"
+        f"{result['model']['label']} on {result['dataset_name']} ({split}, n={result['count']}): {_metrics_line(result['metrics'])}"
     )
+
+
+def _metrics_line(m: dict) -> str:
+    keys = ("accuracy", "macro_f1", "ece", "recall@1", "mrr@10", "ndcg@10")
+    return ", ".join(f"{k} {m[k]}" for k in keys if k in m)
 
 
 @finetune_app.command("history")
@@ -636,14 +650,127 @@ def rank(
 def activate(
     run_id: str,
     use: str = typer.Argument(
-        ..., help="memory_routing, relevance, embedding or reranker"
+        ..., help="memory_routing or relevance (use swap for embedding and reranking)"
     ),
     backend: Optional[str] = BACKEND,
     raw_json: bool = JSON_OUT,
 ):
-    """Make a trained model the one MemoRizz uses for ``use``."""
+    """Record a decision model for memory_routing or relevance.
+
+    Embedding models and rerankers are put to work with ``swap``."""
     with _finetuning(backend) as ft:
         _print(ft.activate(run_id, use), raw_json)
+
+
+@finetune_app.command("models")
+def models(backend: Optional[str] = BACKEND, raw_json: bool = JSON_OUT):
+    """What each job uses now, the best fine-tuned model for it, and whether
+    fine-tuning helped (on the same held-out examples)."""
+    with _finetuning(backend) as ft:
+        cards = ft.overview()
+    if raw_json:
+        _print(cards, True)
+        return
+    for card in cards:
+        print(f"{card['title']}\n  in use: {card['in_use']['label']}")
+        c = card["candidate"]
+        if not c:
+            print("  no fine-tuned model yet\n")
+            continue
+        e = c["evidence"]
+
+        def pct(v):
+            return "-" if v is None else f"{v * 100:.1f}%"
+
+        line = f"  {c['label']}: {e['metric']} {pct(e['fine_tuned'])} vs base {pct(e['base'])}"
+        if e.get("in_use"):
+            line += f" vs in use {pct(e['in_use']['value'])}"
+        print(
+            line
+            + f"  ({e['count']} {'frozen' if e['frozen'] else 'held-out'} examples)"
+        )
+        test = e.get("significance")
+        chance = (
+            f" (p = {test['p']}, {test['differ']} of {test['n']} differ)"
+            if test
+            else ""
+        )
+        verdict = {
+            "better": f"helped: {c['gain_points']:+} points over {c['compared_with']}, unlikely to be chance{chance}",
+            "worse": f"worse than {c['compared_with']}: {c['gain_points']:+} points{chance}",
+            "unclear": f"{c['gain_points']:+} points vs {c['compared_with']}, could be chance{chance}",
+            "untested": f"{c['gain_points']:+} points vs {c['compared_with']}, not tested for chance (memorizz finetune compare {c['run_id']})",
+        }.get(c.get("verdict"), "nothing to compare with yet")
+        state = (
+            "in use"
+            if c["in_use"]
+            else f"memorizz finetune swap {card['use']} {c['run_id']}"
+        )
+        print(f"  {verdict} · {state}\n")
+
+
+@finetune_app.command("compare")
+def compare(run_id: str, backend: Optional[str] = BACKEND, raw_json: bool = JSON_OUT):
+    """Score a fine-tuned model, its untrained base and (embeddings and
+    rerankers) the embedding model in use now on the run's test examples."""
+    with _finetuning(backend) as ft:
+        results = ft.compare(run_id)
+    if raw_json:
+        _print(results, True)
+        return
+    for r in results:
+        print(f"{r['model']['label']} (n={r['count']}): {_metrics_line(r['metrics'])}")
+
+
+@finetune_app.command("swap")
+def swap(
+    card: str = typer.Argument(..., help="memory_routing, embedding or reranking"),
+    run_id: str = typer.Argument(...),
+    dimensions: Optional[int] = typer.Option(
+        None,
+        "--dimensions",
+        help="Embeddings: the vector size to store (see `memorizz finetune plan`); "
+        "default keeps the store's size when the model can be cut to it",
+    ),
+    backend: Optional[str] = BACKEND,
+    raw_json: bool = JSON_OUT,
+):
+    """Put a fine-tuned model to work. Embedding swaps re-embed the stored
+    memories beside the live ones and switch at once; ``swap-back`` undoes
+    it, reusing the vectors it kept."""
+    with _finetuning(backend) as ft:
+        result = ft.swap(
+            card,
+            run_id,
+            progress=lambda m: print(m, file=sys.stderr, flush=True),
+            dimensions=dimensions,
+        )
+    _print(result, raw_json)
+
+
+@finetune_app.command("plan")
+def plan(
+    run_id: str = typer.Argument(..., help="An embedding run"),
+    backend: Optional[str] = BACKEND,
+    raw_json: bool = JSON_OUT,
+):
+    """The vector sizes an embedding version can be swapped in at."""
+    with _finetuning(backend) as ft:
+        _print(ft.embedding_plan(run_id), raw_json)
+
+
+@finetune_app.command("swap-back")
+def swap_back(
+    card: str = typer.Argument(..., help="memory_routing, embedding or reranking"),
+    backend: Optional[str] = BACKEND,
+    raw_json: bool = JSON_OUT,
+):
+    """Return a job to the model it used before the first swap."""
+    with _finetuning(backend) as ft:
+        result = ft.swap_back(
+            card, progress=lambda m: print(m, file=sys.stderr, flush=True)
+        )
+    _print(result, raw_json)
 
 
 @finetune_app.command("route")

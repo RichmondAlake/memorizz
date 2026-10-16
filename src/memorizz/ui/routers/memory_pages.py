@@ -43,6 +43,10 @@ async def memory_list(request: Request, memory_type: str, error: Optional[str] =
         "shared": MemoryType.SHARED_MEMORY,
         "cache": MemoryType.SEMANTIC_CACHE,
         "skills": MemoryType.SKILLBOX,
+        # The records themselves (/memory/workflows and /memory/skills are
+        # the continual-learning views of the same stores).
+        "workflow-memory": MemoryType.WORKFLOW_MEMORY,
+        "skillbox": MemoryType.SKILLBOX,
     }
 
     mem_type = type_mapping.get(memory_type)

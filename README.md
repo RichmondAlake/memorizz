@@ -132,7 +132,15 @@ The learning control plane adds traceable outcome evidence, bounded retrieval,
 and reversible forgetting. Together, these capabilities help agents retain,
 recall, reuse, and refine experience.
 
-Read about [continual learning](docs/guides/continual-learning.md), the
+Memorizz also fine-tunes the small models behind memory on your own
+memories: decision models that file each memory in the right store,
+embedding models (EmbeddingGemma 2, Qwen3-Embedding) and rerankers. The
+datasets stay in the connected memory provider, each model is scored against
+the one in use on held-out examples, and you swap it in (or back) from the
+UI, the CLI or MCP.
+
+Read about [continual learning](docs/guides/continual-learning.md),
+[fine-tuning](docs/guides/fine-tuning.md), the
 [learning control plane](docs/guides/learning-control-plane.md), the
 [forgetting mechanism](docs/guides/forgetting-mechanism.md), and
 [evaluation methods](docs/evaluation-suite.md).

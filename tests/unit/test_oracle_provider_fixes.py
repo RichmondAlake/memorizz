@@ -337,6 +337,23 @@ def test_delete_by_logical_id_and_raw_fallback(memory_type, column):
     assert connection.commits == 3
 
 
+@pytest.mark.unit
+def test_shared_memory_rows_delete_by_their_memory_id():
+    """Shared-memory rows (fine-tuning records, learning records) are stored
+    and read by memory_id; deleting by it must work too, not only by UUID."""
+    cursor = _Cursor(rowcount=1)
+    provider, _ = _provider(cursor)
+    assert provider.delete_by_id("bdaca0003a9b", MemoryType.SHARED_MEMORY) is True
+    sql, params = cursor.calls[-1]
+    assert sql == "DELETE FROM MEMORIZZ.shared_memory WHERE memory_id = :memory_id"
+    assert params == {"memory_id": "bdaca0003a9b"}
+    row_id = uuid.uuid4()
+    assert provider.delete_by_id(str(row_id), MemoryType.SHARED_MEMORY) is True
+    sql, params = cursor.calls[-1]
+    assert sql.endswith("WHERE memory_id = :memory_id OR id = :row_id")
+    assert params == {"memory_id": str(row_id), "row_id": row_id.bytes}
+
+
 # ---------------------------------------------------------------------------
 # Finding 3: workflow rows are written in one INSERT / one transaction
 # ---------------------------------------------------------------------------
@@ -1229,3 +1246,35 @@ def test_query_observability_records_falls_back_for_unsupported_filters():
         provider.query_observability_records(
             MemoryType.SHARED_MEMORY, cursor="@@not-a-cursor@@"
         )
+
+
+@pytest.mark.unit
+def test_pooled_connections_fetch_lobs_with_their_rows():
+    """LOBs read after ``with self._get_connection()`` used to wait on a
+    connection already back in the pool; under concurrent UI requests every
+    pooled connection could wait and the page froze. Connections now fetch
+    CLOBs as str and BLOBs as bytes."""
+    import oracledb
+
+    from memorizz.memory_provider.oracle.provider import _lobs_as_values
+
+    acquired = SimpleNamespace(outputtypehandler=None)
+    provider = OracleProvider.__new__(OracleProvider)
+    provider.pool = SimpleNamespace(acquire=lambda: acquired)
+    assert provider._get_connection() is acquired
+    assert acquired.outputtypehandler is _lobs_as_values
+
+    class _VarCursor:
+        arraysize = 50
+
+        def var(self, type_code, arraysize):
+            return (type_code, arraysize)
+
+    def handled(type_code):
+        return _lobs_as_values(_VarCursor(), SimpleNamespace(type_code=type_code))
+
+    assert handled(oracledb.DB_TYPE_CLOB) == (oracledb.DB_TYPE_LONG, 50)
+    assert handled(oracledb.DB_TYPE_NCLOB) == (oracledb.DB_TYPE_LONG_NVARCHAR, 50)
+    assert handled(oracledb.DB_TYPE_BLOB) == (oracledb.DB_TYPE_LONG_RAW, 50)
+    assert handled(oracledb.DB_TYPE_VARCHAR) is None
+    assert handled(oracledb.DB_TYPE_VECTOR) is None

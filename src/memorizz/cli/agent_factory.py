@@ -207,7 +207,12 @@ def _choose_embedding(llm_config: Dict[str, Any]) -> Dict[str, Any]:
     """
     explicit = _env("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER")
     if explicit:
-        return {"embedding_provider": explicit, "embedding_config": {}}
+        from ..embeddings import embedding_settings_from_env
+
+        # Keep the configured model and size (a fine-tuned model folder, a
+        # reduced dimension), not just the provider's default model.
+        _, config = embedding_settings_from_env()
+        return {"embedding_provider": explicit, "embedding_config": config}
 
     # Fully-local: if the LLM is Ollama (or Ollama is reachable) and the embed
     # model is pulled, use Ollama embeddings so nothing hits the network.
@@ -237,6 +242,20 @@ def _choose_embedding(llm_config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> Any:
+    """The memory provider the environment names (see ``_detect_memory_provider``),
+    recorded so other MemoRizz processes can see this one uses it."""
+    import sys
+
+    provider = _detect_memory_provider(llm_config, warnings)
+    if provider is not None:
+        from ..finetune import clients
+
+        args = " ".join(sys.argv[1:3])
+        clients.register("mcp" if "mcp" in args else "cli", provider)
+    return provider
+
+
+def _detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> Any:
     """Build a MemoryProvider, defaulting to a local FileSystem store."""
     backend = (_env("MEMORIZZ_BACKEND") or "").lower()
     if backend not in {"", "filesystem", "mongodb", "oracle", "notion"}:

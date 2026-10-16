@@ -14,7 +14,7 @@ from pymongo import InsertOne, MongoClient, ReplaceOne, ReturnDocument
 from pymongo.errors import CollectionInvalid, DuplicateKeyError, OperationFailure
 from pymongo.operations import SearchIndexModel
 
-from ...embeddings import get_embedding
+from ...embeddings import embed_as_query, get_embedding
 from ...enums.memory_type import MemoryType
 from ...memagent import MemAgentModel
 from ..base import (
@@ -23,6 +23,7 @@ from ..base import (
     MemoryProvider,
     MemoryProviderCapabilities,
 )
+from .vector_staging import MongoDBVectorStaging
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,10 @@ class MongoDBConfig:
 
 
 class MongoDBProvider(
-    GlobalEmbeddingFallbackMixin, FilteredSkillboxSearchMixin, MemoryProvider
+    MongoDBVectorStaging,
+    GlobalEmbeddingFallbackMixin,
+    FilteredSkillboxSearchMixin,
+    MemoryProvider,
 ):
     """MongoDB implementation of the MemoryProvider interface."""
 
@@ -1604,7 +1608,7 @@ class MongoDBProvider(
 
         # Get the embedding for the query
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
@@ -1636,7 +1640,7 @@ class MongoDBProvider(
 
         # Get the embedding for the query
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
@@ -1665,7 +1669,7 @@ class MongoDBProvider(
         layer enforces its own (stricter) similarity threshold on it.
         """
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(
                 "Failed to generate a skillbox query embedding (%s)",
@@ -1729,7 +1733,7 @@ class MongoDBProvider(
                 )
 
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.warning(
                 "Failed to generate an entity query embedding (%s)",
@@ -1779,7 +1783,7 @@ class MongoDBProvider(
 
         # Get the embedding for the query
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
@@ -1810,7 +1814,7 @@ class MongoDBProvider(
         """
         # Get the embedding for the query
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
@@ -1851,7 +1855,7 @@ class MongoDBProvider(
             caller can rely on the return shape.
         """
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.warning(
                 f"Failed to generate embedding for conversation_memory query: {e}"
@@ -1894,7 +1898,7 @@ class MongoDBProvider(
         queries a real semantic path.
         """
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.warning(
                 f"Failed to generate embedding for knowledge_base query: {e}"
@@ -2029,7 +2033,7 @@ class MongoDBProvider(
         """
 
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for semantic cache query: {e}")
             return []

@@ -240,6 +240,15 @@ semantic search on, for example
 when some records were stored before embeddings were on. `memorizz_store_memory`
 embeds what it stores whenever an embedding model works.
 
+**Fine-tuned models.** With a memory-routing model swapped in (see
+[Fine-tuning](fine-tuning.md#putting-a-model-to-work)),
+`memorizz_store_memory(content, memory_type="auto")` files the memory where
+the router says (knowledge base or short-term memory), stores nothing when it
+says `do_not_store`, and returns its answer as `routing`, with the tool that
+files an entity, a conversation turn or a summary properly. With
+`MEMORIZZ_RERANKER_MODEL` set, `memorizz_search_memories` reorders its
+semantic matches with that reranker; each match carries `rerank_score`.
+
 **Update instead of delete.** `memorizz_update_memory(record_id, content,
 memory_type="knowledge_base", reason=None, duplicate_of=None)` stores a new
 record and keeps the old one:

@@ -52,6 +52,7 @@ from ..completion import (
     CompletionRejectedError,
 )
 from ..conversation_history import is_trace_bundle_entry
+from ..embeddings import embed_as_query
 from ..enums import ApplicationMode, ApplicationModeConfig, MemoryType, Role
 from ..execution import (
     AgentExecutionError,
@@ -147,6 +148,19 @@ if TYPE_CHECKING:
     from ..short_term_memory.semantic_cache import SemanticCacheInspection
 
 logger = logging.getLogger(__name__)
+
+
+def _memory_reranker(query: str, agent_id: Any = None, provider: Any = None):
+    """The fine-tuned reranker for this agent's recall, bound to this query:
+    the agent's own choice, else the store's (MEMORIZZ_RERANKER_MODEL);
+    None without one."""
+    try:
+        from ..finetune.reranking import rerank_for
+
+        return rerank_for(query, provider=provider, agent_id=agent_id)
+    except Exception as exc:  # optional dependency; never break recall
+        logger.warning("Memory reranker unavailable: %s", exc)
+        return None
 
 
 _MIN_HISTORY_LIMIT = 24
@@ -9350,7 +9364,7 @@ class MemAgent:
 
                         # Served from the LRU cache — the retrieval calls
                         # above already embedded this exact query text.
-                        query_embedding = get_embedding(query)
+                        query_embedding = embed_as_query(get_embedding, query)
                     except Exception:
                         query_embedding = None
 
@@ -9362,6 +9376,11 @@ class MemAgent:
                         dedupe_parent_sources=policy.dedupe_parent_sources,
                         selection_ledger=self._last_selection_ledger,
                         scoring=self._retrieval_scoring(),
+                        rerank=_memory_reranker(
+                            query,
+                            agent_id=getattr(self, "agent_id", None),
+                            provider=getattr(self, "memory_provider", None),
+                        ),
                     )
                     if selected:
                         context["retrieved_memories"] = selected

@@ -7,7 +7,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -162,22 +162,33 @@ class EmbeddingManager:
         List[float]
             The embedding vector
         """
-        # Only memoize the plain-text call shape: kwargs may override the
-        # model/dimensions, which would make cached vectors wrong.
-        cacheable = isinstance(text, str) and bool(text) and not kwargs
+        # Only memoize the plain-text call shape (optionally marked as a
+        # query): other kwargs may override the model/dimensions, which would
+        # make cached vectors wrong.
+        cacheable = (
+            isinstance(text, str) and bool(text) and set(kwargs) <= {"input_type"}
+        )
+        key = _cache_key(text, kwargs.get("input_type")) if cacheable else None
         if cacheable:
             with self._embedding_cache_lock:
-                cached = self._embedding_cache.get(text)
+                cached = self._embedding_cache.get(key)
                 if cached is not None:
-                    self._embedding_cache.move_to_end(text)
+                    self._embedding_cache.move_to_end(key)
                     return list(cached)
 
-        result = self._provider.get_embedding(text, **kwargs)
+        if set(kwargs) == {"input_type"}:
+            result = (
+                embed_as_query(self._provider.get_embedding, text)
+                if kwargs["input_type"] == "query"
+                else _without_input_type(self._provider.get_embedding, text, kwargs)
+            )
+        else:
+            result = self._provider.get_embedding(text, **kwargs)
 
         if cacheable and isinstance(result, list) and result:
             with self._embedding_cache_lock:
-                self._embedding_cache[text] = list(result)
-                self._embedding_cache.move_to_end(text)
+                self._embedding_cache[key] = list(result)
+                self._embedding_cache.move_to_end(key)
                 while len(self._embedding_cache) > _EMBEDDING_CACHE_MAX_ENTRIES:
                     self._embedding_cache.popitem(last=False)
         return result
@@ -192,24 +203,25 @@ class EmbeddingManager:
         if not values:
             return []
         provider_batch = getattr(self._provider, "get_embeddings", None)
-        if kwargs or not callable(provider_batch):
+        if set(kwargs) - {"input_type"} or not callable(provider_batch):
             return [self.get_embedding(text, **kwargs) for text in values]
+        input_type = kwargs.get("input_type")
 
         results: List[Optional[List[float]]] = [None] * len(values)
         missing_indexes: List[int] = []
         missing_texts: List[str] = []
         with self._embedding_cache_lock:
             for index, text in enumerate(values):
-                cached = self._embedding_cache.get(text)
+                cached = self._embedding_cache.get(_cache_key(text, input_type))
                 if cached is None:
                     missing_indexes.append(index)
                     missing_texts.append(text)
                 else:
-                    self._embedding_cache.move_to_end(text)
+                    self._embedding_cache.move_to_end(_cache_key(text, input_type))
                     results[index] = list(cached)
 
         if missing_texts:
-            generated = provider_batch(missing_texts)
+            generated = _without_input_type(provider_batch, missing_texts, kwargs)
             if len(generated) != len(missing_texts):
                 raise RuntimeError(
                     "Embedding provider returned a different batch length "
@@ -222,8 +234,9 @@ class EmbeddingManager:
                     value = list(embedding)
                     results[index] = value
                     if text:
-                        self._embedding_cache[text] = value
-                        self._embedding_cache.move_to_end(text)
+                        key = _cache_key(text, input_type)
+                        self._embedding_cache[key] = value
+                        self._embedding_cache.move_to_end(key)
                 while len(self._embedding_cache) > _EMBEDDING_CACHE_MAX_ENTRIES:
                     self._embedding_cache.popitem(last=False)
         return [list(item or []) for item in results]
@@ -251,6 +264,38 @@ class EmbeddingManager:
             "dimensions": self.get_dimensions(),
             "config": self.config,
         }
+
+
+def embed_as_query(embed: Callable[..., List[float]], text: str) -> List[float]:
+    """Call ``embed(text, input_type="query")``; embedders that take only the
+    text (custom providers, test doubles) are called with the text alone."""
+    try:
+        return embed(text, input_type="query")
+    except TypeError as exc:
+        if "input_type" not in str(exc) and "argument" not in str(exc):
+            raise
+        return embed(text)
+
+
+def _without_input_type(
+    call: Callable[..., Any], value: Any, kwargs: Dict[str, Any]
+) -> Any:
+    if not kwargs:
+        return call(value)
+    try:
+        return call(value, **kwargs)
+    except TypeError as exc:
+        if set(kwargs) != {"input_type"} or (
+            "input_type" not in str(exc) and "argument" not in str(exc)
+        ):
+            raise
+        return call(value)
+
+
+def _cache_key(text: str, input_type: Optional[str]) -> str:
+    # Queries and stored documents embed differently on asymmetric models
+    # (Voyage, EmbeddingGemma, Qwen3-Embedding, MemoRizz fine-tuned models).
+    return f"{input_type}\x00{text}" if input_type else text
 
 
 # Global embedding manager instance (can be reconfigured)
@@ -311,6 +356,39 @@ def get_embedding_manager() -> EmbeddingManager:
     return _global_embedding_manager
 
 
+def embedding_settings_from_env() -> tuple:
+    """``(provider, config)`` from the MEMORIZZ_DEFAULT_EMBEDDING_* settings
+    (``("", {})`` when no provider is set)."""
+    import os
+
+    return embedding_settings_from(os.environ)
+
+
+def embedding_settings_from(values: Dict[str, str]) -> tuple:
+    """``(provider, config)`` from MEMORIZZ_DEFAULT_EMBEDDING_* values (the
+    environment, or settings saved elsewhere, such as before a swap)."""
+    name = (
+        str(values.get("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", "") or "").strip().lower()
+    )
+    config: Dict[str, Any] = {}
+    if not name:
+        return "", config
+    model = str(values.get("MEMORIZZ_DEFAULT_EMBEDDING_MODEL", "") or "").strip()
+    if model:
+        config["model"] = model
+    dimensions = str(
+        values.get("MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS", "") or ""
+    ).strip()
+    if dimensions.isdigit():
+        key = "output_dimension" if name == "voyageai" else "dimensions"
+        config[key] = int(dimensions)
+        if name == "huggingface":
+            # Matryoshka-trained models (EmbeddingGemma, Qwen3-Embedding)
+            # keep their quality when cut to a smaller size.
+            config["truncate_dim"] = int(dimensions)
+    return name, config
+
+
 def _default_embedding_manager() -> EmbeddingManager:
     """The provider named by MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER, else OpenAI.
 
@@ -318,18 +396,8 @@ def _default_embedding_manager() -> EmbeddingManager:
     _DIMENSIONS, so a local setup (``ollama`` with ``nomic-embed-text``) needs
     no OpenAI key.
     """
-    import os
-
-    name = os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", "").strip().lower()
+    name, config = embedding_settings_from_env()
     if name:
-        config: Dict[str, Any] = {}
-        model = os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_MODEL", "").strip()
-        if model:
-            config["model"] = model
-        dimensions = os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS", "").strip()
-        if dimensions.isdigit():
-            key = "output_dimension" if name == "voyageai" else "dimensions"
-            config[key] = int(dimensions)
         try:
             manager = EmbeddingManager(name, config)
             logger.info("Using the default embedding provider: %s", name)
@@ -359,6 +427,21 @@ def get_embedding(text: str, **kwargs) -> List[float]:
         The embedding vector
     """
     return get_embedding_manager().get_embedding(text, **kwargs)
+
+
+def get_query_embedding(text: str, **kwargs) -> List[float]:
+    """Embed a search query. Asymmetric models (Voyage, EmbeddingGemma,
+    Qwen3-Embedding, models fine-tuned in MemoRizz) embed queries with their
+    query prompt and stored memories with their document prompt; others
+    ignore the distinction."""
+    return get_embedding_manager().get_embedding(text, input_type="query", **kwargs)
+
+
+def reset_embedding_manager() -> None:
+    """Forget the global embedding manager so the next call rebuilds it from
+    the current ``MEMORIZZ_DEFAULT_EMBEDDING_*`` settings."""
+    global _global_embedding_manager
+    _global_embedding_manager = None
 
 
 def get_embedding_dimensions(model: Optional[str] = None) -> int:

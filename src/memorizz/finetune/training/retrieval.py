@@ -10,8 +10,10 @@ Both train on (query, positive memory, hard negatives) triples:
   pair with binary cross-entropy, positives against hard negatives and other
   queries' memories.
 
-Each is scored on the held-out queries before and after, against a corpus
-of every memory in the dataset.
+Each is scored on the held-out queries before and after with
+``memorizz.finetune.scoring`` (the code the comparisons in the UI use): an
+embedding model searches every memory in the dataset; a reranker reorders
+each query's memory, its look-alikes and 9 other memories.
 """
 
 from __future__ import annotations
@@ -70,17 +72,6 @@ def corpus_of(data: Dict[str, List[Dict[str, Any]]]) -> Dict[str, str]:
     return {doc_id: text for text, doc_id in texts.items()}
 
 
-def _ir_metrics(raw: Dict[str, Any], name: str) -> Dict[str, Any]:
-    pick = {
-        "recall@1": f"{name}_cosine_recall@1",
-        "recall@5": f"{name}_cosine_recall@5",
-        "recall@10": f"{name}_cosine_recall@10",
-        "mrr@10": f"{name}_cosine_mrr@10",
-        "ndcg@10": f"{name}_cosine_ndcg@10",
-    }
-    return {k: round(float(raw[v]), 4) for k, v in pick.items() if v in raw}
-
-
 def train_embedding(
     config: Dict[str, Any],
     data: Dict[str, List[Dict[str, Any]]],
@@ -93,9 +84,9 @@ def train_embedding(
         SentenceTransformerTrainingArguments,
         losses,
     )
-    from sentence_transformers.evaluation import InformationRetrievalEvaluator
     from sentence_transformers.training_args import BatchSamplers
 
+    from ..scoring import embedding_scorer, memory_pool, rank_held_out
     from .decision_embed import add_lora, load_encoder, merge_lora
 
     params = {**EMBEDDING_DEFAULTS, **(config.get("params") or {})}
@@ -106,23 +97,18 @@ def train_embedding(
     model = load_encoder(config["base_model"], family, device, str(params["precision"]))
     model.max_seq_length = int(params["max_length"])
 
-    corpus = corpus_of(data)
-    doc_id = {text: key for key, text in corpus.items()}
+    pool = memory_pool(data)
     held_out = data.get("test") or data.get("validation") or []
-    evaluator = InformationRetrievalEvaluator(
-        queries={f"q{i}": row["input"]["query"] for i, row in enumerate(held_out)},
-        corpus=corpus,
-        relevant_docs={
-            f"q{i}": {doc_id[row["input"]["positive"]]}
-            for i, row in enumerate(held_out)
-        },
-        query_prompt=prompts["query"],
-        corpus_prompt=prompts["document"],
-        name="test",
-        show_progress_bar=False,
-    )
+
+    def measure() -> Dict[str, Any]:
+        if not held_out:
+            return {}
+        return rank_held_out(
+            "embedding", held_out, pool, embedding_scorer(model, prompts)
+        )
+
     report.status("Scoring the base model on held-out queries")
-    before = _ir_metrics(evaluator(model), "test") if held_out else {}
+    before = measure()
     report.evaluation("before", before)
 
     if params["lora"]:
@@ -138,7 +124,19 @@ def train_embedding(
     loss = losses.MultipleNegativesRankingLoss(model)
     if family == "embeddinggemma":
         loss = losses.MatryoshkaLoss(model, loss, matryoshka_dims=[768, 512, 256, 128])
-    callback = reporter_callback(report)
+    validation = data.get("validation") or []
+    callback = reporter_callback(
+        report,
+        on_epoch=(
+            (
+                lambda: rank_held_out(
+                    "embedding", validation, pool, embedding_scorer(model, prompts)
+                )
+            )
+            if validation
+            else None
+        ),
+    )
     args = SentenceTransformerTrainingArguments(
         output_dir=str(out_dir / "checkpoints"),
         num_train_epochs=float(params["epochs"]),
@@ -171,11 +169,12 @@ def train_embedding(
     trainer.train()
     if callback.canceled:
         raise Canceled("Training was canceled")
-    after = _ir_metrics(evaluator(model), "test") if held_out else {}
+    # Merge first, so "after" scores the model as saved and used.
+    merge_lora(model)
+    after = measure()
     report.evaluation("after", after)
 
     report.status("Saving the model")
-    merge_lora(model)
     model.prompts = {"query": prompts["query"], "document": prompts["document"]}
     model_dir = out_dir / "model"
     model.save(str(model_dir))
@@ -184,6 +183,11 @@ def train_embedding(
         "family": family,
         "base_model": config["base_model"],
         "prompts": model.prompts,
+        "dimensions": int(
+            model.get_embedding_dimension()
+            if hasattr(model, "get_embedding_dimension")
+            else model.get_sentence_embedding_dimension()
+        ),
     }
     (model_dir / "memorizz_model.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
@@ -229,10 +233,9 @@ def train_reranker(
         CrossEncoderTrainer,
         CrossEncoderTrainingArguments,
     )
-    from sentence_transformers.cross_encoder.evaluation import (
-        CrossEncoderRerankingEvaluator,
-    )
     from sentence_transformers.cross_encoder.losses import BinaryCrossEntropyLoss
+
+    from ..scoring import cross_encoder_scorer, memory_pool, rank_held_out
 
     params = {**RERANKER_DEFAULTS, **(config.get("params") or {})}
     device = pick_device(params.get("device"))
@@ -246,23 +249,16 @@ def train_reranker(
     )
     pool = list(corpus_of(data).values())
     held_out = data.get("test") or data.get("validation") or []
-    evaluator = CrossEncoderRerankingEvaluator(
-        samples=reranking_samples(held_out, pool, 9, seed),
-        at_k=10,
-        always_rerank_positives=True,
-        name="test",
-        show_progress_bar=False,
-    )
 
-    def metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            k: round(float(raw[f"test_{k}"]), 4)
-            for k in ("map", "mrr@10", "ndcg@10")
-            if f"test_{k}" in raw
-        }
+    def measure() -> Dict[str, Any]:
+        if not held_out:
+            return {}
+        return rank_held_out(
+            "reranker", held_out, memory_pool(data), cross_encoder_scorer(model)
+        )
 
     report.status("Scoring the base model on held-out queries")
-    before = metrics(evaluator(model)) if held_out else {}
+    before = measure()
     report.evaluation("before", before)
 
     queries, passages, labels = [], [], []
@@ -277,7 +273,22 @@ def train_reranker(
     loss = BinaryCrossEntropyLoss(
         model, pos_weight=torch.tensor((len(labels) - positives) / positives)
     )
-    callback = reporter_callback(report)
+    validation = data.get("validation") or []
+    callback = reporter_callback(
+        report,
+        on_epoch=(
+            (
+                lambda: rank_held_out(
+                    "reranker",
+                    validation,
+                    memory_pool(data),
+                    cross_encoder_scorer(model),
+                )
+            )
+            if validation
+            else None
+        ),
+    )
     args = CrossEncoderTrainingArguments(
         output_dir=str(out_dir / "checkpoints"),
         num_train_epochs=float(params["epochs"]),
@@ -306,7 +317,7 @@ def train_reranker(
     trainer.train()
     if callback.canceled:
         raise Canceled("Training was canceled")
-    after = metrics(evaluator(model)) if held_out else {}
+    after = measure()
     report.evaluation("after", after)
     report.status("Saving the model")
     model_dir = out_dir / "model"

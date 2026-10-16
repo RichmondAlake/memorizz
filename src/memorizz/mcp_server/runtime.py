@@ -78,6 +78,13 @@ class MemorizzServerError(Exception):
         super().__init__(message)
 
 
+def _row_text(row: Dict[str, Any]) -> str:
+    content = row.get("content") if isinstance(row, dict) else None
+    if isinstance(content, dict):
+        content = content.get("content") or content.get("text")
+    return str(content or row.get("text") or "")
+
+
 def _accepts_keyword(function: Callable[..., Any], keyword: str) -> bool:
     try:
         parameters = inspect.signature(function).parameters.values()
@@ -1974,6 +1981,29 @@ class MemorizzRuntime:
             else:
                 if not include_superseded:
                     rows = [row for row in rows or [] if not _is_superseded(row)]
+                rerank = None
+                try:
+                    from ..finetune.reranking import rerank_for
+
+                    rerank = rerank_for(
+                        text, provider=self.provider, memory_id=memory_id
+                    )
+                except ImportError:
+                    pass
+                if rerank is not None:
+                    # A fine-tuned reranker (the store's, or that of the
+                    # agent owning this memory) reorders this tenant's
+                    # candidates before the result is cut to the limit.
+                    from ..finetune.reranking import rerank_rows
+
+                    rows = self._tenant_rows(rows, identity, len(rows or []) or 1)
+                    rows = rerank_rows(
+                        text,
+                        list(rows),
+                        _row_text,
+                        provider=self.provider,
+                        memory_id=memory_id,
+                    )
                 values = self._tenant_rows(rows, identity, resolved_limit)
         mode = "semantic"
         if not embedder.get("ready") or semantic_failed:
@@ -2211,6 +2241,12 @@ class MemorizzRuntime:
                 "content_too_large",
                 f"Memory content exceeds {self.config.max_text_chars} characters",
             )
+        routing: Optional[Dict[str, Any]] = None
+        if str(memory_type or "").strip().lower() == "auto":
+            routing = self._route_memory(text, memory_id)
+            if routing["memory_type"] is None:
+                return {"ok": True, "stored": False, "routing": routing}
+            memory_type = routing["memory_type"]
         resolved_type = self._normalize_memory_type(
             memory_type, identity, writable=True
         )
@@ -2222,8 +2258,15 @@ class MemorizzRuntime:
             "user_id",
             "memory_id",
             "memory_type",
+            "routing",
         ):
             safe_metadata.pop(reserved, None)
+        if routing and routing.get("routed_to"):
+            safe_metadata["routing"] = {
+                key: routing[key]
+                for key in ("routed_to", "confidence", "run_id", "applied")
+                if key in routing
+            }
         resolved_memory_id = str(memory_id or uuid.uuid4())
         document = {
             **safe_metadata,
@@ -2248,12 +2291,35 @@ class MemorizzRuntime:
             raise MemorizzServerError(
                 "provider_error", "The memory provider could not store the memory"
             ) from exc
-        return {
+        result = {
             "ok": True,
             "record_id": str(record_id),
             "memory_id": resolved_memory_id,
             "memory_type": resolved_type.value,
         }
+        if routing is not None:
+            result["routing"] = routing
+        return result
+
+    def _route_memory(
+        self, text: str, memory_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Where the memory router files ``text`` (the router of the agent
+        that owns ``memory_id`` if it has its own), limited to the stores
+        this tool writes."""
+        from ..finetune import routing as memory_routing
+
+        try:
+            answer = memory_routing.route(self.provider, text, memory_id=memory_id)
+        except Exception as exc:
+            logger.warning(
+                "Memory routing failed (%s); using the default store",
+                type(exc).__name__,
+            )
+            answer = None
+        return memory_routing.place(
+            answer, {t.value for t in _WRITABLE_MEMORY_TYPES}, default="knowledge_base"
+        )
 
     def forget(
         self,

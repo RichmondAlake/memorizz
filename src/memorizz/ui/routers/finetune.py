@@ -1,9 +1,11 @@
 """Fine-tuning: datasets in the connected memory provider, synthetic data,
-training runs with live metrics, and trained models to try and activate."""
+training runs with live metrics, and trained models to try, compare and
+swap in."""
 
 from __future__ import annotations
 
 import io
+import logging
 import os
 import threading
 import uuid
@@ -19,6 +21,7 @@ from ..security import ui_read_only
 from ..state import _state, templates
 from ..trace_access import current_principal
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["fine-tuning"])
 
 _jobs: Dict[str, Dict[str, Any]] = {}
@@ -65,7 +68,9 @@ async def _run(function, *args, **kwargs):
 
 
 @router.get("/fine-tuning", response_class=HTMLResponse)
-async def finetune_page(request: Request, dataset: str = ""):
+async def finetune_page(
+    request: Request, dataset: str = "", tab: str = "", run: str = ""
+):
     if not _state.get("provider"):
         return RedirectResponse("/connect", status_code=302)
     _provider()
@@ -75,11 +80,39 @@ async def finetune_page(request: Request, dataset: str = ""):
             "request": request,
             "active_page": "fine-tuning",
             "dataset_id": dataset,
+            # Deep links (the model registry): open a dataset's step and run.
+            "tab": tab
+            if tab in {"data", "train", "results", "scores", "task", "format"}
+            else "",
+            "run_id": run,
             "provider_type": _state.get("provider_type") or "",
             "read_only": ui_read_only() or _state.get("read_only", False),
         },
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get("/fine-tuning/models", response_class=HTMLResponse)
+async def model_registry_page(request: Request):
+    if not _state.get("provider"):
+        return RedirectResponse("/connect", status_code=302)
+    _provider()
+    return templates.TemplateResponse(
+        "finetune_models.html",
+        {
+            "request": request,
+            "active_page": "model-registry",
+            "provider_type": _state.get("provider_type") or "",
+            "read_only": ui_read_only() or _state.get("read_only", False),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/api/finetune/registry")
+async def model_registry():
+    """Every model per job: in use, fine-tuned versions, base models."""
+    return await _run(_ft().registry)
 
 
 @router.get("/api/finetune/overview")
@@ -128,6 +161,7 @@ class DatasetPatch(BaseModel):
     name: Optional[str] = None
     spec: Optional[Dict[str, Any]] = None
     description: Optional[str] = None
+    test_set: Optional[bool] = None
 
 
 @router.patch("/api/finetune/datasets/{dataset_id}")
@@ -139,6 +173,7 @@ async def update_dataset(dataset_id: str, body: DatasetPatch):
         name=body.name,
         spec=body.spec,
         description=body.description,
+        test_set=body.test_set,
     )
     return dataset.to_dict()
 
@@ -289,8 +324,10 @@ def _start_job(dataset_id: str, work) -> Dict[str, str]:
             job["report"] = work(progress)
             job["status"] = "succeeded"
         except (FineTuningError, ValueError, ImportError) as exc:
+            logger.warning("Fine-tuning job %s failed: %s", job_id, exc)
             job.update(status="failed", error=str(exc))
         except Exception as exc:  # shown in the page, not raised
+            logger.exception("Fine-tuning job %s failed", job_id)
             job.update(status="failed", error=f"{type(exc).__name__}: {exc}"[:500])
 
     threading.Thread(target=run, name=f"finetune-job-{job_id}", daemon=True).start()
@@ -302,7 +339,9 @@ class EvaluateIn(BaseModel):
     run_id: Optional[str] = None
     base_model: Optional[str] = None
     jev_model: Optional[str] = None
+    in_use: bool = False
     split: str = "test"
+    max_length: Optional[int] = None  # tokens an untrained base model reads
 
 
 @router.post("/api/finetune/evaluate")
@@ -315,7 +354,9 @@ async def evaluate(body: EvaluateIn):
             run_id=body.run_id,
             base_model=body.base_model,
             jev_model=body.jev_model,
+            in_use=body.in_use,
             split=body.split,
+            max_length=body.max_length,
         ),
     )
 
@@ -403,6 +444,7 @@ class RunIn(BaseModel):
     params: Dict[str, Any] = {}
     backend: str = "auto"
     name: str = ""
+    label: str = ""
     from_run: Optional[str] = None
     replay: Optional[List[Dict[str, Any]]] = None
 
@@ -419,8 +461,9 @@ async def start_run(dataset_id: str, body: RunIn):
         name=body.name,
         from_run=body.from_run or None,
         replay=body.replay or None,
+        label=body.label,
     )
-    return run.to_dict()
+    return await _run(ft.run, run.run_id)
 
 
 @router.get("/api/finetune/runs")
@@ -431,6 +474,49 @@ async def list_runs(dataset_id: str = ""):
 @router.get("/api/finetune/runs/{run_id}")
 async def get_run(run_id: str):
     return await _run(_ft().run, run_id)
+
+
+class RunPatch(BaseModel):
+    label: str = ""
+
+
+@router.patch("/api/finetune/runs/{run_id}")
+async def rename_run(run_id: str, body: RunPatch):
+    return await _run(_ft(write=True).rename_run, run_id, body.label)
+
+
+@router.get("/api/finetune/runs/{run_id}/curves")
+async def run_curves(run_id: str):
+    """Loss by step, validation per epoch, before/after and convergence."""
+    return await _run(_ft().curves, run_id)
+
+
+@router.get("/api/finetune/runs/{run_id}/data")
+async def run_data(
+    run_id: str, split: str = "", source: str = "", offset: int = 0, limit: int = 25
+):
+    """The examples the run trained and was scored on (its own snapshot)."""
+    return await _run(
+        _ft().run_data,
+        run_id,
+        split=split or None,
+        source=source or None,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post("/api/finetune/runs/{run_id}/speed")
+async def run_speed(run_id: str):
+    """Time the version, what is in use now and its base (a job)."""
+    ft = _ft(write=True)
+    return _start_job("", lambda progress: ft.speed(run_id, progress=progress))
+
+
+@router.get("/api/finetune/runs/{run_id}/verdict")
+async def run_verdict(run_id: str):
+    """The comparison and verdict the run's Models-in-use card would show."""
+    return await _run(_ft().verdict, run_id)
 
 
 @router.get("/api/finetune/runs/{run_id}/events")
@@ -468,19 +554,79 @@ async def rank(run_id: str, body: RankIn):
     return {"ranking": await _run(_ft().rank, run_id, body.query, body.passages)}
 
 
-class ActivateIn(BaseModel):
-    use: str
+# -- models in use: compare and swap -------------------------------------------
 
 
-@router.post("/api/finetune/runs/{run_id}/activate")
-async def activate(run_id: str, body: ActivateIn):
-    return await _run(_ft(write=True).activate, run_id, body.use)
+@router.get("/api/finetune/models")
+async def models():
+    return {"models": await _run(_ft().overview)}
 
 
-@router.post("/api/finetune/active/{use}/clear")
-async def deactivate(use: str):
-    await _run(_ft(write=True).deactivate, use)
-    return {"ok": True}
+class SwapIn(BaseModel):
+    run_id: str
+    # Embeddings: the vector size to store (from the run's embedding plan).
+    dimensions: Optional[int] = None
+
+
+def _job_progress(progress):
+    return lambda message: progress(0, 1, message)
+
+
+@router.post("/api/finetune/models/{card}/swap")
+async def swap(card: str, body: SwapIn):
+    ft = _ft(write=True)
+    return _start_job(
+        "",
+        lambda progress: ft.swap(
+            card,
+            body.run_id,
+            progress=_job_progress(progress),
+            dimensions=body.dimensions,
+        ),
+    )
+
+
+@router.post("/api/finetune/models/{card}/swap-back")
+async def swap_back(card: str):
+    ft = _ft(write=True)
+    return _start_job(
+        "", lambda progress: ft.swap_back(card, progress=_job_progress(progress))
+    )
+
+
+@router.get("/api/finetune/runs/{run_id}/embedding-plan")
+async def embedding_plan(run_id: str):
+    """The vector sizes an embedding version can be swapped in at."""
+    return await _run(_ft().embedding_plan, run_id)
+
+
+@router.get("/api/finetune/models/{card}/impact")
+async def swap_impact(card: str):
+    """What a swap for ``card`` touches: store, agents, other processes."""
+    return await _run(_ft().swap_impact, card)
+
+
+@router.get("/api/finetune/agents")
+async def agent_models():
+    """Each agent's own memory router and reranker, if it has one."""
+    return {"agents": await _run(_ft().agent_models)}
+
+
+class AgentModelIn(BaseModel):
+    choice: Optional[str] = None  # a run id, "off", or "default"
+
+
+@router.put("/api/finetune/agents/{agent_id}/models/{job}")
+async def set_agent_model(agent_id: str, job: str, body: AgentModelIn):
+    return await _run(_ft(write=True).set_agent_model, agent_id, job, body.choice)
+
+
+@router.post("/api/finetune/models/{card}/compare")
+async def compare(card: str, body: SwapIn):
+    """Score the fine-tuned model, its untrained base and (for embeddings and
+    reranking) the model in use now on the run's test examples."""
+    ft = _ft(write=True)
+    return _start_job("", lambda progress: ft.compare(body.run_id, progress=progress))
 
 
 __all__ = ["router"]

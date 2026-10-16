@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ....embeddings import get_embedding
+from ....embeddings import embed_as_query, get_embedding
 from ....enums.memory_type import MemoryType
 from ....llms.llm_provider import LLMProvider
 from ....memory_provider import MemoryProvider
@@ -355,7 +355,7 @@ class Skillbox:
             if similarity is None:
                 if query_embedding is None:
                     try:
-                        query_embedding = get_embedding(query)
+                        query_embedding = embed_as_query(get_embedding, query)
                     except Exception:
                         query_embedding = []
                 similarity = _cosine(query_embedding, doc.get("embedding") or [])

@@ -283,10 +283,10 @@ def test_decision_generation_balances_labels_and_tops_up_rejected_ones():
     assert report["rejected"]["verifier_disagreed"] >= 4
     assert all(e.verified and e.source == "synthetic" for e in examples)
     assert any("wrapped" in e.input["state"] for e in examples)
-    assert {e.split for e in examples if e.label["q"]["choice"] == "alpha"} >= {
-        "train",
-        "test",
-    }
+    # Examples written by one call are paraphrases of each other: they stay
+    # in one split, so none is tested against a near-copy it trained on.
+    for group in {e.group for e in examples}:
+        assert len({e.split for e in examples if e.group == group}) == 1
 
 
 class _PairModel:
@@ -550,9 +550,9 @@ def test_a_run_trains_on_a_snapshot_and_records_metrics_in_the_provider(
     )
     dataset = _seed(ft)
     with pytest.raises(FineTuningError, match="at least 8"):
-        ft.start_run(_seed(ft, n=3).dataset_id, detach=False)
+        ft.start_run(_seed(ft, n=3).dataset_id, in_process=True)
     run = ft.start_run(
-        dataset.dataset_id, base_model="Qwen/Qwen3-Embedding-0.6B", detach=False
+        dataset.dataset_id, base_model="Qwen/Qwen3-Embedding-0.6B", in_process=True
     )
     assert run.status == "succeeded" and run.metrics_after == {"accuracy": 0.9}
     # Everything was marked train: some were held out for scoring.
@@ -590,6 +590,10 @@ def test_a_run_trains_on_a_snapshot_and_records_metrics_in_the_provider(
     assert ft.route("Priya prefers calls")["memory_type"] == "entity_memory"
     with pytest.raises(FineTuningError):
         ft.activate(run.run_id, "embedding")
+    # A version in use is not deleted from under MemoRizz.
+    with pytest.raises(FineTuningError, match="in use for memory routing"):
+        ft.delete_run(run.run_id)
+    ft.deactivate("memory_routing")
     assert ft.delete_run(run.run_id) and "memory_routing" not in ft.active()
 
 
@@ -612,7 +616,7 @@ def test_a_failing_trainer_leaves_a_failed_run_with_the_error(ft, monkeypatch):
             "install": "",
         },
     )
-    run = ft.start_run(_seed(ft).dataset_id, detach=False)
+    run = ft.start_run(_seed(ft).dataset_id, in_process=True)
     assert (
         run.status == "failed"
         and "out of memory" in run.error

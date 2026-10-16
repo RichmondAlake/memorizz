@@ -90,6 +90,8 @@ trust boundaries.
 - Choose a [memory provider](memory-providers/filesystem.md) and follow the
   [multi-tenant contract](guides/multi-tenant.md).
 - Control token use with [context efficiency, semantic caching, and compaction](guides/context-efficiency.md).
+- [Fine-tune memory routing, embedding and reranking models](guides/fine-tuning.md)
+  on your own memories, and swap one in when it beats the model in use.
 - Inspect runs with [observability and trace analysis](observability-ui.md).
 - Verify optional integrations with [capability reports and preflight](reference/capabilities.md).
 - Use the [evaluation suite](evaluation-suite.md) for reproducible comparisons;

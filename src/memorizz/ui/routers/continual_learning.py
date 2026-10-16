@@ -110,8 +110,12 @@ def _tool_sequence(provider, stat: TrajectoryStats) -> str:
         if not doc:
             continue
         signature = doc.get("canonical_signature")
-        if signature:
-            return " → ".join(str(unit.get("tool")) for unit in signature)
+        if isinstance(signature, list) and signature:
+            # Units ({"tool", ...}), or bare tool names from other writers.
+            return " → ".join(
+                str(unit.get("tool") if isinstance(unit, dict) else unit)
+                for unit in signature
+            )
         steps = doc.get("steps") or {}
         if steps:
             from ...long_term.procedural.workflow.canonicalization import (

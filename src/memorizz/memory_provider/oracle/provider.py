@@ -21,6 +21,7 @@ except ImportError:
         "Install it with: pip install oracledb"
     )
 
+from ...embeddings import embed_as_query
 from ...enums.memory_type import MemoryType
 from ...long_term.semantic.persona.persona import Persona
 from ...long_term.semantic.persona.role_type import RoleType
@@ -33,6 +34,7 @@ from ..base import (
     MemoryProviderCapabilities,
     filter_tool_log_rows,
 )
+from .vector_staging import SHADOW_COLUMNS, OracleVectorStaging
 
 if TYPE_CHECKING:
     pass
@@ -157,6 +159,27 @@ def _cm(col: str, *emits: tuple) -> _Field:
 
 def _select_list(fields: tuple) -> str:
     return ", ".join(f.col for f in fields)
+
+
+def _lobs_as_values(cursor: Any, metadata: Any) -> Any:
+    """Output type handler: CLOB/NCLOB columns arrive as ``str`` and BLOBs as
+    ``bytes``, read with their rows.
+
+    A LOB locator is read over the connection that fetched it. Much of this
+    provider fetches inside ``with self._get_connection()`` and decodes the
+    rows after the block, by which time the connection is back in the pool;
+    a LOB read then waited for that connection while another thread held it,
+    and under concurrent requests every pooled connection could end up
+    waiting (the UI froze at 0% CPU). Values also save one round trip per
+    LOB."""
+    arraysize = getattr(cursor, "arraysize", 100)
+    if metadata.type_code is oracledb.DB_TYPE_CLOB:
+        return cursor.var(oracledb.DB_TYPE_LONG, arraysize=arraysize)
+    if metadata.type_code is oracledb.DB_TYPE_NCLOB:
+        return cursor.var(oracledb.DB_TYPE_LONG_NVARCHAR, arraysize=arraysize)
+    if metadata.type_code is oracledb.DB_TYPE_BLOB:
+        return cursor.var(oracledb.DB_TYPE_LONG_RAW, arraysize=arraysize)
+    return None
 
 
 _TS_CREATED = _c("created_at", kind="ts")
@@ -859,7 +882,10 @@ class OracleConfig:
 
 
 class OracleProvider(
-    GlobalEmbeddingFallbackMixin, FilteredSkillboxSearchMixin, MemoryProvider
+    OracleVectorStaging,
+    GlobalEmbeddingFallbackMixin,
+    FilteredSkillboxSearchMixin,
+    MemoryProvider,
 ):
     """Oracle Database implementation of the MemoryProvider interface."""
 
@@ -1278,8 +1304,11 @@ class OracleProvider(
         return self._observability_index
 
     def _get_connection(self):
-        """Get a connection from the pool."""
-        return self.pool.acquire()
+        """Get a connection from the pool; it fetches LOBs as plain values
+        (see ``_lobs_as_values``)."""
+        connection = self.pool.acquire()
+        connection.outputtypehandler = _lobs_as_values
+        return connection
 
     @staticmethod
     def _vector_dimension_from_ddl(ddl: str, column_name: str) -> Optional[int]:
@@ -2280,6 +2309,7 @@ class OracleProvider(
         doc = {
             column: (self._read_lob_value(value) if hasattr(value, "read") else value)
             for column, value in zip(columns, row)
+            if column not in SHADOW_COLUMNS  # staged/previous vectors of a swap
         }
         if memory_store_type == MemoryType.ENTITY_MEMORY:
             for key in ("attributes", "relations", "metadata"):
@@ -4113,7 +4143,7 @@ class OracleProvider(
             from ...embeddings import get_embedding
 
             try:
-                embedding = get_embedding(query)
+                embedding = embed_as_query(get_embedding, query)
             except Exception as e:
                 logger.error(f"Failed to generate embedding for entity query: {e}")
                 return []
@@ -4155,7 +4185,7 @@ class OracleProvider(
                 from ...embeddings import get_embedding
 
                 try:
-                    query_embedding = get_embedding(query)
+                    query_embedding = embed_as_query(get_embedding, query)
                 except Exception as exc:
                     logger.error("Failed to embed knowledge_base query: %s", exc)
                     return []
@@ -4187,7 +4217,7 @@ class OracleProvider(
                 from ...embeddings import get_embedding
 
                 try:
-                    query_embedding = get_embedding(query)
+                    query_embedding = embed_as_query(get_embedding, query)
                 except Exception as exc:
                     logger.error("Failed to embed conversation_memory query: %s", exc)
                     return []
@@ -4596,6 +4626,20 @@ class OracleProvider(
                         f"WHERE {logical_column} = :{logical_column} OR id = :row_id",
                         params,
                     )
+                conn.commit()
+                return cursor.rowcount > 0
+
+            if memory_store_type == MemoryType.SHARED_MEMORY:
+                # Shared-memory rows are stored and read by their logical
+                # memory_id (store() upserts on it, so it names one row).
+                params = {"memory_id": str(id)}
+                clause = "memory_id = :memory_id"
+                try:
+                    params["row_id"] = uuid.UUID(str(id)).bytes
+                    clause += " OR id = :row_id"
+                except (ValueError, TypeError):
+                    pass
+                cursor.execute(f"DELETE FROM {table_name} WHERE {clause}", params)
                 conn.commit()
                 return cursor.rowcount > 0
 
@@ -5563,6 +5607,7 @@ class OracleProvider(
             MemoryType.SKILLBOX: {
                 "id_field": "skill_id",
                 "fields": {
+                    "embedding",
                     "status",
                     "injection_role",
                     "version",
@@ -6495,7 +6540,7 @@ class OracleProvider(
         from ...embeddings import get_embedding
 
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
@@ -6514,7 +6559,7 @@ class OracleProvider(
         from ...embeddings import get_embedding
 
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
@@ -6543,7 +6588,7 @@ class OracleProvider(
         from ...embeddings import get_embedding
 
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(
                 "Failed to generate a skillbox query embedding (%s)",
@@ -6577,7 +6622,7 @@ class OracleProvider(
         from ...embeddings import get_embedding
 
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
@@ -6602,7 +6647,7 @@ class OracleProvider(
         from ...embeddings import get_embedding
 
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
@@ -6623,7 +6668,7 @@ class OracleProvider(
         from ...embeddings import get_embedding
 
         try:
-            embedding = get_embedding(query)
+            embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for semantic cache query: {e}")
             return []
@@ -7555,7 +7600,9 @@ class OracleProvider(
         """
         try:
             # Generate embedding for the query
-            query_embedding = self._embedding_provider.get_embedding(query)
+            query_embedding = embed_as_query(
+                self._embedding_provider.get_embedding, query
+            )
             if not query_embedding or not isinstance(query_embedding, list):
                 logger.warning("Failed to generate query embedding for tool search")
                 return []

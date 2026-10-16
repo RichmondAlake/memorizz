@@ -47,7 +47,7 @@ isolation declaration. Create it with `memorizz harness init`; see the
 |---|---|
 | `MEMORIZZ_DEFAULT_LLM_PROVIDER` | `openai`, `anthropic`, `ollama`, `azure` |
 | `MEMORIZZ_DEFAULT_LLM_MODEL` | Provider model or deployment name |
-| `MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER` | `openai`, `ollama`, or another registered provider |
+| `MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER` | `openai`, `ollama`, `huggingface` (a local Sentence Transformers model or folder), or another registered provider |
 | `MEMORIZZ_DEFAULT_EMBEDDING_MODEL` | Embedding model name |
 | `MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS` | Dimension matching the persisted vector schema |
 | `MEMORIZZ_BACKEND` | `filesystem`, `mongodb`, `oracle`, or `notion` |
@@ -87,6 +87,24 @@ VALUE`, or the options of `memorizz plugin install`); see
 | `MEMORIZZ_PLUGIN_REMOTE_URL` | A hosted MemoRizz MCP server (`https://…/mcp`) used instead of the local store |
 | `MEMORIZZ_PLUGIN_REMOTE_TOKEN_ENV` | The environment variable holding that server's API key (default `MEMORIZZ_MCP_TOKEN`) |
 | `MEMORIZZ_BIN` | The `memorizz` executable the plugins run when the one recorded at install is gone |
+
+## Fine-tuning
+
+See [Fine-tuning decision models, embeddings and rerankers](../guides/fine-tuning.md).
+
+| Variable | Purpose |
+|---|---|
+| `MEMORIZZ_FINETUNE_TEACHER` | The model that writes synthetic examples (`provider/model`); default: your default LLM, then a local Ollama model |
+| `MEMORIZZ_RERANKER_MODEL` | A fine-tuned reranker folder (a cross-encoder or a relevance decision model). Agent recall and `memorizz_search_memories` reorder what vector search found with it. Empty: no reranking |
+| `MEMORIZZ_ROUTING_MIN_CONFIDENCE` | Below this router confidence, a `memory_type="auto"` write goes to the knowledge base (default `0.5`) |
+| `MEMORIZZ_MCP_SERVER_ALLOW_TRAINING` | Lets `memorizz_start_finetune_run` train (default: on for local `stdio` with agent execution, off over HTTP) |
+
+**Swap in** on the Fine-tuning page, or `memorizz finetune swap`, writes
+`MEMORIZZ_RERANKER_MODEL` or the three `MEMORIZZ_DEFAULT_EMBEDDING_*`
+settings to MemoRizz's `.env` (`MEMORIZZ_HOME/.env`); the active router is
+kept in the memory provider with the datasets. An exported variable of the
+same name overrides the saved value when a process starts (see
+[Precedence](#precedence)), so unset it for a swap to hold after a restart.
 
 ## Credentials
 
