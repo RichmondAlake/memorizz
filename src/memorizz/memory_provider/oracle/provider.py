@@ -7573,7 +7573,23 @@ class OracleProvider(
                 toolbox_table = self._get_table_name(MemoryType.TOOLBOX)
                 agent_prefix = f"{agent_id_str}:"
                 kept_tool_ids: List[str] = []
+                # Rows a Toolbox registered (own ids, often one user's) stay as
+                # they are: an "<agent>:<tool>" copy would carry no owner and
+                # so be shared with every user of the agent.
+                cursor.execute(
+                    f"SELECT tool_id, name FROM {toolbox_table} "
+                    f"WHERE agent_id = :agent_id AND {_AGENT_TOOL_TYPE_FILTER}",
+                    {"agent_id": agent_id_str},
+                )
+                registered = {
+                    str(name): str(row_id)
+                    for row_id, name in cursor.fetchall()
+                    if name and not str(row_id).startswith(agent_prefix)
+                }
                 for tool_meta in tools:
+                    if tool_meta.get("name") in registered:
+                        kept_tool_ids.append(registered[tool_meta["name"]])
+                        continue
                     raw_tool_id = str(
                         tool_meta.get("_id") or tool_meta.get("name", str(uuid.uuid4()))
                     )

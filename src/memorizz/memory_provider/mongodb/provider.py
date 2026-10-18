@@ -7,7 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from bson import ObjectId
 from pymongo import InsertOne, MongoClient, ReplaceOne, ReturnDocument
@@ -3016,14 +3016,18 @@ class MongoDBProvider(
 
         return memagent_dict
 
-    def _clear_agent_toolbox_rows(self, agent_id: str) -> Dict[str, Any]:
-        """Delete the rows mirroring an agent's tools in one query (see base).
+    def _clear_agent_toolbox_rows(
+        self, agent_id: str
+    ) -> Tuple[Dict[str, Any], Set[str]]:
+        """Delete the rows this mirror wrote for an agent in one query (see base).
 
-        Rows the MCP tool index keeps are left alone; the vectors of the
-        deleted rows are returned so rows written back unchanged keep them.
+        Rows a Toolbox registered and rows the MCP tool index keeps are left
+        alone; returns the deleted rows' vectors, so rows written back
+        unchanged keep them, and the names the agent's other rows hold.
         """
         from ...long_term.procedural.toolbox.indexing import (
             KEPT_BY_MCP_TOOL_INDEX,
+            is_agent_mirror_row,
             search_text,
         )
 
@@ -3031,13 +3035,20 @@ class MongoDBProvider(
             "agent_id": agent_id,
             "tool_type": {"$nin": list(KEPT_BY_MCP_TOOL_INDEX)},
         }
-        embedded = {
-            str(doc["_id"]): (search_text(doc), doc["embedding"])
-            for doc in self.toolbox_collection.find(query)
-            if doc.get("embedding") is not None
-        }
-        self.toolbox_collection.delete_many(query)
-        return embedded
+        embedded: Dict[str, Any] = {}
+        registered: Set[str] = set()
+        mirrored: List[Any] = []
+        for doc in self.toolbox_collection.find(query):
+            if not is_agent_mirror_row(doc, agent_id):
+                if doc.get("name"):
+                    registered.add(str(doc["name"]))
+                continue
+            mirrored.append(doc["_id"])
+            if doc.get("embedding") is not None:
+                embedded[str(doc["_id"])] = (search_text(doc), doc["embedding"])
+        if mirrored:
+            self.toolbox_collection.delete_many({"_id": {"$in": mirrored}})
+        return embedded, registered
 
     def retrieve_memagent(self, agent_id: str) -> "MemAgentModel":
         """

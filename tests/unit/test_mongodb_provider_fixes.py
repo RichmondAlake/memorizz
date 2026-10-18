@@ -200,6 +200,31 @@ def test_saving_an_agent_keeps_its_mcp_index_rows_and_unchanged_vectors(provider
 
 
 @pytest.mark.unit
+def test_saving_an_agent_keeps_a_toolbox_row_registered_for_one_user(provider):
+    provider.toolbox_collection.insert_one(
+        {
+            "_id": "3f2b9c1e-0f4a-4f0e-9c55-1a2b3c4d5e6f",
+            "name": "maya_notes",
+            "agent_id": "agent-1",
+            "user_id": "maya",
+        }
+    )
+    tools = [{"name": "maya_notes"}, {"name": "search"}]
+
+    provider._sync_agent_tools_to_toolbox("agent-1", tools)
+    provider._sync_agent_tools_to_toolbox("agent-1", tools)
+
+    rows = sorted(
+        (str(doc["_id"]), doc.get("user_id"))
+        for doc in provider.toolbox_collection.find({"agent_id": "agent-1"})
+    )
+    assert rows == [
+        ("3f2b9c1e-0f4a-4f0e-9c55-1a2b3c4d5e6f", "maya"),
+        ("agent-1:search", None),
+    ]
+
+
+@pytest.mark.unit
 def test_string_id_that_looks_like_object_id_still_resolves(provider):
     hex_id = str(ObjectId())
     provider.store(

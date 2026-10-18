@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A tool registered for one user (`Toolbox.from_functions(..., user_id=...)`)
+  lost its owner when the agent was saved, so every user of the agent could
+  see it. Saving rewrote the agent's toolbox rows as ownerless
+  `<agent_id>:<tool>` copies, which the 0.17.1 sharing rule treats as
+  agent-wide. Saving now rewrites only those copies of the agent's own tools
+  and leaves a tool the agent already has a row for, with its owner, as it
+  is, on every provider. Rows already rewritten by 0.17.1 have lost their
+  owner: register those tools again with their `user_id`.
+- `KnowledgeBase.delete_knowledge(id)` returns `False` when the id matches
+  nothing (it returned `True`).
+- Reloading an agent built with continual learning no longer logs a warning
+  that its memory types omit `workflow_memory`: saving leaves out the types
+  continual learning turns on, so every reload turned them on again with a
+  warning. It is an info message now.
+
 ## 0.17.1 — 2026-10-18
 
 0.17.0 was tagged but never published (a release check failed); 0.17.1 is

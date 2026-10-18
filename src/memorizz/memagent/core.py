@@ -686,7 +686,9 @@ class MemAgent:
         if self.continual_learning:
             if MemoryType.WORKFLOW_MEMORY not in self.active_memory_types:
                 if memory_types is not None:
-                    logger.warning(
+                    # Expected, not a fault: saving leaves runtime types out,
+                    # so every reload of such an agent lands here.
+                    logger.info(
                         "continual_learning=True but the configured "
                         "memory_types omit workflow_memory — enabling it; "
                         "the learning loop cannot observe runs without it."

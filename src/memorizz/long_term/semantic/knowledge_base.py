@@ -575,11 +575,15 @@ class KnowledgeBase:
         Returns:
         --------
         bool
-            True if deletion was successful, False otherwise (including a
-            refused cross-tenant delete).
+            True if chunks were found and all deleted, False otherwise
+            (including an id that matches nothing and a refused cross-tenant
+            delete).
         """
         # Get all entries with this memory ID
         entries = self.retrieve_knowledge(knowledge_base_id)
+        if not entries:
+            # Nothing was deleted; True here hid typos and stale ids.
+            return False
         if user_id is not _UNSET:
             foreign = [entry for entry in entries if entry.get("user_id") != user_id]
             if foreign:

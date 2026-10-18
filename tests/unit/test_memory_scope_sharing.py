@@ -370,6 +370,72 @@ def test_toolbox_and_router_include_agent_wide_tools():
     assert names == ["shared_tool", "alice_tool"]
 
 
+def _maya_notes(topic: str) -> str:
+    """Return Maya's private notes on a topic."""
+    return topic
+
+
+def _team_search(query: str) -> str:
+    """Search the team wiki."""
+    return query
+
+
+def _toolbox_rows(provider, agent_id):
+    rows = provider.retrieve_by_query(
+        {"agent_id": agent_id}, MemoryType.TOOLBOX, limit=50
+    )
+    return sorted((row["_id"], row["name"], row.get("user_id")) for row in rows)
+
+
+def test_saving_an_agent_keeps_a_users_tool_private(provider):
+    """Saving rewrote a Toolbox row registered for one user as an ownerless
+    mirror, which the sharing rule then showed to every user of the agent."""
+    from memorizz.long_term.procedural.toolbox.toolbox import Toolbox
+    from memorizz.memagent import MemAgent
+
+    toolbox = Toolbox.from_functions(
+        [_maya_notes],
+        memory_provider=provider,
+        agent_id="tools-agent",
+        user_id="maya",
+        augment=False,
+    )
+    registered = _toolbox_rows(provider, "tools-agent")
+    agent = MemAgent(
+        agent_id="tools-agent",
+        llm_config={"provider": "ollama", "model": "qwen2.5:7b"},
+        memory_provider=provider,
+        toolbox=toolbox,
+        tools=[_team_search],
+    )
+
+    agent.save()
+    agent.save()
+
+    rows = _toolbox_rows(provider, "tools-agent")
+    assert registered[0] in rows  # Maya's row: same id, still hers
+    assert ("tools-agent:_team_search", "_team_search", None) in rows
+    assert [row for row in rows if row[1] == "_maya_notes"] == registered
+
+    def visible(user_id):
+        found = provider.retrieve_by_query(
+            {"agent_id": "tools-agent"}, MemoryType.TOOLBOX, limit=100, user_id=user_id
+        )
+        return {row["name"] for row in found}
+
+    assert "_maya_notes" not in visible("bob")
+    assert "_maya_notes" in visible("maya")
+
+
+def test_saving_still_removes_a_mirrored_tool_the_agent_dropped(provider):
+    provider._sync_agent_tools_to_toolbox(
+        "agent-1", [{"name": "old_tool"}, {"name": "kept_tool"}]
+    )
+    provider._sync_agent_tools_to_toolbox("agent-1", [{"name": "kept_tool"}])
+
+    assert [row[1] for row in _toolbox_rows(provider, "agent-1")] == ["kept_tool"]
+
+
 # ---------------------------------------------------------------------------
 # Skill promotion per user scope
 # ---------------------------------------------------------------------------

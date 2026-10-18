@@ -10,7 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from .._time import to_epoch
 
@@ -459,20 +459,27 @@ class MemoryProvider(ABC):
             return [result]
         return list(result or [])
 
-    def _clear_agent_toolbox_rows(self, agent_id: str) -> Dict[str, Any]:
-        """Delete the TOOLBOX rows mirrored for one agent.
+    def _clear_agent_toolbox_rows(
+        self, agent_id: str
+    ) -> Tuple[Dict[str, Any], Set[str]]:
+        """Delete the TOOLBOX rows this mirror wrote for one agent.
 
-        Returns the embeddings they carried, by row id and the text each was
-        embedded from, so rows written back unchanged keep them.
+        Only its own ``<agent_id>:<tool>`` rows go. Rows a Toolbox registered
+        (with their owner) and the MCP tool index stay. Returns the deleted
+        rows' embeddings, by row id with the text each was embedded from, so
+        rows written back unchanged keep them; and the names of the tools the
+        agent's other rows already hold, which are not mirrored again.
         """
         from ..enums.memory_type import MemoryType
         from ..long_term.procedural.toolbox.indexing import (
             KEPT_BY_MCP_TOOL_INDEX,
+            is_agent_mirror_row,
             row_type,
             search_text,
         )
 
         embedded: Dict[str, Any] = {}
+        registered: Set[str] = set()
         for doc in list(self.list_all(MemoryType.TOOLBOX) or []):
             if not isinstance(doc, dict):
                 continue
@@ -480,23 +487,29 @@ class MemoryProvider(ABC):
                 continue
             if row_type(doc) in KEPT_BY_MCP_TOOL_INDEX:
                 continue
+            if not is_agent_mirror_row(doc, agent_id):
+                if doc.get("name"):
+                    registered.add(str(doc["name"]))
+                continue
             doc_id = doc.get("_id") or doc.get("id")
             if doc_id:
                 if doc.get("embedding") is not None:
                     embedded[str(doc_id)] = (search_text(doc), doc["embedding"])
                 self.delete_by_id(str(doc_id), MemoryType.TOOLBOX)
-        return embedded
+        return embedded, registered
 
     def _sync_agent_tools_to_toolbox(
         self, agent_id: str, tools: Optional[List[Dict[str, Any]]]
     ) -> None:
         """Mirror an agent's tool list into the TOOLBOX store.
 
-        Deletes any existing TOOLBOX rows for this ``agent_id`` before
-        re-inserting the current set so tools removed from the agent
-        don't linger in the playground's toolbox-memory pane.
-        ``tools=None`` is treated as "caller didn't include tools in this
-        save" and is a no-op — only an explicit empty list clears rows.
+        Replaces the rows this mirror wrote before (``<agent_id>:<tool>``) so
+        tools removed from the agent don't linger in the playground's
+        toolbox-memory pane. A tool the agent already has a row for, such as
+        one a Toolbox registered for one user, keeps that row (and its owner)
+        and gets no ownerless copy. ``tools=None`` is treated as "caller
+        didn't include tools in this save" and is a no-op — only an explicit
+        empty list clears rows.
         """
         from ..enums.memory_type import MemoryType
         from ..long_term.procedural.toolbox.indexing import search_text
@@ -505,7 +518,7 @@ class MemoryProvider(ABC):
             return
 
         try:
-            embedded = self._clear_agent_toolbox_rows(agent_id) or {}
+            embedded, registered = self._clear_agent_toolbox_rows(agent_id)
         except Exception as exc:
             logger.warning(
                 "Failed to clear toolbox rows for agent %s: %s", agent_id, exc
@@ -519,7 +532,7 @@ class MemoryProvider(ABC):
             if not isinstance(tool_meta, dict):
                 continue
             raw_id = tool_meta.get("_id") or tool_meta.get("name")
-            if not raw_id:
+            if not raw_id or tool_meta.get("name") in registered:
                 continue
             tool_doc = {
                 "_id": f"{agent_id}:{raw_id}",

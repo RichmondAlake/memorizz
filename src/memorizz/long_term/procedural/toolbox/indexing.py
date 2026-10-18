@@ -36,6 +36,16 @@ def row_type(row: Dict[str, Any]) -> str:
     return str(row.get("tool_type") or row.get("type") or "function").strip().lower()
 
 
+def is_agent_mirror_row(row: Dict[str, Any], agent_id: str) -> bool:
+    """A row saving the agent wrote (``<agent_id>:<tool>``), so it may rewrite.
+
+    Rows a Toolbox registered have their own ids and owners; saving the agent
+    leaves them alone.
+    """
+    row_id = str(row.get("_id") or row.get("tool_id") or row.get("id") or "")
+    return bool(agent_id) and row_id.startswith(f"{agent_id}:")
+
+
 def search_text(row: Dict[str, Any]) -> str:
     """The text a tool row is embedded from: its name, what it does and the
     names of its arguments (which often say what a terse description omits)."""

@@ -317,3 +317,35 @@ def test_last_memory_context_evidence_counts_the_evidence_pack(provider):
     ]
     # Content-free: hashed references only.
     assert "Friday" not in str(evidence)
+
+
+# ---------------------------------------------------------------------------
+# Reported on 0.17.1
+# ---------------------------------------------------------------------------
+
+
+def test_deleting_a_knowledge_base_that_does_not_exist_reports_false(provider):
+    knowledge = KnowledgeBase(provider)
+    kb_id = knowledge.ingest_knowledge("Kept.", namespace="notes", embeddings="off")
+
+    assert knowledge.delete_knowledge("no-such-knowledge-base") is False
+    assert knowledge.delete_knowledge(kb_id) is True
+    assert knowledge.delete_knowledge(kb_id) is False
+
+
+def test_reloading_a_continual_learning_agent_does_not_warn(provider, caplog):
+    built = (
+        MemAgentBuilder()
+        .with_llm_config(LLM)
+        .with_memory_provider(provider)
+        .with_name("learner")
+        .with_continual_learning(True)
+        .build_and_save()
+    )
+
+    with caplog.at_level(logging.WARNING, logger="memorizz"):
+        loaded = MemAgent.load(built.agent_id, memory_provider=provider)
+        MemAgent.load(built.agent_id, memory_provider=provider)
+
+    assert not [r for r in caplog.records if "omit workflow_memory" in r.message]
+    assert "workflow_memory" in {t.value for t in loaded.active_memory_types}
