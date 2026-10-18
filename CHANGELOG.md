@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.3 — 2026-10-18
+
+### Changed
+
+- `/history` in the CLI prints the current conversation in full: every
+  question after the prompt and every answer as Markdown, with the tools an
+  answer used on one line. It printed the last 20 entries cut to 200
+  characters, with stored tool results as raw JSON.
+- Resuming a conversation with `/conversations` replays its last 30 messages
+  in the terminal, the same way, before the prompt returns.
+
 ## 0.17.2 — 2026-10-18
 
 ### Fixed
