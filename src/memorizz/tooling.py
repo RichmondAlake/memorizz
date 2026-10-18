@@ -697,7 +697,10 @@ class SemanticToolRouter:
     ) -> List[str]:
         # Whole words (plurals folded), and a word in the tool's name counts
         # three times one in its description, so "create a page" finds
-        # notion-create-pages rather than tools with long descriptions.
+        # notion-create-pages rather than tools with long descriptions. A
+        # request that says every word of a tool's name names that tool:
+        # "search my Notion for the page ..." wants notion-search, not the
+        # page tools whose descriptions also say "search" and "database".
         terms = self._words(query)
         scored: List[tuple[int, str]] = []
         for metadata in self._metadata():
@@ -712,6 +715,8 @@ class SemanticToolRouter:
                 3 if term in name_words else 1 if term in description_words else 0
                 for term in terms
             )
+            if name_words and name_words <= terms:
+                score += 3
             scored.append((score, name))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [name for score, name in scored if score >= min_score][:limit]
@@ -719,6 +724,8 @@ class SemanticToolRouter:
     def _semantic_candidates(
         self, query: str, *, user_id: Optional[str], limit: int
     ) -> List[str]:
+        from .memory_provider.base import user_scope_matches
+
         if self.toolbox is None:
             return []
         try:
@@ -742,7 +749,8 @@ class SemanticToolRouter:
                 self.agent_id,
             }:
                 continue
-            if row.get("user_id") != user_id:
+            # A tool without a user belongs to the whole agent.
+            if not user_scope_matches(row.get("user_id"), user_id, "toolbox"):
                 continue
             name = self._resolve_name(str(row.get("name") or ""))
             if name in registered and name not in names:
@@ -786,17 +794,19 @@ class SemanticToolRouter:
         semantic = self._semantic_candidates(query, user_id=user_id, limit=bounded)
         if not semantic:
             return self._lexical_candidates(query, bounded)
-        # MCP tools are not in the toolbox's semantic index, so clear keyword
-        # matches among them share the slots instead of never appearing. Clear
-        # means two words in the tool's name, or one plus its description.
-        mcp = [
-            name
-            for name in self._lexical_candidates(
-                query, max(1, bounded // 2), min_score=4, source="mcp"
-            )
-            if name not in semantic
-        ]
-        return (semantic[: bounded - len(mcp)] + mcp)[:bounded]
+        # MCP tools are ranked by meaning once indexed (see MCPToolIndex).
+        # Until then, or with nothing to embed them, clear keyword matches
+        # among them fill the slots meaning left free. Clear means two words
+        # in the tool's name, or one plus its description. They never push
+        # out a pick: "list the pages under it" shares words with every
+        # list-*-pages tool, while meaning ranks notion-search among them.
+        chosen = semantic[:bounded]
+        for name in self._lexical_candidates(query, bounded, min_score=4, source="mcp"):
+            if len(chosen) >= bounded:
+                break
+            if name not in chosen:
+                chosen.append(name)
+        return chosen
 
     def disclose(self, names: Iterable[str]) -> None:
         """Make registered tools visible and callable for the rest of the turn."""

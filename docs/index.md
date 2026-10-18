@@ -52,6 +52,7 @@ stateless agent.
 | Configure and inspect agents in a browser | [Local UI guide](getting-started/local-ui.md) |
 | Let an MCP host operate Memorizz | [Memorizz MCP server](guides/mcp-server.md) |
 | Give an agent access to Notion, Calendar, or another MCP server | [MCP connectivity](guides/mcp-connectivity.md) |
+| Let an agent open, read, and operate the apps on a Mac | [Desktop control (computer use)](desktop-control/index.md) |
 | Run Codex, Claude Code, OpenHands, or MemAgent behind one control plane | [Memory-first MetaHarness](guides/meta-harness.md) |
 
 Not sure which path fits? Read [Choose Your Path](getting-started/overview.md)
@@ -63,7 +64,7 @@ and [Installation](getting-started/installation.md).
 request + tenant scope
         │
         ▼
-  MemAgent runtime ── policies ── tools / MCP / browser / sandbox
+  MemAgent runtime ── policies ── tools / MCP / browser / desktop / sandbox
         │
         ├── retrieve and assemble bounded context
         ├── call the configured model and governed capabilities
@@ -87,6 +88,9 @@ trust boundaries.
 ## Build, operate, and evaluate
 
 - Add application functions with [typed tools and durable approvals](guides/tools-and-approvals.md).
+- Let agents operate Mac apps with [desktop control](desktop-control/index.md):
+  windows read as numbered text, actions that wait for approval and never take
+  your focus, and every run kept as workflow memory.
 - Choose a [memory provider](memory-providers/filesystem.md) and follow the
   [multi-tenant contract](guides/multi-tenant.md).
 - Control token use with [context efficiency, semantic caching, and compaction](guides/context-efficiency.md).

@@ -15,7 +15,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from ...._time import parse_iso_datetime
+from ...._time import to_utc, utc_now
 from ....embeddings import get_embedding
 
 # Distinguishes "no embedding supplied — generate one" (fresh skill) from
@@ -145,8 +145,8 @@ class Skill:
             status if isinstance(status, SkillStatus) else SkillStatus(str(status))
         )
         self.version = int(version)
-        self.created_at = created_at or datetime.now()
-        self.updated_at = updated_at or datetime.now()
+        self.created_at = created_at or utc_now()
+        self.updated_at = updated_at or utc_now()
         self.promoted_at = promoted_at
         self.demoted_at = demoted_at
         self.demotion_reason = demotion_reason
@@ -229,10 +229,11 @@ class Skill:
             exemplar_workflow_id=data.get("exemplar_workflow_id"),
             status=SkillStatus(data.get("status", SkillStatus.CANDIDATE.value)),
             version=data.get("version", 1),
-            created_at=parse_iso_datetime(data.get("created_at")),
-            updated_at=parse_iso_datetime(data.get("updated_at")),
-            promoted_at=parse_iso_datetime(data.get("promoted_at")),
-            demoted_at=parse_iso_datetime(data.get("demoted_at")),
+            # Stamps without an offset were written with datetime.now().
+            created_at=to_utc(data.get("created_at"), naive="local"),
+            updated_at=to_utc(data.get("updated_at"), naive="local"),
+            promoted_at=to_utc(data.get("promoted_at"), naive="local"),
+            demoted_at=to_utc(data.get("demoted_at"), naive="local"),
             demotion_reason=data.get("demotion_reason"),
             # Legacy skills pre-date trust-aware injection and must retain the
             # original user-context authority after upgrade.

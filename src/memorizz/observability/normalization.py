@@ -8,9 +8,10 @@ import json
 from collections import Counter
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
+from .._time import to_utc
 from .analytics import MEMORY_FIELDS
 from .models import IDENTITY_FIELDS, ResourceRef, SelectionDecision, TraceEventV3
 from .pricing import PRICING_FIELDS
@@ -133,19 +134,16 @@ LEGACY_FIELDS = frozenset(TRACE_METADATA_FIELDS) | frozenset(
 )
 
 
-def timestamp(value: Any) -> str:
-    try:
-        if isinstance(value, (int, float)):
-            date = datetime.fromtimestamp(value, timezone.utc)
-        elif isinstance(value, datetime):
-            date = value
-        else:
-            date = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if date.tzinfo is None:
-            date = date.replace(tzinfo=timezone.utc)
-        return date.astimezone(timezone.utc).isoformat(timespec="microseconds")
-    except (ValueError, TypeError, OverflowError, OSError):
-        return ""
+def timestamp(value: Any, *, naive: str = "utc") -> str:
+    """``value`` as UTC ISO-8601 with microseconds; "" when unreadable.
+
+    ``naive`` says how a value without an offset was written (see
+    ``memorizz._time.to_utc``).
+    """
+    if value is not None and not isinstance(value, (int, float, datetime)):
+        value = str(value)
+    date = to_utc(value, naive=naive)
+    return date.isoformat(timespec="microseconds") if date is not None else ""
 
 
 def read_payload(row: dict) -> dict | None:
@@ -438,6 +436,10 @@ def normalize_trace_snapshot(
                     )
             else:
                 children = [row]
+            # Conversation and tool-log rows written before UTC stamps
+            # (datetime.now()) hold local time without an offset; trace
+            # bundle events have always been UTC.
+            naive = "local" if source != "bundle" and not bundle else "utc"
             for index, child in enumerate(children):
                 if not isinstance(child, dict):
                     errors.append(
@@ -538,9 +540,9 @@ def normalize_trace_snapshot(
                             if source == "tool"
                             else kind
                         ),
-                        "timestamp": timestamp(child.get("timestamp"))
-                        or timestamp(row.get("timestamp"))
-                        or timestamp((payload or {}).get("timestamp")),
+                        "timestamp": timestamp(child.get("timestamp"), naive=naive)
+                        or timestamp(row.get("timestamp"), naive=naive)
+                        or timestamp((payload or {}).get("timestamp"), naive=naive),
                         "content": child.get("content")
                         or child.get("message")
                         or child.get("text")

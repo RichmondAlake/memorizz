@@ -14,9 +14,9 @@ swallows and logs.
 """
 
 import logging
-from datetime import datetime
 from typing import Callable, List, Optional
 
+from ...._time import utc_now_iso
 from ....enums.memory_type import MemoryType
 from .promotion import PromotionConfig
 from .skill import Skill, SkillStatus
@@ -74,7 +74,7 @@ class SkillMonitor:
                     stats["failures"] = stats.get("failures", 0) + 1
                 if run_hash and run_hash != skill.source_canonical_hash:
                     stats["deviations"] = stats.get("deviations", 0) + 1
-                stats["last_activated_at"] = datetime.now().isoformat()
+                stats["last_activated_at"] = utc_now_iso()
                 recent = list(stats.get("recent_outcomes") or [])
                 recent.append(bool(succeeded))
                 stats["recent_outcomes"] = recent[

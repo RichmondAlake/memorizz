@@ -31,6 +31,7 @@ class MemAgentModel(BaseModel):
     tool_access: Optional[str] = Field(default=DEFAULT_TOOL_ACCESS)
     knowledge_base_ids: Optional[List[str]] = None
     delegates: Optional[List[str]] = None  # Store delegate agent IDs
+    embedding_provider: Optional[str] = None
     embedding_config: Optional[Dict[str, Any]] = None
     semantic_cache: Optional[bool] = False  # Enable semantic cache
     semantic_cache_config: Optional[

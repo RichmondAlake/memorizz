@@ -33,6 +33,7 @@ nav:
           - MemoRizz in Codex and Claude Code: guides/coding-agent-plugins.md
       - Internet Access: internet-access/providers.md
       - Browser Control: browser-control/index.md
+      - Desktop Control (Computer Use): desktop-control/index.md
       - Code Execution:
           - Choose a Provider: sandbox/index.md
           - E2B: sandbox/e2b.md

@@ -11,9 +11,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from .._time import to_utc
 from ..enums.memory_type import MemoryType
 from ..long_term.semantic.entity_memory import EntityMemory
-from ..memagent.utils.context_dedup import is_suppressed
+from ..memagent.utils.context_dedup import is_suppressed, naive_time_convention
+from ..memory_provider.base import user_scope_matches
 from .models import (
     EvidenceItem,
     EvidencePack,
@@ -54,24 +56,23 @@ def _lexical_score(query: str, content: str) -> float:
     return min(1.0, precision * 0.8 + coverage * 0.2)
 
 
-def _coerce_timestamp(value: Any) -> Tuple[Optional[str], Optional[float]]:
+_TIME_FIELDS = ("timestamp", "updated_at", "created_at", "period_end")
+
+
+def _coerce_timestamp(
+    value: Any, naive: str = "utc"
+) -> Tuple[Optional[str], Optional[float]]:
+    """``value`` as UTC ISO-8601 and its age in seconds.
+
+    ``naive`` says how a value without an offset was written.
+    """
     if value is None:
         return None, None
-    if hasattr(value, "isoformat"):
-        try:
-            text = value.isoformat()
-        except Exception:
-            text = str(value)
-    else:
-        text = str(value)
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        age = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
-        return parsed.isoformat(), age
-    except (TypeError, ValueError):
-        return text, None
+    parsed = to_utc(value, naive=naive)
+    if parsed is None:
+        return str(value), None
+    age = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+    return parsed.isoformat(), age
 
 
 def _row_id(row: Mapping[str, Any]) -> str:
@@ -189,6 +190,7 @@ def _scope_matches(
     memory_id: Optional[str],
     user_id: Optional[str],
     thread_id: Optional[str],
+    knowledge_base_ids: frozenset = frozenset(),
 ) -> bool:
     row_agent = row.get("agent_id") or row.get("owner_agent_id")
     # Knowledge/conversation/summary rows are shared through an explicit
@@ -202,14 +204,21 @@ def _scope_matches(
     ):
         return False
     row_memory = row.get("trace_memory_id") or row.get("memory_id")
-    if (
+    if source_type == "knowledge_base":
+        # Ingested chunks are keyed by their knowledge base, not by an agent's
+        # memory: in scope when attached to the agent or carrying memory_id.
+        attached = str(row.get("knowledge_base_id") or "") in knowledge_base_ids
+        if not attached and str(row_memory or "") != str(memory_id or ""):
+            return False
+    elif (
         memory_id is not None
         and row_memory is not None
         and str(row_memory) != str(memory_id)
     ):
         return False
-    # Tenant isolation is fail-closed.  Explicit None selects anonymous rows.
-    if row.get("user_id") != user_id:
+    # Tenant isolation is fail-closed.  Explicit None selects anonymous rows;
+    # a user also sees the agent-wide (no user) knowledge and skills.
+    if not user_scope_matches(row.get("user_id"), user_id, source_type):
         return False
     if source_type == "conversation_memory" and thread_id is not None:
         row_thread = row.get("thread_id") or row.get("conversation_id")
@@ -238,6 +247,21 @@ class EvidencePlanner:
         self.config = config
         self.store = store
 
+    def _attached_knowledge_base_ids(self) -> frozenset:
+        """The knowledge bases attached to the agent, from its stored record."""
+        retrieve = getattr(self.provider, "retrieve_memagent", None)
+        if not callable(retrieve):
+            return frozenset()
+        try:
+            record = retrieve(self.agent_id)
+        except Exception:
+            return frozenset()
+        if isinstance(record, Mapping):
+            ids = record.get("knowledge_base_ids")
+        else:
+            ids = getattr(record, "knowledge_base_ids", None)
+        return frozenset(str(value) for value in ids or () if value)
+
     def _provider_candidates(
         self,
         query: str,
@@ -246,6 +270,7 @@ class EvidencePlanner:
         memory_id: Optional[str],
         user_id: Optional[str],
         thread_id: Optional[str],
+        knowledge_base_ids: frozenset = frozenset(),
     ) -> Tuple[List[Mapping[str, Any]], Dict[str, Any]]:
         memory_type = _SOURCE_TYPES[source_type]
         if source_type == "entity_memory":
@@ -273,11 +298,27 @@ class EvidencePlanner:
                 annotated.append(candidate)
             return annotated, diagnostics
 
+        # Skills belong to the agent, not to a memory: scope them by agent and
+        # user (agent-wide skills included), never by memory_id.
+        skill_candidates = getattr(self.provider, "retrieve_skillbox_candidates", None)
+        if source_type == "skillbox" and callable(skill_candidates):
+            rows = skill_candidates(
+                query,
+                limit=self.config.evidence_candidates_per_source,
+                statuses=["active"],
+                agent_id=self.agent_id,
+                user_id=user_id,
+            )
+            return [item for item in rows or [] if isinstance(item, Mapping)], {}
+
         kwargs: Dict[str, Any] = {
-            "memory_id": memory_id,
             "user_id": user_id,
             "limit": self.config.evidence_candidates_per_source,
         }
+        if source_type != "skillbox":
+            kwargs["memory_id"] = memory_id
+        if source_type == "knowledge_base" and knowledge_base_ids:
+            kwargs["knowledge_base_ids"] = sorted(knowledge_base_ids)
         if source_type == "conversation_memory" and thread_id is not None:
             kwargs["thread_id"] = thread_id
         try:
@@ -329,6 +370,7 @@ class EvidencePlanner:
         memory_id: Optional[str],
         user_id: Optional[str],
         thread_id: Optional[str],
+        knowledge_base_ids: frozenset = frozenset(),
     ) -> Tuple[List[Tuple[str, Mapping[str, Any]]], List[str]]:
         rows_by_source: List[Tuple[str, Mapping[str, Any]]] = []
         warnings: List[str] = []
@@ -349,6 +391,7 @@ class EvidencePlanner:
                         memory_id=memory_id,
                         user_id=user_id,
                         thread_id=thread_id,
+                        knowledge_base_ids=knowledge_base_ids,
                     )
                 else:
                     warnings.append(f"unknown evidence source: {source_type}")
@@ -375,6 +418,7 @@ class EvidencePlanner:
         tombstones: set[str],
         history_hashes: set[str],
         freshness: Mapping[str, int],
+        knowledge_base_ids: frozenset = frozenset(),
     ) -> Optional[EvidenceItem]:
         if not _scope_matches(
             row,
@@ -383,6 +427,7 @@ class EvidencePlanner:
             memory_id=memory_id,
             user_id=user_id,
             thread_id=thread_id,
+            knowledge_base_ids=knowledge_base_ids,
         ):
             return None
         source_id = _row_id(row)
@@ -397,11 +442,9 @@ class EvidencePlanner:
         if content_hash in history_hashes:
             return None
 
+        time_field = next((key for key in _TIME_FIELDS if row.get(key)), "timestamp")
         timestamp, age_seconds = _coerce_timestamp(
-            row.get("timestamp")
-            or row.get("updated_at")
-            or row.get("created_at")
-            or row.get("period_end")
+            row.get(time_field), naive_time_convention(source_type, time_field)
         )
         max_age = freshness.get(source_type)
         stale = bool(max_age and age_seconds is not None and age_seconds > max_age)
@@ -527,11 +570,20 @@ class EvidencePlanner:
         user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         history_texts: Optional[Sequence[str]] = None,
+        knowledge_base_ids: Optional[Sequence[str]] = None,
     ) -> EvidencePack:
+        """Build the pack. ``knowledge_base_ids`` are the knowledge bases
+        attached to the agent; omitted, they are read from its stored record."""
         started = time.perf_counter()
         query_text = str(query or "").strip()
         if not query_text:
             raise ValueError("EvidencePlanner query is required")
+        if knowledge_base_ids is not None:
+            attached = frozenset(str(value) for value in knowledge_base_ids if value)
+        elif "knowledge_base" in self.config.evidence_sources:
+            attached = self._attached_knowledge_base_ids()
+        else:
+            attached = frozenset()
         tombstones = (
             self.store.tombstoned_ids(memory_id=memory_id, user_id=user_id)
             if self.store is not None
@@ -547,6 +599,7 @@ class EvidencePlanner:
             memory_id=memory_id,
             user_id=user_id,
             thread_id=thread_id,
+            knowledge_base_ids=attached,
         )
         freshness = self.config.freshness_map()
         candidates: List[EvidenceItem] = []
@@ -562,6 +615,7 @@ class EvidencePlanner:
                 tombstones=tombstones,
                 history_hashes=history_hashes,
                 freshness=freshness,
+                knowledge_base_ids=attached,
             )
             if candidate is not None:
                 candidates.append(candidate)

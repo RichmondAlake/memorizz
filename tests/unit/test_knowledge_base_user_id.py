@@ -156,7 +156,10 @@ def test_ingest_knowledge_isolates_users_when_provider_filters(kb):
 
 
 def test_ingest_knowledge_user_id_none_is_separate_scope_from_alice(kb):
-    """``user_id=None`` is a scope (anonymous bucket), not match-everything."""
+    """``user_id=None`` is a scope (anonymous bucket), not match-everything.
+
+    Knowledge without a user belongs to the whole agent, so Alice sees it
+    beside her own; the anonymous scope never sees Alice's."""
     knowledge_base, provider = kb
 
     knowledge_base.ingest_knowledge(
@@ -179,7 +182,7 @@ def test_ingest_knowledge_user_id_none_is_separate_scope_from_alice(kb):
     alice_contents = {r["content"] for r in alice_rows}
 
     assert anon_contents == {"public content"}
-    assert alice_contents == {"alice content"}
+    assert alice_contents == {"alice content", "public content"}
 
 
 # ---------------------------------------------------------------------------

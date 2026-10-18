@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from ..._time import utc_now, utc_now_iso
 from ...enums.memory_type import MemoryType
 from ...memory_provider import MemoryProvider
 from .messages import (
@@ -33,7 +34,7 @@ class BlackboardEntry:
         self.entry_type = (
             entry_type  # "tool_call", "conversation", "task_assignment", "result"
         )
-        self.created_at = created_at or datetime.now()
+        self.created_at = created_at or utc_now()
         self.memory_id = str(uuid.uuid4())
 
     def to_dict(self) -> Dict[str, Any]:
@@ -79,8 +80,8 @@ class SharedMemory:
             "delegate_agent_ids": delegate_agent_ids or [],
             "sub_agent_ids": [],
             "blackboard": [],
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
+            "created_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
             "status": "active",  # active, completed, failed
             "workflow_id": workflow_id,
             "user_id": user_id,
@@ -213,7 +214,7 @@ class SharedMemory:
                 payload = self._decode_payload(session)
                 if mutate(payload) is False:
                     return True  # already applied, with the same idempotency key
-                payload["updated_at"] = datetime.now().isoformat()
+                payload["updated_at"] = utc_now_iso()
                 payload["revision"] = int(payload.get("revision", 0)) + 1
                 serialized = json.dumps(
                     self._sanitize_payload(self._build_storage_payload(payload)),

@@ -14,10 +14,12 @@ from pymongo import InsertOne, MongoClient, ReplaceOne, ReturnDocument
 from pymongo.errors import CollectionInvalid, DuplicateKeyError, OperationFailure
 from pymongo.operations import SearchIndexModel
 
+from ..._time import to_epoch
 from ...embeddings import embed_as_query, get_embedding
 from ...enums.memory_type import MemoryType
 from ...memagent import MemAgentModel
 from ..base import (
+    AGENT_WIDE_STORES,
     FilteredSkillboxSearchMixin,
     GlobalEmbeddingFallbackMixin,
     MemoryProvider,
@@ -77,16 +79,20 @@ def _mongo_memory_type_supports_user_id(memory_store_type: Any) -> bool:
     return memory_store_type in _MONGO_USER_SCOPED_TYPES
 
 
-def _mongo_user_id_predicate(user_id: Any) -> Dict[str, Any]:
+def _mongo_user_id_predicate(user_id: Any, memory_type: Any = None) -> Dict[str, Any]:
     """Build a Mongo filter that matches rows in the given user_id scope.
 
     ``None`` matches documents whose ``user_id`` is missing or null so that
     legacy rows are still visible to anonymous callers. Any other value
     enforces strict equality — preventing cross-tenant leaks even when the
-    stored row predates this change.
+    stored row predates this change — except that in AGENT_WIDE_STORES a
+    user also sees the agent's rows without a user (``user_scope_matches``).
     """
     if user_id is None:
         return {"user_id": {"$in": [None]}}
+    store = str(getattr(memory_type, "value", memory_type) or "")
+    if store in AGENT_WIDE_STORES:
+        return {"user_id": {"$in": [user_id, None]}}
     return {"user_id": user_id}
 
 
@@ -109,6 +115,17 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _turn_epoch(value: Any) -> float:
+    """Epoch seconds of a conversation turn's ``timestamp`` (0.0 if unreadable).
+
+    Turns are ISO strings; those written before UTC stamps hold local time
+    without an offset (``datetime.now()``). BSON dates come back naive UTC.
+    """
+    naive = "local" if isinstance(value, str) else "utc"
+    epoch = to_epoch(value, naive=naive)
+    return 0.0 if epoch is None else epoch
 
 
 def _parse_expiry(value: Any) -> Optional[datetime]:
@@ -144,6 +161,20 @@ def _lexical_overlap(query_tokens: set[str], content: Any) -> float:
         if query_tokens
         else 0.0
     )
+
+
+# $vectorSearch pre-filter paths beyond memory_id, per collection. A filter on
+# a path the index does not declare fails the search. Knowledge recall scopes
+# by the agent's attached knowledge bases (knowledge_base_id), namespace and
+# user; workflow and summary recall by user. Adding a path to an existing
+# index updates it in place, and Atlas rebuilds the index.
+_VECTOR_FILTER_FIELDS: Dict[str, List[str]] = {
+    MemoryType.SKILLBOX.value: ["status", "agent_id", "user_id"],
+    MemoryType.ENTITY_MEMORY.value: ["user_id"],
+    MemoryType.KNOWLEDGE_BASE.value: ["knowledge_base_id", "namespace", "user_id"],
+    MemoryType.WORKFLOW_MEMORY.value: ["user_id"],
+    MemoryType.SUMMARIES.value: ["user_id"],
+}
 
 
 _PRESERVED_MONGO_ID_FIELDS = {
@@ -789,15 +820,7 @@ class MongoDBProvider(
                     collection,
                     "vector_index",
                     memory_store,
-                    filter_fields=(
-                        ["status", "agent_id", "user_id"]
-                        if collection_name == MemoryType.SKILLBOX.value
-                        else (
-                            ["user_id"]
-                            if collection_name == MemoryType.ENTITY_MEMORY.value
-                            else None
-                        )
-                    ),
+                    filter_fields=_VECTOR_FILTER_FIELDS.get(collection_name),
                 )
                 if ensured and not self._vector_index_unavailable(collection_name):
                     self._vector_indexes_created.add(index_key)
@@ -1069,15 +1092,7 @@ class MongoDBProvider(
                     collection=self.db[memory_store_type.value],
                     index_name="vector_index",
                     memory_store=memory_store_present,
-                    filter_fields=(
-                        ["status", "agent_id", "user_id"]
-                        if memory_store_type == MemoryType.SKILLBOX
-                        else (
-                            ["user_id"]
-                            if memory_store_type == MemoryType.ENTITY_MEMORY
-                            else None
-                        )
-                    ),
+                    filter_fields=_VECTOR_FILTER_FIELDS.get(memory_store_type.value),
                 )
 
     def _collection(self, memory_store_type: MemoryType):
@@ -1370,7 +1385,10 @@ class MongoDBProvider(
             if isinstance(query, dict) and _mongo_memory_type_supports_user_id(
                 memory_store_type
             ):
-                query = {**query, **_mongo_user_id_predicate(user_id_scope)}
+                query = {
+                    **query,
+                    **_mongo_user_id_predicate(user_id_scope, memory_store_type),
+                }
             kwargs["user_id"] = user_id_scope
 
         # Define projection to exclude embeddings by default
@@ -1392,7 +1410,7 @@ class MongoDBProvider(
                 or []
             )
         elif memory_store_type == MemoryType.WORKFLOW_MEMORY:
-            return self.retrieve_workflow_by_query(query, limit) or []
+            return self.retrieve_workflow_by_query(query, limit, **kwargs) or []
         elif memory_store_type == MemoryType.SHORT_TERM_MEMORY:
             # Short-term memory is a scratchpad — dict queries do a filter,
             # string queries from the relevant-memories path have no
@@ -1470,7 +1488,7 @@ class MongoDBProvider(
                 or []
             )
         elif memory_store_type == MemoryType.SUMMARIES:
-            return self.retrieve_summaries_by_query(query, limit) or []
+            return self.retrieve_summaries_by_query(query, limit, **kwargs) or []
         elif memory_store_type == MemoryType.SEMANTIC_CACHE:
             # For semantic cache, we need to handle two different cases:
             # 1. Dict query: Loading existing cache entries (e.g., {"agent_id": "xyz"})
@@ -1690,7 +1708,7 @@ class MongoDBProvider(
         if agent_id is not _MONGO_UNSET:
             filters.append({"agent_id": {"$eq": agent_id}})
         if user_id is not _MONGO_UNSET:
-            filters.append({"user_id": {"$eq": user_id}})
+            filters.append(_mongo_user_id_predicate(user_id, MemoryType.SKILLBOX))
         search_filter = (
             {"$and": filters} if len(filters) > 1 else (filters[0] if filters else None)
         )
@@ -1762,7 +1780,7 @@ class MongoDBProvider(
         )
 
     def retrieve_workflow_by_query(
-        self, query: Dict[str, Any], limit: int = 1
+        self, query: Dict[str, Any], limit: int = 1, **kwargs
     ) -> Optional[Dict[str, Any]]:
         """
         Retrieve a workflow or several workflows from MongoDB.
@@ -1774,28 +1792,25 @@ class MongoDBProvider(
             The query to use for retrieval.
         limit : int
             The maximum number of workflows to return.
+        **kwargs : Dict[str, Any]
+            Optional ``memory_id`` / ``user_id`` scope, applied inside the
+            vector search.
 
         Returns:
         --------
         Optional[List[Dict[str, Any]]]
             The retrieved workflows, or None if not found.
         """
-
-        # Get the embedding for the query
-        try:
-            embedding = embed_as_query(get_embedding, query)
-        except Exception as e:
-            logger.error(f"Failed to generate embedding for query: {e}")
-            return []
-
-        pipeline = self._build_vector_search_pipeline(embedding, limit)
-        results = self._run_vector_search(
-            self.workflow_memory_collection, pipeline, label="workflow_memory"
+        return self._memory_scoped_vector_search(
+            self.workflow_memory_collection,
+            MemoryType.WORKFLOW_MEMORY,
+            query,
+            limit,
+            **kwargs,
         )
-        return results if results else None
 
     def retrieve_summaries_by_query(
-        self, query: Dict[str, Any], limit: int = 1
+        self, query: Dict[str, Any], limit: int = 1, **kwargs
     ) -> Optional[Dict[str, Any]]:
         """
         Retrieve summaries by query using vector search.
@@ -1806,23 +1821,49 @@ class MongoDBProvider(
             The query to use for retrieval.
         limit : int
             The maximum number of summaries to return.
+        **kwargs : Dict[str, Any]
+            Optional ``memory_id`` / ``user_id`` scope, applied inside the
+            vector search.
 
         Returns:
         --------
         Optional[List[Dict[str, Any]]]
             The retrieved summaries, or None if not found.
         """
-        # Get the embedding for the query
+        return self._memory_scoped_vector_search(
+            self.summaries_collection, MemoryType.SUMMARIES, query, limit, **kwargs
+        )
+
+    def _memory_scoped_vector_search(
+        self, collection, memory_type: MemoryType, query: Any, limit: int, **kwargs
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Vector search pre-filtered by the ``memory_id`` / ``user_id`` scope.
+
+        Filtering a global top-k afterwards gives a tenant a false empty
+        whenever other tenants' rows fill every slot.
+        """
         try:
             embedding = embed_as_query(get_embedding, query)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}")
             return []
 
-        pipeline = self._build_vector_search_pipeline(embedding, limit)
-        results = self._run_vector_search(
-            self.summaries_collection, pipeline, label="summaries"
+        if getattr(self, "lazy_vector_indexes", False):
+            # The index must declare the filter paths before a scoped query.
+            self._ensure_vector_index_for_collection(
+                collection, memory_type.value, memory_store=True
+            )
+        search_filter: Dict[str, Any] = {}
+        memory_id = kwargs.get("memory_id")
+        if memory_id is not None:
+            search_filter["memory_id"] = str(memory_id)
+        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
+        if user_id_scope is not _MONGO_UNSET:
+            search_filter.update(_mongo_user_id_predicate(user_id_scope, memory_type))
+        pipeline = self._build_vector_search_pipeline(
+            embedding, limit, search_filter=search_filter or None
         )
+        results = self._run_vector_search(collection, pipeline, label=memory_type.value)
         return results if results else None
 
     def find_similar_conversation_entries(
@@ -1912,6 +1953,38 @@ class MongoDBProvider(
             **kwargs,
         )
 
+    @staticmethod
+    def _knowledge_base_search_filter(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Scope filter for knowledge-base vector and fallback searches.
+
+        Ingested chunks carry their ``knowledge_base_id``, not an agent's
+        ``memory_id``, so attached ``knowledge_base_ids`` widen the memory
+        boundary to (attached knowledge bases OR memory_id).
+        """
+        search_filter: Dict[str, Any] = {}
+        memory_id = kwargs.get("memory_id")
+        knowledge_base_ids = sorted(
+            {str(value) for value in kwargs.get("knowledge_base_ids") or () if value}
+        )
+        if knowledge_base_ids:
+            scope: Dict[str, Any] = {"knowledge_base_id": {"$in": knowledge_base_ids}}
+            search_filter.update(
+                {"$or": [scope, {"memory_id": str(memory_id)}]}
+                if memory_id is not None
+                else scope
+            )
+        elif memory_id is not None:
+            search_filter["memory_id"] = str(memory_id)
+        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
+        if user_id_scope is not _MONGO_UNSET:
+            search_filter.update(
+                _mongo_user_id_predicate(user_id_scope, MemoryType.KNOWLEDGE_BASE)
+            )
+        namespace = kwargs.get("namespace")
+        if namespace:
+            search_filter["namespace"] = str(namespace)
+        return search_filter
+
     def _knowledge_base_scoped_fallback(
         self,
         *,
@@ -1929,16 +2002,7 @@ class MongoDBProvider(
         attached to every row so callers and traces can distinguish it from a
         semantic match.
         """
-        search_filter: Dict[str, Any] = {}
-        memory_id = kwargs.get("memory_id")
-        if memory_id is not None:
-            search_filter["memory_id"] = str(memory_id)
-        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
-        if user_id_scope is not _MONGO_UNSET:
-            search_filter.update(_mongo_user_id_predicate(user_id_scope))
-        namespace = kwargs.get("namespace")
-        if namespace:
-            search_filter["namespace"] = str(namespace)
+        search_filter = self._knowledge_base_search_filter(kwargs)
 
         bounded_limit = max(1, min(int(limit), 100))
         candidate_limit = min(200, max(32, bounded_limit * 8))
@@ -1976,17 +2040,8 @@ class MongoDBProvider(
     ) -> List[Dict[str, Any]]:
         """Internal: run a ``$vectorSearch`` on the KB collection with a
         pre-computed embedding plus optional ``memory_id`` / ``user_id`` /
-        ``namespace`` filters."""
-        search_filter: Dict[str, Any] = {}
-        memory_id = kwargs.get("memory_id")
-        if memory_id is not None:
-            search_filter["memory_id"] = str(memory_id)
-        user_id_scope = kwargs.get("user_id", _MONGO_UNSET)
-        if user_id_scope is not _MONGO_UNSET:
-            search_filter.update(_mongo_user_id_predicate(user_id_scope))
-        namespace = kwargs.get("namespace")
-        if namespace:
-            search_filter["namespace"] = str(namespace)
+        ``namespace`` filters, widened by ``knowledge_base_ids``."""
+        search_filter = self._knowledge_base_search_filter(kwargs)
 
         pipeline = self._build_vector_search_pipeline(
             embedding,
@@ -2065,7 +2120,12 @@ class MongoDBProvider(
         )
 
     def clear_semantic_cache(
-        self, agent_id: Optional[str] = None, memory_id: Optional[str] = None
+        self,
+        agent_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        *,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> int:
         """
         Clear semantic cache entries with optional filtering.
@@ -2076,6 +2136,10 @@ class MongoDBProvider(
             Clear only entries for this agent ID
         memory_id : Optional[str]
             Clear only entries for this memory ID
+        user_id : Optional[str]
+            Clear only entries for this user
+        session_id : Optional[str]
+            Clear only entries for this session
 
         Returns:
         --------
@@ -2087,6 +2151,10 @@ class MongoDBProvider(
             query["agent_id"] = agent_id
         if memory_id:
             query["memory_id"] = memory_id
+        if user_id is not None:
+            query["user_id"] = user_id
+        if session_id is not None:
+            query["session_id"] = session_id
 
         try:
             result = self.semantic_cache_collection.delete_many(query)
@@ -2274,7 +2342,7 @@ class MongoDBProvider(
         if user_id is not _MONGO_UNSET and _mongo_memory_type_supports_user_id(
             memory_store_type
         ):
-            mongo_filter.update(_mongo_user_id_predicate(user_id))
+            mongo_filter.update(_mongo_user_id_predicate(user_id, memory_store_type))
 
         collection = self._collection(memory_store_type)
         if collection is None:
@@ -2314,7 +2382,7 @@ class MongoDBProvider(
         if user_id is not _MONGO_UNSET and _mongo_memory_type_supports_user_id(
             memory_store_type
         ):
-            mongo_filter.update(_mongo_user_id_predicate(user_id))
+            mongo_filter.update(_mongo_user_id_predicate(user_id, memory_store_type))
         collection = self._collection(memory_store_type)
         if collection is None:
             return []
@@ -2811,6 +2879,8 @@ class MongoDBProvider(
                 base_filter, projection
             ).sort("timestamp", 1)
             results = list(query)
+        # MongoDB orders the ISO strings as text; order by instant instead.
+        results.sort(key=lambda doc: _turn_epoch(doc.get("timestamp")))
 
         # Backward compat: migrate old conversation_id → thread_id on read
         for doc in results:
@@ -2946,8 +3016,28 @@ class MongoDBProvider(
 
         return memagent_dict
 
-    def _clear_agent_toolbox_rows(self, agent_id: str) -> None:
-        self.toolbox_collection.delete_many({"agent_id": agent_id})
+    def _clear_agent_toolbox_rows(self, agent_id: str) -> Dict[str, Any]:
+        """Delete the rows mirroring an agent's tools in one query (see base).
+
+        Rows the MCP tool index keeps are left alone; the vectors of the
+        deleted rows are returned so rows written back unchanged keep them.
+        """
+        from ...long_term.procedural.toolbox.indexing import (
+            KEPT_BY_MCP_TOOL_INDEX,
+            search_text,
+        )
+
+        query = {
+            "agent_id": agent_id,
+            "tool_type": {"$nin": list(KEPT_BY_MCP_TOOL_INDEX)},
+        }
+        embedded = {
+            str(doc["_id"]): (search_text(doc), doc["embedding"])
+            for doc in self.toolbox_collection.find(query)
+            if doc.get("embedding") is not None
+        }
+        self.toolbox_collection.delete_many(query)
+        return embedded
 
     def retrieve_memagent(self, agent_id: str) -> "MemAgentModel":
         """
@@ -3074,15 +3164,12 @@ class MongoDBProvider(
                 raise ValueError(f"MemAgent with id {agent_id} not found")
 
             # Delete every memory unit tagged with one of the agent's
-            # memory_ids, in every store except the agent store itself (the
-            # agent row is deleted below). Same sweep as the filesystem
-            # provider: agent-scoped definitions without a memory_id
-            # (personas, toolbox entries) are left alone.
+            # memory_ids that no other agent still uses, in every store except
+            # the agent store itself (the agent row is deleted below). Same
+            # sweep as the filesystem provider: agent-scoped definitions
+            # without a memory_id (personas, toolbox entries) are left alone.
             for memory_id in memagent.memory_ids or []:
-                for memory_type in MemoryType:
-                    if memory_type == MemoryType.MEMAGENT:
-                        continue
-                    self._delete_memory_units_by_memory_id(memory_id, memory_type)
+                self.delete_memory_units(memory_id, agent_id=agent_id)
 
         try:
             result = self.memagent_collection.delete_one(

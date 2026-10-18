@@ -75,6 +75,11 @@ mcp = [
 ]
 # CLI deps ship in base; this empty alias keeps `pip install memorizz[cli]` valid.
 cli = []
+# `memorizz desktop`: agents open, read and operate Mac apps over MCP.
+desktop = [
+    "mcp>=2.0.0,<3.0.0",
+    "pyobjc-framework-ApplicationServices>=10.3; sys_platform == 'darwin'",
+]
 # Fully-local stack: Ollama LLM + Ollama embeddings + FAISS filesystem memory.
 local = ["memorizz[ollama]", "memorizz[filesystem]"]
 anthropic = ["anthropic>=0.26.0"]

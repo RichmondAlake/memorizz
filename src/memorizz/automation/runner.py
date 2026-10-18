@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from ..channels.whatsapp.numbers import normalize_whatsapp_number
 from ..channels.whatsapp.twilio import TwilioWhatsAppSender
 from ..memagent import MemAgent
+from ..memagent.persistence import keep_stored_fields
 from .models import AutomationDelivery, AutomationJob
 from .schedule import render_query_template
 
@@ -104,11 +105,15 @@ def execute_job_action(
     agent = MemAgent.load(
         job.agent_id, memory_provider=memory_provider, automations_enabled=False
     )
+    # Both are for this run only: a save during it (a new memory registered,
+    # a tool that saves the agent) keeps the agent's own settings.
+    keep_stored_fields(agent, "automations_enabled", "tools")
     if getattr(agent, "tool_manager", None) is not None:
         from ..memagent.managers.automation_manager import AUTOMATION_TOOL_NAMES
 
         for _name in AUTOMATION_TOOL_NAMES:
-            agent.tool_manager.remove_tool(_name)
+            if _name in agent.tool_manager.tools:
+                agent.tool_manager.remove_tool(_name)
 
     augmented_query = f"[{AUTOMATION_DIRECTIVE}]\n\n{rendered_query}"
     response = agent.run(augmented_query, memory_id=memory_id)

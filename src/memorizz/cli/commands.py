@@ -858,6 +858,15 @@ def cmd_ingest(session, args: str):
     kb = KnowledgeBase(memory_provider=session.provider)
     kb_id = kb.ingest_file(str(path))
     console.print(f"[green]Ingested[/green] {path.name} → knowledge_base_id {kb_id}")
+    # Recall only searches the knowledge bases attached to the agent; attach
+    # it (and save the agent) as the UI ingest does.
+    if kb.attach_to_agent(session.agent, kb_id):
+        console.print("[dim]Attached to this agent; recall can use it now.[/dim]")
+    else:
+        console.print(
+            "[yellow]Not attached to this agent[/yellow] (the file produced no "
+            "chunks, or the agent could not be saved)."
+        )
 
 
 # --------------------------------------------------------------------------- #

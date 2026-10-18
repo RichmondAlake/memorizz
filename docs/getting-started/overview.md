@@ -38,7 +38,7 @@ application.
 | `deep_research` | Tools, knowledge, shared coordination | Multi-step investigation and synthesis |
 
 Modes select sensible memory defaults; they do not grant authority. Add tools,
-MCP, browser control, internet access, or code execution explicitly and apply
+MCP, browser control, desktop control, internet access, or code execution explicitly and apply
 the corresponding host policy.
 
 For repository and terminal work, a MemAgent can either delegate to an external

@@ -12,7 +12,7 @@ from __future__ import annotations
 import array
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import oracledb
 import pytest
@@ -106,7 +106,7 @@ def test_store_persona_insert_sql_and_binds_pinned():
     assert persona_id == "persona-1"
     assert cursor.calls[0] == (_PERSONA_SELECT, {"persona_id": "persona-1"})
     insert_sql, params = cursor.calls[1]
-    columns = _PERSONA_COLUMNS + ["embedding"]
+    columns = _PERSONA_COLUMNS + ["goals", "embedding"]
     assert insert_sql == (
         f"INSERT INTO MEMORIZZ.personas ({', '.join(columns)}) "
         f"VALUES ({', '.join(':' + c for c in columns)})"
@@ -120,6 +120,7 @@ def test_store_persona_insert_sql_and_binds_pinned():
         "agent_id": "agent-1",
         "traits": '["careful"]',
         "expertise": '{"domain": "ml"}',
+        "goals": "Cite sources",
         "embedding": array.array("f", embedding),
     }
     assert len(cursor.calls) == 2
@@ -143,7 +144,8 @@ def test_store_persona_update_sql_and_binds_pinned():
     assert cursor.calls[1] == (
         "UPDATE MEMORIZZ.personas SET name = :name, role_type = :role_type, "
         "background = :background, memory_id = :memory_id, agent_id = :agent_id, "
-        "traits = :traits, expertise = :expertise, updated_at = CURRENT_TIMESTAMP "
+        "traits = :traits, expertise = :expertise, goals = :goals, "
+        "updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP) "
         "WHERE persona_id = :persona_id",
         {
             "persona_id": "Planner",
@@ -154,6 +156,7 @@ def test_store_persona_update_sql_and_binds_pinned():
             "agent_id": "agent-2",
             "traits": None,
             "expertise": None,
+            "goals": "",
         },
     )
     assert connection.commits == 1
@@ -243,7 +246,7 @@ def test_store_toolbox_update_sql_and_binds_pinned():
         "deprecated_arguments = :deprecated_arguments, queries = :queries, "
         "import_reference = :import_reference, user_id = :user_id, "
         "memory_id = :memory_id, agent_id = :agent_id, "
-        "updated_at = CURRENT_TIMESTAMP WHERE tool_id = :tool_id",
+        "updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP) WHERE tool_id = :tool_id",
         {
             "tool_id": "lookup",
             "name": "lookup",
@@ -359,6 +362,11 @@ _CREATED = datetime(2026, 1, 2, 3, 4, 5)
 _UPDATED = datetime(2026, 1, 2, 4, 0, 0)
 
 
+def _utc(value):
+    """A fetched TIMESTAMP (UTC wall clock) as the aware value reads return."""
+    return value.replace(tzinfo=timezone.utc)
+
+
 @pytest.mark.unit
 def test_retrieve_by_filter_semantic_cache_mapping_pinned():
     row_id = uuid.uuid4()
@@ -379,6 +387,7 @@ def test_retrieve_by_filter_semantic_cache_mapping_pinned():
         [0.1, 0.2],
         _CREATED,
         expires,
+        datetime(2026, 1, 3),
     )
     cursor = _Cursor(rows=[row])
     provider, _connection = _provider(cursor)
@@ -393,8 +402,9 @@ def test_retrieve_by_filter_semantic_cache_mapping_pinned():
     assert cursor.calls[0] == (
         "SELECT id, cache_key, query_text, response, scope, similarity_threshold, "
         "hit_count, agent_id, memory_id, session_id, user_id, metadata, embedding, "
-        "created_at, expires_at FROM MEMORIZZ.semantic_cache WHERE "
-        "agent_id = :agent_id AND (expires_at IS NULL OR expires_at > SYSTIMESTAMP) "
+        "created_at, expires_at, last_accessed FROM MEMORIZZ.semantic_cache WHERE "
+        "agent_id = :agent_id AND "
+        "(expires_at IS NULL OR expires_at > SYS_EXTRACT_UTC(SYSTIMESTAMP)) "
         "FETCH FIRST :limit ROWS ONLY",
         {"agent_id": "agent-1", "limit": 5},
     )
@@ -412,9 +422,10 @@ def test_retrieve_by_filter_semantic_cache_mapping_pinned():
         "session_id": "session-1",
         "user_id": "alice",
         "metadata": {"domain": "inventory"},
-        "timestamp": _CREATED.timestamp(),
-        "created_at": _CREATED,
-        "expires_at": expires,
+        "timestamp": _utc(_CREATED).timestamp(),
+        "created_at": _utc(_CREATED),
+        "expires_at": _utc(expires),
+        "last_accessed": _utc(datetime(2026, 1, 3)).timestamp(),
     }
     assert without == [expected]
     assert with_vectors == [dict(expected, embedding=[0.1, 0.2])]
@@ -441,7 +452,7 @@ def test_retrieve_by_filter_semantic_cache_defaults_pinned():
 _RETENTION_ROW = (0.75, _UPDATED, 3, "active", _Lob('{"suppressed_by": "ops"}'))
 _RETENTION_DOC = {
     "importance": 0.75,
-    "last_accessed_at": _UPDATED.isoformat(),
+    "last_accessed_at": _utc(_UPDATED).isoformat(),
     "access_count": 3,
     "retention_state": "active",
     "suppressed_by": "ops",
@@ -483,7 +494,7 @@ def test_retrieve_by_id_conversation_memory_mapping_pinned():
             "thread_id": "thread-1",
             "role": "user",
             "content": "hello",
-            "timestamp": _CREATED.isoformat(),
+            "timestamp": _utc(_CREATED).isoformat(),
             "agent_id": "agent-1",
             "user_id": "alice",
             "summary_id": "summary-1",
@@ -574,8 +585,8 @@ def test_retrieve_by_id_shared_memory_mapping_pinned():
         "memory_type": "shared_memory",
         "scope": "global",
         "owner_agent_id": "agent-1",
-        "created_at": _CREATED.isoformat(),
-        "updated_at": _UPDATED.isoformat(),
+        "created_at": _utc(_CREATED).isoformat(),
+        "updated_at": _utc(_UPDATED).isoformat(),
         "embedding": [0.5, 0.6],
         "access_list": ["agent-1", "agent-2"],
     }
@@ -648,7 +659,7 @@ def test_retrieve_conversation_history_mapping_pinned():
             "thread_id": "thread-1",
             "role": "assistant",
             "content": "reply",
-            "timestamp": _CREATED.isoformat(),
+            "timestamp": _utc(_CREATED).isoformat(),
             "agent_id": "agent-1",
             "user_id": "alice",
             "summary_id": None,
@@ -766,7 +777,8 @@ def test_store_shared_memory_insert_binds_vector_pinned():
         "INSERT INTO MEMORIZZ.shared_memory (id, memory_id, content, memory_type, "
         "scope, owner_agent_id, created_at, updated_at, embedding, access_list) "
         "VALUES (:id, :memory_id, :content, :memory_type, :scope, :owner_agent_id, "
-        "SYSTIMESTAMP, SYSTIMESTAMP, :embedding, :access_list)"
+        "SYS_EXTRACT_UTC(SYSTIMESTAMP), SYS_EXTRACT_UTC(SYSTIMESTAMP), "
+        ":embedding, :access_list)"
     )
     assert _binds_without_id(params) == {
         "memory_id": "memory-1",
@@ -793,7 +805,7 @@ def test_store_shared_memory_update_binds_vector_pinned():
 
     assert cursor.calls[1] == (
         "UPDATE MEMORIZZ.shared_memory SET content = :content, "
-        "updated_at = SYSTIMESTAMP, embedding = :embedding "
+        "updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP), embedding = :embedding "
         "WHERE memory_id = :memory_id",
         {"memory_id": "memory-1", "content": "raw text", "embedding": existing_vector},
     )
@@ -807,7 +819,7 @@ def test_store_shared_memory_update_binds_vector_pinned():
     assert cursor.input_sizes == []
     assert cursor.calls[1][0] == (
         "UPDATE MEMORIZZ.shared_memory SET content = :content, "
-        "updated_at = SYSTIMESTAMP WHERE memory_id = :memory_id"
+        "updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP) WHERE memory_id = :memory_id"
     )
 
 

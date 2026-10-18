@@ -664,6 +664,8 @@ def build_session_agent(
             # persistent default agent exists.
             config_owner = "cli-default"
         if mcp_config.has_server_config(config_owner):
+            if config_owner != owner_id:
+                mcp_config.adopt_tool_cache(config_owner, owner_id)
             agent.with_mcp_servers(mcp_config.load_servers(config_owner))
             if config_owner != owner_id:
                 mcp_config.save_servers(agent.mcp_servers, owner_id)

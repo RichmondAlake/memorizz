@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -210,27 +210,22 @@ def test_list_all_personas_returns_rows():
 
 
 @pytest.mark.unit
-def test_base_clear_semantic_cache_now_deletes_oracle_rows():
-    fields, _order_by = _LIST_SPECS[MemoryType.SEMANTIC_CACHE]
-    row_id = uuid.uuid4()
-    cursor = _Cursor(
-        routes=[
-            (
-                "SELECT",
-                [_row_for(fields, {"id": row_id.bytes, "cache_key": "cache-1"})],
-            )
-        ]
-    )
+def test_clear_semantic_cache_deletes_oracle_rows_in_one_scoped_statement():
+    cursor = _Cursor(rowcount=1)
     provider, connection = _provider(cursor)
 
-    deleted = provider.clear_semantic_cache()
-
-    assert deleted == 1
-    delete_sql, params = cursor.calls[-1]
-    assert delete_sql.startswith("DELETE FROM MEMORIZZ.semantic_cache")
-    assert "cache_key = :cache_key OR id = :row_id" in delete_sql
-    assert params["row_id"] == row_id.bytes
+    assert provider.clear_semantic_cache() == 1
+    assert cursor.calls[-1] == ("DELETE FROM MEMORIZZ.semantic_cache", {})
     assert connection.commits == 1
+
+    cursor.calls.clear()
+    provider.clear_semantic_cache("agent-1", user_id="alice", session_id="s-1")
+    sql, params = cursor.calls[-1]
+    assert sql == (
+        "DELETE FROM MEMORIZZ.semantic_cache WHERE agent_id = :agent_id "
+        "AND user_id = :user_id AND session_id = :session_id"
+    )
+    assert params == {"agent_id": "agent-1", "user_id": "alice", "session_id": "s-1"}
 
 
 @pytest.mark.unit
@@ -243,7 +238,7 @@ def test_purge_expired_semantic_cache_defaults_to_database_clock():
     sql, params = cursor.calls[0]
     assert sql == (
         "DELETE FROM MEMORIZZ.semantic_cache "
-        "WHERE expires_at IS NOT NULL AND expires_at < SYSTIMESTAMP"
+        "WHERE expires_at IS NOT NULL AND expires_at < SYS_EXTRACT_UTC(SYSTIMESTAMP)"
     )
     assert params == {}
     assert connection.commits == 1
@@ -272,7 +267,97 @@ def test_semantic_cache_filter_and_vector_search_exclude_expired_rows():
     provider._vector_search(MemoryType.SEMANTIC_CACHE, [0.1, 0.2], limit=3)
 
     for sql, _params in cursor.calls:
-        assert "(expires_at IS NULL OR expires_at > SYSTIMESTAMP)" in sql
+        assert (
+            "(expires_at IS NULL OR expires_at > SYS_EXTRACT_UTC(SYSTIMESTAMP))" in sql
+        )
+
+
+@pytest.mark.unit
+def test_semantic_cache_expiry_is_bound_and_compared_in_utc():
+    """A short TTL must not be expired on arrival when the session runs ahead
+    of UTC: ``expires_at`` is a plain TIMESTAMP holding UTC, so every bind is
+    naive UTC and every predicate uses the UTC database clock."""
+    from datetime import timedelta, timezone
+
+    expires = datetime(2026, 3, 1, 12, 0, 30)  # naive UTC
+    aware_utc = expires.replace(tzinfo=timezone.utc)
+    ahead = aware_utc.astimezone(timezone(timedelta(hours=9)))  # same instant
+    cursor = _Cursor(rowcount=0)
+    provider, _connection = _provider(cursor)
+
+    # Store: the refresh UPDATE misses (rowcount 0), so the INSERT runs too.
+    provider._store_semantic_cache(
+        {"cache_key": "k", "query_text": "q", "response": "r", "expires_at": ahead}
+    )
+    provider.update_by_id(
+        "k", {"expires_at": aware_utc.timestamp()}, MemoryType.SEMANTIC_CACHE
+    )
+    provider.update_by_id(
+        "k", {"expires_at": ahead.isoformat()}, MemoryType.SEMANTIC_CACHE
+    )
+    provider._store_short_term_memory({"content": "c", "expires_at": ahead})
+    binds = [params["expires_at"] for _sql, params in cursor.calls]
+    assert [sql.split()[0] for sql, _params in cursor.calls] == [
+        "UPDATE",
+        "INSERT",
+        "UPDATE",
+        "UPDATE",
+        "INSERT",
+    ]
+    assert binds == [expires] * 5
+    assert all(bind.tzinfo is None for bind in binds)
+
+    cursor.calls.clear()
+    for now in (aware_utc.timestamp(), ahead, ahead.isoformat()):
+        provider.purge_expired_semantic_cache(now=now)
+    assert [params for _sql, params in cursor.calls] == [{"now": expires}] * 3
+
+    cursor.calls.clear()
+    provider.purge_expired_semantic_cache()
+    provider._retrieve_by_filter({"agent_id": "a"}, MemoryType.SEMANTIC_CACHE, 5)
+    provider._vector_search(MemoryType.SEMANTIC_CACHE, [0.1, 0.2], limit=3)
+    assert len(cursor.calls) == 3
+    for sql, _params in cursor.calls:
+        assert "SYS_EXTRACT_UTC(SYSTIMESTAMP)" in sql
+        assert not re.search(r"expires_at [<>] SYSTIMESTAMP", sql)
+
+
+@pytest.mark.unit
+def test_knowledge_recall_ranks_inside_attached_knowledge_bases(monkeypatch):
+    """Ingested chunks carry knowledge_base_id, not the agent's memory_id: the
+    attached knowledge bases widen the memory scope inside the SQL, with
+    bound ids, so ranking happens within it."""
+    monkeypatch.setattr("memorizz.embeddings.get_embedding", lambda _text: [0.1, 0.2])
+    cursor = _Cursor()
+    provider, _connection = _provider(cursor)
+
+    provider.retrieve_by_query(
+        "refund window",
+        memory_type=MemoryType.KNOWLEDGE_BASE,
+        memory_id="memory-1",
+        user_id=None,
+        namespace="handbook",
+        knowledge_base_ids=["kb-1", "kb-2", "kb-1"],
+        limit=3,
+    )
+    provider.retrieve_by_query(
+        "refund window", memory_type=MemoryType.KNOWLEDGE_BASE, memory_id="memory-1"
+    )
+
+    (scoped_sql, params), (plain_sql, _plain) = cursor.calls
+    assert (
+        "(knowledge_base_id IN (:kb_0, :kb_1) OR memory_id = :memory_id)" in scoped_sql
+    )
+    assert "namespace = :namespace" in scoped_sql and "user_id IS NULL" in scoped_sql
+    assert scoped_sql.index("WHERE") < scoped_sql.index("ORDER BY VECTOR_DISTANCE")
+    assert (params["kb_0"], params["kb_1"], params["memory_id"]) == (
+        "kb-1",
+        "kb-2",
+        "memory-1",
+    )
+    assert "kb-1" not in scoped_sql
+    assert "memory_id = :memory_id" in plain_sql
+    assert "knowledge_base_id IN" not in plain_sql
 
 
 @pytest.mark.unit
@@ -524,7 +609,10 @@ def test_update_shared_memory_rejects_unknown_columns_before_sql():
     assert connection.commits == 0
 
     assert provider._update_shared_memory_by_id("memory-1", {"scope": "team"}) is True
-    assert "SET updated_at = SYSTIMESTAMP, scope = :scope" in cursor.calls[0][0]
+    assert (
+        "SET updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP), scope = :scope"
+        in cursor.calls[0][0]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -741,12 +829,12 @@ def test_store_memagent_skips_reembedding_unchanged_tools_and_personas():
             return [0.1, 0.2]
 
     stored_tool = ["lookup", _Lob("Look up"), "(q)", 1]
-    stored_persona = ["Researcher", _Lob("Keeps provenance"), 1]
+    stored_persona = ["Researcher", _Lob("Keeps provenance"), _Lob("Cite sources"), 1]
     cursor = _Cursor(
         routes=[
             ("SELECT id FROM MEMORIZZ.agents", (agent_uuid,)),
             ("SELECT name, description, signature, CASE", lambda: tuple(stored_tool)),
-            ("SELECT name, background, CASE", lambda: tuple(stored_persona)),
+            ("SELECT name, background, goals, CASE", lambda: tuple(stored_persona)),
             ("SELECT id FROM MEMORIZZ.toolbox", (b"\x01" * 16,)),
             ("SELECT id FROM MEMORIZZ.personas", (b"\x02" * 16,)),
         ]
@@ -761,6 +849,7 @@ def test_store_memagent_skips_reembedding_unchanged_tools_and_personas():
         persona={
             "name": "Researcher",
             "background": "Keeps provenance",
+            "goals": "Cite sources",
             "role": "general",
         },
     )
@@ -786,6 +875,45 @@ def test_store_memagent_skips_reembedding_unchanged_tools_and_personas():
         s for s, _ in cursor.calls if s.startswith("UPDATE MEMORIZZ.toolbox")
     ]
     assert "embedding = :embedding" in toolbox_updates[0]
+
+    # Goals are part of the persona's embedded text: a goals-only edit
+    # re-embeds the persona instead of keeping the stale vector.
+    cursor.calls.clear()
+    embed_calls.clear()
+    stored_tool[1] = _Lob("Look up")
+    stored_persona[2] = _Lob("Old goals")
+    provider.store_memagent(agent)
+    assert embed_calls == ["Researcher: Keeps provenance Cite sources"]
+    persona_updates = [
+        s for s, _ in cursor.calls if s.startswith("UPDATE MEMORIZZ.personas")
+    ]
+    assert "embedding = :embedding" in persona_updates[0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("migrated", [True, False])
+def test_persona_update_by_id_persists_goals_version_and_history(migrated):
+    cursor = _Cursor()
+    provider, _connection = _provider(cursor)
+    evolution = {"goals", "version", "evolution_history"}
+    provider._memory_type_has_column = lambda _kind, column: (
+        migrated or column not in evolution
+    )
+    history = [{"version": 2, "changes": {"goals": {"old": "X", "new": "Y"}}}]
+
+    assert provider.update_by_id(
+        "persona-1",
+        {"goals": "Y", "version": 2, "evolution_history": history, "name": "R"},
+        MemoryType.PERSONAS,
+    )
+
+    sql, params = cursor.calls[0]
+    if migrated:
+        assert params["goals"] == "Y" and params["version"] == 2
+        assert json.loads(params["evolution_history"]) == history
+    else:
+        assert evolution.isdisjoint(params) and "goals" not in sql
+    assert params["name"] == "R"
 
 
 # ---------------------------------------------------------------------------
@@ -870,13 +998,15 @@ def test_store_paths_bind_forgetting_fields_from_epoch_and_iso():
     provider._generate_embedding_if_needed = lambda *_args, **_kwargs: None
     captured = {}
     provider._insert_base_row = lambda *_args, **kwargs: captured.update(kwargs)
+    # Epoch seconds bind as naive UTC (every TIMESTAMP column holds UTC).
     accessed = datetime(2026, 4, 1, 9, 0)
+    accessed_epoch = accessed.replace(tzinfo=timezone.utc).timestamp()
 
     provider._store_knowledge_base(
         {
             "memory_id": "m",
             "content": "c",
-            "last_accessed_at": accessed.timestamp(),
+            "last_accessed_at": accessed_epoch,
             "retention_state": "Suppressed",
             "suppressed_by": "plan-x",
             "suppression_reason": "stale",
@@ -976,7 +1106,7 @@ def test_list_rows_carry_forgetting_fields_and_flatten_retention_meta():
         in cursor.calls[0][0]
     )
     assert row["importance"] == 0.25
-    assert row["last_accessed_at"] == "2026-04-01T09:00:00"
+    assert row["last_accessed_at"] == "2026-04-01T09:00:00+00:00"
     assert row["access_count"] == 3
     assert row["retention_state"] == "suppressed"
     assert row["suppressed_by"] == "plan-x"
@@ -1041,7 +1171,7 @@ def test_conversation_by_id_and_history_carry_forgetting_fields():
     assert "retention_meta FROM MEMORIZZ.conversation_memory" in cursor.calls[0][0]
     for record in (by_id, history[0]):
         assert record["importance"] == 0.5
-        assert record["last_accessed_at"] == "2026-03-02T10:00:00"
+        assert record["last_accessed_at"] == "2026-03-02T10:00:00+00:00"
         assert record["access_count"] == 4
         assert record["retention_state"] == "active"
         assert record["suppressed_by"] == "plan-z"
@@ -1081,10 +1211,14 @@ def test_update_by_id_persists_suppression_and_ignores_unknown_keys():
     assert "bogus" not in params and params["id"] == row_id.bytes
     assert connection.commits == 1
 
+    # A knowledge-base field without a column merges into the metadata JSON
+    # (a bound value, never an identifier); other tables ignore it.
+    assert json.loads(params["metadata_patch"]) == {"bogus": 1}
+    assert "metadata = JSON_MERGEPATCH(" in sql
+
     cursor.calls.clear()
     assert (
-        provider.update_by_id(str(row_id), {"bogus": 1}, MemoryType.KNOWLEDGE_BASE)
-        is False
+        provider.update_by_id("summary-1", {"bogus": 1}, MemoryType.SUMMARIES) is False
     )
     assert cursor.calls == []
 
@@ -1100,7 +1234,9 @@ def test_update_by_id_persists_suppression_and_ignores_unknown_keys():
     )
     sql, params = cursor.calls[-1]
     assert "WHERE summary_id = :summary_id" in sql
-    assert params["last_accessed_at"] == datetime.fromtimestamp(1_800_000_000)
+    assert params["last_accessed_at"] == datetime.fromtimestamp(
+        1_800_000_000, timezone.utc
+    ).replace(tzinfo=None)
     assert params["access_count"] == 4
     assert json.loads(params["retention_meta"]) == {"unsuppressed_by": "alice"}
 
@@ -1119,7 +1255,8 @@ def test_touch_many_updates_rows_in_one_statement():
     assert touched == 2
     sql, params = cursor.calls[0]
     assert sql == (
-        "UPDATE MEMORIZZ.knowledge_base SET last_accessed_at = CURRENT_TIMESTAMP, "
+        "UPDATE MEMORIZZ.knowledge_base "
+        "SET last_accessed_at = SYS_EXTRACT_UTC(SYSTIMESTAMP), "
         "access_count = NVL(access_count, 0) + 1 WHERE id IN (:row_0, :row_2)"
     )
     assert params == {"row_0": first.bytes, "row_2": second.bytes}
@@ -1278,3 +1415,38 @@ def test_pooled_connections_fetch_lobs_with_their_rows():
     assert handled(oracledb.DB_TYPE_BLOB) == (oracledb.DB_TYPE_LONG_RAW, 50)
     assert handled(oracledb.DB_TYPE_VARCHAR) is None
     assert handled(oracledb.DB_TYPE_VECTOR) is None
+
+
+@pytest.mark.unit
+def test_agent_tool_loads_skip_every_mcp_index_row_type():
+    """MCP server settings and MCP tool-index rows describe tools but are not
+    an agent's callables: no agent-tool query may load them, while the
+    generic toolbox search (Toolbox.get_most_similar_tools) still finds them."""
+    from memorizz.long_term.procedural.toolbox.indexing import NOT_AGENT_TOOLS
+
+    agent_row = (uuid.uuid4().bytes, "agent-1", "Agent", "Help.", "assistant")
+    agent_row += (20, "private", 0, 0, 0, None, None, None)
+    cursor = _Cursor(
+        routes=[
+            ("FROM all_tab_columns", (1,)),
+            ("SELECT id, agent_id, name", agent_row),
+        ]
+    )
+    provider, _connection = _provider(cursor)
+
+    provider.retrieve_tools_for_agent("agent-1", "private")
+    provider.retrieve_tools_for_agent("agent-1", "public")
+    provider._embedding_provider = SimpleNamespace(get_embedding=lambda _t: [0.1, 0.2])
+    provider.retrieve_tools_for_agent("agent-1", "public", query="search the web")
+    assert provider.retrieve_memagent("agent-1").agent_id == "agent-1"
+
+    agent_tool_sql = [sql for sql, _ in cursor.calls if "FROM MEMORIZZ.toolbox" in sql]
+    assert len(agent_tool_sql) == 4
+    excluded = ", ".join(f"'{tool_type}'" for tool_type in NOT_AGENT_TOOLS)
+    assert "'mcp_tool'" in excluded and "'mcp_tool_catalog'" in excluded
+    for sql in agent_tool_sql:
+        assert f"LOWER(tool_type) NOT IN ({excluded})" in sql
+
+    cursor.calls.clear()
+    provider._vector_search(MemoryType.TOOLBOX, [0.1, 0.2], limit=3)
+    assert "tool_type" not in cursor.calls[0][0].split(" WHERE ")[1]

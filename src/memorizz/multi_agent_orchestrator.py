@@ -10,9 +10,9 @@ import threading
 import time
 import uuid
 from contextvars import copy_context
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional
 
+from ._time import utc_now_iso
 from .approval import ApprovalRequired
 from .completion import CompletionCandidate, CompletionPolicy, CompletionRejectedError
 from .coordination.shared_memory.shared_memory import SharedMemory
@@ -395,7 +395,7 @@ class MultiAgentOrchestrator:
                 agent_id=self.root_agent.agent_id,
                 content={
                     "original_query": user_query,
-                    "started_at": datetime.now().isoformat(),
+                    "started_at": utc_now_iso(),
                     "orchestrator_type": (
                         "nested" if self.is_nested_orchestrator else "root"
                     ),
@@ -1157,7 +1157,7 @@ class MultiAgentOrchestrator:
                 content={
                     "task_id": task.task_id,
                     "description": task.description,
-                    "started_at": datetime.now().isoformat(),
+                    "started_at": utc_now_iso(),
                 },
                 entry_type="task_start",
             )

@@ -37,6 +37,7 @@ from ..memagent.utils.context_dedup import (
     RetrievalScoring,
     _parse_timestamp,
     is_suppressed,
+    naive_time_convention,
 )
 from ..memagent.utils.importance import clamp_importance
 from .forgetting import ForgettingMechanism
@@ -166,14 +167,16 @@ def _owner(row: Mapping[str, Any]) -> str:
     return str(row.get("agent_id") or row.get("owner_agent_id") or "")
 
 
-def _created_at(row: Mapping[str, Any]) -> Optional[float]:
+def _created_at(row: Mapping[str, Any], memory_type: Any = None) -> Optional[float]:
     for key in ("timestamp", "created_at", "createdAt"):
-        value = _parse_timestamp(row.get(key))
+        value = _parse_timestamp(row.get(key), naive_time_convention(memory_type, key))
         if value is not None:
             return value
     content = row.get("content")
     if isinstance(content, dict):
-        return _parse_timestamp(content.get("timestamp"))
+        return _parse_timestamp(
+            content.get("timestamp"), naive_time_convention(memory_type, "timestamp")
+        )
     return None
 
 
@@ -266,9 +269,14 @@ class RetentionPlanner:
         return not self.agent_id
 
     def score(
-        self, row: Mapping[str, Any], *, max_access: int, now: float
+        self,
+        row: Mapping[str, Any],
+        *,
+        max_access: int,
+        now: float,
+        memory_type: Any = None,
     ) -> Dict[str, float]:
-        created = _created_at(row)
+        created = _created_at(row, memory_type)
         last = _last_accessed(row, created)
         hours = max(0.0, (now - last) / 3600.0) if last is not None else 0.0
         recency = (
@@ -327,7 +335,9 @@ class RetentionPlanner:
                 record_id = _record_id(row)
                 if is_suppressed(row):
                     continue
-                parts = self.score(row, max_access=max_access, now=current)
+                parts = self.score(
+                    row, max_access=max_access, now=current, memory_type=memory_type
+                )
                 verified = _flag(row, "verified")
                 pinned = _flag(row, "pinned")
                 reason = None

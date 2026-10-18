@@ -37,6 +37,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from ..._time import to_epoch
+from ...enums.memory_type import MemoryType
 from ...memory_provider.vectors import cosine
 
 logger = logging.getLogger(__name__)
@@ -93,25 +95,43 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> Optional[float]
     return cosine(a, b, on_mismatch="none")
 
 
-def _parse_timestamp(value: Any) -> Optional[float]:
-    """Best-effort conversion of stored timestamp shapes to epoch seconds."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.timestamp()
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except (TypeError, ValueError):
-        pass
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return None
+def _parse_timestamp(value: Any, naive: str = "utc") -> Optional[float]:
+    """Best-effort conversion of stored timestamp shapes to epoch seconds.
+
+    ``naive`` says how a value without a UTC offset was written (see
+    :func:`naive_time_convention`).
+    """
+    return to_epoch(value, naive=naive)
+
+
+# Sources whose rows were stamped with ``datetime.now()`` (local time, no
+# offset) before MemoRizz wrote UTC: conversation turns everywhere, and the
+# ``created_at`` / ``updated_at`` of knowledge-base chunks, workflows and
+# skills. Entity records and the filesystem provider's default ``timestamp``
+# used ``datetime.utcnow()``; recall times have always carried an offset.
+_LOCAL_TIME_SOURCES = frozenset(
+    {"episodic", "conversation", MemoryType.CONVERSATION_MEMORY.value}
+)
+_LOCAL_CREATED_SOURCES = frozenset(
+    {
+        MemoryType.KNOWLEDGE_BASE.value,
+        MemoryType.WORKFLOW_MEMORY.value,
+        MemoryType.SKILLBOX.value,
+    }
+    | _WORKFLOW_SOURCE_LABELS
+)
+_CREATED_FIELDS = frozenset({"created_at", "createdAt", "updated_at"})
+
+
+def naive_time_convention(source: Any, field: str) -> str:
+    """How ``field`` of a ``source`` row was written when it has no offset:
+    ``"local"`` (``datetime.now()``) or ``"utc"`` (``datetime.utcnow()``)."""
+    label = str(getattr(source, "value", source) or "").strip().lower()
+    if field in _CREATED_FIELDS and label in _LOCAL_CREATED_SOURCES:
+        return "local"
+    if field in _CREATED_FIELDS | {"timestamp"} and label in _LOCAL_TIME_SOURCES:
+        return "local"
+    return "utc"
 
 
 _RECENCY_ANCHORS = ("last_accessed", "created")
@@ -409,16 +429,18 @@ def candidate_embedding(row: Any) -> Optional[List[float]]:
     return None
 
 
-def _candidate_timestamp(row: Any) -> Optional[float]:
+def _candidate_timestamp(row: Any, source: Any = None) -> Optional[float]:
     if not isinstance(row, dict):
         return None
     for key in ("timestamp", "created_at", "createdAt", "period_end"):
-        parsed = _parse_timestamp(row.get(key))
+        parsed = _parse_timestamp(row.get(key), naive_time_convention(source, key))
         if parsed is not None:
             return parsed
     content = row.get("content")
     if isinstance(content, dict):
-        return _parse_timestamp(content.get("timestamp"))
+        return _parse_timestamp(
+            content.get("timestamp"), naive_time_convention(source, "timestamp")
+        )
     return None
 
 
@@ -686,7 +708,7 @@ def dedupe_and_select(
             "text": text,
             "normalized": normalized,
             "embedding": candidate_embedding(row),
-            "timestamp": _candidate_timestamp(row),
+            "timestamp": _candidate_timestamp(row, source),
             "last_accessed": _candidate_last_accessed(row),
             "importance": _candidate_importance(row),
             "id": _candidate_id(row),

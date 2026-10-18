@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from ...._time import to_utc
 from ....enums.memory_type import MemoryType
 from .skill import Skill, SkillStatus
 from .skillbox import ScoredSkill, Skillbox
@@ -40,18 +41,9 @@ class ShadowWorkflowSnapshot:
 
 
 def _as_utc(value: Any) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        parsed = value
-    elif value:
-        try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-    else:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    # Workflow and skill stamps without an offset were written with
+    # datetime.now(), so they are local time.
+    return to_utc(value, naive="local")
 
 
 def calculate_shadow_readiness(

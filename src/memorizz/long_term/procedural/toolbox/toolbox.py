@@ -10,6 +10,7 @@ from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
 from ....llms.llm_provider import LLMProvider
 from ....memory_provider import MemoryProvider
+from ....memory_provider.base import user_scope_matches
 from ....tooling import callable_json_schema, policy_for_callable
 from .tool_schema import ToolSchemaType
 
@@ -343,7 +344,7 @@ class Toolbox:
         for row in rows or []:
             if not isinstance(row, dict):
                 continue
-            if row.get("user_id") != user_id:
+            if not user_scope_matches(row.get("user_id"), user_id, MemoryType.TOOLBOX):
                 continue
             if effective_agent_id is not None and row.get("agent_id") not in {
                 None,

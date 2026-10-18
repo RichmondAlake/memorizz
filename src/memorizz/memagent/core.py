@@ -497,6 +497,13 @@ class MemAgent:
         self._registration_lock = threading.Lock()
         self._registered_memory_ids: Set[str] = set()
         self._registration_attempted = False
+        # True once this agent's record is known to be in its provider (it
+        # was loaded from there or saved): registration then only patches
+        # memory_ids instead of rewriting the whole record.
+        self._agent_record_stored = False
+        # Saved fields a save takes from the stored record, not from this
+        # instance: run-only overrides (see persistence.keep_stored_fields).
+        self._keep_stored_fields: Set[str] = set()
         self.is_favorite = bool(is_favorite)
         self.instruction = instruction or DEFAULT_INSTRUCTION
         self.max_steps = max_steps
@@ -532,6 +539,17 @@ class MemAgent:
         # Initialized to [] here so `getattr(self, "knowledge_base_ids")`
         # always returns a real list rather than AttributeError.
         self.knowledge_base_ids: List[str] = []
+        # Saved with the agent. Not applied yet: embeddings come from the
+        # memory provider's own configuration.
+        self.embedding_provider = (
+            embedding_provider if isinstance(embedding_provider, str) else None
+        )
+        self.embedding_config = (
+            dict(embedding_config) if isinstance(embedding_config, dict) else None
+        )
+        # WhatsApp channel settings (set in the UI), saved with the agent.
+        self.whatsapp_enabled = False
+        self.whatsapp_config: Optional[Dict[str, Any]] = None
         self.tools = tools if tools is not None else []
         self.toolbox = toolbox
         self.skillbox = skillbox
@@ -639,6 +657,10 @@ class MemAgent:
             self.application_mode if self._application_mode_explicit else None,
             memory_types,
         )
+        # Types a runtime rule turned on (continual learning, MCP below). They
+        # are re-applied on every load, so saving leaves them out and the
+        # stored configuration stays what the user chose.
+        self._runtime_memory_types: Set[MemoryType] = set()
 
         # Continual learning cannot learn without workflow capture, and its
         # skills live in the SKILLBOX partition — force both on when the
@@ -652,8 +674,10 @@ class MemAgent:
                         "the learning loop cannot observe runs without it."
                     )
                 self.active_memory_types.append(MemoryType.WORKFLOW_MEMORY)
+                self._runtime_memory_types.add(MemoryType.WORKFLOW_MEMORY)
             if MemoryType.SKILLBOX not in self.active_memory_types:
                 self.active_memory_types.append(MemoryType.SKILLBOX)
+                self._runtime_memory_types.add(MemoryType.SKILLBOX)
 
         # Initialize thread state tracking
         self._current_thread_id = None
@@ -772,6 +796,10 @@ class MemAgent:
         self._mcp_server_tools: Dict[str, List[str]] = {}
         # Public tool name -> (server, MCP tool name) for first-class MCP tools.
         self._mcp_tool_targets: Dict[str, Tuple[str, str]] = {}
+        # MCP tools are indexed in toolbox memory off the request path, one
+        # sync at a time (see _index_mcp_tools).
+        self._mcp_index_lock = threading.Lock()
+        self._mcp_index_in_background = True
         self._self_aware_tools_registered = False
         self._self_aware_tool_names = (
             "self_aware_list_roots",
@@ -806,7 +834,7 @@ class MemAgent:
             self.tool_manager.initialize_from_toolbox(self.toolbox)
         self.semantic_tool_router = SemanticToolRouter(
             self.tool_manager,
-            toolbox=self.toolbox,
+            toolbox=self.toolbox or self._toolbox_search(),
             agent_id=self.agent_id,
             top_k=self.context_policy.tool_top_k,
             enabled=self.context_policy.progressive_tool_disclosure,
@@ -953,6 +981,17 @@ class MemAgent:
             self._register_capability_tools()
         except Exception as exc:
             logger.warning("Capability request tool registration failed: %s", exc)
+
+        # Saved tools come back as metadata only. Every tool live code owns
+        # has registered by now; whatever is still unbound (a built-in that
+        # is off, a function only another process had) cannot run.
+        unbound = self.tool_manager.remove_unbound_tools()
+        if unbound:
+            logger.info(
+                "MemAgent %s dropped saved tools with no function: %s",
+                self.agent_id,
+                ", ".join(sorted(unbound)),
+            )
 
         logger.info(
             f"MemAgent {self.agent_id} initialized with memory types: {self.active_memory_types}"
@@ -1475,7 +1514,9 @@ class MemAgent:
                     if isinstance(application_mode, ApplicationMode)
                     else ApplicationModeConfig.validate_mode(application_mode)
                 )
-                return ApplicationModeConfig.get_memory_types(mode)
+                # A copy: the agent edits its own list (entity memory,
+                # continual learning), never the mode's shared defaults.
+                return list(ApplicationModeConfig.get_memory_types(mode))
             except ValueError:
                 logger.warning(f"Invalid application mode: {application_mode}")
 
@@ -2915,7 +2956,16 @@ class MemAgent:
                     return skill
         if skill_name and self.skillbox:
             try:
-                learned = self.skillbox.get_skill_by_name(skill_name)
+                # Another user's private skill of the same name stays hidden.
+                learned = next(
+                    (
+                        skill
+                        for skill in self.skillbox.list_skills()
+                        if skill.name == skill_name
+                        and self._visible_to_user(skill.user_id, MemoryType.SKILLBOX)
+                    ),
+                    None,
+                )
             except Exception:
                 learned = None
             if learned:
@@ -2982,6 +3032,10 @@ class MemAgent:
                     for learned in self.skillbox.list_skills(
                         statuses=(SkillStatus.ACTIVE,)
                     ):
+                        if not self._visible_to_user(
+                            learned.user_id, MemoryType.SKILLBOX
+                        ):
+                            continue
                         entries.append(
                             {
                                 "name": learned.name,
@@ -3115,6 +3169,7 @@ class MemAgent:
 
     def _register_mcp_tools(self):
         """Register production MCP discovery and invocation tools."""
+        self._keep_mcp_runs_as_workflows()
         if self._mcp_tools_registered or not self.tool_manager:
             return
 
@@ -3230,8 +3285,10 @@ class MemAgent:
 
     def _register_capability_tools(self) -> None:
         """Let the model ask for a missing capability instead of improvising."""
-        if not self.tool_manager or "request_capability" in (
-            self.tool_manager.list_tools() or []
+        # A saved copy of the tool (metadata, no function) must not stand in
+        # for the real one.
+        if not self.tool_manager or self.tool_manager.get_tool_callable(
+            "request_capability"
         ):
             return
         from .. import capability_gaps
@@ -3372,7 +3429,83 @@ class MemAgent:
                 names.append(public_name)
                 self._mcp_tool_targets[public_name] = (server_name, mcp_name)
         self._mcp_server_tools[server_name] = names
+        self._index_mcp_tools(server_name, tools)
         return names
+
+    def _toolbox_search(self):
+        """Search-only access to the toolbox memory the provider keeps.
+
+        An agent built without a Toolbox still has its tools there (and its
+        MCP servers' tools, see _index_mcp_tools), so the tool router can rank
+        them by meaning. This registers and stores nothing.
+        """
+        if self.memory_provider is None:
+            return None
+        from ..long_term.procedural.toolbox import Toolbox
+
+        return Toolbox(self.memory_provider, agent_id=self.agent_id)
+
+    def _keep_mcp_runs_as_workflows(self) -> None:
+        """Runs that act through MCP tools are kept as workflow memory.
+
+        Like continual learning above, an agent that operates other systems
+        keeps each run's steps (tool, arguments, result) as procedural memory,
+        so a task can be recalled and, with continual learning, become a
+        skill. An agent configured with no memory types stays stateless.
+        """
+        if (
+            self.memory_provider is not None
+            and self.active_memory_types
+            and MemoryType.WORKFLOW_MEMORY not in self.active_memory_types
+        ):
+            self.active_memory_types.append(MemoryType.WORKFLOW_MEMORY)
+            self._runtime_memory_types.add(MemoryType.WORKFLOW_MEMORY)
+
+    def _index_mcp_tools(self, server_name: str, tools: List[Dict[str, Any]]) -> None:
+        """Store the server's tools in toolbox memory, searchable by meaning.
+
+        The router then ranks them by what a request means. Steady state is
+        one read per server (see MCPToolIndex), and new tools are embedded
+        off the request path; until then clear keyword matches fill the
+        router's free slots.
+        No tools means none were listed yet (an empty cache), not that the
+        server has none, so nothing is removed.
+        """
+        tools = list(tools or [])
+        if tools:
+            self._update_mcp_tool_index(
+                server_name,
+                lambda index: index.sync(server_name, tools, self._mcp_tool_name),
+            )
+
+    def _forget_mcp_tools(self, server_name: str) -> None:
+        """Remove a disconnected server's tools from toolbox memory."""
+        self._update_mcp_tool_index(
+            server_name, lambda index: index.remove_server(server_name)
+        )
+
+    def _update_mcp_tool_index(self, server_name: str, change) -> None:
+        if self.memory_provider is None or not self.agent_id:
+            return
+        from ..mcp.tool_index import MCPToolIndex
+
+        index = MCPToolIndex(self.memory_provider, self.agent_id)
+
+        def run() -> None:
+            with self._mcp_index_lock:
+                try:
+                    change(index)
+                except Exception as exc:
+                    logger.warning(
+                        "MCP tool index for %s was not updated: %s", server_name, exc
+                    )
+
+        if self._mcp_index_in_background:
+            threading.Thread(
+                target=run, name=f"mcp-tool-index-{server_name}", daemon=True
+            ).start()
+        else:
+            run()
 
     def _unregister_mcp_tools(self) -> None:
         """Remove the MCP facade tools when no connection remains configured."""
@@ -3398,10 +3531,11 @@ class MemAgent:
                 self.tool_manager.remove_tool(tool_name)
             except Exception:
                 pass
-        for names in self._mcp_server_tools.values():
+        for server_name, names in self._mcp_server_tools.items():
             for tool_name in names:
                 if tool_name in registered:
                     self.tool_manager.remove_tool(tool_name)
+            self._forget_mcp_tools(server_name)
         self._mcp_server_tools = {}
         self._mcp_tool_targets = {}
         self._mcp_tools_registered = False
@@ -3448,6 +3582,12 @@ class MemAgent:
                 self._entity_memory_enabled = False
                 self._unregister_entity_memory_tools()
 
+        # The saved memory types carry the switch, so a reload neither turns
+        # entity memory back on (assistant mode includes it) nor drops it.
+        if enabled and MemoryType.ENTITY_MEMORY not in self.active_memory_types:
+            self.active_memory_types.append(MemoryType.ENTITY_MEMORY)
+        elif not enabled and MemoryType.ENTITY_MEMORY in self.active_memory_types:
+            self.active_memory_types.remove(MemoryType.ENTITY_MEMORY)
         return self
 
     def with_internet_access_provider(
@@ -4569,9 +4709,12 @@ class MemAgent:
                 return
             try:
                 updater = getattr(provider, "update_memagent_memory_ids", None)
-                if self._registered_memory_ids and callable(updater):
-                    # The agent document already exists; only its memory
-                    # list grew, so patch that instead of rewriting it all.
+                if (
+                    self._agent_record_stored or self._registered_memory_ids
+                ) and callable(updater):
+                    # The agent document already exists (a loaded agent's
+                    # does); only its memory list grew, so patch that instead
+                    # of rewriting it all with this instance's settings.
                     if not updater(self.agent_id, list(memory_ids)):
                         persistence.save_agent(self)
                 else:
@@ -6746,7 +6889,7 @@ class MemAgent:
                 arguments=json.dumps(model_arguments, ensure_ascii=False),
             ),
         )
-        workflow = self._init_workflow_capture(query, user_id)
+        workflow = self._resume_workflow_capture(checkpoint, query, user_id)
         self._approval_execution_active = True
         raw_tool_result: Any = None
         try:
@@ -7594,6 +7737,8 @@ class MemAgent:
         """
         if not (workflow and workflow.steps) or self.memory_provider is None:
             return False
+        if getattr(workflow, "awaiting_approval", False):
+            return False  # stored when the approved resume finishes the run
         self._apply_workflow_outcome_evaluator(workflow)
         try:
             record_id = workflow.store_workflow(self.memory_provider)
@@ -7712,6 +7857,24 @@ class MemAgent:
             )
             return
         workflow.outcome = evaluated
+
+    def _resume_workflow_capture(
+        self, checkpoint: Dict[str, Any], query: str, user_id: Optional[str]
+    ):
+        """Continue the workflow an approval paused, else start a new one."""
+        saved = checkpoint.get("workflow")
+        if (
+            isinstance(saved, dict)
+            and self.memory_provider is not None
+            and MemoryType.WORKFLOW_MEMORY in self.active_memory_types
+        ):
+            from ..long_term.procedural.workflow.workflow import Workflow
+
+            try:
+                return Workflow.from_dict(saved)
+            except Exception as exc:
+                logger.debug("Paused workflow could not be restored: %s", exc)
+        return self._init_workflow_capture(query, user_id)
 
     def _init_workflow_capture(self, query: str, user_id: Optional[str]):
         """Create the per-run Workflow tracker when workflow memory is active.
@@ -8319,7 +8482,16 @@ class MemAgent:
                         "deferred_tool_calls": _to_jsonable(
                             list(self._deferred_sibling_tool_calls or [])
                         ),
+                        # The run so far; the resume continues it, so a task
+                        # paused for approvals is stored as one workflow.
+                        "workflow": (
+                            _to_jsonable(workflow.to_dict())
+                            if workflow is not None
+                            else None
+                        ),
                     }
+                    if workflow is not None:
+                        workflow.awaiting_approval = True
                     proposal = self._get_approval_store().propose(
                         owner_id=self.agent_id,
                         tool_name=logical_tool_name,
@@ -8604,7 +8776,7 @@ class MemAgent:
                     "_id": str(tool_entry.get("_id")) if tool_entry else None,
                     "arguments": logical_arguments,
                     "result": result,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "error": error_message,
                     "tool_outcome": outcome_payload,
                 },
@@ -9288,6 +9460,11 @@ class MemAgent:
                             turn_id=self._current_turn_id,
                             trace_id=self._current_root_trace_id,
                             history_texts=history_texts,
+                            # Ingested chunks are keyed by their knowledge
+                            # base, not by this agent's memory_id.
+                            knowledge_base_ids=list(
+                                getattr(self, "knowledge_base_ids", None) or []
+                            ),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -9306,6 +9483,19 @@ class MemAgent:
                     and policy.knowledge_base_scope != "disabled"
                 ):
                     if policy.knowledge_base_scope == "namespace":
+                        namespaces = policy.knowledge_base_namespaces
+                        if not namespaces and not getattr(
+                            self, "_warned_unnamed_kb_namespaces", False
+                        ):
+                            # e.g. RetrievalPolicy.from_value("namespace"),
+                            # which cannot name any. Querying nothing would
+                            # look like an empty knowledge base.
+                            self._warned_unnamed_kb_namespaces = True
+                            logger.warning(
+                                "knowledge_base_scope='namespace' names no "
+                                "knowledge_base_namespaces; recalling from every "
+                                "namespace of the attached knowledge bases"
+                            )
                         candidate_sources.extend(
                             (
                                 MemoryType.KNOWLEDGE_BASE,
@@ -9313,7 +9503,7 @@ class MemAgent:
                                 None,
                                 namespace,
                             )
-                            for namespace in policy.knowledge_base_namespaces
+                            for namespace in namespaces or (None,)
                         )
                     else:
                         candidate_sources.append(
@@ -9341,6 +9531,13 @@ class MemAgent:
                     retrieval_thread_id,
                     namespace,
                 ) in candidate_sources:
+                    knowledge_scope: Dict[str, Any] = {}
+                    if memory_type == MemoryType.KNOWLEDGE_BASE:
+                        # Ingested chunks are keyed by their knowledge base,
+                        # not by this agent's memory_id.
+                        knowledge_scope["knowledge_base_ids"] = list(
+                            getattr(self, "knowledge_base_ids", None) or []
+                        )
                     for retrieval_query in retrieval_queries:
                         snippets = self._timed_memory_read(
                             source,
@@ -9353,6 +9550,7 @@ class MemAgent:
                             include_embedding=True,
                             thread_id=retrieval_thread_id,
                             namespace=namespace,
+                            **knowledge_scope,
                         )
                         for row in snippets or []:
                             candidates.append((source, row))
@@ -10293,13 +10491,11 @@ class MemAgent:
             # the provider never reach the LLM's json.dumps path.
             matches: List[Dict[str, Any]] = []
             for entry in raw:
-                if not isinstance(entry, dict):
+                if not self._knowledge_entry_in_scope(entry, kb_ids):
                     continue
                 entry_kb_id = entry.get("knowledge_base_id") or entry.get(
                     "knowledgeBaseId"
                 )
-                if entry_kb_id and entry_kb_id not in kb_ids:
-                    continue
                 matches.append(
                     _to_jsonable(
                         {
@@ -10348,12 +10544,25 @@ class MemAgent:
         self._knowledge_base_cache = cached
         return cached
 
-    @staticmethod
-    def _knowledge_entry_in_scope(entry: Any, kb_ids: Set[str]) -> bool:
+    def _visible_to_user(self, row_user_id: Any, memory_type: MemoryType) -> bool:
+        """Whether a row is visible to this turn's user.
+
+        Agent-wide rows (no user) of the knowledge base, skillbox and toolbox
+        serve every user of the agent; a user's own rows only that user; the
+        personal stores stay exact (see ``user_scope_matches``).
+        """
+        from ..memory_provider.base import user_scope_matches
+
+        return user_scope_matches(row_user_id, self._current_user_id, memory_type)
+
+    def _knowledge_entry_in_scope(self, entry: Any, kb_ids: Set[str]) -> bool:
+        """An entry of this agent's knowledge bases this turn's user may see."""
         if not isinstance(entry, dict):
             return False
         entry_kb_id = entry.get("knowledge_base_id") or entry.get("knowledgeBaseId")
-        return not entry_kb_id or entry_kb_id in kb_ids
+        if entry_kb_id and entry_kb_id not in kb_ids:
+            return False
+        return self._visible_to_user(entry.get("user_id"), MemoryType.KNOWLEDGE_BASE)
 
     _KNOWLEDGE_LOOKUP_MAX_CANDIDATES = 1000
 
@@ -12312,10 +12521,23 @@ class MemAgent:
             True if successful, False otherwise.
         """
         try:
-            # Delete the actual conversation data for each memory_id
+            # Delete the stored rows for each memory_id. Keep the ids when a
+            # delete fails so the caller sees it and can retry.
             if self.memory_manager:
-                for mid in self.memory_ids:
-                    self.memory_manager.delete_memory(mid)
+                failed = [
+                    mid
+                    for mid in list(self.memory_ids or [])
+                    if not self.memory_manager.delete_memory(
+                        mid, agent_id=self.agent_id
+                    )
+                ]
+                if failed:
+                    logger.error(
+                        "Could not delete memory %s for agent %s",
+                        ", ".join(failed),
+                        self.agent_id,
+                    )
+                    return False
 
             # Remove memory_id references from the agent record
             if hasattr(self.memory_provider, "delete_memagent_memory_ids"):

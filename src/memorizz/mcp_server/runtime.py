@@ -2277,6 +2277,9 @@ class MemorizzRuntime:
             "memory_type": resolved_type.value,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        if safe_metadata:
+            # Also nested, for providers that keep only a metadata column.
+            document.setdefault("metadata", dict(safe_metadata))
         embedding = self._embed_or_none(text)
         if embedding:
             document["embedding"] = embedding

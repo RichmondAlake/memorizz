@@ -21,18 +21,30 @@ except ImportError:
         "Install it with: pip install oracledb"
     )
 
+from ..._time import to_epoch
 from ...embeddings import embed_as_query
 from ...enums.memory_type import MemoryType
+from ...long_term.procedural.toolbox.indexing import NOT_AGENT_TOOLS
 from ...long_term.semantic.persona.persona import Persona
 from ...long_term.semantic.persona.role_type import RoleType
 from ...memagent import MemAgentModel
 from ..base import _UNSET as _ANY_USER
 from ..base import (
+    AGENT_WIDE_STORES,
     FilteredSkillboxSearchMixin,
     GlobalEmbeddingFallbackMixin,
     MemoryProvider,
     MemoryProviderCapabilities,
     filter_tool_log_rows,
+    user_scope_matches,
+)
+from .timestamps import (
+    UTC_NOW_SQL,
+    utc_bind,
+    utc_epoch,
+    utc_iso,
+    utc_now_bind,
+    utc_read,
 )
 from .vector_staging import SHADOW_COLUMNS, OracleVectorStaging
 
@@ -81,6 +93,43 @@ def _memory_type_supports_user_id(memory_type: Any) -> bool:
     return memory_type in _USER_SCOPED_MEMORY_TYPES
 
 
+def _user_scope_sql(memory_type: Any, user_id: Any, bind: str) -> tuple:
+    """``(predicate, binds)`` for a read scoped to ``user_id``.
+
+    ``None`` is the anonymous scope (``IS NULL``). In AGENT_WIDE_STORES a
+    user also sees the agent-wide rows, the ones with no user_id; personal
+    stores keep exact isolation.
+    """
+    if user_id is None:
+        return "user_id IS NULL", {}
+    predicate = f"user_id = :{bind}"
+    if str(getattr(memory_type, "value", memory_type) or "") in AGENT_WIDE_STORES:
+        predicate = f"({predicate} OR user_id IS NULL)"
+    return predicate, {bind: user_id}
+
+
+# Oracle allows at most 1000 expressions in one IN list (ORA-01795).
+_IN_LIST_LIMIT = 1000
+
+
+def _in_list_sql(
+    column: str, values: List[Any], prefix: str, params: Dict[str, Any], *, negate=False
+) -> str:
+    """``column IN (...)`` over binds for ``values`` (not empty), split into
+    OR'ed lists of at most 1000; with ``negate``, AND'ed ``NOT IN`` lists.
+    The binds are added to ``params``."""
+    names = []
+    for index, value in enumerate(values):
+        params[f"{prefix}_{index}"] = value
+        names.append(f":{prefix}_{index}")
+    operator, joiner = ("NOT IN", " AND ") if negate else ("IN", " OR ")
+    lists = [
+        f"{column} {operator} ({', '.join(names[start : start + _IN_LIST_LIMIT])})"
+        for start in range(0, len(names), _IN_LIST_LIMIT)
+    ]
+    return lists[0] if len(lists) == 1 else "(" + joiner.join(lists) + ")"
+
+
 # ---------------------------------------------------------------------------
 # Row→dict registry
 # ---------------------------------------------------------------------------
@@ -109,15 +158,25 @@ def _memory_type_supports_user_id(memory_type: Any) -> bool:
 #   json_pre       ``_deserialize_json_field(value) if value else default``
 #                  (legacy pre-check variant kept for exact parity)
 #   json_opt       key only emitted when the deserialized value is truthy
-#   ts             ``value.isoformat() if value else None``
-#   ts_attr        isoformat when available, otherwise the raw value
-#   ts_str         isoformat when available, else ``str(value)`` if truthy
-#   ts_str_nn      isoformat when available, else ``str(value)`` if not None
-#   ts_opt         key only emitted when truthy (isoformat/str)
+#   json_spread    ``json`` (default ``dict``), and once the whole row is
+#                  mapped each key also becomes a row key unless the row
+#                  already has a value for it (the fields a record carried
+#                  that have no column of their own)
+#
+# TIMESTAMP columns hold UTC wall-clock time (see ``timestamps.py``); every
+# timestamp kind reads them as UTC:
+#
+#   ts             ISO-8601 with ``+00:00`` if truthy, else None
+#   ts_attr        ISO-8601 for a datetime, otherwise the raw value
+#   ts_str         ISO-8601 for a datetime, else ``str(value)`` if truthy
+#   ts_str_nn      ISO-8601 for a datetime, else ``str(value)`` if not None
+#   ts_opt         key only emitted when truthy (ISO-8601/str)
+#   ts_dt          aware UTC datetime (None stays None)
+#   epoch          epoch seconds (None stays None)
+#   epoch_now      epoch seconds, fallback ``time.time()``
 #   uuid           RAW(16) → canonical uuid string (None-safe)
 #   int/float/bool coerce when not None, otherwise default
 #   score          ``float(value)`` (vector-search score column)
-#   epoch_now      ``value.timestamp()`` fallback ``time.time()``
 #   vector         ``list(value)`` or None (always emitted)
 #   vector_or_empty ``list(value)`` or []
 #   vector_opt     emitted only when include_embedding and value is not None
@@ -202,6 +261,15 @@ _PERSONA_CORE = (
     _c("expertise", kind="json"),
     _c("memory_id"),
     _c("agent_id"),
+)
+
+# Persona evolution state (migration 010), one of the ``_OPTIONAL_FIELDS``
+# so schemas the startup migration could not alter still load personas
+# (NULL projections).
+_PERSONA_EVOLUTION_FIELDS = (
+    _c("goals", kind="lob_or", default=""),
+    _c("version", kind="int", default=1),
+    _c("evolution_history", kind="json", default=list),
 )
 
 _TOOLBOX_HEAD = (
@@ -319,7 +387,9 @@ _KNOWLEDGE_BASE_HEAD = (
     _c("source_id"),
     _c("parent_source_id"),
     _c("linked_source_ids", kind="json", default=list),
-    _c("metadata", kind="json", default=dict),
+    # Holds the record's fields that have no column (source_path,
+    # source_sha256, caller metadata, ...); they are spread back onto the row.
+    _c("metadata", kind="json_spread", default=dict),
 )
 
 
@@ -398,10 +468,27 @@ _SEMANTIC_CACHE_TAIL = (
     _cm(
         "created_at",
         ("timestamp", "epoch_now", None),
-        ("created_at", "plain", None),
+        ("created_at", "ts_dt", None),
     ),
-    _c("expires_at"),
+    _c("expires_at", kind="ts_dt"),
 )
+
+# Columns later migrations added, appended to every projection of their
+# table by ``_extended_fields``. Each one is projected as NULL until the
+# column exists, so reads keep working (and keep their shape) mid-upgrade.
+_OPTIONAL_FIELDS: Dict[MemoryType, tuple] = {
+    MemoryType.PERSONAS: _PERSONA_EVOLUTION_FIELDS,
+    # Supersede lifecycle (migration 011).
+    MemoryType.KNOWLEDGE_BASE: (
+        _c("status"),
+        _c("superseded_by"),
+        _c("superseded_at", kind="ts"),
+    ),
+    # The record's fields without a column of their own (migration 011).
+    MemoryType.SHORT_TERM_MEMORY: (_c("metadata", kind="json_spread", default=dict),),
+    MemoryType.SEMANTIC_CACHE: (_c("last_accessed", kind="epoch"),),
+}
+
 
 # retrieve_by_id: rows addressed by their logical string id. Workflows,
 # tool logs (and friends) need these dedicated specs because the generic
@@ -721,6 +808,8 @@ def _filterable_columns() -> Dict[MemoryType, frozenset]:
         add(memory_type, fields)
     for memory_type, fields in _VECTOR_SPECS.items():
         add(memory_type, fields)
+    for memory_type, fields in _OPTIONAL_FIELDS.items():
+        add(memory_type, fields)
     for memory_type, names in _ALLOWED_FILTERS.items():
         columns.setdefault(memory_type, set()).update(names)
     columns.setdefault(MemoryType.KNOWLEDGE_BASE, set()).update(_KB_CHUNK_COLUMNS)
@@ -731,9 +820,34 @@ def _filterable_columns() -> Dict[MemoryType, frozenset]:
 
 _FILTER_COLUMNS = _filterable_columns()
 
+# Columns whose known writers bind naive local time (``datetime.now()``):
+# MemoryManager's conversation and tool-log timestamps and the skillbox
+# promotion/demotion stamps. A naive value bound to any other TIMESTAMP
+# column is read as UTC; aware values are converted either way.
+_NAIVE_LOCAL_COLUMNS: Dict[MemoryType, frozenset] = {
+    MemoryType.CONVERSATION_MEMORY: frozenset({"timestamp"}),
+    MemoryType.TOOL_LOG: frozenset({"timestamp"}),
+    MemoryType.SKILLBOX: frozenset({"promoted_at", "demoted_at"}),
+}
+
+# Keys that are never part of a record's metadata JSON: identities, vectors,
+# search scores and the metadata document itself.
+_NOT_RECORD_METADATA = frozenset(
+    {"_id", "id", "row_id", "embedding", "metadata", "score"}
+)
+
 # Columns ``update_by_id`` may rewrite on a shared-memory row.
 _SHARED_MEMORY_UPDATABLE = frozenset(
     {"content", "access_list", "memory_type", "scope", "owner_agent_id"}
+)
+
+# Agent-tool loads skip rows that describe tools but are not the agent's own
+# callables (MCP server settings, MCP tool-index rows). The literals come from
+# a constant, never from input. The generic toolbox search keeps them.
+_AGENT_TOOL_TYPE_FILTER = (
+    "(tool_type IS NULL OR LOWER(tool_type) NOT IN ("
+    + ", ".join(f"'{tool_type.lower()}'" for tool_type in NOT_AGENT_TOOLS)
+    + "))"
 )
 
 # Tool metadata as served to agents (retrieve_tools_for_agent and the
@@ -776,6 +890,42 @@ _MEMAGENT_TOOL_FIELDS = (
     _c("queries", kind="json", default=list),
     _c("import_reference"),
     _c("user_id"),
+)
+
+
+# MemAgentModel fields stored in ``agents`` columns or link tables. Every
+# other field, ``llm_config`` included, rides in agent_llm_configs'
+# additional_config JSON, so a field added to the model round-trips without
+# another list to update. ``model`` is a live client and never stored.
+_MEMAGENT_NATIVE_FIELDS = frozenset(
+    {
+        "model",
+        "agent_id",
+        "name",
+        "instruction",
+        "application_mode",
+        "max_steps",
+        "tool_access",
+        "semantic_cache",
+        "is_favorite",
+        "memory_ids",
+        "knowledge_base_ids",
+        "delegates",
+        "tools",
+        "persona",
+    }
+)
+
+# agent_llm_configs' fixed columns. Rows saved before additional_config kept
+# the whole llm_config load their llm_config from these.
+_LLM_CONFIG_COLUMNS = (
+    "provider",
+    "model",
+    "temperature",
+    "max_tokens",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
 )
 
 
@@ -1656,7 +1806,7 @@ class OracleProvider(
             ("thread_id", "VARCHAR2(255)"),
             ("role", "VARCHAR2(50)"),
             ("content", "CLOB"),
-            ("timestamp", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("timestamp", f"TIMESTAMP DEFAULT {UTC_NOW_SQL}"),
             ("summary_id", "VARCHAR2(255)"),
             ("importance", "NUMBER(5,4)"),
             ("last_accessed_at", "TIMESTAMP"),
@@ -1684,6 +1834,9 @@ class OracleProvider(
             ("last_accessed_at", "TIMESTAMP"),
             ("retention_state", "VARCHAR2(32) DEFAULT 'active'"),
             ("retention_meta", "CLOB CHECK (retention_meta IS JSON)"),
+            ("status", "VARCHAR2(32)"),
+            ("superseded_by", "VARCHAR2(255)"),
+            ("superseded_at", "TIMESTAMP"),
         ],
         MemoryType.SHORT_TERM_MEMORY: [
             ("memory_id", "VARCHAR2(255)"),
@@ -1691,6 +1844,7 @@ class OracleProvider(
             ("memory_type", "VARCHAR2(50)"),
             ("ttl", "NUMBER(10)"),
             ("expires_at", "TIMESTAMP"),
+            ("metadata", "CLOB"),
         ],
         MemoryType.PERSONAS: [
             ("persona_id", "VARCHAR2(255)"),
@@ -1698,6 +1852,9 @@ class OracleProvider(
             ("background", "CLOB"),
             ("traits", "CLOB"),
             ("expertise", "CLOB"),
+            ("goals", "CLOB"),
+            ("version", "NUMBER(10) DEFAULT 1"),
+            ("evolution_history", "CLOB CHECK (evolution_history IS JSON)"),
         ],
         MemoryType.TOOLBOX: [
             ("tool_id", "VARCHAR2(255)"),
@@ -1782,6 +1939,7 @@ class OracleProvider(
             ("session_id", "VARCHAR2(255)"),
             ("user_id", "VARCHAR2(255)"),
             ("metadata", "CLOB"),
+            ("last_accessed", "TIMESTAMP"),
         ],
         MemoryType.TOOL_LOG: [
             ("tool_log_id", "VARCHAR2(255)"),
@@ -1792,7 +1950,7 @@ class OracleProvider(
             ("error", "CLOB"),
             ("outcome", "VARCHAR2(32) DEFAULT 'success'"),
             ("outcome_details", "CLOB"),
-            ("timestamp", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("timestamp", f"TIMESTAMP DEFAULT {UTC_NOW_SQL}"),
             ("tool_call_id", "VARCHAR2(255)"),
             ("thread_id", "VARCHAR2(255)"),
         ],
@@ -1802,25 +1960,35 @@ class OracleProvider(
         """Read the configured schema's tables, columns and indexes once.
 
         Returns ``{"columns": {TABLE: {COLUMN, ...}}, "indexes": {INDEX, ...},
-        "indexed_columns": {(TABLE, COLUMN), ...}}`` (all upper-cased), where
+        "indexed_columns": {(TABLE, COLUMN), ...}, "timestamp_defaults":
+        {(TABLE, COLUMN): default}}`` (names upper-cased), where
         ``indexed_columns`` lists the leading column of every single-column
-        index. Startup DDL consults this instead of probing the dictionary
-        per column and per index.
+        index and ``timestamp_defaults`` the default of every plain TIMESTAMP
+        column that has one. Startup DDL consults this instead of probing the
+        dictionary per column and per index.
         """
         owner = self._schema_owner()
         columns: Dict[str, set] = {}
+        timestamp_defaults: Dict[tuple, str] = {}
         cursor.execute(
             """
-            SELECT table_name, column_name
+            SELECT table_name, column_name, data_type, data_default
             FROM all_tab_columns
             WHERE owner = :owner
             """,
             {"owner": owner},
         )
-        for table_name, column_name in cursor.fetchall():
-            columns.setdefault(str(table_name).upper(), set()).add(
-                str(column_name).upper()
-            )
+        for row in cursor.fetchall():
+            table_name, column_name = str(row[0]).upper(), str(row[1]).upper()
+            columns.setdefault(table_name, set()).add(column_name)
+            data_type, default = (tuple(row[2:4]) + (None, None))[:2]
+            default = self._read_lob_value(default)
+            if (
+                isinstance(default, str)
+                and str(data_type or "").upper().startswith("TIMESTAMP")
+                and "TIME ZONE" not in str(data_type).upper()
+            ):
+                timestamp_defaults[(table_name, column_name)] = default
 
         indexes: set = set()
         per_index: Dict[tuple, List[str]] = {}
@@ -1848,6 +2016,7 @@ class OracleProvider(
             "columns": columns,
             "indexes": indexes,
             "indexed_columns": indexed_columns,
+            "timestamp_defaults": timestamp_defaults,
         }
 
     def _migrate_table_schemas(self, catalog: Optional[Dict[str, Any]] = None) -> None:
@@ -1929,7 +2098,7 @@ class OracleProvider(
                             summary_id VARCHAR2(255) NOT NULL,
                             message_id RAW(16) NOT NULL,
                             position NUMBER(10) NOT NULL,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            created_at TIMESTAMP DEFAULT {UTC_NOW_SQL},
                             PRIMARY KEY (summary_id, message_id),
                             CONSTRAINT fk_summary_link_summary FOREIGN KEY (summary_id)
                                 REFERENCES {self._get_table_name(MemoryType.SUMMARIES)}(summary_id)
@@ -1966,9 +2135,67 @@ class OracleProvider(
                     cursor, conn, catalog, index_name, memory_type, columns
                 )
 
+            self._ensure_utc_timestamp_defaults(cursor, conn, catalog)
+
             # Later ``_memory_type_has_column`` calls can be served from memory.
             for table_key, column_names in table_columns.items():
                 self._table_columns_cache[table_key] = set(column_names)
+
+    # Tables MemoRizz creates; only their timestamp defaults are rewritten.
+    _UTC_DEFAULT_TABLES = frozenset(
+        {memory_type.value.upper() for memory_type in MemoryType}
+        | {
+            "AGENT_LLM_CONFIGS",
+            "AGENT_MEMORIES",
+            "AGENT_KNOWLEDGE_BASES",
+            "AGENT_DELEGATES",
+            "SUMMARY_MESSAGE_LINKS",
+            "AUTOMATION_JOBS",
+            "AUTOMATION_RUNS",
+            "AUTOMATION_DELIVERIES",
+        }
+    )
+    _LOCAL_CLOCK_DEFAULT = re.compile(
+        r"\s*(CURRENT_TIMESTAMP|LOCALTIMESTAMP|SYSTIMESTAMP)\s*(\(\s*\d*\s*\))?\s*",
+        re.IGNORECASE,
+    )
+
+    def _ensure_utc_timestamp_defaults(self, cursor, conn, catalog) -> None:
+        """Point every plain TIMESTAMP default of MemoRizz's tables at UTC.
+
+        Schemas created before the UTC convention default ``created_at``,
+        ``updated_at`` and ``timestamp`` to ``CURRENT_TIMESTAMP`` (the
+        session's local time). A default only affects later inserts, so this
+        runs at startup from the catalog (``timestamp_defaults``), issuing DDL
+        only for columns that still need it; migration 012 does the same out
+        of band. Existing values are converted by migration 013, which is
+        never run automatically.
+        """
+        for (table_name, column_name), default in sorted(
+            (catalog.get("timestamp_defaults") or {}).items()
+        ):
+            if (
+                table_name not in self._UTC_DEFAULT_TABLES
+                or not _IDENTIFIER_RE.match(column_name)
+                or not self._LOCAL_CLOCK_DEFAULT.fullmatch(default)
+            ):
+                continue
+            try:
+                cursor.execute(
+                    f"ALTER TABLE {self._qualified_table(table_name.lower())} "
+                    f"MODIFY ({column_name.lower()} DEFAULT {UTC_NOW_SQL})"
+                )
+                conn.commit()
+                catalog["timestamp_defaults"][(table_name, column_name)] = UTC_NOW_SQL
+            except Exception as exc:
+                conn.rollback()
+                logger.warning(
+                    "Could not default %s.%s to UTC (run migrations/"
+                    "012_utc_timestamp_defaults.sql): %s",
+                    table_name,
+                    column_name,
+                    exc,
+                )
 
     def _create_index_if_missing(
         self,
@@ -2307,7 +2534,12 @@ class OracleProvider(
         """
         columns = [desc[0].lower() for desc in cursor.description]
         doc = {
-            column: (self._read_lob_value(value) if hasattr(value, "read") else value)
+            # LOBs as text; TIMESTAMP columns hold UTC (aware datetimes).
+            column: (
+                self._read_lob_value(value)
+                if hasattr(value, "read")
+                else utc_read(value)
+            )
             for column, value in zip(columns, row)
             if column not in SHADOW_COLUMNS  # staged/previous vectors of a swap
         }
@@ -2329,6 +2561,7 @@ class OracleProvider(
         ``include_embedding`` only affects ``vector_opt*`` fields.
         """
         doc: Dict[str, Any] = {}
+        spread: List[Dict[str, Any]] = []
         for value, field in zip(row, fields):
             for key, kind, default in field.emits:
                 if kind == "plain":
@@ -2359,33 +2592,34 @@ class OracleProvider(
                     if isinstance(parsed, dict):
                         for meta_key, meta_value in parsed.items():
                             doc.setdefault(meta_key, meta_value)
+                elif kind == "json_spread":
+                    parsed = self._deserialize_json_field(value)
+                    if not isinstance(parsed, dict):
+                        parsed = default() if default is not None else None
+                    doc[key] = parsed
+                    if parsed:
+                        spread.append(parsed)
                 elif kind == "ts":
-                    doc[key] = value.isoformat() if value else None
+                    doc[key] = utc_iso(value) if value else None
                 elif kind == "ts_attr":
-                    doc[key] = (
-                        value.isoformat() if hasattr(value, "isoformat") else value
-                    )
+                    doc[key] = utc_iso(value)
                 elif kind == "ts_str":
-                    if hasattr(value, "isoformat"):
-                        doc[key] = value.isoformat()
-                    elif value:
-                        doc[key] = str(value)
-                    else:
-                        doc[key] = value
+                    moment = utc_iso(value)
+                    doc[key] = (
+                        str(moment)
+                        if moment and not isinstance(moment, str)
+                        else moment
+                    )
                 elif kind == "ts_str_nn":
-                    if hasattr(value, "isoformat"):
-                        doc[key] = value.isoformat()
-                    elif value is not None:
-                        doc[key] = str(value)
-                    else:
-                        doc[key] = None
+                    moment = utc_iso(value)
+                    doc[key] = str(moment) if moment is not None else None
                 elif kind == "ts_opt":
                     if value:
-                        doc[key] = (
-                            value.isoformat()
-                            if hasattr(value, "isoformat")
-                            else str(value)
-                        )
+                        doc[key] = str(utc_iso(value))
+                elif kind == "ts_dt":
+                    doc[key] = utc_read(value)
+                elif kind == "epoch":
+                    doc[key] = utc_epoch(value)
                 elif kind == "uuid":
                     doc[key] = str(uuid.UUID(bytes=value)) if value else None
                 elif kind == "int":
@@ -2397,11 +2631,8 @@ class OracleProvider(
                 elif kind == "score":
                     doc[key] = float(value)
                 elif kind == "epoch_now":
-                    doc[key] = (
-                        value.timestamp()
-                        if hasattr(value, "timestamp")
-                        else time.time()
-                    )
+                    moment = utc_epoch(value)
+                    doc[key] = moment if moment is not None else time.time()
                 elif kind == "vector":
                     doc[key] = list(value) if value is not None else None
                 elif kind == "vector_or_empty":
@@ -2414,6 +2645,10 @@ class OracleProvider(
                         doc[key] = value
                 else:  # pragma: no cover - registry authoring error
                     raise ValueError(f"Unknown field kind: {kind}")
+        for extras in spread:
+            for extra_key, extra_value in extras.items():
+                if doc.get(extra_key) is None:
+                    doc[extra_key] = extra_value
         return doc
 
     def _knowledge_base_chunk_fields(self) -> tuple:
@@ -2429,6 +2664,31 @@ class OracleProvider(
         if has_chunking:
             return tuple(_c(col) for col in _KB_CHUNK_COLUMNS)
         return tuple(_c("NULL", key=col) for col in _KB_CHUNK_COLUMNS)
+
+    def _optional_fields(self, memory_type: MemoryType) -> tuple:
+        """``_OPTIONAL_FIELDS`` projections for one table.
+
+        Each column is projected as NULL until the additive startup
+        migration has added it, so tuple shapes stay stable mid-upgrade.
+        """
+        return tuple(
+            field
+            if self._memory_type_has_column(memory_type, field.col)
+            else _Field("NULL", field.emits)
+            for field in _OPTIONAL_FIELDS.get(memory_type, ())
+        )
+
+    def _extended_fields(self, memory_type: MemoryType, fields: tuple) -> tuple:
+        """``fields`` plus every column later migrations added to the table
+        (chunking, optional and forgetting fields), NULL-projected until the
+        column exists. Every registry read path projects through this."""
+        if memory_type == MemoryType.KNOWLEDGE_BASE:
+            fields = fields + self._knowledge_base_chunk_fields()
+        return (
+            fields
+            + self._retention_fields(memory_type)
+            + self._optional_fields(memory_type)
+        )
 
     def _retention_fields(self, memory_type: MemoryType) -> tuple:
         """Forgetting-field projections for one of the primary record types.
@@ -2465,38 +2725,6 @@ class OracleProvider(
         )
         return fields + self._retention_fields(memory_type)
 
-    @staticmethod
-    def _coerce_access_timestamp(value: Any) -> Any:
-        """Bind value for ``last_accessed_at``: datetime, epoch seconds or ISO.
-
-        Timezone-aware inputs are converted to naive session-local time so
-        they sit on the same clock as ``created_at DEFAULT CURRENT_TIMESTAMP``.
-        """
-        from datetime import datetime
-
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, datetime):
-            parsed = value
-        elif isinstance(value, (int, float)):
-            parsed = datetime.fromtimestamp(float(value))
-        else:
-            text = str(value).strip()
-            if not text:
-                return None
-            try:
-                parsed = datetime.fromtimestamp(float(text))
-            except (TypeError, ValueError, OverflowError, OSError):
-                try:
-                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-                except (TypeError, ValueError):
-                    return None
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone().replace(tzinfo=None)
-        return parsed
-
     def _coerce_retention_value(self, column: str, value: Any) -> Any:
         """Bind value for one forgetting column."""
         if column == "importance":
@@ -2504,7 +2732,7 @@ class OracleProvider(
 
             return clamp_importance(value)
         if column == "last_accessed_at":
-            return self._coerce_access_timestamp(value)
+            return self._coerce_utc_timestamp_bind(value)
         if column == "access_count":
             try:
                 return max(0, int(value or 0))
@@ -2559,25 +2787,6 @@ class OracleProvider(
             ).items()
             if self._memory_type_has_column(memory_type, column)
         }
-
-    @staticmethod
-    def _coerce_timestamp(value: Any) -> Any:
-        """Normalize ISO-8601 strings to datetime for TIMESTAMP binds.
-
-        ``to_dict`` serializers (Skill, Workflow) emit datetimes as ISO
-        strings; Oracle's implicit string→TIMESTAMP conversion depends on
-        the session NLS format, so bind real datetimes instead.
-        """
-        if value is None:
-            return None
-        from datetime import datetime
-
-        if isinstance(value, datetime):
-            return value
-        try:
-            return datetime.fromisoformat(str(value))
-        except (TypeError, ValueError):
-            return None
 
     @staticmethod
     def _prepare_vector_value(embedding: Any) -> Any:
@@ -2782,6 +2991,9 @@ class OracleProvider(
                 embedding=embedding,
                 traits=data.get("traits"),
                 expertise=data.get("expertise"),
+                goals=goals,
+                version=data.get("version"),
+                evolution_history=data.get("evolution_history"),
             )
             conn.commit()
 
@@ -2925,8 +3137,12 @@ class OracleProvider(
                 "status": status,
                 "injection_role": str(injection_role),
                 "version": int(version) if version is not None else 1,
-                "promoted_at": self._coerce_timestamp(data.get("promoted_at")),
-                "demoted_at": self._coerce_timestamp(data.get("demoted_at")),
+                "promoted_at": self._timestamp_bind(
+                    MemoryType.SKILLBOX, "promoted_at", data.get("promoted_at")
+                ),
+                "demoted_at": self._timestamp_bind(
+                    MemoryType.SKILLBOX, "demoted_at", data.get("demoted_at")
+                ),
                 "demotion_reason": data.get("demotion_reason"),
                 "baseline": json.dumps(self._sanitize_for_json(baseline))
                 if baseline is not None
@@ -2959,7 +3175,7 @@ class OracleProvider(
                     "demotion_reason = :demotion_reason",
                     "baseline = :baseline",
                     "stats = :stats",
-                    "updated_at = CURRENT_TIMESTAMP",
+                    f"updated_at = {UTC_NOW_SQL}",
                 ]
                 if embedding is not None:
                     set_parts.append("embedding = :embedding")
@@ -3020,9 +3236,30 @@ class OracleProvider(
         embedding: Optional[List[float]],
         traits: Any = None,
         expertise: Any = None,
+        goals: Any = None,
+        version: Any = None,
+        evolution_history: Any = None,
     ) -> None:
         """Insert or update a personas row using an existing cursor."""
         table_name = self._get_table_name(MemoryType.PERSONAS)
+        # Evolution state is written only when supplied (a partial persona
+        # must not reset a stored version or history) and only to columns
+        # the schema has (migration 010 may not have run yet).
+        evolution: Dict[str, Any] = {
+            "goals": goals
+            if goals is None or isinstance(goals, str)
+            else json.dumps(self._sanitize_for_json(goals)),
+            "version": int(version) if version is not None else None,
+            "evolution_history": json.dumps(self._sanitize_for_json(evolution_history))
+            if evolution_history is not None
+            else None,
+        }
+        evolution = {
+            column: value
+            for column, value in evolution.items()
+            if value is not None
+            and self._memory_type_has_column(MemoryType.PERSONAS, column)
+        }
         cursor.execute(
             f"SELECT id FROM {table_name} WHERE persona_id = :persona_id",
             {"persona_id": persona_id},
@@ -3042,6 +3279,7 @@ class OracleProvider(
             "expertise": json.dumps(self._sanitize_for_json(expertise))
             if expertise is not None
             else None,
+            **evolution,
         }
         if embedding is not None:
             params["embedding"] = self._prepare_vector_value(embedding)
@@ -3055,7 +3293,8 @@ class OracleProvider(
                 "agent_id = :agent_id",
                 "traits = :traits",
                 "expertise = :expertise",
-                "updated_at = CURRENT_TIMESTAMP",
+                *(f"{column} = :{column}" for column in evolution),
+                f"updated_at = {UTC_NOW_SQL}",
             ]
             if embedding is not None:
                 set_parts.append("embedding = :embedding")
@@ -3075,6 +3314,7 @@ class OracleProvider(
                 "agent_id",
                 "traits",
                 "expertise",
+                *evolution,
             ]
             insert_params = dict(params)
             insert_params["id"] = uuid.uuid4().bytes
@@ -3199,7 +3439,7 @@ class OracleProvider(
                 "user_id = :user_id",
                 "memory_id = :memory_id",
                 "agent_id = :agent_id",
-                "updated_at = CURRENT_TIMESTAMP",
+                f"updated_at = {UTC_NOW_SQL}",
             ]
             if embedding is not None:
                 set_parts.append("embedding = :embedding")
@@ -3287,7 +3527,7 @@ class OracleProvider(
                 placeholders.append(":embedding")
                 bind_vars["embedding"] = embedding
 
-            # Let Oracle use DEFAULT CURRENT_TIMESTAMP for the timestamp column.
+            # The timestamp column's default is the UTC clock.
             sql = (
                 f"INSERT INTO {table_name} ("
                 + ", ".join(columns)
@@ -3416,6 +3656,37 @@ class OracleProvider(
                 raise
             conn.commit()
 
+    def _record_metadata(self, memory_type: MemoryType, data: Dict[str, Any]) -> str:
+        """The metadata JSON of a knowledge-base or short-term record.
+
+        Callers spread a record's metadata onto its top level (KnowledgeBase,
+        the MCP server), so every field without a column of its own
+        (source_path, source_sha256, timestamp, caller metadata, ...) is kept
+        here, merged over the nested ``metadata``; reads spread it back. A
+        column a migration has not added yet keeps its value here too.
+        """
+        skip = set(_FILTER_COLUMNS.get(memory_type, ())) | _NOT_RECORD_METADATA
+        if memory_type in _RETENTION_TYPES:
+            skip |= set(_RETENTION_META_KEYS)
+        skip -= {
+            field.col
+            for field in _OPTIONAL_FIELDS.get(memory_type, ())
+            if not self._memory_type_has_column(memory_type, field.col)
+        }
+        nested = data.get("metadata")
+        metadata = dict(nested) if isinstance(nested, dict) else {}
+        metadata.update(
+            (key, value)
+            for key, value in data.items()
+            if key not in skip and value is not None
+        )
+        return json.dumps(
+            self._sanitize_for_json(metadata),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+
     def _store_knowledge_base(self, data: Dict[str, Any]) -> str:
         """Store knowledge base entry directly in its base table."""
         memory_id = data.get("memory_id") or str(uuid.uuid4())
@@ -3441,7 +3712,9 @@ class OracleProvider(
                 "content": data.get("content"),
                 "memory_type": data.get("memory_type"),
                 "importance": data.get("importance", 1.0),
-                "last_accessed": data.get("last_accessed"),
+                "last_accessed": self._coerce_utc_timestamp_bind(
+                    data.get("last_accessed")
+                ),
                 "access_count": data.get("access_count", 0),
                 "agent_id": data.get("agent_id"),
             },
@@ -3457,8 +3730,11 @@ class OracleProvider(
                 "linked_source_ids": json.dumps(
                     list(data.get("linked_source_ids") or []), ensure_ascii=False
                 ),
-                "metadata": json.dumps(
-                    data.get("metadata") or {}, ensure_ascii=False, sort_keys=True
+                "metadata": self._record_metadata(MemoryType.KNOWLEDGE_BASE, data),
+                "status": data.get("status"),
+                "superseded_by": data.get("superseded_by"),
+                "superseded_at": self._coerce_utc_timestamp_bind(
+                    data.get("superseded_at")
                 ),
                 # importance / access_count are required columns above.
                 **self._retention_bind_values(
@@ -3492,9 +3768,12 @@ class OracleProvider(
                 "memory_type": data.get("memory_type"),
                 "ttl": data.get("ttl"),
                 "agent_id": data.get("agent_id"),
-                "expires_at": data.get("expires_at"),
+                "expires_at": self._coerce_utc_timestamp_bind(data.get("expires_at")),
             },
-            optional_columns={"user_id": data.get("user_id")},
+            optional_columns={
+                "user_id": data.get("user_id"),
+                "metadata": self._record_metadata(MemoryType.SHORT_TERM_MEMORY, data),
+            },
             embedding=embedding,
         )
         return str(uuid.UUID(bytes=record_id))
@@ -3592,7 +3871,7 @@ class OracleProvider(
                 if immutable:
                     return memory_id
                 # Update existing record
-                update_fields = ["content = :content", "updated_at = SYSTIMESTAMP"]
+                update_fields = ["content = :content", f"updated_at = {UTC_NOW_SQL}"]
                 params = {"memory_id": memory_id, "content": content}
 
                 if embedding is not None:
@@ -3639,8 +3918,8 @@ class OracleProvider(
                     ":memory_type",
                     ":scope",
                     ":owner_agent_id",
-                    "SYSTIMESTAMP",
-                    "SYSTIMESTAMP",
+                    UTC_NOW_SQL,
+                    UTC_NOW_SQL,
                 ]
                 params = {
                     "id": id_bytes,
@@ -3704,8 +3983,10 @@ class OracleProvider(
             "agent_id": data.get("agent_id"),
             "user_id": data.get("user_id"),
             "thread_id": data.get("thread_id"),
-            "period_start": data.get("period_start"),
-            "period_end": data.get("period_end"),
+            # NUMBER columns of epoch seconds; writers also pass datetimes or
+            # ISO strings (ORA-01722 when bound as text).
+            "period_start": to_epoch(data.get("period_start")),
+            "period_end": to_epoch(data.get("period_end")),
             "memory_units_count": data.get(
                 "memory_units_count", len(source_message_ids)
             ),
@@ -3784,6 +4065,14 @@ class OracleProvider(
         embedding = self._generate_embedding_if_needed(
             content=data.get("query_text", ""), existing_embedding=data.get("embedding")
         )
+        # The entry's own admission time (SemanticCache sends ``created_at``
+        # and epoch ``timestamp``) is what ages it for TTL and per-domain
+        # freshness; the insert time would restart that clock.
+        created_at = self._coerce_utc_timestamp_bind(
+            data.get("created_at")
+            if data.get("created_at") is not None
+            else data.get("timestamp")
+        )
         required: Dict[str, Any] = {
             "id": uuid.uuid4().bytes,
             "cache_key": cache_key,
@@ -3793,13 +4082,15 @@ class OracleProvider(
             "similarity_threshold": data.get("similarity_threshold", 0.8),
             "hit_count": data.get("hit_count", 0),
             "agent_id": data.get("agent_id"),
-            "expires_at": data.get("expires_at"),
+            "expires_at": self._coerce_utc_timestamp_bind(data.get("expires_at")),
+            "created_at": created_at or utc_now_bind(),
         }
         optional: Dict[str, Any] = {
             "memory_id": data.get("memory_id"),
             "session_id": data.get("session_id"),
             "user_id": data.get("user_id"),
             "metadata": self._ensure_json_text(data.get("metadata") or {}),
+            "last_accessed": self._coerce_utc_timestamp_bind(data.get("last_accessed")),
         }
         # Cache keys are deterministic per query/scope. Refresh an existing
         # row instead of violating the unique constraint or leaving stale
@@ -3809,6 +4100,8 @@ class OracleProvider(
                 key: value
                 for key, value in required.items()
                 if key not in {"id", "cache_key"}
+                # A refresh without its own admission time keeps the row's.
+                and not (key == "created_at" and created_at is None)
             },
             **optional,
             "embedding": embedding,
@@ -3899,7 +4192,7 @@ class OracleProvider(
                 memory_id = :memory_id,
                 agent_id = :agent_id{user_id_update},
                 embedding = :embedding,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = {UTC_NOW_SQL}
             WHEN NOT MATCHED THEN INSERT (
                 id, entity_id, name, entity_type, attributes,
                 relations, metadata, memory_id, agent_id{user_id_insert_col},
@@ -3907,7 +4200,7 @@ class OracleProvider(
             ) VALUES (
                 :id, :entity_id, :name, :entity_type, :attributes,
                 :relations, :metadata, :memory_id, :agent_id{user_id_insert_val},
-                :embedding, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                :embedding, {UTC_NOW_SQL}, {UTC_NOW_SQL}
             )
         """
 
@@ -3997,7 +4290,9 @@ class OracleProvider(
                 ensure_ascii=False,
                 default=str,
             ),
-            "timestamp": self._coerce_timestamp_bind(data.get("timestamp")),
+            "timestamp": self._timestamp_bind(
+                MemoryType.TOOL_LOG, "timestamp", data.get("timestamp")
+            ),
             "agent_id": data.get("agent_id"),
             "tool_call_id": data.get("tool_call_id", ""),
             "thread_id": data.get("thread_id", ""),
@@ -4011,31 +4306,25 @@ class OracleProvider(
         return tool_log_id
 
     @staticmethod
-    def _coerce_timestamp_bind(value: Any) -> Any:
-        """Return a value safe to bind into an Oracle TIMESTAMP column.
+    def _coerce_utc_timestamp_bind(value: Any, *, naive: str = "utc") -> Any:
+        """Bind ``value`` for a plain TIMESTAMP column, as naive UTC.
 
-        Python ``datetime`` objects map natively via oracledb. ISO-8601 strings
-        (what ``memory_manager`` emits) trigger ORA-01843 because Oracle falls
-        back to ``NLS_DATE_FORMAT`` for implicit string→TIMESTAMP conversion,
-        which doesn't understand ``"2026-04-17T12:34:56+00:00"``.
+        Every TIMESTAMP column this provider writes holds UTC wall-clock time
+        and is compared against ``SYS_EXTRACT_UTC(SYSTIMESTAMP)``. Datetimes,
+        ISO-8601 strings and epoch seconds are accepted (an ISO string must
+        not reach the bind: Oracle would parse it with the session NLS
+        format, ORA-01843). Aware values are converted to UTC; naive ones are
+        taken as UTC, or as local time with ``naive="local"`` for writers
+        known to use ``datetime.now()``. Unreadable values bind as NULL.
         """
-        from datetime import datetime
+        return utc_bind(value, naive=naive)
 
-        if value is None or isinstance(value, datetime):
-            return value
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return None
-            # ``fromisoformat`` accepts offsets in 3.11+; strip a trailing Z
-            # for broader support.
-            if text.endswith("Z"):
-                text = text[:-1] + "+00:00"
-            try:
-                return datetime.fromisoformat(text)
-            except ValueError:
-                return None
-        return value
+    @classmethod
+    def _timestamp_bind(cls, memory_type: MemoryType, column: str, value: Any) -> Any:
+        """``_coerce_utc_timestamp_bind`` with the column's naive convention
+        (``_NAIVE_LOCAL_COLUMNS``)."""
+        local = column in _NAIVE_LOCAL_COLUMNS.get(memory_type, ())
+        return cls._coerce_utc_timestamp_bind(value, naive="local" if local else "utc")
 
     def retrieve_by_query(
         self,
@@ -4201,6 +4490,7 @@ class OracleProvider(
                 filters=({"namespace": namespace_filter} if namespace_filter else None),
                 memory_id=kwargs.get("memory_id"),
                 user_id=kwargs.get("user_id", _UNSET),
+                knowledge_base_ids=kwargs.get("knowledge_base_ids"),
             )
             return rows
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
@@ -4286,17 +4576,22 @@ class OracleProvider(
                     # Silently drop user_id predicate on unmigrated schemas.
                     continue
                 # Tenant isolation: ``user_id=None`` must match SQL ``IS NULL``,
-                # not ``= NULL`` (which silently never matches in Oracle).
-                if key == "user_id" and value is None:
-                    where_clauses.append("user_id IS NULL")
+                # not ``= NULL`` (which silently never matches in Oracle); in
+                # an agent-wide store a user also sees the agent's own rows.
+                if key == "user_id":
+                    predicate, binds = _user_scope_sql(memory_store_type, value, key)
+                    where_clauses.append(predicate)
+                    params.update(binds)
                     continue
                 where_clauses.append(f"{key} = :{key}")
                 params[key] = value
 
             if memory_store_type == MemoryType.SEMANTIC_CACHE:
                 # Expired entries are purged lazily; never serve one.
+                # expires_at holds UTC, so compare against the UTC clock
+                # rather than the session time zone.
                 where_clauses.append(
-                    "(expires_at IS NULL OR expires_at > SYSTIMESTAMP)"
+                    f"(expires_at IS NULL OR expires_at > {UTC_NOW_SQL})"
                 )
 
             where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
@@ -4306,6 +4601,7 @@ class OracleProvider(
             fields = None
             if memory_store_type == MemoryType.SEMANTIC_CACHE:
                 fields, _order_by = _LIST_SPECS[MemoryType.SEMANTIC_CACHE]
+                fields = self._extended_fields(memory_store_type, fields)
             columns = _select_list(fields) if fields is not None else "*"
 
             sql = f"""
@@ -4399,11 +4695,9 @@ class OracleProvider(
         spec = _BY_ID_SPECS.get(memory_store_type)
         if spec is not None:
             id_column, fields = spec
-            if memory_store_type == MemoryType.KNOWLEDGE_BASE:
-                # Match list/vector reads: a by-ID expansion must preserve its
-                # namespace and chunk identity for scope/provenance checks.
-                fields = fields + self._knowledge_base_chunk_fields()
-            fields = fields + self._retention_fields(memory_store_type)
+            # Match list/vector reads: a by-ID expansion must preserve, e.g.,
+            # a chunk's namespace and identity for scope/provenance checks.
+            fields = self._extended_fields(memory_store_type, fields)
             bound_id = id
             if id_column == "id":
                 try:
@@ -4724,8 +5018,8 @@ class OracleProvider(
 
         Sets ``last_accessed_at`` and increments ``access_count`` for every
         row whose logical id or RAW row id is in ``record_ids``. ``now``
-        defaults to the session clock (``CURRENT_TIMESTAMP``, the same clock
-        as ``created_at``). Failures are logged, never raised: a recall must
+        defaults to the database clock in UTC (``SYS_EXTRACT_UTC(SYSTIMESTAMP)``,
+        the clock of every TIMESTAMP column). Failures are logged, never raised: a recall must
         not fail a turn. Returns the number of rows updated.
         """
         memory_type = (
@@ -4749,9 +5043,9 @@ class OracleProvider(
 
         params: Dict[str, Any] = {}
         if now is None:
-            now_sql = "CURRENT_TIMESTAMP"
+            now_sql = UTC_NOW_SQL
         else:
-            bound_now = self._coerce_access_timestamp(now)
+            bound_now = self._coerce_utc_timestamp_bind(now)
             if bound_now is None:
                 raise ValueError(
                     "now must be a datetime, ISO-8601 string or epoch seconds"
@@ -4929,7 +5223,8 @@ class OracleProvider(
         jv = self._observability_json_value
         timestamp_expr = (
             f"COALESCE({jv('timestamp')}, {jv('started_at')}, "
-            "TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6'))"
+            # created_at holds UTC; render it like the payloads' ISO stamps.
+            "TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6') || '+00:00')"
         )
         agent_expr = jv("agent_id")
         memory_expr = f"COALESCE({jv('trace_memory_id')}, {jv('memory_id')}, memory_id)"
@@ -5048,21 +5343,18 @@ class OracleProvider(
     def purge_expired_semantic_cache(self, now: Any = None) -> int:
         """Delete semantic-cache rows whose ``expires_at`` has passed.
 
-        ``now`` defaults to the database clock (``SYSTIMESTAMP``); a
-        ``datetime``, ISO-8601 string or epoch seconds may be supplied
-        instead. Returns the number of rows removed.
+        ``now`` defaults to the database clock in UTC
+        (``SYS_EXTRACT_UTC(SYSTIMESTAMP)``), matching how ``expires_at`` is
+        stored; a ``datetime``, ISO-8601 string or epoch seconds may be
+        supplied instead and is bound as naive UTC. Returns the number of
+        rows removed.
         """
         table_name = self._get_table_name(MemoryType.SEMANTIC_CACHE)
         params: Dict[str, Any] = {}
         if now is None:
-            boundary = "SYSTIMESTAMP"
+            boundary = UTC_NOW_SQL
         else:
-            if isinstance(now, (int, float)) and not isinstance(now, bool):
-                from datetime import datetime
-
-                bound = datetime.fromtimestamp(float(now))
-            else:
-                bound = self._coerce_timestamp_bind(now)
+            bound = self._coerce_utc_timestamp_bind(now)
             if bound is None:
                 raise ValueError(
                     "now must be a datetime, ISO-8601 string or epoch seconds"
@@ -5276,12 +5568,23 @@ class OracleProvider(
         memory_store_type: MemoryType,
         user_id: Any,
     ) -> List[Dict[str, Any]]:
-        """Strict client-side user_id filter. ``_UNSET`` disables filtering."""
+        """Client-side user_id filter. ``_UNSET`` disables filtering.
+
+        Exact in personal stores; in AGENT_WIDE_STORES (toolbox included) a
+        user also sees the rows with no user_id.
+        """
         if user_id is _UNSET:
             return rows
-        if not _memory_type_supports_user_id(memory_store_type):
+        if not (
+            _memory_type_supports_user_id(memory_store_type)
+            or memory_store_type.value in AGENT_WIDE_STORES
+        ):
             return rows
-        return [row for row in rows if row.get("user_id") == user_id]
+        return [
+            row
+            for row in rows
+            if user_scope_matches(row.get("user_id"), user_id, memory_store_type)
+        ]
 
     def _list_all_from_table(
         self,
@@ -5307,9 +5610,7 @@ class OracleProvider(
             spec = _LIST_SPECS.get(memory_store_type)
             if spec is not None:
                 fields, order_by = spec
-                if memory_store_type == MemoryType.KNOWLEDGE_BASE:
-                    fields = fields + self._knowledge_base_chunk_fields()
-                fields = fields + self._retention_fields(memory_store_type)
+                fields = self._extended_fields(memory_store_type, fields)
                 query = f"""
                     SELECT {_select_list(fields)}
                     FROM {table_name}
@@ -5526,6 +5827,7 @@ class OracleProvider(
                     "embedding",
                 },
                 "json_fields": set(),
+                "timestamp_fields": {"timestamp"},
                 "has_updated_at": False,
             },
             MemoryType.KNOWLEDGE_BASE: {
@@ -5539,8 +5841,14 @@ class OracleProvider(
                     "access_count",
                     "agent_id",
                     "embedding",
+                    "status",
+                    "superseded_by",
+                    "superseded_at",
                 },
                 "json_fields": set(),
+                "timestamp_fields": {"last_accessed", "superseded_at"},
+                # Fields without a column merge into the metadata JSON.
+                "metadata_extras": True,
                 "has_updated_at": True,
             },
             MemoryType.PERSONAS: {
@@ -5555,8 +5863,11 @@ class OracleProvider(
                     "agent_id",
                     "user_id",
                     "embedding",
+                    "goals",
+                    "version",
+                    "evolution_history",
                 },
-                "json_fields": {"traits", "expertise"},
+                "json_fields": {"traits", "expertise", "evolution_history"},
                 "has_updated_at": True,
                 "field_map": {"role": "role_type"},
             },
@@ -5572,6 +5883,8 @@ class OracleProvider(
                     "embedding",
                 },
                 "json_fields": set(),
+                "timestamp_fields": {"expires_at"},
+                "metadata_extras": True,
                 "has_updated_at": False,
             },
             MemoryType.TOOLBOX: {
@@ -5666,6 +5979,7 @@ class OracleProvider(
                     "embedding",
                 },
                 "json_fields": {"source_message_ids"},
+                "epoch_fields": {"period_start", "period_end"},
                 "has_updated_at": False,
             },
             MemoryType.ENTITY_MEMORY: {
@@ -5717,6 +6031,7 @@ class OracleProvider(
                     "memory_id",
                 },
                 "json_fields": set(),
+                "timestamp_fields": {"timestamp"},
                 "has_updated_at": False,
             },
             MemoryType.SHARED_MEMORY: {
@@ -5802,11 +6117,38 @@ class OracleProvider(
                 | set(_RETENTION_META_KEYS)
             )
         retention_patch: Dict[str, Any] = {}
+        # Knowledge-base and short-term records keep their fields without a
+        # column in the metadata JSON (as ``store`` does), so an update merges
+        # them there; so does a lifecycle field whose column is not added yet.
+        metadata_patch: Dict[str, Any] = {}
+        metadata_extras = bool(
+            config.get("metadata_extras")
+        ) and self._memory_type_has_column(memory_store_type, "metadata")
+        record_columns = _FILTER_COLUMNS.get(memory_store_type, frozenset())
+        optional_columns = {
+            field.col for field in _OPTIONAL_FIELDS.get(memory_store_type, ())
+        }
 
         for key, value in sanitized_data.items():
             mapped_key = field_map.get(key, key)
             if mapped_key in ("id", "_id", id_field):
                 continue
+            if metadata_extras:
+                if mapped_key == "metadata":
+                    if isinstance(value, dict):
+                        metadata_patch = {**value, **metadata_patch}
+                    continue
+                no_column = (
+                    mapped_key not in record_columns
+                    and mapped_key not in _NOT_RECORD_METADATA
+                    and not (retention_type and mapped_key in _RETENTION_META_KEYS)
+                ) or (
+                    mapped_key in optional_columns
+                    and not self._memory_type_has_column(memory_store_type, mapped_key)
+                )
+                if no_column:
+                    metadata_patch[mapped_key] = value
+                    continue
             if mapped_key not in allowed_fields:
                 continue
             if mapped_key == "user_id" and skip_user_id:
@@ -5823,12 +6165,21 @@ class OracleProvider(
                 if not self._memory_type_has_column(memory_store_type, mapped_key):
                     continue
                 value = self._coerce_retention_value(mapped_key, value)
+            if (
+                memory_store_type == MemoryType.PERSONAS
+                and mapped_key in ("goals", "version", "evolution_history")
+                and not self._memory_type_has_column(memory_store_type, mapped_key)
+            ):
+                # Pre-migration-010 schema: keep the rest of the update.
+                continue
             if mapped_key in json_fields:
                 value = self._ensure_json_text(value)
             elif mapped_key in timestamp_fields:
                 # _sanitize_for_json serialized any datetime to an ISO string;
-                # TIMESTAMP columns need a real datetime bind.
-                value = self._coerce_timestamp(value)
+                # TIMESTAMP columns need a real (naive UTC) datetime bind.
+                value = self._timestamp_bind(memory_store_type, mapped_key, value)
+            elif mapped_key in config.get("epoch_fields", ()):
+                value = to_epoch(value)
             elif mapped_key == "content" and not isinstance(value, str):
                 value = self._ensure_json_text(value)
 
@@ -5853,12 +6204,20 @@ class OracleProvider(
                 "retention_meta = JSON_MERGEPATCH("
                 "COALESCE(retention_meta, TO_CLOB('{}')), :retention_meta RETURNING CLOB)"
             )
+        if metadata_patch:
+            params["metadata_patch"] = json.dumps(
+                self._sanitize_for_json(metadata_patch), ensure_ascii=False, default=str
+            )
+            set_clauses.append(
+                "metadata = JSON_MERGEPATCH("
+                "COALESCE(metadata, TO_CLOB('{}')), :metadata_patch RETURNING CLOB)"
+            )
 
         if not set_clauses:
             return False
 
         if has_updated_at:
-            set_clauses.append("updated_at = SYSTIMESTAMP")
+            set_clauses.append(f"updated_at = {UTC_NOW_SQL}")
 
         table_name = self._get_table_name(memory_store_type)
 
@@ -5930,7 +6289,7 @@ class OracleProvider(
                 expected=oracledb.DB_TYPE_CLOB, content=oracledb.DB_TYPE_CLOB
             )
             cursor.execute(
-                f"UPDATE {table} SET content = :content, updated_at = SYSTIMESTAMP "
+                f"UPDATE {table} SET content = :content, updated_at = {UTC_NOW_SQL} "
                 "WHERE memory_id = :memory_id AND "
                 "((content IS NULL AND :expected IS NULL) OR DBMS_LOB.COMPARE(content, :expected) = 0)",
                 {
@@ -5959,7 +6318,7 @@ class OracleProvider(
             cursor = conn.cursor()
 
             # Build SET clause from data
-            set_clauses = ["updated_at = SYSTIMESTAMP"]
+            set_clauses = [f"updated_at = {UTC_NOW_SQL}"]
             params = {"memory_id": memory_id}
 
             for key, value in data.items():
@@ -6022,6 +6381,8 @@ class OracleProvider(
             "session_id",
             "user_id",
             "expires_at",
+            "created_at",
+            "last_accessed",
             "metadata",
             "embedding",
         }
@@ -6047,14 +6408,15 @@ class OracleProvider(
                     "session_id",
                     "user_id",
                     "metadata",
+                    "last_accessed",
                 } and not self._memory_type_has_column(MemoryType.SEMANTIC_CACHE, key):
                     continue
                 if key == "metadata":
                     value = self._ensure_json_text(value or {})
                 elif key == "embedding":
                     value = self._prepare_vector_value(value)
-                elif key == "expires_at":
-                    value = self._coerce_timestamp(value)
+                elif key in ("expires_at", "created_at", "last_accessed"):
+                    value = self._coerce_utc_timestamp_bind(value)
                 set_clauses.append(f"{key} = :{key}")
                 params[key] = value
 
@@ -6718,7 +7080,7 @@ class OracleProvider(
                 ON (target.id = source.id)
                 WHEN MATCHED THEN UPDATE SET
                     target.embedding = :embedding, target.metadata = :metadata,
-                    target.updated_at = SYSTIMESTAMP
+                    target.updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP)
                     WHERE target.namespace = :namespace
                       AND JSON_VALUE(target.metadata, '$.format') = :format
                 WHEN NOT MATCHED THEN INSERT
@@ -6827,6 +7189,7 @@ class OracleProvider(
         filters: Dict[str, Any] = None,
         memory_id: str = None,
         user_id: Any = _UNSET,
+        knowledge_base_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Perform vector similarity search using Oracle's VECTOR_DISTANCE function.
@@ -6843,6 +7206,9 @@ class OracleProvider(
             Additional filter criteria
         memory_id : str
             Memory ID to filter by
+        knowledge_base_ids : List[str], optional
+            Knowledge bases attached to the agent. On knowledge_base, rows of
+            these knowledge bases are in scope alongside ``memory_id`` rows.
 
         Returns:
         --------
@@ -6865,12 +7231,29 @@ class OracleProvider(
             if memory_type == MemoryType.SEMANTIC_CACHE:
                 # Expired entries are purged lazily; never serve one as a hit.
                 filter_clauses.append(
-                    "(expires_at IS NULL OR expires_at > SYSTIMESTAMP)"
+                    f"(expires_at IS NULL OR expires_at > {UTC_NOW_SQL})"
                 )
             params = {"limit": limit}
             allowed = _ALLOWED_FILTERS.get(memory_type, frozenset())
 
-            if memory_id and "memory_id" in allowed:
+            knowledge_scope = (
+                list(dict.fromkeys(str(value) for value in knowledge_base_ids if value))
+                if knowledge_base_ids
+                and memory_type == MemoryType.KNOWLEDGE_BASE
+                and self._memory_type_has_column(memory_type, "knowledge_base_id")
+                else []
+            )
+            if knowledge_scope:
+                # Ingested chunks carry their knowledge base, not the agent's
+                # memory_id: rank inside (attached KBs OR memory_id) in SQL.
+                clause = _in_list_sql(
+                    "knowledge_base_id", knowledge_scope, "kb", params
+                )
+                if memory_id:
+                    clause = f"({clause} OR memory_id = :memory_id)"
+                    params["memory_id"] = memory_id
+                filter_clauses.append(clause)
+            elif memory_id and "memory_id" in allowed:
                 filter_clauses.append("memory_id = :memory_id")
                 params["memory_id"] = memory_id
 
@@ -6885,7 +7268,8 @@ class OracleProvider(
 
             # Tenant isolation: user_id filter is strict — None becomes IS NULL,
             # not "match everything", to prevent cross-tenant leaks on vector
-            # search paths. _UNSET means "no user_id scoping supplied"
+            # search paths; agent-wide stores add the agent's own rows (no
+            # user_id). _UNSET means "no user_id scoping supplied"
             # (legacy callers) — we leave the query unfiltered. Skip entirely
             # when the column doesn't exist yet (pre-migration schemas).
             apply_user_scope = (
@@ -6894,11 +7278,11 @@ class OracleProvider(
                 and self._memory_type_has_column(memory_type, "user_id")
             )
             if apply_user_scope:
-                if user_id is None:
-                    filter_clauses.append("user_id IS NULL")
-                else:
-                    filter_clauses.append("user_id = :user_id_scope")
-                    params["user_id_scope"] = user_id
+                predicate, binds = _user_scope_sql(
+                    memory_type, user_id, "user_id_scope"
+                )
+                filter_clauses.append(predicate)
+                params.update(binds)
 
             where_clause = " AND ".join(filter_clauses) if filter_clauses else "1=1"
 
@@ -6909,9 +7293,7 @@ class OracleProvider(
                 if fields is None:
                     logger.warning("Vector search not supported for %s", memory_type)
                     return []
-                if memory_type == MemoryType.KNOWLEDGE_BASE:
-                    fields = fields + self._knowledge_base_chunk_fields()
-                fields = fields + self._retention_fields(memory_type)
+                fields = self._extended_fields(memory_type, fields)
 
                 approximate = self.config.vector_search_mode == "approximate"
                 hint = "/*+ VECTOR_INDEX_TRANSFORM */" if approximate else ""
@@ -6992,6 +7374,7 @@ class OracleProvider(
                             filters=filters,
                             memory_id=memory_id,
                             user_id=_UNSET,
+                            knowledge_base_ids=knowledge_base_ids,
                         )
                     self._vector_search_disabled_for.add(memory_type)
                     logger.warning(
@@ -7069,7 +7452,7 @@ class OracleProvider(
                     "max_steps = :max_steps",
                     "tool_access = :tool_access",
                     "semantic_cache = :semantic_cache",
-                    "updated_at = CURRENT_TIMESTAMP",
+                    f"updated_at = {UTC_NOW_SQL}",
                 ]
                 if has_verbose_column:
                     set_parts.append("verbose = :verbose")
@@ -7127,20 +7510,25 @@ class OracleProvider(
                 )
                 persona_name = persona_dict.get("name", "Unnamed Persona")
                 persona_background = persona_dict.get("background", "")
+                persona_goals = persona_dict.get("goals", "")
 
                 persona_text = f"{persona_dict.get('name', '')}: {persona_dict.get('background', '')} {persona_dict.get('goals', '')}"
+                embedded_text = {"name": persona_name, "background": persona_background}
+                if self._memory_type_has_column(MemoryType.PERSONAS, "goals"):
+                    # Goals are embedded too: a goals-only edit must re-embed.
+                    embedded_text["goals"] = persona_goals
                 persona_embedding = None
                 if (
                     generate_embeddings
                     and self._embedding_provider
                     and persona_text.strip()
-                    # Same name/background as the stored row: keep its vector.
+                    # Same embedded text as the stored row: keep its vector.
                     and not self._stored_embedding_is_current(
                         cursor,
                         self._get_table_name(MemoryType.PERSONAS),
                         "persona_id",
                         persona_id_value,
-                        {"name": persona_name, "background": persona_background},
+                        embedded_text,
                     )
                 ):
                     try:
@@ -7171,16 +7559,32 @@ class OracleProvider(
                     embedding=persona_embedding,
                     traits=persona_dict.get("traits"),
                     expertise=persona_dict.get("expertise"),
+                    goals=persona_goals,
+                    version=persona_dict.get("version"),
+                    evolution_history=persona_dict.get("evolution_history"),
                 )
 
-            # Store tools in the toolbox base table
-            if sync_tools and memagent_dict.get("tools"):
+            # Store tools in the toolbox base table. ``None`` means this save
+            # carries no tool list; a list (empty included) is the agent's
+            # complete set, so rows for tools no longer listed are removed —
+            # retrieve_memagent loads every toolbox row of the agent.
+            tools = memagent_dict.get("tools")
+            if sync_tools and tools is not None:
                 toolbox_table = self._get_table_name(MemoryType.TOOLBOX)
-                for tool_meta in memagent_dict["tools"]:
-                    raw_tool_id = tool_meta.get("_id") or tool_meta.get(
-                        "name", str(uuid.uuid4())
+                agent_prefix = f"{agent_id_str}:"
+                kept_tool_ids: List[str] = []
+                for tool_meta in tools:
+                    raw_tool_id = str(
+                        tool_meta.get("_id") or tool_meta.get("name", str(uuid.uuid4()))
                     )
-                    tool_id = f"{agent_id_str}:{raw_tool_id}"
+                    # A reloaded agent's tools already carry their stored id.
+                    tool_id = (
+                        raw_tool_id
+                        if raw_tool_id.startswith(agent_prefix)
+                        else f"{agent_prefix}{raw_tool_id}"
+                    )
+                    # The un-prefixed id is the row Toolbox.register_tool wrote.
+                    kept_tool_ids.extend((tool_id, raw_tool_id))
                     tool_name = tool_meta.get("name", "unknown_tool")
                     tool_description = tool_meta.get("description", "")
                     tool_signature = tool_meta.get("signature", "")
@@ -7237,182 +7641,48 @@ class OracleProvider(
                         user_id=tool_meta.get("user_id"),
                     )
 
-            # Store LLM config in its own table
+                # MCP server settings and MCP tool-index rows
+                # (NOT_AGENT_TOOLS) are kept by other code, never removed here.
+                removal_params: Dict[str, Any] = {"agent_id": agent_id_str}
+                removal = ["agent_id = :agent_id", _AGENT_TOOL_TYPE_FILTER]
+                if kept_tool_ids:
+                    removal.append(
+                        _in_list_sql(
+                            "tool_id",
+                            list(dict.fromkeys(kept_tool_ids)),
+                            "kept_tool",
+                            removal_params,
+                            negate=True,
+                        )
+                    )
+                cursor.execute(
+                    f"DELETE FROM {toolbox_table} WHERE {' AND '.join(removal)}",
+                    removal_params,
+                )
+
+            # Store LLM config in its own table. Every model field without a
+            # column of its own, the whole llm_config included, rides in its
+            # additional_config JSON (``_memagent_config``).
             llm_config = memagent_dict.get("llm_config") or {}
-            additional_cfg = dict(llm_config.get("additional_config", {}) or {})
-
-            application_id_val = memagent_dict.get("application_id")
-            if isinstance(application_id_val, str) and application_id_val.strip():
-                additional_cfg["application_id"] = application_id_val.strip()
-            else:
-                additional_cfg.pop("application_id", None)
-
-            sandbox_val = memagent_dict.get("sandbox_provider")
-            if sandbox_val:
-                additional_cfg["sandbox_provider"] = sandbox_val
-            else:
-                additional_cfg.pop("sandbox_provider", None)
-
-            browser_control_val = memagent_dict.get("browser_control")
-            if browser_control_val:
-                additional_cfg["browser_control"] = browser_control_val
-            else:
-                additional_cfg.pop("browser_control", None)
-
-            additional_cfg["meta_harness"] = bool(
-                memagent_dict.get("meta_harness", False)
+            additional_cfg = self._memagent_config(
+                memagent_dict, has_is_favorite_column
             )
-            meta_harness_mode_val = memagent_dict.get("meta_harness_mode")
-            if meta_harness_mode_val:
-                additional_cfg["meta_harness_mode"] = meta_harness_mode_val
-            else:
-                additional_cfg.pop("meta_harness_mode", None)
-            default_harness_val = memagent_dict.get("default_harness") or "auto"
-            additional_cfg["default_harness"] = default_harness_val
-            harness_config_val = memagent_dict.get("harness_config")
-            if isinstance(harness_config_val, dict) and harness_config_val:
-                additional_cfg["harness_config"] = harness_config_val
-            else:
-                additional_cfg.pop("harness_config", None)
-
-            if "skill_paths" in memagent_dict:
-                skill_paths_val = memagent_dict.get("skill_paths")
-                if skill_paths_val:
-                    additional_cfg["skill_paths"] = skill_paths_val
-                else:
-                    additional_cfg.pop("skill_paths", None)
-
-            if "mcp_servers" in memagent_dict:
-                mcp_servers_val = memagent_dict.get("mcp_servers")
-                if mcp_servers_val:
-                    additional_cfg["mcp_servers"] = mcp_servers_val
-                else:
-                    additional_cfg.pop("mcp_servers", None)
-
-            if "memory_types" in memagent_dict:
-                memory_types_val = memagent_dict.get("memory_types")
-                if memory_types_val:
-                    additional_cfg["memory_types"] = memory_types_val
-                else:
-                    additional_cfg.pop("memory_types", None)
-
-            # Agent runtime governance belongs beside the LLM configuration so
-            # existing Oracle schemas can round-trip the complete 0.5 surface
-            # without adding a grab-bag of nullable columns to ``agents``.
-            for config_key in (
-                "semantic_cache_config",
-                "tool_result_policy",
-                "tool_cache_config",
-                "context_policy",
-                "retrieval_policy",
-                "delegation_config",
-                "skill_retrieval_config",
-                "semantic_layer_config",
-                "context_window_tokens",
-                "context_window_source",
-                "thread_titles",
-            ):
-                config_value = memagent_dict.get(config_key)
-                if config_value not in (None, {}, []):
-                    additional_cfg[config_key] = config_value
-                else:
-                    additional_cfg.pop(config_key, None)
-            additional_cfg["skill_retrieval"] = bool(
-                memagent_dict.get("skill_retrieval", False)
-            )
-
-            internet_provider_val = memagent_dict.get("internet_access_provider")
-            if internet_provider_val:
-                additional_cfg["internet_access_provider"] = internet_provider_val
-            else:
-                additional_cfg.pop("internet_access_provider", None)
-
-            if "internet_access_config" in memagent_dict:
-                internet_config_val = memagent_dict.get("internet_access_config")
-                if internet_config_val:
-                    additional_cfg["internet_access_config"] = internet_config_val
-                else:
-                    additional_cfg.pop("internet_access_config", None)
-
-            skills_provider_val = memagent_dict.get("skills_marketplace_provider")
-            if skills_provider_val:
-                additional_cfg["skills_marketplace_provider"] = skills_provider_val
-            else:
-                additional_cfg.pop("skills_marketplace_provider", None)
-
-            if "skills_marketplace_config" in memagent_dict:
-                skills_config_val = memagent_dict.get("skills_marketplace_config")
-                if skills_config_val:
-                    additional_cfg["skills_marketplace_config"] = skills_config_val
-                else:
-                    additional_cfg.pop("skills_marketplace_config", None)
-
-            if "self_aware" in memagent_dict:
-                additional_cfg["self_aware"] = bool(
-                    memagent_dict.get("self_aware", False)
-                )
-
-            if "self_aware_config" in memagent_dict:
-                self_aware_cfg_val = memagent_dict.get("self_aware_config")
-                if isinstance(self_aware_cfg_val, dict):
-                    additional_cfg["self_aware_config"] = self_aware_cfg_val
-                else:
-                    additional_cfg.pop("self_aware_config", None)
-
-            if "continual_learning" in memagent_dict:
-                additional_cfg["continual_learning"] = bool(
-                    memagent_dict.get("continual_learning", False)
-                )
-
-            if "continual_learning_config" in memagent_dict:
-                cl_cfg_val = memagent_dict.get("continual_learning_config")
-                if isinstance(cl_cfg_val, dict):
-                    additional_cfg["continual_learning_config"] = cl_cfg_val
-                else:
-                    additional_cfg.pop("continual_learning_config", None)
-
-            if "learning_control_plane" in memagent_dict:
-                additional_cfg["learning_control_plane"] = bool(
-                    memagent_dict.get("learning_control_plane", False)
-                )
-
-            if "learning_control_plane_config" in memagent_dict:
-                control_cfg = memagent_dict.get("learning_control_plane_config")
-                if isinstance(control_cfg, dict):
-                    additional_cfg["learning_control_plane_config"] = control_cfg
-                else:
-                    additional_cfg.pop("learning_control_plane_config", None)
-
-            if "automations_enabled" in memagent_dict:
-                additional_cfg["automations_enabled"] = bool(
-                    memagent_dict.get("automations_enabled", True)
-                )
-
-            if "default_timezone" in memagent_dict:
-                tz_val = memagent_dict.get("default_timezone")
-                if isinstance(tz_val, str) and tz_val.strip():
-                    additional_cfg["default_timezone"] = tz_val.strip()
-                else:
-                    additional_cfg.pop("default_timezone", None)
-
-            if has_is_favorite_column:
-                additional_cfg.pop("is_favorite", None)
-            else:
-                additional_cfg["is_favorite"] = bool(
-                    memagent_dict.get("is_favorite", False)
-                )
 
             if llm_config or additional_cfg:
                 llm_data = {
                     "agent_id": agent_uuid,
-                    "provider": llm_config.get("provider", "openai"),
-                    "model": llm_config.get("model", "gpt-4o-mini"),
+                    # Kept for readers of older rows; loads use the JSON copy,
+                    # so nothing here is a default a reload would invent.
+                    "provider": llm_config.get("provider") or "unspecified",
+                    "model": llm_config.get("model")
+                    or llm_config.get("deployment_name")
+                    or "unspecified",
                     "temperature": llm_config.get("temperature"),
                     "max_tokens": llm_config.get("max_tokens"),
                     "top_p": llm_config.get("top_p"),
                     "frequency_penalty": llm_config.get("frequency_penalty"),
                     "presence_penalty": llm_config.get("presence_penalty"),
-                    "additional_config": json.dumps(additional_cfg),
+                    "additional_config": json.dumps(additional_cfg, default=str),
                 }
 
                 try:
@@ -7441,13 +7711,15 @@ class OracleProvider(
                             llm_data,
                         )
 
-            # Store memory_ids (many-to-many relationship table)
-            if memagent_dict.get("memory_ids"):
+            # Store memory_ids (many-to-many relationship table). ``None`` is
+            # "not part of this save"; an empty list detaches every memory
+            # (deleting an agent's last conversation).
+            if memagent_dict.get("memory_ids") is not None:
                 cursor.execute(
                     f"DELETE FROM {agent_memories_table} WHERE agent_id = :agent_id",
                     {"agent_id": agent_uuid},
                 )
-                for memory_id in memagent_dict["memory_ids"]:
+                for memory_id in dict.fromkeys(memagent_dict["memory_ids"]):
                     cursor.execute(
                         f"""
                         INSERT INTO {agent_memories_table} (agent_id, memory_id)
@@ -7549,7 +7821,7 @@ class OracleProvider(
                     SELECT {_select_list(_AGENT_TOOL_FIELDS)}
                     FROM {toolbox_table}
                     WHERE agent_id = :agent_id
-                      AND (tool_type IS NULL OR LOWER(tool_type) <> 'mcp_server_config')
+                      AND {_AGENT_TOOL_TYPE_FILTER}
                       AND name IS NOT NULL
                     ORDER BY created_at DESC
                 """,
@@ -7569,7 +7841,7 @@ class OracleProvider(
                         f"""
                         SELECT {_select_list(_AGENT_TOOL_FIELDS)}
                         FROM {toolbox_table}
-                        WHERE (tool_type IS NULL OR LOWER(tool_type) <> 'mcp_server_config')
+                        WHERE {_AGENT_TOOL_TYPE_FILTER}
                           AND name IS NOT NULL
                         ORDER BY created_at DESC
                         FETCH FIRST :top_k ROWS ONLY
@@ -7622,7 +7894,7 @@ class OracleProvider(
                            VECTOR_DISTANCE(embedding, :query_embedding, COSINE) as distance
                     FROM {self._get_table_name(MemoryType.TOOLBOX)}
                     WHERE embedding IS NOT NULL
-                      AND (tool_type IS NULL OR LOWER(tool_type) <> 'mcp_server_config')
+                      AND {_AGENT_TOOL_TYPE_FILTER}
                       AND name IS NOT NULL
                     ORDER BY distance
                     FETCH FIRST :top_k ROWS ONLY
@@ -7688,18 +7960,79 @@ class OracleProvider(
         return self._apply_row_fields(_AGENT_TOOL_FIELDS, row)
 
     def delete_memagent(self, agent_id: str, cascade: bool = False) -> bool:
-        """Delete a memagent from the memory provider."""
+        """Delete a memagent from the memory provider.
+
+        With ``cascade`` the rows of the agent's memory_ids go too
+        (``delete_memory_units``), except memory_ids another agent still
+        lists: they are shared on purpose (multi-agent orchestration,
+        ``download_memory``), and a delegate's cascade must not wipe its root
+        agent's memory.
+        """
         if cascade:
             memagent = self.retrieve_memagent(agent_id)
             if memagent is None:
                 raise ValueError(f"MemAgent with id {agent_id} not found")
 
-            # Delete all memory units associated with the memagent
-            for memory_id in memagent.memory_ids:
-                for memory_type in MemoryType:
-                    self._delete_memory_units_by_memory_id(memory_id, memory_type)
+            for memory_id in dict.fromkeys(memagent.memory_ids or []):
+                self.delete_memory_units(memory_id, agent_id=agent_id)
 
         return self.delete_by_id(agent_id, MemoryType.MEMAGENT)
+
+    def _memory_id_held_by_other_agent(self, memory_id: str, agent_id: str) -> bool:
+        """Whether an agent other than ``agent_id`` lists ``memory_id``: one
+        indexed query over agent_memories instead of hydrating every agent."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM {self._qualified_table("agent_memories")} link
+                JOIN {self._get_table_name(MemoryType.MEMAGENT)} owner
+                  ON owner.id = link.agent_id
+                WHERE link.memory_id = :memory_id
+                  AND owner.agent_id <> :agent_id
+                """,
+                {"memory_id": str(memory_id), "agent_id": str(agent_id)},
+            )
+            row = cursor.fetchone()
+        return bool(row and row[0])
+
+    def clear_semantic_cache(
+        self,
+        agent_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        *,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> int:
+        """Delete semantic-cache entries in one scoped DELETE (each ``None``
+        means any). Returns the number of entries deleted."""
+        clauses: List[str] = []
+        params: Dict[str, Any] = {}
+        for column, value in (
+            ("agent_id", agent_id or None),
+            ("memory_id", memory_id or None),
+            ("user_id", user_id),
+            ("session_id", session_id),
+        ):
+            if value is None:
+                continue
+            if column != "agent_id" and not self._memory_type_has_column(
+                MemoryType.SEMANTIC_CACHE, column
+            ):
+                return 0  # No row can carry a value the table has no column for.
+            clauses.append(f"{column} = :{column}")
+            params[column] = value
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"DELETE FROM {self._get_table_name(MemoryType.SEMANTIC_CACHE)}"
+                + (f" WHERE {' AND '.join(clauses)}" if clauses else ""),
+                params,
+            )
+            deleted = max(int(cursor.rowcount or 0), 0)
+            conn.commit()
+        return deleted
 
     def update_memagent_memory_ids(self, agent_id: str, memory_ids: List[str]) -> bool:
         """Update the memory_ids of a memagent."""
@@ -7747,23 +8080,27 @@ class OracleProvider(
         return self.update_by_id(agent_id, {"memory_ids": []}, MemoryType.MEMAGENT)
 
     def list_memagents(self) -> List["MemAgentModel"]:
-        """List all memagents in the Oracle database."""
+        """List all memagents in the Oracle database.
+
+        Rebuilt through the same mapping as ``retrieve_memagent``
+        (``_memagent_document``), so a listed agent carries its llm_config,
+        MCP servers, policies and every other stored field.
+        """
         documents = self.list_all(MemoryType.MEMAGENT)
-        agents = []
-        fallback_favorites: Dict[str, bool] = {}
-        additional_cfg_by_agent: Dict[str, Dict[str, Any]] = {}
+        configs: Dict[str, Dict[str, Any]] = {}
+        llm_columns: Dict[str, Dict[str, Any]] = {}
         delegates_by_agent: Dict[str, List[str]] = {}
 
         if documents:
             try:
                 with self._get_connection() as conn:
                     cursor = conn.cursor()
-                    has_is_favorite_column = self._table_has_column(
-                        cursor, "agents", "is_favorite"
+                    llm_select = ", ".join(
+                        f"c.{column}" for column in _LLM_CONFIG_COLUMNS
                     )
                     cursor.execute(
                         f"""
-                        SELECT a.agent_id, c.additional_config
+                        SELECT a.agent_id, {llm_select}, c.additional_config
                         FROM {self._get_table_name(MemoryType.MEMAGENT)} a
                         LEFT JOIN {self._qualified_table("agent_llm_configs")} c
                           ON c.agent_id = a.id
@@ -7771,13 +8108,13 @@ class OracleProvider(
                     )
                     for row in cursor.fetchall():
                         agent_key = row[0]
-                        cfg = self._deserialize_json_field(row[1]) or {}
+                        cfg = self._deserialize_json_field(row[-1]) or {}
                         if isinstance(cfg, dict):
-                            additional_cfg_by_agent[agent_key] = cfg
-                            if not has_is_favorite_column:
-                                fallback_favorites[agent_key] = bool(
-                                    cfg.get("is_favorite", False)
-                                )
+                            configs[agent_key] = cfg
+                        if row[1] is not None:
+                            llm_columns[agent_key] = dict(
+                                zip(_LLM_CONFIG_COLUMNS, row[1:-1])
+                            )
                     agents_table = self._get_table_name(MemoryType.MEMAGENT)
                     cursor.execute(
                         f"""
@@ -7792,95 +8129,96 @@ class OracleProvider(
                     for parent_id, delegate_id in cursor.fetchall():
                         delegates_by_agent.setdefault(parent_id, []).append(delegate_id)
             except Exception:
-                fallback_favorites = {}
-                additional_cfg_by_agent = {}
+                configs, llm_columns = {}, {}
 
+        agents = []
         for doc in documents:
             # Use agent_id from the document, fall back to _id if not present
             agent_id = doc.get("agent_id") or str(doc.get("_id"))
-            favorite_value = doc.get("is_favorite")
-            if favorite_value is None:
-                favorite_value = fallback_favorites.get(agent_id, False)
-            cfg = additional_cfg_by_agent.get(agent_id, {})
-            self_aware_value = bool(cfg.get("self_aware", False))
-            self_aware_cfg_value = cfg.get("self_aware_config")
-            if not isinstance(self_aware_cfg_value, dict):
-                self_aware_cfg_value = None
-            continual_learning_value = bool(cfg.get("continual_learning", False))
-            continual_learning_cfg_value = cfg.get("continual_learning_config")
-            if not isinstance(continual_learning_cfg_value, dict):
-                continual_learning_cfg_value = None
-            learning_control_plane_value = bool(
-                cfg.get("learning_control_plane", False)
-            )
-            learning_control_plane_cfg_value = cfg.get("learning_control_plane_config")
-            if not isinstance(learning_control_plane_cfg_value, dict):
-                learning_control_plane_cfg_value = None
-            automations_enabled_value = cfg.get("automations_enabled", True)
-            if automations_enabled_value is None:
-                automations_enabled_value = True
-            automations_enabled_value = bool(automations_enabled_value)
-            default_timezone_value = cfg.get("default_timezone")
-            if not isinstance(default_timezone_value, str):
-                default_timezone_value = None
-            else:
-                default_timezone_value = default_timezone_value.strip() or None
-            agent = MemAgentModel(
-                name=doc.get("name"),
-                application_id=cfg.get("application_id"),
-                instruction=doc.get("instruction"),
-                application_mode=doc.get("application_mode", "assistant"),
-                memory_types=doc.get("memory_types"),
-                max_steps=doc.get("max_steps") or 20,  # Default to 20 if None
-                memory_ids=doc.get("memory_ids") or [],
-                agent_id=agent_id,
-                is_favorite=bool(favorite_value),
-                tools=doc.get("tools"),
-                knowledge_base_ids=doc.get("knowledge_base_ids"),
-                delegates=delegates_by_agent.get(agent_id) or None,
-                semantic_cache=bool(doc.get("semantic_cache", False)),
-                semantic_cache_config=cfg.get("semantic_cache_config"),
-                tool_result_policy=cfg.get("tool_result_policy"),
-                tool_cache_config=cfg.get("tool_cache_config"),
-                context_policy=cfg.get("context_policy"),
-                retrieval_policy=cfg.get("retrieval_policy"),
-                delegation_config=cfg.get("delegation_config"),
-                skill_retrieval=bool(cfg.get("skill_retrieval", False)),
-                skill_retrieval_config=cfg.get("skill_retrieval_config"),
-                semantic_layer_config=cfg.get("semantic_layer_config"),
-                context_window_tokens=cfg.get("context_window_tokens"),
-                context_window_source=cfg.get("context_window_source"),
-                thread_titles=cfg.get("thread_titles"),
-                browser_control=cfg.get("browser_control"),
-                meta_harness=bool(cfg.get("meta_harness", False)),
-                meta_harness_mode=cfg.get("meta_harness_mode"),
-                default_harness=cfg.get("default_harness", "auto"),
-                harness_config=cfg.get("harness_config"),
-                self_aware=self_aware_value,
-                continual_learning=continual_learning_value,
-                continual_learning_config=continual_learning_cfg_value,
-                learning_control_plane=learning_control_plane_value,
-                learning_control_plane_config=learning_control_plane_cfg_value,
-                self_aware_config=self_aware_cfg_value,
-                automations_enabled=automations_enabled_value,
-                default_timezone=default_timezone_value,
-                memory_provider=self,
-            )
-
-            # Construct persona if present. Use from_dict so stored goals/
-            # background aren't double-merged with role defaults and
-            # version/evolution_history/storage_id round-trip correctly.
-            if doc.get("persona"):
-                stored_persona = doc["persona"]
-                agent.persona = (
-                    stored_persona
-                    if isinstance(stored_persona, Persona)
-                    else Persona.from_dict(stored_persona)
+            base = {**doc, "agent_id": agent_id}
+            if not base.get("delegates"):
+                base["delegates"] = delegates_by_agent.get(agent_id) or None
+            agents.append(
+                self._memagent_model(
+                    self._memagent_document(
+                        base, configs.get(agent_id), llm_columns.get(agent_id)
+                    )
                 )
-
-            agents.append(agent)
-
+            )
         return agents
+
+    def _memagent_config(
+        self, memagent_dict: Dict[str, Any], has_is_favorite_column: bool
+    ) -> Dict[str, Any]:
+        """The additional_config JSON stored for one agent: every model field
+        without a column (``_MEMAGENT_NATIVE_FIELDS``) and the whole
+        ``llm_config``, which is kept even when empty so a reload never
+        rebuilds one from the fixed columns' defaults."""
+        config: Dict[str, Any] = {}
+        for field in MemAgentModel.model_fields:
+            if field in _MEMAGENT_NATIVE_FIELDS:
+                continue
+            value = memagent_dict.get(field)
+            if isinstance(value, str):
+                value = value.strip()
+            if field != "llm_config" and value in (None, "", {}, []):
+                continue
+            config[field] = self._sanitize_for_json(value)
+        if not has_is_favorite_column:
+            config["is_favorite"] = bool(memagent_dict.get("is_favorite", False))
+        return config
+
+    @staticmethod
+    def _memagent_document(
+        base: Dict[str, Any],
+        config: Optional[Dict[str, Any]],
+        llm_columns: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """One stored agent as a MemAgentModel document.
+
+        ``base`` holds what the agents columns and link tables say (its
+        non-None values win), ``config`` the additional_config JSON and
+        ``llm_columns`` that row's fixed LLM columns, used only for rows
+        saved before the JSON kept the whole llm_config. The one mapping
+        behind ``retrieve_memagent`` and ``list_memagents``.
+        """
+        config = dict(config or {})
+        fields = MemAgentModel.model_fields
+        if "llm_config" in config:
+            llm_config = config.pop("llm_config")
+        elif llm_columns:
+            # Older rows: the fixed columns, plus the JSON keys that are not
+            # agent fields (provider options merged in by older releases).
+            llm_config = dict(llm_columns)
+            llm_config["additional_config"] = {
+                key: value for key, value in config.items() if key not in fields
+            }
+        else:
+            llm_config = None
+        document = {
+            key: value
+            for key, value in config.items()
+            if key in fields and key != "model"
+        }
+        document["llm_config"] = llm_config
+        document.update(
+            {key: value for key, value in base.items() if value is not None}
+        )
+        return document
+
+    @staticmethod
+    def _memagent_model(document: Dict[str, Any]) -> "MemAgentModel":
+        """``MemAgentModel.from_document`` that also accepts a loaded Persona."""
+        document = dict(document)
+        persona = document.pop("persona", None)
+        agent = MemAgentModel.from_document(document)
+        if persona:
+            # from_dict keeps stored goals/background from being merged with
+            # role defaults again; an already loaded Persona is kept as is.
+            agent.persona = (
+                persona if isinstance(persona, Persona) else Persona.from_dict(persona)
+            )
+        return agent
 
     def supports_entity_memory(self) -> bool:
         """Oracle provider fully supports entity memory operations."""
@@ -7899,7 +8237,7 @@ class OracleProvider(
                 f"""
                 UPDATE {table_name}
                 SET user_id = :user_id,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = {UTC_NOW_SQL}
                 WHERE memory_id = :memory_id
                   AND user_id IS NULL
                 """,
@@ -7980,13 +8318,14 @@ class OracleProvider(
                 ),
             }
 
-            # Query LLM config (in its own table)
-            llm_config = None
+            # Query LLM config (in its own table): the additional_config JSON
+            # holds the agent's other fields and its whole llm_config.
+            stored_config: Dict[str, Any] = {}
+            llm_columns: Optional[Dict[str, Any]] = None
             if agent_uuid:
                 cursor.execute(
                     f"""
-                    SELECT provider, model, temperature, max_tokens, top_p,
-                           frequency_penalty, presence_penalty, additional_config
+                    SELECT {", ".join(_LLM_CONFIG_COLUMNS)}, additional_config
                     FROM {self._qualified_table("agent_llm_configs")}
                     WHERE agent_id = :agent_id
                 """,
@@ -7994,17 +8333,9 @@ class OracleProvider(
                 )
                 llm_row = cursor.fetchone()
                 if llm_row:
-                    llm_config = {
-                        "provider": llm_row[0],
-                        "model": llm_row[1],
-                        "temperature": llm_row[2],
-                        "max_tokens": llm_row[3],
-                        "top_p": llm_row[4],
-                        "frequency_penalty": llm_row[5],
-                        "presence_penalty": llm_row[6],
-                        "additional_config": self._deserialize_json_field(llm_row[7])
-                        or {},
-                    }
+                    llm_columns = dict(zip(_LLM_CONFIG_COLUMNS, llm_row[:-1]))
+                    parsed = self._deserialize_json_field(llm_row[-1])
+                    stored_config = parsed if isinstance(parsed, dict) else {}
 
                 # Query memory_ids
                 cursor.execute(
@@ -8055,9 +8386,11 @@ class OracleProvider(
 
             # Query persona separately from personas table
             persona = None
+            evolution_fields = self._optional_fields(MemoryType.PERSONAS)
             cursor.execute(
                 f"""
-                SELECT persona_id, name, role_type, background, memory_id, traits, expertise
+                SELECT persona_id, name, role_type, background, memory_id, traits, expertise,
+                       {_select_list(evolution_fields)}
                 FROM {self._get_table_name(MemoryType.PERSONAS)}
                 WHERE agent_id = :agent_id
             """,
@@ -8083,9 +8416,11 @@ class OracleProvider(
                 stored_persona = {
                     "name": persona_row[1],
                     "role": role.value,
-                    "goals": background_text,
                     "background": background_text,
                     "persona_id": persona_row[0],
+                    # goals / version / evolution_history; rows saved before
+                    # migration 010 load with empty goals and version 1.
+                    **self._apply_row_fields(evolution_fields, persona_row[7:]),
                 }
                 if MemoryType.PERSONAS.value in getattr(self, "_archive_types", set()):
                     stored_persona.update(
@@ -8109,7 +8444,7 @@ class OracleProvider(
                     SELECT {_select_list(_MEMAGENT_TOOL_FIELDS)}
                     FROM {self._get_table_name(MemoryType.TOOLBOX)}
                     WHERE agent_id = :agent_id
-                      AND (tool_type IS NULL OR LOWER(tool_type) <> 'mcp_server_config')
+                      AND {_AGENT_TOOL_TYPE_FILTER}
                       AND name IS NOT NULL
                 """,
                     {"agent_id": agent_id},
@@ -8127,184 +8462,35 @@ class OracleProvider(
                     agent_id=agent_id, tool_access=tool_access, query=None, top_k=50
                 )
 
-            # Extract extended config from llm_config's additional_config
-            sandbox_provider = None
-            browser_control = None
-            meta_harness = False
-            meta_harness_mode = None
-            default_harness = "auto"
-            harness_config = None
-            skill_paths = None
-            mcp_servers = None
-            internet_access_provider = None
-            internet_access_config = None
-            skills_marketplace_provider = None
-            skills_marketplace_config = None
-            memory_types = None
-            self_aware = False
-            self_aware_config = None
-            continual_learning = False
-            continual_learning_config = None
-            learning_control_plane = False
-            learning_control_plane_config = None
-            automations_enabled = True
-            default_timezone = None
-            favorite_from_cfg = None
-            semantic_cache_config = None
-            tool_result_policy = None
-            tool_cache_config = None
-            context_policy = None
-            retrieval_policy = None
-            delegation_config = None
-            skill_retrieval = False
-            skill_retrieval_config = None
-            semantic_layer_config = None
-            context_window_tokens = None
-            context_window_source = None
-            thread_titles = None
-            application_id = None
-            if llm_config:
-                additional_cfg = llm_config.get("additional_config") or {}
-                sandbox_provider = additional_cfg.pop("sandbox_provider", None)
-                browser_control = additional_cfg.pop("browser_control", None)
-                meta_harness = bool(additional_cfg.pop("meta_harness", False))
-                meta_harness_mode = additional_cfg.pop("meta_harness_mode", None)
-                default_harness = additional_cfg.pop("default_harness", "auto")
-                harness_config = additional_cfg.pop("harness_config", None)
-                skill_paths = additional_cfg.pop("skill_paths", None)
-                mcp_servers = additional_cfg.pop("mcp_servers", None)
-                internet_access_provider = additional_cfg.pop(
-                    "internet_access_provider", None
+            memagent = self._memagent_model(
+                self._memagent_document(
+                    {
+                        "agent_id": agent_json.get("agentId"),
+                        "name": agent_json.get("name"),
+                        "instruction": agent_json.get("instruction"),
+                        "application_mode": agent_json.get("applicationMode"),
+                        "max_steps": agent_json.get("maxSteps"),
+                        "tool_access": tool_access,
+                        "semantic_cache": bool(agent_json.get("semanticCache")),
+                        "is_favorite": bool(agent_json.get("isFavorite"))
+                        if has_is_favorite_column
+                        else None,
+                        "memory_ids": memory_ids,
+                        "knowledge_base_ids": knowledge_base_ids or None,
+                        "delegates": delegate_ids or None,
+                        "tools": tools or None,
+                        "persona": persona,
+                    },
+                    stored_config,
+                    llm_columns,
                 )
-                internet_access_config = additional_cfg.pop(
-                    "internet_access_config", None
-                )
-                skills_marketplace_provider = additional_cfg.pop(
-                    "skills_marketplace_provider", None
-                )
-                skills_marketplace_config = additional_cfg.pop(
-                    "skills_marketplace_config", None
-                )
-                memory_types = additional_cfg.pop("memory_types", None)
-                semantic_cache_config = additional_cfg.pop(
-                    "semantic_cache_config", None
-                )
-                tool_result_policy = additional_cfg.pop("tool_result_policy", None)
-                tool_cache_config = additional_cfg.pop("tool_cache_config", None)
-                context_policy = additional_cfg.pop("context_policy", None)
-                retrieval_policy = additional_cfg.pop("retrieval_policy", None)
-                delegation_config = additional_cfg.pop("delegation_config", None)
-                skill_retrieval = bool(additional_cfg.pop("skill_retrieval", False))
-                skill_retrieval_config = additional_cfg.pop(
-                    "skill_retrieval_config", None
-                )
-                semantic_layer_config = additional_cfg.pop(
-                    "semantic_layer_config", None
-                )
-                context_window_tokens = additional_cfg.pop(
-                    "context_window_tokens", None
-                )
-                context_window_source = additional_cfg.pop(
-                    "context_window_source", None
-                )
-                thread_titles = additional_cfg.pop("thread_titles", None)
-                self_aware = bool(additional_cfg.pop("self_aware", False))
-                self_aware_config = additional_cfg.pop("self_aware_config", None)
-                if not isinstance(self_aware_config, dict):
-                    self_aware_config = None
-                continual_learning = bool(
-                    additional_cfg.pop("continual_learning", False)
-                )
-                continual_learning_config = additional_cfg.pop(
-                    "continual_learning_config", None
-                )
-                if not isinstance(continual_learning_config, dict):
-                    continual_learning_config = None
-                learning_control_plane = bool(
-                    additional_cfg.pop("learning_control_plane", False)
-                )
-                learning_control_plane_config = additional_cfg.pop(
-                    "learning_control_plane_config", None
-                )
-                if not isinstance(learning_control_plane_config, dict):
-                    learning_control_plane_config = None
-                automations_enabled = additional_cfg.pop("automations_enabled", True)
-                if automations_enabled is None:
-                    automations_enabled = True
-                automations_enabled = bool(automations_enabled)
-                default_timezone = additional_cfg.pop("default_timezone", None)
-                if not isinstance(default_timezone, str):
-                    default_timezone = None
-                else:
-                    default_timezone = default_timezone.strip() or None
-                favorite_from_cfg = additional_cfg.pop("is_favorite", None)
-                application_id = additional_cfg.pop("application_id", None)
-
-            # Create MemAgentModel from JSON
-            memagent = MemAgentModel(
-                name=agent_json.get("name"),
-                application_id=application_id,
-                instruction=agent_json.get("instruction"),
-                application_mode=agent_json.get("applicationMode", "assistant"),
-                memory_types=memory_types,
-                max_steps=agent_json.get("maxSteps", 20),
-                tool_access=tool_access,
-                memory_ids=memory_ids,
-                knowledge_base_ids=knowledge_base_ids or None,
-                delegates=delegate_ids or None,
-                agent_id=agent_json.get("agentId"),
-                is_favorite=bool(
-                    agent_json.get("isFavorite")
-                    if has_is_favorite_column
-                    else favorite_from_cfg
-                    if favorite_from_cfg is not None
-                    else False
-                ),
-                llm_config=llm_config,
-                semantic_cache=bool(agent_json.get("semanticCache")),
-                semantic_cache_config=semantic_cache_config,
-                tool_result_policy=tool_result_policy,
-                tool_cache_config=tool_cache_config,
-                context_policy=context_policy,
-                retrieval_policy=retrieval_policy,
-                delegation_config=delegation_config,
-                skill_retrieval=skill_retrieval,
-                skill_retrieval_config=skill_retrieval_config,
-                semantic_layer_config=semantic_layer_config,
-                context_window_tokens=context_window_tokens,
-                context_window_source=context_window_source,
-                thread_titles=thread_titles,
-                tools=tools if tools else None,
-                persona=persona,
-                sandbox_provider=sandbox_provider,
-                browser_control=browser_control,
-                meta_harness=meta_harness,
-                meta_harness_mode=meta_harness_mode,
-                default_harness=default_harness,
-                harness_config=harness_config,
-                skill_paths=skill_paths,
-                mcp_servers=mcp_servers,
-                internet_access_provider=internet_access_provider,
-                internet_access_config=internet_access_config,
-                skills_marketplace_provider=skills_marketplace_provider,
-                skills_marketplace_config=skills_marketplace_config,
-                self_aware=self_aware,
-                self_aware_config=self_aware_config,
-                continual_learning=continual_learning,
-                continual_learning_config=continual_learning_config,
-                learning_control_plane=learning_control_plane,
-                learning_control_plane_config=learning_control_plane_config,
-                automations_enabled=automations_enabled,
-                default_timezone=default_timezone,
-                memory_provider=self,
             )
 
             return memagent
 
-    # Tables that do not have a memory_id column.
-    _TYPES_WITHOUT_MEMORY_ID = frozenset(
-        {MemoryType.MEMAGENT, MemoryType.SEMANTIC_CACHE}
-    )
+    # Tables that do not have a memory_id column (semantic_cache has one:
+    # migration 001; _store_semantic_cache writes it).
+    _TYPES_WITHOUT_MEMORY_ID = frozenset({MemoryType.MEMAGENT})
 
     def _delete_memory_units_by_memory_id(
         self, memory_id: str, memory_type: MemoryType

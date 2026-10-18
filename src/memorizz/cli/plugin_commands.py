@@ -223,9 +223,15 @@ def _last_summary(provider: Any, memory_id: str) -> Optional[Dict[str, Any]]:
         and _text(row)
         and (user_id is None or row.get("user_id") == user_id)
     ]
+    from .._time import to_epoch
+
+    # By instant: created_at is epoch seconds or ISO with an offset; legacy
+    # session periods are the turns' local-time ISO stamps.
     rows.sort(
-        key=lambda row: _day(row.get("created_at") or row.get("period_end"))
-        + str(row.get("created_at") or ""),
+        key=lambda row: to_epoch(
+            row.get("created_at") or row.get("period_end"), naive="local"
+        )
+        or 0.0,
         reverse=True,
     )
     return rows[0] if rows else None

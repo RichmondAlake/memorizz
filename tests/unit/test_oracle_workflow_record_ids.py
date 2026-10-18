@@ -139,8 +139,9 @@ def test_workflow_list_rows_emit_query_scope_and_timestamps():
 
     assert document["user_id"] == "user-1"
     assert document["user_query"] == "Refund order R-1001"
-    assert document["created_at"] == created_at.isoformat()
-    assert document["updated_at"] == updated_at.isoformat()
+    # TIMESTAMP columns hold UTC; reads label them so.
+    assert document["created_at"] == f"{created_at.isoformat()}+00:00"
+    assert document["updated_at"] == f"{updated_at.isoformat()}+00:00"
     assert document["shadow_evaluations"] == [{"skill_id": "skill-1"}]
 
 

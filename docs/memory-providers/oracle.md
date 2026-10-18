@@ -256,6 +256,11 @@ src/memorizz/memory_provider/oracle/migrations/005_scoped_retrieval_052.sql
 src/memorizz/memory_provider/oracle/migrations/006_knowledge_base_provenance.sql
 src/memorizz/memory_provider/oracle/migrations/007_structured_tool_outcomes.sql
 src/memorizz/memory_provider/oracle/migrations/008_observability.sql
+src/memorizz/memory_provider/oracle/migrations/009_forgetting_fields.sql
+src/memorizz/memory_provider/oracle/migrations/010_persona_evolution.sql
+src/memorizz/memory_provider/oracle/migrations/011_record_lifecycle_columns.sql
+src/memorizz/memory_provider/oracle/migrations/012_utc_timestamp_defaults.sql
+src/memorizz/memory_provider/oracle/migrations/013_utc_timestamps.sql
 ```
 
 Migration 005 adds/backfills exact summary thread scope and restores indexed
@@ -267,6 +272,23 @@ observability index behind traces and usage; `OracleSpanIndex.initialize()`
 applies it too. The provider performs additive startup checks for
 availability, but the SQL files are the recommended review and change-control
 artifacts.
+
+Migrations 010 and 011 add columns, so persona goals, versions and evolution
+history, the knowledge-base supersede lifecycle, short-term memory metadata
+and a cached answer's last use survive a round trip. Migration 012 sets every
+plain `TIMESTAMP` column's default to UTC; it changes no data, and the
+provider applies it at startup when the application user may `ALTER` the
+tables. All three are rerunnable.
+
+!!! warning "Migration 013 converts existing timestamps and runs only by hand"
+    MemoRizz now writes and reads every timestamp as UTC. Earlier releases
+    wrote local time from the machine that ran MemoRizz, so until 013 runs,
+    those older rows read as off by that machine's UTC offset. Back up, set
+    `source_tz` at the top of the file (a region such as `'Europe/London'`
+    keeps daylight saving right), and run it once as the schema owner with
+    SQL\*Plus, SQLcl or SQL Developer, ideally before the new release first
+    writes. If it has already written, also set `convert_before`. The whole
+    conversion is one transaction, and it refuses to run twice.
 
 ## Scoped cleanup
 

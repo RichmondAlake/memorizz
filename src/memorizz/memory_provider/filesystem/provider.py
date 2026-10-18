@@ -27,10 +27,16 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     np = None
 
+from ..._time import to_epoch, utc_now_iso
 from ...embeddings import embed_as_query
 from ...enums.memory_type import MemoryType
 from ..base import _UNSET as _ANY_USER
-from ..base import MemoryProvider, MemoryProviderCapabilities, filter_tool_log_rows
+from ..base import (
+    MemoryProvider,
+    MemoryProviderCapabilities,
+    filter_tool_log_rows,
+    user_scope_matches,
+)
 from ..vectors import cosine, flatten_vector
 from .vector_staging import FileSystemVectorStaging
 
@@ -240,6 +246,9 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         self._vector_state: Dict[
             MemoryType, Dict[str, Any]
         ] = {}  # {"index": faiss.Index, "doc_ids": [...], "dirty": bool}
+        # Toolbox rows that are bookkeeping rather than tools, so are never
+        # embedded (see _embed_tool_rows).
+        self._unembeddable_tool_rows: set = set()
 
         self._initialize_storage()
 
@@ -406,6 +415,21 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         thread_id = kwargs.get("thread_id")
         namespace = kwargs.get("namespace")
 
+        knowledge_base_ids = kwargs.get("knowledge_base_ids")
+        if (
+            knowledge_base_ids
+            and isinstance(query, str)
+            and resolved_type == MemoryType.KNOWLEDGE_BASE
+        ):
+            return self._knowledge_base_scoped_search(
+                query,
+                limit,
+                memory_id,
+                frozenset(str(value) for value in knowledge_base_ids),
+                user_id=user_id_scope,
+                namespace=namespace,
+            )
+
         if isinstance(query, dict):
             return self._filter_documents(
                 resolved_type,
@@ -425,6 +449,13 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id_scope,
                 thread_id=thread_id,
                 namespace=namespace,
+                # Tools are ranked per agent (its own rows and shared ones);
+                # every agent with the same MCP server has identical rows.
+                agent_id=(
+                    kwargs.get("agent_id", _FS_UNSET)
+                    if resolved_type == MemoryType.TOOLBOX
+                    else _FS_UNSET
+                ),
             )
         else:
             raise ValueError("query must be either a dict filter or a string")
@@ -456,7 +487,9 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                     continue
                 if document.get("agent_id") != agent_id:
                     continue
-                if document.get("user_id") != user_id:
+                if not user_scope_matches(
+                    document.get("user_id"), user_id, MemoryType.SKILLBOX
+                ):
                     continue
                 candidates.append(document)
 
@@ -620,7 +653,9 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 document = self._read_document(memory_type, doc_id)
                 if not document:
                     continue
-                if apply_user_filter and document.get("user_id") != user_id:
+                if apply_user_filter and not self._user_id_scope_matches(
+                    document, user_id, memory_type
+                ):
                     continue
                 documents.append(document)
         return documents
@@ -750,7 +785,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                     if not document or document.get("content") != expected_content:
                         return False
                     document["content"] = content
-                    document["updated_at"] = datetime.utcnow().isoformat()
+                    document["updated_at"] = utc_now_iso()
                     self._write_document(
                         memory_type, memory_id, document, persist_index=False
                     )
@@ -773,7 +808,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
             document.update(self._normalize_document(data))
             document["_id"] = id
             document["id"] = id
-            document["updated_at"] = datetime.utcnow().isoformat()
+            document["updated_at"] = utc_now_iso()
             self._write_document(memory_type, id, document)
             return True
 
@@ -822,12 +857,8 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
     def delete_memagent(self, agent_id: str, cascade: bool = False) -> bool:
         if cascade:
             memagent = self.retrieve_memagent(agent_id)
-            if memagent and memagent.memory_ids:
-                for memory_id in memagent.memory_ids:
-                    for memory_type in MemoryType:
-                        if memory_type == MemoryType.MEMAGENT:
-                            continue
-                        self._delete_memory_units_by_memory_id(memory_id, memory_type)
+            for memory_id in (memagent.memory_ids if memagent else None) or []:
+                self.delete_memory_units(memory_id, agent_id=agent_id)
         return self.delete_by_id(agent_id, MemoryType.MEMAGENT)
 
     def update_memagent_memory_ids(self, agent_id: str, memory_ids: List[str]) -> bool:
@@ -948,7 +979,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         """Normalise a whole document for storage, stamping a default timestamp."""
         document = dict(data)
         if document.get("timestamp") is None:
-            document["timestamp"] = datetime.utcnow().isoformat()
+            document["timestamp"] = utc_now_iso()
         return self._normalize_document(document)
 
     def _normalize_document(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1244,20 +1275,27 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         return document
 
     @staticmethod
-    def _user_id_scope_matches(document: Dict[str, Any], user_id: Any) -> bool:
-        """Return True when ``document`` belongs to the given tenant scope.
+    def _user_id_scope_matches(
+        document: Dict[str, Any], user_id: Any, memory_type: Any = None
+    ) -> bool:
+        """Return True when ``document`` is visible to the given tenant scope.
 
         ``_FS_UNSET`` disables filtering entirely. Any other value enforces
         strict equality — ``None`` only matches rows where ``user_id`` is
-        missing or literally ``None``.
+        missing or literally ``None`` — except that a user also sees the
+        agent-wide rows (no user) of AGENT_WIDE_STORES (``user_scope_matches``).
         """
         if user_id is _FS_UNSET:
             return True
-        return document.get("user_id") == user_id
+        return user_scope_matches(document.get("user_id"), user_id, memory_type)
 
-    @staticmethod
+    @classmethod
     def _metadata_scope_may_match(
-        meta: Dict[str, Any], memory_id: Optional[str], user_id: Any
+        cls,
+        meta: Dict[str, Any],
+        memory_id: Optional[str],
+        user_id: Any,
+        memory_type: Any = None,
     ) -> bool:
         """Cheap pre-filter on index metadata; the document check still runs.
 
@@ -1266,10 +1304,8 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         """
         if memory_id and "memory_id" in meta and meta.get("memory_id") != memory_id:
             return False
-        if (
-            user_id is not _FS_UNSET
-            and "user_id" in meta
-            and meta.get("user_id") != user_id
+        if "user_id" in meta and not cls._user_id_scope_matches(
+            meta, user_id, memory_type
         ):
             return False
         return True
@@ -1296,6 +1332,19 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 return False
         return True
 
+    @staticmethod
+    def _memory_scope_matches(
+        document: Dict[str, Any],
+        memory_id: Optional[str],
+        knowledge_base_ids: Optional[frozenset] = None,
+    ) -> bool:
+        """``memory_id`` boundary, widened to rows of attached knowledge bases."""
+        if knowledge_base_ids:
+            if str(document.get("knowledge_base_id") or "") in knowledge_base_ids:
+                return True
+            return bool(memory_id) and document.get("memory_id") == memory_id
+        return not memory_id or document.get("memory_id") == memory_id
+
     def _filter_documents(
         self,
         memory_type: MemoryType,
@@ -1314,7 +1363,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                     continue
                 if memory_id and document.get("memory_id") != memory_id:
                     continue
-                if not self._user_id_scope_matches(document, user_id):
+                if not self._user_id_scope_matches(document, user_id, memory_type):
                     continue
                 if not self._retrieval_scope_matches(
                     document, thread_id=thread_id, namespace=namespace
@@ -1326,6 +1375,46 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                         break
         return matches
 
+    def _embed_tool_rows(self, embedding_provider) -> None:
+        """Embed toolbox rows stored without a vector, once, on first search.
+
+        Tools are bound at startup as metadata only (Toolbox.register_tool
+        leaves embedding to the provider), and this provider does not embed
+        on store. Without vectors they could not be ranked beside tools that
+        have one, such as a connected MCP server's.
+        """
+        from ...long_term.procedural.toolbox.indexing import (
+            NOT_SEARCHABLE,
+            embed_documents,
+            row_type,
+            search_text,
+        )
+
+        with self._locks[MemoryType.TOOLBOX]:
+            pending = [
+                doc_id
+                for doc_id, meta in self._indexes[MemoryType.TOOLBOX].items()
+                if not meta.get("has_embedding")
+                and doc_id not in self._unembeddable_tool_rows
+            ]
+        rows = []
+        for doc_id in pending:
+            document = self._read_document(MemoryType.TOOLBOX, doc_id)
+            text = search_text(document or {})
+            if not document or row_type(document) in NOT_SEARCHABLE or not text:
+                self._unembeddable_tool_rows.add(doc_id)
+                continue
+            rows.append((doc_id, text))
+        if not rows:
+            return
+        try:
+            vectors = embed_documents(embedding_provider, [text for _, text in rows])
+        except Exception as exc:
+            logger.debug("Toolbox rows were not embedded: %s", exc)
+            return
+        for (doc_id, _), vector in zip(rows, vectors):
+            self.update_by_id(doc_id, {"embedding": vector}, MemoryType.TOOLBOX)
+
     def _semantic_search(
         self,
         memory_type: MemoryType,
@@ -1335,8 +1424,11 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         user_id: Any = _FS_UNSET,
         thread_id: Optional[str] = None,
         namespace: Optional[str] = None,
+        agent_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         embedding_provider = self._get_embedding_provider()
+        if embedding_provider is not None and memory_type == MemoryType.TOOLBOX:
+            self._embed_tool_rows(embedding_provider)
         if embedding_provider is None:
             logger.debug(
                 "Embedding provider not configured; falling back to keyword search"
@@ -1358,7 +1450,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
             has_scoped_embedding = any(
                 bool(meta.get("has_embedding"))
                 and (not memory_id or meta.get("memory_id") == memory_id)
-                and (user_id is _FS_UNSET or meta.get("user_id") == user_id)
+                and self._user_id_scope_matches(meta, user_id, memory_type)
                 and (
                     thread_id is None
                     or str(meta.get("thread_id") or "") == str(thread_id)
@@ -1449,12 +1541,18 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         # candidates from index metadata first (no document reads for other
         # tenants) and widen to the whole index when the scope is still short.
         eligible: Optional[set] = None
-        if memory_id or user_id is not _FS_UNSET:
+        if memory_id or user_id is not _FS_UNSET or agent_id is not _FS_UNSET:
             with self._locks[memory_type]:
                 eligible = {
                     doc_id
                     for doc_id, meta in self._indexes[memory_type].items()
-                    if self._metadata_scope_may_match(meta, memory_id, user_id)
+                    if self._metadata_scope_may_match(
+                        meta, memory_id, user_id, memory_type
+                    )
+                    and (
+                        agent_id is _FS_UNSET
+                        or meta.get("agent_id") in (None, agent_id)
+                    )
                 }
             if not eligible:
                 return self._keyword_search(
@@ -1484,7 +1582,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                     continue
                 if memory_id and document.get("memory_id") != memory_id:
                     continue
-                if not self._user_id_scope_matches(document, user_id):
+                if not self._user_id_scope_matches(document, user_id, memory_type):
                     continue
                 if not self._retrieval_scope_matches(
                     document, thread_id=thread_id, namespace=namespace
@@ -1517,6 +1615,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         user_id: Any = _FS_UNSET,
         thread_id: Optional[str] = None,
         namespace: Optional[str] = None,
+        knowledge_base_ids: Optional[frozenset] = None,
     ) -> List[Dict[str, Any]]:
         embedding_provider = embedding_provider or self._get_embedding_provider()
         if embedding_provider is None:
@@ -1528,6 +1627,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
+                knowledge_base_ids=knowledge_base_ids,
             )
 
         query_embedding = embed_as_query(embedding_provider.get_embedding, query)
@@ -1541,9 +1641,11 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 document = self._read_document(memory_type, doc_id)
                 if not document or "embedding" not in document:
                     continue
-                if memory_id and document.get("memory_id") != memory_id:
+                if not self._memory_scope_matches(
+                    document, memory_id, knowledge_base_ids
+                ):
                     continue
-                if not self._user_id_scope_matches(document, user_id):
+                if not self._user_id_scope_matches(document, user_id, memory_type):
                     continue
                 if not self._retrieval_scope_matches(
                     document, thread_id=thread_id, namespace=namespace
@@ -1568,6 +1670,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         user_id: Any = _FS_UNSET,
         thread_id: Optional[str] = None,
         namespace: Optional[str] = None,
+        knowledge_base_ids: Optional[frozenset] = None,
     ) -> List[Dict[str, Any]]:
         if not query:
             return []
@@ -1579,9 +1682,11 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 document = self._read_document(memory_type, doc_id)
                 if not document:
                     continue
-                if memory_id and document.get("memory_id") != memory_id:
+                if not self._memory_scope_matches(
+                    document, memory_id, knowledge_base_ids
+                ):
                     continue
-                if not self._user_id_scope_matches(document, user_id):
+                if not self._user_id_scope_matches(document, user_id, memory_type):
                     continue
                 if not self._retrieval_scope_matches(
                     document, thread_id=thread_id, namespace=namespace
@@ -1618,6 +1723,33 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 scored.append((float(score), ranked))
         scored.sort(key=lambda item: item[0], reverse=True)
         return [document for _, document in scored[: max(int(limit or 1), 1)]]
+
+    def _knowledge_base_scoped_search(
+        self,
+        query: str,
+        limit: int,
+        memory_id: Optional[str],
+        knowledge_base_ids: frozenset,
+        user_id: Any = _FS_UNSET,
+        namespace: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Knowledge recall over the attached knowledge bases and ``memory_id``.
+
+        Ingested chunks carry their ``knowledge_base_id``, not an agent's
+        memory_id. Like other explicitly scoped recall, rank only the eligible
+        rows (a global FAISS top-k could be filled by other knowledge bases).
+        """
+        options = {
+            "user_id": user_id,
+            "namespace": namespace,
+            "knowledge_base_ids": knowledge_base_ids,
+        }
+        matches = self._brute_force_search(
+            MemoryType.KNOWLEDGE_BASE, query, limit, memory_id, **options
+        )
+        return matches or self._keyword_search(
+            MemoryType.KNOWLEDGE_BASE, query, limit, memory_id, **options
+        )
 
     def _ensure_vector_index(
         self, memory_type: MemoryType, dimension: Optional[int] = None
@@ -1712,23 +1844,15 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         return vector / norm
 
     def _coerce_timestamp(self, value: Any) -> float:
-        if value is None:
-            return time.time()
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError:
-                try:
-                    return datetime.fromisoformat(value).timestamp()
-                except ValueError:
-                    return time.time()
-        return time.time()
+        # Conversation rows without an offset were written with datetime.now().
+        epoch = to_epoch(value, naive="local")
+        return time.time() if epoch is None else epoch
 
     def _delete_memory_units_by_memory_id(
         self, memory_id: str, memory_type: MemoryType
     ) -> None:
+        # Rows another instance on this root wrote must go too.
+        self._refresh_index_from_disk(memory_type)
         with self._locks[memory_type]:
             metadata = self._indexes[memory_type]
             for doc_id, meta in list(metadata.items()):

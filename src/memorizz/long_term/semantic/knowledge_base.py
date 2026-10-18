@@ -6,13 +6,14 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+from ..._time import utc_now_iso
 from ...embeddings import get_embedding
 from ...enums.memory_type import MemoryType
 from ...memory_provider import MemoryProvider
+from ...memory_provider.base import user_scope_matches
 from . import extractors as _extractors
 from .extractors import EmptyDocumentError, ExtractorError, FileSource
 
@@ -20,8 +21,13 @@ logger = logging.getLogger(__name__)
 
 # Tenant-scope sentinel, mirroring the memory-provider contract: omitting
 # ``user_id`` is an unscoped read, ``None`` selects anonymous rows, and a
-# string selects that exact tenant.
+# string selects that tenant's rows plus the agent-wide ones (no user).
 _UNSET = object()
+
+
+def _visible_to(row: Dict[str, Any], user_id: Any) -> bool:
+    """Whether a read for ``user_id`` sees ``row`` (see ``user_scope_matches``)."""
+    return user_scope_matches(row.get("user_id"), user_id, MemoryType.KNOWLEDGE_BASE)
 
 
 def _embed_chunks(chunks: List[str]) -> List[Optional[List[float]]]:
@@ -363,7 +369,7 @@ class KnowledgeBase:
             if isinstance(chunking_strategy, str)
             else getattr(chunking_strategy, "__name__", "custom")
         )
-        now = datetime.now().isoformat()
+        now = utc_now_iso()
 
         chunk_embeddings: List[Optional[List[float]]] = [None] * len(chunks)
         if not managed and embeddings != "off":
@@ -392,6 +398,9 @@ class KnowledgeBase:
                 "updated_at": now,
                 "user_id": user_id,
             }
+            if metadata:
+                # Also nested, for providers that keep only a metadata column.
+                entry.setdefault("metadata", dict(metadata))
             self.memory_provider.store(
                 entry, memory_store_type=MemoryType.KNOWLEDGE_BASE
             )
@@ -415,8 +424,8 @@ class KnowledgeBase:
             The unique ID to retrieve knowledge for.
         user_id : optional (keyword)
             Tenant scope. Omit it for an unscoped read, pass ``None`` for the
-            anonymous bucket, or a string for that exact tenant; rows outside
-            the scope are never returned.
+            anonymous bucket, or a string for that tenant and the agent-wide
+            rows (no user); rows outside the scope are never returned.
 
         Returns:
         --------
@@ -454,7 +463,7 @@ class KnowledgeBase:
             rows = self.memory_provider.list_all(
                 memory_store_type=MemoryType.KNOWLEDGE_BASE
             )
-        return [row for row in (rows or []) if row.get("user_id") == user_id]
+        return [row for row in (rows or []) if _visible_to(row, user_id)]
 
     def retrieve_knowledge_by_query(
         self,
@@ -484,7 +493,8 @@ class KnowledgeBase:
         user_id : optional (keyword)
             Tenant scope, pushed into the provider query and re-checked on
             every row. Omit it for an unscoped read, pass ``None`` for the
-            anonymous bucket, or a string for that exact tenant.
+            anonymous bucket, or a string for that tenant and the agent-wide
+            rows (no user).
 
         Returns:
         --------
@@ -538,7 +548,7 @@ class KnowledgeBase:
         rows = [row for row in (results or []) if isinstance(row, dict)]
 
         if user_id is not _UNSET:
-            rows = [row for row in rows if row.get("user_id") == user_id]
+            rows = [row for row in rows if _visible_to(row, user_id)]
         if wanted_ids is not None:
             rows = [
                 row

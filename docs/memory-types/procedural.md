@@ -5,7 +5,7 @@ Procedural memory captures *how* an agent should act. It bundles tool registrati
 ## Components
 
 - **Toolbox (`MemoryType.TOOLBOX`)** – Python callables wrapped with metadata so LLMs can discover and execute them safely.
-- **Workflow Memory (`MemoryType.WORKFLOW_MEMORY`)** – Per-run tool-calling trajectories captured automatically, each carrying a `canonical_hash` (trajectory identity) so repeated procedures can be counted and learned from.
+- **Workflow Memory (`MemoryType.WORKFLOW_MEMORY`)** – Per-run tool-calling trajectories captured automatically, each carrying a `canonical_hash` (trajectory identity) so repeated procedures can be counted and learned from. Agents connected to MCP servers, including [desktop control](../desktop-control/index.md), keep every run this way.
 - **Skillbox (`MemoryType.SKILLBOX`)** – Learned skills: SKILL.md documents distilled from repeated successful workflow trajectories, with a full promotion/monitoring/demotion lifecycle. See the [Continual Learning guide](../guides/continual-learning.md).
 - **Personas** – While technically part of semantic memory, personas often work hand-in-hand with procedural steps to enforce tone and guardrails.
 
@@ -45,6 +45,26 @@ than the original function.
 Tool schemas are capability descriptions, not authority. Apply a
 [`ToolPolicy`](../guides/tools-and-approvals.md) to side effects and use host
 approval for mutations.
+
+## MCP tools in toolbox memory
+
+Tools listed by a connected [MCP server](../guides/mcp-connectivity.md) are
+stored in the agent's toolbox too: one record per tool, with an embedding of
+its name, description and argument names, so a request finds the right tool
+by meaning. A catalog record per server keeps a fingerprint of each tool, so
+only tools whose description changed are embedded again; tools the server no
+longer lists are removed, and disconnecting the server removes its tools.
+Saving the agent keeps these records.
+
+## Runs kept as workflow memory
+
+An agent with an MCP connection records each tool-calling run as a workflow,
+even when its mode does not list workflow memory, unless it was configured
+with no memory types at all. Each record holds the request, every tool call
+with its arguments and result, and the outcome; a run that pauses for an
+approval stays one record. A [desktop control](../desktop-control/index.md)
+step's result also names the screenshot of the app's window, when one was
+kept. Browse runs in `memorizz ui` under **Memory Types → Workflows**.
 
 ## When to Reach for Procedural Memory
 

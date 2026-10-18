@@ -675,6 +675,7 @@ class PersistedMemAgentHarness(AgentHarness):
         agent = None
         try:
             from ..memagent import MemAgent
+            from ..memagent.persistence import keep_stored_fields
 
             overrides: Dict[str, Any] = {}
             if task.model:
@@ -690,12 +691,9 @@ class PersistedMemAgentHarness(AgentHarness):
                 capture_context_snapshots=True,
                 **overrides,
             )
-            if overrides:
-                # Saves during this run (a new memory registered, say) keep
-                # the agent's own model, not the one borrowed for the run.
-                agent._pinned_llm_config = _saved_llm_config(
-                    self.memory_provider, task.agent_id
-                )
+            # Saves during this run (a new memory registered, say) keep the
+            # agent's own meta-harness and model, not the run's.
+            keep_stored_fields(agent, "meta_harness", "meta_harness_mode", *overrides)
             return NativeMemAgentHarness(agent).run(
                 task,
                 workspace=workspace,

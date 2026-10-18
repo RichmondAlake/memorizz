@@ -43,7 +43,8 @@ def test_mongodb_shadow_retrieval_pushes_status_and_tenant_filters(monkeypatch):
         "$and": [
             {"status": {"$in": ["shadow"]}},
             {"agent_id": {"$eq": "agent-a"}},
-            {"user_id": {"$eq": "user-a"}},
+            # The user's own skills and the agent-wide ones (no user).
+            {"user_id": {"$in": ["user-a", None]}},
         ]
     }
     assert captured["label"] == "skillbox"

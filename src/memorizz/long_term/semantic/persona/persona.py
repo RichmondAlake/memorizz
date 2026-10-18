@@ -20,9 +20,9 @@ full tool-use contract.
 import copy
 import logging
 import uuid
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
+from ...._time import utc_now_iso
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
 from ....memory_provider import MemoryProvider
@@ -104,7 +104,7 @@ class Persona:
         self.persona_id = persona_id if persona_id else self.generate_persona_id()
         self.embedding = self._generate_embedding()
 
-        now = datetime.now().isoformat()
+        now = utc_now_iso()
         self.created_at = now
         self.updated_at = now
         self.version: int = 1
@@ -153,7 +153,7 @@ class Persona:
         instance.background = data.get("background", "") or ""
         instance.persona_id = data.get("persona_id") or cls.generate_persona_id()
         instance.embedding = data.get("embedding")
-        instance.created_at = data.get("created_at") or datetime.now().isoformat()
+        instance.created_at = data.get("created_at") or utc_now_iso()
         instance.updated_at = data.get("updated_at") or instance.created_at
 
         try:
@@ -293,8 +293,7 @@ class Persona:
             "source_id": change_trigger.get("source_id"),
             "conversation_id": change_trigger.get("conversation_id"),
             "agent_id": change_trigger.get("agent_id"),
-            "triggered_at": change_trigger.get("triggered_at")
-            or datetime.now().isoformat(),
+            "triggered_at": change_trigger.get("triggered_at") or utc_now_iso(),
         }
 
         source_type = normalized.get("source_type")
@@ -396,7 +395,7 @@ class Persona:
 
         history_entry: Dict[str, Any] = {
             "version": self.version + 1,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "changes": changes,
             "change_trigger": normalized_trigger,
         }

@@ -50,6 +50,7 @@ harnesses.
 | `oracle` | Oracle Database Python driver |
 | `mcp` | MCP client/server, encrypted credential storage, and HTTP runtime |
 | `ui` | FastAPI local control plane |
+| `desktop` | [Desktop control](../desktop-control/index.md) of Mac apps: the MCP runtime and the PyObjC Accessibility bridge (macOS) |
 | `sandbox-e2b` | Stateful E2B sandbox adapter |
 | `sandbox-daytona` | Daytona execution adapter |
 | `ingest-pdf` | PDF extraction with `pypdf` |

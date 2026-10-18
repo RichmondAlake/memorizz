@@ -182,6 +182,102 @@ def test_filesystem_ranks_only_inside_explicit_retrieval_scope(
     assert [row["_id"] for row in rows] == [wanted_id]
 
 
+class _QuietModel:
+    model = "stub"
+
+    def generate(self, messages, tools=None, **kwargs):
+        return "ok"
+
+    def get_config(self):
+        return {"provider": "openai", "model": "stub"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "policy",
+    [
+        RetrievalPolicy(),
+        RetrievalPolicy(
+            conversation_scope="disabled",
+            knowledge_base_scope="namespace",
+            knowledge_base_namespaces=("handbook",),
+        ),
+        # The string shorthand cannot name namespaces: every namespace of
+        # the attached knowledge bases is searched (with a warning).
+        "namespace",
+    ],
+)
+def test_automatic_recall_finds_knowledge_attached_to_the_agent(
+    tmp_path, monkeypatch, policy
+):
+    monkeypatch.setattr("memorizz.embeddings.get_embedding", lambda _text: [1.0, 0.0])
+    monkeypatch.setattr(
+        "memorizz.long_term.semantic.knowledge_base._embed_chunks",
+        lambda chunks: [[1.0, 0.0] for _ in chunks],
+    )
+    from memorizz.long_term.semantic.knowledge_base import KnowledgeBase
+
+    provider = FileSystemProvider(
+        FileSystemConfig(root_path=tmp_path, embedding_provider=_EmbeddingManager())
+    )
+    knowledge = KnowledgeBase(provider)
+
+    def agent(agent_id):
+        return MemAgent(
+            model=_QuietModel(),
+            memory_provider=provider,
+            memory_types=[MemoryType.KNOWLEDGE_BASE],
+            memory_ids=[f"memory-{agent_id}"],
+            agent_id=agent_id,
+            auto_register=False,
+            retrieval_policy=policy,
+        )
+
+    ours, theirs = agent("ours"), agent("theirs")
+    for owner, text in (
+        (ours, "Refunds are issued within 14 days."),
+        (theirs, "The vault code is 0000."),
+    ):
+        # Ingested the documented way: chunks carry knowledge_base_id only.
+        knowledge_base_id = knowledge.ingest_knowledge(text, namespace="handbook")
+        assert knowledge.attach_to_agent(owner, knowledge_base_id)
+    rows = provider.list_all(MemoryType.KNOWLEDGE_BASE)
+    assert len(rows) == 2 and not any(row.get("memory_id") for row in rows)
+
+    context = ours._build_context("How long do refunds take?", "memory-ours")
+
+    recalled = [str(item.get("text")) for item in context["retrieved_memories"]]
+    assert any("14 days" in text for text in recalled)
+    assert not any("vault" in text for text in recalled)
+
+
+@pytest.mark.unit
+def test_memory_manager_scopes_knowledge_by_attached_bases_or_memory_id():
+    class BroadProvider:
+        def __init__(self):
+            self.calls = []
+
+        def retrieve_by_query(self, **kwargs):
+            self.calls.append(kwargs)
+            return [
+                {"_id": "attached", "knowledge_base_id": "kb-1"},
+                {"_id": "stamped", "memory_id": "memory-1"},
+                {"_id": "other-kb", "knowledge_base_id": "kb-2"},
+                {"_id": "legacy", "knowledge_base_id": None},
+            ]
+
+    provider = BroadProvider()
+    rows = MemoryManager(provider).retrieve_relevant_memories(
+        query="refunds",
+        memory_type=MemoryType.KNOWLEDGE_BASE,
+        memory_id="memory-1",
+        knowledge_base_ids=["kb-1"],
+    )
+
+    assert [row["_id"] for row in rows] == ["attached", "stamped"]
+    assert provider.calls[0]["knowledge_base_ids"] == ["kb-1"]
+
+
 @pytest.mark.unit
 def test_summary_registry_and_expansion_are_exactly_thread_scoped():
     class Provider:

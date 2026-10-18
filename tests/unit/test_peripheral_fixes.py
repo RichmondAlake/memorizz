@@ -40,6 +40,7 @@ from memorizz.long_term.semantic.knowledge_base import KnowledgeBase
 from memorizz.memagent.core import MemAgent
 from memorizz.memagent.models import MemAgentModel
 from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+from memorizz.memory_provider.base import user_scope_matches
 from memorizz.sandbox.providers import graalpy_provider
 from memorizz.sandbox.providers.daytona_provider import DaytonaSandboxProvider
 from memorizz.sandbox.providers.graalpy_provider import GraalPySandboxProvider
@@ -436,7 +437,10 @@ def test_name_variants_merge_sequentially_instead_of_overwriting(
 
 
 class InMemoryKnowledgeProvider:
-    """Knowledge-base store that returns rows in insertion order."""
+    """Knowledge-base store that returns rows in insertion order.
+
+    User scoping follows the provider contract: a user sees their own rows
+    and the agent-wide ones (no user)."""
 
     def __init__(self, accept_user_id: bool = True):
         self.rows: Dict[str, Dict[str, Any]] = {}
@@ -464,7 +468,13 @@ class InMemoryKnowledgeProvider:
         self.query_log.append({"limit": limit, **kwargs})
         rows = list(self.rows.values())
         if "user_id" in kwargs:
-            rows = [row for row in rows if row.get("user_id") == kwargs["user_id"]]
+            rows = [
+                row
+                for row in rows
+                if user_scope_matches(
+                    row.get("user_id"), kwargs["user_id"], MemoryType.KNOWLEDGE_BASE
+                )
+            ]
         namespace = kwargs.get("namespace")
         if namespace:
             rows = [row for row in rows if row.get("namespace") == namespace]
@@ -473,7 +483,13 @@ class InMemoryKnowledgeProvider:
     def list_all(self, memory_store_type, user_id: Any = _UNSET):
         rows = [dict(row) for row in self.rows.values()]
         if user_id is not _UNSET:
-            rows = [row for row in rows if row.get("user_id") == user_id]
+            rows = [
+                row
+                for row in rows
+                if user_scope_matches(
+                    row.get("user_id"), user_id, MemoryType.KNOWLEDGE_BASE
+                )
+            ]
         return rows
 
     def delete_by_id(self, id, memory_store_type=None):
@@ -516,7 +532,8 @@ def test_retrieval_scoped_to_a_tenant(provider_accepts_user_id):
     _ingest(kb, "public note", namespace="secrets")
 
     alice_rows = kb.retrieve_knowledge_by_query("secret", user_id="alice", limit=5)
-    assert {row["content"] for row in alice_rows} == {"alice secret"}
+    # The note without a user belongs to the whole agent; Bob's stays his.
+    assert {row["content"] for row in alice_rows} == {"alice secret", "public note"}
     if provider_accepts_user_id:
         assert provider.query_log[-1]["user_id"] == "alice"
     else:

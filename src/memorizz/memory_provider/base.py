@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
+from .._time import to_epoch
+
 # Use TYPE_CHECKING for forward references to avoid circular imports
 if TYPE_CHECKING:
     from memorizz.memagent import MemAgent
@@ -22,6 +24,26 @@ logger = logging.getLogger(__name__)
 # Sentinel so "user_id not supplied" is distinguishable from an explicit None
 # (matching the MongoDB provider's _MONGO_UNSET convention).
 _UNSET = object()
+
+# Stores whose rows can belong to the whole agent rather than to one user. A
+# row there with no user_id (an agent-wide knowledge base, an authored skill,
+# a tool) is visible to every user of the agent; rows written for a user stay
+# private to that user. In personal stores (conversations, entities,
+# summaries, workflows, ...) a row without a user is an anonymous or legacy
+# record, not a shared one, so they keep exact isolation.
+AGENT_WIDE_STORES = frozenset({"knowledge_base", "skillbox", "toolbox"})
+
+
+def user_scope_matches(row_user_id: Any, user_id: Any, memory_type: Any = None) -> bool:
+    """Whether a row owned by ``row_user_id`` is visible to a read for ``user_id``.
+
+    ``_UNSET`` reads everything (administrative); otherwise the row must be
+    the user's own, or an agent-wide row in one of AGENT_WIDE_STORES.
+    """
+    if user_id is _UNSET or row_user_id == user_id:
+        return True
+    store = str(getattr(memory_type, "value", memory_type) or "")
+    return row_user_id is None and user_id is not None and store in AGENT_WIDE_STORES
 
 
 def _observation_matches(
@@ -111,7 +133,12 @@ def filter_tool_log_rows(
         if thread_id is not None and (row.get("thread_id") or "") != thread_id:
             continue
         out.append(row)
-    out.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+    # By instant, not string: rows written before UTC stamps hold local time
+    # without an offset, newer rows carry ``+00:00``.
+    out.sort(
+        key=lambda r: to_epoch(r.get("timestamp"), naive="local") or 0.0,
+        reverse=True,
+    )
     if limit and limit > 0:
         out = out[:limit]
     return out
@@ -432,18 +459,33 @@ class MemoryProvider(ABC):
             return [result]
         return list(result or [])
 
-    def _clear_agent_toolbox_rows(self, agent_id: str) -> None:
-        """Delete the TOOLBOX rows mirrored for one agent."""
-        from ..enums.memory_type import MemoryType
+    def _clear_agent_toolbox_rows(self, agent_id: str) -> Dict[str, Any]:
+        """Delete the TOOLBOX rows mirrored for one agent.
 
+        Returns the embeddings they carried, by row id and the text each was
+        embedded from, so rows written back unchanged keep them.
+        """
+        from ..enums.memory_type import MemoryType
+        from ..long_term.procedural.toolbox.indexing import (
+            KEPT_BY_MCP_TOOL_INDEX,
+            row_type,
+            search_text,
+        )
+
+        embedded: Dict[str, Any] = {}
         for doc in list(self.list_all(MemoryType.TOOLBOX) or []):
             if not isinstance(doc, dict):
                 continue
             if doc.get("agent_id") != agent_id:
                 continue
+            if row_type(doc) in KEPT_BY_MCP_TOOL_INDEX:
+                continue
             doc_id = doc.get("_id") or doc.get("id")
             if doc_id:
+                if doc.get("embedding") is not None:
+                    embedded[str(doc_id)] = (search_text(doc), doc["embedding"])
                 self.delete_by_id(str(doc_id), MemoryType.TOOLBOX)
+        return embedded
 
     def _sync_agent_tools_to_toolbox(
         self, agent_id: str, tools: Optional[List[Dict[str, Any]]]
@@ -457,12 +499,13 @@ class MemoryProvider(ABC):
         save" and is a no-op — only an explicit empty list clears rows.
         """
         from ..enums.memory_type import MemoryType
+        from ..long_term.procedural.toolbox.indexing import search_text
 
         if not agent_id or tools is None:
             return
 
         try:
-            self._clear_agent_toolbox_rows(agent_id)
+            embedded = self._clear_agent_toolbox_rows(agent_id) or {}
         except Exception as exc:
             logger.warning(
                 "Failed to clear toolbox rows for agent %s: %s", agent_id, exc
@@ -491,6 +534,9 @@ class MemoryProvider(ABC):
                 "parameters": tool_meta.get("parameters", {}),
                 "agent_id": agent_id,
             }
+            previous = embedded.get(tool_doc["_id"])
+            if previous and previous[0] == search_text(tool_doc):
+                tool_doc["embedding"] = previous[1]
             try:
                 self.store(tool_doc, memory_store_type=MemoryType.TOOLBOX)
             except Exception as exc:
@@ -902,9 +948,15 @@ class MemoryProvider(ABC):
         )
 
     def clear_semantic_cache(
-        self, agent_id: Optional[str] = None, memory_id: Optional[str] = None
+        self,
+        agent_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        *,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> int:
-        """Delete semantic-cache entries, optionally scoped to an agent/memory.
+        """Delete semantic-cache entries, optionally scoped to an agent,
+        memory, user and session (each ``None`` means any).
 
         Generic implementation over ``list_all`` + ``delete_by_id`` so every
         provider supports it; providers with a native bulk delete (MongoDB)
@@ -927,6 +979,10 @@ class MemoryProvider(ABC):
             if agent_id and row.get("agent_id") != agent_id:
                 continue
             if memory_id and row.get("memory_id") != memory_id:
+                continue
+            if user_id is not None and row.get("user_id") != user_id:
+                continue
+            if session_id is not None and row.get("session_id") != session_id:
                 continue
             record_id = row.get("_id") or row.get("id") or row.get("cache_key")
             if record_id is None:
@@ -1130,3 +1186,60 @@ class MemoryProvider(ABC):
     @abstractmethod
     def list_memagents(self) -> List[Dict[str, Any]]:
         """List all memagents in the memory provider."""
+
+    def delete_memory_units(
+        self, memory_id: str, *, agent_id: Optional[str] = None
+    ) -> bool:
+        """Delete every row carrying ``memory_id``, in every memory store.
+
+        memory_ids are shared on purpose: delegates run on their root agent's
+        memory and ``download_memory`` copies another agent's ids. With
+        ``agent_id`` (the agent letting go of the memory) the rows are deleted
+        only when no other agent still lists ``memory_id``; otherwise they stay
+        for that agent and nothing is deleted. Agent records are never touched.
+        Returns True when the rows are gone or kept for another agent; storage
+        errors raise.
+        """
+        from ..enums.memory_type import MemoryType
+
+        if agent_id is not None and self._memory_id_held_by_other_agent(
+            memory_id, agent_id
+        ):
+            logger.info(
+                "Kept the rows of memory %s: another agent still uses it", memory_id
+            )
+            return True
+        for memory_type in MemoryType:
+            if memory_type != MemoryType.MEMAGENT:
+                self._delete_memory_units_by_memory_id(memory_id, memory_type)
+        return True
+
+    def _memory_id_held_by_other_agent(self, memory_id: str, agent_id: str) -> bool:
+        """Whether a stored agent other than ``agent_id`` lists ``memory_id``."""
+        for record in self.list_memagents() or []:
+            if isinstance(record, dict):
+                other_id = record.get("agent_id") or record.get("_id")
+                memory_ids = record.get("memory_ids") or []
+            else:
+                other_id = getattr(record, "agent_id", None)
+                memory_ids = getattr(record, "memory_ids", None) or []
+            if (
+                other_id is not None
+                and str(other_id) != str(agent_id)
+                and memory_id in memory_ids
+            ):
+                return True
+        return False
+
+    def _delete_memory_units_by_memory_id(self, memory_id: str, memory_type) -> None:
+        """Delete one store's rows carrying ``memory_id``.
+
+        Generic ``list_all`` + ``delete_by_id`` sweep; providers with a bulk
+        delete override it.
+        """
+        for row in list(self.list_all(memory_type) or []):
+            if not isinstance(row, dict) or row.get("memory_id") != memory_id:
+                continue
+            record_id = row.get("_id") or row.get("id")
+            if record_id is not None:
+                self.delete_by_id(str(record_id), memory_type)

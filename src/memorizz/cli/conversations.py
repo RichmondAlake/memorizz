@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .._time import to_utc
 from ..enums.memory_type import MemoryType
 
 
@@ -56,18 +57,11 @@ def _single_line(value: Any) -> str:
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-    text = _text(value)
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return (
-            parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-        )
-    except (TypeError, ValueError):
-        return None
+    # Turns stored without an offset are local time: they were written with
+    # datetime.now() before MemoRizz stamped UTC.
+    if not isinstance(value, (datetime, int, float)):
+        value = _text(value)
+    return to_utc(value, naive="local")
 
 
 def conversation_row_parts(row: Any) -> Dict[str, Any]:

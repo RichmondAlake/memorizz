@@ -177,6 +177,15 @@ credentials. This configuration error does not disable ordinary chat.
 
 See [E2B](sandbox/e2b.md) and [browser control](browser-control/index.md).
 
+## Desktop control cannot read or operate an app
+
+Run `memorizz desktop doctor`. It names the app macOS asks about (the one
+MemoRizz runs in) and whether it has Accessibility and Screen Recording
+permission; `--ask` shows macOS's prompts. Turn on that app under System
+Settings → Privacy & Security, then restart it. Some Electron apps, Notion's
+desktop app among them, expose no content to Accessibility at all; use their
+MCP server instead. See [desktop control](desktop-control/index.md#troubleshooting).
+
 ## An agent harness reports `authentication_required`
 
 Run `memorizz harness doctor HARNESS --json` and follow its `remediation` field.

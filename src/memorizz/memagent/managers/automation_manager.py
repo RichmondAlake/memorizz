@@ -107,7 +107,11 @@ class AutomationManager:
             whatsapp_to: List[str] = None,
             client_request_id: str = "",
         ) -> Dict[str, Any]:
-            """Create a scheduled automation job for this agent."""
+            """Schedule a reminder, report or recurring task for this agent to run later.
+
+            It runs query_template once ("one_shot"), every interval_seconds
+            ("interval") or on a cron_expr ("cron").
+            """
             if store is None:
                 return {"ok": False, "error": "Automations are unavailable (no store)."}
 

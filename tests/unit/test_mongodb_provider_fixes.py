@@ -173,6 +173,33 @@ def test_toolbox_row_with_string_id_can_be_retrieved_updated_and_deleted(provide
 
 
 @pytest.mark.unit
+def test_saving_an_agent_keeps_its_mcp_index_rows_and_unchanged_vectors(provider):
+    """MongoDB overrode the base cleanup with delete_many({"agent_id": ...}),
+    so every save wiped the MCP tool index and re-embedded all tools."""
+    for row_id, tool_type in (
+        ("agent-1:mcp-tool:notion:search", "mcp_tool"),
+        ("agent-1:mcp-tools:notion", "mcp_tool_catalog"),
+    ):
+        provider.toolbox_collection.insert_one(
+            {"_id": row_id, "agent_id": "agent-1", "tool_type": tool_type}
+        )
+    tool = {"name": "search", "description": "Search the web", "parameters": {}}
+    provider._sync_agent_tools_to_toolbox("agent-1", [tool])
+    provider.toolbox_collection.update_one(
+        {"_id": "agent-1:search"}, {"$set": {"embedding": [0.5, 0.5]}}
+    )
+
+    provider._sync_agent_tools_to_toolbox("agent-1", [tool])
+    assert provider.toolbox_collection.find_one({"_id": "agent-1:mcp-tools:notion"})
+    assert provider.toolbox_collection.find_one(
+        {"_id": "agent-1:mcp-tool:notion:search"}
+    )
+    assert provider.toolbox_collection.find_one({"_id": "agent-1:search"})[
+        "embedding"
+    ] == [0.5, 0.5]
+
+
+@pytest.mark.unit
 def test_string_id_that_looks_like_object_id_still_resolves(provider):
     hex_id = str(ObjectId())
     provider.store(
@@ -399,3 +426,145 @@ def test_list_summaries_keeps_user_scope(provider):
         "a",
         "anon",
     ]
+
+
+@pytest.mark.unit
+def test_knowledge_recall_scopes_by_attached_knowledge_bases(provider):
+    from memorizz.memory_provider.mongodb.provider import _VECTOR_FILTER_FIELDS
+
+    provider.knowledge_base_collection.insert_many(
+        [
+            {"_id": "attached", "knowledge_base_id": "kb-1", "content": "refunds"},
+            {"_id": "stamped", "memory_id": "memory-1", "content": "refunds"},
+            {"_id": "other", "knowledge_base_id": "kb-2", "content": "refunds"},
+        ]
+    )
+    scope = {"memory_id": "memory-1", "knowledge_base_ids": ["kb-1"], "user_id": None}
+
+    # The same filter feeds $vectorSearch, so the index must declare the path.
+    assert "knowledge_base_id" in _VECTOR_FILTER_FIELDS[MemoryType.KNOWLEDGE_BASE.value]
+    assert provider._knowledge_base_search_filter(scope)["$or"] == [
+        {"knowledge_base_id": {"$in": ["kb-1"]}},
+        {"memory_id": "memory-1"},
+    ]
+    rows = provider._knowledge_base_scoped_fallback(
+        limit=5, query_text="refunds", reason="test", **scope
+    )
+    assert sorted(row["_id"] for row in rows) == ["attached", "stamped"]
+
+
+# ---------------------------------------------------------------------------
+# Memory scope: shared memory_ids, cache clearing, scoped vector search and
+# agent-wide sharing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_cascade_keeps_rows_of_a_memory_id_another_agent_uses(provider):
+    # A delegate shares its root agent's memory (multi-agent orchestration).
+    _store_agent(provider, "root", ["shared"])
+    _store_agent(provider, "delegate", ["shared", "own"])
+    for memory_id in ("shared", "own"):
+        provider.conversation_memory_collection.insert_one({"memory_id": memory_id})
+
+    assert provider.delete_memagent("delegate", cascade=True) is True
+
+    remaining = provider.conversation_memory_collection.find({}, {"_id": 0})
+    assert [row["memory_id"] for row in remaining] == ["shared"]
+    assert provider.retrieve_memagent("root") is not None
+
+
+@pytest.mark.unit
+def test_delete_memory_units_sweeps_every_store(provider):
+    for memory_type in _CASCADE_TYPES:
+        provider.db[memory_type.value].insert_many(
+            [{"memory_id": "mem-1"}, {"memory_id": "mem-2"}]
+        )
+
+    assert provider.delete_memory_units("mem-1") is True
+
+    for memory_type in _CASCADE_TYPES:
+        collection = provider.db[memory_type.value]
+        assert collection.count_documents({"memory_id": "mem-1"}) == 0, memory_type
+        assert collection.count_documents({"memory_id": "mem-2"}) == 1, memory_type
+
+
+@pytest.mark.unit
+def test_clear_semantic_cache_scopes_by_user_and_session(provider):
+    provider.semantic_cache_collection.insert_many(
+        [
+            {"agent_id": "a1", "user_id": "alice", "session_id": "s1"},
+            {"agent_id": "a1", "user_id": "alice", "session_id": "s2"},
+            {"agent_id": "a1", "user_id": "bob", "session_id": "s1"},
+        ]
+    )
+
+    assert provider.clear_semantic_cache("a1", user_id="alice", session_id="s1") == 1
+    assert provider.clear_semantic_cache("a1", session_id="s1") == 1
+    remaining = list(provider.semantic_cache_collection.find({}, {"_id": 0}))
+    assert remaining == [{"agent_id": "a1", "user_id": "alice", "session_id": "s2"}]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "memory_type", [MemoryType.WORKFLOW_MEMORY, MemoryType.SUMMARIES]
+)
+def test_workflow_and_summary_search_filter_inside_vector_search(
+    provider, monkeypatch, memory_type
+):
+    from memorizz.memory_provider.mongodb import provider as mongo_module
+
+    monkeypatch.setattr(mongo_module, "get_embedding", lambda _query: [1.0, 0.0])
+    provider.lazy_vector_indexes = False
+    captured = {}
+
+    def run_search(collection, pipeline, *, label, raise_on_error=False):
+        captured["filter"] = pipeline[0]["$vectorSearch"].get("filter")
+        return []
+
+    provider._run_vector_search = run_search
+    provider.retrieve_by_query(
+        "refund order",
+        memory_store_type=memory_type,
+        memory_id="mem-1",
+        user_id="alice",
+        limit=3,
+    )
+
+    assert captured["filter"] == {"memory_id": "mem-1", "user_id": "alice"}
+    # A filter on an undeclared path fails the search.
+    assert "user_id" in mongo_module._VECTOR_FILTER_FIELDS[memory_type.value]
+
+
+@pytest.mark.unit
+def test_agent_wide_knowledge_is_shared_but_personal_stores_stay_exact(provider):
+    for memory_type in (MemoryType.KNOWLEDGE_BASE, MemoryType.CONVERSATION_MEMORY):
+        provider.db[memory_type.value].insert_many(
+            [
+                {"_id": f"{memory_type.value}-agent", "memory_id": "m"},
+                {
+                    "_id": f"{memory_type.value}-alice",
+                    "memory_id": "m",
+                    "user_id": "alice",
+                },
+                {"_id": f"{memory_type.value}-bob", "memory_id": "m", "user_id": "bob"},
+            ]
+        )
+
+    def ids(memory_type):
+        rows = provider.list_all(memory_type, user_id="alice")
+        dict_rows = provider.retrieve_by_query(
+            {"memory_id": "m"}, memory_store_type=memory_type, limit=10, user_id="alice"
+        )
+        found = sorted(row["_id"] for row in rows)
+        assert found == sorted(row["_id"] for row in dict_rows)
+        return found
+
+    assert ids(MemoryType.KNOWLEDGE_BASE) == [
+        "knowledge_base-agent",
+        "knowledge_base-alice",
+    ]
+    assert ids(MemoryType.CONVERSATION_MEMORY) == ["conversation_memory-alice"]
+    assert provider._knowledge_base_search_filter({"user_id": "alice"}) == {
+        "user_id": {"$in": ["alice", None]}
+    }

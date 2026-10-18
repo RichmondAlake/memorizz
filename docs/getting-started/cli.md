@@ -712,6 +712,27 @@ For a model-requested task, use the generic approval lifecycle:
 See the [Browser Control guide](../browser-control/index.md) for SDK, builder,
 UI, domain-policy, result, and custom-provider details.
 
+### Desktop control (computer use)
+
+On a Mac, the chat agent can open, read and operate apps. Install the
+`desktop` extra, give the app you run MemoRizz in Accessibility permission, and
+connect the desktop tools:
+
+```bash
+uv tool install --python 3.12 "memorizz[desktop]"
+memorizz desktop doctor --ask    # Accessibility, and Screen Recording for screenshots
+memorizz desktop connect         # one MCP connection, one tool per action
+memorizz                         # restart the chat
+```
+
+The agent reads a window as a numbered outline of its buttons, fields and text,
+then acts by number. Reading never asks; opening an app, clicking, typing,
+pressing keys and scrolling wait for `/approvals` (connect with
+`--no-approval` to let them run). Actions reach the app in the background, so
+you can keep working in another one. Each run is kept as workflow memory, with
+a screenshot of every step when Screen Recording is allowed. See the
+[Desktop Control guide](../desktop-control/index.md).
+
 To run the CLI against Oracle with an existing external-vector schema, keep
 the embedding mode and dimensions aligned with the schema:
 
@@ -789,6 +810,7 @@ memorizz finetune models|compare RUN|swap JOB RUN|swap-back JOB
 memorizz config path|keys|set|get
 memorizz memory configure
 memorizz notion connect|init|status|sync|repair
+memorizz desktop doctor [--ask]|connect [--no-approval] [--no-screenshots]|serve
 memorizz agents create|list|show|update|delete
 memorizz harness list|doctor|init|config|models
 memorizz harness run|plan|compare|continue|conversation

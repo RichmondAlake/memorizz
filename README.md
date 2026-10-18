@@ -58,7 +58,9 @@ Build persistent agents with `MemAgent` and `MemAgentBuilder`. Choose
 [model providers](docs/getting-started/model-providers.md).
 
 - **Tools and integrations:** Python functions, MCP servers, internet search,
-  governed browser control, sandboxes, and external skills. A
+  governed browser control, [desktop control](docs/desktop-control/index.md)
+  of Mac apps (computer use), sandboxes, and external skills. MCP tools are
+  stored in toolbox memory and found by meaning. A
   [tool call cache](docs/guides/context-efficiency.md#tool-call-cache) reuses
   the results of repeated calls to tools that are safe to reuse.
 - **Coordination:** delegate work to specialist agents, share memory, and run

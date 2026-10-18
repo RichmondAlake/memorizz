@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List
 
+from ...._time import to_utc, utc_now
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
 from ....memory_provider import MemoryProvider
@@ -103,8 +104,8 @@ class Workflow:
         self.steps = steps or {}
         # Use MongoDB ObjectId for better performance
         self.workflow_id = workflow_id or str(uuid.uuid4())
-        self.created_at = created_at or datetime.now()
-        self.updated_at = updated_at or datetime.now()
+        self.created_at = created_at or utc_now()
+        self.updated_at = updated_at or utc_now()
         self.memory_id = memory_id or str(uuid.uuid4())
         self.agent_id = agent_id
         self.outcome = outcome or WorkflowOutcome.SUCCESS
@@ -201,16 +202,9 @@ class Workflow:
             description=data.get("description", ""),
             steps=data.get("steps", {}),
             workflow_id=data.get("workflow_id"),
-            created_at=(
-                datetime.fromisoformat(data["created_at"])
-                if data.get("created_at")
-                else None
-            ),
-            updated_at=(
-                datetime.fromisoformat(data["updated_at"])
-                if data.get("updated_at")
-                else None
-            ),
+            # Stamps without an offset were written with datetime.now().
+            created_at=to_utc(data.get("created_at"), naive="local"),
+            updated_at=to_utc(data.get("updated_at"), naive="local"),
             memory_id=data.get("memory_id"),
             agent_id=data.get("agent_id"),
             outcome=WorkflowOutcome(data.get("outcome", WorkflowOutcome.SUCCESS.value)),
@@ -323,4 +317,4 @@ class Workflow:
             The data for the step.
         """
         self.steps[step_name] = step_data
-        self.updated_at = datetime.now()
+        self.updated_at = utc_now()

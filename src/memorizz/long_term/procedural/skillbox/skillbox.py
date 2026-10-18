@@ -6,13 +6,14 @@
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ...._time import utc_now
 from ....embeddings import embed_as_query, get_embedding
 from ....enums.memory_type import MemoryType
 from ....llms.llm_provider import LLMProvider
 from ....memory_provider import MemoryProvider
+from ....memory_provider.base import user_scope_matches
 from ....memory_provider.vectors import cosine
 from .skill import Skill, SkillStatus
 
@@ -87,8 +88,10 @@ class Skillbox:
     ) -> Optional[Skill]:
         """Return the ACTIVE skill covering a trajectory class and user.
 
-        ``user_id`` is exact when supplied, including ``None`` for anonymous
-        workflows. Omitting it preserves the legacy unscoped lookup.
+        A skill covers the runs of every user it is visible to: the user's
+        own, else the agent-wide one (no user). ``None`` selects anonymous
+        workflows, which only agent-wide skills cover. Omitting ``user_id``
+        preserves the legacy unscoped lookup.
         """
         if not canonical_hash:
             return None
@@ -114,7 +117,9 @@ class Skillbox:
                 None,
             )
         else:
-            skill_id = self._active_hash_cache.get((str(canonical_hash), user_id))
+            skill_id = self._active_hash_cache.get(
+                (str(canonical_hash), user_id)
+            ) or self._active_hash_cache.get((str(canonical_hash), None))
         if not skill_id:
             return None
         return self.get_skill_by_id(skill_id)
@@ -139,7 +144,7 @@ class Skillbox:
         retrieval). Identity/content fields never change in place; a
         re-promotion creates a new versioned skill instead.
         """
-        skill.updated_at = datetime.now()
+        skill.updated_at = utc_now()
         self._active_hash_cache = None
         doc = self._find_doc_by_skill_id(skill.skill_id)
         if not doc:
@@ -202,10 +207,10 @@ class Skillbox:
             return False
         skill.status = status
         if status in (SkillStatus.DEMOTED, SkillStatus.DEPRECATED):
-            skill.demoted_at = datetime.now()
+            skill.demoted_at = utc_now()
             skill.demotion_reason = reason
         elif status == SkillStatus.ACTIVE:
-            skill.promoted_at = skill.promoted_at or datetime.now()
+            skill.promoted_at = skill.promoted_at or utc_now()
         return self.update_skill(skill)
 
     # ------------------------------------------------------------- retrieval
@@ -347,7 +352,9 @@ class Skillbox:
                 expected_agent,
             ):
                 continue
-            if user_id is not _SCOPE_UNSET and doc.get("user_id") != user_id:
+            if user_id is not _SCOPE_UNSET and not user_scope_matches(
+                doc.get("user_id"), user_id, MemoryType.SKILLBOX
+            ):
                 continue
             similarity = doc.get("score")
             if similarity is None:

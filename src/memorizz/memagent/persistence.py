@@ -12,13 +12,14 @@ unchanged.
 """
 
 import logging
+import os
 import uuid
 from contextvars import ContextVar
-from typing import Any, FrozenSet, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from ..enums import ApplicationMode, MemoryType
 from ..task_decomposition import normalize_delegation_config
-from .constants import DEFAULT_MAX_STEPS
+from .constants import DEFAULT_INSTRUCTION, DEFAULT_MAX_STEPS
 
 logger = logging.getLogger(__name__)
 
@@ -139,12 +140,19 @@ def save_agent(agent):
             max_steps=agent.max_steps,
             tool_access=getattr(agent, "tool_access", "private"),
             application_mode=_get_application_mode_value(agent),
-            memory_types=[
-                memory_type.value
-                for memory_type in (agent.active_memory_types or [])
-                if hasattr(memory_type, "value")
-            ]
-            or None,
+            # Types a runtime rule turned on are re-applied on load, not saved.
+            # An empty list is a stateless agent and is saved as such; None
+            # would reload with the application mode's default types.
+            memory_types=(
+                None
+                if agent.active_memory_types is None
+                else [
+                    memory_type.value
+                    for memory_type in agent.active_memory_types
+                    if hasattr(memory_type, "value")
+                    and memory_type not in getattr(agent, "_runtime_memory_types", ())
+                ]
+            ),
             memory_ids=agent.memory_ids,
             knowledge_base_ids=getattr(agent, "knowledge_base_ids", None) or None,
             agent_id=agent.agent_id,
@@ -221,7 +229,12 @@ def save_agent(agent):
             ),
             automations_enabled=bool(getattr(agent, "automations_enabled", True)),
             default_timezone=getattr(agent, "default_timezone", None),
+            embedding_provider=getattr(agent, "embedding_provider", None),
+            embedding_config=getattr(agent, "embedding_config", None),
+            whatsapp_enabled=bool(getattr(agent, "whatsapp_enabled", False)),
+            whatsapp_config=getattr(agent, "whatsapp_config", None),
         )
+        memagent_to_save = _with_kept_fields(agent, memagent_to_save)
 
         # Save or update the agent
         if hasattr(agent.memory_provider, "store_memagent"):
@@ -268,6 +281,11 @@ def save_agent(agent):
                                 agent.memory_ids[0]
                             )
 
+            # The record now exists with these memories: registration only
+            # has to patch memory_ids from here on.
+            agent._agent_record_stored = True
+            agent._registered_memory_ids = {str(mid) for mid in agent.memory_ids if mid}
+
             _persist_mcp_servers_to_toolbox_memory(agent)
 
             logger.info(f"MemAgent {agent.agent_id} saved successfully")
@@ -293,6 +311,44 @@ def _write_memagent_compat(writer, model):
         raise
 
 
+def keep_stored_fields(agent, *fields: str) -> None:
+    """Make every later save of ``agent`` keep ``fields`` as stored.
+
+    For settings changed for one run only (a scheduled run with automations
+    off, a harness run on another model, an unsaved playground instruction):
+    a save during the run (a new memory registered, a tool that saves the
+    agent) then writes the agent's own values, read from the store at save
+    time so edits made elsewhere meanwhile survive too.
+    """
+    from .models import MemAgentModel
+
+    unknown = sorted(set(fields) - set(MemAgentModel.model_fields))
+    if unknown:
+        raise ValueError(f"Not saved agent fields: {', '.join(unknown)}")
+    kept = set(getattr(agent, "_keep_stored_fields", None) or ())
+    agent._keep_stored_fields = kept | set(fields)
+
+
+def _record_value(record: Any, name: str) -> Any:
+    """One field of a stored agent record (a model, or a legacy mapping)."""
+    if isinstance(record, dict):
+        return record.get(name)
+    return getattr(record, name, None)
+
+
+def _with_kept_fields(agent, model):
+    """``model`` with the fields ``keep_stored_fields`` named taken from the
+    stored record; unchanged when the agent was never stored."""
+    kept = getattr(agent, "_keep_stored_fields", None)
+    provider = agent.memory_provider
+    if not kept or not agent.agent_id or not hasattr(provider, "retrieve_memagent"):
+        return model
+    stored = provider.retrieve_memagent(agent.agent_id)
+    if not stored:
+        return model
+    return model.model_copy(update={name: _record_value(stored, name) for name in kept})
+
+
 def _get_application_mode_value(agent) -> str:
     """Return the application mode value as a string."""
     if isinstance(agent.application_mode, ApplicationMode):
@@ -307,9 +363,12 @@ def _serialize_tools_for_save(agent):
     if not agent.tool_manager:
         return None
 
+    # An empty list (not None) when the agent has no tools, so a save after
+    # removing the last tool clears the rows that mirrored it; None means
+    # "this save carries no tools" and leaves them alone.
     tools_metadata = agent.tool_manager.get_tool_metadata()
     if not tools_metadata:
-        return None
+        return []
 
     # Tools are agent-scoped (shared across threads), so stamp agent_id
     # and leave memory_id unset. The UI toolbox-memory filter treats
@@ -349,7 +408,7 @@ def _serialize_tools_for_save(agent):
             }
             serializable_tools.append(serializable_tool)
 
-    return serializable_tools if serializable_tools else None
+    return serializable_tools
 
 
 def _persist_mcp_servers_to_toolbox_memory(agent) -> None:
@@ -474,6 +533,270 @@ _LOADING_CHAIN: ContextVar[FrozenSet[str]] = ContextVar(
 )
 
 
+def _bool_or(value: Any, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _dict_or_none(value: Any) -> Optional[Dict[str, Any]]:
+    return value if isinstance(value, dict) else None
+
+
+def _list_or_empty(value: Any) -> List[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+# Restored settings set on the instance after construction.
+_SAVED_ATTRIBUTES = (
+    "knowledge_base_ids",
+    "thread_titles",
+    "whatsapp_enabled",
+    "whatsapp_config",
+)
+# Restored settings load_agent resolves itself instead of passing them on.
+_RESOLVED_ON_LOAD = frozenset(
+    {
+        "llm_config",
+        "context_window_tokens",
+        "application_mode",
+        "delegates",
+        "internet_access_provider",
+    }
+)
+
+
+def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
+    """The settings a stored agent record restores, normalized.
+
+    Keys are ``MemAgent`` constructor arguments, plus ``_SAVED_ATTRIBUTES``.
+    ``load_agent`` builds an agent from them and ``refresh_agent`` applies
+    them to a live one, so both restore the same fields the same way. Three
+    are references: ``llm_config`` (for the model), delegate agent ids, and
+    the internet provider's ``(name, config)``.
+    """
+
+    def field(name: str, default: Any = None) -> Any:
+        return getattr(saved_memagent, name, default)
+
+    llm_config = _dict_or_none(field("llm_config"))
+
+    # Reconstruct semantic cache config
+    semantic_cache_config = None
+    if field("semantic_cache_config"):
+        try:
+            config_dict = dict(field("semantic_cache_config"))
+            # Convert string scope back to enum if needed
+            if "scope" in config_dict and isinstance(config_dict["scope"], str):
+                try:
+                    from ..enums.semantic_cache_scope import SemanticCacheScope
+
+                    scope_str = config_dict["scope"].lower()
+                    if scope_str == "local":
+                        config_dict["scope"] = SemanticCacheScope.LOCAL
+                    elif scope_str == "global":
+                        config_dict["scope"] = SemanticCacheScope.GLOBAL
+                except ImportError:
+                    # If enum not available, keep as string
+                    pass
+            semantic_cache_config = config_dict
+        except Exception as e:
+            logger.warning(f"Failed to reconstruct semantic cache config: {e}")
+
+    internet = None
+    provider_name = field("internet_access_provider")
+    provider_config = _dict_or_none(field("internet_access_config"))
+    if provider_config is not None:
+        # A record saved by an older release may hold the key itself; the
+        # provider resolves it from the environment instead.
+        provider_config = _scrub_internet_access_config(provider_config)
+    if isinstance(provider_name, str) and provider_name:
+        internet = (provider_name, provider_config)
+
+    application_mode = field("application_mode")
+    if not isinstance(application_mode, str) or not application_mode:
+        application_mode = ApplicationMode.DEFAULT.value
+
+    sandbox_provider = field("sandbox_provider")
+    if not isinstance(sandbox_provider, (str, dict)):
+        sandbox_provider = None
+
+    browser_control = field("browser_control")
+    if not isinstance(browser_control, (str, dict)):
+        browser_control = None
+
+    meta_harness_mode = field("meta_harness_mode")
+    if meta_harness_mode not in {"delegate", "runtime"}:
+        meta_harness_mode = None
+    default_harness = field("default_harness", "auto")
+    if not isinstance(default_harness, str):
+        default_harness = "auto"
+
+    skills_marketplace_provider = field("skills_marketplace_provider")
+    if isinstance(skills_marketplace_provider, dict):
+        skills_marketplace_provider = skills_marketplace_provider.get(
+            "provider"
+        ) or skills_marketplace_provider.get("name")
+    if not isinstance(skills_marketplace_provider, str):
+        skills_marketplace_provider = None
+    else:
+        skills_marketplace_provider = (
+            skills_marketplace_provider.strip().lower() or None
+        )
+
+    skill_paths = field("skill_paths")
+    if isinstance(skill_paths, str):
+        skill_paths = [skill_paths]
+    elif not isinstance(skill_paths, list):
+        skill_paths = None
+
+    mcp_servers = field("mcp_servers")
+    if not isinstance(mcp_servers, list):
+        mcp_servers = None
+
+    continual_learning = _bool_or(field("continual_learning", False), False)
+    learning_control_plane_config = _dict_or_none(
+        field("learning_control_plane_config")
+    )
+
+    default_timezone = field("default_timezone")
+    if not isinstance(default_timezone, str):
+        default_timezone = None
+    else:
+        default_timezone = default_timezone.strip() or None
+
+    semantic_layer = None
+    semantic_layer_config = field("semantic_layer_config")
+    if isinstance(semantic_layer_config, dict):
+        try:
+            from ..semantic_layer import SemanticCatalog
+
+            semantic_layer = SemanticCatalog.from_dict(semantic_layer_config)
+        except Exception as exc:
+            logger.warning("Failed to restore semantic catalog: %s", exc)
+
+    tool_access = field("tool_access", "private")
+    if not isinstance(tool_access, str) or tool_access not in {
+        "private",
+        "public",
+        "global",
+    }:
+        tool_access = "private"
+
+    memory_ids = field("memory_ids", [])
+    if isinstance(memory_ids, str):
+        memory_ids = [memory_ids]
+
+    titles = field("thread_titles")
+    embedding_provider = field("embedding_provider")
+
+    # Ordered as refresh applies them: the model before the context window
+    # it bounds, the application mode before the memory types it implies.
+    return {
+        "llm_config": llm_config,
+        "context_window_tokens": _saved_context_cap(saved_memagent, llm_config),
+        "tools": field("tools"),
+        "persona": field("persona"),
+        "name": field("name"),
+        "application_id": field("application_id"),
+        "instruction": field("instruction"),
+        "max_steps": field("max_steps", DEFAULT_MAX_STEPS),
+        "tool_access": tool_access,
+        "memory_ids": _list_or_empty(memory_ids),
+        "application_mode": application_mode,
+        "memory_types": field("memory_types"),
+        "delegates": _list_or_empty(field("delegates")),
+        "semantic_cache": _bool_or(field("semantic_cache", False), False),
+        "semantic_cache_config": semantic_cache_config,
+        "tool_result_policy": _dict_or_none(field("tool_result_policy")),
+        "tool_cache": _dict_or_none(field("tool_cache_config")),
+        "context_policy": _dict_or_none(field("context_policy")),
+        "completion_policy": _dict_or_none(field("completion_policy")),
+        "retrieval_policy": _dict_or_none(field("retrieval_policy")),
+        "skill_retrieval": _bool_or(field("skill_retrieval", False), False),
+        "skill_retrieval_config": _dict_or_none(field("skill_retrieval_config")),
+        "delegation": _dict_or_none(field("delegation_config")),
+        "semantic_layer": semantic_layer,
+        "internet_access_provider": internet,
+        "skills_marketplace_provider": skills_marketplace_provider,
+        "skills_marketplace_config": _dict_or_none(field("skills_marketplace_config")),
+        "sandbox_provider": sandbox_provider,
+        "browser_control": browser_control,
+        "meta_harness": _bool_or(field("meta_harness", False), False),
+        "meta_harness_mode": meta_harness_mode,
+        "default_harness": default_harness,
+        "harness_config": _dict_or_none(field("harness_config")),
+        "skill_paths": skill_paths,
+        "mcp_servers": mcp_servers,
+        "automations_enabled": _bool_or(field("automations_enabled", True), True),
+        "default_timezone": default_timezone,
+        "self_aware": _bool_or(field("self_aware", False), False),
+        "self_aware_config": _dict_or_none(field("self_aware_config")),
+        "continual_learning": continual_learning,
+        "continual_learning_config": _dict_or_none(field("continual_learning_config")),
+        "learning_control_plane": (
+            learning_control_plane_config
+            if learning_control_plane_config is not None
+            else _bool_or(field("learning_control_plane", False), False)
+        ),
+        "is_favorite": _bool_or(field("is_favorite", False), False),
+        "embedding_provider": (
+            embedding_provider if isinstance(embedding_provider, str) else None
+        ),
+        "embedding_config": _dict_or_none(field("embedding_config")),
+        "knowledge_base_ids": _list_or_empty(field("knowledge_base_ids")),
+        "thread_titles": dict(titles) if isinstance(titles, dict) else {},
+        "whatsapp_enabled": _bool_or(field("whatsapp_enabled", False), False),
+        "whatsapp_config": _dict_or_none(field("whatsapp_config")),
+    }
+
+
+def _internet_provider(saved: Optional[Tuple[str, Optional[Dict[str, Any]]]]):
+    """The internet provider a saved ``(name, config)`` describes, or None."""
+    if not saved:
+        return None
+    provider_name, provider_config = saved
+    try:
+        from ..internet_access import create_internet_access_provider
+
+        return create_internet_access_provider(provider_name, provider_config)
+    except Exception as exc:
+        logger.warning(
+            "Failed to restore internet provider '%s': %s", provider_name, exc
+        )
+        return None
+
+
+def _load_delegates(
+    cls, agent_id: str, delegate_ids, memory_provider, runtime_memory_provider
+) -> List[Any]:
+    """Load an agent's delegates, skipping any already in this delegate chain."""
+    loaded = []
+    chain = _LOADING_CHAIN.get() | {str(agent_id)}
+    token = _LOADING_CHAIN.set(chain)
+    try:
+        for delegate_id in delegate_ids:
+            if str(delegate_id) in chain:
+                logger.warning(
+                    "Skipped delegate %s of agent %s: it would load an agent "
+                    "already in this delegate chain",
+                    delegate_id,
+                    agent_id,
+                )
+                continue
+            try:
+                loaded.append(
+                    cls.load(
+                        delegate_id,
+                        memory_provider,
+                        runtime_memory_provider=runtime_memory_provider,
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Could not load delegate agent {delegate_id}: {e}")
+    finally:
+        _LOADING_CHAIN.reset(token)
+    return loaded
+
+
 def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     """Load a MemAgent from the memory provider (see MemAgent.load)."""
     # ``create_llm_provider`` is resolved through the core module at call
@@ -507,13 +830,13 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
         raise ValueError(
             f"MemAgent with agent id {agent_id} not found in the memory provider"
         )
+    settings = _saved_settings(saved_memagent)
 
     # Reconstruct LLM model. Stash any construction error so we can
     # attach it to the new instance below — otherwise chat would
     # surface a generic "No LLM model configured" instead of the
     # actual cause (e.g. uncached HF repo, network failure).
-    saved_llm_config = getattr(saved_memagent, "llm_config", None)
-    resolved_llm_config = overrides.get("llm_config", saved_llm_config)
+    resolved_llm_config = overrides.get("llm_config", settings["llm_config"])
     override_model = overrides.get("model") if "model" in overrides else None
     model_to_load = override_model
     load_llm_error: Optional[str] = None
@@ -536,235 +859,21 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     elif "llm_config" not in overrides and getattr(saved_memagent, "model", None):
         model_to_load = saved_memagent.model
 
-    # Load delegates if they exist
     loaded_delegates = None
-    if hasattr(saved_memagent, "delegates") and saved_memagent.delegates:
-        loaded_delegates = []
-        chain = _LOADING_CHAIN.get() | {str(agent_id)}
-        token = _LOADING_CHAIN.set(chain)
-        try:
-            for delegate_id in saved_memagent.delegates:
-                if str(delegate_id) in chain:
-                    logger.warning(
-                        "Skipped delegate %s of agent %s: it would load an agent "
-                        "already in this delegate chain",
-                        delegate_id,
-                        agent_id,
-                    )
-                    continue
-                try:
-                    delegate_agent = cls.load(
-                        delegate_id,
-                        memory_provider,
-                        runtime_memory_provider=runtime_memory_provider,
-                    )
-                    loaded_delegates.append(delegate_agent)
-                except Exception as e:
-                    logger.warning(f"Could not load delegate agent {delegate_id}: {e}")
-        finally:
-            _LOADING_CHAIN.reset(token)
-
-    # Reconstruct semantic cache config
-    semantic_cache_config_to_load = None
-    if (
-        hasattr(saved_memagent, "semantic_cache_config")
-        and saved_memagent.semantic_cache_config
-    ):
-        try:
-            config_dict = dict(saved_memagent.semantic_cache_config)
-            # Convert string scope back to enum if needed
-            if "scope" in config_dict and isinstance(config_dict["scope"], str):
-                try:
-                    from ..enums.semantic_cache_scope import SemanticCacheScope
-
-                    scope_str = config_dict["scope"].lower()
-                    if scope_str == "local":
-                        config_dict["scope"] = SemanticCacheScope.LOCAL
-                    elif scope_str == "global":
-                        config_dict["scope"] = SemanticCacheScope.GLOBAL
-                except ImportError:
-                    # If enum not available, keep as string
-                    pass
-            semantic_cache_config_to_load = config_dict
-        except Exception as e:
-            logger.warning(f"Failed to reconstruct semantic cache config: {e}")
-
-    internet_provider_instance = None
-    if hasattr(saved_memagent, "internet_access_provider"):
-        provider_name = getattr(saved_memagent, "internet_access_provider", None)
-        provider_config = getattr(saved_memagent, "internet_access_config", None)
-        if not isinstance(provider_name, str):
-            provider_name = None
-        if provider_config is not None and not isinstance(provider_config, dict):
-            provider_config = None
-        if provider_config is not None:
-            # A record saved by an older release may hold the key itself; the
-            # provider resolves it from the environment instead.
-            provider_config = _scrub_internet_access_config(provider_config)
-        if provider_name:
-            try:
-                from ..internet_access import create_internet_access_provider
-
-                internet_provider_instance = create_internet_access_provider(
-                    provider_name, provider_config
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to restore internet provider '%s': %s",
-                    provider_name,
-                    exc,
-                )
-
-    application_mode_to_use = overrides.get("application_mode")
-    if not application_mode_to_use:
-        saved_mode = getattr(saved_memagent, "application_mode", None)
-        if isinstance(saved_mode, str) and saved_mode:
-            application_mode_to_use = saved_mode
-        else:
-            application_mode_to_use = ApplicationMode.DEFAULT.value
-
-    saved_sandbox_provider = getattr(saved_memagent, "sandbox_provider", None)
-    if not isinstance(saved_sandbox_provider, (str, dict)):
-        saved_sandbox_provider = None
-
-    saved_browser_control = getattr(saved_memagent, "browser_control", None)
-    if not isinstance(saved_browser_control, (str, dict)):
-        saved_browser_control = None
-
-    saved_meta_harness = bool(getattr(saved_memagent, "meta_harness", False))
-    saved_meta_harness_mode = getattr(saved_memagent, "meta_harness_mode", None)
-    if saved_meta_harness_mode not in {"delegate", "runtime"}:
-        saved_meta_harness_mode = None
-    saved_default_harness = getattr(saved_memagent, "default_harness", "auto")
-    if not isinstance(saved_default_harness, str):
-        saved_default_harness = "auto"
-    saved_harness_config = getattr(saved_memagent, "harness_config", None)
-    if not isinstance(saved_harness_config, dict):
-        saved_harness_config = None
-
-    saved_skills_marketplace_provider = getattr(
-        saved_memagent, "skills_marketplace_provider", None
-    )
-    if isinstance(saved_skills_marketplace_provider, dict):
-        saved_skills_marketplace_provider = saved_skills_marketplace_provider.get(
-            "provider"
-        ) or saved_skills_marketplace_provider.get("name")
-    if not isinstance(saved_skills_marketplace_provider, str):
-        saved_skills_marketplace_provider = None
-    else:
-        saved_skills_marketplace_provider = (
-            saved_skills_marketplace_provider.strip().lower() or None
+    if settings["delegates"] and "delegates" not in overrides:
+        loaded_delegates = _load_delegates(
+            cls,
+            agent_id,
+            settings["delegates"],
+            memory_provider,
+            runtime_memory_provider,
         )
 
-    saved_skills_marketplace_config = getattr(
-        saved_memagent, "skills_marketplace_config", None
-    )
-    if not isinstance(saved_skills_marketplace_config, dict):
-        saved_skills_marketplace_config = None
-
-    saved_skill_paths = getattr(saved_memagent, "skill_paths", None)
-    if isinstance(saved_skill_paths, str):
-        saved_skill_paths = [saved_skill_paths]
-    elif not isinstance(saved_skill_paths, list):
-        saved_skill_paths = None
-
-    saved_mcp_servers = getattr(saved_memagent, "mcp_servers", None)
-    if not isinstance(saved_mcp_servers, list):
-        saved_mcp_servers = None
-
-    raw_self_aware = getattr(saved_memagent, "self_aware", False)
-    saved_self_aware = raw_self_aware if isinstance(raw_self_aware, bool) else False
-    saved_self_aware_config = getattr(saved_memagent, "self_aware_config", None)
-    if not isinstance(saved_self_aware_config, dict):
-        saved_self_aware_config = None
-
-    raw_continual_learning = getattr(saved_memagent, "continual_learning", False)
-    saved_continual_learning = (
-        raw_continual_learning if isinstance(raw_continual_learning, bool) else False
-    )
-    saved_continual_learning_config = getattr(
-        saved_memagent, "continual_learning_config", None
-    )
-    if not isinstance(saved_continual_learning_config, dict):
-        saved_continual_learning_config = None
-
-    raw_learning_control_plane = getattr(
-        saved_memagent, "learning_control_plane", False
-    )
-    saved_learning_control_plane = (
-        raw_learning_control_plane
-        if isinstance(raw_learning_control_plane, bool)
-        else False
-    )
-    saved_learning_control_plane_config = getattr(
-        saved_memagent, "learning_control_plane_config", None
-    )
-    if not isinstance(saved_learning_control_plane_config, dict):
-        saved_learning_control_plane_config = None
-
-    raw_automations_enabled = getattr(saved_memagent, "automations_enabled", True)
-    saved_automations_enabled = (
-        raw_automations_enabled if isinstance(raw_automations_enabled, bool) else True
-    )
-
-    saved_default_timezone = getattr(saved_memagent, "default_timezone", None)
-    if not isinstance(saved_default_timezone, str):
-        saved_default_timezone = None
-    else:
-        saved_default_timezone = saved_default_timezone.strip() or None
-
-    saved_tool_result_policy = getattr(saved_memagent, "tool_result_policy", None)
-    if not isinstance(saved_tool_result_policy, dict):
-        saved_tool_result_policy = None
-
-    saved_tool_cache = getattr(saved_memagent, "tool_cache_config", None)
-    if not isinstance(saved_tool_cache, dict):
-        saved_tool_cache = None
-
-    saved_context_policy = getattr(saved_memagent, "context_policy", None)
-    if not isinstance(saved_context_policy, dict):
-        saved_context_policy = None
-
-    saved_completion_policy = getattr(saved_memagent, "completion_policy", None)
-    if not isinstance(saved_completion_policy, dict):
-        saved_completion_policy = None
-
-    saved_retrieval_policy = getattr(saved_memagent, "retrieval_policy", None)
-    if not isinstance(saved_retrieval_policy, dict):
-        saved_retrieval_policy = None
-
-    raw_skill_retrieval = getattr(saved_memagent, "skill_retrieval", False)
-    saved_skill_retrieval = (
-        raw_skill_retrieval if isinstance(raw_skill_retrieval, bool) else False
-    )
-    saved_skill_retrieval_config = getattr(
-        saved_memagent, "skill_retrieval_config", None
-    )
-    if not isinstance(saved_skill_retrieval_config, dict):
-        saved_skill_retrieval_config = None
-
-    saved_delegation_config = getattr(saved_memagent, "delegation_config", None)
-    if not isinstance(saved_delegation_config, dict):
-        saved_delegation_config = None
-
-    saved_semantic_layer = None
-    semantic_layer_config = getattr(saved_memagent, "semantic_layer_config", None)
-    if isinstance(semantic_layer_config, dict):
-        try:
-            from ..semantic_layer import SemanticCatalog
-
-            saved_semantic_layer = SemanticCatalog.from_dict(semantic_layer_config)
-        except Exception as exc:
-            logger.warning("Failed to restore semantic catalog: %s", exc)
-
-    saved_tool_access = getattr(saved_memagent, "tool_access", "private")
-    if not isinstance(saved_tool_access, str) or saved_tool_access not in {
-        "private",
-        "public",
-        "global",
-    }:
-        saved_tool_access = "private"
-
+    restored = {
+        key: overrides.get(key, value)
+        for key, value in settings.items()
+        if key not in _RESOLVED_ON_LOAD and key not in _SAVED_ATTRIBUTES
+    }
     # Create new agent instance with loaded configuration
     agent_instance = cls(
         model=model_to_load,
@@ -779,110 +888,45 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
             "context_window_tokens",
             None
             if "llm_config" in overrides or override_model is not None
-            else _saved_context_cap(saved_memagent, resolved_llm_config),
-        ),
-        tools=overrides.get("tools", getattr(saved_memagent, "tools", None)),
-        persona=overrides.get("persona", getattr(saved_memagent, "persona", None)),
-        name=overrides.get("name", getattr(saved_memagent, "name", None)),
-        application_id=overrides.get(
-            "application_id", getattr(saved_memagent, "application_id", None)
-        ),
-        instruction=overrides.get(
-            "instruction", getattr(saved_memagent, "instruction", None)
-        ),
-        max_steps=overrides.get(
-            "max_steps", getattr(saved_memagent, "max_steps", DEFAULT_MAX_STEPS)
-        ),
-        tool_access=overrides.get("tool_access", saved_tool_access),
-        memory_ids=overrides.get(
-            "memory_ids", getattr(saved_memagent, "memory_ids", [])
+            else settings["context_window_tokens"],
         ),
         agent_id=agent_id,
         memory_provider=runtime_memory_provider,
-        application_mode=application_mode_to_use,
-        memory_types=overrides.get(
-            "memory_types", getattr(saved_memagent, "memory_types", None)
+        application_mode=(
+            overrides.get("application_mode") or settings["application_mode"]
         ),
         delegates=overrides.get("delegates", loaded_delegates),
-        semantic_cache=overrides.get(
-            "semantic_cache", getattr(saved_memagent, "semantic_cache", False)
-        ),
-        semantic_cache_config=overrides.get(
-            "semantic_cache_config", semantic_cache_config_to_load
-        ),
-        tool_result_policy=overrides.get(
-            "tool_result_policy",
-            saved_tool_result_policy,
-        ),
-        tool_cache=overrides.get("tool_cache", saved_tool_cache),
-        context_policy=overrides.get("context_policy", saved_context_policy),
-        completion_policy=overrides.get(
-            "completion_policy",
-            saved_completion_policy,
-        ),
-        retrieval_policy=overrides.get("retrieval_policy", saved_retrieval_policy),
-        skill_retrieval=overrides.get("skill_retrieval", saved_skill_retrieval),
-        skill_retrieval_config=overrides.get(
-            "skill_retrieval_config",
-            saved_skill_retrieval_config,
-        ),
-        delegation=overrides.get("delegation", saved_delegation_config),
-        semantic_layer=overrides.get("semantic_layer", saved_semantic_layer),
-        internet_access_provider=overrides.get(
-            "internet_access_provider", internet_provider_instance
-        ),
-        skills_marketplace_provider=overrides.get(
-            "skills_marketplace_provider", saved_skills_marketplace_provider
-        ),
-        skills_marketplace_config=overrides.get(
-            "skills_marketplace_config", saved_skills_marketplace_config
-        ),
-        sandbox_provider=overrides.get("sandbox_provider", saved_sandbox_provider),
-        browser_control=overrides.get("browser_control", saved_browser_control),
-        meta_harness=overrides.get("meta_harness", saved_meta_harness),
-        meta_harness_mode=overrides.get("meta_harness_mode", saved_meta_harness_mode),
-        default_harness=overrides.get("default_harness", saved_default_harness),
-        harness_config=overrides.get("harness_config", saved_harness_config),
-        skill_paths=overrides.get("skill_paths", saved_skill_paths),
-        mcp_servers=overrides.get("mcp_servers", saved_mcp_servers),
-        automations_enabled=overrides.get(
-            "automations_enabled", saved_automations_enabled
-        ),
-        default_timezone=overrides.get("default_timezone", saved_default_timezone),
-        self_aware=overrides.get("self_aware", saved_self_aware),
-        self_aware_config=overrides.get("self_aware_config", saved_self_aware_config),
-        continual_learning=overrides.get(
-            "continual_learning", saved_continual_learning
-        ),
-        continual_learning_config=overrides.get(
-            "continual_learning_config", saved_continual_learning_config
-        ),
-        learning_control_plane=overrides.get(
-            "learning_control_plane",
-            saved_learning_control_plane_config
-            if saved_learning_control_plane_config is not None
-            else saved_learning_control_plane,
+        internet_access_provider=(
+            overrides["internet_access_provider"]
+            if "internet_access_provider" in overrides
+            else _internet_provider(settings["internet_access_provider"])
         ),
         workflow_outcome_evaluator=overrides.get("workflow_outcome_evaluator"),
-        is_favorite=overrides.get(
-            "is_favorite", getattr(saved_memagent, "is_favorite", False)
-        ),
         streaming=overrides.get("streaming", True),
         auto_register=overrides.get("auto_register", True),
         capture_context_snapshots=overrides.get("capture_context_snapshots", False),
         capture_memory_history=overrides.get("capture_memory_history", False),
+        **restored,
     )
 
-    # Hydrate knowledge_base_ids separately — it isn't a constructor arg
-    # (yet) but needs to survive reloads so the `knowledge_base_lookup`
-    # tool can scope retrievals to this agent's ingested documents.
-    _kb_ids = overrides.get(
-        "knowledge_base_ids",
-        getattr(saved_memagent, "knowledge_base_ids", None),
-    )
-    agent_instance.knowledge_base_ids = (
-        list(_kb_ids) if isinstance(_kb_ids, (list, tuple)) else []
-    )
+    # Not constructor arguments. knowledge_base_ids must survive reloads so
+    # the `knowledge_base_lookup` tool can scope retrievals to this agent's
+    # ingested documents.
+    for name in _SAVED_ATTRIBUTES:
+        setattr(agent_instance, name, settings[name])
+    if "knowledge_base_ids" in overrides:
+        agent_instance.knowledge_base_ids = _list_or_empty(
+            overrides["knowledge_base_ids"]
+        )
+
+    # The record is already in this provider, so registering a new memory
+    # patches its memory_ids rather than rewriting it with this instance's
+    # settings (which may include run-only overrides).
+    if runtime_memory_provider is memory_provider:
+        agent_instance._agent_record_stored = True
+        agent_instance._registered_memory_ids = {
+            str(mid) for mid in settings["memory_ids"] if mid
+        }
 
     # Carry the LLM-init failure forward so chat surfaces the real cause.
     # The constructor receives both the resolved model and its persisted
@@ -891,15 +935,435 @@ def load_agent(cls, agent_id: str, memory_provider=None, **overrides):
     if load_llm_error and not getattr(agent_instance, "_llm_init_error", None):
         agent_instance._llm_init_error = load_llm_error
 
-    titles = getattr(saved_memagent, "thread_titles", None)
-    agent_instance.thread_titles = dict(titles) if isinstance(titles, dict) else {}
-
     logger.info(f"MemAgent loaded successfully with agent_id: {agent_id}")
     return agent_instance
 
 
+# --- refresh: apply restored settings to a live agent -----------------------
+
+
+def _set(attribute: str, normalize: Callable[[Any], Any] = lambda value: value):
+    """A refresh step that sets one attribute."""
+
+    def apply(agent, value) -> None:
+        setattr(agent, attribute, normalize(value))
+
+    return apply
+
+
+def _code_owned(agent, tools) -> None:
+    """Tools are code. Built-ins register from it on construction, and saved
+    metadata never replaces a live tool (ToolManager._register_tool_from_data)."""
+
+
+def _refresh_model(agent, llm_config, context_cap) -> None:
+    """A changed LLM config gets a new model; the context cap follows."""
+    from . import core as _core
+
+    config = dict(llm_config or {})
+    if isinstance(getattr(agent, "_pinned_llm_config", None), dict):
+        # This run borrows another model and keeps it; saves keep the
+        # agent's own, now the stored one.
+        agent._pinned_llm_config = config
+        return
+    try:
+        live = agent.model.get_config() if agent.model is not None else None
+    except Exception:
+        live = None
+    if config and config != (agent.llm_config or {}) and config != live:
+        agent.llm_config = config
+        try:
+            agent.model = _core.create_llm_provider(config)
+            agent._llm_init_error = None
+        except Exception as exc:
+            agent.model = None
+            agent._llm_init_error = f"{type(exc).__name__}: {exc}"
+    agent._context_window_cap = (
+        context_cap if type(context_cap) is int and context_cap > 0 else None
+    )
+    agent._context_window_tokens = agent._initialize_context_window_tokens(
+        agent._context_window_cap, agent.llm_config
+    )
+
+
+def _refresh_persona(agent, persona) -> None:
+    # set_persona registers the persona evolution tools (update_persona,
+    # read_persona) when a persona is added here, not just via __init__.
+    if agent.persona_manager:
+        agent.set_persona(persona, save=False)
+
+
+def _refresh_application_id(agent, application_id) -> None:
+    configured = application_id or os.getenv("MEMORIZZ_APPLICATION_ID", "")
+    agent.application_id = (
+        configured.strip()
+        if isinstance(configured, str) and configured.strip()
+        else None
+    )
+
+
+def _refresh_memory_types(agent, application_mode, memory_types) -> None:
+    (
+        agent.application_mode,
+        agent._application_mode_explicit,
+    ) = agent._resolve_application_mode(application_mode)
+    active = agent._initialize_memory_types(
+        agent.application_mode if agent._application_mode_explicit else None,
+        memory_types,
+    )
+    # Types a runtime rule turned on (continual learning, MCP) stay on.
+    for memory_type in agent._runtime_memory_types:
+        if memory_type not in active:
+            active.append(memory_type)
+    agent.active_memory_types = active
+    wanted = MemoryType.ENTITY_MEMORY in active
+    if wanted != agent._entity_memory_enabled:
+        agent.with_entity_memory(wanted)
+
+
+def _refresh_delegates(agent, delegate_ids) -> None:
+    current = [
+        str(delegate.agent_id)
+        for delegate in agent.delegates or []
+        if getattr(delegate, "agent_id", None)
+    ]
+    if [str(delegate_id) for delegate_id in delegate_ids] != current:
+        agent.delegates = _load_delegates(
+            type(agent),
+            agent.agent_id,
+            delegate_ids,
+            agent.memory_provider,
+            agent.memory_provider,
+        )
+
+
+def _refresh_semantic_cache(agent, enabled, config) -> None:
+    manager = agent.cache_manager
+    if not enabled:
+        if manager is not None:
+            manager.enabled = False
+        return
+    stored = {
+        key: getattr(value, "value", value) for key, value in (config or {}).items()
+    }
+    if (
+        manager is not None
+        and manager.enabled
+        and stored == (_serialize_semantic_cache_config(agent) or {})
+    ):
+        return
+    from .managers import CacheManager
+
+    agent.cache_manager = CacheManager(
+        enabled=True,
+        config=config,
+        agent_id=agent.agent_id,
+        memory_id=agent.memory_ids[0] if agent.memory_ids else None,
+        memory_provider=agent.memory_provider,
+    )
+
+
+def _refresh_policies(agent, tool_result, context, completion, retrieval) -> None:
+    from ..completion import CompletionPolicy
+    from ..retrieval import RetrievalPolicy
+    from ..tooling import ContextPolicy, ToolResultPolicy
+
+    agent.tool_result_policy = ToolResultPolicy.from_value(tool_result)
+    agent.completion_policy = CompletionPolicy.from_value(completion)
+    agent.retrieval_policy = RetrievalPolicy.from_value(retrieval)
+    agent.context_policy = policy = ContextPolicy.from_value(context)
+    router = getattr(agent, "semantic_tool_router", None)
+    if router is not None:
+        # The tool router took these from the policy when it was built.
+        router.top_k = max(1, min(int(policy.tool_top_k), 50))
+        router.enabled = bool(policy.progressive_tool_disclosure)
+        router.max_invocations_per_turn = max(
+            1, int(policy.max_tool_invocations_per_turn)
+        )
+        router.max_attempts_per_call = max(1, int(policy.max_tool_attempts_per_call))
+        router.sticky_limit = max(0, int(policy.sticky_tool_limit))
+        router.stable_under_tokens = max(0, int(policy.stable_tool_list_tokens))
+
+
+def _refresh_tool_cache(agent, value) -> None:
+    from ..tool_cache import ToolCache, ToolCacheConfig
+
+    config = ToolCacheConfig.from_value(value)
+    current = agent.tool_cache_config
+    if (config.to_dict() if config else None) != (
+        current.to_dict() if current else None
+    ):
+        agent.tool_cache_config = config
+        agent.tool_cache = (
+            ToolCache(config, agent_id=agent.agent_id) if config else None
+        )
+
+
+def _refresh_skill_retrieval(agent, enabled, config) -> None:
+    # Continual learning retrieves skills whatever the switch says.
+    agent.skill_retrieval = bool(enabled) or bool(agent.continual_learning)
+    agent.skill_retrieval_config = dict(config or {})
+    if agent.skill_retrieval and agent.skillbox is None and agent.memory_provider:
+        from ..long_term.procedural.skillbox import Skillbox
+
+        agent.skillbox = Skillbox(
+            memory_provider=agent.memory_provider,
+            llm_provider=agent.model,
+            agent_id=agent.agent_id,
+        )
+        agent._register_skill_tools()
+
+
+def _refresh_semantic_layer(agent, catalog) -> None:
+    def as_dict(value):
+        return value.to_dict() if hasattr(value, "to_dict") else None
+
+    if as_dict(catalog) != as_dict(agent.semantic_layer):
+        # Its tools hold the catalog they were built with.
+        _keep_until_reload(agent, "semantic_layer_config")
+
+
+def _refresh_internet_access(agent, saved) -> None:
+    live = None
+    live_name = agent.get_internet_access_provider_name()
+    if live_name:
+        live_config = agent.internet_access_manager.get_provider_config()
+        live = (live_name, _scrub_internet_access_config(live_config) or {})
+    stored = (saved[0], saved[1] or {}) if saved else None
+    if stored == live:
+        return
+    if stored is None and agent.application_mode == ApplicationMode.DEEP_RESEARCH:
+        return  # deep research attaches its default provider itself
+    provider = _internet_provider(saved)
+    if saved and provider is None:
+        return  # not restorable here (logged); the live one stays
+    agent.with_internet_access_provider(provider)
+
+
+def _refresh_skills_marketplace(agent, provider_name, config) -> None:
+    if not provider_name:
+        # As on construction: no saved provider means the process default.
+        provider_name = (
+            os.getenv("MEMORIZZ_DEFAULT_SKILLS_MARKETPLACE_PROVIDER", "")
+            .strip()
+            .lower()
+            or None
+        )
+    live = (
+        agent.get_skills_marketplace_provider_name(),
+        agent.get_skills_marketplace_config() or {},
+    )
+    if (provider_name, dict(config or {})) != live:
+        agent.with_skills_marketplace_provider(provider_name, config=config)
+
+
+def _refresh_sandbox(agent, saved) -> None:
+    live_name = agent.get_sandbox_provider_name() if agent.has_sandbox() else None
+    if saved is None:
+        if live_name:
+            agent.with_sandbox_provider(None)
+        return
+    if isinstance(saved, str) and saved.strip().lower() == (live_name or ""):
+        return
+    if isinstance(saved, dict) and live_name:
+        if saved == agent.sandbox_manager.get_provider_config():
+            return
+    agent.with_sandbox_provider(saved)
+
+
+def _refresh_browser_control(agent, saved) -> None:
+    wanted = {"provider": saved} if isinstance(saved, str) else saved
+    if wanted != agent.browser_control_config:
+        agent.with_browser_control(saved)
+
+
+def _refresh_meta_harness(agent, enabled, mode, default_harness, config) -> None:
+    stored = {
+        "meta_harness": bool(enabled),
+        "meta_harness_mode": mode,
+        "default_harness": default_harness,
+        "harness_config": dict(config or {}),
+    }
+    if isinstance(getattr(agent, "_pinned_harness", None), dict):
+        # This session runs on a harness of its own choosing; saves keep the
+        # agent's own settings, now the stored ones.
+        agent._pinned_harness = stored
+        return
+    live = {
+        "meta_harness": agent.meta_harness is not None,
+        "meta_harness_mode": agent.meta_harness_mode,
+        "default_harness": agent.default_harness,
+        "harness_config": dict(agent.harness_config or {}),
+    }
+    if stored != live:
+        # A live agent has no way to switch its meta-harness off.
+        _keep_until_reload(agent, *stored)
+
+
+def _refresh_skill_paths(agent, skill_paths) -> None:
+    paths = agent._normalize_skill_paths(skill_paths)
+    if paths == agent.skill_paths:
+        return
+    agent.skill_paths = paths
+    agent.skills = agent._load_skills()
+    if agent.skills or agent.skillbox:
+        agent._register_skill_tools()
+
+
+def _refresh_mcp_servers(agent, servers) -> None:
+    if list(servers or []) != list(agent.mcp_servers or []):
+        agent.with_mcp_servers(servers or [])
+
+
+def _refresh_automations(agent, enabled, default_timezone) -> None:
+    if (
+        enabled == bool(agent.automations_enabled)
+        and default_timezone == agent.default_timezone
+    ):
+        return
+    from .managers.automation_manager import AUTOMATION_TOOL_NAMES, AutomationManager
+
+    agent.automations_enabled = enabled
+    agent.default_timezone = default_timezone
+    for tool_name in AUTOMATION_TOOL_NAMES:
+        if tool_name in agent.tool_manager.tools:
+            agent.tool_manager.remove_tool(tool_name)
+    agent.automation_manager = AutomationManager(agent.memory_provider, enabled=enabled)
+    if agent.automation_manager.is_enabled():
+        # The tools resolve times in the default timezone they are built with.
+        agent.automation_manager.register_tools(
+            agent.tool_manager,
+            agent_id=agent.agent_id,
+            default_timezone=default_timezone,
+        )
+
+
+def _refresh_self_aware(agent, enabled, config) -> None:
+    agent.with_self_aware(enabled, config=config)
+
+
+def _refresh_learning(agent, enabled, config, control_plane) -> None:
+    from ..learning import LearningControlPlaneConfig
+
+    stored_plane = LearningControlPlaneConfig.from_value(control_plane, implied=enabled)
+    live_plane = agent.learning_control_plane_config
+    if (
+        enabled != bool(agent.continual_learning)
+        or (config or None) != (agent.continual_learning_config or None)
+        or stored_plane.to_dict() != (live_plane.to_dict() if live_plane else None)
+    ):
+        # The learning loop owns workflow capture and the skillbox.
+        _keep_until_reload(
+            agent,
+            "continual_learning",
+            "continual_learning_config",
+            "learning_control_plane",
+            "learning_control_plane_config",
+        )
+
+
+def _keep_until_reload(agent, *fields: str) -> None:
+    """A stored change a live agent cannot apply: saves keep it as stored,
+    and it takes effect when the agent is next loaded."""
+    logger.info(
+        "MemAgent %s: %s changed in storage; applies on the next load",
+        agent.agent_id,
+        ", ".join(fields),
+    )
+    keep_stored_fields(agent, *fields)
+
+
+# Every restored setting and how refresh applies it. A setting
+# _saved_settings gains needs a step here; a unit test checks the two match.
+_REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
+    (("llm_config", "context_window_tokens"), _refresh_model),
+    (("tools",), _code_owned),
+    (("persona",), _refresh_persona),
+    (
+        ("name",),
+        _set(
+            "name",
+            lambda value: value.strip()
+            if isinstance(value, str) and value.strip()
+            else None,
+        ),
+    ),
+    (("application_id",), _refresh_application_id),
+    (("instruction",), _set("instruction", lambda v: v or DEFAULT_INSTRUCTION)),
+    (("max_steps",), _set("max_steps")),
+    (("tool_access",), _set("tool_access")),
+    (("memory_ids",), _set("memory_ids", list)),
+    (("application_mode", "memory_types"), _refresh_memory_types),
+    (("delegates",), _refresh_delegates),
+    (("semantic_cache", "semantic_cache_config"), _refresh_semantic_cache),
+    (
+        (
+            "tool_result_policy",
+            "context_policy",
+            "completion_policy",
+            "retrieval_policy",
+        ),
+        _refresh_policies,
+    ),
+    (("tool_cache",), _refresh_tool_cache),
+    (("skill_retrieval", "skill_retrieval_config"), _refresh_skill_retrieval),
+    (("delegation",), _set("delegation_config", normalize_delegation_config)),
+    (("semantic_layer",), _refresh_semantic_layer),
+    (("internet_access_provider",), _refresh_internet_access),
+    (
+        ("skills_marketplace_provider", "skills_marketplace_config"),
+        _refresh_skills_marketplace,
+    ),
+    (("sandbox_provider",), _refresh_sandbox),
+    (("browser_control",), _refresh_browser_control),
+    (
+        ("meta_harness", "meta_harness_mode", "default_harness", "harness_config"),
+        _refresh_meta_harness,
+    ),
+    (("skill_paths",), _refresh_skill_paths),
+    (("mcp_servers",), _refresh_mcp_servers),
+    (("automations_enabled", "default_timezone"), _refresh_automations),
+    (("self_aware", "self_aware_config"), _refresh_self_aware),
+    (
+        ("continual_learning", "continual_learning_config", "learning_control_plane"),
+        _refresh_learning,
+    ),
+    (("is_favorite",), _set("is_favorite")),
+    (("embedding_provider",), _set("embedding_provider")),
+    (("embedding_config",), _set("embedding_config")),
+    (("knowledge_base_ids",), _set("knowledge_base_ids")),
+    (("thread_titles",), _set("thread_titles")),
+    (("whatsapp_enabled",), _set("whatsapp_enabled")),
+    (("whatsapp_config",), _set("whatsapp_config")),
+)
+
+
+def _apply_saved_settings(agent, settings: Dict[str, Any]) -> None:
+    """Apply restored settings to a live agent, one step at a time."""
+    kept = set(getattr(agent, "_keep_stored_fields", None) or ())
+    for keys, apply in _REFRESH_STEPS:
+        if kept.intersection(keys):
+            continue  # overridden for this run; saves read the store anyway
+        try:
+            apply(agent, *(settings[key] for key in keys))
+        except Exception as exc:
+            logger.warning(
+                "Could not refresh %s of MemAgent %s: %s",
+                ", ".join(keys),
+                agent.agent_id,
+                exc,
+            )
+
+
 def refresh_agent(agent):
-    """Refresh ``agent`` from its memory provider (see MemAgent.refresh)."""
+    """Refresh ``agent`` from its memory provider (see MemAgent.refresh).
+
+    Every saved setting is applied the way ``load_agent`` restores it, so a
+    save afterwards does not undo edits made elsewhere (the UI, another
+    process). A few a live agent cannot switch (its meta-harness, the
+    learning loop, a semantic catalog) are kept as stored by later saves
+    and take effect on the next load.
+    """
     if not agent.memory_provider:
         logger.error("Cannot refresh MemAgent: no memory provider configured")
         return False
@@ -913,37 +1377,11 @@ def refresh_agent(agent):
         if hasattr(agent.memory_provider, "retrieve_memagent"):
             saved_memagent = agent.memory_provider.retrieve_memagent(agent.agent_id)
             if saved_memagent:
-                # Update configuration attributes
-                if hasattr(saved_memagent, "instruction"):
-                    agent.instruction = saved_memagent.instruction
-                if hasattr(saved_memagent, "max_steps"):
-                    agent.max_steps = saved_memagent.max_steps
-                if hasattr(saved_memagent, "tool_access"):
-                    agent.tool_access = saved_memagent.tool_access or "private"
-                if hasattr(saved_memagent, "memory_ids"):
-                    agent.memory_ids = saved_memagent.memory_ids
-                if hasattr(saved_memagent, "knowledge_base_ids"):
-                    _kb = saved_memagent.knowledge_base_ids
-                    agent.knowledge_base_ids = (
-                        list(_kb) if isinstance(_kb, (list, tuple)) else []
-                    )
-                if hasattr(saved_memagent, "name"):
-                    agent.name = saved_memagent.name
-                if hasattr(saved_memagent, "is_favorite"):
-                    agent.is_favorite = bool(saved_memagent.is_favorite)
-                if hasattr(saved_memagent, "self_aware"):
-                    agent.with_self_aware(
-                        bool(getattr(saved_memagent, "self_aware", False)),
-                        config=getattr(saved_memagent, "self_aware_config", None),
-                    )
-
-                # Update persona if changed. Route through the public
-                # ``set_persona`` wrapper so persona evolution tools
-                # (update_persona, read_persona) register when a persona
-                # is added via refresh(), not just via __init__.
-                if hasattr(saved_memagent, "persona") and agent.persona_manager:
-                    agent.set_persona(saved_memagent.persona, save=False)
-
+                _apply_saved_settings(agent, _saved_settings(saved_memagent))
+                agent._agent_record_stored = True
+                agent._registered_memory_ids = {
+                    str(mid) for mid in agent.memory_ids if mid
+                }
                 logger.info(f"MemAgent {agent.agent_id} refreshed successfully")
                 return agent
             else:

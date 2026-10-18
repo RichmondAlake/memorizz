@@ -17,6 +17,8 @@ class DelegateDatabase:
             name: uuid.uuid4().bytes for name in ("team", "research", "review")
         }
         self.links = []
+        # persona_id -> bound column values from persona INSERT/UPDATE.
+        self.personas = {}
         self.rows = []
         self.commits = 0
 
@@ -46,6 +48,20 @@ class DelegateDatabase:
                 else (names[delegate],)
                 for parent, delegate in self.links
                 if not params or parent == params["agent_id"]
+            ]
+        elif sql.startswith("SELECT id FROM personas"):
+            stored = self.personas.get(params["persona_id"])
+            self.rows = [(stored["id"],)] if stored else []
+        elif sql.startswith("INSERT INTO personas"):
+            self.personas[params["persona_id"]] = dict(params)
+        elif sql.startswith("UPDATE personas"):
+            self.personas[params["persona_id"]].update(params)
+        elif sql.startswith("SELECT persona_id") and "FROM personas" in sql:
+            columns = sql[len("SELECT ") : sql.index(" FROM ")].split(", ")
+            self.rows = [
+                tuple(stored.get(column) for column in columns)
+                for stored in self.personas.values()
+                if stored["agent_id"] == params["agent_id"]
             ]
         elif sql.startswith("SELECT id, agent_id, name"):
             name = params["agent_id"]
@@ -147,6 +163,64 @@ def test_oracle_loading_persona_does_not_generate_embeddings(database, monkeypat
     )
     agent = provider.retrieve_memagent("team")
     assert agent.persona.background == "Saved background"
+    # Goals were never stored for this row: load empty, not the background.
+    assert agent.persona.goals == ""
+
+
+@pytest.mark.parametrize("migrated", [True, False])
+def test_oracle_persona_goals_version_and_history_survive_reload(
+    database, monkeypatch, migrated
+):
+    from memorizz.long_term.semantic.persona import persona as persona_module
+
+    provider, db = database
+    monkeypatch.setattr(
+        persona_module,
+        "get_embedding",
+        lambda *_: pytest.fail("Save/reload must not invoke embeddings"),
+    )
+    columns = {"PERSONA_ID", "NAME", "ROLE_TYPE", "BACKGROUND", "TRAITS", "EXPERTISE"}
+    if migrated:
+        columns |= {"GOALS", "VERSION", "EVOLUTION_HISTORY"}
+    provider._table_columns_cache = {"PERSONAS": columns}
+    history = [
+        {
+            "version": 3,
+            "timestamp": "2026-10-01T09:00:00",
+            "changes": {"goals": {"old": "W", "new": "X"}},
+            "change_trigger": {"reason": "Clarified", "source_type": "manual"},
+        }
+    ]
+    persona = persona_module.Persona.from_dict(
+        {
+            "persona_id": "persona-1",
+            "name": "Researcher",
+            "goals": "X",
+            "background": "B",
+            "version": 3,
+            "evolution_history": history,
+        }
+    )
+    agent = MemAgentModel(agent_id="team", persona=persona)
+
+    provider.store_memagent(agent)  # INSERT
+    loaded = provider.retrieve_memagent("team").persona
+    assert loaded.background == "B"
+    if not migrated:
+        # Pre-migration schema: still saves and loads, nothing invented.
+        assert "goals" not in db.personas["persona-1"]
+        assert (loaded.goals, loaded.version, loaded.evolution_history) == ("", 1, [])
+        return
+    assert (loaded.goals, loaded.version, loaded.evolution_history) == (
+        "X",
+        3,
+        history,
+    )
+
+    persona.goals, persona.version = "Y", 4
+    provider.store_memagent(agent)  # UPDATE of the existing row
+    loaded = provider.retrieve_memagent("team").persona
+    assert (loaded.goals, loaded.version) == ("Y", 4)
 
 
 @pytest.mark.parametrize("hydrated", [False, True])

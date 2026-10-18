@@ -1403,6 +1403,7 @@ async def agent_playground_stream(request: Request, agent_id: str):
     import time
 
     from ...memagent import MemAgent
+    from ...memagent.persistence import keep_stored_fields
     from ...streaming import agent_event_stream, check_cancelled, execution_lock
 
     def prepare(session):
@@ -1422,11 +1423,16 @@ async def agent_playground_stream(request: Request, agent_id: str):
         agent_instance = MemAgent.load(
             agent_id, memory_provider=_state["provider"], **overrides
         )
+        # Settings this message runs with but the agent was not saved with:
+        # unsaved config-panel edits and this process's default providers.
+        # A save during the run keeps the stored values for them.
+        run_only: List[str] = ["instruction"] if override_instruction else []
         # The stored record drives the model override and the sandbox,
         # internet and entity-memory checks below: read it once per message.
         stored_agent = _state["provider"].retrieve_memagent(agent_id)
         # Apply runtime model override if user changed the model in the playground
         if override_model:
+            run_only.append("llm_config")
             try:
                 from ...llms.llm_factory import create_llm_provider
 
@@ -1488,6 +1494,7 @@ async def agent_playground_stream(request: Request, agent_id: str):
                     if validation_error:
                         raise ValueError(validation_error)
                     agent_instance.with_sandbox_provider(resolved_sandbox_cfg)
+                    run_only.append("sandbox_provider")
                 except Exception as exc:
                     logger.debug(f"Sandbox provider not available: {exc}")
 
@@ -1508,6 +1515,7 @@ async def agent_playground_stream(request: Request, agent_id: str):
             if not stored_browser_config:
                 try:
                     agent_instance.with_browser_control(browser_config)
+                    run_only.append("browser_control")
                 except Exception as exc:
                     browser_apply_error = (
                         "Browser control unavailable: " + _to_text(exc).strip()
@@ -1542,6 +1550,7 @@ async def agent_playground_stream(request: Request, agent_id: str):
                 os.environ.get("MEMORIZZ_DEFAULT_INTERNET_PROVIDER", "")
             )
             internet_provider_config = None
+            run_only.extend(("internet_access_provider", "internet_access_config"))
 
         if internet_provider_name and not agent_instance.has_internet_access():
             try:
@@ -1571,6 +1580,7 @@ async def agent_playground_stream(request: Request, agent_id: str):
                 scope="internet",
                 message="Internet access unavailable",
             )
+        keep_stored_fields(agent_instance, *run_only)
 
         # Validate entity-memory runtime tool availability.
         entity_memory_warning = _entity_memory_status_error(stored_agent)

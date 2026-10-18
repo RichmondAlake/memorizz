@@ -433,10 +433,12 @@ def _is_toolbox_tool_doc(doc: Dict[str, Any]) -> bool:
     if not isinstance(doc, dict):
         return False
 
+    from ..long_term.procedural.toolbox.indexing import NOT_SEARCHABLE
+
     tool_type = _to_text(doc.get("tool_type") or doc.get("type")).strip().lower()
     name = _to_text(doc.get("name")).strip()
 
-    if tool_type == "mcp_server_config":
+    if tool_type in NOT_SEARCHABLE:
         return False
     if name.startswith("mcp::"):
         return False

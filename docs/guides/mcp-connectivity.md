@@ -39,11 +39,28 @@ Small local models handle these much better than the two-step
 
 Tool lists are cached per agent in `~/.memorizz/mcp_tools/` after any
 successful **Test**, **Tools** or `mcp_list_tools` call, and reused only while
-the server's URL or command is unchanged. With progressive tool disclosure (the
-default), an MCP tool is shown to the model when the request names it or its
-purpose clearly: two words of the request in the tool's name, or one plus its
+the server's URL or command is unchanged.
+
+Each listed tool is also stored in the agent's toolbox memory, one record per
+tool with an embedding of its name, description and argument names. With
+progressive tool disclosure (the default), the tools shown to the model are
+chosen by meaning first: "what's in my notes about the launch?" finds
+`notion-search`. A tool the request names or describes clearly then fills any
+slot left: two words of the request in the tool's name, or one plus its
 description ("create a page" finds `notion-create-pages`). Chat filler such as
-"can", "you" or "it" does not count. `discover_tools` finds the rest.
+"can", "you" or "it" does not count. Without an embedding model, that word
+rule alone decides. `discover_tools` finds the rest.
+
+The toolbox index is updated in the background whenever a server's tools are
+listed. Only tools whose name, description or arguments changed are embedded
+again, tools the server no longer lists are removed, and changing the
+embedding model embeds them all again. An empty listing (for example, a server
+that has not been listed yet) never removes anything. Disconnecting a server
+removes its tools. See [procedural memory](../memory-types/procedural.md#mcp-tools-in-toolbox-memory).
+
+Every tool-calling run of an MCP-connected agent is kept as
+[workflow memory](../memory-types/procedural.md#runs-kept-as-workflow-memory),
+so you can review what it called, with which arguments, and how it ended.
 
 When a model calls a tool it was not shown, the call does not run. If the name
 is exact, the tool is disclosed and its schema returned so the next call fits;
@@ -152,7 +169,14 @@ memorizz mcp tools notion
 
 The terminal login opens a browser and asks you to paste the full final callback
 URL. This also works when the browser cannot load the loopback page: copy the URL
-from its address bar.
+from its address bar. The preset's callback is `127.0.0.1:8765`, the same port
+as `memorizz ui`; with the UI running, the page reports that the OAuth state is
+invalid or expired. That is expected: paste the address into the terminal
+anyway. Sign-in may take up to ten minutes before the connection gives up.
+
+Notion's desktop app exposes no content to macOS Accessibility, so
+[desktop control](../desktop-control/index.md) cannot read it; use this
+preset for Notion.
 
 ## Google Calendar
 
@@ -218,6 +242,9 @@ memorizz mcp add local-files \
   --arg mcp-server-filesystem \
   --arg /absolute/allowed/path
 ```
+
+To let an agent operate the apps on a Mac, `memorizz desktop connect` adds a
+local server of this kind; see [Desktop Control](../desktop-control/index.md).
 
 Add a custom remote server:
 

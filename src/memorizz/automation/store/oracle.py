@@ -2,7 +2,16 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
-"""Oracle-backed automation store (jobs, runs, deliveries)."""
+"""Oracle-backed automation store (jobs, runs, deliveries).
+
+Schedule times live in TIMESTAMP WITH TIME ZONE columns. python-oracledb drops
+a datetime's tzinfo when binding, and Oracle then labels the bare wall-clock
+time with the session time zone (thin mode: the Python process's local
+offset), so an aware UTC value used to be stored as that wall clock in the
+local zone. Every schedule time is therefore bound as naive UTC wrapped in
+``FROM_TZ(..., 'UTC')`` (``_tstz``). The plain ``created_at``/``updated_at``
+columns hold UTC like the memory tables (``memory_provider/oracle/timestamps``).
+"""
 
 from __future__ import annotations
 
@@ -12,8 +21,19 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from ..._time import as_utc
+from ...memory_provider.oracle.timestamps import UTC_NOW_SQL, utc_bind, utc_tstz_sql
 from ..models import AutomationDelivery, AutomationJob, AutomationRun
 from ..schedule import utcnow as _utcnow
+
+# The TIMESTAMP WITH TIME ZONE columns of automation_jobs.
+_JOB_TSTZ_COLUMNS = frozenset(
+    {"start_at", "next_run_at", "last_run_at", "lock_expires_at"}
+)
+
+
+def _tstz(bind: str) -> str:
+    """SQL for the naive-UTC bind ``:bind`` as a UTC TIMESTAMP WITH TIME ZONE."""
+    return utc_tstz_sql(bind)
 
 
 def _json_dumps(value: Any) -> Optional[str]:
@@ -133,11 +153,11 @@ class OracleAutomationStore:
                 ) VALUES (
                     :job_id, :agent_id, :name, :enabled,
                     :schedule_type, :cron_expr, :interval_seconds, :timezone,
-                    :start_at, :next_run_at, :last_run_at,
+                    {_tstz("start_at")}, {_tstz("next_run_at")}, {_tstz("last_run_at")},
                     :misfire_policy, :max_run_seconds, :retry_max_attempts, :retry_backoff_seconds,
                     :action_type, :action_config,
                     :delivery_type, :delivery_config,
-                    :locked_by, :lock_expires_at
+                    :locked_by, {_tstz("lock_expires_at")}
                 )
                 """,
                 {
@@ -149,9 +169,9 @@ class OracleAutomationStore:
                     "cron_expr": payload.get("cron_expr"),
                     "interval_seconds": payload.get("interval_seconds"),
                     "timezone": payload["timezone"],
-                    "start_at": payload.get("start_at"),
-                    "next_run_at": payload["next_run_at"],
-                    "last_run_at": payload.get("last_run_at"),
+                    "start_at": utc_bind(payload.get("start_at")),
+                    "next_run_at": utc_bind(payload["next_run_at"]),
+                    "last_run_at": utc_bind(payload.get("last_run_at")),
                     "misfire_policy": payload.get("misfire_policy") or "skip",
                     "max_run_seconds": int(payload.get("max_run_seconds") or 900),
                     "retry_max_attempts": int(payload.get("retry_max_attempts") or 1),
@@ -165,7 +185,7 @@ class OracleAutomationStore:
                         payload.get("delivery_config") or {}
                     ),
                     "locked_by": payload.get("locked_by"),
-                    "lock_expires_at": payload.get("lock_expires_at"),
+                    "lock_expires_at": utc_bind(payload.get("lock_expires_at")),
                 },
             )
             conn.commit()
@@ -209,13 +229,17 @@ class OracleAutomationStore:
                 continue
             col = allowed[key]
             bind = f"v_{key}"
+            placeholder = f":{bind}"
             if key in {"enabled"}:
                 params[bind] = 1 if bool(value) else 0
             elif key in {"action_config", "delivery_config"}:
                 params[bind] = _json_dumps(value or {})
+            elif key in _JOB_TSTZ_COLUMNS:
+                params[bind] = utc_bind(value)
+                placeholder = _tstz(bind)
             else:
                 params[bind] = value
-            set_parts.append(f"{col} = :{bind}")
+            set_parts.append(f"{col} = {placeholder}")
 
         if not set_parts:
             existing = self.get_job(job_id)
@@ -223,7 +247,7 @@ class OracleAutomationStore:
                 raise ValueError("Job not found")
             return existing
 
-        set_sql = ", ".join(set_parts) + ", updated_at = CURRENT_TIMESTAMP"
+        set_sql = ", ".join(set_parts) + f", updated_at = {UTC_NOW_SQL}"
         with self.provider.pool.acquire() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -334,14 +358,14 @@ class OracleAutomationStore:
                 WHERE ROWID IN (
                     SELECT ROWID FROM {jobs_table}
                     WHERE enabled = 1
-                      AND next_run_at <= :now_utc
-                      AND (lock_expires_at IS NULL OR lock_expires_at <= :now_utc)
+                      AND next_run_at <= {_tstz("now_utc")}
+                      AND (lock_expires_at IS NULL OR lock_expires_at <= {_tstz("now_utc")})
                     ORDER BY next_run_at
                     FETCH FIRST {safe_limit} ROWS ONLY
                 )
                 FOR UPDATE SKIP LOCKED
                 """,
-                {"now_utc": now_utc},
+                {"now_utc": utc_bind(now_utc)},
             )
             rows = cursor.fetchall() or []
             jobs = [self._row_to_job(row) for row in rows]
@@ -351,13 +375,13 @@ class OracleAutomationStore:
                     f"""
                     UPDATE {jobs_table}
                     SET locked_by = :worker_id,
-                        lock_expires_at = :lease_expiry,
-                        updated_at = CURRENT_TIMESTAMP
+                        lock_expires_at = {_tstz("lease_expiry")},
+                        updated_at = {UTC_NOW_SQL}
                     WHERE job_id = :job_id
                     """,
                     {
                         "worker_id": worker_id,
-                        "lease_expiry": lease_expiry,
+                        "lease_expiry": utc_bind(lease_expiry),
                         "job_id": job.job_id,
                     },
                 )
@@ -390,10 +414,10 @@ class OracleAutomationStore:
                 SELECT {self._select_job_columns()}
                 FROM {jobs_table}
                 WHERE job_id = :job_id
-                  AND (lock_expires_at IS NULL OR lock_expires_at <= :now_utc)
+                  AND (lock_expires_at IS NULL OR lock_expires_at <= {_tstz("now_utc")})
                 FOR UPDATE SKIP LOCKED
                 """,
-                {"job_id": job_id, "now_utc": now_utc},
+                {"job_id": job_id, "now_utc": utc_bind(now_utc)},
             )
             row = cursor.fetchone()
             if not row:
@@ -406,14 +430,14 @@ class OracleAutomationStore:
                 f"""
                 UPDATE {jobs_table}
                 SET locked_by = :worker_id,
-                    lock_expires_at = :lease_expiry,
+                    lock_expires_at = {_tstz("lease_expiry")},
                     enabled = :enabled,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = {UTC_NOW_SQL}
                 WHERE job_id = :job_id
                 """,
                 {
                     "worker_id": worker_id,
-                    "lease_expiry": lease_expiry,
+                    "lease_expiry": utc_bind(lease_expiry),
                     "enabled": 1 if force_enable else (1 if job.enabled else 0),
                     "job_id": job.job_id,
                 },
@@ -441,15 +465,15 @@ class OracleAutomationStore:
                     run_id, job_id, scheduled_for, started_at, status, attempt,
                     error, result_summary, result_payload
                 ) VALUES (
-                    :run_id, :job_id, :scheduled_for, :started_at, :status, :attempt,
-                    :error, :result_summary, :result_payload
+                    :run_id, :job_id, {_tstz("scheduled_for")}, {_tstz("started_at")},
+                    :status, :attempt, :error, :result_summary, :result_payload
                 )
                 """,
                 {
                     "run_id": run_id,
                     "job_id": job.job_id,
-                    "scheduled_for": scheduled_for,
-                    "started_at": started_at,
+                    "scheduled_for": utc_bind(scheduled_for),
+                    "started_at": utc_bind(started_at),
                     "status": "running",
                     "attempt": 1,
                     "error": None,
@@ -485,7 +509,7 @@ class OracleAutomationStore:
             cursor.execute(
                 f"""
                 UPDATE {runs_table}
-                SET finished_at = :finished_at,
+                SET finished_at = {_tstz("finished_at")},
                     status = :status,
                     attempt = :attempt,
                     error = :error,
@@ -494,7 +518,7 @@ class OracleAutomationStore:
                 WHERE run_id = :run_id
                 """,
                 {
-                    "finished_at": finished_at,
+                    "finished_at": utc_bind(finished_at),
                     "status": status,
                     "attempt": int(attempt or 1),
                     "error": error,

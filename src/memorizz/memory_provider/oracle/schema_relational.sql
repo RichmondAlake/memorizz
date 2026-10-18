@@ -1,6 +1,10 @@
 -- ==============================================================================
 -- Oracle Relational Schema for Memorizz
 -- This replaces the hybrid JSON-in-CLOB approach with proper relational tables
+--
+-- Every plain TIMESTAMP column holds UTC wall-clock time and defaults to
+-- SYS_EXTRACT_UTC(SYSTIMESTAMP); TIMESTAMP WITH TIME ZONE columns are written
+-- as UTC instants.
 -- ==============================================================================
 
 -- ==============================================================================
@@ -18,8 +22,8 @@ CREATE TABLE agents (
     is_favorite NUMBER(1) DEFAULT 0,     -- Boolean: 0=false, 1=true
     verbose NUMBER(1) DEFAULT 0,         -- Boolean: 0=false, 1=true
     embedding VECTOR(256, FLOAT32),       -- For semantic search on agents
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     -- Constraints
     CONSTRAINT chk_agents_semantic_cache CHECK (semantic_cache IN (0, 1)),
@@ -61,7 +65,7 @@ CREATE INDEX idx_agent_llm_model ON agent_llm_configs(model);
 CREATE TABLE agent_memories (
     agent_id RAW(16) NOT NULL,
     memory_id VARCHAR2(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     -- Composite primary key
     PRIMARY KEY (agent_id, memory_id),
@@ -83,7 +87,7 @@ CREATE INDEX idx_agent_memories_memory_id ON agent_memories(memory_id);
 CREATE TABLE agent_knowledge_bases (
     agent_id RAW(16) NOT NULL,
     knowledge_base_id VARCHAR2(64) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     PRIMARY KEY (agent_id, knowledge_base_id),
 
@@ -99,7 +103,7 @@ CREATE INDEX idx_agent_kb_knowledge_base_id ON agent_knowledge_bases(knowledge_b
 CREATE TABLE agent_delegates (
     agent_id RAW(16) NOT NULL,
     delegate_agent_id RAW(16) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     -- Composite primary key
     PRIMARY KEY (agent_id, delegate_agent_id),
@@ -122,11 +126,14 @@ CREATE TABLE personas (
     background CLOB,
     traits CLOB CHECK (traits IS JSON),       -- JSON array of traits
     expertise CLOB CHECK (expertise IS JSON), -- JSON array of expertise areas
+    goals CLOB,
+    version NUMBER(10) DEFAULT 1,             -- Bumped by each Persona.update
+    evolution_history CLOB CHECK (evolution_history IS JSON), -- JSON array of changes
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     -- Foreign key to agents
     CONSTRAINT fk_personas_agent FOREIGN KEY (agent_id)
@@ -161,8 +168,8 @@ CREATE TABLE toolbox (
     agent_id VARCHAR2(255),
     user_id VARCHAR2(255),
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     -- Foreign key to agents
     CONSTRAINT fk_toolbox_agent FOREIGN KEY (agent_id)
@@ -203,8 +210,8 @@ CREATE TABLE skillbox (
     baseline CLOB CHECK (baseline IS JSON),   -- JSON object of pre-promotion metrics
     stats CLOB CHECK (stats IS JSON),         -- JSON object of activation stats
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     -- Constraints
     CONSTRAINT chk_skillbox_status CHECK (status IN ('candidate', 'shadow', 'active', 'deprecated', 'demoted')),
@@ -231,7 +238,7 @@ CREATE TABLE conversation_memory (
     thread_id VARCHAR2(255),
     role VARCHAR2(50) NOT NULL,              -- 'user', 'assistant', 'system', 'tool'
     content CLOB NOT NULL,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    timestamp TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
     agent_id VARCHAR2(255),
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     summary_id VARCHAR2(255),                 -- compaction marker
@@ -273,10 +280,13 @@ CREATE TABLE knowledge_base (
     source_id VARCHAR2(512),                 -- Stable upstream/source provenance
     parent_source_id VARCHAR2(512),          -- Parent chunk or original memory
     linked_source_ids CLOB,                  -- JSON array for multi-source memories
-    metadata CLOB,                           -- JSON provenance and event metadata
+    metadata CLOB,                           -- JSON: provenance and the record's fields without a column
+    status VARCHAR2(32),                     -- e.g. 'superseded'
+    superseded_by VARCHAR2(255),             -- Record that replaced this one
+    superseded_at TIMESTAMP,
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP)
 );
 
 -- Indexes
@@ -299,8 +309,9 @@ CREATE TABLE short_term_memory (
     ttl NUMBER(10),                           -- Time-to-live in seconds
     agent_id VARCHAR2(255),
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
+    metadata CLOB,                            -- JSON: the record's fields without a column
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
     expires_at TIMESTAMP
 );
 
@@ -333,8 +344,8 @@ CREATE TABLE workflow_memory (
     skills_activated CLOB CHECK (skills_activated IS JSON),  -- JSON array of skill IDs in context
     shadow_evaluations CLOB CHECK (shadow_evaluations IS JSON),  -- Passive SHADOW evidence
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     -- Constraints
     CONSTRAINT chk_workflow_status CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'))
@@ -361,8 +372,8 @@ CREATE TABLE shared_memory (
     owner_agent_id VARCHAR2(255),
     access_list CLOB CHECK (access_list IS JSON),  -- JSON array of agent IDs
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     -- Constraints
     CONSTRAINT chk_shared_scope CHECK (scope IN ('global', 'team', 'private'))
@@ -390,7 +401,7 @@ CREATE TABLE summaries (
     period_end NUMBER,
     memory_units_count NUMBER(10) DEFAULT 0,
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP)
 );
 
 -- Indexes
@@ -405,7 +416,7 @@ CREATE TABLE summary_message_links (
     summary_id VARCHAR2(255) NOT NULL,
     message_id RAW(16) NOT NULL,
     position NUMBER(10) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
     PRIMARY KEY (summary_id, message_id),
     CONSTRAINT fk_summary_link_summary FOREIGN KEY (summary_id)
         REFERENCES summaries(summary_id) ON DELETE CASCADE,
@@ -432,8 +443,9 @@ CREATE TABLE semantic_cache (
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     metadata CLOB CONSTRAINT chk_cache_metadata_json CHECK (metadata IS JSON),
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP), -- The entry's admission time
     expires_at TIMESTAMP,
+    last_accessed TIMESTAMP,
 
     -- Constraints
     CONSTRAINT chk_cache_scope CHECK (scope IN ('local', 'global', 'agent'))
@@ -461,8 +473,8 @@ CREATE TABLE entity_memory (
     agent_id VARCHAR2(255),
     user_id VARCHAR2(255),                    -- Multi-tenant scope (NULL = legacy/anonymous)
     embedding VECTOR(256, FLOAT32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP)
 );
 
 -- Indexes
@@ -484,7 +496,7 @@ CREATE TABLE tool_log (
     error CLOB,
     outcome VARCHAR2(32) DEFAULT 'success',
     outcome_details CLOB,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    timestamp TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
     agent_id VARCHAR2(255),
     tool_call_id VARCHAR2(255),
     thread_id VARCHAR2(255),
@@ -526,8 +538,8 @@ CREATE TABLE automation_jobs (
     delivery_config CLOB CHECK (delivery_config IS JSON),
     locked_by VARCHAR2(255),
     lock_expires_at TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
 
     CONSTRAINT chk_automation_jobs_enabled CHECK (enabled IN (0, 1))
 );
@@ -547,7 +559,7 @@ CREATE TABLE automation_runs (
     error CLOB,
     result_summary CLOB,
     result_payload CLOB CHECK (result_payload IS JSON),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP)
 );
 
 CREATE INDEX idx_automation_runs_job ON automation_runs(job_id, created_at);
@@ -562,8 +574,8 @@ CREATE TABLE automation_deliveries (
     status VARCHAR2(32) NOT NULL,            -- 'queued', 'sent', 'failed'
     provider_message_id VARCHAR2(255),
     error CLOB,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
+    updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP)
 );
 
 CREATE INDEX idx_automation_deliveries_run ON automation_deliveries(run_id);

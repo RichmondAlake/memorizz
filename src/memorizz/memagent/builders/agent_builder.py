@@ -5,7 +5,7 @@
 """Builder pattern for MemAgent construction."""
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
 
 from ...enums import ApplicationMode
 from ...internet_access import get_default_internet_access_provider
@@ -35,6 +35,7 @@ class MemAgentBuilder:
         self._name = None
         self._memory_provider = None
         self._memory_ids = []
+        self._knowledge_base_ids: List[str] = []
         self._delegates = []
         self._embedding_provider = None
         self._embedding_config = None
@@ -185,6 +186,21 @@ class MemAgentBuilder:
             self._memory_ids = [memory_ids]
         else:
             self._memory_ids = memory_ids
+        return self
+
+    def with_knowledge_base(
+        self, knowledge_base_ids: Union[str, Iterable[str]]
+    ) -> "MemAgentBuilder":
+        """Attach knowledge bases by the ids ``ingest_knowledge`` returns.
+
+        Accepts one id or several; repeated ids are kept once, in order.
+        """
+        if isinstance(knowledge_base_ids, str):
+            knowledge_base_ids = [knowledge_base_ids]
+        for kb_id in knowledge_base_ids or []:
+            kb_id = str(kb_id or "").strip()
+            if kb_id and kb_id not in self._knowledge_base_ids:
+                self._knowledge_base_ids.append(kb_id)
         return self
 
     def with_internet_access_provider(self, provider: Any) -> "MemAgentBuilder":
@@ -610,6 +626,10 @@ class MemAgentBuilder:
                 key: dict(value) if isinstance(value, dict) else value
                 for key, value in self._environment_reports.items()
             }
+            # Not a constructor argument: hydrate it the way MemAgent.load()
+            # does, before validation and the save below.
+            if self._knowledge_base_ids:
+                agent.knowledge_base_ids = list(self._knowledge_base_ids)
 
             logger.info(f"MemAgent built successfully with {len(self._tools)} tools")
 
@@ -645,82 +665,14 @@ class MemAgentBuilder:
             New MemAgentBuilder instance with the same configuration.
         """
         new_builder = MemAgentBuilder()
-
-        # Copy configuration
+        # Every setting, so one added to the builder is never left out of a
+        # clone (entity memory once was): containers are copied, models and
+        # providers shared.
+        for name, value in vars(self).items():
+            if isinstance(value, (list, dict)):
+                value = value.copy()
+            setattr(new_builder, name, value)
         new_builder.config = MemAgentConfig(**self.config.to_dict())
-        new_builder._model = self._model
-        new_builder._llm_config = self._llm_config.copy() if self._llm_config else None
-        new_builder._tools = self._tools.copy()
-        new_builder._internet_access_provider = self._internet_access_provider
-        new_builder._skills_marketplace_provider = self._skills_marketplace_provider
-        new_builder._skills_marketplace_config = (
-            self._skills_marketplace_config.copy()
-            if self._skills_marketplace_config
-            else None
-        )
-        new_builder._is_favorite = self._is_favorite
-        new_builder._persona = self._persona
-        new_builder._name = self._name
-        new_builder._memory_provider = self._memory_provider
-        new_builder._memory_ids = self._memory_ids.copy()
-        new_builder._delegates = self._delegates.copy()
-        new_builder._embedding_provider = self._embedding_provider
-        new_builder._embedding_config = (
-            self._embedding_config.copy() if self._embedding_config else None
-        )
-        new_builder._semantic_cache_config = (
-            self._semantic_cache_config.copy() if self._semantic_cache_config else None
-        )
-        new_builder._tool_cache_config = (
-            dict(self._tool_cache_config) if self._tool_cache_config else None
-        )
-        new_builder._skill_paths = self._skill_paths.copy()
-        new_builder._mcp_servers = self._mcp_servers.copy()
-        new_builder._sandbox_provider = self._sandbox_provider
-        new_builder._browser_control = self._browser_control
-        new_builder._meta_harness = self._meta_harness
-        new_builder._meta_harness_mode = self._meta_harness_mode
-        new_builder._default_harness = self._default_harness
-        new_builder._harness_config = (
-            self._harness_config.copy() if self._harness_config else None
-        )
-        new_builder._toolbox = self._toolbox
-        new_builder._skillbox = self._skillbox
-        new_builder._authored_skills = self._authored_skills.copy()
-        new_builder._skill_retrieval_enabled = self._skill_retrieval_enabled
-        new_builder._skill_retrieval_config = (
-            self._skill_retrieval_config.copy()
-            if self._skill_retrieval_config
-            else None
-        )
-        new_builder._tool_result_policy = self._tool_result_policy
-        new_builder._context_policy = self._context_policy
-        new_builder._completion_policy = self._completion_policy
-        new_builder._retrieval_policy = self._retrieval_policy
-        new_builder._approval_store = self._approval_store
-        new_builder._delegation_config = (
-            self._delegation_config.copy() if self._delegation_config else None
-        )
-        new_builder._semantic_layer = self._semantic_layer
-        new_builder._self_aware_enabled = self._self_aware_enabled
-        new_builder._self_aware_config = (
-            self._self_aware_config.copy() if self._self_aware_config else None
-        )
-        new_builder._continual_learning_enabled = self._continual_learning_enabled
-        new_builder._continual_learning_config = (
-            self._continual_learning_config.copy()
-            if self._continual_learning_config
-            else None
-        )
-        new_builder._learning_control_plane = (
-            self._learning_control_plane.copy()
-            if isinstance(self._learning_control_plane, dict)
-            else self._learning_control_plane
-        )
-        new_builder._workflow_outcome_evaluator = self._workflow_outcome_evaluator
-        new_builder._automations_enabled = self._automations_enabled
-        new_builder._auto_register = self._auto_register
-        new_builder._default_timezone = self._default_timezone
         new_builder._environment_reports = {
             key: dict(value) if isinstance(value, dict) else value
             for key, value in self._environment_reports.items()

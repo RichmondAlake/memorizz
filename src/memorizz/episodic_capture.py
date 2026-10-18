@@ -91,8 +91,16 @@ def _thread_turns(
         and row.get("thread_id") == thread_id
         and (user_id is None or row.get("user_id") == user_id)
     ]
-    rows.sort(key=lambda row: str(row.get("timestamp") or ""))
+    rows.sort(key=lambda row: _turn_time(row) or 0.0)
     return rows
+
+
+def _turn_time(turn: dict) -> Optional[float]:
+    """A turn's epoch seconds; turns stored without an offset are local time
+    (written with ``datetime.now()`` before MemoRizz stamped UTC)."""
+    from ._time import to_epoch
+
+    return to_epoch(turn.get("timestamp"), naive="local")
 
 
 def summarize_thread(
@@ -107,8 +115,7 @@ def summarize_thread(
     """Summarize a coding session's turns into the summaries store (one summary
     per call, covering the whole thread) and return its ID. Nothing is made
     without a configured model or without turns."""
-    from datetime import datetime, timezone
-
+    from ._time import utc_now_iso
     from .enums import MemoryType
 
     turns = _thread_turns(provider, memory_id, thread_id, user_id)
@@ -137,7 +144,7 @@ def summarize_thread(
         embedding = get_embedding(summary)
     except Exception:
         pass
-    now = datetime.now(timezone.utc).isoformat()
+    now = utc_now_iso()
     record_id = provider.store(
         {
             "memory_id": memory_id,
@@ -145,8 +152,10 @@ def summarize_thread(
             "user_id": user_id,
             "thread_id": thread_id,
             "content": summary,
-            "period_start": turns[0].get("timestamp"),
-            "period_end": turns[-1].get("timestamp"),
+            # Epoch seconds, like every other summary (providers sort and
+            # store these as numbers).
+            "period_start": _turn_time(turns[0]),
+            "period_end": _turn_time(turns[-1]),
             "memory_units_count": len(turns),
             "source_message_ids": [
                 str(turn.get("_id") or turn.get("id") or "") for turn in turns

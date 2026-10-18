@@ -5,7 +5,15 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, Mock
 
+from memorizz._time import to_epoch
 from memorizz.enums import MemoryType
+
+
+def _unit_time(unit: Any) -> float:
+    """Sort key for stored units: tests and legacy rows pass naive local
+    datetimes, the memory layer writes aware UTC; compare them as instants."""
+    epoch = to_epoch(getattr(unit, "timestamp", None), naive="local")
+    return 0.0 if epoch is None else epoch
 
 
 class MockLLMProvider:
@@ -201,7 +209,7 @@ class MockMemoryProvider:
         units = self.storage[memory_id]
         if len(units) <= self.capacity_limit:
             return
-        units.sort(key=lambda unit: unit.timestamp)
+        units.sort(key=_unit_time)
         self.storage[memory_id] = units[-self.capacity_limit :]
         self._reindex_memory_id(memory_id)
 
@@ -435,12 +443,12 @@ class MockMemoryProvider:
 
         units = [unit for unit in units if _matches(unit)]
         if not limit:
-            sorted_units = sorted(units, key=lambda unit: unit.timestamp)
+            sorted_units = sorted(units, key=_unit_time)
             return [unit.to_dict() for unit in sorted_units]
 
         # Fast path: select most recent N without sorting the full list.
-        recent = heapq.nlargest(int(limit), units, key=lambda unit: unit.timestamp)
-        recent.sort(key=lambda unit: unit.timestamp)
+        recent = heapq.nlargest(int(limit), units, key=_unit_time)
+        recent.sort(key=_unit_time)
         return [unit.to_dict() for unit in recent]
 
     def store_memagent(self, agent_data: Dict[str, Any]) -> str:

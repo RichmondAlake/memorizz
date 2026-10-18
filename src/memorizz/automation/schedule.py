@@ -217,10 +217,14 @@ def next_cron_time(expr: str, *, after_utc: datetime, tz_name: str) -> datetime:
         minutes=1
     )
 
-    # Scan ahead up to ~1 year, minute by minute.
+    # Scan ahead up to ~1 year, minute by minute in wall-clock time. Wall-clock
+    # arithmetic drops ``fold``, so inside the hour repeated when clocks go
+    # back a match can fall before ``after_utc``; never return one.
     for _ in range(0, 60 * 24 * 366):
         if cron_matches(cursor, spec):
-            return cursor.astimezone(timezone.utc)
+            candidate = cursor.astimezone(timezone.utc)
+            if candidate > after_utc:
+                return candidate
         cursor = cursor + timedelta(minutes=1)
 
     raise ValueError("cron_expr did not produce a next run time within 366 days")

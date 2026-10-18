@@ -190,6 +190,44 @@ def test_notion_oauth_required_path_stops_before_network_use(tmp_path, monkeypat
 
 
 @pytest.mark.unit
+def test_sign_in_requests_wait_for_the_person_in_the_browser(tmp_path, monkeypatch):
+    """Sign-in runs inside ``initialize``; a 30s timeout cut it off mid-consent."""
+    from memorizz.mcp.manager import SIGN_IN_SECONDS
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    manager = MCPClientManager(
+        owner_id="agent-oauth",
+        servers=[
+            {
+                "name": "notion",
+                "transport": "streamable_http",
+                "url": "https://unresolvable.invalid/mcp",
+                "timeout": 30,
+                "auth": {
+                    "type": "oauth",
+                    "redirect_uri": "http://127.0.0.1:8765/api/mcp/oauth/callback",
+                },
+            }
+        ],
+    )
+    timeouts = []
+
+    async def list_tools(server, redirect_handler=None, callback_handler=None):
+        timeouts.append(server.timeout)
+        return {"ok": True, "server_name": server.name, "tools": []}
+
+    monkeypatch.setattr(manager, "_list_tools_async", list_tools)
+
+    manager.authorize_interactive(
+        "notion", on_authorization_url=lambda url: None, callback_reader=lambda: ""
+    )
+    manager.begin_oauth("notion", wait_seconds=5)
+
+    assert timeouts == [SIGN_IN_SECONDS, SIGN_IN_SECONDS]
+    assert manager.get_server("notion").timeout == 30
+
+
+@pytest.mark.unit
 def test_notion_unauthenticated_path_reports_missing_bearer_token(
     tmp_path, monkeypatch
 ):

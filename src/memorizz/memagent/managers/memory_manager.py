@@ -12,10 +12,11 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from ..._time import to_epoch, utc_now
 from ...enums import MemoryType, Role
 from ...long_term.episodic.conversational_memory_unit import ConversationMemoryUnit
 from ...memory_provider import MemoryProvider
-from ...memory_provider.base import _UNSET, filter_tool_log_rows
+from ...memory_provider.base import _UNSET, filter_tool_log_rows, user_scope_matches
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,17 @@ class MemoryManager:
         content = entry.get("content")
         nested = content if isinstance(content, dict) else {}
         return str(entry.get("memory_id") or nested.get("memory_id") or "")
+
+    @staticmethod
+    def _entry_knowledge_base_id(entry: Any) -> str:
+        """Read the owning knowledge-base id from flat and nested rows."""
+        if not isinstance(entry, dict):
+            return ""
+        content = entry.get("content")
+        nested = content if isinstance(content, dict) else {}
+        return str(
+            entry.get("knowledge_base_id") or nested.get("knowledge_base_id") or ""
+        )
 
     def load_conversation_history(
         self,
@@ -363,6 +375,7 @@ class MemoryManager:
         include_embedding: bool = False,
         thread_id: Optional[str] = None,
         namespace: Optional[str] = None,
+        knowledge_base_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve memories relevant to a query.
@@ -379,6 +392,10 @@ class MemoryManager:
                 run similarity dedup/MMR without re-embedding anything.
             thread_id: Optional exact thread boundary for episodic recall.
             namespace: Optional exact namespace boundary for knowledge recall.
+            knowledge_base_ids: Knowledge bases attached to the agent. For
+                knowledge recall a row is in scope when it belongs to one of
+                them or carries ``memory_id``: ingested chunks are keyed by
+                their knowledge base, not by an agent's memory.
 
         Returns:
             List of relevant memory entries. Always a list — providers that
@@ -397,6 +414,15 @@ class MemoryManager:
                 kwargs["thread_id"] = str(thread_id)
             if namespace is not None:
                 kwargs["namespace"] = str(namespace)
+            knowledge_scope = (
+                {str(value) for value in knowledge_base_ids or () if value}
+                if memory_type == MemoryType.KNOWLEDGE_BASE
+                else set()
+            )
+            if knowledge_scope and _callable_accepts(
+                self.memory_provider.retrieve_by_query, "knowledge_base_ids"
+            ):
+                kwargs["knowledge_base_ids"] = sorted(knowledge_scope)
             # Only forward include_embedding to providers that understand it;
             # older/third-party providers keep their default projection.
             if include_embedding and _callable_accepts(
@@ -432,8 +458,11 @@ class MemoryManager:
                 row
                 for row in results
                 if isinstance(row, dict)
-                and self._entry_memory_id(row) == wanted_memory_id
-                and self._entry_user_id(row) == user_id
+                and (
+                    self._entry_memory_id(row) == wanted_memory_id
+                    or self._entry_knowledge_base_id(row) in knowledge_scope
+                )
+                and user_scope_matches(self._entry_user_id(row), user_id, memory_type)
             ]
 
             # Providers may accept **kwargs yet not push every scope into their
@@ -497,7 +526,7 @@ class MemoryManager:
             A new ConversationMemoryUnit instance.
         """
         if timestamp is None:
-            timestamp = datetime.now()
+            timestamp = utc_now()
 
         return ConversationMemoryUnit(
             role=role.value,
@@ -651,7 +680,7 @@ class MemoryManager:
         """
         try:
             log_id = str(uuid.uuid4())
-            timestamp = datetime.now()
+            timestamp = utc_now()
 
             # Serialize result to string if needed
             result_str = result
@@ -1024,13 +1053,13 @@ class MemoryManager:
                 }
             )
 
-        # Sort by period_end descending (most recent first)
+        # Sort by period_end descending (most recent first). Periods are
+        # epoch seconds; session summaries once stored the turns' ISO
+        # timestamps, which were local time when they carry no offset.
         def _sort_key(item):
             val = item.get("period_end") or item.get("period_start") or 0
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                return 0.0
+            epoch = to_epoch(val, naive="local")
+            return 0.0 if epoch is None else epoch
 
         filtered.sort(key=_sort_key, reverse=True)
         return filtered[:limit] if limit and limit > 0 else filtered
@@ -1105,12 +1134,14 @@ class MemoryManager:
             )
         return marked
 
-    def delete_memory(self, memory_id: str) -> bool:
+    def delete_memory(self, memory_id: str, agent_id: Optional[str] = None) -> bool:
         """
         Delete all memories associated with a memory ID.
 
         Args:
             memory_id: The memory ID to delete.
+            agent_id: The agent letting go of the memory. Its rows are kept
+                while another agent still uses ``memory_id``.
 
         Returns:
             True if successful, False otherwise.
@@ -1119,8 +1150,11 @@ class MemoryManager:
             # Clear cache first
             self.clear_conversation_cache(memory_id)
 
-            # Delete from storage
-            success = self.memory_provider.delete_by_id(memory_id)
+            # Every store's rows for this memory_id (conversation, summaries,
+            # tool log, workflows, entities, ...), not one row by id.
+            success = self.memory_provider.delete_memory_units(
+                memory_id, agent_id=agent_id
+            )
 
             if success:
                 logger.info(f"Deleted all memories for memory_id: {memory_id}")
@@ -1302,19 +1336,11 @@ class MemoryManager:
                 )
                 return []
 
-            # Sort memories by timestamp
+            # Sort memories by timestamp (epoch seconds; turns stored without
+            # an offset are local time, from datetime.now())
             def get_timestamp(mem):
-                ts = mem.get("timestamp", 0)
-                if isinstance(ts, str):
-                    try:
-                        from datetime import datetime
-
-                        return datetime.fromisoformat(
-                            ts.replace("Z", "+00:00")
-                        ).timestamp()
-                    except (ValueError, Exception):
-                        return 0
-                return float(ts) if isinstance(ts, (int, float)) else 0
+                epoch = to_epoch(mem.get("timestamp", 0), naive="local")
+                return 0 if epoch is None else epoch
 
             all_memories.sort(key=get_timestamp)
 

@@ -8,11 +8,11 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, Union
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+from ...._time import utc_now_iso
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
 from ....memory_provider import MemoryProvider
@@ -1255,4 +1255,4 @@ class EntityMemory:
 
     @staticmethod
     def _timestamp() -> str:
-        return datetime.utcnow().isoformat()
+        return utc_now_iso()

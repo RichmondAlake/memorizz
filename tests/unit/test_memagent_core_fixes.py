@@ -423,6 +423,52 @@ def test_safe_sibling_runs_before_the_pause_and_continuation_answers_both(
     agent.close()
 
 
+def test_a_task_paused_for_approval_is_stored_as_one_workflow(work_dir):
+    from memorizz.enums.memory_type import MemoryType
+
+    @governed_tool(side_effects=True, requires_approval=True)
+    def create_item(name: str) -> dict:
+        """Create an item (needs approval)."""
+        return {"created": name}
+
+    def lookup_price(sku: str) -> dict:
+        """Read a price."""
+        return {"sku": sku, "price": 9}
+
+    model = _StubModel(
+        responses=[
+            lambda: _tool_call_response([("call_B", "lookup_price", {"sku": "s1"})]),
+            lambda: _tool_call_response([("call_A", "create_item", {"name": "x"})]),
+            "All done.",
+        ]
+    )
+    provider = _fs_provider(work_dir)
+    agent = MemAgent(
+        model=model,
+        tools=[create_item, lookup_price],
+        approval_store=SQLiteApprovalStore(work_dir / "approvals.sqlite3"),
+        memory_provider=provider,
+        memory_ids=["memory-1"],
+        auto_register=False,
+    )
+    assert MemoryType.WORKFLOW_MEMORY in agent.active_memory_types
+
+    paused = json.loads(agent.run("price s1 then create x", memory_id="memory-1"))
+    assert paused["status"] == "approval_required"
+    # Nothing half-finished is stored while the run waits.
+    assert provider.list_all(MemoryType.WORKFLOW_MEMORY) == []
+
+    proposal_id = paused["proposal"]["proposal_id"]
+    agent.approve(proposal_id, approver_id="operator@example.com")
+    assert agent.resume_approval(proposal_id).assistant_response == "All done."
+
+    stored = provider.list_all(MemoryType.WORKFLOW_MEMORY)
+    assert len(stored) == 1
+    assert list(stored[0]["steps"]) == ["Step 1: lookup_price", "Step 2: create_item"]
+    assert stored[0]["user_query"] == "price s1 then create x"
+    agent.close()
+
+
 def test_guarded_sibling_gets_a_not_executed_result(work_dir):
     executed: List[tuple] = []
 

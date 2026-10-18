@@ -3,14 +3,20 @@
 The optional archive_extras column keeps portable fields for which a relational
 table has no column. Native fields remain authoritative after subsequent edits.
 No embedding service is called unless reembed=True.
+
+TIMESTAMP columns hold UTC (``timestamps.py``): exports label them ``+00:00``
+and imports bind them as naive UTC. Rows written before that convention hold
+local time and are exported as if it were UTC until
+``migrations/013_utc_timestamps.sql`` has converted them.
 """
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from ...enums.memory_type import MemoryType
 from ...memory_archive import ID_FIELDS, MemoryArchiveError
+from .timestamps import utc_bind, utc_iso
 from .vector_staging import SHADOW_COLUMNS
 
 _RAW_TYPES = {
@@ -142,6 +148,25 @@ def get_record(provider, kind, identifier):
         return records[0] if records else None
 
 
+def _metadata_spread_kinds() -> frozenset:
+    """Stores whose ``metadata`` column holds the record's column-less fields."""
+    global _SPREAD_KINDS
+    if _SPREAD_KINDS is None:
+        from .provider import _LIST_SPECS, _OPTIONAL_FIELDS
+
+        specs = [(kind, fields) for kind, (fields, _order) in _LIST_SPECS.items()]
+        specs += list(_OPTIONAL_FIELDS.items())
+        _SPREAD_KINDS = frozenset(
+            kind
+            for kind, fields in specs
+            if any(emit[1] == "json_spread" for field in fields for emit in field.emits)
+        )
+    return _SPREAD_KINDS
+
+
+_SPREAD_KINDS = None
+
+
 def _decode(provider, kind, cursor, *, parse_content=True):
     names = [field[0].lower() for field in cursor.description]
     records = []
@@ -154,7 +179,7 @@ def _decode(provider, kind, cursor, *, parse_content=True):
             if isinstance(item, bytes):
                 item = str(uuid.UUID(bytes=item))
             elif isinstance(item, datetime):
-                item = item.replace(tzinfo=timezone.utc).isoformat()
+                item = utc_iso(item)
             elif key in _JSON or (
                 parse_content and key == "content" and kind == MemoryType.SHARED_MEMORY
             ):
@@ -175,6 +200,13 @@ def _decode(provider, kind, cursor, *, parse_content=True):
         extras = data.pop("archive_extras", None)
         if isinstance(extras, dict):
             data = {**extras, **data}
+        if kind in _metadata_spread_kinds() and isinstance(data.get("metadata"), dict):
+            # A record's fields without a column of their own live in its
+            # metadata; give them back at the top level, as the provider's
+            # own reads do (``json_spread`` columns).
+            for meta_key, meta_value in data["metadata"].items():
+                if data.get(meta_key) is None:
+                    data[meta_key] = meta_value
         key = ID_FIELDS.get(kind)
         identifier = data.get(key) if key else data.get("id")
         data["_id"] = data["id"] = str(identifier)
@@ -274,10 +306,12 @@ def store_record(provider, kind, identifier, data, *, replace=False, reembed=Fal
             if item is None and default is not None:
                 continue  # Let the target's native default apply.
             if datatype.startswith("TIMESTAMP") or datatype == "DATE":
-                if isinstance(item, str):
-                    item = datetime.fromisoformat(item.replace("Z", "+00:00"))
-                if isinstance(item, datetime) and item.tzinfo:
-                    item = item.astimezone(timezone.utc).replace(tzinfo=None)
+                bound = utc_bind(item)
+                if bound is None and item not in (None, ""):
+                    raise MemoryArchiveError(
+                        f"{kind.value}.{key} is not a timestamp: {item!r}"
+                    )
+                item = bound
             elif isinstance(item, (dict, list)):
                 item = json.dumps(item, ensure_ascii=False)
             elif isinstance(item, bool):

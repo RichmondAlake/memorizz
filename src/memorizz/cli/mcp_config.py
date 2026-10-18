@@ -72,6 +72,27 @@ def save_servers(servers: List[Dict[str, Any]], owner_id: Optional[str] = None) 
     return path
 
 
+def adopt_tool_cache(from_owner: str, to_owner: str) -> None:
+    """Give an agent the tool listings cached under the owner it adopted.
+
+    ``memorizz mcp add`` before the first chat lists tools under
+    ``cli-default``; without this the new agent sees only the generic MCP
+    tools until something lists each server again.
+    """
+    from ..mcp import MCPClientManager
+
+    source = MCPClientManager(owner_id=from_owner)._tool_catalog_path()
+    target = MCPClientManager(owner_id=to_owner)._tool_catalog_path()
+    if not source.is_file() or target.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, source.read_bytes())
+    finally:
+        os.close(descriptor)
+
+
 def build_manager(owner_id: Optional[str] = None):
     from ..mcp import MCPClientManager
 

@@ -20,6 +20,7 @@ import typer
 from .._env_io import env_bool, resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
 from .agent_commands import agents_app
+from .desktop_commands import desktop_app
 from .eval_commands import eval_app
 from .finetune_commands import finetune_app
 from .harness_commands import harness_app
@@ -48,6 +49,7 @@ app.add_typer(agents_app, name="agents")
 app.add_typer(harness_app, name="harness")
 app.add_typer(eval_app, name="eval")
 app.add_typer(plugin_app, name="plugin")
+app.add_typer(desktop_app, name="desktop")
 
 
 def _eprint(msg: str) -> None:

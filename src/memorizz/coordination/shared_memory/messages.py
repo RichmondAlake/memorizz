@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+from ..._time import utc_now_iso
 
 
 class SharedMemoryMessageType(str, Enum):
@@ -29,7 +30,7 @@ class SharedMemoryMessage:
     message_type: SharedMemoryMessageType
     payload: Dict[str, Any]
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=utc_now_iso)
 
     def to_dict(self) -> Dict[str, Any]:
         """Return serializable payload."""

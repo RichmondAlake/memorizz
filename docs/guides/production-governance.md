@@ -440,6 +440,18 @@ denylists, direct-IP blocking, headless/vision controls, step limits, and wall
 timeouts are host policy—not model arguments. See [Browser
 Control](../browser-control/index.md).
 
+## Governed desktop control
+
+`memorizz desktop` is a local MCP server that reads and operates Mac apps
+through macOS Accessibility, with the permissions of the app that runs
+MemoRizz. Its reading tools are marked read-only and run freely; opening an
+app, clicking, typing, pressing keys and scrolling are marked as changes and
+enter the same durable approval lifecycle unless the connection is saved with
+`--no-approval`. Actions are delivered to the target app's process, so they do
+not depend on, or change, which app has keyboard focus. Each run is stored as
+workflow memory, with optional window screenshots kept as local files. See
+[Desktop Control](../desktop-control/index.md).
+
 ## Deployment checks
 
 Do not infer feature availability from `memorizz >= 0.5.0` alone:

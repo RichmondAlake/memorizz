@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .._time import to_epoch
 from ..embeddings import EmbeddingManager, get_embedding_manager
 from ..enums.memory_type import MemoryType
 from ..enums.semantic_cache_scope import SemanticCacheScope
@@ -359,16 +360,7 @@ class SemanticCache:
                 ):
                     continue
                 query_text = candidate.get("query") or candidate.get("query_text")
-                timestamp = candidate.get("timestamp")
-                if timestamp is None and "created_at" in candidate:
-                    created_at = candidate["created_at"]
-                    timestamp = (
-                        created_at.timestamp()
-                        if hasattr(created_at, "timestamp")
-                        else time.time()
-                    )
-                elif timestamp is None:
-                    timestamp = time.time()
+                timestamp = self._stored_timestamp(candidate)
                 best_match = SemanticCacheEntry(
                     query=query_text,
                     response=candidate["response"],
@@ -379,7 +371,7 @@ class SemanticCache:
                     agent_id=candidate.get("agent_id"),
                     user_id=candidate.get("user_id"),
                     usage_count=self._stored_hit_count(candidate),
-                    last_accessed=candidate.get("last_accessed"),
+                    last_accessed=to_epoch(candidate.get("last_accessed")),
                     metadata=candidate.get("metadata", {}),
                     cache_key=candidate.get("cache_key"),
                 )
@@ -512,6 +504,21 @@ class SemanticCache:
             parameter.kind is inspect.Parameter.VAR_KEYWORD
             for parameter in parameters.values()
         )
+
+    @staticmethod
+    def _stored_timestamp(row: Dict[str, Any]) -> float:
+        """Epoch seconds a stored row was cached at; now when it has no time.
+
+        ``timestamp`` is epoch seconds. ``created_at`` is written as aware UTC:
+        a naive datetime is BSON's UTC, while an ISO string without an offset
+        is a legacy Oracle value in the session's (local) time zone.
+        """
+        epoch = to_epoch(row.get("timestamp"))
+        if epoch is None:
+            created_at = row.get("created_at")
+            naive = "local" if isinstance(created_at, str) else "utc"
+            epoch = to_epoch(created_at, naive=naive)
+        return time.time() if epoch is None else epoch
 
     @staticmethod
     def _stored_hit_count(row: Dict[str, Any]) -> int:
@@ -920,7 +927,12 @@ class SemanticCache:
             # Oracle's table only has hit_count (it ignores unknown columns);
             # MongoDB/filesystem rows carry both fields, so write both or the
             # next read (which prefers hit_count) pins the count at 1.
-            update_data = {"hit_count": count, "usage_count": count}
+            # ``last_accessed`` is epoch seconds, as entries store it.
+            update_data = {
+                "hit_count": count,
+                "usage_count": count,
+                "last_accessed": entry.last_accessed,
+            }
             candidates: List[str] = []
             # The row id from a provider hit or preload, when we have it.
             if entry.metadata and "_id" in entry.metadata:
@@ -1140,17 +1152,8 @@ class SemanticCache:
                     # Handle both 'query' and 'query_text' field names for compatibility
                     query_text = entry_data.get("query") or entry_data.get("query_text")
 
-                    # Handle timestamp field (Oracle uses 'created_at', cache uses 'timestamp')
-                    timestamp = entry_data.get("timestamp")
-                    if timestamp is None and "created_at" in entry_data:
-                        # Convert datetime to timestamp if needed
-                        created_at = entry_data["created_at"]
-                        if hasattr(created_at, "timestamp"):
-                            timestamp = created_at.timestamp()
-                        else:
-                            timestamp = time.time()
-                    elif timestamp is None:
-                        timestamp = time.time()
+                    # Oracle returns 'created_at'; the cache writes 'timestamp'.
+                    timestamp = self._stored_timestamp(entry_data)
 
                     cache_entry = SemanticCacheEntry(
                         query=query_text,
@@ -1164,7 +1167,7 @@ class SemanticCache:
                         agent_id=entry_data.get("agent_id"),
                         user_id=entry_data.get("user_id"),
                         usage_count=self._stored_hit_count(entry_data),
-                        last_accessed=entry_data.get("last_accessed"),
+                        last_accessed=to_epoch(entry_data.get("last_accessed")),
                         metadata=metadata,
                         cache_key=entry_data.get("cache_key"),
                     )
@@ -1268,25 +1271,20 @@ class SemanticCache:
         for key in keys_to_remove:
             del self.cache[key]
 
-        # Also clear from persistent storage if enabled
-        if clear_persistent and self.memory_provider and memory_cleared > 0:
+        # Also clear the same scope from persistent storage if enabled. Stored
+        # rows this process never loaded match too, so this runs even when
+        # nothing was cleared from memory.
+        if clear_persistent and self.memory_provider:
             try:
-                # Build filter for persistent storage
-                # Note: session_id filtering not supported by memory provider currently
-                # so we clear by agent_id and memory_id only
                 persistent_cleared = self.memory_provider.clear_semantic_cache(
                     agent_id=self.agent_id,
-                    memory_id=memory_id,  # This will be passed if specified
+                    memory_id=memory_id,
+                    user_id=user_id,
+                    session_id=session_id,
                 )
                 logger.info(
                     f"Cleared {persistent_cleared} entries from persistent storage"
                 )
-
-                if session_id is not None:
-                    logger.warning(
-                        "Session-specific clearing from persistent storage is not supported. "
-                        "Cleared by agent_id and memory_id only."
-                    )
             except Exception as e:
                 logger.error(f"Failed to clear persistent cache: {e}")
 

@@ -68,6 +68,34 @@ def test_successful_listings_are_cached_per_server_address(tmp_path, monkeypatch
     assert blocked_name not in {tool["name"] for tool in blocked.cached_tools("test")}
 
 
+def test_an_agent_adopting_bootstrap_servers_keeps_their_cached_tools(
+    tmp_path, monkeypatch
+):
+    from memorizz.cli import mcp_config
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    server = {
+        "name": "f1",
+        "transport": "streamable_http",
+        "url": "https://racecalendar.app/mcp",
+        "auth": {"type": "none"},
+    }
+    bootstrap = MCPClientManager(owner_id="cli-default", servers=[server])
+    bootstrap._remember_tool_listing(bootstrap.get_server("f1"), F1_TOOLS)
+
+    mcp_config.adopt_tool_cache("cli-default", "agent-new")
+    adopted = MCPClientManager(owner_id="agent-new", servers=[server])
+    assert [tool["name"] for tool in adopted.cached_tools("f1")] == [
+        "get_f1_next_event",
+        "get_f1_standings",
+    ]
+
+    # An agent's own listing is never replaced by the bootstrap one.
+    adopted._remember_tool_listing(adopted.get_server("f1"), F1_TOOLS[:1])
+    mcp_config.adopt_tool_cache("cli-default", "agent-new")
+    assert len(adopted.cached_tools("f1")) == 1
+
+
 def _agent_with_cached_f1_tools(tmp_path, monkeypatch):
     from memorizz import MemAgent
 
@@ -410,6 +438,85 @@ def test_chat_filler_does_not_outrank_the_tool_the_request_names():
     query = "can you create a new page and give me the link to open it"
     # "page" matches "pages"; "can", "you", "it" and "me" no longer count.
     assert router.preview(query) == ["notion__notion-create-pages"]
+
+
+def test_a_request_that_says_a_tools_whole_name_gets_that_tool():
+    """Live with gemma4: page tools whose descriptions say "search" and
+    "database" outranked notion-search, and the model invented a tool."""
+    manager = ToolManager()
+    tools = {
+        "notion-create-pages": "Create Notion pages. Use search to find the "
+        "parent page or database first.",
+        "notion-update-page": "Update a Notion page. Use search to find the "
+        "page or database.",
+        "notion-search": "Search the Notion workspace for pages.",
+    }
+    for name, description in tools.items():
+        manager.add_tool(
+            {
+                "name": f"notion__{name}",
+                "metadata": {
+                    "name": f"notion__{name}",
+                    "description": description,
+                    "input_schema": {"type": "object", "properties": {}},
+                    "source": "mcp",
+                },
+                "function": lambda **kwargs: kwargs,
+                "type": "function",
+            }
+        )
+    router = SemanticToolRouter(manager, top_k=1)
+    router.begin_turn()
+    assert router.preview(
+        "Search my Notion for the page called Solopreneur Flow and tell me "
+        "which pages and databases sit under it."
+    ) == ["notion__notion-search"]
+    assert router.preview("create a new page in Notion for my notes") == [
+        "notion__notion-create-pages"
+    ]
+
+
+def test_keyword_matches_never_push_out_what_meaning_ranked():
+    """Live with Notion and gemma4: notion-create-comment (5th by meaning) and
+    notion-search (4th) were pushed out by tools that merely share words
+    with the request, and the model used the wrong tool."""
+    manager = ToolManager()
+    names = [
+        "list-private-pages",
+        "list-page-backlinks",
+        "list-shared-pages",
+        "search",
+        "list-favorite-pages",
+        "list-recent-pages",
+    ]
+    for name in names:
+        manager.add_tool(
+            {
+                "name": f"notion__notion-{name}",
+                "metadata": {
+                    "name": f"notion__notion-{name}",
+                    "description": f"{name.replace('-', ' ').capitalize()}.",
+                    "input_schema": {"type": "object", "properties": {}},
+                    "source": "mcp",
+                },
+                "function": lambda **kwargs: kwargs,
+                "type": "function",
+            }
+        )
+
+    class Toolbox:
+        def get_most_similar_tools(self, query, limit=25, **kwargs):
+            return [
+                {"name": f"notion__notion-{name}", "user_id": None, "agent_id": None}
+                for name in names[:limit]
+            ]
+
+    router = SemanticToolRouter(manager, toolbox=Toolbox(), top_k=5)
+    router.begin_turn()
+    chosen = router.preview(
+        "Find the Solopreneur Flow page and list the pages under it"
+    )
+    assert chosen == [f"notion__notion-{name}" for name in names[:5]]
 
 
 def test_misnamed_or_undisclosed_tools_get_a_way_forward():

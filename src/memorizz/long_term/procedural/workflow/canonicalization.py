@@ -26,10 +26,10 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from ...._time import parse_iso_datetime
+from ...._time import to_utc
 from ....enums.memory_type import MemoryType
 
 # Step keys are written by MemAgent as ``"Step {n}: {tool_name}"``. The tool
@@ -99,7 +99,8 @@ def canonical_signature(steps: Any) -> List[Dict[str, Any]]:
         entries.append(
             {
                 "index": index,
-                "timestamp": parse_iso_datetime(data.get("timestamp")),
+                # Step stamps without an offset were written with datetime.now().
+                "timestamp": to_utc(data.get("timestamp"), naive="local"),
                 "tool": _tool_name_from_step_key(step_key),
                 "arg_keys": arg_keys,
                 "errored": errored,
@@ -193,7 +194,8 @@ class RunRef:
 
 @dataclass
 class TrajectoryStats:
-    """Aggregated view of one trajectory class (one ``canonical_hash``)."""
+    """Aggregated view of one trajectory class (one ``canonical_hash``) for
+    one user scope (``user_id``; ``None`` for anonymous runs)."""
 
     canonical_hash: str
     executions: int = 0
@@ -207,6 +209,7 @@ class TrajectoryStats:
     already_promoted: bool = False
     promoted_skill_id: Optional[str] = None
     runs: List[RunRef] = field(default_factory=list)
+    user_id: Optional[str] = None
 
     def baseline_snapshot(self) -> Dict[str, Any]:
         """Frozen promotion-time baseline stored on the skill document."""
@@ -233,7 +236,12 @@ def aggregate_trajectory_stats(
     agent_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> List[TrajectoryStats]:
-    """Group workflow documents by ``canonical_hash``.
+    """Group workflow documents by user scope and ``canonical_hash``.
+
+    A class never mixes users: one user's runs are promoted into that user's
+    skill and stamped with it, and anonymous runs (no user) are their own
+    class rather than padding a user's. ``user_id`` keeps only that user's
+    runs; omitted, every user's classes are returned.
 
     Pure-Python aggregation over ``provider.list_all(WORKFLOW_MEMORY)`` —
     provider-agnostic by construction. Add a MongoDB ``$group`` fast path
@@ -249,23 +257,23 @@ def aggregate_trajectory_stats(
     """
     documents = provider.list_all(memory_store_type=MemoryType.WORKFLOW_MEMORY) or []
 
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    grouped: Dict[Tuple[Optional[str], str], List[Dict[str, Any]]] = {}
     for doc in documents:
         if not isinstance(doc, dict):
             continue
         if agent_id is not None and doc.get("agent_id") != agent_id:
             continue
-        if user_id is not None and doc.get("user_id") not in (None, user_id):
+        if user_id is not None and doc.get("user_id") != user_id:
             continue
         doc_hash = doc.get("canonical_hash")
         if not doc_hash:
             doc_hash = canonical_hash(canonical_signature(doc.get("steps") or {}))
         if not doc_hash:
             continue
-        grouped.setdefault(doc_hash, []).append(doc)
+        grouped.setdefault((doc.get("user_id"), doc_hash), []).append(doc)
 
     stats: List[TrajectoryStats] = []
-    for doc_hash, docs in grouped.items():
+    for (scope_user_id, doc_hash), docs in grouped.items():
         runs: List[RunRef] = []
         queries = set()
         for doc in docs:
@@ -274,7 +282,7 @@ def aggregate_trajectory_stats(
                 RunRef(
                     workflow_id=doc.get("workflow_id"),
                     outcome=_outcome(doc.get("outcome")),
-                    created_at=parse_iso_datetime(doc.get("created_at")),
+                    created_at=to_utc(doc.get("created_at"), naive="local"),
                     user_query=doc.get("user_query"),
                     promoted_skill_id=doc.get("promoted_skill_id"),
                     record_id=str(record_id) if record_id is not None else None,
@@ -286,7 +294,7 @@ def aggregate_trajectory_stats(
 
         # Most-recent-first; runs without timestamps sort last.
         runs.sort(
-            key=lambda run: run.created_at or datetime.min,
+            key=lambda run: run.created_at or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
         )
         successes = [run for run in runs if run.outcome == "success"]
@@ -314,6 +322,7 @@ def aggregate_trajectory_stats(
                 already_promoted=promoted is not None,
                 promoted_skill_id=promoted,
                 runs=runs,
+                user_id=scope_user_id,
             )
         )
 

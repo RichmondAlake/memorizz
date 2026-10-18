@@ -163,6 +163,19 @@ def _sign_in_probe(tools: List[Any]) -> Optional[str]:
 
 MAX_CACHED_TOOLS = 100
 
+# How long sign-in waits for the person in the browser.
+SIGN_IN_SECONDS = 600
+
+
+def _signing_in(server: MCPServerConfig) -> MCPServerConfig:
+    """The server with request timeouts that outlast a person signing in.
+
+    Sign-in runs inside the first request (``initialize``), so that request
+    must wait as long as the browser step does.
+    """
+    return server.model_copy(update={"timeout": max(server.timeout, SIGN_IN_SECONDS)})
+
+
 AuthorizationURLHandler = Callable[[str], None]
 AuthorizationCallbackReader = Callable[[], str]
 
@@ -1518,6 +1531,7 @@ class MCPClientManager:
                 f"MCP server '{server.name}' is not configured for OAuth",
                 server.name,
             )
+        server = _signing_in(server)
         flow = PendingOAuthFlow(
             owner_id=self.owner_id, server_name=server.name, return_to=return_to
         )
@@ -1535,7 +1549,7 @@ class MCPClientManager:
         async def callback_handler():
             from mcp.shared.auth import AuthorizationCodeResult
 
-            ready = await asyncio.to_thread(flow.callback_ready.wait, 600)
+            ready = await asyncio.to_thread(flow.callback_ready.wait, SIGN_IN_SECONDS)
             if not ready:
                 raise MCPAuthorizationRequired("OAuth callback timed out", server.name)
             if flow.error:
@@ -1681,6 +1695,7 @@ class MCPClientManager:
                 f"MCP server '{server.name}' is not configured for OAuth",
                 server.name,
             )
+        server = _signing_in(server)
 
         def default_url_handler(url: str) -> None:
             print(f"Open this URL to authorize {server.name}:\n{url}\n")

@@ -1,5 +1,121 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Desktop control (computer use) on macOS: `memorizz desktop connect |
+  doctor | serve`, with the new `memorizz[desktop]` extra. A local MCP server
+  lets an agent open, read and operate Mac apps through Accessibility.
+  `list_apps` and `read_window` (a window as a numbered outline of its
+  buttons, fields and text) never ask; `open_app`, `click`, `type_text`,
+  `press_keys` and `scroll` wait for approval unless the connection is saved
+  with `--no-approval`. Buttons are pressed through Accessibility and keys,
+  text and scrolling are posted to the app's process, so actions reach apps
+  behind other windows and never take the user's focus. The last read is kept
+  in `~/.memorizz/desktop/last-read.json`, and each element is found again
+  and checked before an action runs. `doctor` names the app macOS asks about
+  and checks Accessibility and Screen Recording (`--ask` shows macOS's
+  prompts). See the Desktop Control guide.
+- Desktop runs are kept as workflow (procedural) memory: one record per task,
+  also across approval pauses, with each step's arguments and the window it
+  read. With Screen Recording allowed, each step also saves a screenshot of
+  the window under `~/.memorizz/desktop/screenshots/`, named in the step's
+  result (`--no-screenshots` turns this off).
+- MCP tools are stored in toolbox memory: one record per tool, with an
+  embedding of its name, description and argument names, and a catalog
+  record per server holding each tool's fingerprint. The index is synced in
+  the background whenever a server's tools are listed. Only changed tools are
+  embedded again, tools a server stops listing are removed, a new embedding
+  model embeds them all again, an empty listing never removes anything, and
+  disconnecting a server removes its tools. Saving the agent keeps them.
+- Tools are routed by meaning: progressive disclosure ranks MCP tools
+  semantically first, and clear keyword matches only fill the slots left.
+  Keyword matches used to push out better picks (gemma4 chose
+  `notion-list-page-backlinks` over `notion-search`). A tool's whole name in
+  the request counts for more than scattered words. CLI agents, which had no
+  toolbox, now search the stored tools too, and the filesystem provider
+  embeds toolbox records on first search and ranks them per agent.
+- An agent connected to MCP servers keeps every tool-calling run as workflow
+  memory, unless it was configured with no memory types. Memory types turned
+  on for a run this way, or by continual learning from the environment, are
+  not saved on the agent.
+- `MemAgentBuilder.with_knowledge_base(ids)` attaches knowledge bases by the
+  ids `ingest_knowledge` returns; `build_and_save()` keeps them.
+- Oracle migrations 010 (persona goals, version and evolution history), 011
+  (knowledge-base supersede lifecycle, short-term memory metadata, a cached
+  answer's last use), 012 (UTC column defaults) and 013 (one-off conversion
+  of older local-time values, run by hand; see Upgrade notes).
+
+### Changed
+
+- Every timestamp is stored in UTC, on every provider, and every time is
+  compared in UTC. Values stored without a zone by earlier releases are read
+  the way their writer meant them: conversation, tool-log, knowledge-base,
+  workflow and skill times as local time, entity and filesystem defaults as
+  UTC. Oracle writes `SYS_EXTRACT_UTC(SYSTIMESTAMP)`.
+- One sharing rule across providers: knowledge bases, skills and tools stored
+  without a user are shared by every user of the agent, and anything stored
+  for a user stays that user's. Conversations, entities, summaries,
+  workflows and cached answers stay strictly per user.
+- `delete_memory()`, like a cascade delete, keeps memory that another agent
+  still uses.
+- `RetrievalPolicy(knowledge_base_scope="namespace")` with no namespaces
+  recalls from every namespace of the attached knowledge bases and logs a
+  warning, instead of finding nothing.
+
+### Fixed
+
+- Notion and other OAuth sign-ins no longer fail with "Request 'initialize'
+  timed out" after consent: the connection now waits up to ten minutes while
+  you sign in, in the CLI and the UI. `memorizz mcp add` before the first
+  chat gives the new agent the tool listings it cached.
+- Saving and reloading agents:
+  - A reloaded agent no longer rewrites its whole record on its first run, so
+    automations, meta-harness settings and unsaved Playground edits survive.
+  - Changes to a tool's description in code now reach saved agents, which
+    kept the description from when they were first stored.
+  - A saved tool with no code behind it (a built-in that is now off, a
+    function from another process) is dropped instead of blocking the real
+    tool or failing every call.
+  - Persona goals and version, the entity-memory switch, WhatsApp settings
+    and the embedding configuration are saved; `refresh()` reloads every
+    setting; an agent made stateless reloads stateless.
+- Oracle:
+  - Semantic-cache expiry was stored in UTC but compared in the session's
+    time zone, so short TTLs expired at once; cached answers also keep their
+    real age.
+  - Every model setting is kept (`base_url`, Azure deployments, the Ollama
+    host), as are completion policy and WhatsApp settings. Removed tools stay
+    removed, and listing agents returns their full details.
+  - Re-ingesting an unchanged file no longer duplicates its chunks,
+    superseding a knowledge record works, and knowledge metadata reads back
+    on schemas restored from an archive.
+  - Session summaries with ISO period times save (ORA-01722).
+- Scope and deletion:
+  - `RetrievalPolicy(knowledge_base_scope="namespace")` found nothing,
+    because knowledge rows carry the knowledge base's id as their memory id.
+  - `delete_memory()` deletes, and reports a failure as one.
+  - `/ingest` attaches the knowledge base to the agent.
+  - Learning evidence finds knowledge-base records and skills.
+  - Clearing one user's semantic cache leaves other users' entries alone,
+    and skills no longer cross users.
+- Automations: in the hour repeated when clocks go back, a cron job could
+  run twice.
+
+### Upgrade notes
+
+- Oracle: migrations 010–012 are applied at startup (012 needs the
+  application user to be allowed to `ALTER` the tables; otherwise run the
+  file). Migration 013 converts timestamps written by earlier releases from
+  local time to UTC and never runs on its own: set `source_tz` in the file
+  and run it once by hand, ideally before this release first writes. Until
+  then, older rows read as off by that machine's UTC offset.
+- MongoDB Atlas: the knowledge-base, workflow and summary vector indexes gain
+  filter paths, so Atlas rebuilds them once.
+- Workflows that earlier releases stored under the wrong user are left as
+  they are.
+
 ## 0.16.6 — 2026-10-16
 
 ### Added

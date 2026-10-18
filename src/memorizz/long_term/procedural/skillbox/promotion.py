@@ -13,10 +13,12 @@ report, not a skill.
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ...._time import to_epoch, to_utc, utc_now
 from ....enums.memory_type import MemoryType
+from ....memory_provider.base import user_scope_matches
 from ..workflow.canonicalization import TrajectoryStats, aggregate_trajectory_stats
 from .distiller import SkillDistiller
 from .skill import (
@@ -28,6 +30,12 @@ from .skill import (
 from .skillbox import Skillbox
 
 logger = logging.getLogger(__name__)
+
+
+def _since(moment: datetime) -> timedelta:
+    """Time elapsed since ``moment``; a naive value is local time (workflow
+    stamps were written with ``datetime.now()`` before MemoRizz wrote UTC)."""
+    return utc_now() - to_utc(moment, naive="local")
 
 
 @dataclass
@@ -218,10 +226,12 @@ class PromotionEngine:
                 (candidate.canonical_hash, ["no sample runs retrievable"])
             )
             return
+        # The skill belongs to the class's user scope; one promoted from
+        # anonymous runs has no user, so it is agent-wide.
         source_user_scopes = {
             doc.get("user_id") for doc in success_docs if isinstance(doc, dict)
         }
-        if len(source_user_scopes) > 1:
+        if source_user_scopes != {candidate.user_id}:
             report.rejected.append(
                 (
                     candidate.canonical_hash,
@@ -229,10 +239,10 @@ class PromotionEngine:
                 )
             )
             return
-        skill_user_id = next(iter(source_user_scopes), None)
+        skill_user_id = candidate.user_id
 
         previous = self._latest_retired_skill(
-            skills_by_hash.get(candidate.canonical_hash, [])
+            self._visible_skills(candidate, skills_by_hash)
         )
         skill_md = self.distiller.distill(
             success_docs,
@@ -271,7 +281,7 @@ class PromotionEngine:
             ),
             status=status,
             version=(previous.version + 1) if previous else 1,
-            promoted_at=datetime.now() if status == SkillStatus.ACTIVE else None,
+            promoted_at=utc_now() if status == SkillStatus.ACTIVE else None,
             injection_role=self.config.skill_injection_role,
             baseline=candidate.baseline_snapshot(),
         )
@@ -280,7 +290,7 @@ class PromotionEngine:
             # SHADOW skills deliberately do NOT stamp: they are never
             # injected, so suppressing workflow retrieval for them would
             # remove context without providing the compiled replacement.
-            self.stamp_workflows(candidate, skill.skill_id)
+            self._stamp_covered_runs(skill)
         report.promoted.append(skill.skill_id)
 
     def promote_class(
@@ -337,17 +347,10 @@ class PromotionEngine:
         if injection_role is not None:
             skill.injection_role = normalize_skill_injection_role(injection_role)
         skill.status = SkillStatus.ACTIVE
-        skill.promoted_at = skill.promoted_at or datetime.now()
+        skill.promoted_at = skill.promoted_at or utc_now()
         if not self.skillbox.update_skill(skill):
             return False
-        if skill.source_canonical_hash:
-            stats = aggregate_trajectory_stats(
-                self.memory_provider, agent_id=self.agent_id
-            )
-            for stat in stats:
-                if stat.canonical_hash == skill.source_canonical_hash:
-                    self.stamp_workflows(stat, skill_id)
-                    break
+        self._stamp_covered_runs(skill)
         return True
 
     # ----------------------------------------------------------------- gates
@@ -357,7 +360,7 @@ class PromotionEngine:
         stat: TrajectoryStats,
         skills_by_hash: Dict[str, List[Skill]],
     ) -> Tuple[bool, Optional[str]]:
-        existing = skills_by_hash.get(stat.canonical_hash, [])
+        existing = self._visible_skills(stat, skills_by_hash)
         live = [
             s
             for s in existing
@@ -374,10 +377,11 @@ class PromotionEngine:
         retired = self._latest_retired_skill(existing)
         runs = stat.runs
         if retired and retired.demoted_at:
+            demoted = to_epoch(retired.demoted_at, naive="local")
             runs = [
                 run
                 for run in stat.runs
-                if run.created_at and run.created_at > retired.demoted_at
+                if run.created_at and to_epoch(run.created_at, naive="local") > demoted
             ]
 
         executions = len(runs)
@@ -400,7 +404,7 @@ class PromotionEngine:
             )
         if stat.last_seen is None:
             return False, "no timestamps on runs"
-        age_days = (datetime.now() - stat.last_seen).days
+        age_days = _since(stat.last_seen).days
         if age_days > self.config.max_days_since_last_seen:
             return False, f"stale: last seen {age_days}d ago"
         return True, None
@@ -408,13 +412,27 @@ class PromotionEngine:
     def _score(self, stat: TrajectoryStats) -> float:
         days_since = 0.0
         if stat.last_seen:
-            days_since = max(
-                0.0, (datetime.now() - stat.last_seen).total_seconds() / 86400.0
-            )
+            days_since = max(0.0, _since(stat.last_seen).total_seconds() / 86400.0)
         recency = 0.5 ** (days_since / self.config.recency_halflife_days)
         return stat.success_rate * math.log1p(stat.executions) * recency
 
     # ------------------------------------------------------------- stamping
+
+    def _stamp_covered_runs(self, skill: Skill) -> int:
+        """Stamp the stored runs ``skill`` covers: the runs of its class whose
+        user can see it — the skill user's own, or every user's when the
+        skill is agent-wide (no user). A user's class already stamped by
+        another live skill keeps that stamp."""
+        if not skill.source_canonical_hash:
+            return 0
+        stats = aggregate_trajectory_stats(self.memory_provider, agent_id=self.agent_id)
+        return sum(
+            self.stamp_workflows(stat, skill.skill_id)
+            for stat in stats
+            if stat.canonical_hash == skill.source_canonical_hash
+            and stat.promoted_skill_id in (None, skill.skill_id)
+            and user_scope_matches(skill.user_id, stat.user_id, MemoryType.SKILLBOX)
+        )
 
     def stamp_workflows(self, stat: TrajectoryStats, skill_id: str) -> int:
         """Set ``promoted_skill_id`` on every stored run of the class."""
@@ -441,6 +459,20 @@ class PromotionEngine:
             if skill.source_canonical_hash:
                 grouped.setdefault(skill.source_canonical_hash, []).append(skill)
         return grouped
+
+    @staticmethod
+    def _visible_skills(
+        stat: TrajectoryStats, skills_by_hash: Dict[str, List[Skill]]
+    ) -> List[Skill]:
+        """The class's skills its user sees: their own and agent-wide ones.
+        Another user's skill never covers (or blocks) this user's class."""
+        return [
+            skill
+            for skill in skills_by_hash.get(stat.canonical_hash, [])
+            if user_scope_matches(
+                getattr(skill, "user_id", None), stat.user_id, MemoryType.SKILLBOX
+            )
+        ]
 
     @staticmethod
     def _latest_retired_skill(skills: List[Skill]) -> Optional[Skill]:

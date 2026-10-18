@@ -33,9 +33,12 @@ Collections are created lazily (e.g., `agents_personas`, `agents_knowledge_base`
 3. Give the provider search-index management permission, or provision the
    indexes separately.
 
-MemoRizz reconciles the `memory_id` and `user_id` filter definitions used by
-entity retrieval, and `status`, `agent_id`, and `user_id` for Skillbox
-retrieval. Filters are applied inside `$vectorSearch` before top-k selection.
+MemoRizz reconciles the filter paths each vector index needs beyond
+`memory_id`: `user_id` for entity, workflow and summary retrieval;
+`knowledge_base_id`, `namespace` and `user_id` for knowledge-base retrieval;
+and `status`, `agent_id` and `user_id` for Skillbox retrieval. Filters are
+applied inside `$vectorSearch` before top-k selection. Adding a path updates an
+existing index in place, and Atlas rebuilds it.
 If Atlas Search is missing or unavailable, entity memory uses a strict bounded
 exact fallback. Query failures are reported as degraded retrieval rather than
 healthy zero-match results.

@@ -231,6 +231,7 @@ for outcome in agent.last_tool_outcomes:
 | Call a typed application function | Python tool | Your application process |
 | Call Notion, Calendar, or another MCP service | [MCP client](mcp-connectivity.md) | Remote/local MCP server plus durable mutation gate |
 | Navigate websites | [Browser control](../browser-control/index.md) | Isolated Browser Use process plus approval |
+| Operate the apps on a Mac | [Desktop control](../desktop-control/index.md) | macOS Accessibility permission plus approval for every action |
 | Execute code | [Sandbox](../sandbox/index.md) | Provider-specific; read each security contract |
 
 Approval limits *when* authority is exercised. It does not make untrusted code,

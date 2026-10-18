@@ -347,6 +347,33 @@ class ToolManager:
         """
         return list(self.tools.keys())
 
+    def remove_unbound_tools(self) -> List[str]:
+        """Remove tools that have nothing to run; return their names.
+
+        A saved agent keeps tool metadata, never code. A saved tool that no
+        live code registered again (a built-in that is now off, a function
+        from another process) can only answer "Tool function not available".
+        """
+        unbound = [
+            name
+            for name, entry in self.tools.items()
+            if isinstance(entry, dict)
+            and (
+                (
+                    entry.get("type", "function") == "function"
+                    and not callable(entry.get("function"))
+                )
+                or (
+                    entry.get("type") == "workflow"
+                    and not isinstance(entry.get("workflow"), Workflow)
+                )
+            )
+        ]
+        for name in unbound:
+            self.tools.pop(name, None)
+            self._tool_metadata_cache.pop(name, None)
+        return unbound
+
     def get_tool_callable(self, tool_name: str) -> Optional[Callable[..., Any]]:
         """Return the trusted in-process callable for a registered tool."""
         value = self.tools.get(str(tool_name))
@@ -373,9 +400,11 @@ class ToolManager:
         persisted Toolbox entries look after serialize/deserialize).
 
         If a callable for this tool was previously registered in-memory,
-        we preserve the function — otherwise a later replay of persisted
-        flat metadata would clobber the runtime callable and the tool
-        would silently stop working.
+        flat metadata (a saved copy) leaves that tool as registered: its
+        function, and the metadata its code produced. Replaying the saved
+        copy over it would either stop the tool working or pin a stale
+        description, schema and tool policy that every later save writes
+        back.
 
         Metadata values coming from persistence are also run through the
         LOB coercion helper: when the backing store is Oracle, CLOB
@@ -406,6 +435,10 @@ class ToolManager:
                 tool_type = tool_data.get("type", "function")
                 workflow = tool_data.get("workflow")
             else:
+                if callable(existing_func) and isinstance(
+                    existing.get("metadata"), dict
+                ):
+                    return True
                 metadata = _coerce_jsonable(tool_data)
                 function = existing_func
                 tool_type = tool_data.get("type", "function")

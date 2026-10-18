@@ -142,6 +142,31 @@ def test_builder_build_and_save_persists_new_runtime_policies(tmp_path):
 
 
 @pytest.mark.unit
+def test_builder_build_and_save_persists_knowledge_bases(tmp_path):
+    from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+
+    provider = FileSystemProvider(
+        FileSystemConfig(root_path=tmp_path / "memory", embedding_provider=None)
+    )
+    builder = (
+        MemAgentBuilder()
+        .with_name("KB agent")
+        .with_memory_provider(provider)
+        .with_knowledge_base(["kb-1", "kb-2"])
+        .with_knowledge_base("kb-1")
+    )
+    assert builder.clone()._knowledge_base_ids == ["kb-1", "kb-2"]
+
+    agent = builder.build_and_save()
+
+    assert agent.knowledge_base_ids == ["kb-1", "kb-2"]
+    saved = provider.retrieve_memagent(agent.agent_id)
+    assert saved.knowledge_base_ids == ["kb-1", "kb-2"]
+    loaded = MemAgent.load(agent.agent_id, memory_provider=provider)
+    assert loaded.knowledge_base_ids == ["kb-1", "kb-2"]
+
+
+@pytest.mark.unit
 def test_deterministic_delegates_are_operational_from_agent_run():
     provider = MockMemoryProvider()
     delegate = MemAgent(memory_provider=provider, agent_id="delegate-1")

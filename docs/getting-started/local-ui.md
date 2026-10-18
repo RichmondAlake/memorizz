@@ -121,7 +121,7 @@ Once connected, the sidebar is your main navigation.
 | Playground | `/playground` and `/agents/{id}/playground` | Interactive chat, thread switching, token/context stats, and per-agent runtime config. |
 | MCP Connections | `/mcp` | Configure/test MCP servers, authorize OAuth, inspect capabilities, and invoke governed tools. |
 | Automations | `/automations` | Create schedules, inspect runs, and manage worker-backed agent jobs. |
-| Memory Types | `/memory/{type}` | Browse stored memory entries by type (`personas`, `toolbox`, `workflow-memory`, `skillbox`, `conversations`, etc.). |
+| Memory Types | `/memory/{type}` | Browse stored memory entries by type (`personas`, `toolbox`, `workflow-memory`, `skillbox`, `conversations`, etc.). Workflows lists every MCP and [desktop control](../desktop-control/index.md) run with its steps. |
 | Continual Learning | `/memory/workflows` and `/memory/skills` | Review canonical trajectory classes, run gated distillation, inspect persisted skill authority, and activate/demote skills. |
 | Fine-tuning | `/fine-tuning` | Models in use cards (compare, Swap in, Swap back); datasets grouped by job, with test sets; each dataset's Data → Train → Results steps (generation and review, training with live loss curves, the verdict, where it goes wrong, versions compared on the same sets). |
 | Model registry | `/fine-tuning/models` | Every model per job: what runs now, each fine-tuned version as a family tree (data, training result and its significance, fixed-set scores, size), failed runs with their errors, and the base models to start from; swap in, rename or delete a version. |
