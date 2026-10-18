@@ -4,6 +4,8 @@ import re
 import threading
 from pathlib import Path
 
+import pytest
+
 from memorizz.enums import MemoryType
 from memorizz.long_term.procedural.toolbox.indexing import argument_names, search_text
 from memorizz.mcp.tool_index import MCPToolIndex, catalog_row_id, tool_row_id
@@ -69,12 +71,13 @@ def _public(server, name):
     return f"{server}__{name}"
 
 
-def _provider(tmp_path, embedder):
+def _provider(tmp_path, embedder, use_faiss=True):
     return FileSystemProvider(
         FileSystemConfig(
             root_path=Path(tmp_path) / "memory",
             embedding_provider=embedder,
             lazy_vector_indexes=True,
+            use_faiss=use_faiss,
         )
     )
 
@@ -155,9 +158,14 @@ def test_saving_an_agent_keeps_its_mcp_index_and_unchanged_vectors(tmp_path):
     assert not _row(provider, "agent-1:web_search").get("embedding")
 
 
-def test_tool_rows_are_embedded_on_first_search_and_ranked_per_agent(tmp_path):
+# Without FAISS (the base install) ranking falls back to brute-force cosine,
+# which must rank per agent too: every agent with the server has the same rows.
+@pytest.mark.parametrize("use_faiss", [True, False], ids=["faiss", "brute-force"])
+def test_tool_rows_are_embedded_on_first_search_and_ranked_per_agent(
+    tmp_path, use_faiss
+):
     embedder = WordEmbedder()
-    provider = _provider(tmp_path, embedder)
+    provider = _provider(tmp_path, embedder, use_faiss=use_faiss)
     MCPToolIndex(provider, "agent-1").sync("notion", [SEARCH, CALENDAR], _public)
     MCPToolIndex(provider, "agent-2").sync("notion", [SEARCH, CALENDAR], _public)
     provider._sync_agent_tools_to_toolbox(
@@ -189,6 +197,23 @@ def test_tool_rows_are_embedded_on_first_search_and_ranked_per_agent(tmp_path):
     # a tool and stays unembedded.
     assert _row(provider, "agent-1:remind_me")["embedding"]
     assert not _row(provider, "agent-1:mcp:notion").get("embedding")
+
+
+def test_keyword_fallback_ranks_tools_per_agent(tmp_path):
+    provider = _provider(tmp_path, None)
+    for agent in ("agent-1", "agent-2"):
+        provider._sync_agent_tools_to_toolbox(
+            agent, [{"name": "calendar_events", "description": "List events."}]
+        )
+
+    rows = provider.retrieve_by_query(
+        "calendar_events",
+        memory_store_type=MemoryType.TOOLBOX,
+        limit=5,
+        user_id=None,
+        agent_id="agent-2",
+    )
+    assert [row["agent_id"] for row in rows] == ["agent-2"]
 
 
 def test_argument_names_read_every_parameter_shape():

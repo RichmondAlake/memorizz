@@ -1441,6 +1441,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
+                agent_id=agent_id,
             )
 
         # Documents created while embeddings were disabled have no vector to
@@ -1466,6 +1467,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
+                agent_id=agent_id,
             )
 
         if self._faiss is None or np is None:
@@ -1481,6 +1483,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
+                agent_id=agent_id,
             )
             return matches or self._keyword_search(
                 memory_type,
@@ -1490,6 +1493,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
+                agent_id=agent_id,
             )
 
         # A global FAISS top-k followed by filtering can return a false miss
@@ -1505,6 +1509,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
+                agent_id=agent_id,
             )
             return matches or self._keyword_search(
                 memory_type,
@@ -1514,6 +1519,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
+                agent_id=agent_id,
             )
 
         query_embedding = embed_as_query(embedding_provider.get_embedding, query)
@@ -1533,6 +1539,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 user_id=user_id,
                 thread_id=thread_id,
                 namespace=namespace,
+                agent_id=agent_id,
             )
 
         top_k = max(limit or 1, 1)
@@ -1549,10 +1556,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                     if self._metadata_scope_may_match(
                         meta, memory_id, user_id, memory_type
                     )
-                    and (
-                        agent_id is _FS_UNSET
-                        or meta.get("agent_id") in (None, agent_id)
-                    )
+                    and self._agent_scope_matches(meta, agent_id)
                 }
             if not eligible:
                 return self._keyword_search(
@@ -1563,6 +1567,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                     user_id=user_id,
                     thread_id=thread_id,
                     namespace=namespace,
+                    agent_id=agent_id,
                 )
         wanted = top_k if eligible is None else min(top_k, len(eligible))
 
@@ -1603,7 +1608,13 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
             user_id=user_id,
             thread_id=thread_id,
             namespace=namespace,
+            agent_id=agent_id,
         )
+
+    @staticmethod
+    def _agent_scope_matches(record: Dict[str, Any], agent_id: Any) -> bool:
+        """A row of this agent, or one no agent owns (the toolbox ranks per agent)."""
+        return agent_id is _FS_UNSET or record.get("agent_id") in (None, agent_id)
 
     def _brute_force_search(
         self,
@@ -1616,6 +1627,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         thread_id: Optional[str] = None,
         namespace: Optional[str] = None,
         knowledge_base_ids: Optional[frozenset] = None,
+        agent_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         embedding_provider = embedding_provider or self._get_embedding_provider()
         if embedding_provider is None:
@@ -1628,6 +1640,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 thread_id=thread_id,
                 namespace=namespace,
                 knowledge_base_ids=knowledge_base_ids,
+                agent_id=agent_id,
             )
 
         query_embedding = embed_as_query(embedding_provider.get_embedding, query)
@@ -1646,6 +1659,8 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 ):
                     continue
                 if not self._user_id_scope_matches(document, user_id, memory_type):
+                    continue
+                if not self._agent_scope_matches(document, agent_id):
                     continue
                 if not self._retrieval_scope_matches(
                     document, thread_id=thread_id, namespace=namespace
@@ -1671,6 +1686,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         thread_id: Optional[str] = None,
         namespace: Optional[str] = None,
         knowledge_base_ids: Optional[frozenset] = None,
+        agent_id: Any = _FS_UNSET,
     ) -> List[Dict[str, Any]]:
         if not query:
             return []
@@ -1687,6 +1703,8 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 ):
                     continue
                 if not self._user_id_scope_matches(document, user_id, memory_type):
+                    continue
+                if not self._agent_scope_matches(document, agent_id):
                     continue
                 if not self._retrieval_scope_matches(
                     document, thread_id=thread_id, namespace=namespace
