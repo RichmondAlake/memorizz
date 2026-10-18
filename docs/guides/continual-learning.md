@@ -1,7 +1,8 @@
 # Continual Learning: Workflows → Skills
 
-MemoRizz agents can **learn from their own successful behavior**. Every
-tool-calling run is captured as a workflow trajectory; when the same
+MemoRizz agents can **learn from their own successful behavior**. With
+continual learning on, every tool-calling run is captured as a workflow
+trajectory; when the same
 procedure keeps succeeding across different queries, it is distilled into a
 reusable **skill** — a SKILL.md document stored in the new `skillbox` memory
 store — and injected into future runs that match after any required review.
@@ -77,6 +78,15 @@ agent = (
 `MEMORIZZ_CONTINUAL_LEARNING=1` flips the default on for every agent in the
 process. Enabling the feature force-activates `workflow_memory` (the loop
 cannot observe runs without it) and the `skillbox` store.
+
+!!! note "Workflows are captured only where workflow memory is active"
+    `MemAgentBuilder` builds in the `assistant` mode by default, and that mode
+    does not include `workflow_memory`: a builder-made assistant captures no
+    workflows until you turn on continual learning
+    (`with_continual_learning(True)`), connect an MCP server (MCP-connected
+    agents keep their runs as workflows), choose the `workflow` mode, or list
+    `workflow_memory` in its memory types. A `MemAgent(...)` constructed with
+    neither a mode nor memory types includes it.
 
 ### Memory-provider support
 

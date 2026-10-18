@@ -52,7 +52,15 @@ This page covers the stable, high-value Python surface. Import public types from
 `agent.save()` stores the current definition in its configured memory provider.
 `MemAgent.load(agent_id, memory_provider=provider, **overrides)` restores it;
 omit `memory_provider` only when the definition lives in the default filesystem
-provider.
+provider. Tool code is not stored: pass the functions back with
+`tools=[...]`, which also restores their `governed_tool` policies.
+
+`MemAgentBuilder.with_knowledge_base(ids)` attaches knowledge bases by the ids
+`ingest_knowledge` returns. Their chunks are recalled automatically whenever
+`knowledge_base` is one of the agent's memory types (the `assistant`,
+`workflow` and `deep_research` modes include it), whatever `memory_id` they
+were ingested under. Rebuilding a named agent keeps its stored knowledge bases
+unless `with_knowledge_base` is called.
 
 ## Personalization context
 
@@ -89,6 +97,10 @@ The rendered prompt tells the model to use memories only when they naturally
 improve the current answer. `personalization.trace_summary()` and
 `agent.last_memory_context_evidence()` contain counts, scores, attribute names,
 and hashed references, not the underlying profile values or conversation text.
+With continual learning on, recall arrives as one evidence pack: its items are
+counted in `source_counts["evidence_items"]`, by source in
+`evidence_source_counts`, and referenced in `evidence_refs`.
+`learning_control_plane.explain_last_retrieval()` explains each choice.
 
 ### Canonical user entities and duplicate cleanup
 

@@ -198,6 +198,24 @@ _OBSERVABILITY_CONTEXT_FIELDS = frozenset(
         "grounding_source_ids",
     }
 )
+# MemoRizz's own memory tools. Their results are already in the memory block
+# (entities, persona, summaries) or are storage receipts with ids and flags, so
+# the recent tool-output digest leaves them out: on a real workload entity
+# upserts were three quarters of its tokens.
+_MEMORY_BOOKKEEPING_TOOLS = frozenset(
+    {
+        "entity_memory_lookup",
+        "entity_memory_upsert",
+        "read_persona",
+        "update_persona",
+        "summarize_conversation",
+        "expand_summary",
+        "list_summary_registry_tool",
+        "context_window_stats_tool",
+        "retrieve_tool_log_entry",
+        "list_recent_tool_logs",
+    }
+)
 
 
 _CONTEXT_LOCAL_MISSING = object()
@@ -5006,6 +5024,18 @@ class MemAgent:
             for row in (built_context.get("summaries") or [])
             if isinstance(row, dict)
         ]
+        # With the learning control plane on, recall arrives as one evidence
+        # pack (knowledge, entities, summaries, workflows, skills) instead of
+        # retrieved_memories and entity profiles.
+        evidence_pack = built_context.get("evidence_pack")
+        evidence_items = list(getattr(evidence_pack, "items", None) or ())
+        evidence_candidate_count = int(
+            getattr(evidence_pack, "candidate_count", 0) or 0
+        )
+        evidence_source_counts: Dict[str, int] = {}
+        for item in evidence_items:
+            source = str(getattr(item, "source_type", "") or "memory")
+            evidence_source_counts[source] = evidence_source_counts.get(source, 0) + 1
         has_personalization = built_context.get("personalization_context") is not None
         personalization = PersonalizationContext.from_value(
             built_context.get("personalization_context")
@@ -5068,6 +5098,7 @@ class MemAgent:
             "entity_profiles": len(entities),
             "entity_attributes": entity_attribute_count,
             "summaries": len(summaries),
+            "evidence_items": len(evidence_items),
             "preferences": int(
                 personalization_summary.get("source_counts", {}).get("preferences", 0)
             ),
@@ -5090,6 +5121,7 @@ class MemAgent:
                 "semantic_memories",
                 "entity_attributes",
                 "summaries",
+                "evidence_items",
                 "preferences",
                 "conversation_memories",
                 "writing_samples",
@@ -5112,6 +5144,9 @@ class MemAgent:
             )
             + int(personalization_summary.get("rendered_char_count") or 0)
             + persona_chars
+            + sum(
+                len(str(getattr(item, "content", "") or "")) for item in evidence_items
+            )
         )
         if personalization.is_empty:
             volatile_chars += entity_char_count
@@ -5144,9 +5179,11 @@ class MemAgent:
                 semantic_candidate_count
                 + automatic_entity_candidate_count
                 + personalization_candidate_count
+                + evidence_candidate_count
             ),
             "retrieved_source_counts": {
                 "semantic": semantic_candidate_count,
+                "evidence_pack": evidence_candidate_count,
                 "entity": (
                     int(personalization_diagnostics.get("entity_candidate_count") or 0)
                     if personalization_owns_entity
@@ -5158,6 +5195,7 @@ class MemAgent:
             },
             "retrieved_selected_count": (
                 len(semantic)
+                + len(evidence_items)
                 + (
                     personalization_selected_count
                     if has_personalization
@@ -5166,6 +5204,7 @@ class MemAgent:
             ),
             "retrieved_selected_source_counts": {
                 "semantic": len(semantic),
+                "evidence_pack": len(evidence_items),
                 "entity": (
                     int(personalization_diagnostics.get("entity_selected_count") or 0)
                     if personalization_owns_entity
@@ -5182,6 +5221,15 @@ class MemAgent:
             "semantic_refs": semantic_refs,
             "entity_refs": entity_refs,
             "summary_refs": summary_refs,
+            "evidence_source_counts": evidence_source_counts,
+            "evidence_refs": [
+                {
+                    "ref": self._fingerprint(f"{item.source_type}:{item.source_id}"),
+                    "source": str(item.source_type)[:40],
+                    "score": item.relevance,
+                }
+                for item in evidence_items
+            ],
             "preference_keys": personalization_summary.get("preference_keys") or [],
             "conversation_refs": personalization_summary.get("conversation_refs") or [],
             "writing_sample_refs": personalization_summary.get("writing_sample_refs")
@@ -7591,10 +7639,12 @@ class MemAgent:
     def _format_recent_tool_logs_digest(self, limit: int = 10) -> str:
         """Build a compact, agent-facing digest of this thread's tool_log entries.
 
-        Injected into the system prompt every turn so the agent retains
-        pickable ``tool_log_id`` references across turns — the placeholder
-        rows themselves are filtered out of the LLM's history to avoid
-        orphan tool-role messages. This is the durable recall channel.
+        Added to the per-turn memory block (in the final user message, after
+        the cached prefix) so the agent retains pickable ``tool_log_id``
+        references across turns — the placeholder rows themselves are
+        filtered out of the LLM's history to avoid orphan tool-role messages.
+        This is the durable recall channel. MemoRizz's own memory tools
+        (``_MEMORY_BOOKKEEPING_TOOLS``) are left out.
 
         Format (one entry per line):
             • <tool_log_id>  tool=<name>  args=<short>  digest=<one-liner>
@@ -7604,9 +7654,10 @@ class MemAgent:
         if not self.memory_manager or not self._current_memory_id:
             return ""
         try:
+            # Read past bookkeeping calls so up to ``limit`` real ones remain.
             rows = self.memory_manager.list_tool_logs(
                 memory_id=self._current_memory_id,
-                limit=limit,
+                limit=limit * 4,
                 user_id=self._current_user_id,
                 thread_id=self._current_thread_id,
             )
@@ -7616,13 +7667,17 @@ class MemAgent:
         if not isinstance(rows, (list, tuple)) or not rows:
             return ""
         lines: List[str] = []
-        for row in rows[:limit]:
+        for row in rows:
+            if len(lines) >= limit:
+                break
             if not isinstance(row, dict):
                 continue
             tlid = row.get("tool_log_id") or row.get("_id") or ""
             if not tlid:
                 continue
             tname = row.get("tool_name") or "?"
+            if tname in _MEMORY_BOOKKEEPING_TOOLS:
+                continue
             args_text = _summarize_tool_args(row.get("arguments"), limit=120)
             # Tool-log result is stored as a string; parse if it looks like JSON
             # so we can still produce a field-aware digest.
@@ -9478,6 +9533,22 @@ class MemAgent:
                             context.get("evidence_pack")
                         )
                         active = set()
+                elif (
+                    getattr(self, "knowledge_base_ids", None)
+                    and MemoryType.KNOWLEDGE_BASE not in active
+                    and not getattr(self, "_warned_unrecalled_kbs", False)
+                ):
+                    # Attached, yet never recalled: only knowledge_base_lookup
+                    # reaches them, so nothing looks wrong but the answers.
+                    self._warned_unrecalled_kbs = True
+                    logger.warning(
+                        "%d knowledge base(s) are attached to agent %s, but "
+                        "knowledge_base is not one of its memory types, so they "
+                        "are not recalled automatically; add it to memory_types "
+                        "or use application_mode='assistant'",
+                        len(self.knowledge_base_ids),
+                        self.agent_id,
+                    )
                 if (
                     MemoryType.KNOWLEDGE_BASE in active
                     and policy.knowledge_base_scope != "disabled"

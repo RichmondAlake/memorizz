@@ -36,6 +36,8 @@ class MemAgentBuilder:
         self._memory_provider = None
         self._memory_ids = []
         self._knowledge_base_ids: List[str] = []
+        # Unset, a rebuild keeps the knowledge bases of the stored agent.
+        self._knowledge_bases_chosen = False
         self._delegates = []
         self._embedding_provider = None
         self._embedding_config = None
@@ -194,7 +196,11 @@ class MemAgentBuilder:
         """Attach knowledge bases by the ids ``ingest_knowledge`` returns.
 
         Accepts one id or several; repeated ids are kept once, in order.
+        These replace the knowledge bases of a stored agent with the same
+        name, which a rebuild otherwise keeps; ``with_knowledge_base([])``
+        detaches them all.
         """
+        self._knowledge_bases_chosen = True
         if isinstance(knowledge_base_ids, str):
             knowledge_base_ids = [knowledge_base_ids]
         for kb_id in knowledge_base_ids or []:
@@ -628,8 +634,20 @@ class MemAgentBuilder:
             }
             # Not a constructor argument: hydrate it the way MemAgent.load()
             # does, before validation and the save below.
-            if self._knowledge_base_ids:
+            if self._knowledge_bases_chosen:
                 agent.knowledge_base_ids = list(self._knowledge_base_ids)
+            else:
+                # A named agent gets the same id on every build, so saving a
+                # rebuild replaces the stored record: keep its knowledge bases.
+                stored = self._stored_knowledge_base_ids(agent)
+                if stored:
+                    agent.knowledge_base_ids = stored
+                    logger.info(
+                        "Kept %d knowledge base(s) attached to the stored agent %s; "
+                        "with_knowledge_base([]) detaches them",
+                        len(stored),
+                        agent.agent_id,
+                    )
 
             logger.info(f"MemAgent built successfully with {len(self._tools)} tools")
 
@@ -652,6 +670,25 @@ class MemAgentBuilder:
         except Exception as e:
             logger.error(f"Failed to build MemAgent: {e}")
             raise
+
+    @staticmethod
+    def _stored_knowledge_base_ids(agent: "MemAgent") -> List[str]:
+        """The knowledge bases of the stored agent with this agent's id."""
+        provider = getattr(agent, "memory_provider", None)
+        if not provider or not hasattr(provider, "retrieve_memagent"):
+            return []
+        try:
+            record = provider.retrieve_memagent(agent.agent_id)
+        except Exception as exc:
+            logger.debug("No stored agent to keep knowledge bases from: %s", exc)
+            return []
+        if isinstance(record, dict):
+            ids = record.get("knowledge_base_ids")
+        else:
+            ids = getattr(record, "knowledge_base_ids", None)
+        if not isinstance(ids, (list, tuple)):
+            return []
+        return [str(kb_id) for kb_id in ids if kb_id]
 
     def build_and_save(self, validate: bool = True) -> "MemAgent":
         """Build, validate, and persist the configured agent."""

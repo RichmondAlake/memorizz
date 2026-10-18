@@ -91,6 +91,61 @@ def _row_id(row: Mapping[str, Any]) -> str:
     return content_digest(row)[:32]
 
 
+def _entity_facts(attributes: Any) -> List[Tuple[str, str]]:
+    """``(name, value)`` per attribute, the most confident (then newest) kept.
+
+    Confidence, source and timestamps rank the facts but are not shown: they
+    cost several times the facts' own tokens.
+    """
+    if isinstance(attributes, Mapping):
+        items = [
+            {"name": key, **value}
+            if isinstance(value, Mapping)
+            else {"name": key, "value": value}
+            for key, value in attributes.items()
+        ]
+    elif isinstance(attributes, (list, tuple)):
+        items = [item for item in attributes if isinstance(item, Mapping)]
+    else:
+        return []
+    best: Dict[str, Tuple[Tuple[float, str], str]] = {}
+    for item in items:
+        name = str(
+            item.get("name") or item.get("attribute") or item.get("key") or ""
+        ).strip()
+        value = item.get("value")
+        if not name or value in (None, ""):
+            continue
+        try:
+            confidence = float(item.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        rank = (confidence, str(item.get("updated_at") or item.get("created_at") or ""))
+        if name not in best or rank >= best[name][0]:
+            best[name] = (rank, str(value))
+    return [(name, value) for name, (_rank, value) in best.items()]
+
+
+def _entity_text(row: Mapping[str, Any]) -> str:
+    """One entity as ``Ada (person): role = CTO; city = Lagos``."""
+    name = str(row.get("name") or row.get("entity_id") or "entity")
+    head = f"{name} ({row['entity_type']})" if row.get("entity_type") else name
+    facts = "; ".join(
+        f"{key} = {value}" for key, value in _entity_facts(row.get("attributes"))
+    )
+    lines = [f"{head}: {facts}" if facts else head]
+    relations = ", ".join(
+        f"{rel.get('relation_type') or 'related'} → {rel['entity_id']}"
+        for rel in row.get("relations") or []
+        if isinstance(rel, Mapping) and rel.get("entity_id")
+    )
+    if relations:
+        lines.append(f"relations: {relations}")
+    if isinstance(row.get("content"), str) and row["content"].strip():
+        lines.append(row["content"].strip())
+    return "\n".join(lines)
+
+
 def _row_content(source_type: str, row: Mapping[str, Any]) -> str:
     if source_type == "workflow_memory":
         return "\n".join(
@@ -116,17 +171,7 @@ def _row_content(source_type: str, row: Mapping[str, Any]) -> str:
             if item not in (None, "", [], {})
         )
     if source_type == "entity_memory":
-        return "\n".join(
-            str(item)
-            for item in (
-                row.get("name"),
-                row.get("entity_type"),
-                row.get("attributes"),
-                row.get("relations"),
-                row.get("content"),
-            )
-            if item not in (None, "", [], {})
-        )
+        return _entity_text(row)
     value = row.get("content")
     if hasattr(value, "read"):
         try:

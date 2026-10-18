@@ -62,6 +62,13 @@ never changes. Only larger catalogs, such as agents with many MCP tools, use
 progressive disclosure. Set `stable_tool_list_tokens=0` to always disclose
 progressively.
 
+!!! note "`tool_top_k` does nothing for small catalogs"
+    While every tool schema fits in `stable_tool_list_tokens`, the agent sees
+    all of its tools on every turn, so `tool_top_k` and `sticky_tool_limit`
+    have no effect. That default is deliberate: a list that never changes
+    keeps the provider prompt cache intact. To make `tool_top_k` limit the
+    tools sent, lower `stable_tool_list_tokens` (or set it to `0`).
+
 ### One tool list per turn
 
 A streamed turn makes a private tool-phase call, then generates the public

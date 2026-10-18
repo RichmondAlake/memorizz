@@ -42,6 +42,14 @@
   not saved on the agent.
 - `MemAgentBuilder.with_knowledge_base(ids)` attaches knowledge bases by the
   ids `ingest_knowledge` returns; `build_and_save()` keeps them.
+- `last_memory_context_evidence()` counts the evidence pack, where recall
+  happens once continual learning is on: `source_counts["evidence_items"]`,
+  `evidence_source_counts` (per source), `evidence_refs` (hashed), and the
+  pack's candidates and picks in the retrieved counts. It used to show only
+  the older retrieval path, so recall looked empty.
+- A warning, once per agent, when knowledge bases are attached but
+  `knowledge_base` is not one of the agent's memory types, so only
+  `knowledge_base_lookup` could reach them.
 - Oracle migrations 010 (persona goals, version and evolution history), 011
   (knowledge-base supersede lifecycle, short-term memory metadata, a cached
   answer's last use), 012 (UTC column defaults) and 013 (one-off conversion
@@ -63,6 +71,20 @@
 - `RetrievalPolicy(knowledge_base_scope="namespace")` with no namespaces
   recalls from every namespace of the attached knowledge bases and logs a
   warning, instead of finding nothing.
+- The per-turn list of recent tool outputs leaves out MemoRizz's own memory
+  tools (entity, persona, summary and tool-log tools) and still shows up to
+  ten real calls. On one reported workload, entity upserts with their ids and
+  storage flags were 74% of that list's tokens. Its docstring now says where
+  it goes: the memory block of the final user message, not the system prompt.
+- Recalled entities in the evidence pack read as their facts,
+  `Ada (person): role = CTO; cutover = Friday`, keeping the most confident
+  value of each attribute, without confidence, source and timestamps. A
+  six-fact entity takes 52 tokens instead of 334.
+- Rebuilding a named agent (`build_and_save()` with the same name, which
+  gives the same agent id) keeps the knowledge bases attached to the stored
+  agent, unless the builder calls `with_knowledge_base(...)`;
+  `with_knowledge_base([])` detaches them. Rebuilds used to detach them
+  silently.
 
 ### Fixed
 
@@ -102,6 +124,14 @@
     and skills no longer cross users.
 - Automations: in the hour repeated when clocks go back, a cron job could
   run twice.
+- On installs without FAISS, toolbox search ignored the agent, so another
+  agent's identical MCP tool records could push out this agent's own tools.
+- Docs: `tool_top_k` and `sticky_tool_limit` have no effect while every tool
+  schema fits in `stable_tool_list_tokens` (all tools are sent, by design);
+  workflows are captured only where `workflow_memory` is active, which the
+  builder's default `assistant` mode leaves out until continual learning or
+  an MCP connection adds it; `MemAgent.load(agent_id, tools=[...])` restores
+  governed tools with their policies, since tool code is never stored.
 
 ### Upgrade notes
 

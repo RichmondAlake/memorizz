@@ -791,7 +791,7 @@ class MemoryManager:
                 for an exact scoped read.
             thread_id: Optional thread scope. When set, only tool logs recorded
                 in that conversation thread are returned — this is what keeps the
-                system-prompt tool-log digest from leaking another thread's tool
+                per-turn tool-log digest from leaking another thread's tool
                 ids or letting one fall off a global last-N window. ``None``
                 preserves the legacy all-threads behaviour.
 

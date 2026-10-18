@@ -101,6 +101,20 @@ If you construct an explicit provider, pass the same provider to
 `MemAgent.load(...)`. A saved `agent_id` is discoverable only in the provider
 where it was stored.
 
+A saved agent keeps its settings, persona (goals and version included) and
+attached knowledge bases, but not your tools' code: Python functions are never
+stored. Pass them back when you load, and their policies return with them:
+
+```python
+# The same functions the agent was built with.
+restored = MemAgent.load(agent.agent_id, tools=[search_orders, refund_order])
+```
+
+A named agent gets the same `agent_id` every time it is built, so
+`build_and_save()` with the same name updates the stored agent. A rebuild keeps
+the knowledge bases already attached to it unless the builder calls
+`with_knowledge_base(...)`; `with_knowledge_base([])` detaches them.
+
 ## Use an explicit filesystem provider
 
 Configure a provider directly when you need a different path, embedding model,

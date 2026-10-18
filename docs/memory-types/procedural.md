@@ -58,6 +58,14 @@ Saving the agent keeps these records.
 
 ## Runs kept as workflow memory
 
+Tool-calling runs are captured only while `workflow_memory` is one of the
+agent's memory types. The `workflow` mode includes it, and so does a
+`MemAgent(...)` constructed with neither a mode nor memory types. The
+`assistant` mode, `MemAgentBuilder`'s default, does not: a builder-made
+assistant captures nothing until you turn on continual learning
+(`with_continual_learning(True)`), which adds it, or list it in the agent's
+memory types.
+
 An agent with an MCP connection records each tool-calling run as a workflow,
 even when its mode does not list workflow memory, unless it was configured
 with no memory types at all. Each record holds the request, every tool call
