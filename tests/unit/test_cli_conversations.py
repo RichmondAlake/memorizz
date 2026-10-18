@@ -232,6 +232,148 @@ def test_cmd_conversations_resumes_and_persists_selected_pair(monkeypatch):
 
 
 @pytest.mark.unit
+def test_thread_messages_keep_full_text_and_fold_tools_into_the_reply():
+    now = datetime.now(timezone.utc)
+    provider = _Provider(
+        {
+            "memory-1": [
+                # Offloaded tool results are stamped before their turn's user row.
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    "tool",
+                    '{"tool_name": "update_persona", "digest": "ok"}',
+                    now,
+                ),
+                _row("memory-1", "thread-1", "tool", '{"type":"trace_bundle"}', now),
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    "user",
+                    "Be my coach\nand plan my week",
+                    now + timedelta(seconds=1),
+                ),
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    "assistant",
+                    "**Done.**\n\n1. Monday",
+                    now + timedelta(seconds=2),
+                ),
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    "user",
+                    "Next?",
+                    now + timedelta(seconds=3),
+                ),
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    "assistant",
+                    "Ship it.",
+                    now + timedelta(seconds=4),
+                ),
+                _row("memory-1", "thread-2", "user", "Other thread", now),
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    "user",
+                    "Another agent",
+                    now,
+                    agent_id="agent-2",
+                ),
+            ]
+        }
+    )
+
+    messages = conversations.thread_messages(
+        provider, "memory-1", "thread-1", agent_id="agent-1"
+    )
+
+    assert [(m["role"], m["text"], m["tools"]) for m in messages] == [
+        ("user", "Be my coach\nand plan my week", []),
+        ("assistant", "**Done.**\n\n1. Monday", ["update_persona"]),
+        ("user", "Next?", []),
+        ("assistant", "Ship it.", []),
+    ]
+
+
+@pytest.mark.unit
+def test_cmd_conversations_replays_the_resumed_thread(monkeypatch):
+    from memorizz.cli import picker
+
+    now = datetime.now(timezone.utc)
+    provider = _Provider(
+        {
+            "memory-2": [
+                _row(
+                    "memory-2",
+                    "thread-2",
+                    "user",
+                    f"question {n}",
+                    now + timedelta(seconds=2 * n),
+                )
+                for n in range(20)
+            ]
+            + [
+                _row(
+                    "memory-2",
+                    "thread-2",
+                    "assistant",
+                    f"**answer {n}**",
+                    now + timedelta(seconds=2 * n + 1),
+                )
+                for n in range(20)
+            ]
+        }
+    )
+    selected = ConversationSummary(
+        memory_id="memory-2",
+        thread_id="thread-2",
+        title="question 0",
+        preview="question 19",
+        created_at=now,
+        updated_at=now,
+        message_count=40,
+    )
+    output = StringIO()
+    session = SimpleNamespace(
+        agent=SimpleNamespace(
+            agent_id="agent-1",
+            memory_ids=["memory-2"],
+            resume_thread=lambda memory_id, thread_id: None,
+        ),
+        provider=provider,
+        memory_id="memory-1",
+        thread_id="thread-1",
+        user_id=None,
+        code_mode=False,
+        console=Console(file=output, color_system=None, width=120),
+    )
+    monkeypatch.setattr(
+        commands.conversations, "discover_conversations", lambda *a, **k: [selected]
+    )
+    monkeypatch.setattr(
+        commands.conversations, "pick_conversation", lambda *a, **k: selected
+    )
+    monkeypatch.setattr(commands.cfg, "save_state", lambda state: None)
+    monkeypatch.setattr(picker, "picker_available", lambda console: True)
+
+    commands.cmd_conversations(session, "")
+
+    text = output.getvalue()
+    assert "Earlier in this conversation" in text
+    assert "… 10 earlier messages" in text
+    assert "memorizz> question 4\n" not in text
+    assert "memorizz> question 5\n" in text and "memorizz> question 19\n" in text
+    # Answers render as Markdown, not raw markup.
+    assert "answer 19" in text and "**answer 19**" not in text
+    # The summary line closes the replay, right above the prompt.
+    assert text.index("answer 19") < text.index("Resumed conversation question 0")
+
+
+@pytest.mark.unit
 def test_cmd_conversations_list_prints_without_opening_the_picker(monkeypatch):
     from datetime import datetime
 
@@ -310,3 +452,67 @@ def test_conversation_command_and_aliases_are_registered():
     assert commands.ALIASES["conversation"] == "conversations"
     assert commands.ALIASES["converstations"] == "conversations"
     assert commands.ALIASES["threads"] == "conversations"
+
+
+@pytest.mark.unit
+def test_cmd_history_prints_the_whole_thread_untruncated():
+    now = datetime.now(timezone.utc)
+    long_answer = "Listen up. " + "word " * 200 + "the end."
+    provider = _Provider(
+        {
+            "memory-1": [
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    "tool",
+                    '{"tool_name": "update_persona", "digest": "{\'updated\': True}"}',
+                    now,
+                ),
+                _row("memory-1", "thread-1", "user", "update your persona", now),
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    "assistant",
+                    long_answer,
+                    now + timedelta(seconds=1),
+                ),
+            ]
+            + [
+                _row(
+                    "memory-1",
+                    "thread-1",
+                    role,
+                    f"{role} {n}",
+                    now + timedelta(seconds=2 + 2 * n + (role == "assistant")),
+                )
+                for n in range(30)
+                for role in ("user", "assistant")
+            ]
+        }
+    )
+    output = StringIO()
+    session = SimpleNamespace(
+        agent=SimpleNamespace(agent_id="agent-1"),
+        provider=provider,
+        memory_id="memory-1",
+        thread_id="thread-1",
+        user_id=None,
+        code_mode=False,
+        console=Console(file=output, color_system=None, width=120),
+    )
+
+    commands.cmd_history(session, "")
+
+    text = output.getvalue()
+    assert "Conversation history · 62 messages" in text
+    assert "earlier messages" not in text
+    assert "memorizz> update your persona" in text
+    assert "Tools: update_persona" in text and "digest" not in text
+    assert "the end." in text
+    assert "memorizz> user 29" in text and "assistant 29" in text
+
+    output.truncate(0)
+    output.seek(0)
+    session.thread_id = None
+    commands.cmd_history(session, "")
+    assert "No conversation history yet." in output.getvalue()

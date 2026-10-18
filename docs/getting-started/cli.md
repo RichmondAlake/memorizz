@@ -341,8 +341,8 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/memory [id\|project [path]]` | Show or switch the active memory id. `project` resolves the folder's project memory, the one the Codex and Claude Code plugins write to. |
 | `/session <run> [N]` | Show one recorded session inside the chat: its header and the last N turns (default 20), with tool activity counted between turns. Takes the short run id from `/sessions`. |
 | `/sessions [codex\|claude-code] [N]` | List the Codex and Claude Code sessions the MemoRizz plugins recorded: when, agent, project memory, turns, folder, opening prompt and run id. |
-| `/history` | Print the current conversation history. |
-| `/conversations [search]` | Open a searchable picker and resume a saved conversation thread. |
+| `/history` | Print the current conversation in full: every question and answer, with the tools each answer used. |
+| `/conversations [search]` | Open a searchable picker and resume a saved conversation thread. Its last 30 messages are printed in the terminal before you continue. |
 | `/forget <id>` | Delete a single stored memory by id. |
 | `/new` | Start a fresh conversation thread (keeps long-term memory). |
 | `/clear` | **Erase the agent's entire stored memory** (asks to confirm). |

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -87,6 +88,7 @@ def conversation_row_parts(row: Any) -> Dict[str, Any]:
         ),
         "role": role,
         "content": _single_line(content),
+        "text": _text(content),
         "timestamp": _parse_timestamp(
             row.get("timestamp")
             or row.get("created_at")
@@ -188,6 +190,73 @@ def discover_conversations(
 
     summaries.sort(key=_sort_key, reverse=True)
     return summaries
+
+
+_TOOL_PLACEHOLDER = re.compile(r"\[Tool '([^']+)'")
+
+
+def _tool_name(text: str) -> str:
+    """The tool a stored tool row came from: an offloaded result's JSON or an
+    older ``[Tool 'name' …]`` placeholder. Trace bundles name no tool."""
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        match = _TOOL_PLACEHOLDER.match(text)
+        return match.group(1) if match else ""
+    return _text(payload.get("tool_name")) if isinstance(payload, dict) else ""
+
+
+def thread_messages(
+    provider: Any,
+    memory_id: str,
+    thread_id: str,
+    *,
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """One thread's turns in order with their full text, for replaying it.
+
+    Each item is ``{"role", "text", "timestamp", "tools"}``. Tool rows are not
+    turns: the tools they name go on the reply that follows them.
+    """
+    rows = []
+    for row in _history_rows(provider, memory_id, user_id):
+        item = conversation_row_parts(row)
+        if item.get("thread_id") != thread_id:
+            continue
+        if item.get("has_user_id") and item.get("user_id") != user_id:
+            continue
+        row_agent_id = item.get("agent_id")
+        if agent_id and row_agent_id and row_agent_id != agent_id:
+            continue
+        rows.append(item)
+    rows.sort(
+        key=lambda item: item.get("timestamp")
+        or datetime.min.replace(tzinfo=timezone.utc)
+    )
+
+    messages: List[Dict[str, Any]] = []
+    tools: List[str] = []
+    for item in rows:
+        role, text = item.get("role"), item.get("text") or ""
+        if role == "tool":
+            name = _tool_name(text)
+            if name:
+                tools.append(name)
+            continue
+        if role not in ("user", "assistant") or not text:
+            continue
+        messages.append(
+            {
+                "role": role,
+                "text": text,
+                "timestamp": item.get("timestamp"),
+                "tools": list(dict.fromkeys(tools)) if role == "assistant" else [],
+            }
+        )
+        if role == "assistant":
+            tools = []
+    return messages
 
 
 def latest_thread_id(

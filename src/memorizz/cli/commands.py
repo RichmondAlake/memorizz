@@ -501,40 +501,87 @@ def cmd_memory(session, args: str):
         pass
 
 
-def _render_history_entry(entry) -> Optional[str]:
-    if isinstance(entry, dict):
-        item = conversations.conversation_row_parts(entry)
-        role = item.get("role") or ("user" if entry.get("query") else "assistant")
-        content = item.get("content") or ""
-        if not content:
-            return None
-        return f"[dim]{role}:[/dim] {content[:200]}"
-    text = str(entry).strip()
-    return text[:200] if text else None
+def _thread_messages(session, memory_id: str, thread_id: str) -> List[dict]:
+    return conversations.thread_messages(
+        session.provider,
+        memory_id,
+        thread_id,
+        user_id=session.user_id,
+        agent_id=getattr(session.agent, "agent_id", None),
+    )
 
 
 def cmd_history(session, args: str):
+    """Print the current thread in full, the way its turns looked."""
     console = _con(session)
+    if not session.memory_id or not session.thread_id:
+        console.print("[dim]No conversation history yet.[/dim]")
+        return
     try:
-        history = (
-            session.agent.load_conversation_history(
-                session.memory_id,
-                thread_id=session.thread_id,
-                user_id=session.user_id,
-            )
-            or []
-        )
+        messages = _thread_messages(session, session.memory_id, session.thread_id)
     except Exception as exc:
         console.print(f"[red]Could not load history:[/red] {exc}")
         return
-    if not history:
+    if not messages:
         console.print("[dim]No conversation history yet.[/dim]")
         return
-    console.print(f"[bold]Conversation history[/bold] ({len(history)} entries):")
-    for entry in history[-20:]:
-        line = _render_history_entry(entry)
-        if line:
-            console.print("  " + line)
+    _print_transcript(
+        session, console, messages, f"Conversation history · {len(messages)} messages"
+    )
+
+
+# How many of a resumed thread's messages are replayed into the terminal.
+TRANSCRIPT_MESSAGES = 30
+
+
+def _show_transcript(session, console, selected) -> None:
+    """Replay the end of a resumed thread above the prompt."""
+    try:
+        messages = _thread_messages(session, selected.memory_id, selected.thread_id)
+    except Exception:
+        return
+    if not messages:
+        return
+    title = "Earlier in this conversation"
+    if selected.updated_at is not None:
+        title += f" · {conversations.human_age(selected.updated_at)}"
+    _print_transcript(session, console, messages, title, limit=TRANSCRIPT_MESSAGES)
+
+
+def _print_transcript(
+    session, console, messages: List[dict], title: str, limit: Optional[int] = None
+) -> None:
+    """Print turns the way they looked when they ran: the question after the
+    prompt, the tools it used, the answer as Markdown."""
+    from rich.markdown import Markdown
+    from rich.rule import Rule
+    from rich.text import Text
+
+    shown = messages[-limit:] if limit else messages
+    console.print(Rule(title, style="dim"))
+    if len(messages) > len(shown):
+        console.print(
+            f"[dim]… {len(messages) - len(shown)} earlier messages · "
+            f"/history prints them all[/dim]"
+        )
+    # The prompt's colours (ui.STYLE), without the harness: a turn may have
+    # run on a different one.
+    prompt = "code" if getattr(session, "code_mode", False) else "memorizz"
+    for message in shown:
+        if message["role"] == "user":
+            console.print(
+                Text.assemble(
+                    (prompt, "bold #7dd3fc"), ("> ", "#9ca3af"), message["text"]
+                )
+            )
+            continue
+        if message["tools"]:
+            console.print(
+                Text("Tools: " + ", ".join(message["tools"]), style="dim cyan")
+            )
+        console.print(Markdown(message["text"]))
+        console.print()
+    console.print(Rule(style="dim"))
 
 
 def cmd_conversations(session, args: str):
@@ -607,6 +654,7 @@ def cmd_conversations(session, args: str):
         )
     except Exception:
         pass
+    _show_transcript(session, console, selected)
     console.print(
         f"[green]Resumed conversation[/green] {escape(selected.title[:80])}\n"
         f"[dim]memory {escape(selected.memory_id)} · "
@@ -2042,7 +2090,7 @@ COMMANDS: Dict[str, Command] = {
         "/memory-provider [filesystem|mongodb|oracle|notion] [--project]",
     ),
     "history": Command(
-        cmd_history, "Print the current conversation history.", "/history"
+        cmd_history, "Print the current conversation in full.", "/history"
     ),
     "conversations": Command(
         cmd_conversations,
