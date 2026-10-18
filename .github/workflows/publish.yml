@@ -284,38 +284,31 @@ jobs:
   npm:
     needs: pypi
     runs-on: ubuntu-latest
+    # npm Trusted Publishing: npm accepts this workflow's GitHub OIDC identity
+    # (package memorizz -> RichmondAlake/memorizz, publish.yml), so no token
+    # has to be kept or renewed, and provenance is attached automatically.
+    # NPM_TOKEN, when still set, is only a fallback; npm tries OIDC first.
     permissions:
-      id-token: write # npm provenance
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      contents: read
+      id-token: write # OIDC -> npm Trusted Publishing and provenance
     steps:
-      - name: Check npm token
-        id: gate
-        run: |
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::NPM_TOKEN not configured - skipping npm shim publication."
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/checkout@v4
-        if: steps.gate.outputs.enabled == 'true'
         with:
           ref: ${{ env.RELEASE_TAG }}
       - uses: actions/setup-node@v4
-        if: steps.gate.outputs.enabled == 'true'
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+      # Trusted Publishing needs npm 11.5.1 or later.
+      - name: Update npm
+        run: npm install -g npm@latest
       - name: Test npm launcher
-        if: steps.gate.outputs.enabled == 'true'
         working-directory: packaging/npm
         run: node test/launcher.test.js
       - name: Sync version + publish shim
-        if: steps.gate.outputs.enabled == 'true'
         working-directory: packaging/npm
         env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VER="${RELEASE_TAG#v}"
           npm version "$VER" --no-git-tag-version --allow-same-version

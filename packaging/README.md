@@ -33,7 +33,11 @@ artifacts under the same version.
 - PyPI uses the `pypi` environment and its configured trusted publisher.
 - GitHub release notes come from the matching changelog section, with wheel and
   source archive attached.
-- The npm wrapper requires `NPM_TOKEN` and must match the Python release version.
+- The npm wrapper uses npm Trusted Publishing: on npmjs.com, the `memorizz`
+  package's trusted publisher is GitHub Actions, `RichmondAlake/memorizz`,
+  workflow `publish.yml`, no environment. No token is stored or renewed.
+  `NPM_TOKEN`, if set, is only a fallback. The wrapper must match the Python
+  release version.
 - The Homebrew tap requires `TAP_PUSH_TOKEN` with write access to
   `RichmondAlake/homebrew-memorizz`. Without it, the job skips the tap update;
   a green Publish workflow alone does not prove that every channel was updated.
