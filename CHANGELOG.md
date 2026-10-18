@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.17.0 — 2026-10-18
+## 0.17.1 — 2026-10-18
+
+0.17.0 was tagged but never published (a release check failed); 0.17.1 is
+that release, with the fixes below for issues reported on 0.16.6.
 
 ### Added
 
