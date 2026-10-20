@@ -106,6 +106,39 @@ async def api_get_agent(agent_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/agents/{agent_id}/memory-overview")
+async def api_agent_memory_overview(agent_id: str):
+    """What the agent remembers and how: ``MemAgent.describe_memory()``.
+
+    Also says whether its conversations are sealed and how many
+    consolidation plans its background schedule left for review.
+    """
+    if not _state["provider"]:
+        raise HTTPException(status_code=400, detail="Not connected")
+
+    from ...memagent import MemAgent
+    from ...memagent.core import _shared_upkeep
+
+    try:
+        agent = await run_in_threadpool(
+            MemAgent.load, agent_id, memory_provider=_state["provider"]
+        )
+    except Exception as exc:
+        logger.error("Failed to load agent %s for memory overview: %s", agent_id, exc)
+        raise HTTPException(status_code=404, detail="Agent not found")
+    overview = agent.describe_memory()
+    overview["sealed"] = agent.retrieval_policy.is_sealed
+    overview["chat_model"] = {
+        key: (agent.llm_config or {}).get(key)
+        for key in ("provider", "model")
+        if (agent.llm_config or {}).get(key)
+    }
+    overview["pending_consolidations"] = len(
+        _shared_upkeep(_state["provider"], agent_id).plans
+    )
+    return overview
+
+
 @router.get("/agents/{agent_id}/system-prompt")
 async def api_agent_system_prompt(agent_id: str):
     """Return the fully-assembled system prompt for an agent.

@@ -663,6 +663,18 @@ def cmd_conversations(session, args: str):
     )
 
 
+def cmd_consolidate(session, args: str):
+    from . import memory_upkeep
+
+    memory_upkeep.cmd_consolidate(session, args)
+
+
+def cmd_background_model(session, args: str):
+    from . import memory_upkeep
+
+    memory_upkeep.cmd_background_model(session, args)
+
+
 def cmd_forget(session, args: str):
     console = _con(session)
     target = args.strip()
@@ -761,6 +773,88 @@ def cmd_agent(session, args: str):
     console.print(f"[green]Loaded agent[/green] {agent_id}")
 
 
+# The longest agent name /name keeps; the UI's header field allows the same.
+AGENT_NAME_MAX = 80
+
+
+def _stored_agent(session):
+    provider = getattr(session, "provider", None)
+    agent_id = getattr(session.agent, "agent_id", None)
+    if provider is None or not agent_id:
+        return provider, None
+    return provider, provider.retrieve_memagent(agent_id)
+
+
+def save_agent_fields(session, **fields) -> None:
+    """Write only ``fields`` to the stored agent, so nothing else the running
+    agent holds (the CLI's slimmer tool set, a newer instruction) is saved."""
+    provider, record = _stored_agent(session)
+    if provider is None:
+        return
+    if record is None:
+        session.agent.save()
+        return
+    if hasattr(record, "model_copy"):
+        record = record.model_copy(update=fields)
+    else:
+        for key, value in fields.items():
+            setattr(record, key, value)
+    if hasattr(provider, "update_memagent"):
+        provider.update_memagent(record)
+    else:
+        provider.store_memagent(record)
+
+
+def _save_agent_name(session, name: str) -> None:
+    save_agent_fields(session, name=name)
+
+
+def refresh_agent_name(session) -> None:
+    """Pick up a rename made elsewhere (the UI, another session) before a
+    turn, so the status bar is current and a later save cannot undo it."""
+    try:
+        _, record = _stored_agent(session)
+    except Exception:
+        return
+    name = getattr(record, "name", None)
+    if isinstance(name, str) and name.strip():
+        session.agent.name = name
+
+
+def cmd_name(session, args: str):
+    """Show or set the active agent's name; it is saved with the agent."""
+    from rich.markup import escape
+
+    from . import ui
+
+    console = _con(session)
+    agent_id = getattr(session.agent, "agent_id", None) or "?"
+    name = " ".join(args.split())[:AGENT_NAME_MAX]
+    if not name:
+        current = getattr(session.agent, "name", None)
+        if isinstance(current, str) and current.strip():
+            console.print(
+                f"Agent name: [bold cyan]{escape(current)}[/]  [dim]agent {agent_id}[/dim]"
+            )
+        else:
+            console.print(
+                f"This agent has no name; it shows as "
+                f"[cyan]{escape(ui.agent_label(session))}[/cyan]  "
+                f"[dim]agent {agent_id}[/dim]"
+            )
+        console.print("[dim]Usage: /name <new name>[/dim]")
+        return
+    previous = getattr(session.agent, "name", None)
+    session.agent.name = name
+    try:
+        _save_agent_name(session, name)
+    except Exception as exc:
+        session.agent.name = previous
+        console.print(f"[red]Could not rename the agent:[/red] {escape(str(exc))}")
+        return
+    console.print(f"[green]Agent renamed →[/green] {escape(name)}")
+
+
 def _persona_usage(console):
     console.print("[dim]Usage:[/dim]   /persona <name> [| goals | background]")
     console.print(
@@ -770,6 +864,13 @@ def _persona_usage(console):
     console.print(
         "[dim](separate name, goals, and background with the | character)[/dim]"
     )
+
+
+def cmd_connect(session, args: str):
+    """Connect Notion, Gmail or Google Calendar, or sign in to one attached."""
+    from . import connect
+
+    connect.command(session, args)
 
 
 def cmd_persona(session, args: str):
@@ -1126,7 +1227,14 @@ def cmd_config(session, args: str):
     from dotenv import dotenv_values
 
     provider_type = type(session.provider).__name__ if session.provider else "(none)"
+    from rich.markup import escape
+
+    from . import ui
+
     console.print("[bold]memorizz config[/bold]")
+    console.print(
+        f"  agent name:    {escape(ui.agent_label(session))}  [dim](/name to change)[/dim]"
+    )
     console.print(f"  home:          {cfg.memorizz_home()}")
     console.print(f"  env file:      {cfg.resolve_env_file()}")
     console.print(f"  memory root:   {cfg.memory_root()}")
@@ -1848,6 +1956,8 @@ def cmd_menu(session, args: str):
 
     actions = [
         ("/agents", "switch agent", "←"),
+        ("/name", "rename this agent", ""),
+        ("/connect", "connect Notion, Gmail or Calendar", ""),
         ("/harnesses", "run turns on a harness", "→"),
         ("/sessions", "what Codex and Claude Code did (plugin sessions)", ""),
         ("/memory project", "chat over this folder's project memory", ""),
@@ -2100,8 +2210,24 @@ COMMANDS: Dict[str, Command] = {
     "forget": Command(
         cmd_forget, "Delete a single stored memory by id.", "/forget <id>"
     ),
+    "consolidate": Command(
+        cmd_consolidate,
+        "Tidy this memory: merge duplicates, retire stale facts, add missed ones.",
+        "/consolidate [kb] · /consolidate undo <plan id>",
+    ),
+    "background-model": Command(
+        cmd_background_model,
+        "Show or set the model summaries and /consolidate run on.",
+        "/background-model [model|provider:model|off]",
+    ),
     "agents": Command(cmd_agents, "List saved agents.", "/agents"),
     "agent": Command(cmd_agent, "Load a saved agent by id.", "/agent <id>"),
+    "name": Command(cmd_name, "Show or change the agent's name.", "/name [new name]"),
+    "connect": Command(
+        cmd_connect,
+        "Connect Notion, Gmail or Google Calendar; sign in in the browser.",
+        "/connect [notion|gmail|google-calendar|server]",
+    ),
     "automation": Command(
         cmd_automation,
         "List/run an automation attached to this agent.",
@@ -2178,6 +2304,10 @@ COMMANDS: Dict[str, Command] = {
 }
 
 ALIASES: Dict[str, str] = {
+    "rename": "name",
+    "mcp": "connect",
+    # Unambiguous before /name was introduced.
+    "n": "new",
     # These were unambiguous before /memory-provider was introduced.
     "mem": "memory",
     "memo": "memory",

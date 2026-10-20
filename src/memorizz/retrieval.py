@@ -13,11 +13,13 @@ independently and is never disabled by this policy.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 _CONVERSATION_SCOPES = {"memory", "thread", "disabled"}
 _KNOWLEDGE_SCOPES = {"memory", "namespace", "disabled"}
+_ENTITY_SCOPES = {"memory", "thread", "disabled"}
 
 
 def _scope(value: Any, *, allowed: set[str], label: str) -> str:
@@ -43,18 +45,66 @@ def _namespaces(value: Optional[Iterable[Any]]) -> Tuple[str, ...]:
     return tuple(result)
 
 
+# ``retention_state`` of conversation rows and summaries a sealed thread
+# wrote: recalled inside that thread only.
+SEALED_STATE = "sealed"
+
+
+def sealed_elsewhere(row: Any, thread_id: Optional[str]) -> bool:
+    """True for a row a sealed thread wrote, read from any other thread."""
+    if not isinstance(row, dict):
+        return False
+    content = row.get("content") if isinstance(row.get("content"), dict) else {}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    state = (
+        row.get("retention_state")
+        or content.get("retention_state")
+        or metadata.get("retention_state")
+    )
+    if str(state or "").strip().lower() != SEALED_STATE:
+        return False
+    row_thread = (
+        row.get("thread_id")
+        or row.get("conversation_id")
+        or content.get("thread_id")
+        or content.get("conversation_id")
+    )
+    return str(row_thread or "") != str(thread_id or "")
+
+
+def thread_entity_memory_id(memory_id: str, thread_id: str) -> str:
+    """The memory scope holding one thread's entity facts (``entity_scope="thread"``).
+
+    Entity rows are scoped by memory and user only, so a thread gets its own
+    memory scope. It stays under the 255 characters every provider allows.
+    """
+    scoped = f"{memory_id}:thread:{thread_id}"
+    if len(scoped) <= 255:
+        return scoped
+    digest = hashlib.sha256(scoped.encode("utf-8")).hexdigest()[:32]
+    return f"{str(memory_id)[:200]}:thread:{digest}"
+
+
 @dataclass(frozen=True)
 class RetrievalPolicy:
     """Configure automatic semantic recall without changing storage.
 
     The defaults preserve the pre-0.5.2 behaviour for compatibility. Safer
-    conversational applications can use ``RetrievalPolicy.disabled()`` or
-    select ``conversation_scope="thread"`` and explicit KB namespaces.
+    conversational applications can use ``RetrievalPolicy.disabled()``,
+    select ``conversation_scope="thread"`` and explicit KB namespaces, or seal
+    each thread with ``RetrievalPolicy.sealed()``.
+
+    ``entity_scope`` decides where entity facts live: ``"memory"`` shares
+    them across the threads of a memory and user, ``"thread"`` keeps the
+    facts a thread writes, and the facts it recalls, inside that thread, and
+    ``"disabled"`` stops recalling them automatically (the entity tools still
+    work).
     """
 
     conversation_scope: str = "memory"
     knowledge_base_scope: str = "memory"
     knowledge_base_namespaces: Tuple[str, ...] = ()
+    entity_scope: str = "memory"
     candidate_limit: int = 5
     max_items: int = 4
     query_expansion: bool = False
@@ -94,6 +144,11 @@ class RetrievalPolicy:
             "knowledge_base_namespaces",
             _namespaces(self.knowledge_base_namespaces),
         )
+        object.__setattr__(
+            self,
+            "entity_scope",
+            _scope(self.entity_scope, allowed=_ENTITY_SCOPES, label="entity_scope"),
+        )
         if isinstance(self.candidate_limit, bool) or int(self.candidate_limit) < 1:
             raise ValueError("candidate_limit must be a positive integer")
         if isinstance(self.max_items, bool) or int(self.max_items) < 1:
@@ -119,6 +174,23 @@ class RetrievalPolicy:
         )
 
     @classmethod
+    def sealed(cls, **overrides: Any) -> "RetrievalPolicy":
+        """Nothing a user said in one thread reaches another.
+
+        Conversation recall and entity facts stay inside the current thread,
+        the semantic cache only answers from the same thread, and the agent's
+        persona is read-only. The knowledge base is shared reference material
+        and stays on.
+        """
+        return cls(
+            **{"conversation_scope": "thread", "entity_scope": "thread", **overrides}
+        )
+
+    @property
+    def is_sealed(self) -> bool:
+        return self.conversation_scope != "memory" and self.entity_scope != "memory"
+
+    @classmethod
     def from_value(
         cls,
         value: Optional[Union["RetrievalPolicy", Dict[str, Any], str, bool]],
@@ -134,19 +206,21 @@ class RetrievalPolicy:
             if normalized == "disabled":
                 return cls.disabled()
             if normalized == "thread":
-                return cls(
-                    conversation_scope="thread",
-                    knowledge_base_scope="disabled",
-                )
+                # Narrows conversation recall only; the knowledge base is
+                # shared reference material and stays on.
+                return cls(conversation_scope="thread")
             if normalized == "memory":
                 return cls()
+            if normalized == "sealed":
+                return cls.sealed()
             if normalized == "namespace":
                 return cls(
                     conversation_scope="disabled",
                     knowledge_base_scope="namespace",
                 )
             raise ValueError(
-                "retrieval_policy string must be thread, memory, namespace, or disabled"
+                "retrieval_policy string must be thread, sealed, memory, namespace, "
+                "or disabled"
             )
         if isinstance(value, dict):
             data = dict(value)
@@ -168,6 +242,8 @@ class RetrievalPolicy:
             "knowledge_base_scope": self.knowledge_base_scope,
             "knowledge_base_namespaces": list(self.knowledge_base_namespaces),
         }
+        if self.entity_scope != "memory":
+            result["entity_scope"] = self.entity_scope
         if self.candidate_limit != 5:
             result["candidate_limit"] = self.candidate_limit
         if self.max_items != 4:

@@ -16,6 +16,7 @@ import queue
 import re
 import textwrap
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from rich.text import Text
@@ -124,8 +125,10 @@ def _result_text(data: Dict[str, Any]) -> str:
 
 
 class _Run:
-    def __init__(self, harness: str) -> None:
+    def __init__(self, harness: str, delegate: Optional[str] = None) -> None:
         self.harness = harness
+        # The delegate whose share this run is; its lines carry its name.
+        self.delegate = delegate
         self.held: Optional[str] = None  # latest message: may be the answer
         # Text still being written: {"kind", "id", "text"} (see metaharness.live).
         self.partial: Optional[Dict[str, str]] = None
@@ -166,8 +169,10 @@ class HarnessFeed:
                 return out
             run = self._runs.get(run_id)
             if run is None:
-                run = self._runs[run_id] = _Run(harness)
-                out.append(self._header(run))
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                run = self._runs[run_id] = _Run(harness, data.get("delegate"))
+                if not run.delegate:  # a delegate's start has its own line
+                    out.append(self._header(run))
             if harness and run.harness != harness:
                 run.harness = harness
             out.extend(self._render(run, event))
@@ -208,14 +213,18 @@ class HarnessFeed:
     # -- rendering -----------------------------------------------------------
 
     def _label(self, run: _Run) -> str:
+        if run.delegate:
+            return run.delegate
         return HARNESS_LABELS.get(run.harness, run.harness or "harness")
 
     def _header(self, run: _Run) -> Text:
         return Text.assemble(("● ", "bold magenta"), (self._label(run), "bold"))
 
     def _prefix(self, run: _Run) -> List[tuple]:
-        if self.label_every_line or (
-            len([r for r in self._runs.values() if not r.finished]) > 1
+        if (
+            self.label_every_line
+            or run.delegate
+            or len([r for r in self._runs.values() if not r.finished]) > 1
         ):
             return [(f"{self._label(run)} · ", "dim magenta")]
         return []
@@ -255,7 +264,8 @@ class HarnessFeed:
             run.partial["text"] += str(data.get("delta") or "")
             return []
         if kind == "run.finished":
-            out = self._flush_held(run) if self.show_answers else []
+            # A delegate's last message is its result, not the reply's answer.
+            out = self._flush_held(run) if self.show_answers or run.delegate else []
             run.finished, run.partial = True, None
             return out
         if kind == "message":
@@ -380,6 +390,71 @@ class HarnessFeed:
         if kind == "error":
             return [self._line(run, ("✗ " + _clip(data.get("error")), "red"))]
         return []
+
+
+def _took(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 60}m {seconds % 60:02d}s" if seconds >= 60 else f"{seconds}s"
+
+
+class DelegateLines:
+    """A line when each delegate starts and when it finishes or fails.
+
+    A coordinator's delegates are steps of its reply (``tool.started`` and
+    ``tool.completed`` with a ``delegate:`` span); a harness-backed
+    delegate's own work prints in between, under its name (``HarnessFeed``).
+    """
+
+    PREFIX = "Delegate · "
+
+    def __init__(self) -> None:
+        self._started: Dict[str, float] = {}
+
+    @staticmethod
+    def is_delegate(event: Dict[str, Any]) -> bool:
+        return str(event.get("span_id") or "").startswith("delegate:")
+
+    def event(self, event: Dict[str, Any]) -> List[Text]:
+        if not self.is_delegate(event):
+            return []
+        span = str(event["span_id"])
+        name = str(event.get("tool_name") or "delegate")
+        if name.startswith(self.PREFIX):
+            name = name[len(self.PREFIX) :]
+        if event.get("type") == "tool.started":
+            if span in self._started:
+                return []
+            self._started[span] = time.monotonic()
+            return [
+                Text.assemble(
+                    ("● ", "bold magenta"), (name, "bold"), (" is working", "dim")
+                )
+            ]
+        if event.get("type") != "tool.completed":
+            return []
+        began = self._started.pop(span, None)
+        took = f" · {_took(time.monotonic() - began)}" if began is not None else ""
+        if str(event.get("status") or "") in {
+            "success",
+            "completed",
+            "succeeded",
+            "ok",
+        }:
+            return [
+                Text.assemble(
+                    ("✓ ", "bold green"), (name, "bold"), (f" done{took}", "dim")
+                )
+            ]
+        reason = str(event.get("reason_code") or "").replace("_", " ")
+        return [
+            Text.assemble(
+                ("✗ ", "bold red"),
+                (name, "bold"),
+                (" failed", "red"),
+                (f" · {reason}" if reason else "", "red"),
+                (took, "dim"),
+            )
+        ]
 
 
 def plain(lines: List[Text]) -> str:

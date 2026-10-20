@@ -208,6 +208,8 @@ class LearningControlPlane:
         trace_id: Optional[str] = None,
         history_texts: Optional[Sequence[str]] = None,
         knowledge_base_ids: Optional[Sequence[str]] = None,
+        retrieval_policy: Any = None,
+        entity_memory_id: Optional[str] = None,
     ) -> EvidencePack:
         pack = self.evidence_planner.build(
             query,
@@ -216,6 +218,8 @@ class LearningControlPlane:
             thread_id=thread_id,
             history_texts=history_texts,
             knowledge_base_ids=knowledge_base_ids,
+            retrieval_policy=retrieval_policy,
+            entity_memory_id=entity_memory_id,
         )
         self._last_evidence_pack = pack
         scope = {

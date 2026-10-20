@@ -413,3 +413,45 @@
         display: none;
     }
 }
+
+/* Memory consolidation panel */
+.lcp-consolidation .lcp-consolidation-form {
+  margin-top: 4px;
+}
+.lcp-consolidation .lcp-check {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  align-self: center;
+  white-space: nowrap;
+}
+.lcp-consolidation .lcp-check input {
+  width: auto;
+  height: auto;
+  min-height: 0;
+  margin: 0;
+}
+.lcp-consolidation-plan {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+.lcp-subtitle {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.lcp-plan-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.lcp-plan-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

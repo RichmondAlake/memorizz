@@ -63,6 +63,7 @@ nav:
       - Workflows to Skills: guides/continual-learning.md
       - Learning Control Plane: guides/learning-control-plane.md
       - Forgetting Mechanism: guides/forgetting-mechanism.md
+      - Memory Consolidation: guides/memory-consolidation.md
       - Fine-Tuning Models: guides/fine-tuning.md
       - Account-Owned Persona Evolution: persona-evolution-hosts.md
   - Operate:

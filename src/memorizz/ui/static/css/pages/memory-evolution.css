@@ -335,6 +335,14 @@
 .me-node[data-action="observed"] {
   border-style: dashed;
 }
+/* Changes made by an approved plan: a coloured edge, the plan's family as
+   the header ("consolidation", "forgetting"). */
+.me-node[data-governed="consolidation"] {
+  border-left: 3px solid var(--accent-primary, #9da4ff);
+}
+.me-node[data-governed="forgetting"] {
+  border-left: 3px solid var(--text-muted, #8993a5);
+}
 .me-node:hover,
 .me-node[aria-pressed="true"] {
   border-color: var(--text-muted, #8993a5);

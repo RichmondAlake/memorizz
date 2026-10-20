@@ -74,6 +74,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["playground"])
 
+# The longest agent name the header field and the rename API accept.
+AGENT_NAME_MAX = 80
+
 # Messages served per thread request: the newest page, as the CLI shows.
 THREAD_PAGE_SIZE = 200
 THREAD_PAGE_MAX = 1000
@@ -1827,6 +1830,58 @@ async def agent_rename_thread(request: Request, agent_id: str, memory_id: str):
         titles.pop(memory_id, None)
     _save_agent_fields(agent, thread_titles=titles or None)
     return {"ok": True, "memory_id": memory_id, "title": title or None}
+
+
+@router.get("/api/agents/{agent_id}/live")
+async def agent_live_turns(
+    request: Request, agent_id: str, memory_id: str = "", wait: float = 300.0
+):
+    """Server-sent events for turns the CLI runs with this agent, as they
+    stream; ``memory_id`` keeps one conversation's. The stream closes after
+    ``wait`` seconds and the browser reconnects."""
+    import asyncio
+    import time
+
+    from ...live_turns import LiveTail
+    from ..helpers import _load_agent
+
+    _load_agent(agent_id)
+    tail = LiveTail(agent_id, memory_id.strip() or None)
+    deadline = time.monotonic() + max(0.0, min(wait, 300.0))
+
+    async def events():
+        yield "retry: 2000\n\n"
+        beat = time.monotonic()
+        while True:
+            for event in await run_in_threadpool(tail.poll):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            now = time.monotonic()
+            if now >= deadline or await request.is_disconnected():
+                return
+            if now - beat >= 15:
+                yield ": keep-alive\n\n"
+                beat = now
+            await asyncio.sleep(0.2)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/api/agents/{agent_id}/name")
+async def agent_rename(request: Request, agent_id: str):
+    """Rename an agent: the name the playground, the agent list and the CLI show."""
+    from ..helpers import _load_agent, _save_agent_fields
+
+    agent = _load_agent(agent_id)
+    payload = await _json_object(request, required=False)
+    name = " ".join(str(payload.get("name") or "").split())[:AGENT_NAME_MAX]
+    if not name:
+        raise HTTPException(status_code=400, detail="The name cannot be empty")
+    _save_agent_fields(agent, name=name)
+    return {"ok": True, "agent_id": agent_id, "name": name}
 
 
 def _delete_conversation(

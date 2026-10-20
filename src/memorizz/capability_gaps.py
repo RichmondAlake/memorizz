@@ -277,6 +277,29 @@ def state_for_agent(agent: Any) -> List[Dict[str, Any]]:
     )
 
 
+def resolve(name: Any) -> Optional[str]:
+    """The capability a model or user named: its id, its title ("Notes and
+    docs"), or a service that provides it ("notion", "gmail")."""
+    words = re.sub(r"[\s_-]+", " ", str(name or "")).strip().lower()
+    for capability in CAPABILITIES:
+        if words in {
+            capability.id.replace("_", " "),
+            capability.title.lower(),
+            (capability.preset or "").replace("-", " "),
+            *capability.server_terms,
+        }:
+            return capability.id
+    return None
+
+
+def service_title(capability_id: str) -> Optional[str]:
+    """The service the app connects for a capability ("Notion"), if any."""
+    capability = BY_ID.get(capability_id)
+    if capability is None or not capability.preset:
+        return None
+    return catalog.PRESETS[catalog.preset_key(capability.preset)]["title"]
+
+
 def missing(state: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [row for row in state if row["status"] != "enabled"]
 
@@ -306,8 +329,9 @@ def manifest(state: Iterable[Dict[str, Any]]) -> str:
         "Capabilities not enabled for this agent:\n"
         + "\n".join(lines)
         + "\nIf a request needs one of these, call request_capability with its "
-        "name instead of improvising, pretending, or offering a workaround. The "
-        "user can enable it from the app."
+        "name instead of improvising, pretending, or offering a workaround. Each "
+        "can be connected: say it isn't set up yet, never that it is impossible, "
+        "even if earlier conversation said so. The user can enable it from the app."
     )
 
 
@@ -318,6 +342,8 @@ __all__ = [
     "capability_state",
     "manifest",
     "missing",
+    "resolve",
+    "service_title",
     "state_for_agent",
     "suggest",
 ]

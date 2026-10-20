@@ -16,10 +16,12 @@ import urllib.parse
 import urllib.request
 import uuid
 import warnings
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
+from dataclasses import replace as replace_fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +34,7 @@ from typing import (
     Iterable,
     List,
     Optional,
+    Sequence,
     Set,
     Tuple,
     Union,
@@ -69,6 +72,7 @@ from ..observability.analytics import memory_type as usage_memory_type
 from ..observability.normalization import TRACE_METADATA_FIELDS
 from ..observability.pricing import DEFAULT_PRICING
 from ..observability.prompt_cache import add_call_usage
+from ..retrieval import sealed_elsewhere
 from ..streaming import (
     HarnessProgress,
     StreamCancelled,
@@ -353,6 +357,45 @@ def _provider_error_details(exc: Exception) -> Tuple[bool, bool, Optional[int]]:
     return False, False, None
 
 
+class _UpkeepState:
+    """Memory upkeep of one agent on one memory provider.
+
+    A server often loads a fresh MemAgent for each request. Every instance of
+    the same agent on the same provider shares this, so the consolidation
+    schedule, plans waiting for review, the reflection counters and the
+    background compaction a turn has to wait for outlive the instance.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.worker: Optional[ThreadPoolExecutor] = None
+        self.futures: Dict[Tuple[Any, ...], Any] = {}
+        # Per (memory_id, user_id): turns and threads since the last pass.
+        self.consolidation: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        self.plans: Dict[str, Any] = {}
+        # Generative-Agents reflection: importance accumulated per memory_id
+        # since that conversation last reflected.
+        self.reflection: Dict[str, float] = {}
+        self.reflection_lock = threading.Lock()
+
+
+_UPKEEP_STATES: "weakref.WeakKeyDictionary[Any, Dict[str, _UpkeepState]]" = (
+    weakref.WeakKeyDictionary()
+)
+_UPKEEP_STATES_LOCK = threading.Lock()
+
+
+def _shared_upkeep(provider: Any, agent_id: Optional[str]) -> _UpkeepState:
+    if provider is None or not agent_id:
+        return _UpkeepState()
+    with _UPKEEP_STATES_LOCK:
+        try:
+            by_agent = _UPKEEP_STATES.setdefault(provider, {})
+        except TypeError:  # a provider that can't be weakly referenced
+            return _UpkeepState()
+        return by_agent.setdefault(str(agent_id), _UpkeepState())
+
+
 class MemAgent:
     """MemAgent class that orchestrates manager components."""
 
@@ -393,6 +436,11 @@ class MemAgent:
     _approval_execution_active = _ContextLocal(lambda: False)
     _last_context_window_stats = _ContextLocal()
     _last_completion_decisions = _ContextLocal(list)
+    # ``run(..., retrieval_policy=)`` for this call only; never saved.
+    _retrieval_policy_override = _ContextLocal()
+    # How close this turn's request came to compact_at, for compacting the
+    # thread in the background before the next turn needs it.
+    _compaction_outlook = _ContextLocal()
 
     # Internet tools pause for this long after this many consecutive provider
     # failures (override per process with MEMORIZZ_INTERNET_ACCESS_COOLDOWN_SECONDS
@@ -402,6 +450,10 @@ class MemAgent:
     _internet_access_clock = staticmethod(time.monotonic)
     # Bounded wait in close() for background conversation-embedding writes.
     embedding_backfill_close_timeout = 30.0
+    # Bounded wait in close() for model-backed memory upkeep, and how long a
+    # turn waits for its thread's background compaction before going ahead.
+    memory_upkeep_close_timeout = 60.0
+    background_compaction_wait_seconds = 120.0
 
     def __init__(
         self,
@@ -469,6 +521,9 @@ class MemAgent:
         streaming: bool = True,
         capture_context_snapshots: bool = False,
         capture_memory_history: bool = False,
+        background_model: Optional[Any] = None,
+        background_llm_config: Optional[Dict[str, Any]] = None,
+        memory_consolidation: Optional[Union[bool, Dict[str, Any]]] = None,
     ):
         """Initialize the MemAgent with configuration."""
         # Eager creation: no first-use race between concurrent runs.
@@ -716,6 +771,9 @@ class MemAgent:
         # cached locally", "401 from HuggingFace") instead of the generic
         # "No LLM model configured" — which sends users on a wild goose
         # chase when in reality the model failed to load.
+        self._background_model: Optional[Any] = None
+        self.background_llm_config: Dict[str, Any] = {}
+        self._background_model_error: Optional[str] = None
         self.model = model
         # Preserve the resolved LLM config dict so callers / status pages /
         # debug tooling can introspect ``agent.llm_config`` /
@@ -729,6 +787,12 @@ class MemAgent:
             except Exception as e:
                 self._llm_init_error = f"{type(e).__name__}: {e}"
                 logger.warning("Could not create LLM from config: %s", e)
+        if background_model is not None or background_llm_config:
+            self.with_background_model(
+                background_model
+                if background_model is not None
+                else background_llm_config
+            )
 
         self._context_window_tokens = self._initialize_context_window_tokens(
             context_window_tokens, llm_config
@@ -782,8 +846,12 @@ class MemAgent:
         self._embedding_backfill_lock = threading.Lock()
         # Generative-Agents reflection: importance accumulated per memory_id
         # since that conversation last reflected (see _note_importance_for_reflection).
-        self._reflection_importance: Dict[str, float] = {}
-        self._reflection_lock = threading.Lock()
+        # Model-backed memory upkeep off the user's turn (reflection, thread
+        # compaction, consolidation) shares one worker and schedule per agent
+        # and provider; see _UpkeepState.
+        from ..learning.consolidation import ConsolidationConfig
+
+        self.memory_consolidation = ConsolidationConfig.from_value(memory_consolidation)
         self._retrieval_scoring_cache: Optional[Tuple[Any, RetrievalScoring]] = None
         self._internet_access_failure_count = 0
         self._internet_access_disabled_reason: Optional[str] = None
@@ -1013,9 +1081,81 @@ class MemAgent:
                 ", ".join(sorted(unbound)),
             )
 
+        overview = self.describe_memory()
         logger.info(
-            f"MemAgent {self.agent_id} initialized with memory types: {self.active_memory_types}"
+            "MemAgent %s remembers %s; entity facts %s; memory tools: %s",
+            self.agent_id,
+            ", ".join(overview["memory_types"]) or "nothing",
+            (
+                "on, "
+                + {
+                    "memory": "shared across threads",
+                    "thread": "kept per thread",
+                    "disabled": "not recalled automatically",
+                }[self.retrieval_policy.entity_scope]
+                if overview["entity_memory"]
+                else "off"
+            ),
+            ", ".join(overview["memory_tools"]) or "none",
         )
+
+    @property
+    def model(self) -> Any:
+        """The agent's LLM provider."""
+        return self.__dict__.get("_model")
+
+    @model.setter
+    def model(self, value: Any) -> None:
+        self.__dict__["_model"] = value
+        # Memory upkeep follows a swapped model unless it has its own.
+        self._sync_background_model()
+
+    @property
+    def background_model(self) -> Any:
+        """The model memory upkeep runs on: summaries, compaction,
+        reflection, importance ratings, skill distillation and consolidation.
+        The agent's own model unless :meth:`with_background_model` set one."""
+        return self.__dict__.get("_background_model") or self.model
+
+    def with_background_model(self, model: Any = None):
+        """Run memory upkeep on a second, usually cheaper, model.
+
+        Pass an ``llm_config`` dict (saved with the agent, secrets left out),
+        a model instance from ``create_llm_provider``, or ``None`` to go back
+        to the agent's own model. The user's turns keep the agent's model.
+        Returns the agent, for chaining.
+        """
+        self._background_model_error = None
+        if model is None:
+            self._background_model = None
+            self.background_llm_config = {}
+        elif isinstance(model, dict):
+            config = dict(model)
+            try:
+                self._background_model = create_llm_provider(config)
+            except Exception as exc:
+                self._background_model = None
+                self._background_model_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "Could not create the background model; memory upkeep "
+                    "uses the agent's model: %s",
+                    exc,
+                )
+            self.background_llm_config = config
+        else:
+            self._background_model = model
+            get_config = getattr(model, "get_config", None)
+            config = get_config() if callable(get_config) else None
+            self.background_llm_config = (
+                dict(config) if isinstance(config, dict) else {}
+            )
+        self._sync_background_model()
+        return self
+
+    def _sync_background_model(self) -> None:
+        manager = self.__dict__.get("continual_learning_manager")
+        if manager is not None:
+            manager.set_llm_provider(self.background_model)
 
     @property
     def llm_provider(self) -> Optional[str]:
@@ -1654,7 +1794,7 @@ class MemAgent:
 
                     self.continual_learning_manager = ContinualLearningManager(
                         memory_provider=memory_provider,
-                        llm_provider=self.model,
+                        llm_provider=self.background_model,
                         agent_id=self.agent_id,
                         config=self.continual_learning_config,
                         tool_manager=self.tool_manager,
@@ -1678,7 +1818,7 @@ class MemAgent:
 
             self.skillbox = Skillbox(
                 memory_provider=memory_provider,
-                llm_provider=self.model,
+                llm_provider=self.background_model,
                 agent_id=self.agent_id,
             )
         if self.authored_skills:
@@ -2258,6 +2398,26 @@ class MemAgent:
             sections.append(recent_digest)
             self._record_memory_chars("tool_log", sections[-1])
 
+        # Next to the query, where it outweighs an old "I can't" in memory.
+        gaps = context.get("capability_gaps") or []
+        if gaps:
+            sections.append(
+                "This request needs something this agent is not connected to "
+                "yet:\n"
+                + "\n".join(
+                    f"- {row['title']} ({row['summary']}): "
+                    + (
+                        "connected but not signed in"
+                        if row.get("status") == "needs_sign_in"
+                        else "not connected yet"
+                    )
+                    for row in gaps
+                )
+                + "\nIt can be connected. Say it isn't connected yet and that "
+                "the user can connect it now; never call it impossible or a hard "
+                "limit, even if earlier conversation said so."
+            )
+
         if request_context:
             visible_request_context = dict(request_context)
             # The typed block above is already rendered with its own authority
@@ -2592,6 +2752,7 @@ class MemAgent:
         """
         threshold = int(getattr(self.context_policy, "compact_at", 0) or 0)
         window = self._context_window_tokens
+        self._compaction_outlook = None
         if (
             not threshold
             or not window
@@ -2601,15 +2762,41 @@ class MemAgent:
         ):
             return history
         estimate = self._compaction_estimate(history, system_prompt, query)
-        if estimate * 100 < threshold * window:
-            return history
         keep = int(self.context_policy.keep_recent_messages)
         messages = self._compaction_messages(history)
+        # Unless this turn compacts, the thread may be compacted in the
+        # background after it (see _schedule_background_compaction).
+        self._compaction_outlook = {
+            "estimate": estimate,
+            "window": window,
+            "threshold": threshold,
+            "keep": keep,
+            "messages": len(messages),
+            "scope": (
+                self._current_memory_id,
+                self._current_user_id,
+                self._current_thread_id,
+            ),
+        }
+        if estimate * 100 < threshold * window:
+            return history
+        running = self._upkeep_future(
+            self._compaction_key(
+                self._current_memory_id,
+                self._current_user_id,
+                self._current_thread_id,
+            )
+        )
+        if running is not None and not running.done():
+            # The background compaction outlived the wait in _build_context;
+            # trim this turn rather than summarize the same messages twice.
+            return history
         # Compact in batches (at least as many messages as are kept) so a
         # threshold below the fixed prompt size cannot trigger every turn.
         if len(messages) < 2 * keep:
             return history
 
+        self._compaction_outlook = None
         session = session_for(self)
         if session is not None:
             session.emit("status", stage="compacting_context")
@@ -3286,11 +3473,12 @@ class MemAgent:
             logger.debug("Capability state unavailable: %s", exc)
             return []
 
-    def _suggest_capabilities(self, session: Any, query: str) -> None:
+    def _suggest_capabilities(self, session: Any, query: str) -> List[Dict[str, Any]]:
         """Tell the host when a request needs a capability the agent lacks.
 
         A keyword check, independent of the model, so small models that never
-        call request_capability still surface the enable card.
+        call request_capability still surface the enable card. Returns the
+        capabilities' rows for this turn's context.
         """
         from .. import capability_gaps
 
@@ -3299,9 +3487,10 @@ class MemAgent:
             ids = capability_gaps.suggest(query, state)
         except Exception as exc:
             logger.debug("Capability suggestion skipped: %s", exc)
-            return
+            return []
         if ids:
             session.emit("capability.suggested", capabilities=ids)
+        return [row for row in state if row["id"] in ids]
 
     def _register_capability_tools(self) -> None:
         """Let the model ask for a missing capability instead of improvising."""
@@ -3322,12 +3511,8 @@ class MemAgent:
             web_search, email, calendar, notes, code_execution or browser. Call
             this instead of saying you can or cannot do something that needs it.
             """
-            wanted = str(capability or "").strip().lower().replace(" ", "_")
             state = {row["id"]: row for row in self._capability_state()}
-            row = state.get(wanted) or next(
-                (item for item in state.values() if item["title"].lower() == wanted),
-                None,
-            )
+            row = state.get(capability_gaps.resolve(capability) or "")
             if row is None:
                 return {
                     "ok": False,
@@ -3354,14 +3539,17 @@ class MemAgent:
                 if row["status"] == "needs_sign_in"
                 else "isn't set up"
             )
+            service = capability_gaps.service_title(row["id"])
+            label = row["title"].lower() + (f" ({service})" if service else "")
             return {
                 "ok": True,
                 "capability": row["id"],
                 "status": row["status"],
                 "message": (
-                    f"Tell the user in one short sentence that {row['title'].lower()} "
-                    f"{needs} for this agent yet, and that they can enable it from "
-                    "the app. Do not offer workarounds or pretend to have done it."
+                    f"Tell the user in one short sentence that {label} "
+                    f"{needs} for this agent yet, and that they can connect it now; "
+                    "the app offers to. Do not offer workarounds or pretend to "
+                    "have done it."
                 ),
             }
 
@@ -4147,8 +4335,26 @@ class MemAgent:
         # relay its progress so the stream says more than "working" until it
         # returns.
         stream_session = current_stream.get() or progress_stream.get()
+        # A delegate's run is named after the delegate and tied to its step.
+        delegation = (context or {}).get("delegation") or {}
+        delegated_task = (
+            delegation.get("task_id") if isinstance(delegation, dict) else None
+        )
+        persona = getattr(self, "persona", None)
         progress = (
-            HarnessProgress(stream_session, meta_harness, task.harness)
+            HarnessProgress(
+                stream_session,
+                meta_harness,
+                task.harness,
+                delegate=(
+                    getattr(self, "name", None)
+                    or getattr(persona, "name", None)
+                    or str(self.agent_id)[:8]
+                )
+                if delegated_task
+                else None,
+                span_id=f"delegate:{delegated_task}" if delegated_task else None,
+            )
             if stream_session is not None
             else None
         )
@@ -5172,10 +5378,18 @@ class MemAgent:
         personalization_selected_count = int(
             personalization_diagnostics.get("selected_count") or 0
         )
+        knowledge_base_hits = sum(
+            1 for row in semantic if row.get("source") == "knowledge_base"
+        )
         payload = {
             "schema_version": 1,
             "stage": "supplied",
             "source_counts": source_counts,
+            # semantic_memories, split by where each recalled memory came from.
+            "semantic_source_counts": {
+                "knowledge_base": knowledge_base_hits,
+                "conversation": len(semantic) - knowledge_base_hits,
+            },
             "persona_ref": persona_ref,
             "retrieved_candidate_count": (
                 semantic_candidate_count
@@ -6126,6 +6340,8 @@ class MemAgent:
                 bypass_reason=self._cache_bypass_reason,
             )
         self._record_interaction(query, response, memory_id, thread_id, user_id=user_id)
+        self._schedule_background_compaction(response)
+        self._note_turn_for_consolidation(memory_id, user_id, thread_id)
 
     def run(
         self,
@@ -6136,6 +6352,7 @@ class MemAgent:
         context: Optional[Dict[str, Any]] = None,
         tool_context: Optional[Dict[str, Any]] = None,
         observability_context: Optional[Dict[str, Any]] = None,
+        retrieval_policy: Any = None,
     ) -> str:
         """
         Run the agent with the given query using the new manager architecture.
@@ -6179,10 +6396,32 @@ class MemAgent:
                 the private trace bundle. Only a strict allowlist of routing,
                 ownership, grounding, and fingerprint fields is retained; this
                 dict is never sent to the LLM or conversation history.
+            retrieval_policy: A policy for this call only. A scope string
+                such as ``"sealed"`` or ``"thread"`` changes just those scopes
+                and keeps the agent's other settings (scoring, retention,
+                namespaces); a ``RetrievalPolicy`` or dict replaces the
+                agent's policy for the call. The agent's own policy, and what
+                ``save()`` writes, stay unchanged, and other calls running at
+                the same time keep theirs.
 
         Returns:
             The agent's response
         """
+        if retrieval_policy is not None:
+            previous_policy = self._retrieval_policy_override
+            self._retrieval_policy_override = self._call_policy(retrieval_policy)
+            try:
+                return self.run(
+                    query,
+                    memory_id=memory_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    context=context,
+                    tool_context=tool_context,
+                    observability_context=observability_context,
+                )
+            finally:
+                self._retrieval_policy_override = previous_policy
         if (
             self.meta_harness is not None
             and self.meta_harness_mode == "runtime"
@@ -7095,6 +7334,7 @@ class MemAgent:
         raise_on_provider_error: bool = False,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         observability_context: Optional[Dict[str, Any]] = None,
+        retrieval_policy: Any = None,
     ) -> Generator[str, None, None]:
         """
         Run the agent with streaming output, yielding text chunks as they arrive.
@@ -7123,6 +7363,8 @@ class MemAgent:
                 with ``set_stream_event_callback`` immediately before a run.
             observability_context: Optional content-free host provenance. See
                 ``run()``; the same strict persistence allowlist applies.
+            retrieval_policy: Optional policy for this stream only. See
+                ``run()``.
 
         Yields:
             str: Partial text chunks of the agent's response
@@ -7130,6 +7372,24 @@ class MemAgent:
         .. deprecated:: 0.13
             Use :meth:`run_stream_events`. This method will be removed in 0.14.
         """
+        if retrieval_policy is not None:
+            previous_policy = self._retrieval_policy_override
+            self._retrieval_policy_override = self._call_policy(retrieval_policy)
+            try:
+                yield from self.run_stream(
+                    query,
+                    memory_id=memory_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    context=context,
+                    tool_context=tool_context,
+                    raise_on_provider_error=raise_on_provider_error,
+                    event_callback=event_callback,
+                    observability_context=observability_context,
+                )
+            finally:
+                self._retrieval_policy_override = previous_policy
+            return
         logger.info(f"MemAgent {self.agent_id} streaming query: {query[:50]}...")
         if session_for(self) is None:
             # Called directly rather than driven by the event engine.
@@ -8808,9 +9068,11 @@ class MemAgent:
                     agent_id=self.agent_id,
                     user_id=user_id,
                 )
-                self.memory_manager.save_memory_unit(
+                placeholder_id = self.memory_manager.save_memory_unit(
                     placeholder_unit, self._current_memory_id
                 )
+                if self._active_retrieval_policy().is_sealed:
+                    self._mark_sealed(MemoryType.CONVERSATION_MEMORY, [placeholder_id])
             except Exception as persist_exc:
                 logger.debug("Tool placeholder persist failed: %s", persist_exc)
 
@@ -8954,7 +9216,9 @@ class MemAgent:
                 request_context=request_context,
             )
             return
-        self._suggest_capabilities(session, query)
+        gaps = self._suggest_capabilities(session, query)
+        if gaps:
+            context = {**context, "capability_gaps": gaps}
         workflow, messages, tools = self._prepare_turn_request(
             system_prompt,
             query,
@@ -9393,6 +9657,7 @@ class MemAgent:
     ) -> Dict[str, Any]:
         """Build context for the query using memory manager."""
         context = {"query": query}
+        policy = self._active_retrieval_policy()
         self._last_retrieved_memories = []
         self._last_selection_ledger = []
         self._last_retrieval_stats = {
@@ -9434,6 +9699,7 @@ class MemAgent:
                 logger.warning(f"Learned-skill retrieval failed: {e}")
 
         if self.memory_manager:
+            self._join_background_compaction(memory_id, user_id)
             # Load conversation history
             try:
                 history_limit = self._get_conversation_history_limit()
@@ -9484,7 +9750,6 @@ class MemAgent:
             try:
                 active = set(self.active_memory_types or [])
                 candidate_sources = []
-                policy = self.retrieval_policy
                 if policy.query_expansion:
                     try:
                         from ..retrieval_concepts import expand_query_concepts
@@ -9522,6 +9787,14 @@ class MemAgent:
                             knowledge_base_ids=list(
                                 getattr(self, "knowledge_base_ids", None) or []
                             ),
+                            # A delegate only recalls its own task's thread.
+                            retrieval_policy=(
+                                replace_fields(policy, conversation_scope="thread")
+                                if delegated_execution.get()
+                                and policy.conversation_scope == "memory"
+                                else policy
+                            ),
+                            entity_memory_id=self._entity_memory_id(memory_id),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -9626,6 +9899,11 @@ class MemAgent:
                             **knowledge_scope,
                         )
                         for row in snippets or []:
+                            # Another thread's sealed conversation stays there.
+                            if memory_type == MemoryType.CONVERSATION_MEMORY and (
+                                sealed_elsewhere(row, self._current_thread_id)
+                            ):
+                                continue
                             candidates.append((source, row))
 
                 if candidates:
@@ -9669,6 +9947,7 @@ class MemAgent:
 
         if (
             include_entity_memory
+            and policy.entity_scope != "disabled"
             and self.learning_control_plane is None
             and self._entity_memory_enabled
             and self.entity_memory_manager
@@ -9679,7 +9958,7 @@ class MemAgent:
                     "entity",
                     self.entity_memory_manager.build_context_with_diagnostics,
                     query=query,
-                    memory_id=memory_id,
+                    memory_id=self._entity_memory_id(memory_id),
                     user_id=user_id,
                 )
                 entity_context = entity_result.get("profiles") or []
@@ -9808,9 +10087,12 @@ class MemAgent:
         else:
             prompt_parts.append(self.instruction)
 
-        # 4. Persona information (with evolution history + update guidance)
+        # 4. Persona information (with evolution history + update guidance).
+        # A sealed conversation leaves the history out: its reasons can quote
+        # other conversations.
         persona_prompt = self.persona_manager.get_persona_prompt(
-            include_history=True, history_limit=5
+            include_history=not self._active_retrieval_policy().is_sealed,
+            history_limit=5,
         )
         self._rendered_persona_chars = len(persona_prompt or "")
         if persona_prompt:
@@ -10007,7 +10289,9 @@ class MemAgent:
             prompt_parts.append(
                 "Configured MCP servers:\n"
                 + "\n".join(mcp_lines)
-                + "\nUse 'list_mcp_servers' to inspect servers, 'mcp_list_tools' "
+                + "\nThese connections are live now: if earlier conversation says "
+                "you could not reach one of these services, that is out of date. "
+                "Use 'list_mcp_servers' to inspect servers, 'mcp_list_tools' "
                 "to discover tools, and 'mcp_call_tool' to execute MCP tools. "
                 "Use the resource and prompt MCP helpers when the server exposes "
                 "those capabilities. Mutating calls are paused automatically and "
@@ -10286,8 +10570,9 @@ class MemAgent:
             limit: int = 5,
         ) -> Dict[str, Any]:
             """Search structured entity memory by id, name, or semantic query."""
-            resolved_memory_id = self._current_memory_id or (
-                self.memory_ids[0] if self.memory_ids else None
+            resolved_memory_id = self._entity_memory_id(
+                self._current_memory_id
+                or (self.memory_ids[0] if self.memory_ids else None)
             )
             result = self.entity_memory_manager.lookup_entities_with_diagnostics(
                 entity_id=entity_id,
@@ -10419,8 +10704,9 @@ class MemAgent:
             """Insert or update a structured entity in the active run scope."""
             # Scope is host-owned and deliberately absent from the model-visible
             # schema. The model supplies entity facts, never tenant identifiers.
-            resolved_memory_id = self._current_memory_id or (
-                self.memory_ids[0] if self.memory_ids else None
+            resolved_memory_id = self._entity_memory_id(
+                self._current_memory_id
+                or (self.memory_ids[0] if self.memory_ids else None)
             )
             if resolved_memory_id is None:
                 raise ValueError("A memory_id is required to store entity information.")
@@ -10851,6 +11137,14 @@ class MemAgent:
                 when fields changed, or ``{"updated": False, "reason": ...}`` when the supplied
                 updates matched the current state.
             """
+            if self._active_retrieval_policy().is_sealed:
+                # Every conversation shares the persona; a sealed one can't
+                # carry what it learned into the others this way.
+                return {
+                    "updated": False,
+                    "reason": "This conversation is sealed, so the shared persona "
+                    "can't be changed from it.",
+                }
             change_trigger = {
                 "reason": reason,
                 "source_type": source_type,
@@ -11366,6 +11660,10 @@ class MemAgent:
             assistant_unit_id = self.memory_manager.save_memory_unit(
                 assistant_memory, memory_id
             )
+            if self._active_retrieval_policy().is_sealed:
+                self._mark_sealed(
+                    MemoryType.CONVERSATION_MEMORY, [user_unit_id, assistant_unit_id]
+                )
             if not user_unit_id or not assistant_unit_id:
                 report_recording_warning(
                     "conversation_persistence",
@@ -11459,6 +11757,421 @@ class MemAgent:
             _backfill, label="conversation embedding backfill", backfill=True
         )
 
+    # ------------------------------------------------------------------
+    # Memory upkeep off the user's turn (background model)
+    # ------------------------------------------------------------------
+
+    def _upkeep(self) -> _UpkeepState:
+        provider = self.__dict__.get("memory_provider")
+        if provider is None:
+            provider = getattr(self, "memory_provider", None)
+        key = (id(provider), self.__dict__.get("agent_id"))
+        cached = self.__dict__.get("_upkeep_cache")
+        if cached is None or cached[0] != key:
+            cached = (key, _shared_upkeep(provider, key[1]))
+            self.__dict__["_upkeep_cache"] = cached
+        return cached[1]
+
+    @property
+    def _upkeep_lock(self) -> Any:
+        return self._upkeep().lock
+
+    @property
+    def _upkeep_futures(self) -> Dict[Tuple[Any, ...], Any]:
+        return self._upkeep().futures
+
+    @property
+    def _upkeep_worker(self) -> Optional[ThreadPoolExecutor]:
+        return self._upkeep().worker
+
+    @_upkeep_worker.setter
+    def _upkeep_worker(self, value: Optional[ThreadPoolExecutor]) -> None:
+        self._upkeep().worker = value
+
+    @property
+    def _consolidation_state(self) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
+        return self._upkeep().consolidation
+
+    @property
+    def _consolidation_plans(self) -> Dict[str, Any]:
+        return self._upkeep().plans
+
+    @property
+    def _reflection_importance(self) -> Dict[str, float]:
+        return self._upkeep().reflection
+
+    @property
+    def _reflection_lock(self) -> Any:
+        return self._upkeep().reflection_lock
+
+    def _submit_upkeep(
+        self, key: Tuple[Any, ...], task: Callable[[], Any], *, label: str
+    ) -> bool:
+        """Run ``task`` on the memory upkeep worker in a copy of this context.
+
+        One task per ``key`` at a time: False when that key is still running
+        (or the worker is shut down). Failures are logged, never raised.
+        """
+
+        def _run() -> None:
+            try:
+                task()
+            except Exception as exc:
+                logger.warning("Background %s failed: %s", label, exc)
+
+        context = copy_context()
+        with self._upkeep_lock:
+            running = self._upkeep_futures.get(key)
+            if running is not None and not running.done():
+                return False
+            if self._upkeep_worker is None:
+                self._upkeep_worker = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="memorizz-memory-upkeep"
+                )
+            try:
+                future = self._upkeep_worker.submit(context.run, _run)
+            except RuntimeError:
+                return False
+            self._upkeep_futures[key] = future
+        return True
+
+    def _upkeep_future(self, key: Tuple[Any, ...]) -> Any:
+        with self._upkeep_lock:
+            return self._upkeep_futures.get(key)
+
+    def wait_for_memory_upkeep(self, timeout: Optional[float] = None) -> bool:
+        """Wait for background memory upkeep (thread compaction, reflection,
+        consolidation) to finish. True when nothing is still running."""
+        with self._upkeep_lock:
+            pending = [
+                item for item in self._upkeep_futures.values() if not item.done()
+            ]
+        if not pending:
+            return True
+        _done, not_done = wait_for_futures(pending, timeout=timeout)
+        return not not_done
+
+    def _shutdown_upkeep(self, timeout: float) -> bool:
+        complete = self.wait_for_memory_upkeep(timeout)
+        if not complete:
+            logger.warning(
+                "Closing with memory upkeep still running after %.0fs", timeout
+            )
+        with self._upkeep_lock:
+            worker, self._upkeep_worker = self._upkeep_worker, None
+            self._upkeep_futures.clear()
+        if worker is not None:
+            worker.shutdown(wait=False, cancel_futures=True)
+        return complete
+
+    @staticmethod
+    def _compaction_key(
+        memory_id: Optional[str], user_id: Optional[str], thread_id: Optional[str]
+    ) -> Tuple[Any, ...]:
+        return ("compaction", memory_id, user_id, thread_id)
+
+    def _join_background_compaction(
+        self, memory_id: Optional[str], user_id: Optional[str]
+    ) -> None:
+        """Let this thread's background compaction finish before its history loads."""
+        future = self._upkeep_future(
+            self._compaction_key(memory_id, user_id, self._current_thread_id)
+        )
+        if future is None or future.done():
+            return
+        session = session_for(self)
+        if session is not None:
+            session.emit("status", stage="compacting_context")
+        try:
+            future.result(timeout=self.background_compaction_wait_seconds)
+        except Exception:
+            logger.warning(
+                "Background compaction of thread %s is still running; "
+                "this turn goes ahead without it",
+                self._current_thread_id,
+            )
+
+    def _schedule_background_compaction(self, response: str) -> None:
+        """Compact the thread now when its next request would pass compact_at.
+
+        The compaction the next turn would run before its first token runs
+        on the background model between turns instead.
+        """
+        outlook = self._compaction_outlook
+        self._compaction_outlook = None
+        if not outlook:
+            return
+        projected = outlook["estimate"] + estimate_tokens(response or "")
+        if projected * 100 < outlook["threshold"] * outlook["window"]:
+            return
+        keep = outlook["keep"]
+        count = outlook["messages"] + 2
+        if count < 2 * keep:
+            return
+        memory_id, user_id, thread_id = outlook["scope"]
+        if not memory_id or not thread_id:
+            return
+
+        def _compact() -> None:
+            summary_ids = self.generate_summaries(
+                days_back=36500,
+                max_memories_per_summary=max(count - keep, 1),
+                memory_id=memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                keep_recent=keep,
+                summary_type="compaction",
+            )
+            logger.info(
+                "Compacted thread %s in the background into %d summaries",
+                thread_id,
+                len(summary_ids or []),
+            )
+
+        self._submit_upkeep(
+            self._compaction_key(memory_id, user_id, thread_id),
+            _compact,
+            label="thread compaction",
+        )
+
+    # ------------------------------------------------------------------
+    # Memory consolidation (docs/guides/memory-consolidation.md)
+    # ------------------------------------------------------------------
+
+    def with_memory_consolidation(self, enabled: bool = True, **settings: Any):
+        """Consolidate memory in the background every so many turns or hours.
+
+        Settings are those of :class:`ConsolidationConfig`: ``every_n_turns``
+        (20), ``every_hours`` (24), ``auto_apply`` (True), ``review_attributes``,
+        ``extract_facts``, ``max_entities``, ``max_threads`` and
+        ``max_messages_per_thread``. Passes run on the background model.
+        Returns the agent, for chaining.
+        """
+        from ..learning.consolidation import ConsolidationConfig
+
+        self.memory_consolidation = ConsolidationConfig.from_value(
+            {**self.memory_consolidation.to_dict(), **settings, "enabled": enabled}
+        )
+        return self
+
+    def _consolidator(self) -> Any:
+        from ..learning.consolidation import MemoryConsolidator
+
+        if self.memory_provider is None:
+            raise ValueError("Memory consolidation requires a memory provider")
+        return MemoryConsolidator(
+            self.memory_provider,
+            agent_id=self.agent_id,
+            model=self.background_model,
+            config=self.memory_consolidation,
+            knowledge_base_ids=getattr(self, "knowledge_base_ids", None) or (),
+        )
+
+    def _keep_consolidation_plan(self, plan: Any) -> None:
+        self._consolidation_plans[plan.plan_id] = plan
+        while len(self._consolidation_plans) > 20:
+            self._consolidation_plans.pop(next(iter(self._consolidation_plans)))
+
+    def plan_memory_consolidation(
+        self,
+        memory_id: Optional[str] = None,
+        *,
+        user_id: Optional[str] = None,
+        thread_ids: Optional[Sequence[str]] = None,
+        since: Optional[float] = None,
+        knowledge_base: bool = False,
+    ) -> Any:
+        """Dry-run consolidation of one memory and user; nothing changes.
+
+        Merges duplicate entities, suppresses duplicate summaries (and, with
+        ``knowledge_base=True``, duplicate knowledge-base chunks), and, on the
+        background model, retires facts stored twice or contradicted by a
+        newer one and finds facts the user stated in ``thread_ids`` that were
+        never stored. Without ``thread_ids`` it reads the threads this agent
+        served since the last pass. ``user_id=None`` is the anonymous scope.
+        """
+        memory = (
+            memory_id
+            or self._current_memory_id
+            or (self.memory_ids[0] if self.memory_ids else None)
+        )
+        if not memory:
+            raise ValueError("memory_id is required for memory consolidation")
+        if thread_ids is None:
+            with self._upkeep_lock:
+                state = self._consolidation_state.get((memory, user_id)) or {}
+                thread_ids = sorted(state.get("threads") or ())
+                since = since if since is not None else state.get("since")
+        plan = self._consolidator().plan(
+            memory_id=memory,
+            user_id=user_id,
+            thread_ids=list(thread_ids),
+            since=since,
+            knowledge_base=knowledge_base,
+            # Facts kept per thread are not this pass's to merge or add to.
+            entities=self.retrieval_policy.entity_scope == "memory",
+        )
+        self._keep_consolidation_plan(plan)
+        return plan
+
+    def apply_memory_consolidation(
+        self, plan: Any, approved_by: str, reason: Optional[str] = None
+    ) -> Any:
+        """Make a consolidation plan's changes (a plan, its dict, or its id).
+
+        Nothing is deleted; :meth:`restore_memory_consolidation` undoes it.
+        """
+        from ..learning.consolidation import ConsolidationPlan
+
+        if isinstance(plan, str):
+            if plan not in self._consolidation_plans:
+                raise KeyError(f"Consolidation plan not found: {plan}")
+            plan = self._consolidation_plans[plan]
+        elif isinstance(plan, dict):
+            plan = ConsolidationPlan.from_dict(plan)
+        result = self._consolidator().apply(
+            plan, approved_by=approved_by, reason=reason
+        )
+        self._consolidation_plans.pop(plan.plan_id, None)
+        return result
+
+    def restore_memory_consolidation(
+        self,
+        plan_id: str,
+        *,
+        approved_by: str,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Undo an applied consolidation plan in one memory and user."""
+        memory = (
+            memory_id
+            or self._current_memory_id
+            or (self.memory_ids[0] if self.memory_ids else None)
+        )
+        if not memory:
+            raise ValueError("memory_id is required")
+        return self._consolidator().restore(
+            plan_id, memory_id=memory, user_id=user_id, approved_by=approved_by
+        )
+
+    def pending_memory_consolidations(self) -> List[Any]:
+        """Plans made in this process that are waiting to be applied."""
+        return list(self._consolidation_plans.values())
+
+    def _note_turn_for_consolidation(
+        self, memory_id: Optional[str], user_id: Optional[str], thread_id: Optional[str]
+    ) -> None:
+        """Count the turn and schedule a pass when one is due."""
+        config = self.memory_consolidation
+        if not config.enabled or self.memory_provider is None or not memory_id:
+            return
+        policy = self._active_retrieval_policy()
+        if policy.is_sealed:
+            # A sealed conversation is never mined into shared memory.
+            return
+        now = time.time()
+        key = (memory_id, user_id)
+        with self._upkeep_lock:
+            # ``since`` is when the last pass started (None before the first):
+            # a pass reads the messages written after it.
+            state = self._consolidation_state.setdefault(
+                key, {"turns": 0, "since": None, "started": now, "threads": set()}
+            )
+            state["turns"] += 1
+            if thread_id and policy.entity_scope == "memory":
+                state["threads"].add(str(thread_id))
+            due = state["turns"] >= config.every_n_turns or (
+                config.every_hours > 0
+                and now - state["started"] >= config.every_hours * 3600
+            )
+            if not due:
+                return
+            threads, since = sorted(state["threads"]), state["since"]
+            state.update(turns=0, since=now, started=now, threads=set())
+
+        def _consolidate() -> None:
+            from ..learning.consolidation import AUTOMATIC_APPROVER
+
+            plan = self.plan_memory_consolidation(
+                memory_id, user_id=user_id, thread_ids=threads, since=since
+            )
+            if not plan.ops:
+                logger.info("Memory consolidation of %s: nothing to change", memory_id)
+                self._consolidation_plans.pop(plan.plan_id, None)
+                return
+            if not self.memory_consolidation.auto_apply:
+                logger.info(
+                    "Memory consolidation plan %s for %s is waiting for review: %s",
+                    plan.plan_id,
+                    memory_id,
+                    plan.counts,
+                )
+                return
+            result = self.apply_memory_consolidation(
+                plan, approved_by=AUTOMATIC_APPROVER
+            )
+            logger.info(
+                "Memory consolidation %s of %s applied %s%s",
+                plan.plan_id,
+                memory_id,
+                result.applied,
+                f" with {len(result.errors)} errors" if result.errors else "",
+            )
+
+        if not self._submit_upkeep(
+            ("consolidation", memory_id, user_id),
+            _consolidate,
+            label="memory consolidation",
+        ):
+            # A pass is still running: keep what it has not seen for the next.
+            with self._upkeep_lock:
+                state = self._consolidation_state[key]
+                state["threads"].update(threads)
+                state["since"] = since
+
+    def describe_memory(self) -> Dict[str, Any]:
+        """What this agent remembers and how it recalls it.
+
+        The active memory types, whether entity facts are on, the memory
+        tools the model can call, the retrieval policy, the background model
+        and the consolidation schedule.
+        """
+        try:
+            registered = (
+                set(self.tool_manager.list_tools()) if self.tool_manager else set()
+            )
+        except Exception:
+            registered = set()
+        memory_tools = sorted(
+            registered & (_MEMORY_BOOKKEEPING_TOOLS | {"knowledge_base_lookup"})
+        )
+        background = self.__dict__.get("_background_model")
+        return {
+            "memory_types": [
+                getattr(item, "value", str(item))
+                for item in self.active_memory_types or []
+            ],
+            "entity_memory": bool(self._entity_memory_enabled),
+            "memory_tools": memory_tools,
+            "retrieval_policy": self.retrieval_policy.to_dict(),
+            "background_model": (
+                {
+                    key: self.background_llm_config.get(key)
+                    for key in ("provider", "model")
+                    if self.background_llm_config.get(key)
+                }
+                or {"model": type(background).__name__}
+                if background is not None
+                else None
+            ),
+            "memory_consolidation": (
+                self.memory_consolidation.to_dict()
+                if self.memory_consolidation.enabled
+                else None
+            ),
+        }
+
     def _background_executor(self) -> ThreadPoolExecutor:
         """The agent's single background worker (embedding backfill, memory
         reinforcement, importance re-rating); ``close()`` drains it."""
@@ -11532,10 +12245,70 @@ class MemAgent:
     # Forgetting mechanism (docs/guides/forgetting-mechanism.md)
     # ------------------------------------------------------------------
 
+    def _call_policy(self, value: Any) -> Any:
+        """The policy a call runs with (see ``run(retrieval_policy=)``)."""
+        from ..retrieval import RetrievalPolicy
+
+        if not isinstance(value, str):
+            return RetrievalPolicy.from_value(value)
+        shortcut, default = RetrievalPolicy.from_value(value), RetrievalPolicy()
+        changes = {
+            name: getattr(shortcut, name)
+            for name in (
+                "conversation_scope",
+                "knowledge_base_scope",
+                "knowledge_base_namespaces",
+                "entity_scope",
+            )
+            if getattr(shortcut, name) != getattr(default, name)
+        }
+        return replace_fields(self.retrieval_policy, **changes)
+
+    def _active_retrieval_policy(self) -> Any:
+        """The policy for this call: ``run(..., retrieval_policy=)`` when one
+        was passed, else the agent's own."""
+        return self._retrieval_policy_override or self.retrieval_policy
+
+    def _entity_memory_id(self, memory_id: Optional[str]) -> Optional[str]:
+        """Where this turn's entity facts live: a per-thread scope under
+        ``entity_scope="thread"``, else the memory itself."""
+        thread_id = self._current_thread_id
+        if (
+            not memory_id
+            or not thread_id
+            or self._active_retrieval_policy().entity_scope != "thread"
+        ):
+            return memory_id
+        from ..retrieval import thread_entity_memory_id
+
+        return thread_entity_memory_id(memory_id, thread_id)
+
+    def _mark_sealed(self, memory_type: MemoryType, record_ids: Iterable[Any]) -> None:
+        """Rows a sealed thread writes are recalled inside it only."""
+        from ..retrieval import SEALED_STATE
+
+        provider = self.memory_provider
+        if provider is None:
+            return
+        for record_id in record_ids:
+            if not record_id:
+                continue
+            try:
+                provider.update_by_id(
+                    str(record_id), {"retention_state": SEALED_STATE}, memory_type
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not mark %s %s as sealed: %s",
+                    memory_type.value,
+                    record_id,
+                    exc,
+                )
+
     def _retrieval_scoring(self) -> RetrievalScoring:
         """This agent's retrieval scoring: policy ``scoring`` overrides laid
         over the global ``MEMORIZZ_*`` defaults, cached per policy object."""
-        policy = self.retrieval_policy
+        policy = self._active_retrieval_policy()
         cached = getattr(self, "_retrieval_scoring_cache", None)
         if cached is not None and cached[0] is policy:
             return cached[1]
@@ -11645,35 +12418,17 @@ class MemAgent:
         """The importance rater: ``MEMORIZZ_IMPORTANCE_*`` settings overlaid
         with the policy's ``scoring.importance`` mapping when present."""
         config = ImportanceConfig.from_env()
-        scoring = getattr(self.retrieval_policy, "scoring", None)
+        scoring = getattr(self._active_retrieval_policy(), "scoring", None)
         overlay = scoring.get("importance") if isinstance(scoring, dict) else None
         if isinstance(overlay, dict):
             config = ImportanceConfig.from_mapping(overlay, base=config)
         return ImportanceRater(config, generate=generate)
 
     def _importance_generate(self) -> Optional[Callable[[str], str]]:
-        """A one-prompt ``generate`` on the agent's own model for LLM ratings."""
-        model = self.model
-        if model is None:
-            return None
-        text_fn = getattr(model, "generate_text", None)
-        if callable(text_fn):
-            return lambda prompt: str(text_fn(prompt) or "")
-        generate = getattr(model, "generate", None)
-        if not callable(generate):
-            return None
+        """A one-prompt ``generate`` on the background model for LLM ratings."""
+        from ..learning.consolidation import text_generator
 
-        def _call(prompt: str) -> str:
-            response = generate([{"role": "user", "content": prompt}])
-            if isinstance(response, str):
-                return response
-            choices = getattr(response, "choices", None)
-            if choices:
-                message = getattr(choices[0], "message", None)
-                return str(getattr(message, "content", "") or "")
-            return str(response or "")
-
-        return _call
+        return text_generator(self.background_model)
 
     def _store_importance_ratings(
         self,
@@ -11788,12 +12543,36 @@ class MemAgent:
                 self._reflection_importance[memory_id] = accumulated
                 return
             self._reflection_importance[memory_id] = 0.0
-        self._run_reflection(
-            memory_id,
-            accumulated=accumulated,
-            threshold=threshold,
-            user_id=user_id,
-            thread_id=thread_id,
+        scheduled = self._submit_upkeep(
+            ("reflection", memory_id, user_id, thread_id),
+            lambda: self._run_reflection(
+                memory_id,
+                accumulated=accumulated,
+                threshold=threshold,
+                user_id=user_id,
+                thread_id=thread_id,
+            ),
+            label="reflection",
+        )
+        if not scheduled:
+            # One is still running for this conversation: try again next turn.
+            with self._reflection_lock:
+                self._reflection_importance[memory_id] = max(
+                    self._reflection_importance.get(memory_id, 0.0), accumulated
+                )
+            return
+        self._emit_stream_event(
+            "trace",
+            {
+                "trace_kind": "reflection",
+                "title": "Reflection scheduled",
+                "memory_id": memory_id,
+                "accumulated_importance": round(accumulated, 3),
+                "threshold": threshold,
+                "status": "scheduled",
+                "success": True,
+                "content": "",
+            },
         )
 
     def _run_reflection(
@@ -11805,7 +12584,10 @@ class MemAgent:
         user_id: Optional[str],
         thread_id: Optional[str],
     ) -> List[str]:
-        """Compact this conversation's older memories into a summary once."""
+        """Compact this conversation's older memories into a summary once.
+
+        Runs on the memory upkeep worker, after the turn that crossed the
+        threshold has returned."""
         keep = int(getattr(self.context_policy, "keep_recent_messages", 0) or 0)
         summary_ids: List[str] = []
         try:
@@ -11823,19 +12605,12 @@ class MemAgent:
             )
         except Exception as exc:
             logger.warning("Reflection for memory %s failed: %s", memory_id, exc)
-        self._emit_stream_event(
-            "trace",
-            {
-                "trace_kind": "reflection",
-                "title": "Reflection triggered",
-                "memory_id": memory_id,
-                "accumulated_importance": round(accumulated, 3),
-                "threshold": threshold,
-                "summary_ids": summary_ids,
-                "status": "success" if summary_ids else "no_summary",
-                "success": bool(summary_ids),
-                "content": "",
-            },
+        logger.info(
+            "Reflection for memory %s (importance %.2f of %.2f) wrote %d summaries",
+            memory_id,
+            accumulated,
+            threshold,
+            len(summary_ids),
         )
         return summary_ids
 
@@ -12105,17 +12880,22 @@ class MemAgent:
         # prevents stale reuse within one thread when page, selection, or other
         # ephemeral grounding changes between otherwise identical questions.
         request_context_fingerprint = self._fingerprint(context)
+        fingerprints = {
+            "model": self._fingerprint(model_value),
+            "prompt": self._fingerprint(prompt_value),
+            "tool_schema": self._fingerprint(tool_metadata),
+            "completion_policy": self._fingerprint(self.completion_policy.to_dict()),
+            "data_version": str(data_version),
+            "request_context": request_context_fingerprint,
+        }
+        if self._active_retrieval_policy().is_sealed and self._current_thread_id:
+            # A sealed thread's answers are reused inside that thread only,
+            # and answers from other threads never match it.
+            fingerprints["sealed_thread"] = self._fingerprint(
+                str(self._current_thread_id)
+            )
         return {
-            "fingerprints": {
-                "model": self._fingerprint(model_value),
-                "prompt": self._fingerprint(prompt_value),
-                "tool_schema": self._fingerprint(tool_metadata),
-                "completion_policy": self._fingerprint(
-                    self.completion_policy.to_dict()
-                ),
-                "data_version": str(data_version),
-                "request_context": request_context_fingerprint,
-            },
+            "fingerprints": fingerprints,
             "domain": sorted(domains)[0] if len(domains) == 1 else None,
             "domains": sorted(domains),
             "tags": sorted(set(tags)),
@@ -12458,14 +13238,19 @@ class MemAgent:
                 )
             elif self.memory_manager:
                 try:
-                    candidates = self.memory_manager.retrieve_relevant_memories(
-                        query=query,
-                        memory_type=MemoryType.CONVERSATION_MEMORY,
-                        memory_id=resolved_memory_id,
-                        limit=resolved_policy.conversation_candidate_limit,
-                        user_id=user_id,
-                        include_embedding=True,
-                    )
+                    candidates = [
+                        row
+                        for row in self.memory_manager.retrieve_relevant_memories(
+                            query=query,
+                            memory_type=MemoryType.CONVERSATION_MEMORY,
+                            memory_id=resolved_memory_id,
+                            limit=resolved_policy.conversation_candidate_limit,
+                            user_id=user_id,
+                            include_embedding=True,
+                        )
+                        or []
+                        if not sealed_elsewhere(row, exclude_thread_id)
+                    ]
                     if exclude_thread_id:
                         wanted_exclusion = str(exclude_thread_id)
 
@@ -12696,7 +13481,17 @@ class MemAgent:
                 report["closed"][label] = False
                 report["errors"].append(f"{label} close failed: {exc}")
 
-        # Stop background embedding writes before the provider they write to.
+        # Finish model-backed upkeep, then embedding writes, before the
+        # provider they write to closes.
+        if self._upkeep_worker is not None:
+            try:
+                report["closed"]["memory_upkeep"] = self._shutdown_upkeep(
+                    self.memory_upkeep_close_timeout
+                )
+            except Exception as exc:
+                report["ok"] = False
+                report["closed"]["memory_upkeep"] = False
+                report["errors"].append(f"memory_upkeep close failed: {exc}")
         try:
             report["closed"]["embedding_backfill"] = self._shutdown_embedding_backfill(
                 timeout=self.embedding_backfill_close_timeout
@@ -12815,8 +13610,8 @@ class MemAgent:
         manager = self.memory_manager or MemoryManager(self.memory_provider)
         selected_memory_ids = [memory_id] if memory_id else self.memory_ids
         current_memory_id = memory_id or self._current_memory_id
-        return manager.generate_summaries(
-            model=self.model,
+        summary_ids = manager.generate_summaries(
+            model=self.background_model,
             agent_id=self.agent_id,
             memory_ids=selected_memory_ids,
             current_memory_id=current_memory_id,
@@ -12828,3 +13623,6 @@ class MemAgent:
             keep_recent=keep_recent,
             summary_type=summary_type,
         )
+        if summary_ids and self._active_retrieval_policy().is_sealed:
+            self._mark_sealed(MemoryType.SUMMARIES, summary_ids)
+        return summary_ids

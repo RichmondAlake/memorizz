@@ -84,6 +84,23 @@ def test_memory_label_and_toolbar(session):
     assert "harness codex" in to_plain_text(ui.toolbar(sess))
 
 
+def test_status_bar_names_the_agent(session):
+    sess, _ = session
+    # No name and no persona: the start of the agent id.
+    assert ui.agent_label(sess) == "agent-1"
+    assert "\n memorizz · agent-1 · ollama/gemma4:latest · memory" in to_plain_text(
+        ui.toolbar(sess)
+    )
+    sess.agent.persona_manager = type(
+        "PM", (), {"current_persona": type("P", (), {"name": "Coach"})()}
+    )()
+    assert ui.agent_label(sess) == "Coach"
+    sess.agent.name = "  Productivity   engine "
+    assert ui.agent_label(sess) == "Productivity engine"
+    sess.agent.name = "A very long agent name that keeps going"
+    assert "· A very long agent name… ·" in to_plain_text(ui.toolbar(sess))
+
+
 def test_prompt_fragments_keep_the_plain_label(session):
     sess, _ = session
     assert to_plain_text(ui.prompt_fragments(sess)) == "memorizz> "

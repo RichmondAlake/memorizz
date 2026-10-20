@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..._env_io import memorizz_home
-from ...mcp import MCPClientError, MCPClientManager, catalog
+from ...mcp import MCPClientError, MCPClientManager, catalog, oauth_handoff
 from ...mcp.audit import MCPAuditLogger
 from .. import integrations_view as view
 from ..dashboard import relative_time
@@ -397,6 +397,12 @@ async def api_mcp_disconnect(agent_id: str, server_name: str):
     }
 
 
+@router.get("/api/mcp/oauth/handoff")
+async def api_mcp_oauth_handoff():
+    """Tells a terminal sign-in that this app passes its callback on."""
+    return {"ok": True, "handoff": True}
+
+
 @router.get("/api/mcp/oauth/callback")
 async def api_mcp_oauth_callback(
     state: str = "",
@@ -416,6 +422,14 @@ async def api_mcp_oauth_callback(
         error=error_value,
     )
     if not result:
+        # A sign-in the CLI started lands here when this app owns the redirect.
+        handed_off = await asyncio.to_thread(
+            oauth_handoff.deliver,
+            state,
+            {"code": code, "state": state, "iss": iss, "error": error_value},
+        )
+        if handed_off:
+            return HTMLResponse(oauth_handoff.page(error_value))
         raise HTTPException(status_code=400, detail="OAuth state is invalid or expired")
     outcome = (
         "error"

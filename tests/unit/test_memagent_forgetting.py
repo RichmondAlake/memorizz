@@ -502,15 +502,17 @@ def test_reflection_runs_once_when_accumulated_importance_crosses_the_threshold(
 
     agent._record_interaction("first thing", "second thing", "memory-1", "thread-1")
 
+    # The turn only schedules it; the summaries are written off the turn.
+    reflections = [e for e in events if e.get("trace_kind") == "reflection"]
+    assert len(reflections) == 1
+    assert reflections[0]["status"] == "scheduled"
+    assert reflections[0]["accumulated_importance"] == pytest.approx(1.2)
+    assert agent.wait_for_memory_upkeep(timeout=10)
     assert len(calls) == 1
     assert calls[0]["memory_id"] == "memory-1" and calls[0]["thread_id"] == "thread-1"
     assert calls[0]["summary_type"] == "compaction"
     assert agent._reflection_importance["memory-1"] == 0.0
-    reflections = [e for e in events if e.get("trace_kind") == "reflection"]
-    assert len(reflections) == 1
-    assert reflections[0]["accumulated_importance"] == pytest.approx(1.2)
-    assert reflections[0]["summary_ids"] == ["s1"]
-    agent.close()
+    assert agent.close()["closed"]["memory_upkeep"] is True
 
 
 def test_reflection_is_off_by_default(work_dir, monkeypatch):

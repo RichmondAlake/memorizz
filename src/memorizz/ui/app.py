@@ -1134,36 +1134,63 @@ def create_app(
             return RedirectResponse(url="/dashboard", status_code=302)
         return RedirectResponse(url="/connect", status_code=302)
 
+    def _connect_context(
+        request: Request, provider_type: Optional[str], error: Optional[str]
+    ) -> Dict[str, Any]:
+        """The connect page's fields, pre-filled from the environment and
+        from the FileSystem stores found on this computer."""
+        from .local_stores import detect_local_stores
+
+        env_mongodb_uri = os.environ.get("MONGODB_URI", "")
+        stores = detect_local_stores()
+        default_store = next((store for store in stores if store["default"]), None)
+        if not provider_type:
+            provider_type = os.environ.get("MEMORIZZ_BACKEND", "").strip()
+        if not provider_type:
+            # A database configured in the environment comes first. Otherwise
+            # a local store with agents (where the CLI keeps memory unless told
+            # otherwise) beats guessing Oracle.
+            oracle_configured = all(
+                os.environ.get(key) for key in ("ORACLE_USER", "ORACLE_DSN")
+            )
+            if env_mongodb_uri:
+                provider_type = "mongodb"
+            elif not oracle_configured and any(store["agents"] for store in stores):
+                provider_type = "filesystem"
+            else:
+                provider_type = "oracle"
+        return {
+            "request": request,
+            "error": error,
+            "provider_type": provider_type,
+            # Pre-fill from env vars so users don't have to re-type
+            "env_oracle_user": os.environ.get("ORACLE_USER", ""),
+            "has_env_oracle_password": bool(os.environ.get("ORACLE_PASSWORD", "")),
+            "env_oracle_dsn": os.environ.get("ORACLE_DSN", ""),
+            "env_oracle_schema": os.environ.get("ORACLE_SCHEMA", ""),
+            "has_env_mongodb_uri": bool(env_mongodb_uri),
+            "env_mongodb_db_name": os.environ.get("MONGODB_DB_NAME", ""),
+            "env_notion_data_source_id": os.environ.get(
+                "MEMORIZZ_NOTION_DATA_SOURCE_ID", ""
+            ),
+            "env_filesystem_path": os.environ.get("MEMORIZZ_MEMORY_ROOT", "")
+            or (default_store["display"] if default_store else ""),
+            "default_filesystem_path": default_store["display"]
+            if default_store
+            else "~/.memorizz/memory",
+            "local_stores": stores,
+            "has_env_notion_token": bool(os.environ.get("NOTION_TOKEN")),
+            "env_notion_semantic_backend": os.environ.get(
+                "MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"
+            ),
+            "ui_read_only": read_only_mode,
+        }
+
     @app.get("/connect", response_class=HTMLResponse)
     async def connect_page(request: Request):
         """Show the connection page."""
-        env_mongodb_uri = os.environ.get("MONGODB_URI", "")
-        provider_type = os.environ.get("MEMORIZZ_BACKEND", "").strip()
-        if not provider_type:
-            provider_type = "mongodb" if env_mongodb_uri else "oracle"
         return templates.TemplateResponse(
-            "connect.html",
-            {
-                "request": request,
-                "error": None,
-                "provider_type": provider_type,
-                # Pre-fill from env vars so users don't have to re-type
-                "env_oracle_user": os.environ.get("ORACLE_USER", ""),
-                "has_env_oracle_password": bool(os.environ.get("ORACLE_PASSWORD", "")),
-                "env_oracle_dsn": os.environ.get("ORACLE_DSN", ""),
-                "env_oracle_schema": os.environ.get("ORACLE_SCHEMA", ""),
-                "has_env_mongodb_uri": bool(env_mongodb_uri),
-                "env_mongodb_db_name": os.environ.get("MONGODB_DB_NAME", ""),
-                "env_notion_data_source_id": os.environ.get(
-                    "MEMORIZZ_NOTION_DATA_SOURCE_ID", ""
-                ),
-                "env_filesystem_path": os.environ.get("MEMORIZZ_MEMORY_ROOT", ""),
-                "has_env_notion_token": bool(os.environ.get("NOTION_TOKEN")),
-                "env_notion_semantic_backend": os.environ.get(
-                    "MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"
-                ),
-                "ui_read_only": read_only_mode,
-            },
+            "connect.html", _connect_context(request, None, None)
         )
 
     @app.post("/connect", response_class=HTMLResponse)
@@ -1311,30 +1338,10 @@ def create_app(
         except Exception as e:
             logger.error(f"Connection failed: {e}")
             error = _format_connect_error(provider_type, e)
-            return templates.TemplateResponse(
-                "connect.html",
-                {
-                    "request": request,
-                    "error": error,
-                    "provider_type": provider_type,
-                    "env_oracle_user": os.environ.get("ORACLE_USER", ""),
-                    "has_env_oracle_password": bool(
-                        os.environ.get("ORACLE_PASSWORD", "")
-                    ),
-                    "env_oracle_dsn": os.environ.get("ORACLE_DSN", ""),
-                    "env_oracle_schema": os.environ.get("ORACLE_SCHEMA", ""),
-                    "has_env_mongodb_uri": bool(os.environ.get("MONGODB_URI", "")),
-                    "env_mongodb_db_name": os.environ.get("MONGODB_DB_NAME", ""),
-                    "env_notion_data_source_id": os.environ.get(
-                        "MEMORIZZ_NOTION_DATA_SOURCE_ID", ""
-                    ),
-                    "has_env_notion_token": bool(os.environ.get("NOTION_TOKEN")),
-                    "env_notion_semantic_backend": os.environ.get(
-                        "MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"
-                    ),
-                    "ui_read_only": read_only_mode,
-                },
-            )
+            context = _connect_context(request, provider_type, error)
+            if filesystem_path:
+                context["env_filesystem_path"] = filesystem_path
+            return templates.TemplateResponse("connect.html", context)
 
     @app.get("/disconnect")
     async def disconnect():

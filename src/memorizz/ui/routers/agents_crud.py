@@ -620,6 +620,7 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "continual_learning": bool(getattr(agent, "continual_learning", False)),
         "learning_control_plane": bool(getattr(agent, "learning_control_plane", False)),
         "forgetting": _forgetting_form_values(getattr(agent, "retrieval_policy", None)),
+        **_memory_upkeep_form_values(agent),
         "skill_injection_role": skill_injection_role,
         "continual_learning_require_shadow": bool(
             continual_learning_config.get("require_shadow", False)
@@ -782,6 +783,127 @@ def _retrieval_policy_with_forgetting(
     else:
         policy.pop("retention", None)
     return policy or None
+
+
+def _memory_upkeep_form_values(agent: Any) -> Dict[str, Any]:
+    """Template values for the Memory upkeep group."""
+    from ...learning.consolidation import ConsolidationConfig
+    from ...retrieval import RetrievalPolicy
+
+    background = getattr(agent, "background_llm_config", None) or {}
+    model = background.get("model") if isinstance(background, dict) else None
+    try:
+        sealed = RetrievalPolicy.from_value(
+            getattr(agent, "retrieval_policy", None) or None
+        ).is_sealed
+    except (TypeError, ValueError):
+        sealed = False
+    try:
+        consolidation = ConsolidationConfig.from_value(
+            getattr(agent, "memory_consolidation", None)
+        )
+    except (TypeError, ValueError):
+        consolidation = ConsolidationConfig()
+    policy = getattr(agent, "retrieval_policy", None) or {}
+    if hasattr(policy, "to_dict"):
+        policy = policy.to_dict()
+    return {
+        "background_model": (
+            f"{background.get('provider')}:{model}"
+            if model and background.get("provider")
+            else model or ""
+        ),
+        "sealed_conversations": sealed,
+        "entity_scope": (
+            str(policy.get("entity_scope") or "memory")
+            if isinstance(policy, dict)
+            else "memory"
+        ),
+        "memory_consolidation": consolidation.enabled,
+        "consolidation_every_n_turns": consolidation.every_n_turns,
+        "consolidation_auto_apply": consolidation.auto_apply,
+    }
+
+
+_BACKGROUND_PROVIDERS = (
+    "openai",
+    "anthropic",
+    "azure",
+    "ollama",
+    "huggingface",
+    "mlx",
+    "local-openai",
+)
+
+
+def _parse_background_model(
+    spec: Optional[str], chat_config: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """``provider:model``, or a model of the chat provider; blank is none."""
+    text = _to_text(spec).strip()
+    if not text:
+        return None
+    chat = {
+        key: value
+        for key, value in dict(chat_config or {}).items()
+        if key not in {"model", "deployment_name", "api_key"}
+    }
+    head, _, rest = text.partition(":")
+    if head.lower() in _BACKGROUND_PROVIDERS and rest.strip():
+        provider = head.lower()
+        base = chat if chat.get("provider") == provider else {}
+        return {**base, "provider": provider, "model": rest.strip()}
+    return {**chat, "model": text}
+
+
+def _retrieval_policy_with_privacy(
+    policy: Optional[Dict[str, Any]],
+    sealed: bool,
+    entity_scope: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Seal (or unseal) every conversation: nothing crosses between them.
+
+    ``entity_scope`` (memory, thread, disabled) applies when not sealed;
+    None leaves the stored one as it is.
+    """
+    current = dict(policy or {})
+    if sealed:
+        current.update(conversation_scope="thread", entity_scope="thread")
+        return current
+    if (
+        current.get("conversation_scope") == "thread"
+        and current.get("entity_scope") == "thread"
+    ):
+        current["conversation_scope"] = "memory"
+        current.pop("entity_scope", None)
+    scope = _to_text(entity_scope).strip().lower()
+    if scope in {"thread", "disabled"}:
+        current["entity_scope"] = scope
+    elif scope == "memory":
+        current.pop("entity_scope", None)
+    return current or None
+
+
+def _memory_consolidation_value(
+    enabled: Optional[str],
+    every_n_turns: Optional[str],
+    auto_apply: Optional[str],
+    existing: Any = None,
+) -> Optional[Dict[str, Any]]:
+    from ...learning.consolidation import ConsolidationConfig
+
+    if not _parse_bool(enabled):
+        return None
+    value = dict(existing) if isinstance(existing, dict) else {}
+    value["enabled"] = True
+    try:
+        turns = int(_to_text(every_n_turns).strip())
+    except ValueError:
+        turns = 0
+    if turns >= 1:
+        value["every_n_turns"] = turns
+    value["auto_apply"] = _parse_bool(auto_apply)
+    return ConsolidationConfig.from_value(value).to_dict()
 
 
 def _parse_default_timezone(
@@ -1215,6 +1337,12 @@ async def agent_create_submit(
     forgetting_retention_enabled: Optional[str] = Form(None),
     forgetting_retention_min_retention: Optional[str] = Form(None),
     forgetting_retention_grace_days: Optional[str] = Form(None),
+    background_model: Optional[str] = Form(None),
+    sealed_conversations: Optional[str] = Form(None),
+    entity_scope: Optional[str] = Form(None),
+    memory_consolidation: Optional[str] = Form(None),
+    consolidation_every_n_turns: Optional[str] = Form(None),
+    consolidation_auto_apply: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -1283,7 +1411,15 @@ async def agent_create_submit(
         "retention_min_retention": forgetting_retention_min_retention,
         "retention_grace_days": forgetting_retention_grace_days,
     }
-    retrieval_policy_value = _retrieval_policy_with_forgetting(None, forgetting_form)
+    retrieval_policy_value = _retrieval_policy_with_privacy(
+        _retrieval_policy_with_forgetting(None, forgetting_form),
+        _parse_bool(sealed_conversations),
+        entity_scope,
+    )
+    background_llm_config_value = _parse_background_model(background_model, llm_config)
+    memory_consolidation_value = _memory_consolidation_value(
+        memory_consolidation, consolidation_every_n_turns, consolidation_auto_apply
+    )
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
     )
@@ -1502,6 +1638,8 @@ async def agent_create_submit(
         learning_control_plane=learning_control_plane_enabled,
         learning_control_plane_config=learning_control_plane_config_value,
         retrieval_policy=retrieval_policy_value,
+        background_llm_config=background_llm_config_value,
+        memory_consolidation=memory_consolidation_value,
         automations_enabled=automations_enabled_value,
         default_timezone=default_timezone_value,
         whatsapp_enabled=whatsapp_enabled_value,
@@ -1565,6 +1703,12 @@ async def agent_edit_submit(
     forgetting_retention_enabled: Optional[str] = Form(None),
     forgetting_retention_min_retention: Optional[str] = Form(None),
     forgetting_retention_grace_days: Optional[str] = Form(None),
+    background_model: Optional[str] = Form(None),
+    sealed_conversations: Optional[str] = Form(None),
+    entity_scope: Optional[str] = Form(None),
+    memory_consolidation: Optional[str] = Form(None),
+    consolidation_every_n_turns: Optional[str] = Form(None),
+    consolidation_auto_apply: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -1644,8 +1788,19 @@ async def agent_edit_submit(
         "retention_min_retention": forgetting_retention_min_retention,
         "retention_grace_days": forgetting_retention_grace_days,
     }
-    retrieval_policy_value = _retrieval_policy_with_forgetting(
-        getattr(existing, "retrieval_policy", None), forgetting_form
+    retrieval_policy_value = _retrieval_policy_with_privacy(
+        _retrieval_policy_with_forgetting(
+            getattr(existing, "retrieval_policy", None), forgetting_form
+        ),
+        _parse_bool(sealed_conversations),
+        entity_scope,
+    )
+    background_llm_config_value = _parse_background_model(background_model, llm_config)
+    memory_consolidation_value = _memory_consolidation_value(
+        memory_consolidation,
+        consolidation_every_n_turns,
+        consolidation_auto_apply,
+        getattr(existing, "memory_consolidation", None),
     )
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
@@ -1938,6 +2093,8 @@ async def agent_edit_submit(
             "learning_control_plane": learning_control_plane_enabled,
             "learning_control_plane_config": learning_control_plane_config_value,
             "retrieval_policy": retrieval_policy_value,
+            "background_llm_config": background_llm_config_value,
+            "memory_consolidation": memory_consolidation_value,
             "automations_enabled": automations_enabled_value,
             "default_timezone": default_timezone_value,
             "whatsapp_enabled": whatsapp_enabled_value,

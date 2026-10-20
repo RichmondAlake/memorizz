@@ -5,7 +5,7 @@
         <div class="me-filter-fields">
         <label class="me-search">Search loaded history<input type="search" data-me-search aria-label="Search loaded memory history" placeholder="Find a memory, writer or source…"></label>
         <label>Memory type<select data-me-type aria-label="Filter memory type"><option value="">All types</option></select></label>
-        <label>Change<select data-me-action aria-label="Filter change"><option value="">All changes</option><option value="created">Created</option><option value="updated">Updated</option><option value="deleted">Deleted</option><option value="observed">Existing records</option></select></label>
+        <label>Change<select data-me-action aria-label="Filter change"><option value="">All changes</option><option value="created">Created</option><option value="updated">Updated</option><option value="deleted">Deleted</option><option value="observed">Existing records</option><option value="consolidation">Memory consolidation</option><option value="forgetting">Forgetting</option></select></label>
         <label>Writer<select data-me-actor aria-label="Filter writer"><option value="">All writers</option></select></label>
         <label>Execution<select data-me-execution aria-label="Filter loaded executions"><option value="">All loaded executions</option></select></label>
         {% if not compact %}<label>Group by<select data-me-group aria-label="Group memory changes"><option value="type">Memory type</option><option value="writer">Writer</option></select></label>{% endif %}

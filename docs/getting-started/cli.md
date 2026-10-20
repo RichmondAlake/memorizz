@@ -344,6 +344,8 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/history` | Print the current conversation in full: every question and answer, with the tools each answer used. |
 | `/conversations [search]` | Open a searchable picker and resume a saved conversation thread. Its last 30 messages are printed in the terminal before you continue. |
 | `/forget <id>` | Delete a single stored memory by id. |
+| `/consolidate [kb]` | Tidy the memory in use: merge duplicate entities and summaries, retire facts stored twice or replaced by newer ones, and add facts you stated that were never saved. Lists every change and applies them only on yes; `kb` also checks the knowledge base; `/consolidate undo <plan id>` restores a plan. See [Memory consolidation](../guides/memory-consolidation.md). |
+| `/background-model [model\|provider:model\|off]` | Show or set the model summaries, compaction, reflection and `/consolidate` run on. Your turns keep the chat model. Saved with the agent. |
 | `/new` | Start a fresh conversation thread (keeps long-term memory). |
 | `/clear` | **Erase the agent's entire stored memory** (asks to confirm). |
 | `/cls` | Clear the terminal screen. |
@@ -352,6 +354,8 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/compare <harness> <harness> <task>` | Run one read-only task on two or more harnesses side by side and print each verdict; saved as a workflow. |
 | `/agents` | List saved agents. |
 | `/agent <id>` | Load a saved agent by id. |
+| `/name [new name]` | Show or change the agent's name (`/rename` works too). The name shows in the banner, the status bar and the UI's chat header, where you can also click it to rename the agent. |
+| `/connect [notion\|gmail\|google-calendar\|server]` | Without a name, list what the agent can reach and how to connect the rest (`/mcp` works too). With one, attach that connector to the agent and sign in in the browser; the agent gets its tools straight away. When you ask for something the agent isn't connected to, such as "search my Notion", the CLI offers this after the answer. Gmail and Google Calendar need your own Google OAuth client first; `/connect gmail` explains the step. |
 | `/persona [name \| goals \| background]` | Show or set the agent's persona. |
 | `/persona-reset` | Clear the persona (revert to default). |
 | `/tools` | List the agent's registered tools. |
@@ -456,7 +460,7 @@ done. MemoRizz keeps only whole messages in the run's record; the pieces are
 shown, never stored.
 
 The harness's last message is its answer, which prints in full below. When
-several harnesses work at once (delegates), each line names its harness. The
+several harnesses work at once, each line names its harness. The
 same feed goes to stderr for `memorizz run --harness ...` and
 `memorizz harness run` (not with `--json`), and the whole run stays in
 `memorizz harness show <run>`. A long wait with nothing printed is the
@@ -494,6 +498,23 @@ Comparing codex vs claude-code on: where can totals lose precision in billing.py
 │ claude-code  succeeded  -         $0.0312  21.7s  The sum …  │
 └──────────────────────────────────────────────────────────────┘
 Saved as workflow 3c2e…: memorizz harness show-workflow 3c2e… or the Agent Harnesses page.
+```
+
+When an agent hands parts of a request to its delegates (a crew such as a
+code review crew, or `/harness delegate`), each delegate gets a line as it
+starts and one when it ends, with how long it took or why it failed, and a
+harness delegate's own work prints in between under the delegate's name:
+
+```text
+● Codex bug hunter (codex) is working
+● pi doc checker (pi) is working
+  pi doc checker · $ grep -n paginate README.md
+  Codex bug hunter · $ pytest -q tests/test_app.py
+  Codex bug hunter ·   1 failed, 7 passed
+  pi doc checker · Docs are current.
+✓ pi doc checker (pi) done · 3s
+  Codex bug hunter · 1 bug: paginate() drops the last page.
+✓ Codex bug hunter (codex) done · 14s
 ```
 
 `/harness delegate` is the coordinator pattern: your agent's own model keeps
@@ -849,7 +870,7 @@ Configure, authorize, inspect, and call local or remote MCP servers without
 leaving the terminal:
 
 ```bash
-# Notion hosted MCP (OAuth)
+# Notion hosted MCP (OAuth); /connect notion does both in the chat
 memorizz mcp add notion --preset notion
 memorizz mcp login notion
 

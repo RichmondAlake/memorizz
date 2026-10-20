@@ -428,6 +428,8 @@ class RetentionPlanner:
                             "suppression_reason": candidate.reason,
                             "suppression_approver": approver[:240],
                             "suppression_note": str(reason or "")[:2000],
+                            # Restored on unsuppress (a sealed row stays sealed).
+                            "suppressed_from": row.get("retention_state") or "active",
                         },
                         memory_type,
                     )
@@ -486,10 +488,14 @@ class RetentionPlanner:
             source="forgetting:unsuppress",
             agent_id=self.agent_id or None,
         ):
+            meta = row.get("retention_meta")
+            previous = row.get("suppressed_from") or (
+                meta.get("suppressed_from") if isinstance(meta, dict) else None
+            )
             ok = self.provider.update_by_id(
                 str(record_id),
                 {
-                    "retention_state": "active",
+                    "retention_state": str(previous or "active"),
                     "unsuppressed_by": approver[:240],
                     "unsuppressed_at": utc_now(),
                     "unsuppression_note": str(reason or "")[:2000],

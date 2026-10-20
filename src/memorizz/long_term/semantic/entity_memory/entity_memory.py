@@ -8,7 +8,18 @@ import json
 import logging
 import re
 import uuid
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+)
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -381,6 +392,7 @@ class EntityMemory:
         allow_legacy_scope: bool = False,
         entity_ids: Optional[Sequence[str]] = None,
         canonical_identity_key: Optional[str] = None,
+        provenance: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Plan or safely apply duplicate consolidation inside one exact scope.
 
@@ -389,6 +401,8 @@ class EntityMemory:
         it never deletes data.  Superseded rows stay recoverable for audit and
         rollback but are excluded from normal lookup and prompt retrieval.
         Anonymous legacy scope requires an additional explicit opt-in.
+        ``provenance`` (a consolidation plan id) is recorded on each
+        superseded row so :meth:`restore_consolidation` can undo the merge.
         """
         resolved_memory_id = str(memory_id or "").strip()
         if not resolved_memory_id:
@@ -469,11 +483,25 @@ class EntityMemory:
                 "applied": False,
             }
             if apply:
+                if provenance:
+                    # What the surviving record held before the merge, so
+                    # restore_consolidation can put it back exactly.
+                    merged_metadata = dict(merged.get("metadata") or {})
+                    merged_metadata["merge_undo"] = {
+                        **dict(merged_metadata.get("merge_undo") or {}),
+                        provenance: {
+                            "attributes": list(canonical.get("attributes") or []),
+                            "relations": list(canonical.get("relations") or []),
+                            "merged_at": merged.get("updated_at"),
+                        },
+                    }
+                    merged["metadata"] = merged_metadata
                 self._store_consolidated_group(
                     merged,
                     duplicate_rows,
                     memory_id=resolved_memory_id,
                     user_id=user_id,
+                    provenance=provenance,
                 )
                 plan["applied"] = True
             plans.append(plan)
@@ -492,6 +520,185 @@ class EntityMemory:
             "strategy": "merge_then_soft_supersede",
             "explicit_selection": bool(requested_ids),
         }
+
+    def retire_attributes(
+        self,
+        entity_id: str,
+        *,
+        memory_id: str,
+        user_id: Optional[str],
+        retirements: Sequence[Mapping[str, Any]],
+        retired_by: str,
+    ) -> int:
+        """Take facts out of an entity without losing them.
+
+        Each ``retirements`` item names an attribute (``name``) and may give a
+        ``reason`` and the attribute that ``kept`` its place. The attribute
+        moves to ``metadata.retired_attributes``, where prompts and searches
+        never read it, and :meth:`restore_consolidation` puts it back.
+        Returns how many attributes were retired.
+        """
+        record = self._fetch_one_in_scope(
+            {"entity_id": entity_id}, memory_id=memory_id, user_id=user_id
+        )
+        if not record:
+            raise ValueError("entity not found in the requested scope")
+        wanted = {
+            str(item.get("name") or "").casefold(): item
+            for item in retirements
+            if str(item.get("name") or "").strip()
+        }
+        now = self._timestamp()
+        kept: List[Dict[str, Any]] = []
+        retired: List[Dict[str, Any]] = []
+        for attribute in record.get("attributes") or []:
+            item = wanted.get(str((attribute or {}).get("name") or "").casefold())
+            if not isinstance(attribute, dict) or item is None:
+                kept.append(attribute)
+                continue
+            retired.append(
+                {
+                    **attribute,
+                    "retired_by": retired_by,
+                    "retired_at": now,
+                    "retired_reason": str(item.get("reason") or "")[:500],
+                    "kept_attribute": item.get("kept"),
+                }
+            )
+        if not retired:
+            return 0
+        metadata = dict(record.get("metadata") or {})
+        metadata["retired_attributes"] = [
+            *(metadata.get("retired_attributes") or []),
+            *retired,
+        ]
+        updated = {**record, "attributes": kept, "metadata": metadata}
+        updated["updated_at"] = now
+        self._store_rewritten(updated)
+        return len(retired)
+
+    def restore_consolidation(
+        self, plan_id: str, *, memory_id: str, user_id: Optional[str]
+    ) -> Dict[str, int]:
+        """Undo what one consolidation plan changed in this memory and user.
+
+        Merged duplicates come back, retired attributes return to their
+        entity, and facts the plan added are removed.
+        """
+        source = f"consolidation:{plan_id}"
+        counts = {"entities": 0, "attributes": 0, "facts_removed": 0}
+        for record in self.list_entities(
+            memory_id=memory_id, user_id=user_id, include_superseded=True
+        ):
+            metadata = dict(record.get("metadata") or {})
+            changed = False
+            undo = dict(metadata.get("merge_undo") or {})
+            snapshot = undo.pop(plan_id, None)
+            if isinstance(snapshot, dict):
+                # The record that absorbed duplicates goes back to what it
+                # held, plus any fact written since the merge.
+                merged_at = str(snapshot.get("merged_at") or "")
+                kept_names = {
+                    str(item.get("name") or "").casefold()
+                    for item in snapshot.get("attributes") or []
+                    if isinstance(item, dict)
+                }
+                later = [
+                    item
+                    for item in record.get("attributes") or []
+                    if isinstance(item, dict)
+                    and str(item.get("updated_at") or "") > merged_at
+                    and str(item.get("name") or "").casefold() not in kept_names
+                ]
+                record = {
+                    **record,
+                    "attributes": [*(snapshot.get("attributes") or []), *later],
+                    "relations": list(snapshot.get("relations") or []),
+                }
+                if undo:
+                    metadata["merge_undo"] = undo
+                else:
+                    metadata.pop("merge_undo", None)
+                metadata.pop("merged_entity_ids", None)
+                metadata.pop("consolidated_at", None)
+                changed = True
+            if metadata.get("superseded_by_plan") == plan_id:
+                for key in ("superseded_by", "superseded_at", "superseded_by_plan"):
+                    metadata.pop(key, None)
+                counts["entities"] += 1
+                changed = True
+            attributes = [
+                attribute
+                for attribute in record.get("attributes") or []
+                if not (
+                    isinstance(attribute, dict) and attribute.get("source") == source
+                )
+            ]
+            removed = len(record.get("attributes") or []) - len(attributes)
+            if removed:
+                counts["facts_removed"] += removed
+                changed = True
+            retired = list(metadata.get("retired_attributes") or [])
+            returning = [
+                item
+                for item in retired
+                if isinstance(item, dict) and item.get("retired_by") == plan_id
+            ]
+            if returning:
+                metadata["retired_attributes"] = [
+                    item for item in retired if item not in returning
+                ]
+                live = {
+                    str(attribute.get("name") or "").casefold()
+                    for attribute in attributes
+                    if isinstance(attribute, dict)
+                }
+                for item in returning:
+                    attribute = {
+                        key: value
+                        for key, value in item.items()
+                        if key
+                        not in {
+                            "retired_by",
+                            "retired_at",
+                            "retired_reason",
+                            "kept_attribute",
+                        }
+                    }
+                    if str(attribute.get("name") or "").casefold() not in live:
+                        attributes.append(attribute)
+                        counts["attributes"] += 1
+                changed = True
+            if changed:
+                self._store_rewritten(
+                    {
+                        **record,
+                        "attributes": attributes,
+                        "metadata": metadata,
+                        "updated_at": self._timestamp(),
+                    }
+                )
+        return counts
+
+    def _store_rewritten(self, record: Dict[str, Any]) -> None:
+        """Store a changed record over its row, with a fresh embedding."""
+        payload = dict(record)
+        payload.pop("score", None)
+        embedding_text = self._build_embedding_text(payload)
+        from ....memory_provider.base import provider_manages_embeddings
+
+        if embedding_text and not provider_manages_embeddings(self.memory_provider):
+            try:
+                payload["embedding"] = get_embedding(embedding_text)
+            except Exception as exc:
+                logger.warning(
+                    "Storing entity %s without an embedding (%s)",
+                    payload.get("entity_id"),
+                    type(exc).__name__,
+                )
+        self.memory_provider.store(
+            data=payload, memory_store_type=MemoryType.ENTITY_MEMORY
+        )
 
     def migrate_legacy_scope(self, *, memory_id: str, user_id: str) -> int:
         """Explicitly assign anonymous entity rows to one authenticated user.
@@ -863,6 +1070,7 @@ class EntityMemory:
         *,
         memory_id: str,
         user_id: Optional[str],
+        provenance: Optional[str] = None,
     ) -> None:
         if not self._record_in_scope(canonical, memory_id=memory_id, user_id=user_id):
             raise ValueError("Canonical entity escaped the requested scope")
@@ -896,6 +1104,8 @@ class EntityMemory:
             archived = dict(duplicate)
             metadata = dict(archived.get("metadata") or {})
             metadata.update({"superseded_by": canonical_id, "superseded_at": now})
+            if provenance:
+                metadata["superseded_by_plan"] = provenance
             archived["metadata"] = metadata
             archived["updated_at"] = now
             self.memory_provider.store(
@@ -1247,8 +1457,11 @@ class EntityMemory:
                 f"Relation ({relation.get('relation_type')})->{relation.get('entity_id')}"
             )
         if record.get("metadata"):
+            # Retired facts stay out of the vector, so searches stop finding them.
             metadata_parts = [
-                f"{key}: {value}" for key, value in record["metadata"].items()
+                f"{key}: {value}"
+                for key, value in record["metadata"].items()
+                if key not in {"retired_attributes", "merge_undo"}
             ]
             lines.extend(metadata_parts)
         return "\n".join(lines)

@@ -64,6 +64,8 @@ class MemAgentBuilder:
         self._context_policy = None
         self._completion_policy = None
         self._retrieval_policy = None
+        self._background_model: Any = None
+        self._memory_consolidation: Any = None
         self._approval_store = None
         self._delegation_config = None
         self._semantic_layer = None
@@ -505,6 +507,19 @@ class MemAgentBuilder:
         self._retrieval_policy = policy
         return self
 
+    def with_background_model(self, model: Any) -> "MemAgentBuilder":
+        """Run memory upkeep (summaries, reflection, consolidation) on a
+        second model: an ``llm_config`` dict or a model instance."""
+        self._background_model = model
+        return self
+
+    def with_memory_consolidation(
+        self, enabled: bool = True, **settings: Any
+    ) -> "MemAgentBuilder":
+        """Consolidate memory in the background; see ``ConsolidationConfig``."""
+        self._memory_consolidation = {**settings, "enabled": enabled}
+        return self
+
     def with_embedding_provider(
         self, provider: str, config: Dict[str, Any] = None
     ) -> "MemAgentBuilder":
@@ -627,6 +642,17 @@ class MemAgentBuilder:
                 learning_control_plane=self._learning_control_plane,
                 workflow_outcome_evaluator=self._workflow_outcome_evaluator,
                 auto_register=self._auto_register,
+                background_model=(
+                    None
+                    if isinstance(self._background_model, dict)
+                    else self._background_model
+                ),
+                background_llm_config=(
+                    self._background_model
+                    if isinstance(self._background_model, dict)
+                    else None
+                ),
+                memory_consolidation=self._memory_consolidation,
             )
             agent.environment_reports = {
                 key: dict(value) if isinstance(value, dict) else value

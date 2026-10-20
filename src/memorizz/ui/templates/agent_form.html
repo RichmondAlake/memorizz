@@ -156,6 +156,33 @@
                 </div>
                 <p class="form-hint">Suppression only ever hides a memory from retrieval after an approved dry run on the learning control-plane page; nothing is deleted and every suppression can be restored.</p>
             </details>
+            <details class="form-group" id="memory-upkeep" {% if sealed_conversations|default(false) or memory_consolidation|default(false) or entity_scope|default('memory') != 'memory' %}open{% endif %}>
+                <summary>Conversation privacy and memory upkeep</summary>
+                <label class="checkbox-group">
+                    <input type="checkbox" id="sealed_conversations" name="sealed_conversations" value="on" {% if sealed_conversations|default(false) %}checked{% endif %} onchange="syncEntityScope()">
+                    Seal each conversation
+                </label>
+                <p class="form-hint">Nothing a user says in one conversation reaches another: recall, entity facts and cached answers stay in their conversation, and the shared persona can't be changed from one. Knowledge bases stay shared.</p>
+                <label for="entity_scope">Entity facts</label>
+                <select id="entity_scope" name="entity_scope">
+                    <option value="memory" {% if entity_scope|default('memory') == 'memory' %}selected{% endif %}>Shared by the conversations of a memory (default)</option>
+                    <option value="thread" {% if entity_scope|default('memory') == 'thread' %}selected{% endif %}>Kept to each conversation</option>
+                    <option value="disabled" {% if entity_scope|default('memory') == 'disabled' %}selected{% endif %}>Not recalled automatically (the entity tools still work)</option>
+                </select>
+                <p class="form-hint">Where the facts the agent stores about people and things live. A sealed conversation keeps them to itself.</p>
+                <label class="checkbox-group">
+                    <input type="checkbox" name="memory_consolidation" value="on" {% if memory_consolidation|default(false) %}checked{% endif %}>
+                    Consolidate memory in the background
+                </label>
+                <div class="form-grid">
+                    <label>Every this many turns<input type="number" min="1" step="1" name="consolidation_every_n_turns" value="{{ consolidation_every_n_turns|default(20) }}"></label>
+                    <label class="checkbox-group" style="align-self:end">
+                        <input type="checkbox" name="consolidation_auto_apply" value="on" {% if consolidation_auto_apply|default(true) %}checked{% endif %}>
+                        Apply changes automatically
+                    </label>
+                </div>
+                <p class="form-hint">Merges duplicate entities and summaries, retires facts stored twice or replaced by newer ones, and adds facts the user stated that were never saved. Nothing is deleted; every change can be undone with <code>memorizz learning consolidation-restore</code>.</p>
+            </details>
             <div class="form-group">
                 <label for="skill_injection_role">Authority for newly learned skills</label>
                 <select id="skill_injection_role" name="skill_injection_role"
@@ -258,6 +285,28 @@
                 <textarea id="llm_config_json" name="llm_config_json" rows="4">{{ llm_config_json }}</textarea>
                 <p class="form-hint">Optional provider-specific fields (e.g. azure_endpoint, api_version, ollama host, HuggingFace settings, temperature, base_url for local-openai).</p>
             </div>
+            <div class="form-grid" id="background-model">
+                <div class="form-group">
+                    <label for="background_provider">Background model</label>
+                    <select id="background_provider" onchange="syncBackgroundModel(true)">
+                        <option value="">Same as the chat model</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="anthropic">Anthropic</option>
+                        <option value="azure">Azure OpenAI</option>
+                        <option value="ollama">Ollama (Local)</option>
+                        <option value="huggingface">HuggingFace</option>
+                        <option value="mlx">MLX (Apple Silicon)</option>
+                        <option value="local-openai">Local OpenAI-compatible</option>
+                    </select>
+                </div>
+                <div class="form-group" id="background_model_group">
+                    <label for="background_model_name">Background model name</label>
+                    <input id="background_model_name" type="text" list="background_model_options" autocomplete="off" oninput="syncBackgroundModel(false)" placeholder="e.g. qwen2.5:7b">
+                    <datalist id="background_model_options"></datalist>
+                </div>
+            </div>
+            <input type="hidden" id="background_model" name="background_model" value="{{ background_model|default('') }}">
+            <p class="form-hint">Summaries, context compaction, reflection, skill distillation and memory consolidation run on this model; replies keep the chat model. A smaller, cheaper model is usually enough.</p>
         </div>
     </details>
     <script>
@@ -935,6 +984,33 @@ const AGENT_FORM_MODEL_CATALOG = {{ llm_model_catalog|default({}, true)|tojson }
 const AGENT_FORM_DEFAULT_MODELS = {{ default_llm_model_by_provider|default({}, true)|tojson }};
 const AGENT_FORM_CUSTOM = '__custom__';
 
+// Background model: a provider and a model name, sent as "provider:model".
+function syncBackgroundModel(providerChanged) {
+    const provider = document.getElementById('background_provider').value;
+    const nameInput = document.getElementById('background_model_name');
+    const hidden = document.getElementById('background_model');
+    const list = document.getElementById('background_model_options');
+    document.getElementById('background_model_group').style.display = provider ? '' : 'none';
+    const models = Array.isArray(AGENT_FORM_MODEL_CATALOG[provider]) ? AGENT_FORM_MODEL_CATALOG[provider] : [];
+    list.innerHTML = models.map(function(model) {
+        return '<option value="' + escapeHtml(model.value) + '">' + escapeHtml(model.label || model.value) + '</option>';
+    }).join('');
+    if (providerChanged && provider && !nameInput.value.trim()) {
+        nameInput.value = (AGENT_FORM_DEFAULT_MODELS[provider] || (models[0] || {}).value || '');
+    }
+    const name = nameInput.value.trim();
+    hidden.value = provider && name ? provider + ':' + name : '';
+}
+
+// A sealed conversation keeps its entity facts to itself.
+function syncEntityScope() {
+    const sealed = document.getElementById('sealed_conversations');
+    const scope = document.getElementById('entity_scope');
+    if (!sealed || !scope) return;
+    if (sealed.checked) scope.value = 'thread';
+    scope.disabled = sealed.checked;
+}
+
 function syncAgentModelOptions() {
     const providerSelect = document.getElementById('llm_provider');
     const modelSelect = document.getElementById('llm_model_select');
@@ -1039,6 +1115,17 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     syncAgentModelOptions();
+    syncEntityScope();
+    const background = (document.getElementById('background_model').value || '').trim();
+    const split = background.indexOf(':');
+    const knownProviders = Array.from(document.getElementById('background_provider').options).map(function(o) { return o.value; });
+    if (background) {
+        const head = split > 0 ? background.slice(0, split) : '';
+        const provider = knownProviders.includes(head) ? head : (document.getElementById('llm_provider').value || '');
+        document.getElementById('background_provider').value = provider;
+        document.getElementById('background_model_name').value = knownProviders.includes(head) ? background.slice(split + 1) : background;
+    }
+    syncBackgroundModel(false);
 
     // Continuous mode: on form submit, send max_steps=0
     var agentForm = document.querySelector('.agent-form');

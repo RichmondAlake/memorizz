@@ -125,6 +125,12 @@ class ContinualLearningManager:
         self._cycle_in_flight = False
         self.last_report: Optional[PromotionReport] = None
 
+    def set_llm_provider(self, llm_provider) -> None:
+        """Distil and judge skills on ``llm_provider`` from now on."""
+        self.skillbox.llm_provider = llm_provider
+        self.engine.llm_provider = llm_provider
+        self.engine.distiller.llm_provider = llm_provider
+
     # -------------------------------------------------------------- retrieval
 
     def retrieve_skills_for_query(

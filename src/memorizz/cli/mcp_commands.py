@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import webbrowser
 from typing import List, Optional
 
 import typer
@@ -587,24 +586,11 @@ def login(
     name: str = typer.Argument(...),
     no_browser: bool = typer.Option(False, "--no-browser"),
 ):
-    """Authorize an OAuth server, then paste the final callback URL."""
-    console = _console()
+    """Sign in to an OAuth server in the browser; the result comes back here."""
+    from .connect import sign_in
 
-    def show_url(url: str) -> None:
-        console.print(f"Open this URL:\n[link={url}]{url}[/link]")
-        if not no_browser:
-            try:
-                webbrowser.open(url)
-            except Exception:
-                pass
-
-    def read_callback() -> str:
-        return typer.prompt("Paste the full callback URL")
-
-    result = mcp_config.build_manager().authorize_interactive(
-        name,
-        on_authorization_url=show_url,
-        callback_reader=read_callback,
+    result = sign_in(
+        mcp_config.build_manager(), name, _console(), open_browser=not no_browser
     )
     _print_result(result)
     _exit_for_result(result)

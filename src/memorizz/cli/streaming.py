@@ -22,12 +22,14 @@ def save_stream_session(session):
 def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
     if output not in {"text", "jsonl"}:
         raise ValueError("output must be text or jsonl")
+    from ..live_turns import LiveTurn
     from ..streaming import harness_event_listener
-    from .harness_feed import HarnessFeed, plain
+    from .harness_feed import DelegateLines, HarnessFeed, plain
 
     stdout, stderr = stdout or sys.stdout, stderr or sys.stderr
     # In text mode a harness's own output goes to stderr as it happens.
     feed = HarnessFeed() if output == "text" else None
+    delegates = DelegateLines()
     listening = harness_event_listener.set(feed.listener if feed else None)
     try:
         stream = session.agent.run_stream_events(
@@ -41,8 +43,11 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
         raise
     status, state_saved, failure_message = "error", "unknown", None
     answer = ""
+    # The local UI's playground shows this turn as it streams.
+    live_turn = LiveTurn(getattr(session.agent, "agent_id", None), prompt)
     try:
         for event in stream:
+            live_turn.event(event)
             kind = event["type"]
             if feed is not None:
                 if kind == "answer.delta":
@@ -51,7 +56,7 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
                     feed.finish(answer)
                     if kind in {"answer.done", "run.done"}
                     else feed.drain()
-                )
+                ) + delegates.event(event)
                 if lines:
                     stderr.write(plain(lines))
                     stderr.flush()
@@ -103,6 +108,7 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
             else 1
         )
     except KeyboardInterrupt:
+        live_turn.close("interrupted")
         stderr.write("Interrupted; partial answer retained.\n")
         return 130
     except BrokenPipeError:
@@ -114,5 +120,6 @@ def consume_stream(session, prompt, *, output="text", stdout=None, stderr=None):
             pass
         return 141
     finally:
+        live_turn.close()
         stream.close()
         harness_event_listener.reset(listening)

@@ -78,6 +78,8 @@ _LAZY = {
     "EvidencePack": (".learning", "EvidencePack"),
     "OutcomeEvidence": (".learning", "OutcomeEvidence"),
     "ForgettingReport": (".learning", "ForgettingReport"),
+    "ConsolidationConfig": (".learning", "ConsolidationConfig"),
+    "ConsolidationPlan": (".learning", "ConsolidationPlan"),
     "SemanticCacheInspection": (
         ".short_term_memory.semantic_cache",
         "SemanticCacheInspection",
@@ -225,6 +227,8 @@ __all__ = [
     "EvidencePack",
     "OutcomeEvidence",
     "ForgettingReport",
+    "ConsolidationConfig",
+    "ConsolidationPlan",
     "SemanticCacheInspection",
     "governed_tool",
     # Meta-harness

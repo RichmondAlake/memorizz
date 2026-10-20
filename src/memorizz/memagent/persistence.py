@@ -134,6 +134,7 @@ def save_agent(agent):
 
         memagent_to_save = MemAgentModel(
             llm_config=llm_config_to_save,
+            background_llm_config=_background_llm_config_to_save(agent),
             application_id=getattr(agent, "application_id", None),
             name=agent.name,
             instruction=agent.instruction,
@@ -174,6 +175,11 @@ def save_agent(agent):
             context_policy=agent.context_policy.to_dict(),
             completion_policy=agent.completion_policy.to_dict(),
             retrieval_policy=agent.retrieval_policy.to_dict(),
+            memory_consolidation=(
+                agent.memory_consolidation.to_dict()
+                if agent.memory_consolidation.enabled
+                else None
+            ),
             delegation_config=normalize_delegation_config(
                 agent.delegation_config, for_persistence=True
             ),
@@ -693,6 +699,8 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
     return {
         "llm_config": llm_config,
         "context_window_tokens": _saved_context_cap(saved_memagent, llm_config),
+        "background_llm_config": _dict_or_none(field("background_llm_config")),
+        "memory_consolidation": _dict_or_none(field("memory_consolidation")),
         "tools": field("tools"),
         "persona": field("persona"),
         "name": field("name"),
@@ -986,6 +994,31 @@ def _refresh_model(agent, llm_config, context_cap) -> None:
     )
 
 
+def _background_llm_config_to_save(agent) -> Optional[Dict[str, Any]]:
+    """The background model's settings without credentials, or None."""
+    model = getattr(agent, "_background_model", None)
+    get_config = getattr(model, "get_config", None)
+    config = get_config() if callable(get_config) else None
+    if not isinstance(config, dict):
+        config = getattr(agent, "background_llm_config", None)
+    if not config:
+        return None
+    from ..internet_access.base import scrub_secret_config
+
+    safe = scrub_secret_config(config)
+    safe.pop("api_key_set", None)
+    return safe or None
+
+
+def _refresh_background(agent, background_llm_config, consolidation) -> None:
+    from ..learning.consolidation import ConsolidationConfig
+
+    stored = dict(background_llm_config or {})
+    if stored != (_background_llm_config_to_save(agent) or {}):
+        agent.with_background_model(stored or None)
+    agent.memory_consolidation = ConsolidationConfig.from_value(consolidation)
+
+
 def _refresh_persona(agent, persona) -> None:
     # set_persona registers the persona evolution tools (update_persona,
     # read_persona) when a persona is added here, not just via __init__.
@@ -1108,7 +1141,7 @@ def _refresh_skill_retrieval(agent, enabled, config) -> None:
 
         agent.skillbox = Skillbox(
             memory_provider=agent.memory_provider,
-            llm_provider=agent.model,
+            llm_provider=agent.background_model,
             agent_id=agent.agent_id,
         )
         agent._register_skill_tools()
@@ -1277,6 +1310,7 @@ def _keep_until_reload(agent, *fields: str) -> None:
 # _saved_settings gains needs a step here; a unit test checks the two match.
 _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
     (("llm_config", "context_window_tokens"), _refresh_model),
+    (("background_llm_config", "memory_consolidation"), _refresh_background),
     (("tools",), _code_owned),
     (("persona",), _refresh_persona),
     (

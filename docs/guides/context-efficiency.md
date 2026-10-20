@@ -241,6 +241,66 @@ Use `RetrievalPolicy.disabled()` when the application already has explicit,
 tenant-scoped search tools. Exact current-thread history still loads normally;
 only automatic semantic recall is disabled.
 
+The scopes:
+
+| Field | Values | Default |
+|---|---|---|
+| `conversation_scope` | `memory` (every thread of the memory), `thread`, `disabled` | `memory` |
+| `knowledge_base_scope` | `memory` (the attached knowledge bases), `namespace` (only `knowledge_base_namespaces`), `disabled` | `memory` |
+| `entity_scope` | `memory` (facts shared by the memory's threads), `thread` (a thread's facts stay in it, both written and recalled), `disabled` (not recalled automatically; the entity tools still work) | `memory` |
+
+A string works too:
+
+- `"thread"` narrows conversation recall and leaves the knowledge base on.
+  It used to turn the knowledge base off as well, and agents saved with
+  `"thread"` before the fix still have `knowledge_base_scope="disabled"`
+  stored: set it back to `"memory"` if they should recall it.
+- `"sealed"` is `RetrievalPolicy.sealed()`. See
+  [sealed threads](multi-tenant.md#sealed-threads).
+- `"memory"`, `"namespace"` and `"disabled"` are the other shortcuts.
+
+The learning control plane's evidence pack follows the same policy.
+
+### A policy for one call
+
+`run()`, `run_stream()` and `run_stream_events()` take `retrieval_policy=`
+for that call only. A scope string such as `"sealed"` or `"thread"` changes
+just those scopes and keeps the agent's other settings (scoring, retention,
+namespaces). A `RetrievalPolicy` or a dict replaces the agent's policy for
+the call.
+
+```python
+agent.run(question, user_id=user, thread_id=thread, retrieval_policy="sealed")
+```
+
+The agent's own policy, and what `save()` writes, stay as they are. Calls
+running at the same time on a shared agent each keep their own policy.
+Delegates use their own policies.
+
+### What was recalled, by source
+
+The `memory_context` trace (stage `supplied`) counts what reached the prompt,
+and the playground shows it per turn under *Memory supplied*, for example
+"3 recalled memories (2 from the knowledge base, 1 from conversations)".
+`source_counts["semantic_memories"]` is every semantic match.
+`semantic_source_counts` splits it into `knowledge_base` and `conversation`.
+`evidence_source_counts` does the same for evidence-pack items.
+
+`agent.describe_memory()` returns:
+
+- the agent's active memory types;
+- whether entity memory is on;
+- the memory tools the model can call;
+- the retrieval policy;
+- the background model;
+- the consolidation schedule.
+
+The agent also logs this at INFO when it is built, for example: "remembers
+conversation_memory, knowledge_base, …; entity facts on, shared across
+threads; memory tools: entity_memory_lookup, …". Assistant mode turns entity
+memory on. `with_entity_memory(False)`, or `memory_types` without
+`entity_memory`, turns it off.
+
 Semantic response caching is session-scoped by default. Its fingerprint also
 includes per-request context, so the same query on a different page or quoted
 selection is a miss rather than a stale replay.

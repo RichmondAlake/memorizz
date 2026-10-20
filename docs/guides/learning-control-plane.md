@@ -96,7 +96,13 @@ agent = MemAgent(
 ## Bounded recall before inference
 
 When enabled, `EvidencePack` owns automatic multi-source retrieval for each
-turn. It applies memory, user, thread, and agent scope before ranking; excludes
+turn. It follows the agent's `RetrievalPolicy` (or the one passed to
+`run()`): conversation evidence comes from every thread of the memory, from
+the current thread only (`conversation_scope="thread"`, which also limits
+summaries to that thread), or from none; the knowledge base can be turned off
+or limited to named namespaces; and entity facts follow `entity_scope`.
+Delegates still recall only their own task's thread. It applies memory, user,
+thread, and agent scope before ranking; excludes
 promoted raw workflows when their active skill is available; removes exact
 history duplicates; caps items per source; and enforces the token budget before
 the model request. The model receives evidence as untrusted retrieved data,

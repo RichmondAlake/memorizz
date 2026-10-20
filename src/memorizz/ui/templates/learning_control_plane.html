@@ -4,7 +4,7 @@
 
 {% block title %}Learning control plane - Memorizz{% endblock %}
 {% block body_attrs %} data-sidebar-scope="learning" data-sidebar-default="collapsed"{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/learning-control-plane.css?v=5">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/learning-control-plane.css?v=7">{% endblock %}
 
 {% block content %}
 {#- Links out of an event: its trace, and the exact scope its compile stream covers. -#}
@@ -113,7 +113,7 @@
     <div class="panel-header">
         <div>
             <h2 class="panel-title" id="lcp-suppressed-title">Suppressed memories</h2>
-            <p class="panel-description">{{ suppressed|length }} record(s) hidden from retrieval by an approved retention plan. They are still stored and audited; restore one to make it retrievable again.</p>
+            <p class="panel-description">{{ suppressed|length }} record(s) hidden from retrieval by an approved retention or consolidation plan. They are still stored and audited; restore one to make it retrievable again.</p>
         </div>
         <span class="pill pill--warning">Reversible</span>
     </div>
@@ -144,6 +144,118 @@
         </table>
     </div>
     {% if suppressed|length > 50 %}<p class="panel-empty">{{ suppressed|length - 50 }} more suppressed in this scope.</p>{% endif %}
+</section>
+{% endif %}
+
+{% if selected_agent_id and consolidation %}
+{% set cact = action if action and action.kind in ('consolidation-plan', 'consolidation-applied', 'consolidation-restored') else none %}
+{% set hidden_scope %}<input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">{% endset %}
+{% macro op_row(op) -%}
+{%- set d = op.details -%}
+<tr>
+    <td><span class="pill {{ 'pill--warning' if op.kind in ('retire_attribute', 'suppress_duplicate') else '' }}">{{ {'merge_entities': 'Merge', 'suppress_duplicate': 'Hide duplicate', 'retire_attribute': 'Retire fact', 'add_fact': ('Update fact' if 'replaces' in d else 'Add fact')}[op.kind] }}</span></td>
+    <td>
+        {%- if op.kind == 'merge_entities' -%}{{ (d.names or [])|reject('none')|unique|join(' + ') or op.target_id }} <small class="mono">→ {{ op.target_id[:12] }}</small>
+        {%- elif op.kind == 'suppress_duplicate' -%}{{ op.memory_type|replace('_', ' ') }} <span class="mono" title="{{ op.target_id }}">{{ op.target_id[:12] }}</span> <small>same as <span class="mono">{{ (d.duplicate_of or '')[:12] }}</span></small>
+        {%- elif op.kind == 'retire_attribute' -%}<strong>{{ d.entity }}.{{ d.attribute }}</strong> = {{ d.value }} <small>keeps {{ d.kept }} = {{ d.kept_value }}</small>
+        {%- else -%}<strong>{{ d.entity }}.{{ d.attribute }}</strong> = {{ d.value }}{% if 'replaces' in d %} <small>was {{ d.replaces }}</small>{% endif %}
+        {%- endif -%}
+    </td>
+    <td class="lcp-reason" title="{{ op.reason }}">{% if op.kind == 'add_fact' %}“{{ d.evidence }}”{% else %}{{ op.reason }}{% endif %}</td>
+</tr>
+{%- endmacro %}
+<section class="panel lcp-consolidation" id="memory-consolidation" aria-labelledby="lcp-consolidation-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="lcp-consolidation-title">Memory consolidation</h2>
+            <p class="panel-description">Merges duplicate entities and summaries, retires the older of two facts about the same thing, and adds facts a user stated that were never stored, each quoting the user. The model steps run on {% if consolidation.model %}<strong>{{ consolidation.model }}</strong> ({{ 'background model' if consolidation.model_is_background else 'the chat model; set a background model on the agent' }}){% else %}no model, so only duplicates are checked{% endif %}. Nothing is deleted; every change can be undone. Conversations that ran sealed are never read.</p>
+        </div>
+        {% set sched = consolidation.schedule %}
+        <span class="pill" title="Set on the agent's form, under Memory upkeep">{% if sched and sched.enabled %}Every {{ sched.every_n_turns }} turns{% if sched.every_hours %} or {{ sched.every_hours|int }} h{% endif %} · {{ 'applies automatically' if sched.auto_apply else 'waits for review' }}{% else %}On demand{% endif %}</span>
+    </div>
+    {% if consolidation.entity_scope != 'memory' %}<p class="form-note lcp-note">This agent keeps entity facts per conversation, so only duplicate summaries and knowledge-base chunks are checked.</p>{% endif %}
+    {% if not ui_read_only %}
+    <form method="post" action="/learning-control-plane/consolidation-plan" class="filter-bar lcp-consolidation-form" aria-label="Plan memory consolidation">
+        {{ hidden_scope }}
+        <label for="consolidation_memory_id">Memory ID<input id="consolidation_memory_id" name="consolidation_memory_id" list="lcp-memory-ids" required autocomplete="off" value="{{ memory_id or (consolidation.memory_ids[-1] if consolidation.memory_ids else '') }}"></label>
+        <datalist id="lcp-memory-ids">{% for item in consolidation.memory_ids %}<option value="{{ item }}"></option>{% endfor %}</datalist>
+        <label for="consolidation_user_id">User ID<input id="consolidation_user_id" name="consolidation_user_id" value="{{ user_id }}" placeholder="Anonymous user" autocomplete="off"></label>
+        <label for="consolidation_thread_ids" class="is-wide">Conversations to read<input id="consolidation_thread_ids" name="consolidation_thread_ids" placeholder="The most recent ones, or thread IDs separated by commas" autocomplete="off"></label>
+        <label class="lcp-check"><input type="checkbox" name="knowledge_base" value="on"> Also duplicate knowledge-base chunks</label>
+        <button class="btn" type="submit" title="Reads this memory and proposes changes; nothing changes until you approve">Plan consolidation (dry run)</button>
+    </form>
+    {% endif %}
+
+    {% if cact and cact.kind == 'consolidation-plan' %}
+    {% set report = cact.report %}
+    <div class="lcp-consolidation-plan">
+        <p class="panel-description">Plan <span class="mono">{{ report.plan_id }}</span> for memory <span class="mono">{{ report.memory_id }}</span>{% if report.user_id %}, user <span class="mono">{{ report.user_id }}</span>{% endif %}{% if report.model %}, on {{ report.model }}{% endif %}{% if report.thread_ids %}, reading {{ report.thread_ids|length }} conversation(s){% endif %}.</p>
+        {% for warning in report.warnings %}<p class="form-note lcp-note">{{ warning }}</p>{% endfor %}
+        {% if report.ops %}
+        <div class="table-scroll">
+            <table class="data-table lcp-compact">
+                <thead><tr><th scope="col">Change</th><th scope="col">Memory</th><th scope="col">Why</th></tr></thead>
+                <tbody>{% for op in report.ops %}{{ op_row(op) }}{% endfor %}</tbody>
+            </table>
+        </div>
+        {% if not ui_read_only %}
+        <form method="post" action="/learning-control-plane/consolidation-apply" class="filter-bar">
+            {{ hidden_scope }}<input type="hidden" name="plan_id" value="{{ report.plan_id }}">
+            <label for="consolidation_approved_by">Approver identity<input id="consolidation_approved_by" name="approved_by" required autocomplete="off"></label>
+            <label for="consolidation_reason" class="is-wide">Reason<input id="consolidation_reason" name="reason" placeholder="Optional" autocomplete="off"></label>
+            <button class="btn btn-primary" type="submit">Apply {{ report.ops|length }} change(s)</button>
+        </form>
+        {% endif %}
+        {% else %}
+        <p class="panel-empty">Nothing to change: no duplicates, no stale facts and nothing new in the conversations read.</p>
+        {% endif %}
+    </div>
+    {% elif cact and cact.kind == 'consolidation-applied' %}
+    {% set report = cact.report %}
+    <div class="lcp-consolidation-plan">
+        <p class="panel-description">Applied plan <span class="mono">{{ report.plan_id }}</span> as {{ report.approved_by }}: {{ report.applied.merge_entities }} merge(s), {{ report.applied.suppress_duplicate }} hidden duplicate(s), {{ report.applied.retire_attribute }} retired fact(s), {{ report.applied.add_fact }} added fact(s). The changes are on the <a href="/traces/memory-evolution?agent_id={{ selected_agent_id|urlencode }}&memory_id={{ report.memory_id|urlencode }}">memory evolution</a> timeline.</p>
+        {% for error in report.errors %}<p class="error-message">{{ error }}</p>{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if consolidation.pending %}
+    <h3 class="lcp-subtitle">Waiting for review</h3>
+    <ul class="lcp-plan-list">
+        {% for plan in consolidation.pending %}
+        <li><span class="mono">{{ plan.plan_id[:24] }}</span> · {{ plan.memory_id }} · {{ plan.ops|length }} change(s){% if not ui_read_only %}
+            <form method="post" action="/learning-control-plane/consolidation-review" class="cl-inline-form">{{ hidden_scope }}<input type="hidden" name="plan_id" value="{{ plan.plan_id }}"><button class="btn btn-sm" type="submit">Review</button></form>{% endif %}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if consolidation.applied %}
+    <h3 class="lcp-subtitle">Applied plans</h3>
+    <div class="table-scroll">
+        <table class="data-table lcp-compact">
+            <thead><tr><th scope="col">Plan</th><th scope="col">Memory ID</th><th scope="col">Changes</th><th scope="col">Approved by</th><th scope="col">When</th>{% if not ui_read_only %}<th scope="col">Undo</th>{% endif %}</tr></thead>
+            <tbody>
+            {% for plan in consolidation.applied %}
+            <tr>
+                <td class="mono" title="{{ plan.plan_id }}">{{ plan.plan_id[:24] }}</td>
+                <td class="mono">{{ plan.memory_id or '—' }}</td>
+                <td><a href="/traces/memory-evolution?agent_id={{ selected_agent_id|urlencode }}&memory_id={{ (plan.memory_id or '')|urlencode }}">{{ plan.changes }} recorded</a></td>
+                <td>{{ plan.approver or '—' }}</td>
+                <td class="mono">{{ (plan.at or '')[:16] }}</td>
+                {% if not ui_read_only %}
+                <td>{% if plan.undone %}Undone{% else %}
+                    <form method="post" action="/learning-control-plane/consolidation-restore" class="cl-inline-form">
+                        {{ hidden_scope }}<input type="hidden" name="plan_id" value="{{ plan.plan_id }}"><input type="hidden" name="consolidation_memory_id" value="{{ plan.memory_id or '' }}"><input type="hidden" name="consolidation_user_id" value="{{ plan.user_id or '' }}">
+                        <input name="approved_by" required placeholder="Approver" aria-label="Approver identity" autocomplete="off">
+                        <button class="btn btn-sm" type="submit">Undo</button>
+                    </form>{% endif %}
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
 </section>
 {% endif %}
 

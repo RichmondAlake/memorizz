@@ -83,7 +83,10 @@ def _build_manager(agent_id: Optional[str]):
             agent_model = None
         if agent_model is not None:
             config = getattr(agent_model, "continual_learning_config", None)
-            llm_config = getattr(agent_model, "llm_config", None)
+            # Distillation is memory upkeep: the background model when set.
+            llm_config = getattr(agent_model, "background_llm_config", None) or getattr(
+                agent_model, "llm_config", None
+            )
             if llm_config:
                 try:
                     model = create_llm_provider(dict(llm_config))

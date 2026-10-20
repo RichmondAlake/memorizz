@@ -76,6 +76,8 @@ COMMAND_KINDS = {
         (
             "agent",
             "agents",
+            "name",
+            "connect",
             "persona",
             "persona-reset",
             "tools",
@@ -100,10 +102,14 @@ COMMAND_KINDS = {
             "forget",
             "clear",
             "ingest",
+            "consolidate",
         ),
         "memory",
     ),
-    **dict.fromkeys(("models", "provider", "ollama", "login", "config"), "model"),
+    **dict.fromkeys(
+        ("models", "provider", "ollama", "login", "config", "background-model"),
+        "model",
+    ),
 }
 # The model in use is coloured by its provider, so a switch shows at a glance.
 PROVIDER_COLOURS = {
@@ -141,6 +147,7 @@ STYLE = Style.from_dict(
         "bottom-toolbar.key": "bold #e5e7eb",
         "bottom-toolbar.dim": "#8a93a6",
         "bottom-toolbar.memory": KIND_COLOURS["memory"],
+        "bottom-toolbar.agent": f"bold {KIND_COLOURS['agents']}",
         "bottom-toolbar.harness": f"bold {KIND_COLOURS['harness']}",
         "bottom-toolbar.update": "bold #fbbf24 bg:#3b2f0b",
         # The / completion menu: dark, each command in its kind's colour.
@@ -351,6 +358,20 @@ def prompt_message(session: Any) -> List[Tuple[str, str]]:
     return [frame_rule(session), ("", "\n"), *fragments]
 
 
+def agent_label(session: Any) -> str:
+    """The active agent's name, as the UI's header shows it: its own name,
+    else its persona's, else the first eight characters of its id."""
+    agent = getattr(session, "agent", None)
+    name = getattr(agent, "name", None)
+    if not (isinstance(name, str) and name.strip()):
+        manager = getattr(agent, "persona_manager", None)
+        name = getattr(getattr(manager, "current_persona", None), "name", None)
+    if isinstance(name, str) and name.strip():
+        return " ".join(name.split())
+    agent_id = getattr(agent, "agent_id", None)
+    return agent_id[:8] if isinstance(agent_id, str) and agent_id else "agent"
+
+
 def memory_label(session: Any) -> str:
     """How the status bar names the active memory: a project id in full,
     otherwise the first eight characters, or 'new' before the first turn."""
@@ -364,7 +385,7 @@ def memory_label(session: Any) -> str:
 
 def toolbar(session: Any) -> List[Tuple[str, str]]:
     """Under the prompt: the frame's bottom rule, then the status line
-    (model, memory, harness and the hotkeys)."""
+    (agent, model, memory, harness and the hotkeys)."""
     harness = harness_session.active_harness(session) or "off"
     harness_model = harness_session.harness_model_label(session)
     if harness_model and harness not in {"off", harness_session.DELEGATE}:
@@ -383,8 +404,13 @@ def toolbar(session: Any) -> List[Tuple[str, str]]:
         f"{command.lstrip('/')}</style>"
         for key, command, _ in HOTKEYS
     )
+    agent = agent_label(session)
+    if len(agent) > 24:
+        agent = agent[:23].rstrip() + "…"
     status = HTML(
         f" <bottom-toolbar.brand>memorizz</bottom-toolbar.brand> "
+        f"<bottom-toolbar.dim>·</bottom-toolbar.dim> "
+        f"<bottom-toolbar.agent>{_escape(agent)}</bottom-toolbar.agent> "
         f"<bottom-toolbar.dim>·</bottom-toolbar.dim> {model} "
         f"<bottom-toolbar.dim>· memory</bottom-toolbar.dim> "
         f"<bottom-toolbar.memory>{_escape(memory_label(session))}</bottom-toolbar.memory> "
@@ -475,6 +501,7 @@ __all__ = [
     "FramedPromptSession",
     "HOTKEYS",
     "STYLE",
+    "agent_label",
     "animate_crest",
     "command_colour",
     "framed",

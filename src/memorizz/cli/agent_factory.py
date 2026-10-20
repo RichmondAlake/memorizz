@@ -12,8 +12,8 @@ All heavy imports (``memorizz`` core, providers) are deferred into functions so
 the CLI's ``--help`` / ``init`` / ``--version`` paths never pay for them.
 """
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set
 
 from .._env_io import env_text as _env
 from .._env_io import resolve_oracle_in_database_embedding_from_env
@@ -57,6 +57,8 @@ class Session:
     harness_models_cache: Optional[Dict[str, Any]] = None
     # A newer release found by the update check: {latest, command}.
     update_notice: Optional[Dict[str, Any]] = None
+    # Capabilities already offered after a turn (``connect.offer``).
+    offered_capabilities: Set[str] = field(default_factory=set)
 
     @property
     def provider_name(self) -> str:

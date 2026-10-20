@@ -217,3 +217,16 @@ Approved retention plans show up as recorded changes: a suppression is an
 restore is the next recorded version of the same memory. Suppressed records
 stay on the timeline because nothing was deleted. See the
 [forgetting mechanism](forgetting-mechanism.md).
+
+Plan-made changes are marked on their cards:
+
+- **Card header.** "forgetting" or "consolidation" replaces the action, and
+  the card has a coloured edge.
+- **Summary line.** It says what happened: *Hidden by a forgetting plan*,
+  *Restored to retrieval*, *Memory consolidation* or *Consolidation undone*.
+- **Source.** The details pane names the plan.
+- **Card title.** A [memory consolidation](memory-consolidation.md) change is
+  titled with what it did, such as "Merged duplicates of Ada Lovelace" or
+  "Added user.city".
+- **Filter.** *Change → Memory consolidation* and *Change → Forgetting* show
+  only these changes.

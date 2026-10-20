@@ -22,6 +22,7 @@ from rich.columns import Columns
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -113,8 +114,11 @@ def _banner(console: Console, session) -> None:
         if browser_provider
         else "[dim]disabled[/dim]"
     )
+    agent_id = getattr(session.agent, "agent_id", None) or ""
     body = (
         f"[bold]memorizz {__version__}[/bold] — {mode}\n"
+        f"agent:    [bold cyan]{escape(ui.agent_label(session))}[/]  "
+        f"[dim]{escape(str(agent_id))} · /name to rename[/dim]\n"
         f"provider: [{colour}]{session.provider_name}[/]   "
         f"model: [bold {colour}]{session.model_name}[/]\n"
         f"memory:   {store_line}\n"
@@ -144,9 +148,10 @@ def _stream_turn(session, query: str) -> None:
     """Render public deltas and tool status with bounded refresh frequency."""
     import time
 
+    from ..live_turns import LiveTurn
     from ..llms.streaming import provider_error_message
     from ..streaming import harness_event_listener
-    from .harness_feed import HarnessFeed
+    from .harness_feed import DelegateLines, HarnessFeed
     from .streaming import consume_stream, save_stream_session
 
     console = session.console or Console()
@@ -157,13 +162,19 @@ def _stream_turn(session, query: str) -> None:
         return
 
     answer, status, tools = "", "preparing", []
+    # Capabilities the request needed but the agent lacks; offered afterwards.
+    needed = []
     stream = None
+    # The local UI's playground shows this turn as it streams.
+    live_turn = LiveTurn(getattr(session.agent, "agent_id", None), query)
     last_refresh = 0.0
     started, finished = time.monotonic(), False
     # A harness's own output (messages, commands, tool calls) prints above
     # the live status as it happens; the text it is still writing shows in
     # the live area until the answer replaces it.
     feed = HarnessFeed()
+    # A coordinator's delegates: a line as each starts and ends.
+    delegates = DelegateLines()
     listening = harness_event_listener.set(feed.listener)
     with ui.quiet_keys(), Live(
         console=console, refresh_per_second=12, auto_refresh=False
@@ -206,8 +217,10 @@ def _stream_turn(session, query: str) -> None:
                     break
                 show_feed(feed.drain())
                 if event is None:
+                    live_turn.tick()
                     refresh()
                     continue
+                live_turn.event(event)
                 kind = event["type"]
                 if kind in {"run.started", "run.done"}:
                     session.memory_id = event.get("memory_id") or session.memory_id
@@ -218,10 +231,18 @@ def _stream_turn(session, query: str) -> None:
                     status = event.get("message") or event.get(
                         "stage", "working"
                     ).replace("_", " ")
+                elif kind in {"tool.started", "tool.completed"} and (
+                    delegates.is_delegate(event)
+                ):
+                    show_feed(delegates.event(event))
                 elif kind == "tool.started":
                     tools.append(event.get("tool_name", "tool"))
                 elif kind == "approval.required":
                     status = "paused for approval"
+                elif kind == "capability.suggested":
+                    needed.extend(event.get("capabilities") or [])
+                elif kind == "capability.requested":
+                    needed.append(event.get("capability"))
                 elif kind == "answer.done":
                     status, finished = "answer complete; saving", True
                     show_feed(feed.finish(answer))
@@ -235,15 +256,22 @@ def _stream_turn(session, query: str) -> None:
                 refresh(force=kind in {"answer.done", "run.done"})
         except KeyboardInterrupt:
             status, finished = "interrupted; partial answer retained", True
+            live_turn.close("interrupted")
         except Exception:
             status, finished = "stream failed; partial answer retained", True
+            live_turn.close("failed")
         finally:
+            live_turn.close()
             if stream is not None:
                 stream.close()
             harness_event_listener.reset(listening)
             refresh(force=True)
     if save_stream_session(session) == "failed":
         session.console.print("[yellow]Session state could not be saved.[/yellow]")
+    if needed:
+        from . import connect
+
+        connect.offer(session, needed)
 
 
 def run_repl(session) -> None:
@@ -286,5 +314,6 @@ def run_repl(session) -> None:
                     break
                 continue
 
+            commands.refresh_agent_name(session)
             _stream_turn(session, line)
             harness_session.report_pending_approvals(session, console)

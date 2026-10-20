@@ -443,3 +443,33 @@ def test_thread_count_matches_the_list_not_run_traces(ui, memory):
     assert any(row.get("message_type") == "trace_bundle" for row in payload["messages"])
     assert payload["message_count"] == 2
     assert listed == 2
+
+
+def test_rename_the_agent_from_the_playground_header(ui, memory):
+    agent_id = _saved_agent(memory, name="helpful", memory_ids=["m"])
+    page = ui.get(f"/agents/{agent_id}/playground")
+    assert 'id="pg-agent-name"' in page.text
+    assert "<title>Playground - helpful - Memorizz</title>" in page.text
+
+    response = ui.post(
+        f"/api/agents/{agent_id}/name", json={"name": "  Productivity   engine "}
+    )
+    assert response.json() == {
+        "ok": True,
+        "agent_id": agent_id,
+        "name": "Productivity engine",
+    }
+    stored = memory.retrieve_memagent(agent_id)
+    assert stored.name == "Productivity engine"
+    # Only the name changed.
+    assert stored.memory_ids == ["m"]
+    assert "Productivity engine" in ui.get(f"/agents/{agent_id}/playground").text
+
+    assert (
+        ui.post(f"/api/agents/{agent_id}/name", json={"name": "  "}).status_code == 400
+    )
+    assert (
+        ui.post(f"/api/agents/{agent_id}/name", json={"name": "x" * 200}).json()["name"]
+        == "x" * 80
+    )
+    assert ui.post("/api/agents/missing/name", json={"name": "a"}).status_code == 404

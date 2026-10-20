@@ -351,7 +351,9 @@
       let visible = all.filter(
         (e) =>
           (!this.q("type").value || e.memory_type === this.q("type").value) &&
-          (!this.q("action").value || e.action === this.q("action").value) &&
+          (!this.q("action").value ||
+            e.action === this.q("action").value ||
+            this.governedFamily(e) === this.q("action").value) &&
           (!this.q("actor").value || e.actor === this.q("actor").value) &&
           (!this.q("execution").value ||
             (this.q("execution").value === "none"
@@ -439,7 +441,7 @@
             : e.previous_event_id
               ? "Next recorded version"
               : "";
-          return `<button type="button" class="me-node" data-action="${esc(e.action)}" data-event-id="${esc(e.record_id)}" aria-pressed="${e.record_id === this.selected}" style="left:${e._x}px;top:${e._y}px" title="${esc(label + " · " + actor + " · " + this.changeSummary(e))}"><span class="me-node-title"><span>${esc(e.action === "observed" ? "Existing · history unknown" : e.action)}</span><span title="${esc(relation)}">${e.parents?.length ? "↳ " + new Set(e.parents.map((p) => p.record_id)).size : e.previous_event_id ? "↻" : ""}</span></span><strong>${esc(label)}</strong><small class="me-node-type">${esc(friendly(e.memory_type))}</small><small title="${esc(e.actor)}">${esc(actor)}</small>${this.compact ? "" : `<small class="me-node-summary">${esc(this.changeSummary(e))}</small>`}</button>`;
+          return `<button type="button" class="me-node" data-action="${esc(e.action)}" data-governed="${esc(this.governedFamily(e))}" data-event-id="${esc(e.record_id)}" aria-pressed="${e.record_id === this.selected}" style="left:${e._x}px;top:${e._y}px" title="${esc(label + " · " + actor + " · " + this.changeSummary(e))}"><span class="me-node-title"><span>${esc(e.action === "observed" ? "Existing · history unknown" : this.governedFamily(e) ? this.governedFamily(e) : e.action)}</span><span title="${esc(relation)}">${e.parents?.length ? "↳ " + new Set(e.parents.map((p) => p.record_id)).size : e.previous_event_id ? "↻" : ""}</span></span><strong>${esc(label)}</strong><small class="me-node-type">${esc(friendly(e.memory_type))}</small><small title="${esc(e.actor)}">${esc(actor)}</small>${this.compact ? "" : `<small class="me-node-summary">${esc(this.changeSummary(e))}</small>`}</button>`;
         })
         .join("");
       if (!visible.length)
@@ -664,7 +666,34 @@
       nav.hidden = !current && !previous && !delegates.length;
       nav.innerHTML = `<div class="me-agent-nav-head"><div>${current ? `<small>MemAgent memory history</small><strong>${esc(current.name)}</strong>` : ""}</div><div class="me-agent-shortcuts">${previous}${ownHistory}${inspector}</div></div>${delegates.length ? `<div class="me-delegates"><span title="Delegates from the current saved configuration">Delegates</span>${delegates.map((agent) => `<a class="me-agent-link" data-me-delegate="${esc(agent.agent_id)}" href="${esc(this.timelineHref(agent.agent_id))}" title="Open this delegate's own memory history">${esc(agent.name)} →</a>`).join("")}</div>` : ""}`;
     }
+    // Changes made by an approved plan rather than by a turn: memory
+    // consolidation (``consolidation:<plan>``) and forgetting (``forgetting:``).
+    governedFamily(event) {
+      const source = String(event.source || "");
+      if (source.startsWith("consolidation:")) return "consolidation";
+      if (source.startsWith("forgetting:")) return "forgetting";
+      return "";
+    }
+    governedChange(event) {
+      const source = String(event.source || "");
+      const family = this.governedFamily(event);
+      if (family === "consolidation")
+        return source.endsWith(":restore")
+          ? "Consolidation undone"
+          : "Memory consolidation";
+      if (family === "forgetting")
+        return source === "forgetting:unsuppress"
+          ? "Restored to retrieval"
+          : "Hidden by a forgetting plan";
+      return "";
+    }
+    governedPlan(event) {
+      const parts = String(event.source || "").split(":");
+      return parts.length > 1 && parts[1] !== "unsuppress" ? parts[1] : "";
+    }
     changeSummary(event) {
+      const governed = this.governedChange(event);
+      if (governed) return governed;
       if (event.action === "observed") return "Earlier changes unknown";
       if (event.action === "created") return "New memory";
       if (event.action === "deleted") return "Memory removed";
@@ -841,7 +870,7 @@
           ? "Agent-owned record"
           : "Ownership unknown";
       this.q("detail").innerHTML =
-        `<div class="me-detail-controls"><span>Change ${position + 1} of ${this.visible.length} visible</span><button type="button" class="btn btn-sm" data-me-close aria-label="Close change details">×</button></div><p class="me-detail-eyebrow">${esc(event.action === "observed" ? "Existing record" : event.action)} · ${esc(friendly(event.memory_type))}</p><h3>${esc(this.nodeLabel(event))}</h3><div class="me-step-controls"><button type="button" class="btn btn-sm" data-me-step="-1" ${position === 0 ? "disabled" : ""}>← Previous change</button><button type="button" class="btn btn-sm" data-me-step="1" ${position === this.visible.length - 1 ? "disabled" : ""}>Next change →</button></div><dl>${pair(event.action === "observed" ? "Record timestamp" : "Recorded at", this.stamp(event.timestamp))}<dt>Writer</dt><dd>${this.writerLink(event.actor)}</dd><dt>Owner</dt><dd>${event.agent_id ? this.writerLink(event.agent_id) : "Unknown"}</dd>${pair("Initiated by", event.initiator ? this.writerLabel(event.initiator) : "Not recorded")}${pair("Storage", ownership)}${pair("Namespace", event.memory_id || "Not recorded")}${pair("Source", event.source)}${event.source_ref ? pair("Origin", event.source_ref) : ""}${pair("Execution", event.run_id ? "Run " + event.run_id.slice(0, 8) : event.turn_id ? "Turn " + event.turn_id.slice(0, 8) : "No execution ID recorded")}${versionIndex >= 0 ? pair("Loaded version", versionIndex + 1 + " of " + versionsLoaded.length) : ""}</dl><div class="me-evidence-links">${hasExecution ? `<a class="btn btn-sm" data-me-trace href="${esc("/traces?" + traceParams)}">Open execution trace ↗</a>` : ""}${captured ? `<a class="btn btn-sm" data-me-context href="${esc("/agents/" + encodeURIComponent(event.agent_id) + "/playground?" + contextParams)}">Captured turn context ↗</a>` : ""}</div>${event.changed_fields?.length ? `<div class="me-fields"><span>Changed fields</span>${event.changed_fields.map((field) => `<code title="${esc(field)}">${esc(friendly(field))}${event.field_changes?.[field] ? " · " + esc(event.field_changes[field]) : ""}</code>`).join("")}</div>` : ""}<div class="me-value-evidence"><strong>Value evidence</strong><p>Historical before/after values were not stored in this journal. Hashes establish a recorded change; they do not reconstruct its content.</p>${event.action !== "observed" ? '<button class="btn btn-sm" type="button" data-me-current>View current stored value</button><div data-me-values></div>' : "<p>This is a current-record observation, not a recorded change.</p>"}</div><details class="me-identifiers"><summary>Technical details</summary><dl>${record}${pair("Actor ID", event.actor)}${pair("Attribution", event.attribution || "Historical attribution unavailable")}${identifiers}</dl></details>${event.history_gap ? '<p class="me-gap-note">Earlier changes for this record are unavailable. No continuous version history is implied.</p>' : ""}`;
+        `<div class="me-detail-controls"><span>Change ${position + 1} of ${this.visible.length} visible</span><button type="button" class="btn btn-sm" data-me-close aria-label="Close change details">×</button></div><p class="me-detail-eyebrow">${esc(event.action === "observed" ? "Existing record" : event.action)} · ${esc(friendly(event.memory_type))}</p><h3>${esc(this.nodeLabel(event))}</h3><div class="me-step-controls"><button type="button" class="btn btn-sm" data-me-step="-1" ${position === 0 ? "disabled" : ""}>← Previous change</button><button type="button" class="btn btn-sm" data-me-step="1" ${position === this.visible.length - 1 ? "disabled" : ""}>Next change →</button></div><dl>${pair(event.action === "observed" ? "Record timestamp" : "Recorded at", this.stamp(event.timestamp))}<dt>Writer</dt><dd>${this.writerLink(event.actor)}</dd><dt>Owner</dt><dd>${event.agent_id ? this.writerLink(event.agent_id) : "Unknown"}</dd>${pair("Initiated by", event.initiator ? this.writerLabel(event.initiator) : "Not recorded")}${pair("Storage", ownership)}${pair("Namespace", event.memory_id || "Not recorded")}${pair("Source", this.governedChange(event) ? this.governedChange(event) + (this.governedPlan(event) ? " · plan " + this.governedPlan(event) : "") : event.source)}${event.source_ref ? pair("Origin", event.source_ref) : ""}${pair("Execution", event.run_id ? "Run " + event.run_id.slice(0, 8) : event.turn_id ? "Turn " + event.turn_id.slice(0, 8) : "No execution ID recorded")}${versionIndex >= 0 ? pair("Loaded version", versionIndex + 1 + " of " + versionsLoaded.length) : ""}</dl><div class="me-evidence-links">${hasExecution ? `<a class="btn btn-sm" data-me-trace href="${esc("/traces?" + traceParams)}">Open execution trace ↗</a>` : ""}${captured ? `<a class="btn btn-sm" data-me-context href="${esc("/agents/" + encodeURIComponent(event.agent_id) + "/playground?" + contextParams)}">Captured turn context ↗</a>` : ""}</div>${event.changed_fields?.length ? `<div class="me-fields"><span>Changed fields</span>${event.changed_fields.map((field) => `<code title="${esc(field)}">${esc(friendly(field))}${event.field_changes?.[field] ? " · " + esc(event.field_changes[field]) : ""}</code>`).join("")}</div>` : ""}<div class="me-value-evidence"><strong>Value evidence</strong><p>Historical before/after values were not stored in this journal. Hashes establish a recorded change; they do not reconstruct its content.</p>${event.action !== "observed" ? '<button class="btn btn-sm" type="button" data-me-current>View current stored value</button><div data-me-values></div>' : "<p>This is a current-record observation, not a recorded change.</p>"}</div><details class="me-identifiers"><summary>Technical details</summary><dl>${record}${pair("Actor ID", event.actor)}${pair("Attribution", event.attribution || "Historical attribution unavailable")}${identifiers}</dl></details>${event.history_gap ? '<p class="me-gap-note">Earlier changes for this record are unavailable. No continuous version history is implied.</p>' : ""}`;
       const versions = (this.connections || []).filter(
         ([a, b, branch]) =>
           !branch && (a.record_id === id || b.record_id === id),

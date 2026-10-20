@@ -5007,3 +5007,15 @@ body.theme-light .connect-btn {
 .pg-cache-stats strong { display: block; font-size: 18px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .pg-cache-note { margin: 8px 0 0; font-size: 12px; line-height: 1.45; color: var(--text-secondary); overflow-wrap: anywhere; }
 .pg-cache-last { color: var(--text-primary); }
+
+/* Agent form: the privacy and upkeep group spans the whole row when open,
+   so its select and inputs keep their width. */
+.agent-form details#memory-upkeep[open] {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  max-width: 720px;
+}
+.agent-form details#memory-upkeep select {
+  width: 100%;
+}

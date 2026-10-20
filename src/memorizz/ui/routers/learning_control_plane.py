@@ -51,6 +51,97 @@ def _retention_overrides(agent_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _saved_agent(agent_id: str) -> Any:
+    try:
+        return _state["provider"].retrieve_memagent(agent_id)
+    except Exception:
+        return None
+
+
+def _consolidator(agent_id: str, *, with_model: bool = True) -> Any:
+    """A consolidator for a saved agent, on its background (else chat) model."""
+    from ...learning.consolidation import (
+        ConsolidationConfig,
+        MemoryConsolidator,
+        model_for_agent,
+    )
+
+    record = _saved_agent(agent_id)
+    model = None
+    if with_model and record is not None:
+        try:
+            model = model_for_agent(record)
+        except Exception as exc:
+            logger.warning("No consolidation model for %s: %s", agent_id, exc)
+    try:
+        config = ConsolidationConfig.from_value(
+            _agent_field(record, "memory_consolidation") or None
+        )
+    except (TypeError, ValueError):
+        config = ConsolidationConfig()
+    return MemoryConsolidator(
+        _state["provider"],
+        agent_id=agent_id,
+        model=model,
+        config=config,
+        knowledge_base_ids=_agent_field(record, "knowledge_base_ids") or (),
+    )
+
+
+def _entity_scope(agent_id: str) -> str:
+    policy = _agent_field(_saved_agent(agent_id), "retrieval_policy")
+    if hasattr(policy, "to_dict"):
+        policy = policy.to_dict()
+    return str((policy or {}).get("entity_scope") or "memory")
+
+
+def _pending_consolidations(agent_id: str) -> Dict[str, Any]:
+    """Plans the agent's background schedule left for review in this process."""
+    from ...memagent.core import _shared_upkeep
+
+    return _shared_upkeep(_state["provider"], agent_id).plans
+
+
+def _applied_consolidations(agent_id: str, limit: int = 8) -> list:
+    """Recently applied consolidation plans, from the memory history journal."""
+    from ...memory_history import MemoryHistory
+
+    try:
+        events = MemoryHistory(_state["provider"]).timeline(
+            agent_id=agent_id, limit=1000
+        )["events"]
+    except Exception as exc:
+        logger.debug("Consolidation history unavailable: %s", exc)
+        return []
+    plans: Dict[str, Dict[str, Any]] = {}
+    for event in events:
+        source = str(event.get("source") or "")
+        if not source.startswith("consolidation:"):
+            continue
+        parts = source.split(":")
+        plan = plans.setdefault(
+            parts[1],
+            {
+                "plan_id": parts[1],
+                "changes": 0,
+                "undone": False,
+                "approver": event.get("actor"),
+                "at": event.get("timestamp"),
+                "memory_id": event.get("memory_id"),
+                "user_id": event.get("user_id"),
+            },
+        )
+        if source.endswith(":restore"):
+            plan["undone"] = True
+        else:
+            plan["changes"] += 1
+            plan["at"] = max(str(plan["at"] or ""), str(event.get("timestamp") or ""))
+            plan["memory_id"] = plan["memory_id"] or event.get("memory_id")
+    return sorted(plans.values(), key=lambda item: str(item["at"]), reverse=True)[
+        :limit
+    ]
+
+
 def _redirect(agent_id: str, **scope: Any) -> RedirectResponse:
     query = {"agent_id": agent_id}
     query.update(
@@ -143,10 +234,34 @@ async def learning_control_plane_page(
             logger.debug("Suppressed-memory listing failed: %s", exc)
         finally:
             review_plane.close()
+    consolidation: Dict[str, Any] = {}
+    if selected:
+        try:
+            record = selected_agent or _saved_agent(selected)
+            schedule = _agent_field(record, "memory_consolidation") or None
+            background = _agent_field(record, "background_llm_config") or {}
+            chat = _agent_field(record, "llm_config") or {}
+            model = background or chat
+            consolidation = {
+                "memory_ids": list(_agent_field(record, "memory_ids") or []),
+                "schedule": schedule,
+                "model": (
+                    f"{model.get('provider')}/{model.get('model')}"
+                    if model.get("model")
+                    else None
+                ),
+                "model_is_background": bool(background),
+                "pending": list(_pending_consolidations(selected).values()),
+                "applied": _applied_consolidations(selected),
+                "entity_scope": _entity_scope(selected),
+            }
+        except Exception as exc:
+            logger.debug("Consolidation panel data failed: %s", exc)
     return templates.TemplateResponse(
         "learning_control_plane.html",
         {
             "suppressed": suppressed,
+            "consolidation": consolidation,
             "request": request,
             "provider_type": _state["provider_type"],
             "connection_info": _state["connection_info"],
@@ -355,6 +470,170 @@ async def unsuppress_memory(
         _last_actions[agent_id] = {"kind": "error", "message": str(exc)}
     finally:
         plane.close()
+    return _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+
+
+@router.post("/learning-control-plane/consolidation-plan")
+async def plan_consolidation(
+    agent_id: str = Form(...),
+    consolidation_memory_id: str = Form(...),
+    consolidation_user_id: Optional[str] = Form(None),
+    consolidation_thread_ids: Optional[str] = Form(None),
+    knowledge_base: Optional[str] = Form(None),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Dry-run consolidation of one memory (the model calls take a while)."""
+    from starlette.concurrency import run_in_threadpool
+
+    target = consolidation_memory_id.strip()
+    person = (consolidation_user_id or "").strip() or None
+    threads = [
+        item.strip()
+        for item in (consolidation_thread_ids or "").replace("\n", ",").split(",")
+        if item.strip()
+    ]
+
+    def _plan() -> Dict[str, Any]:
+        consolidator = _consolidator(agent_id)
+        wanted = threads or consolidator.recent_threads(target, person)
+        plan = consolidator.plan(
+            memory_id=target,
+            user_id=person,
+            thread_ids=wanted,
+            knowledge_base=knowledge_base in ("on", "true", "1"),
+            entities=_entity_scope(agent_id) == "memory",
+        )
+        return {**plan.to_dict(), "thread_ids": wanted}
+
+    try:
+        report = await run_in_threadpool(_plan)
+        total = len(report["ops"])
+        _last_actions[agent_id] = {
+            "kind": "consolidation-plan",
+            "message": (
+                f"Consolidation dry run for {target}: {total} change(s) to review"
+                if total
+                else f"Consolidation dry run for {target}: memory is tidy"
+            ),
+            "report": report,
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        _last_actions[agent_id] = {"kind": "error", "message": str(exc)}
+    return _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+
+
+@router.post("/learning-control-plane/consolidation-review")
+async def review_consolidation(
+    agent_id: str = Form(...),
+    plan_id: str = Form(...),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Open a plan the background schedule left for review."""
+    plan = _pending_consolidations(agent_id).get(plan_id)
+    if plan is None:
+        _last_actions[agent_id] = {
+            "kind": "error",
+            "message": f"Consolidation plan {plan_id} is no longer waiting",
+        }
+    else:
+        _last_actions[agent_id] = {
+            "kind": "consolidation-plan",
+            "message": f"Scheduled consolidation plan for {plan.memory_id}",
+            "report": plan.to_dict(),
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    return _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+
+
+@router.post("/learning-control-plane/consolidation-apply")
+async def apply_consolidation(
+    agent_id: str = Form(...),
+    plan_id: str = Form(...),
+    approved_by: str = Form(...),
+    reason: Optional[str] = Form(None),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Apply the reviewed plan; every change can be undone."""
+    from ...learning.consolidation import ConsolidationPlan
+
+    action = _last_actions.get(agent_id) or {}
+    report = (
+        action.get("report") if action.get("kind") == "consolidation-plan" else None
+    )
+    try:
+        if not report or report.get("plan_id") != plan_id:
+            raise ValueError(
+                "This consolidation plan is no longer the one under review; plan again"
+            )
+        plan = ConsolidationPlan.from_dict(report)
+        result = _consolidator(agent_id, with_model=False).apply(
+            plan, approved_by=approved_by, reason=reason
+        )
+        _pending_consolidations(agent_id).pop(plan_id, None)
+        applied = sum(result.applied.values())
+        _last_actions[agent_id] = {
+            "kind": "consolidation-applied",
+            "message": (
+                f"Applied {applied} consolidation change(s)"
+                + (f"; {len(result.errors)} failed" if result.errors else "")
+            ),
+            "report": {
+                **result.to_dict(),
+                "memory_id": plan.memory_id,
+                "user_id": plan.user_id,
+            },
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        _last_actions[agent_id] = {"kind": "error", "message": str(exc)}
+    return _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+
+
+@router.post("/learning-control-plane/consolidation-restore")
+async def restore_consolidation(
+    agent_id: str = Form(...),
+    plan_id: str = Form(...),
+    approved_by: str = Form(...),
+    consolidation_memory_id: str = Form(...),
+    consolidation_user_id: Optional[str] = Form(None),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Undo an applied consolidation plan."""
+    try:
+        counts = _consolidator(agent_id, with_model=False).restore(
+            plan_id,
+            memory_id=consolidation_memory_id.strip(),
+            user_id=(consolidation_user_id or "").strip() or None,
+            approved_by=approved_by,
+        )
+        _last_actions[agent_id] = {
+            "kind": "consolidation-restored",
+            "message": (
+                f"Undid consolidation {plan_id[:20]}: {counts['entities']} merge(s), "
+                f"{counts['attributes']} retired fact(s) and {counts['rows']} hidden "
+                f"row(s) restored, {counts['facts_removed']} added fact(s) removed"
+            ),
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        _last_actions[agent_id] = {"kind": "error", "message": str(exc)}
     return _redirect(
         agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
     )

@@ -28,7 +28,7 @@
         button[type="submit"].connect-btn,
         button[type="submit"],
         form button[type="submit"],
-        .connect-form button,
+        .connect-form button:not(.local-store),
         .connect-form .connect-btn {
             background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
             background-color: #000000 !important;
@@ -45,7 +45,7 @@
         button[type="submit"].connect-btn:hover,
         button[type="submit"]:hover,
         form button[type="submit"]:hover,
-        .connect-form button:hover,
+        .connect-form button:not(.local-store):hover,
         .connect-form .connect-btn:hover {
             background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
             background-color: #000000 !important;
@@ -62,7 +62,7 @@
         button[type="submit"].connect-btn:active,
         button[type="submit"]:active,
         form button[type="submit"]:active,
-        .connect-form button:active,
+        .connect-form button:not(.local-store):active,
         .connect-form .connect-btn:active {
             background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
             background-color: #000000 !important;
@@ -140,6 +140,50 @@
 
             <style>
                 @keyframes docker-spin { to { transform: rotate(360deg); } }
+
+                /* FileSystem stores found on this computer */
+                .local-stores {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.35rem;
+                    margin-top: 0.6rem;
+                }
+                .local-stores-label {
+                    color: #888;
+                    font-size: 0.78rem;
+                }
+                .local-store {
+                    display: flex;
+                    flex-wrap: wrap;
+                    justify-content: space-between;
+                    gap: 0.25rem 0.75rem;
+                    padding: 0.5rem 0.75rem;
+                    color: #ddd;
+                    font: inherit;
+                    font-size: 0.85rem;
+                    text-align: left;
+                    background: #050505;
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 8px;
+                    cursor: pointer;
+                }
+                .local-store:hover,
+                .local-store:focus-visible {
+                    border-color: rgba(0, 217, 255, 0.45);
+                }
+                .local-store.is-selected {
+                    color: #00d9ff;
+                    border-color: rgba(0, 217, 255, 0.6);
+                }
+                .local-store-path {
+                    min-width: 0;
+                    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                    overflow-wrap: anywhere;
+                }
+                .local-store-meta {
+                    color: #888;
+                    font-size: 0.78rem;
+                }
 
                 /* Phase checklist */
                 .docker-phase-list {
@@ -235,6 +279,17 @@
                         <option value="filesystem" {% if provider_type == 'filesystem' %}selected{% endif %}>FileSystem</option>
                         <option value="notion" {% if provider_type == 'notion' %}selected{% endif %}>Notion + separate semantic provider</option>
                     </select>
+                    {% if local_stores %}
+                    <div class="local-stores" role="group" aria-label="Stores found on this computer">
+                        <span class="local-stores-label">FileSystem stores on this computer</span>
+                        {% for store in local_stores %}
+                        <button type="button" class="local-store" data-path="{{ store.display }}" title="{{ store.path }}">
+                            <span class="local-store-path">{{ store.display }}</span>
+                            <span class="local-store-meta">{% if store.agents %}{{ store.agents }} agent{{ 's' if store.agents != 1 }}{% elif store.exists %}empty{% else %}not created yet{% endif %}{% if store.default %} · the CLI's store{% endif %}</span>
+                        </button>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
                 </div>
 
                 <!-- Oracle Fields -->
@@ -288,7 +343,7 @@
                 <div id="filesystem-fields" class="provider-fields" style="display: none;">
                     <div class="form-group">
                         <label for="filesystem_path">Storage Path</label>
-                        <input type="text" name="filesystem_path" id="filesystem_path" placeholder="~/.memorizz/data" value="{{ env_filesystem_path or '' }}">
+                        <input type="text" name="filesystem_path" id="filesystem_path" placeholder="{{ default_filesystem_path }}" value="{{ env_filesystem_path or '' }}">
                     </div>
                 </div>
 
@@ -347,6 +402,25 @@
 
         // Initialize on page load
         toggleProviderFields();
+
+        // A store found on this computer fills the FileSystem path.
+        function markLocalStore() {
+            const filesystem = document.getElementById('provider_type').value === 'filesystem';
+            const value = document.getElementById('filesystem_path').value.trim();
+            document.querySelectorAll('.local-store').forEach(function(button) {
+                button.classList.toggle('is-selected', filesystem && button.dataset.path === value);
+            });
+        }
+        document.getElementById('provider_type').addEventListener('change', markLocalStore);
+        document.querySelectorAll('.local-store').forEach(function(button) {
+            button.addEventListener('click', function() {
+                document.getElementById('filesystem_path').value = button.dataset.path;
+                document.getElementById('provider_type').value = 'filesystem';
+                toggleProviderFields();
+                markLocalStore();
+            });
+        });
+        document.getElementById('filesystem_path').addEventListener('input', markLocalStore);
 
         function setupPasswordToggles() {
             document.querySelectorAll('.password-toggle').forEach(btn => {
@@ -425,6 +499,7 @@
             const rememberBox = document.getElementById('remember_me');
             const hasSaved = loadCredentials();
             if (hasSaved) rememberBox.checked = true;
+            markLocalStore();
 
             // Save or clear on form submit
             document.querySelector('.connect-form').addEventListener('submit', function() {

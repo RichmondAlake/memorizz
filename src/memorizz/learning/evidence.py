@@ -7,7 +7,7 @@ import math
 import re
 import time
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -16,6 +16,7 @@ from ..enums.memory_type import MemoryType
 from ..long_term.semantic.entity_memory import EntityMemory
 from ..memagent.utils.context_dedup import is_suppressed, naive_time_convention
 from ..memory_provider.base import user_scope_matches
+from ..retrieval import sealed_elsewhere
 from .models import (
     EvidenceItem,
     EvidencePack,
@@ -236,6 +237,7 @@ def _scope_matches(
     user_id: Optional[str],
     thread_id: Optional[str],
     knowledge_base_ids: frozenset = frozenset(),
+    recall: Optional["_RecallScope"] = None,
 ) -> bool:
     row_agent = row.get("agent_id") or row.get("owner_agent_id")
     # Knowledge/conversation/summary rows are shared through an explicit
@@ -249,12 +251,23 @@ def _scope_matches(
     ):
         return False
     row_memory = row.get("trace_memory_id") or row.get("memory_id")
+    if source_type == "entity_memory" and recall is not None:
+        memory_id = recall.entity_memory_id
     if source_type == "knowledge_base":
         # Ingested chunks are keyed by their knowledge base, not by an agent's
         # memory: in scope when attached to the agent or carrying memory_id.
         attached = str(row.get("knowledge_base_id") or "") in knowledge_base_ids
         if not attached and str(row_memory or "") != str(memory_id or ""):
             return False
+        if recall is not None and recall.namespaces:
+            content = row.get("content")
+            namespace = row.get("namespace") or (
+                content.get("namespace") if isinstance(content, Mapping) else None
+            )
+            # The provider already filtered by namespace; a row that names a
+            # different one is dropped, one that names none is kept.
+            if namespace is not None and str(namespace) not in recall.namespaces:
+                return False
     elif (
         memory_id is not None
         and row_memory is not None
@@ -265,7 +278,12 @@ def _scope_matches(
     # a user also sees the agent-wide (no user) knowledge and skills.
     if not user_scope_matches(row.get("user_id"), user_id, source_type):
         return False
-    if source_type == "conversation_memory" and thread_id is not None:
+    thread_sources = {"conversation_memory"}
+    if recall is not None:
+        thread_id = recall.conversation_thread_id
+        if recall.summaries_by_thread:
+            thread_sources.add("summaries")
+    if source_type in thread_sources and thread_id is not None:
         row_thread = row.get("thread_id") or row.get("conversation_id")
         if str(row_thread or "") != str(thread_id):
             return False
@@ -274,6 +292,48 @@ def _scope_matches(
     if source_type == "workflow_memory" and row.get("promoted_skill_id"):
         return False
     return True
+
+
+@dataclass(frozen=True)
+class _RecallScope:
+    """An agent's ``RetrievalPolicy`` applied to one pack."""
+
+    conversation_thread_id: Optional[str]
+    summaries_by_thread: bool
+    skipped_sources: frozenset
+    namespaces: Tuple[str, ...]
+    entity_memory_id: Optional[str]
+
+    @classmethod
+    def build(
+        cls,
+        policy: Any,
+        *,
+        memory_id: Optional[str],
+        thread_id: Optional[str],
+        entity_memory_id: Optional[str],
+    ) -> Optional["_RecallScope"]:
+        if policy is None:
+            return None
+        skipped = set()
+        if policy.conversation_scope == "disabled":
+            skipped.add("conversation_memory")
+        if policy.knowledge_base_scope == "disabled":
+            skipped.add("knowledge_base")
+        if policy.entity_scope == "disabled":
+            skipped.add("entity_memory")
+        by_thread = policy.conversation_scope == "thread"
+        return cls(
+            conversation_thread_id=thread_id if by_thread else None,
+            summaries_by_thread=by_thread,
+            skipped_sources=frozenset(skipped),
+            namespaces=(
+                tuple(policy.knowledge_base_namespaces)
+                if policy.knowledge_base_scope == "namespace"
+                else ()
+            ),
+            entity_memory_id=entity_memory_id or memory_id,
+        )
 
 
 class EvidencePlanner:
@@ -316,8 +376,27 @@ class EvidencePlanner:
         user_id: Optional[str],
         thread_id: Optional[str],
         knowledge_base_ids: frozenset = frozenset(),
+        recall: Optional[_RecallScope] = None,
     ) -> Tuple[List[Mapping[str, Any]], Dict[str, Any]]:
         memory_type = _SOURCE_TYPES[source_type]
+        if recall is not None:
+            thread_id = recall.conversation_thread_id
+            if source_type == "entity_memory":
+                memory_id = recall.entity_memory_id
+            if source_type == "knowledge_base" and len(recall.namespaces) > 1:
+                rows: List[Mapping[str, Any]] = []
+                for namespace in recall.namespaces:
+                    found, _ = self._provider_candidates(
+                        query,
+                        source_type=source_type,
+                        memory_id=memory_id,
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        knowledge_base_ids=knowledge_base_ids,
+                        recall=replace(recall, namespaces=(namespace,)),
+                    )
+                    rows.extend(found)
+                return rows, {}
         if source_type == "entity_memory":
             supports = getattr(self.provider, "supports_entity_memory", None)
             if callable(supports) and not supports():
@@ -366,6 +445,8 @@ class EvidencePlanner:
             kwargs["knowledge_base_ids"] = sorted(knowledge_base_ids)
         if source_type == "conversation_memory" and thread_id is not None:
             kwargs["thread_id"] = thread_id
+        if source_type == "knowledge_base" and recall is not None and recall.namespaces:
+            kwargs["namespace"] = recall.namespaces[0]
         try:
             result = self.provider.retrieve_by_query(
                 query,
@@ -416,10 +497,13 @@ class EvidencePlanner:
         user_id: Optional[str],
         thread_id: Optional[str],
         knowledge_base_ids: frozenset = frozenset(),
+        recall: Optional[_RecallScope] = None,
     ) -> Tuple[List[Tuple[str, Mapping[str, Any]]], List[str]]:
         rows_by_source: List[Tuple[str, Mapping[str, Any]]] = []
         warnings: List[str] = []
         for source_type in self.config.evidence_sources:
+            if recall is not None and source_type in recall.skipped_sources:
+                continue
             try:
                 if source_type == "learning_artifacts":
                     rows = self._artifact_candidates(
@@ -437,6 +521,7 @@ class EvidencePlanner:
                         user_id=user_id,
                         thread_id=thread_id,
                         knowledge_base_ids=knowledge_base_ids,
+                        recall=recall,
                     )
                 else:
                     warnings.append(f"unknown evidence source: {source_type}")
@@ -464,7 +549,13 @@ class EvidencePlanner:
         history_hashes: set[str],
         freshness: Mapping[str, int],
         knowledge_base_ids: frozenset = frozenset(),
+        recall: Optional[_RecallScope] = None,
     ) -> Optional[EvidenceItem]:
+        if source_type in {"conversation_memory", "summaries"} and sealed_elsewhere(
+            row, thread_id
+        ):
+            # Another thread's sealed conversation stays there.
+            return None
         if not _scope_matches(
             row,
             source_type=source_type,
@@ -473,6 +564,7 @@ class EvidencePlanner:
             user_id=user_id,
             thread_id=thread_id,
             knowledge_base_ids=knowledge_base_ids,
+            recall=recall,
         ):
             return None
         source_id = _row_id(row)
@@ -616,9 +708,17 @@ class EvidencePlanner:
         thread_id: Optional[str] = None,
         history_texts: Optional[Sequence[str]] = None,
         knowledge_base_ids: Optional[Sequence[str]] = None,
+        retrieval_policy: Any = None,
+        entity_memory_id: Optional[str] = None,
     ) -> EvidencePack:
         """Build the pack. ``knowledge_base_ids`` are the knowledge bases
-        attached to the agent; omitted, they are read from its stored record."""
+        attached to the agent; omitted, they are read from its stored record.
+
+        ``retrieval_policy`` is the agent's ``RetrievalPolicy`` for the turn:
+        its conversation, knowledge-base and entity scopes decide which
+        sources are read and how. Without one, conversation evidence comes
+        from the current thread only. ``entity_memory_id`` is where the
+        turn's entity facts live when they are kept per thread."""
         started = time.perf_counter()
         query_text = str(query or "").strip()
         if not query_text:
@@ -639,12 +739,19 @@ class EvidencePlanner:
             for text in (history_texts or [])
             if str(text).strip()
         }
+        recall = _RecallScope.build(
+            retrieval_policy,
+            memory_id=memory_id,
+            thread_id=thread_id,
+            entity_memory_id=entity_memory_id,
+        )
         source_rows, warnings = self._collect_source_rows(
             query_text,
             memory_id=memory_id,
             user_id=user_id,
             thread_id=thread_id,
             knowledge_base_ids=attached,
+            recall=recall,
         )
         freshness = self.config.freshness_map()
         candidates: List[EvidenceItem] = []
@@ -661,6 +768,7 @@ class EvidencePlanner:
                 history_hashes=history_hashes,
                 freshness=freshness,
                 knowledge_base_ids=attached,
+                recall=recall,
             )
             if candidate is not None:
                 candidates.append(candidate)
@@ -679,7 +787,14 @@ class EvidencePlanner:
             "user_id": user_id,
             "thread_id": thread_id,
         }
-        policy_hash = content_digest(self.config.to_dict())
+        policy_hash = content_digest(
+            self.config.to_dict()
+            if retrieval_policy is None
+            else {
+                **self.config.to_dict(),
+                "retrieval_policy": retrieval_policy.to_dict(),
+            }
+        )
         pack_id = (
             "evidence-pack-"
             + hashlib.sha256(

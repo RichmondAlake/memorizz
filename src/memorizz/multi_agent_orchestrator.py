@@ -23,6 +23,7 @@ from .coordination.structured_results import (
 from .execution import AgentExecutionError, delegated_execution, recording_warning
 from .streaming import (
     CancellationToken,
+    DelegateProgress,
     StreamCancelled,
     current_cancellation,
     current_stream,
@@ -1258,14 +1259,39 @@ class MultiAgentOrchestrator:
                         ] = harness_result.context_pack
                 result = harness_result.final_response
             else:
-                result = agent.run(
-                    task.description,
-                    memory_id,
-                    thread_id,
-                    user_id=self._request_user_id,
-                    context=request_context,
-                    tool_context=tool_context,
+                # The reply shows what an in-process delegate is doing too. Its
+                # stream callback is per context, so this worker's alone.
+                session = progress_stream.get()
+                progress = (
+                    DelegateProgress(
+                        session,
+                        getattr(agent, "name", None)
+                        or getattr(getattr(agent, "persona", None), "name", None)
+                        or str(agent.agent_id)[:8],
+                        f"delegate:{task.task_id}",
+                    )
+                    if session is not None
+                    and hasattr(agent, "set_stream_event_callback")
+                    else None
                 )
+                if progress is not None:
+                    previous = getattr(agent, "_stream_event_callback", None)
+                    agent.set_stream_event_callback(progress)
+                    progress.start()
+                result = None
+                try:
+                    result = agent.run(
+                        task.description,
+                        memory_id,
+                        thread_id,
+                        user_id=self._request_user_id,
+                        context=request_context,
+                        tool_context=tool_context,
+                    )
+                finally:
+                    if progress is not None:
+                        agent.set_stream_event_callback(previous)
+                        progress.stop(result)
 
             return result
 

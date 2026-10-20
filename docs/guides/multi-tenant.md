@@ -93,6 +93,45 @@ tenant. Never omit the provider filter in a request-serving path; the unscoped
 form exists for migration, audit, and maintenance jobs. Agent internals always
 pass their scope explicitly.
 
+## Sealed threads
+
+`user_id` keeps users apart. To also keep each conversation of one user apart,
+so that nothing said in one thread reaches another, seal it:
+
+```python
+from memorizz import RetrievalPolicy
+
+agent = MemAgent(..., retrieval_policy=RetrievalPolicy.sealed())
+# or for one call on a shared agent:
+agent.run(question, user_id=user, thread_id=thread, retrieval_policy="sealed")
+```
+
+A sealed thread:
+
+- recalls only its own conversation and summaries;
+- keeps the entity facts it writes, and the ones it recalls, to itself;
+- reuses cached answers only from itself, and its answers are never served
+  to another thread;
+- sees the agent's persona without its change history, and can't change the
+  persona, which every conversation shares;
+- is never mined by [memory consolidation](memory-consolidation.md).
+
+The knowledge base stays shared: it is reference material, not something a
+user said. Exact current-thread history loads as always.
+
+What a sealed thread writes is marked as sealed:
+
+- **Conversation rows and summaries** get `retention_state="sealed"`. Other
+  threads' recall, including the learning control plane's evidence pack and
+  personalization recall, skips them. They stay sealed if the agent is
+  unsealed later, and come back sealed after a suppression is restored.
+- **Entity facts** are stored in their own memory scope,
+  `<memory_id>:thread:<thread_id>`. Facts stored before a thread was sealed
+  stay in the shared scope and are not recalled from it.
+
+The sealed cache relies on the semantic cache's default
+`require_fingerprint_match=True`.
+
 ## What is NOT scoped by `user_id`
 
 `user_id` scopes *per-user memory*. It does **not** scope:

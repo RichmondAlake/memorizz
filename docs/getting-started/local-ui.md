@@ -43,6 +43,15 @@ The Memorizz local UI gives you a browser-based workflow for connecting to your 
   mechanism** section (importance rater, recency decay and weights, suppression
   thresholds, reflection). Each agent's form has a *Forgetting (per-agent
   overrides)* group for the same values.
+- Set the agent's background model (summaries, compaction and consolidation)
+  under *LLM configuration*. Under *Conversation privacy and memory upkeep*
+  you can seal conversations, choose where entity facts live, and turn on
+  background consolidation.
+- Consolidate an agent's memory from *Continual learning → Control plane*:
+  plan, review each change, apply it with an approver, undo it later. The
+  Playground's *Memory* tab shows how the agent remembers, and the memory
+  evolution timeline labels every change a plan made (see
+  [Memory consolidation](../guides/memory-consolidation.md)).
 
 ## 1. Install UI Dependencies
 
@@ -97,7 +106,15 @@ On first load, the UI opens the `/connect` page.
 ### Filesystem
 
 - Required: `Storage Path`
-- Example path: `~/.memorizz/memory`
+- The CLI's store is `~/.memorizz/memory` (or `MEMORIZZ_MEMORY_ROOT` when set),
+  so the CLI and the UI see the same agents when both use it.
+
+The connect page finds the stores on this computer: the CLI's store and any
+other folder under `~/.memorizz` that holds agents, each with its agent count.
+Click one to use it. When `MEMORIZZ_BACKEND` is unset, no MongoDB URI or
+Oracle login is in the environment and the CLI's store already has agents,
+the page starts on FileSystem with that path filled in.
+A path that does not exist yet becomes a new, empty store when you connect.
 
 For Oracle embedding consistency across UI, SDK, and evaluations, first run
 `memorizz oracle preflight --json`, then set the dimension reported by the
@@ -224,6 +241,24 @@ See the [Browser Control guide](../browser-control/index.md).
   the first question). The bin asks for confirmation, then deletes the
   conversation's messages, summaries and tool logs for this agent. Run
   traces stay on the Traces page.
+- **Rename the agent:** click its name at the top of the chat, type the new
+  name and press Enter (Esc cancels). The agent list and the CLI show the new
+  name too; in the CLI, `/name` does the same.
+- **Watch the CLI live:** when you chat with the same agent in the CLI
+  (`memorizz` or `memorizz run`), each turn appears in the open playground as
+  it streams: your question marked "Sent from the CLI", the tools it uses and
+  the answer as it is written. Once the turn ends the stored conversation is
+  shown. A turn in another conversation shows a notice with a button to open
+  it. The CLI writes its running turns to `~/.memorizz/live/` (removed after
+  an hour), so this works when the UI and the CLI share a machine and
+  `MEMORIZZ_HOME`.
+- **Watch delegates work:** when the agent hands parts of a request to its
+  delegates, each one gets a row in the reply: its name and harness, what it
+  is doing now, how long it has worked, and when it ends, done or failed with
+  the reason. A harness delegate's row links to its run on Agent Harnesses
+  and has a live log of its commands and their output, tool calls, file edits
+  and messages, read from the run's record while it works. A crew run from
+  the CLI shows the same rows in the open playground.
 - **Settings:** the Save button stays at the bottom of the Settings tab and
   shows "Unsaved changes" once you edit a field.
 

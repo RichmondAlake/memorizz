@@ -119,7 +119,7 @@ def test_agent_asks_for_a_capability_instead_of_improvising(monkeypatch):
             "request_capability", {"capability": "web search", "reason": "news"}
         )
         assert result["ok"] is True and result["capability"] == "web_search"
-        assert "enable it from the app" in result["message"]
+        assert "connect it now" in result["message"]
         assert emitted == [
             (
                 "capability.requested",
@@ -145,6 +145,9 @@ def test_agent_asks_for_a_capability_instead_of_improvising(monkeypatch):
 class _FakeModel:
     model = "fake"
 
+    def __init__(self):
+        self.prompts = []
+
     def get_config(self):
         return {"provider": "openai", "model": "fake"}
 
@@ -155,6 +158,7 @@ class _FakeModel:
         return None
 
     def generate_stream(self, messages, tools=None, **kwargs):
+        self.prompts.append(messages)
         yield {"type": "content", "content": "No."}
         yield {"type": "done", "content": "No."}
 
@@ -162,7 +166,8 @@ class _FakeModel:
 def test_stream_reports_a_needed_capability_before_the_model_answers():
     from memorizz import MemAgent
 
-    agent = MemAgent(model=_FakeModel(), memory_provider=False, auto_register=False)
+    model = _FakeModel()
+    agent = MemAgent(model=model, memory_provider=False, auto_register=False)
     try:
         with agent.run_stream_events("can you search the internet for me") as events:
             kinds = [(event["type"], event.get("capabilities")) for event in events]
@@ -176,8 +181,27 @@ def test_stream_reports_a_needed_capability_before_the_model_answers():
             else len(kinds)
         )
         assert kinds.index(("capability.suggested", ["web_search"])) < first_model
+        # Beside the query, where it outweighs an old "I can't" in memory.
+        turn = [m for m in model.prompts[0] if m["role"] == "user"][-1]["content"]
+        assert "- Web search (Search the web and read pages): not connected yet" in turn
+        assert "never call it impossible" in turn
+        assert turn.index("not connected yet") < turn.index(
+            "can you search the internet"
+        )
     finally:
         agent.close()
+
+
+def test_a_capability_is_found_by_id_title_or_the_service_behind_it():
+    assert capability_gaps.resolve("notes") == "notes"
+    assert capability_gaps.resolve("Notes and docs") == "notes"
+    assert capability_gaps.resolve("notion") == "notes"
+    assert capability_gaps.resolve("web search") == "web_search"
+    assert capability_gaps.resolve("Gmail") == "email"
+    assert capability_gaps.resolve("google-calendar") == "calendar"
+    assert capability_gaps.resolve("teleport") is None
+    assert capability_gaps.service_title("notes") == "Notion"
+    assert capability_gaps.service_title("web_search") is None
 
 
 # --------------------------------------------------------------------- UI

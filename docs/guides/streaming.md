@@ -51,7 +51,12 @@ reports it, `model`) and `harness_activity` (with `activity`, such as
 `writing`, plus `tool_name` for tool calls). They name the kind of work only,
 never command text, tool input or reasoning, and all arrive before the
 buffered answer. This covers every harness run inside a streamed reply: a
-runtime turn, a delegate's share and the `run_harness_task` tool. An
+runtime turn, a delegate's share and the `run_harness_task` tool. A
+coordinator's delegates are steps of its reply: `tool.started` and
+`tool.completed` with a `delegate:<task>` `span_id` (a failed one carries a
+`reason_code`), and a harness delegate's progress events carry the same
+`span_id` and name the delegate in their `message`, so a host can show each
+delegate's work under its own step. An
 in-process consumer that wants the run's full (redacted) ledger events, as the
 terminal chat does, sets `memorizz.streaming.harness_event_listener` to a
 `listener(run_id, harness, event)` callable before starting the stream; those

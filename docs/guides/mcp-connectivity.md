@@ -158,7 +158,9 @@ encrypted outside the agent record. See Notion's
 [MCP client guide](https://developers.notion.com/guides/mcp/build-mcp-client)
 and [connection guide](https://developers.notion.com/guides/mcp/get-started-with-mcp).
 
-CLI OAuth:
+CLI OAuth: in the `memorizz` chat, `/connect notion` attaches the preset to the
+agent, opens Notion's sign-in and gives the agent Notion's tools once you allow
+access. The same works from a shell:
 
 ```bash
 memorizz mcp add notion --preset notion
@@ -167,12 +169,12 @@ memorizz mcp test notion
 memorizz mcp tools notion
 ```
 
-The terminal login opens a browser and asks you to paste the full final callback
-URL. This also works when the browser cannot load the loopback page: copy the URL
-from its address bar. The preset's callback is `127.0.0.1:8765`, the same port
-as `memorizz ui`; with the UI running, the page reports that the OAuth state is
-invalid or expired. That is expected: paste the address into the terminal
-anyway. Sign-in may take up to ten minutes before the connection gives up.
+The terminal login opens a browser and finishes on its own when you allow
+access. The preset's callback is `127.0.0.1:8765`, the same port as
+`memorizz ui`: if nothing is listening there, the CLI catches the callback
+itself; if the UI is running, the UI passes it back to the terminal. Only an
+older UI cannot: its page reports that the OAuth state is invalid or expired,
+and the terminal asks you to paste the address from the browser's address bar. Sign-in may take up to ten minutes before the connection gives up.
 
 Notion's desktop app exposes no content to macOS Accessibility, so
 [desktop control](../desktop-control/index.md) cannot read it; use this

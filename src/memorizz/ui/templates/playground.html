@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 
-{% block title %}Playground - {{ agent.persona.name if agent and agent.persona and agent.persona.name else 'Agent' }} - Memorizz{% endblock %}
+{% block title %}Playground - {{ (agent.name or (agent.persona.name if agent.persona and agent.persona.name else 'Agent')) if agent else 'Agent' }} - Memorizz{% endblock %}
 
 {% block body_attrs %} class="page-playground" data-sidebar-scope="playground" data-sidebar-default="collapsed"{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="/static/css/playground.css?v=13">
-<link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=7">
-<script src="/static/js/memory-evolution.js?v=7" defer></script>
+<link rel="stylesheet" href="/static/css/playground.css?v=20">
+<link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8">
+<script src="/static/js/memory-evolution.js?v=8" defer></script>
 <script src="/static/js/context-history.js?v=2" defer></script>
 <link rel="stylesheet" href="/static/css/catalog.css?v=4">
 <script src="/static/js/catalog.js?v=2" defer></script>
@@ -263,7 +263,7 @@
         <header class="pg-topbar">
             <button type="button" class="pg-icon-btn" id="pg-rail-toggle" onclick="togglePlaygroundRail()" aria-controls="pg-rail" aria-expanded="true" title="Show or hide conversations"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9 4.5v15"/></svg></button>
             <div class="pg-topbar-title">
-                <h1>{{ agent_title }}</h1>
+                <h1><button type="button" class="pg-agent-name" id="pg-agent-name" onclick="pgStartAgentRename()" title="Rename this agent"><span class="pg-agent-name-text">{{ agent_title }}</span><span class="sr-only"> (rename)</span><svg class="pg-agent-name-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></h1>
                 <button type="button" class="pg-model-chip" onclick="openInspectorTab('settings')" title="{{ llm_provider }} / {{ llm_model }} · change the model in Settings">{{ llm_model }}</button>
             </div>
             <div class="pg-topbar-actions">
@@ -651,6 +651,10 @@
             <div class="pg-memory-actions">
                 <a class="btn btn-sm" href="/memory-transfer?agent_id={{ agent.agent_id|urlencode }}">Export &amp; import memory</a>
             </div>
+            <details class="context-block context-block-collapsible" id="pg-memory-overview" data-agent-id="{{ agent.agent_id }}">
+                <summary class="context-block-title">How this agent remembers</summary>
+                <div class="context-block-body pg-memory-overview" data-overview-body><p class="pg-panel-intro">Loading…</p></div>
+            </details>
             <details class="context-block context-block-collapsible" id="pg-memory-evolution">
                 <summary class="context-block-title">Memory evolution</summary>
                 <div class="context-block-body">
@@ -1965,6 +1969,72 @@ function pgAgentName() {
     return (app && app.dataset.agentName) || 'the agent';
 }
 
+// ---------------------------------------------------------------------
+// Rename the agent from its name in the header.
+// ---------------------------------------------------------------------
+
+function pgSetAgentName(name) {
+    const app = document.getElementById('pg-app');
+    if (app) app.dataset.agentName = name;
+    const textEl = document.querySelector('#pg-agent-name .pg-agent-name-text');
+    if (textEl) textEl.textContent = name;
+    const query = document.getElementById('pg-query');
+    if (query) query.placeholder = `Message ${name}…`;
+    document.title = `Playground - ${name} - Memorizz`;
+    const initial = (name.trim()[0] || 'A').toUpperCase();
+    document.querySelectorAll('.pg-message--assistant .pg-message-role').forEach(function(el) { el.textContent = name; });
+    document.querySelectorAll('.pg-message--assistant .pg-agent-mark').forEach(function(el) { el.textContent = initial; });
+    document.querySelectorAll('.pg-empty-title').forEach(function(el) { el.textContent = `How can ${name} help?`; });
+}
+
+function pgStartAgentRename() {
+    const button = document.getElementById('pg-agent-name');
+    const textEl = button && button.querySelector('.pg-agent-name-text');
+    if (!textEl || button.hidden) return;
+    const original = textEl.textContent;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'pg-agent-name-input';
+    input.value = original;
+    input.maxLength = 80;
+    input.setAttribute('aria-label', 'Agent name');
+    button.hidden = true;
+    button.after(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async function(save) {
+        if (done) return;
+        done = true;
+        const name = input.value.trim().replace(/\s+/g, ' ');
+        input.remove();
+        button.hidden = false;
+        if (!save) button.focus();
+        if (!save || !name || name === original) return;
+        pgSetAgentName(name);
+        try {
+            const response = await fetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/name`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name}),
+            });
+            const body = await response.json().catch(function() { return {}; });
+            if (!response.ok || body.ok === false) throw new Error(body.detail || `HTTP ${response.status}`);
+            pgSetAgentName(body.name || name);
+        } catch (error) {
+            pgSetAgentName(original);
+            const notice = pgEl('span', 'pg-agent-name-notice', `Could not rename: ${error.message}`);
+            notice.setAttribute('role', 'status');
+            button.after(notice);
+            setTimeout(function() { notice.remove(); }, 4000);
+        }
+    };
+    input.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter') { event.preventDefault(); finish(true); }
+        else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false); }
+    });
+    input.addEventListener('blur', function() { finish(true); });
+}
+
 function renderThreadEmptyState(memoryId) {
     const container = document.getElementById('playground-messages');
     if (!container) return;
@@ -2064,10 +2134,13 @@ function renderThreadMessages(messages, memoryId) {
                 const outcomeBadge = outcomeMeta
                     ? `<span class="pg-trace-outcome pg-trace-outcome--${outcomeMeta.status}">${escapeHtml(outcomeMeta.label)}</span>`
                     : '';
+                const body = traceKind === 'memory_context'
+                    ? pgMemoryContextText(content)
+                    : formatTraceContent(content);
                 return `
                     <div class="pg-trace-item pg-trace-item--${traceKindClass}${outcomeMeta ? ` pg-trace-item--outcome-${outcomeMeta.status}` : ''}">
                         <div class="pg-trace-title">${escapeHtml(title)}${outcomeBadge}</div>
-                        <div class="pg-trace-content">${escapeHtml(formatTraceContent(content))}</div>
+                        <div class="pg-trace-content">${escapeHtml(body)}</div>
                     </div>
                 `;
             }).join('');
@@ -2376,6 +2449,7 @@ const PG_TOOL_REASONS = {
 
 // Tool calls stream as short steps inside the reply, like chat assistants show.
 function pgLiveActivity(messageEl, event) {
+    if (String(event.span_id || '').startsWith('delegate:')) return pgDelegateRow(messageEl, event);
     const list = messageEl && messageEl.querySelector('.pg-live-activity');
     if (!list || !event.tool_name) return;
     const key = event.span_id || event.tool_name;
@@ -2398,6 +2472,180 @@ function pgLiveActivity(messageEl, event) {
         item.appendChild(reason);
     }
     list.hidden = false;
+}
+
+// A coordinator's delegates: a row each with what it is doing, how long it
+// has worked and its harness run. The stream names only the kind of work; a
+// harness delegate's own log (commands, tool calls, edits, messages) is read
+// from this app's run ledger while it works.
+const PG_DELEGATE_LOG_LINES = 40;
+
+function pgDuration(ms) {
+    const seconds = Math.max(0, Math.round(ms / 1000));
+    return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+}
+
+function pgClip(text, limit) {
+    const value = String(text || '').replace(/\s+/g, ' ').trim();
+    return value.length > limit ? value.slice(0, limit - 1) + '\u2026' : value;
+}
+
+function pgDelegateName(toolName) {
+    const label = String(toolName || 'delegate').replace(/^Delegate \u00b7 /, '');
+    const match = label.match(/^(.*) \(([^()]+)\)$/);
+    return match ? {name: match[1], harness: match[2]} : {name: label, harness: ''};
+}
+
+function pgDelegateItem(key, who) {
+    const item = pgEl('li', 'pg-delegate is-running');
+    item.dataset.key = key;
+    const head = pgEl('div', 'pg-delegate-head');
+    head.appendChild(pgEl('span', 'pg-delegate-name', who.name));
+    if (who.harness) head.appendChild(pgEl('span', 'pg-delegate-harness', who.harness));
+    const activity = pgEl('span', 'pg-delegate-activity', 'starting');
+    const time = pgEl('span', 'pg-delegate-time', '0s');
+    const link = pgEl('a', 'pg-delegate-run', 'Open run');
+    link.hidden = true;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    head.append(activity, time, link);
+    const log = pgEl('details', 'pg-delegate-log');
+    log.hidden = true;
+    const summary = pgEl('summary', '', 'Live log');
+    const lines = pgEl('ol', 'pg-delegate-lines');
+    log.append(summary, lines);
+    item.append(head, log);
+    const state = {activity, time, link, log, summary, lines, started: Date.now(), runId: null, cursor: 0, seen: new Set(), count: 0, finished: false, polling: false};
+    state.timer = setInterval(function() {
+        if (!item.isConnected || state.finished) return clearInterval(state.timer);
+        time.textContent = pgDuration(Date.now() - state.started);
+    }, 1000);
+    item._pgDelegate = state;
+    return item;
+}
+
+function pgCommandText(command) {
+    const value = (Array.isArray(command) ? command.join(' ') : String(command || '')).trim();
+    const match = value.match(/^(?:\/\S+\/)?(?:ba|z)?sh -l?c (?:(['"])([\s\S]*)\1|([^'"][\s\S]*))$/);
+    return match ? (match[2] || match[3] || '').replace(/\\"/g, '"') : value;
+}
+
+// One ledger event as log lines, the way the terminal chat prints them.
+function pgDelegateLines(state, event) {
+    const data = event && event.data && typeof event.data === 'object' ? event.data : {};
+    const key = String(data.id || data.call_id || '');
+    if (event.type === 'command') {
+        const out = [];
+        if (!key || !state.seen.has(key)) {
+            if (key) state.seen.add(key);
+            out.push({text: '$ ' + pgClip(pgCommandText(data.command), 160), kind: 'command'});
+        }
+        const done = !['', 'in_progress', 'started', undefined, null].includes(data.status) || data.exit_code != null;
+        if (done) {
+            String(data.aggregated_output || data.output || data.stdout || '').split('\n')
+                .filter(function(line) { return line.trim(); }).slice(-3)
+                .forEach(function(line) { out.push({text: '  ' + pgClip(line, 160), kind: 'output'}); });
+            if (data.exit_code != null && String(data.exit_code) !== '0') out.push({text: `  exit ${data.exit_code}`, kind: 'error'});
+        }
+        return out;
+    }
+    if (event.type === 'tool_call') {
+        if ((data.harness_run_id && !data.name) || (key && state.seen.has(key))) return [];
+        if (key) state.seen.add(key);
+        const name = String(data.name || data.tool || data.type || 'tool').replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '');
+        return [{text: '\u2699 ' + name, kind: 'tool'}];
+    }
+    if (event.type === 'file_change') {
+        const changes = Array.isArray(data.changes) ? data.changes : (data.path ? [data] : []);
+        return changes.filter(function(change) { return change && typeof change === 'object'; })
+            .map(function(change) { return {text: `\u270e ${change.kind || 'edit'} ${pgClip(change.path, 140)}`, kind: 'edit'}; });
+    }
+    if (event.type === 'message') {
+        if (data.role && data.role !== 'assistant') return [];
+        const text = pgClip(data.text, 300);
+        return text ? [{text: text, kind: 'message'}] : [];
+    }
+    if (event.type === 'error') return [{text: '\u2717 ' + pgClip(data.error || data.message, 200), kind: 'error'}];
+    return [];
+}
+
+async function pgDelegateFetch(state) {
+    try {
+        const response = await fetch(`/api/harness-runs/${encodeURIComponent(state.runId)}/events?after=${state.cursor}&limit=500`, {cache: 'no-store'});
+        if (!response.ok) return false;
+        const data = await response.json();
+        let latest = null;
+        for (const event of data.events || []) {
+            const sequence = Number(event.sequence) || 0;
+            if (sequence && sequence <= state.cursor) continue;
+            state.cursor = Math.max(state.cursor, sequence);
+            for (const line of pgDelegateLines(state, event)) {
+                state.lines.appendChild(pgEl('li', 'is-' + line.kind, line.text));
+                state.count += 1;
+                latest = line;
+            }
+        }
+        while (state.lines.children.length > PG_DELEGATE_LOG_LINES) state.lines.firstElementChild.remove();
+        if (state.count) {
+            state.log.hidden = false;
+            state.summary.textContent = `Live log \u00b7 ${state.count} line${state.count === 1 ? '' : 's'}`;
+            state.lines.scrollTop = state.lines.scrollHeight;
+        }
+        if (latest && !state.finished && latest.kind !== 'output') state.activity.textContent = latest.text;
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+function pgDelegatePoll(state) {
+    if (state.polling || !state.runId) return;
+    state.polling = true;
+    (async function() {
+        // The run id arrives just before the ledger has the run; keep asking
+        // while the delegate works, giving up only after repeated misses.
+        let misses = 0;
+        while (!state.finished && misses < 20) {
+            misses = (await pgDelegateFetch(state)) ? 0 : misses + 1;
+            if (!state.finished) await new Promise(function(resolve) { setTimeout(resolve, 1500); });
+        }
+        state.polling = false;
+    })();
+}
+
+function pgDelegateRow(messageEl, event) {
+    const list = messageEl && messageEl.querySelector('.pg-live-activity');
+    if (!list) return;
+    const key = String(event.span_id);
+    let item = Array.from(list.children).find(function(li) { return li.dataset.key === key; });
+    if (!item) {
+        if (event.type !== 'tool.started') return;
+        item = pgDelegateItem(key, pgDelegateName(event.tool_name));
+        list.appendChild(item);
+    }
+    const state = item._pgDelegate;
+    list.hidden = false;
+    if (event.type === 'status' && !state.finished) {
+        if (event.harness_run_id && !state.runId) {
+            state.runId = String(event.harness_run_id);
+            state.link.href = `/harnesses?run=${encodeURIComponent(state.runId)}`;
+            state.link.hidden = false;
+            pgDelegatePoll(state);
+        }
+        if (!state.count) state.activity.textContent = event.activity || (event.model ? `working \u00b7 ${event.model}` : 'working');
+    } else if (event.type === 'tool.completed' && !state.finished) {
+        state.finished = true;
+        clearInterval(state.timer);
+        state.time.textContent = pgDuration(Date.now() - state.started);
+        const status = String(event.status || '');
+        const waiting = status === 'approval_required';
+        const failed = !waiting && status && !['success', 'completed', 'succeeded', 'ok'].includes(status);
+        item.className = 'pg-delegate ' + (failed ? 'is-failed' : waiting ? 'is-running' : 'is-done');
+        const reason = event.reason_code ? (PG_TOOL_REASONS[event.reason_code] || String(event.reason_code).replace(/_/g, ' ')) : '';
+        state.activity.textContent = failed ? 'failed' + (reason ? ' \u00b7 ' + reason : '') : waiting ? 'waiting for approval' : 'done';
+        // The ledger may hold a last few events.
+        if (state.runId) setTimeout(function() { pgDelegateFetch(state); }, 500);
+    }
 }
 
 // Tokens and prompt-cache reuse for the turn, shown under the reply.
@@ -2644,6 +2892,7 @@ async function loadThreadMessages(memoryId, options = {}) {
         });
         if (renderChat) {
             renderThreadMessages(messages, normalized);
+            pgReplayLiveTurns(normalized, messages);
         }
         renderContextConversation(payload.token_stats?.history_messages || messages.filter(message => message.message_type !== 'trace_bundle'));
         renderContextToolbox(Array.isArray(payload.toolbox_memory) ? payload.toolbox_memory : []);
@@ -2670,6 +2919,12 @@ async function loadThreadMessages(memoryId, options = {}) {
         if (!renderChat) return;
         const container = document.getElementById('playground-messages');
         if (!container) return;
+        // A conversation the CLI has just started is not stored yet.
+        if (Array.from(pgLive.log.values()).some(function(entry) { return entry.memoryId === normalized; })) {
+            container.innerHTML = '';
+            pgReplayLiveTurns(normalized, []);
+            return;
+        }
         container.innerHTML = `
             <div class="pg-empty">
                 <div class="pg-empty-icon">⚠️</div>
@@ -2750,6 +3005,146 @@ function createStreamingMessage() {
         traceTimeline: div.querySelector('.pg-trace-timeline'),
     };
 }
+
+// ---------------------------------------------------------------------
+// Turns the CLI runs with this agent, shown here as they stream. Running
+// turns are kept until they finish, so switching to their conversation, or
+// reloading it, shows them again; a finished turn reloads the stored one.
+// ---------------------------------------------------------------------
+
+const pgLive = {log: new Map(), views: new Map(), source: null};
+
+function pgFollowLiveTurns() {
+    if (pgLive.source || typeof EventSource === 'undefined') return;
+    pgLive.source = new EventSource(`/api/agents/${encodeURIComponent(AGENT_ID)}/live`);
+    pgLive.source.onmessage = function(message) {
+        let event;
+        try { event = JSON.parse(message.data); } catch (_) { return; }
+        pgOnLiveEvent(event);
+    };
+}
+
+function pgOnLiveEvent(event) {
+    if (!event || !event.turn_id) return;
+    if (event.type === 'turn.started') {
+        // A reconnect replays a running turn from its start.
+        pgLive.log.set(event.turn_id, {memoryId: event.memory_id, query: (event.query || '').trim(), events: []});
+    }
+    const entry = pgLive.log.get(event.turn_id);
+    if (!entry || entry.done) return;
+    entry.events.push(event);
+    if (event.type === 'turn.done') { entry.done = true; entry.doneAt = Date.now(); }
+    if (event.memory_id === pgActiveMemoryId()) pgRenderLiveEvent(event);
+    else pgLiveElsewhere(event);
+}
+
+// After the stored conversation renders: show the turns still running, and a
+// finished one until the stored conversation has it (or for two minutes).
+function pgReplayLiveTurns(memoryId, messages) {
+    pgLive.views.clear();
+    const asked = new Set((messages || []).filter(function(message) {
+        return String(message && message.role || '').toLowerCase() === 'user';
+    }).map(function(message) { return String(message.content ?? message.text ?? '').trim(); }));
+    pgLive.log.forEach(function(entry, turnId) {
+        if (entry.done && (asked.has(entry.query) || Date.now() - entry.doneAt > 120000)) {
+            pgLive.log.delete(turnId);
+            return;
+        }
+        if (entry.memoryId === memoryId) {
+            entry.events.forEach(function(event) { pgRenderLiveEvent(event, true); });
+        }
+    });
+}
+
+function pgRenderLiveEvent(event, replaying) {
+    let view = pgLive.views.get(event.turn_id);
+    if (event.type === 'turn.started') {
+        if (view) { view.user.remove(); view.stream.container.remove(); }
+        const user = appendMessage('user', event.query || '');
+        const stream = createStreamingMessage();
+        if (!user || !stream) return;
+        user.appendChild(pgEl('div', 'pg-message-source', 'Sent from the CLI'));
+        const head = stream.container.querySelector('.pg-message-head');
+        if (head) head.appendChild(pgEl('span', 'pg-live-badge', 'CLI · live'));
+        const status = pgEl('div', 'pg-stream-status', 'Running in the CLI');
+        status.setAttribute('role', 'status');
+        stream.container.appendChild(status);
+        view = {user: user, stream: stream, status: status, text: '', paint: null};
+        pgLive.views.set(event.turn_id, view);
+        return;
+    }
+    if (!view) return;
+    const target = view.stream.textElement;
+    if (event.type === 'answer.delta') {
+        view.text += event.delta || '';
+        if (view.paint === null) {
+            view.paint = requestAnimationFrame(function() {
+                view.paint = null;
+                const container = document.getElementById('playground-messages');
+                const atBottom = !container || container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+                target.textContent = view.text;
+                if (atBottom) scrollToBottom();
+            });
+        }
+    } else if (event.type === 'status') {
+        view.status.textContent = event.message || '';
+        if (event.span_id) pgLiveActivity(view.stream.container, event);
+    } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
+        view.status.textContent = (event.type === 'tool.started' ? 'Running ' : 'Finished ') + event.tool_name;
+        pgLiveActivity(view.stream.container, event);
+    } else if (event.type === 'turn.done') {
+        if (view.paint !== null) cancelAnimationFrame(view.paint);
+        view.stream.container.classList.remove('is-streaming');
+        const badge = view.stream.container.querySelector('.pg-live-badge');
+        if (badge) badge.textContent = 'CLI';
+        if (view.text) {
+            target.innerHTML = renderMarkdown(view.text);
+            target.classList.add('md-rendered');
+        } else {
+            target.textContent = '';
+        }
+        view.stream.container.dataset.raw = view.text;
+        view.status.textContent = event.status === 'completed' ? '' : `Ended in the CLI: ${String(event.status).replace(/_/g, ' ')}.`;
+        pgLive.views.delete(event.turn_id);
+        if (replaying) return;
+        // The stored conversation is the record: show it once it is saved.
+        const memoryId = event.memory_id;
+        setTimeout(function() {
+            if (!isStreaming && !pgLive.views.size && pgActiveMemoryId() === memoryId) void loadThreadMessages(memoryId);
+        }, 800);
+    }
+}
+
+function pgLiveElsewhere(event) {
+    let note = document.getElementById('pg-live-elsewhere');
+    if (event.type === 'turn.done') {
+        const text = note && note.dataset.turnId === event.turn_id && note.querySelector('span');
+        if (text) text.textContent = 'The CLI answered in another conversation.';
+        return;
+    }
+    if (event.type !== 'turn.started') return;
+    const thread = document.getElementById('playground-messages');
+    if (!thread) return;
+    if (!note) {
+        note = pgEl('div', 'pg-live-elsewhere');
+        note.id = 'pg-live-elsewhere';
+        note.setAttribute('role', 'status');
+        thread.before(note);
+    }
+    note.dataset.turnId = event.turn_id;
+    note.textContent = '';
+    note.appendChild(pgEl('span', null, 'The CLI is answering in another conversation.'));
+    const open = pgEl('button', 'btn btn-sm', 'Show it');
+    open.type = 'button';
+    open.addEventListener('click', function() {
+        note.remove();
+        const known = Array.from(document.querySelectorAll('.playground-thread-tab')).some(function(tab) { return tab.dataset.memoryId === event.memory_id; });
+        useThreadMemoryId(event.memory_id, !known);
+    });
+    note.appendChild(open);
+}
+
+document.addEventListener('DOMContentLoaded', pgFollowLiveTurns);
 
 // Capability card: shown when the agent asks for a capability it lacks
 // (capability.requested) or the request clearly needs one
@@ -3235,6 +3630,36 @@ function traceOutcomeMeta(traceEvent) {
         error: 'Failed',
     };
     return labels[status] ? { status, label: labels[status] } : null;
+}
+
+// "Memory supplied": what reached the prompt, with semantic recall split by
+// where it came from (knowledge base or other conversations).
+function pgMemoryContextText(content) {
+    let value;
+    try { value = JSON.parse(String(content || '')); } catch (err) { return formatTraceContent(content); }
+    if (!value || value.stage !== 'supplied' || !value.source_counts) return formatTraceContent(content);
+    const counts = value.source_counts || {};
+    const split = value.semantic_source_counts || {};
+    const plural = function(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); };
+    const lines = [];
+    if (counts.history_messages) lines.push(plural(counts.history_messages, 'history message'));
+    if (counts.semantic_memories) {
+        const parts = [];
+        if (split.knowledge_base) parts.push(split.knowledge_base + ' from the knowledge base');
+        if (split.conversation) parts.push(split.conversation + ' from conversations');
+        lines.push(plural(counts.semantic_memories, 'recalled memory').replace('memorys', 'memories') + (parts.length ? ' (' + parts.join(', ') + ')' : ''));
+    }
+    if (counts.evidence_items) {
+        const by = Object.entries(value.evidence_source_counts || {}).map(function(e) { return e[1] + ' ' + e[0].replace(/_/g, ' '); });
+        lines.push(plural(counts.evidence_items, 'evidence item') + (by.length ? ' (' + by.join(', ') + ')' : ''));
+    }
+    if (counts.entity_profiles) lines.push(plural(counts.entity_profiles, 'entity profile') + ', ' + plural(counts.entity_attributes || 0, 'fact'));
+    if (counts.summaries) lines.push(plural(counts.summaries, 'summary').replace('summarys', 'summaries'));
+    if (counts.preferences) lines.push(plural(counts.preferences, 'preference'));
+    if (counts.persona_snapshots) lines.push('the persona');
+    if (!lines.length) lines.push('Nothing from memory this turn');
+    if (value.injected_char_count) lines.push(value.injected_char_count.toLocaleString() + ' characters in all');
+    return lines.join('\n');
 }
 
 // Trace payloads are often JSON objects; show them as readable key: value lines.
@@ -3781,6 +4206,7 @@ async function sendMessage() {
                 showStatus('Execution paused for approval.');
             } else if (event.type === 'status') {
                 showStatus(event.message || PG_STAGE_LABELS[event.stage] || String(event.stage || '').replaceAll('_', ' '));
+                if (event.span_id) pgLiveActivity(streamMessage.container, event);
             } else if (event.type === 'capability.requested') {
                 renderCapabilityCard(streamMessage.container, [event.capability], {query: query});
             } else if (event.type === 'capability.suggested') {
@@ -3979,6 +4405,60 @@ document.querySelectorAll('.pg-message-text[data-md-raw]').forEach(function(el) 
         el.innerHTML = renderMarkdown(raw);
     }
 });
+
+// Memory tab: "How this agent remembers" (MemAgent.describe_memory()).
+(function() {
+    const details = document.getElementById('pg-memory-overview');
+    if (!details) return;
+    const body = details.querySelector('[data-overview-body]');
+    const agentId = details.dataset.agentId;
+    let loaded = false;
+    const scopes = {
+        memory: 'shared by the conversations of a memory',
+        thread: 'kept to each conversation',
+        disabled: 'not recalled automatically',
+    };
+    function row(label, value) {
+        return '<dt>' + escapeHtml(label) + '</dt><dd>' + value + '</dd>';
+    }
+    function chips(items) {
+        return (items || []).map(function(item) {
+            return '<code>' + escapeHtml(String(item).replace(/_/g, ' ')) + '</code>';
+        }).join(' ') || 'None';
+    }
+    function render(data) {
+        const policy = data.retrieval_policy || {};
+        const background = data.background_model;
+        const chat = data.chat_model || {};
+        const schedule = data.memory_consolidation;
+        const edit = '/agents/' + encodeURIComponent(agentId) + '/edit#memory-upkeep';
+        const lcp = '/learning-control-plane?agent_id=' + encodeURIComponent(agentId) + '#memory-consolidation';
+        body.innerHTML = '<dl class="pg-overview-list">'
+            + row('Memory types', chips(data.memory_types))
+            + row('Entity facts', data.entity_memory ? 'On, ' + escapeHtml(scopes[policy.entity_scope || 'memory']) : 'Off')
+            + row('Conversations', data.sealed
+                ? 'Sealed: nothing said in one conversation reaches another'
+                : 'Recall reaches ' + escapeHtml(policy.conversation_scope === 'thread' ? 'the current conversation only' : policy.conversation_scope === 'disabled' ? 'no conversation' : 'every conversation of the memory'))
+            + row('Knowledge base', escapeHtml(policy.knowledge_base_scope === 'disabled' ? 'Not recalled automatically' : policy.knowledge_base_scope === 'namespace' ? 'Only ' + (policy.knowledge_base_namespaces || []).join(', ') : 'Recalled from the attached knowledge bases'))
+            + row('Memory tools', chips(data.memory_tools))
+            + row('Background model', background
+                ? escapeHtml([background.provider, background.model].filter(Boolean).join('/'))
+                : 'The chat model' + (chat.model ? ' (' + escapeHtml([chat.provider, chat.model].filter(Boolean).join('/')) + ')' : ''))
+            + row('Consolidation', schedule
+                ? 'Every ' + schedule.every_n_turns + ' turns' + (schedule.every_hours ? ' or ' + Math.round(schedule.every_hours) + ' h' : '') + ', ' + (schedule.auto_apply ? 'applied automatically' : 'waits for review')
+                    + (data.pending_consolidations ? ' · <a href="' + lcp + '">' + data.pending_consolidations + ' waiting</a>' : '')
+                : 'On demand')
+            + '</dl><p class="pg-panel-intro"><a href="' + edit + '">Change these on the agent form</a> · <a href="' + lcp + '">Consolidate now</a></p>';
+    }
+    function load() {
+        body.innerHTML = '<p class="pg-panel-intro">Loading…</p>';
+        fetch('/api/agents/' + encodeURIComponent(agentId) + '/memory-overview')
+            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(function(data) { render(data); loaded = true; })
+            .catch(function(err) { body.innerHTML = '<p class="pg-panel-intro">Could not load: ' + escapeHtml(err.message) + '</p>'; });
+    }
+    details.addEventListener('toggle', function() { if (details.open && !loaded) load(); });
+})();
 
 scrollToBottom();
 </script>

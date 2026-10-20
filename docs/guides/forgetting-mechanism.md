@@ -73,8 +73,11 @@ the user path (`touch_many`): `last_accessed_at` moves to now and
 paper. New conversation rows are rated at store time and their importance
 accumulates per conversation; when `MEMORIZZ_REFLECTION_ENABLED` is on and the
 sum passes `MEMORIZZ_REFLECTION_THRESHOLD` (default 15.0 on the 0 to 1 scale,
-the paper's 150 on 1 to 10), the agent runs one summarisation pass over that
-conversation, the paper's reflection step, and records it in the turn trace.
+the paper's 150 on 1 to 10), the agent schedules one summarisation pass over
+that conversation, the paper's reflection step, and records it in the turn
+trace as `Reflection scheduled`. The pass runs after the turn returns, on the
+agent's [background model](memory-consolidation.md#the-background-model).
+LLM importance ratings use the background model too.
 
 ## Tier 1: governed suppression (plan, approve, restore)
 

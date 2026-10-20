@@ -388,6 +388,98 @@ class _Session:
             )
 
 
+class DelegateProgress:
+    """Relay a MemAgent delegate's steps into the open reply stream.
+
+    A harness delegate reports through its run (``HarnessProgress``). A
+    MemAgent delegate runs in-process, so its own trace events (it is the
+    delegate's stream event callback) become the same content-free
+    ``status`` events, on the delegate's step (``span_id``). A
+    ``harness_event_listener`` (the terminal) also gets them as feed events:
+    each tool call with its arguments, the first piece of its result and the
+    delegate's answer, redacted.
+    """
+
+    def __init__(self, session, delegate, span_id):
+        self.session = session
+        self.delegate = str(delegate or "delegate")
+        self.span_id = span_id
+        self.listener = harness_event_listener.get()
+        self._last = None
+
+    def _emit(self, stage, message, **fields):
+        try:
+            self.session.emit(
+                "status", stage=stage, message=message, span_id=self.span_id, **fields
+            )
+        except Exception:
+            pass
+
+    def _notify(self, event):
+        if self.listener is None:
+            return
+        try:
+            self.listener(self.span_id, "memagent", event)
+        except Exception:
+            self.listener = None
+
+    def start(self):
+        self._emit("delegate_running", f"{self.delegate} is working")
+        self._notify({"type": "run.started", "data": {"delegate": self.delegate}})
+
+    def __call__(self, event):
+        from .metaharness.security import redact
+
+        if event.get("type") != "trace":
+            return
+        kind = event.get("trace_kind")
+        call_id = event.get("tool_call_id") or event.get("span_id")
+        if kind == "tool_result":
+            if not event.get("append"):  # the first piece is enough here
+                self._notify(
+                    {
+                        "type": "tool_result",
+                        "data": {
+                            "tool_use_id": call_id,
+                            "content": redact(str(event.get("content") or ""))[:2000],
+                            "is_error": event.get("success") is False,
+                        },
+                    }
+                )
+            return
+        if kind == "model_call":
+            activity = {"activity": "thinking"}
+        elif kind == "tool_call":
+            name = str(event.get("tool_name") or "tool")
+            activity = {"activity": f"calling {name}", "tool_name": name}
+            self._notify(
+                {
+                    "type": "tool_call",
+                    "data": {
+                        "id": call_id,
+                        "name": name,
+                        "input": redact(str(event.get("content") or "")),
+                    },
+                }
+            )
+        else:
+            return
+        if activity != self._last:
+            self._last = activity
+            self._emit(
+                "delegate_activity",
+                f"{self.delegate}: {activity['activity']}",
+                **activity,
+            )
+
+    def stop(self, answer=None):
+        from .metaharness.security import redact
+
+        if answer:
+            self._notify({"type": "message", "data": {"text": redact(str(answer))}})
+        self._notify({"type": "run.finished"})
+
+
 def _harness_activity(event):
     """Plain words for one harness ledger event, or None to stay quiet.
 
@@ -428,10 +520,23 @@ class HarnessProgress:
     kind of work.
     """
 
-    def __init__(self, session, service, harness, *, poll_seconds=0.25):
+    def __init__(
+        self,
+        session,
+        service,
+        harness,
+        *,
+        poll_seconds=0.25,
+        delegate=None,
+        span_id=None,
+    ):
         self.session, self.service = session, service
         self.harness = str(harness or "")
         self.poll_seconds = poll_seconds
+        # A delegate's run: its name, and the reply step (``delegate:<task>``)
+        # its progress belongs to.
+        self.delegate = str(delegate or "") or None
+        self.span_id = span_id
         self.listener = harness_event_listener.get()
         self.run_id = None
         self._cursor, self._last, self._lock = 0, None, threading.Lock()
@@ -443,7 +548,8 @@ class HarnessProgress:
     def label(self):
         from .metaharness.catalog import HARNESS_LABELS
 
-        return HARNESS_LABELS.get(self.harness, self.harness or "The harness")
+        harness = HARNESS_LABELS.get(self.harness, self.harness or "The harness")
+        return f"{self.delegate} ({harness})" if self.delegate else harness
 
     def _emit(self, stage, message, **fields):
         try:
@@ -453,6 +559,7 @@ class HarnessProgress:
                 harness=self.harness or None,
                 harness_run_id=self.run_id,
                 message=message,
+                **({"span_id": self.span_id} if self.span_id else {}),
                 **fields,
             )
         except Exception:
@@ -471,7 +578,11 @@ class HarnessProgress:
         if self.harness in {"", "auto"}:
             self._resolve_harness()
         self._emit("harness_running", f"{self.label} is working")
-        self._notify({"type": "run.started"})
+        self._notify(
+            {"type": "run.started", "data": {"delegate": self.delegate}}
+            if self.delegate
+            else {"type": "run.started"}
+        )
         if self.listener is not None:
             from .metaharness import live
 
@@ -694,15 +805,22 @@ def agent_event_stream(
                         text = (
                             getattr(result, "final_response", None) or result or status
                         )
+                        succeeded = status in {"completed", "succeeded"}
                         trace = {
                             "trace_kind": "tool_result",
                             "title": f"Delegate result: {label}",
-                            "status": "success"
-                            if status in {"completed", "succeeded"}
-                            else "error",
-                            "success": status in {"completed", "succeeded"},
+                            "status": "success" if succeeded else "error",
+                            "success": succeeded,
                             "content": str(text)[:4000],
                         }
+                        # Why it failed, as a code: no error text in the stream.
+                        code = (
+                            result.get("error_code")
+                            if isinstance(result, dict)
+                            else None
+                        )
+                        if not succeeded:
+                            trace["outcome_reason_code"] = str(code or status)
                     event_callback(
                         {
                             "type": "trace",

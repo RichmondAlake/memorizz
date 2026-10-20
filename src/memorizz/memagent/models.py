@@ -16,6 +16,8 @@ class MemAgentModel(BaseModel):
 
     model: Optional[Any] = None
     llm_config: Optional[Dict[str, Any]] = None  # Configuration for the LLM
+    # The model memory upkeep runs on (no credentials); None is the agent's.
+    background_llm_config: Optional[Dict[str, Any]] = None
     agent_id: Optional[str] = None
     application_id: Optional[str] = None
     name: Optional[str] = None
@@ -43,6 +45,7 @@ class MemAgentModel(BaseModel):
     context_policy: Optional[Dict[str, Any]] = None
     completion_policy: Optional[Dict[str, Any]] = None
     retrieval_policy: Optional[Dict[str, Any]] = None
+    memory_consolidation: Optional[Dict[str, Any]] = None
     delegation_config: Optional[Dict[str, Any]] = None
     skill_retrieval: bool = False
     skill_retrieval_config: Optional[Dict[str, Any]] = None

@@ -775,6 +775,7 @@ _RETENTION_META_KEYS = (
     "unsuppressed_by",
     "unsuppressed_at",
     "unsuppression_note",
+    "suppressed_from",
 )
 _RETENTION_FIELDS = (
     _c("importance", kind="float"),

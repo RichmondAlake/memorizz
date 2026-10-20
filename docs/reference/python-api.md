@@ -21,6 +21,14 @@ This page covers the stable, high-value Python surface. Import public types from
         - disable_tool_cache
         - invalidate_tool_cache
         - generate_summaries
+        - with_background_model
+        - wait_for_memory_upkeep
+        - describe_memory
+        - with_memory_consolidation
+        - plan_memory_consolidation
+        - apply_memory_consolidation
+        - restore_memory_consolidation
+        - pending_memory_consolidations
         - observability_summary
         - get_trace_context
         - build_personalization_context
@@ -169,6 +177,8 @@ authenticated runtime reads never adopt them automatically.
         - with_tool_cache
         - with_embedding_provider
         - with_retrieval_policy
+        - with_background_model
+        - with_memory_consolidation
         - with_context_policy
         - with_tool_result_policy
         - with_approval_store
@@ -277,6 +287,16 @@ adapter security matrix and complete SDK, CLI, UI, and MCP workflows.
       show_root_heading: true
 
 ::: memorizz.retrieval.RetrievalPolicy
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.learning.consolidation.ConsolidationConfig
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.learning.consolidation.ConsolidationPlan
     options:
       show_source: false
       show_root_heading: true
