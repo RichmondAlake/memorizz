@@ -1,5 +1,162 @@
 # Changelog
 
+## 0.17.4 — 2026-10-20
+
+### Fixed
+
+- `retrieval_policy="thread"` (`RetrievalPolicy.from_value("thread")`) also
+  turned knowledge-base recall off. It now narrows conversation recall only.
+  Agents saved with `"thread"` before this fix still have
+  `knowledge_base_scope="disabled"` in their stored policy; set it to
+  `"memory"` to recall their knowledge base again.
+- With the learning control plane on, the evidence pack ignored the agent's
+  `RetrievalPolicy`: conversation evidence always came from the current
+  thread only, `RetrievalPolicy.disabled()` did not turn recall off, and
+  knowledge-base namespaces were not applied. The evidence pack now follows
+  the policy, so an agent with the default `conversation_scope="memory"`
+  recalls every thread of its memory there too, as it does without the
+  control plane.
+
+### Added
+
+- Sealed threads: `RetrievalPolicy.sealed()` (or `"sealed"`) keeps everything
+  a user said in one conversation out of the others, in both directions.
+  - **Recall:** a sealed thread recalls only its own conversation, summaries
+    and entity facts.
+  - **What it writes:** its conversation rows and summaries are marked
+    `retention_state="sealed"`, so other threads never recall them.
+  - **Cache and persona:** the semantic cache only reuses the thread's own
+    answers, and the shared persona is read-only there.
+
+  The new `entity_scope` field (`memory`, `thread`, `disabled`) sets where
+  entity facts live on its own. Restoring a suppressed row now returns it to
+  the state it had before (a sealed row stays sealed).
+- `run()`, `run_stream()` and `run_stream_events()` take `retrieval_policy=`
+  for one call. The agent's own policy, and what `save()` writes, are
+  unchanged, and concurrent calls keep their own.
+- The `memory_context` trace has `semantic_source_counts`, splitting
+  `semantic_memories` into `knowledge_base` and `conversation`.
+- `agent.describe_memory()` lists:
+  - the active memory types;
+  - whether entity memory is on;
+  - the memory tools the model can call;
+  - the retrieval policy;
+  - the background model;
+  - the consolidation schedule.
+
+  The agent logs the same at INFO when it is built.
+- A background model for memory upkeep: `background_llm_config=` or
+  `with_background_model()`, on the agent and the builder.
+  - **What runs on it:** summaries, context compaction, reflection, LLM
+    importance ratings, skill distillation and memory consolidation. Replies
+    keep the agent's model.
+  - **Saving:** the model's config is saved with the agent, without its API
+    key.
+  - **Where to set it:** the CLI's `/background-model`, or the *Background
+    model* picker under *LLM configuration* in the local UI's agent form.
+- Memory consolidation, MemoRizz's form of sleep-time compute or "dreaming".
+  - **What a pass does:**
+    - merges duplicate entities;
+    - hides duplicate summaries, and optionally duplicate knowledge-base
+      chunks;
+    - on the background model, retires the older of two facts about the same
+      thing, and merges one person stored under two names when the records
+      share at least two facts;
+    - adds facts the user stated in recent conversations but the agent never
+      stored, each quoting the user's words.
+  - **How it runs:**
+    - by hand: `agent.plan_memory_consolidation()` makes a dry-run plan,
+      `apply_memory_consolidation(plan, approved_by=...)` applies it, and
+      `restore_memory_consolidation(plan_id, ...)` undoes it;
+    - on a schedule: `with_memory_consolidation(every_n_turns=20,
+      every_hours=24)`, off the turn;
+    - from the command line: `/consolidate` in the CLI, and
+      `memorizz learning consolidate` / `consolidation-restore`.
+  - **Nothing is deleted.** See the new Memory consolidation guide.
+- `EntityMemory.retire_attributes()` and `restore_consolidation()`.
+  `consolidate_duplicate_entities()` takes `provenance=` (the plan id), and
+  a merge records what the surviving record held, so undoing it is exact.
+- Local UI:
+  - **Learning control plane:** a *Memory consolidation* panel. Plan a pass
+    for one memory and user, review each change with the quote it rests on,
+    apply it with an approver, see applied plans and undo them, and open
+    plans the background schedule left for review.
+  - **Agent form:** a *Background model* picker under LLM configuration.
+    *Conversation privacy and memory upkeep* has the seal, where entity facts
+    live, and the consolidation schedule.
+  - **Playground:** the Memory tab has *How this agent remembers*. A turn's
+    *Memory supplied* trace reads as plain counts, with semantic recall split
+    into knowledge base and conversations.
+  - **Memory evolution:** consolidation and forgetting changes are labelled
+    with what they did, name their plan, and have their own *Change* filter
+    options.
+- `/connect [notion|gmail|google-calendar|server]` in the CLI chat.
+  - **Without a name** (or as `/mcp`), it lists what the agent can reach and
+    how to connect the rest.
+  - **With one,** it attaches that connector to the agent and opens the
+    sign-in in the browser. The agent gets the tools as soon as you allow
+    access.
+  - **When a request needs something the agent isn't connected to,** such as
+    "search my Notion", the CLI offers to connect it after the answer.
+
+  Gmail and Google Calendar need your own Google OAuth client first; the
+  command explains that step.
+- `/name [new name]` (or `/rename`) shows or changes the agent's name in the
+  CLI. In the local UI, click the name at the top of the playground chat to
+  rename the agent.
+- Delegates show their work while they run.
+  - **CLI:** each delegate gets a line when it starts and when it ends, with
+    how long it took or why it failed. A harness delegate's commands and
+    output print in between, under its name.
+  - **Local UI:** each delegate has a row in the reply with its name and
+    harness, what it is doing now, how long it has worked, and how it ended.
+    A harness delegate's row links to its run and has a live log.
+  - **Stream:** a coordinator's delegates are `tool.started` and
+    `tool.completed` steps with a `delegate:<task>` `span_id`, and their
+    progress events carry the same `span_id`. A failed delegate's step
+    carries a `reason_code`. MemAgent delegates report their steps too, not
+    only harness delegates.
+- The playground follows CLI turns live. A turn you run in the CLI with the
+  same agent appears in the open playground as it streams: the question
+  (marked "Sent from the CLI"), the tools it uses, and the answer as it is
+  written. A turn in another conversation shows a notice with a button to
+  open it. The CLI writes running turns to `~/.memorizz/live/` and removes
+  them after an hour.
+- The local UI's connect page lists the FileSystem stores on this computer
+  with their agent counts: the CLI's store and any other folder under
+  `~/.memorizz` that holds agents. When no other backend is configured and
+  the CLI's store has agents, the page starts on FileSystem with that path
+  filled in.
+
+### Changed
+
+- Context compaction that the next turn would need now runs on the
+  background worker after the turn that brought the thread near
+  `compact_at`, so the next turn no longer waits for it before its first
+  token (it waits only if that compaction is still running).
+- Reflection (`MEMORIZZ_REFLECTION_ENABLED`) runs after the turn returns,
+  and its trace says `Reflection scheduled`. `agent.wait_for_memory_upkeep()`
+  waits for it, and `close()` drains it (`memory_upkeep_close_timeout`, 60 s).
+- Continual learning keeps distilling on the agent's current model when the
+  model is swapped, unless a background model is set. It used to keep the
+  model it was built with.
+- Memory upkeep is shared by every instance of one agent on one provider in
+  a process: the consolidation schedule, plans waiting for review, the
+  reflection counters and the background compaction a turn waits for. This
+  matters for servers that load the agent per request, such as the local UI.
+- `retrieval_policy=` for one call: a scope string (`"sealed"`, `"thread"`)
+  changes only those scopes and keeps the agent's scoring, retention and
+  namespaces. A `RetrievalPolicy` or dict still replaces the policy for the
+  call.
+- An MCP sign-in started from the terminal (`memorizz mcp login`,
+  `/connect`) finishes on its own when you allow access. If port 8765 is
+  free, the CLI receives the callback itself; if the local UI is running
+  there, the UI passes the callback back to the terminal. Only a UI older
+  than this release still needs the address pasted into the terminal.
+- When the agent lacks a capability, the prompt now says it can be
+  connected. The model says the capability isn't set up yet, instead of
+  saying it is impossible.
+
 ## 0.17.3 — 2026-10-18
 
 ### Changed
