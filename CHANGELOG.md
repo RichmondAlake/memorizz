@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.17.5 — 2026-10-21
+
+### Added
+
+- Agent templates on the local UI's create page. **Use template** fills in
+  the form, which you review before saving; a template's MCP connections are
+  attached when the agent is saved.
+  - **Built in:** personal productivity assistant, personal finance
+    assistant, research assistant, customer support agent (sealed
+    conversations), writing partner and study coach.
+  - **Your own:** **Save as template** on the create and edit forms keeps
+    the form's settings as a template, stored privately in
+    `$MEMORIZZ_HOME/agent-templates/`. Memory IDs, delegates, file paths and
+    any key or token in the LLM config are left out.
+  - **In code:** `memorizz.memagent.templates` adds `save_user_template()`,
+    `load_user_templates()`, `delete_user_template()` and
+    `AgentTemplate.form_values()`; `get_template()` finds saved templates too.
+- The create and edit forms have an overview beside them: section navigation
+  with what each section sets, a configuration summary, and the agent as
+  Python SDK code to copy.
+- `/models` in the CLI, with no model named, offers a picker for OpenAI,
+  Anthropic and the other cloud providers too: the same models as the local
+  UI, then any newer ones the provider lists for your key. It listed only
+  installed Ollama models.
+
+### Changed
+
+- The agent form is grouped into Identity, Model, Persona, Memory, Learning,
+  Tools & integrations, Runtime & orchestration, and Automations & channels.
+  Save stays in reach at the bottom of the window. *LLM configuration* is now
+  *Model*. Field names are unchanged, so scripts that post the form keep
+  working.
+- The UI's model list and defaults move to `memorizz.llms.model_catalog`,
+  shared with the CLI; `memorizz.ui.helpers` still exports them.
+- The model picker lists current models: GPT-6 Astra, GPT-6.1 Sol and GPT-6
+  Luna, the GPT-5.6 family, and Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and
+  Fable 5.1. Deprecated models are gone from the list but still work as a
+  custom model. New agents default to `gpt-6.1-sol` on OpenAI and
+  `claude-opus-5-5` on Anthropic.
+- The CLI's default models are the same as the UI's: `claude-opus-5-5` with
+  an Anthropic key, `gpt-6.1-sol` with an OpenAI key, and the `gpt-5`
+  deployment on Azure. They were `claude-sonnet-4-5-20250929`, `gpt-4o-mini`
+  and `gpt-4o`. `MEMORIZZ_DEFAULT_LLM_MODEL` and `--model` still override
+  them.
+
+### Fixed
+
+- In-page confirmations (deleting runs and templates) open centred instead
+  of in the top-left corner.
+- Claude Haiku 5.5 usage is priced: $0.10 input, $0.01 cache reads and $0.50
+  output per million tokens, and five times every rate for a request whose
+  prompt (cache reads and writes included) is over 100,000 tokens. It showed
+  as unpriced in usage, and harness comparisons left it out. Claude Sonnet 5.5
+  is priced in harness comparisons too.
+- Claude Sonnet 5.5 cache reads cost $0.10 per million tokens (0.05x input);
+  usage priced them at $0.20.
+- The one-hour cache-write rate in harness comparisons now takes a model's
+  long-prompt multiplier, like the other rates.
+
 ## 0.17.4 — 2026-10-20
 
 ### Fixed
