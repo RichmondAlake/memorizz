@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.17.7 — 2026-10-21
+
+### Added
+
+- Embeddings from OpenAI-compatible servers (Ollama's `/v1`, vLLM, LM
+  Studio): the `openai` embedding provider takes any model name when it has
+  a `base_url` that is not OpenAI's. It asks the server for `dimensions` only
+  when you set them, cuts the vectors itself when the server refuses or
+  ignores the size, and otherwise learns the size from the first answer.
+  `MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL` (and
+  `MEMORIZZ_DEFAULT_EMBEDDING_API_KEY` for a server that takes a key) set it
+  for the default provider, on the UI's Settings page or with `memorizz
+  memory configure`. The OpenAI key is never sent to another server.
+- Shorter Ollama embeddings: `dimensions` on the `ollama` embedding provider
+  (and `MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS`) asks Ollama for that size,
+  for 256-dimension `nomic-embed-text` vectors for instance; an older
+  Ollama's full vectors are cut and rescaled the same way, and a size larger
+  than the model's is an error that says so.
+
+### Changed
+
+- The sidebar shows the running version under the name. Folded, it shows
+  just the logo, and the expand button takes its place on hover.
+- The create page's templates are compact cards in a panel that folds away
+  while a template is in use, so the form starts on the first screen.
+  Built-in descriptions fit their card, a template you saved without a
+  description shows its persona's role or the first sentence of its
+  instruction, a missing web search key is a short warning with the detail
+  on hover, and your own templates are marked *Yours*.
+- Section labels on the agent form say something: *6 types · Routed* for
+  Memory, *20 tool rounds* for Runtime, *Automations on* for Automations.
+- The LLM config JSON box moved into a folded *Advanced provider settings*
+  group under the Model section.
+- The navigation keeps one width across list pages (Agents, Automations,
+  Continual learning, Memory, Harnesses); only the playground and a harness
+  conversation start with it folded.
+- The playground's Memory tab opens on what the agent remembers (entities,
+  knowledge base, summaries), with the toolbox and tool logs folded at the
+  end, each tool's parameter schema behind *Parameters*, and readable
+  times.
+
+### Fixed
+
+- *Route what the user says after each turn* showed as ticked while memory
+  routing was off; it now shows only when a router is chosen.
+- An empty model reply (no text and no tool call, as small local models
+  sometimes give) is asked again once, with a note telling the model to
+  answer; the note goes with that request only and is never stored. Both
+  attempts are traced as model calls. A second empty reply is still the
+  `empty_response` error. Streams now retry an empty reply that began with an
+  empty text delta, and without the back-off wait.
+- An embedding provider's API key no longer appears in the provider details
+  logged when a memory store starts.
+
 ## 0.17.6 — 2026-10-21
 
 ### Added
