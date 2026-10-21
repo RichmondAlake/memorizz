@@ -92,7 +92,10 @@ memorizz
 ```
 
 Cloud keys are auto-detected (Anthropic → OpenAI → Azure → local Ollama). You can
-also save a key from inside the REPL with `/login`.
+also save a key from inside the REPL with `/login`. The default models are
+`claude-opus-5-5` (Anthropic) and `gpt-6.1-sol` (OpenAI), the same as the local
+UI's; set `MEMORIZZ_DEFAULT_LLM_MODEL`, pass `--model`, or use `/models` to
+choose another.
 
 ### Choose a memory provider (including Notion)
 
@@ -152,7 +155,7 @@ Add `--tool-cache` to reuse results of repeated calls to cacheable tools (see
 
 The command uses the configured memory provider and therefore defaults to the
 filesystem store under `~/.memorizz/memory`. LLM settings are auto-detected;
-pass `--llm-provider openai --model gpt-4o-mini` to select one explicitly, or
+pass `--llm-provider openai --model gpt-6-luna` to select one explicitly, or
 `--no-llm` to create a configuration that will be completed later in the SDK or
 UI. `--set-default` makes the new agent the one opened by `memorizz chat`.
 
@@ -331,7 +334,7 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/help` | List all commands + the current mode/model. |
 | `/update` | Check PyPI now for a newer release and show the upgrade command for your installer. |
 | `/menu` | Quick actions: the arrow-key shortcuts and the most used commands, plus the current model, memory and harness. |
-| `/models [name]` | Show the current model, list installed Ollama models, or switch models (keeps the provider). |
+| `/models [name]` | Show the current model and pick another, or switch to the one named (keeps the provider). Ollama lists its installed models; OpenAI, Anthropic and the other cloud providers list the same models as the local UI, then any newer ones your key can use. |
 | `/provider [name]` | Switch provider: `openai`/`anthropic`/`ollama`/`azure`/`huggingface`/`mlx`. |
 | `/ollama [list\|pull <tag>\|host <url>]` | List/pull Ollama models or set `OLLAMA_HOST`. |
 | `/web [on\|off\|tavily\|firecrawl]` | Enable/disable internet search (Tavily/Firecrawl). |

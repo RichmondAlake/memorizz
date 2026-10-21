@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ...memagent.delegation_settings import (
     DELEGATION_CONSOLIDATIONS,
@@ -997,6 +997,9 @@ def _render_agent_form(
     if is_edit:
         context["agents_nav"] = _build_agent_nav_items(active_agent_id=agent_id)
         context["active_agent_id"] = agent_id
+    else:
+        context["agent_templates"] = _template_cards()
+    context["builder_context"] = _builder_context(agent_id)
     context.update(
         {
             "active_page": "agents",
@@ -1142,8 +1145,10 @@ async def agent_toggle_favorite(
 
 
 @router.get("/agents/new", response_class=HTMLResponse)
-async def agent_create_page(request: Request):
-    """Show form to create a new agent."""
+async def agent_create_page(
+    request: Request, template: str = "", saved: str = "", deleted: str = ""
+):
+    """Show form to create a new agent; ``?template=<key>`` fills it in."""
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
 
@@ -1207,29 +1212,169 @@ async def agent_create_page(request: Request):
                 os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "")
             ).strip(),
             "agent_tools": [],
-            "agent_templates": _template_cards(),
+            "apply_template": _to_text(template).strip().lower(),
+            "template_notice": (
+                f"Saved the template {saved.strip()}."
+                if saved.strip()
+                else f"Deleted the template {deleted.strip()}."
+                if deleted.strip()
+                else ""
+            ),
             **_delegation_form_context("", [], {}),
         },
     )
 
 
-def _template_cards() -> List[Dict[str, Any]]:
-    from ...mcp import catalog
-    from ...memagent.templates import TEMPLATES
+def _builder_context(agent_id: Optional[str]) -> Dict[str, Any]:
+    """What the form's overview and code view need: the store this UI is
+    connected to (no secrets) and each mode's default memory types."""
+    from ...enums import ApplicationMode
+    from ..helpers import _default_memory_types_for_mode
 
-    return [
-        {
-            "key": template.key,
-            "title": template.title,
-            "summary": template.summary,
-            "persona": template.persona,
-            "connections": [
-                catalog.PRESETS[catalog.preset_key(key)]["title"]
-                for key in template.mcp_presets
-            ],
-        }
-        for template in TEMPLATES.values()
-    ]
+    info = _state.get("connection_info") or {}
+    provider_type = _to_text(_state.get("provider_type")).strip().lower()
+    store: Dict[str, Any] = {"type": provider_type}
+    if provider_type == "filesystem":
+        store["path"] = _to_text(info.get("path") or info.get("root_path")).strip()
+    elif provider_type == "mongodb":
+        store["db_name"] = _to_text(info.get("db_name")).strip() or "memorizz"
+    elif provider_type == "oracle":
+        store["user"] = _to_text(info.get("user")).strip()
+        store["dsn"] = _to_text(info.get("dsn")).strip()
+    mcp_servers: List[str] = []
+    if agent_id and _state.get("provider") is not None:
+        try:
+            agent = _state["provider"].retrieve_memagent(agent_id)
+            mcp_servers = [
+                _to_text(server.get("name")).strip()
+                for server in (getattr(agent, "mcp_servers", None) or [])
+                if isinstance(server, dict) and server.get("name")
+            ]
+        except Exception:
+            mcp_servers = []
+    return {
+        "agent_id": agent_id or "",
+        "store": store,
+        "mcp_servers": mcp_servers,
+        "mode_memory_types": {
+            mode.value: _default_memory_types_for_mode(mode.value)
+            for mode in ApplicationMode
+        },
+    }
+
+
+def _template_cards() -> List[Dict[str, Any]]:
+    from ..agent_templates import template_cards
+
+    return template_cards()
+
+
+def _attach_template_servers(
+    request: Request,
+    agent_id: str,
+    template: Any,
+    google_client_id: str = "",
+    google_client_secret: str = "",
+) -> None:
+    """Attach a template's MCP servers to a new agent."""
+    from ...mcp import MCPClientManager
+    from ...memagent.templates import template_mcp_servers
+    from ..helpers import _load_agent
+    from .mcp import _callback_url, _save_servers
+
+    manager = MCPClientManager(owner_id=agent_id, servers=[])
+    for server in template_mcp_servers(
+        template,
+        redirect_uri=_callback_url(request),
+        google_client_id=_to_text(google_client_id).strip() or None,
+        google_client_secret=_to_text(google_client_secret).strip() or None,
+    ):
+        manager.upsert_server(server)
+    _save_servers(_load_agent(agent_id), manager.server_dicts())
+
+
+def _agent_mcp_presets(agent_id: str) -> Tuple[str, ...]:
+    """The built-in presets an agent's MCP servers were made from, matched by
+    URL. Their sign-ins and any other server stay with the agent."""
+    from ...mcp import catalog as mcp_catalog
+
+    by_url = {preset["url"]: key for key, preset in mcp_catalog.PRESETS.items()}
+    try:
+        agent = _state["provider"].retrieve_memagent(agent_id)
+    except Exception:
+        return ()
+    found: List[str] = []
+    for server in getattr(agent, "mcp_servers", None) or []:
+        key = by_url.get(server.get("url")) if isinstance(server, dict) else None
+        if key and key not in found:
+            found.append(key)
+    return tuple(found)
+
+
+def _wants_json(request: Request) -> bool:
+    return "application/json" in request.headers.get("accept", "")
+
+
+@router.post("/agents/templates/save")
+async def agent_template_save(request: Request):
+    """Save the posted agent form as a template of the user's own."""
+    from ...memagent.templates import save_user_template
+    from ..agent_templates import find_template, values_from_form
+
+    form = await request.form()
+    values = values_from_form(form)
+    title = (
+        _to_text(form.get("template_title")).strip()
+        or values.get("agent_name")
+        or values.get("persona_name")
+        or ""
+    )
+    base = find_template(form.get("template_key"))
+    mcp_presets = base.mcp_presets if base else ()
+    if not mcp_presets and _to_text(form.get("source_agent_id")).strip():
+        mcp_presets = _agent_mcp_presets(_to_text(form.get("source_agent_id")).strip())
+    try:
+        template = save_user_template(
+            title,
+            values,
+            summary=_to_text(form.get("template_summary")).strip(),
+            mcp_presets=mcp_presets,
+        )
+    except ValueError as exc:
+        if _wants_json(request):
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("Failed to save agent template: %s", exc)
+        detail = "Could not save the template"
+        if _wants_json(request):
+            return JSONResponse({"detail": detail}, status_code=500)
+        raise HTTPException(status_code=500, detail=detail) from exc
+    from urllib.parse import quote
+
+    url = f"/agents/new?template={quote(template.key)}&saved={quote(template.title)}"
+    if _wants_json(request):
+        return JSONResponse({"key": template.key, "title": template.title, "url": url})
+    return RedirectResponse(url=url, status_code=303)
+
+
+@router.post("/agents/templates/{template_key}/delete")
+async def agent_template_delete(request: Request, template_key: str):
+    """Delete a template the user saved. Built-in templates stay."""
+    from urllib.parse import quote
+
+    from ...memagent.templates import delete_user_template
+    from ..agent_templates import find_template
+
+    template = find_template(template_key)
+    if template is None or template.builtin:
+        raise HTTPException(status_code=404, detail="No saved template by that name")
+    delete_user_template(template.key)
+    if _wants_json(request):
+        return JSONResponse({"deleted": template.key})
+    return RedirectResponse(
+        url=f"/agents/new?deleted={quote(template.title)}", status_code=303
+    )
 
 
 @router.post("/agents/templates/{template_key}")
@@ -1246,11 +1391,8 @@ async def agent_create_from_template(
 
     from urllib.parse import quote
 
-    from ...mcp import MCPClientManager
     from ...memagent.models import MemAgentModel
-    from ...memagent.templates import get_template, template_mcp_servers
-    from ..helpers import _load_agent
-    from .mcp import _callback_url, _save_servers
+    from ...memagent.templates import get_template
 
     try:
         template = get_template(template_key)
@@ -1301,15 +1443,9 @@ async def agent_create_from_template(
     if not agent_id:
         raise HTTPException(status_code=500, detail="Failed to create the agent")
 
-    manager = MCPClientManager(owner_id=agent_id, servers=[])
-    for server in template_mcp_servers(
-        template,
-        redirect_uri=_callback_url(request),
-        google_client_id=_to_text(google_client_id).strip() or None,
-        google_client_secret=_to_text(google_client_secret).strip() or None,
-    ):
-        manager.upsert_server(server)
-    _save_servers(_load_agent(agent_id), manager.server_dicts())
+    _attach_template_servers(
+        request, agent_id, template, google_client_id, google_client_secret
+    )
     return RedirectResponse(
         url=f"/mcp?agent_id={quote(agent_id)}&created={quote(template.key)}",
         status_code=303,
@@ -1378,8 +1514,14 @@ async def agent_create_submit(
     delegation_max_workers: str = Form(""),
     delegation_consolidation: str = Form("model"),
     delegation_root_fallback: Optional[str] = Form(None),
+    template_key: str = Form(""),
+    google_client_id: str = Form(""),
+    google_client_secret: str = Form(""),
 ):
-    """Create a new agent using the configured memory provider."""
+    """Create a new agent using the configured memory provider.
+
+    A form filled from a template with MCP connections attaches them, then
+    opens MCP connections to sign in to each one."""
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
 
@@ -1552,6 +1694,7 @@ async def agent_create_submit(
         "automations_enabled": automations_enabled_value,
         "default_timezone": default_timezone,
         "agent_tools": [],
+        "template_key": _to_text(template_key).strip(),
         **delegation_form_ctx,
     }
 
@@ -1661,6 +1804,19 @@ async def agent_create_submit(
             request, error=error or "Failed to create agent.", form_data=form_data
         )
 
+    from ..agent_templates import find_template
+
+    template = find_template(template_key)
+    if template is not None and template.mcp_presets:
+        from urllib.parse import quote
+
+        _attach_template_servers(
+            request, agent_id, template, google_client_id, google_client_secret
+        )
+        return RedirectResponse(
+            url=f"/mcp?agent_id={quote(agent_id)}&created={quote(template.key)}",
+            status_code=303,
+        )
     return RedirectResponse(url=f"/agents/{agent_id}/playground", status_code=302)
 
 

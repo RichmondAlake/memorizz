@@ -79,6 +79,28 @@ def _swap_model(session, new_config: Dict[str, object], carry_key: bool) -> None
     session.llm_config = dict(new_config)
 
 
+def _model_choices(provider: str) -> List[Dict[str, str]]:
+    """Models to offer for a cloud provider: the built-in list (the UI's),
+    then any newer ones the provider lists for this key."""
+    from ..llms.model_catalog import LLM_MODEL_CATALOG
+    from ..llms.model_lists import latest_models
+
+    choices = [
+        {
+            "value": m["value"],
+            "label": f"{m.get('label') or m['value']}  ·  {m['value']}"
+            + (f"  ({m['group']})" if m.get("group") else ""),
+        }
+        for m in LLM_MODEL_CATALOG.get(provider, [])
+    ]
+    known = {m["value"] for m in choices}
+    for value in latest_models(provider):
+        if value not in known:
+            known.add(value)
+            choices.append({"value": value, "label": f"{value}  (listed for your key)"})
+    return choices
+
+
 def cmd_model(session, args: str):
     console = _con(session)
     name = args.strip()
@@ -107,6 +129,28 @@ def cmd_model(session, args: str):
                 console.print("Available Ollama models:")
                 for m in models:
                     console.print(f"  • {m}")
+        else:
+            choices = _model_choices(session.provider_name)
+            from . import picker
+
+            if choices and picker.picker_available(console):
+                chosen = picker.pick(
+                    choices,
+                    title=f"Switch model ({session.provider_name})",
+                    render=lambda m: m["label"],
+                    search_text=lambda m: f"{m['label']} {m['value']}",
+                    is_current=lambda m: m["value"] == session.model_name,
+                    verb="use",
+                )
+                if chosen is None or chosen["value"] == session.model_name:
+                    console.print("[dim]No change.[/dim]")
+                    return
+                cmd_model(session, chosen["value"])
+                return
+            if choices:
+                console.print(f"Models for {session.provider_name}:")
+                for m in choices:
+                    console.print(f"  • {m['value']}")
         console.print("Usage: /models <model-name>")
         return
     new_config = dict(session.llm_config)

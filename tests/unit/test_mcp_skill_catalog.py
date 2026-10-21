@@ -413,7 +413,9 @@ def test_productivity_template_creates_agent_with_three_connections(ui):
     client, provider, _ = ui
 
     form = client.get("/agents/new")
-    assert "Start from a template: Personal productivity assistant" in form.text
+    assert "Start from a template" in form.text
+    assert 'data-use-template="productivity"' in form.text
+    assert "Personal productivity assistant" in form.text
 
     created = client.post(
         "/agents/templates/productivity",

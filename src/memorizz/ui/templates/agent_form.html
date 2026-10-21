@@ -1,17 +1,28 @@
 {% extends "base.html" %}
 
 {% block title %}{{ form_title|capitalize }} - Memorizz{% endblock %}
-{% block head %}<script src="/static/js/local-models.js?v=1"></script>{% endblock %}
+{% block head %}<script src="/static/js/local-models.js?v=1"></script>
+<script src="/static/js/page-dialogs.js?v=1"></script>
+<link rel="stylesheet" href="/static/css/components/dialogs.css?v=2">{% endblock %}
 
 {% block content %}
+{% macro section_summary(key, title, description) %}
+        <summary>
+            <span class="builder-section-heading">
+                <span class="builder-section-title">{{ title }}</span>
+                <span class="builder-section-desc">{{ description }}</span>
+            </span>
+            <span class="builder-section-status" data-section-status="{{ key }}"></span>
+        </summary>
+{% endmacro %}
 {% from '_ui.html' import page_header, id_chip %}
 {% set form_back = ('/agents/' ~ agent_id ~ '/playground', 'Agent playground') if is_edit else ('/agents', 'All agents') %}
 {% if is_edit %}
-{% call page_header(form_title|capitalize, 'Configure how this agent behaves and runs.', 'Agents', back=form_back) %}
+{% call page_header(form_title|capitalize, 'Instructions, model, memory, tools and runtime. Every setting here has a Python SDK equivalent.', 'Agents', back=form_back) %}
     <span class="panel-meta">Agent ID</span>{{ id_chip(agent_id|string, 40) }}
 {% endcall %}
 {% else %}
-{{ page_header(form_title|capitalize, 'Configure how this agent behaves and runs.', 'Agents', back=form_back) }}
+{{ page_header(form_title|capitalize, 'Instructions, model, memory, tools and runtime. Every setting here has a Python SDK equivalent.', 'Agents', back=form_back) }}
 {% endif %}
 
 {% if error %}
@@ -20,222 +31,100 @@
 </div>
 {% endif %}
 
+{% if template_notice %}
+<div class="success-message" role="status">{{ template_notice }}</div>
+{% endif %}
+
 {% if not is_edit and agent_templates %}
-{% for template in agent_templates %}
-<details class="panel agent-template" id="agent-template-{{ template.key }}">
-    <summary><span>Start from a template: {{ template.title }}</span><span class="agent-template-meta">{{ template.summary }}</span></summary>
-    <form method="post" action="/agents/templates/{{ template.key }}" class="agent-template-form">
-        <p class="form-hint">Creates the agent with instructions, a persona and memory for people and projects, and attaches {{ template.connections|join(', ') }} over MCP. You then sign in to each one on MCP connections. Changes such as drafts or Notion edits wait for your approval.</p>
-        <p class="form-hint">Gmail and Google Calendar are Google Developer Previews and need a Google OAuth client (Web application) with the redirect URI <code data-callback-url>/api/mcp/oauth/callback</code>. You can add it now or later with Edit on MCP connections. <a href="https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server" target="_blank" rel="noopener noreferrer">Google setup guide</a>.</p>
-        <div class="form-grid">
-            <div class="form-group"><label for="tpl-{{ template.key }}-client-id">Google OAuth client ID (optional)</label><input id="tpl-{{ template.key }}-client-id" name="google_client_id" autocomplete="off"></div>
-            <div class="form-group"><label for="tpl-{{ template.key }}-client-secret">Google OAuth client secret (optional)</label><input id="tpl-{{ template.key }}-client-secret" name="google_client_secret" type="password" autocomplete="new-password"><small class="form-hint">Encrypted at rest; never stored in the agent record.</small></div>
-        </div>
-        <p class="form-hint">Uses the default model ({{ llm_provider }} · {{ llm_model }}). Change it later in the playground.</p>
-        <button type="submit" class="btn btn-primary">Create {{ template.persona.name }}</button>
-    </form>
-</details>
-{% endfor %}
+<section class="panel agent-templates" id="agent-templates" aria-labelledby="agent-templates-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="agent-templates-title">Start from a template</h2>
+        <span class="panel-meta">Fills in the form below. Review it, then save the agent.</span>
+    </div>
+    <div class="agent-template-grid">
+        {% for template in agent_templates %}
+        <article class="agent-template-card" data-template-card="{{ template.key }}">
+            <div class="agent-template-card-head">
+                <span class="agent-template-category">{{ template.category }}</span>
+                {% if not template.builtin %}<span class="agent-template-yours">Yours</span>{% endif %}
+            </div>
+            <h3 class="agent-template-title">{{ template.title }}</h3>
+            {% if template.summary %}<p class="agent-template-summary" title="{{ template.summary }}">{{ template.summary }}</p>{% endif %}
+            {% if template.chips %}
+            <ul class="agent-template-chips">
+                {% for chip in template.chips %}<li>{{ chip }}</li>{% endfor %}
+            </ul>
+            {% endif %}
+            <div class="agent-template-actions">
+                <button type="button" class="btn btn-sm btn-primary" data-use-template="{{ template.key }}" aria-pressed="false">Use template</button>
+                {% if not template.builtin %}
+                <form method="post" action="/agents/templates/{{ template.key|urlencode }}/delete" data-delete-template="{{ template.title }}">
+                    <button type="submit" class="btn btn-sm">Delete</button>
+                </form>
+                {% endif %}
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    <p class="form-hint">Make your own: set up the form, then use <strong>Save as template</strong> at the bottom. An agent's edit page has it too.</p>
+</section>
 <script>
-    document.querySelectorAll('[data-callback-url]').forEach(function(el) { el.textContent = window.location.origin + '/api/mcp/oauth/callback'; });
+    window.AGENT_FORM_TEMPLATES = {{ agent_templates|tojson }};
+    window.AGENT_FORM_APPLY_TEMPLATE = {{ (apply_template|default(''))|tojson }};
 </script>
 {% endif %}
 
-<form method="post" action="{{ form_action }}" class="agent-form">
-    <!-- Basics — always visible -->
-    <section class="panel agent-form-section" aria-labelledby="agent-form-basics-title">
-        <div class="panel-header"><h2 class="panel-title" id="agent-form-basics-title">Basics</h2></div>
-        <div class="form-group">
-            <label for="agent_name">Agent name</label>
-            <input id="agent_name" name="agent_name" type="text" value="{{ agent_name }}" placeholder="Agent name shown in the UI">
+<div class="agent-builder">
+<div class="agent-builder-main">
+<form method="post" action="{{ form_action }}" class="agent-form"{% if is_edit %} data-is-edit="1"{% endif %}>
+    <input type="hidden" id="template_key" name="template_key" value="{{ template_key|default('') }}">
+    {% if is_edit %}<input type="hidden" name="source_agent_id" value="{{ agent_id }}">{% endif %}
+    {% if not is_edit %}
+    <div class="panel agent-template-banner" id="agent-template-banner" role="status" hidden>
+        <div class="agent-template-banner-head">
+            <p><strong>Using the <span data-template-title></span> template.</strong> Review the fields below, then save the agent.</p>
+            <button type="button" class="btn btn-sm" data-clear-template>Start blank</button>
         </div>
-        <div class="form-group">
-            <label for="instruction">System instruction</label>
-            <textarea id="instruction" name="instruction" rows="5">{{ instruction }}</textarea>
-        </div>
-        <div class="form-grid">
-            <div class="form-group">
-                <label for="application_mode">Application mode</label>
-                <select id="application_mode" name="application_mode">
-                    <option value="assistant" {% if application_mode == 'assistant' %}selected{% endif %}>Assistant</option>
-                    <option value="workflow" {% if application_mode == 'workflow' %}selected{% endif %}>Workflow</option>
-                    <option value="deep_research" {% if application_mode == 'deep_research' %}selected{% endif %}>Deep research</option>
-                </select>
-            </div>
-            <div class="form-group">
-                <label for="max_steps">Max tool iterations</label>
-                <div class="form-group checkbox-group" style="margin-bottom: 8px;">
-                    <label>
-                        <input type="checkbox" id="continuous_mode" value="1"
-                            {% if max_steps == 0 %}checked{% endif %}
-                            onchange="toggleContinuousMode(this)">
-                        Continuous mode (unlimited)
-                    </label>
-                </div>
-                <input id="max_steps" name="max_steps" type="number" min="1"
-                    value="{{ max_steps if max_steps != 0 else 20 }}"
-                    {% if max_steps == 0 %}disabled{% endif %}>
-                <p class="form-hint">Maximum tool-calling rounds per run (default: 20).</p>
-                <p id="continuous-warning" class="form-hint"
-                    style="color: var(--accent-warning); display: {% if max_steps == 0 %}block{% else %}none{% endif %};">
-                    Continuous mode may consume a very large number of tokens.
-                    The agent will keep running tool loops until the task is complete.
-                </p>
-            </div>
-            <div class="form-group">
-                <label for="tool_access">Tool access</label>
-                <select id="tool_access" name="tool_access">
-                    <option value="private" {% if tool_access == 'private' %}selected{% endif %}>Private</option>
-                    <option value="public" {% if tool_access == 'public' %}selected{% endif %}>Public</option>
-                    <option value="global" {% if tool_access == 'global' %}selected{% endif %}>Global</option>
-                </select>
-            </div>
-            <div class="form-group checkbox-group">
-                <label>
-                    <input type="checkbox" name="semantic_cache" {% if semantic_cache %}checked{% endif %}>
-                    Enable semantic cache
-                </label>
-            </div>
-            <div class="form-group checkbox-group">
-                <label>
-                    <input type="checkbox" name="tool_cache" {% if tool_cache %}checked{% endif %}>
-                    Enable tool call cache
-                </label>
-                <small class="form-hint">Reuse results of repeated calls to tools marked cacheable, and MCP tools their server marks read-only and idempotent. Results stay fresh for 5 minutes.</small>
-            </div>
-            <div class="form-group checkbox-group">
-                <label>
-                    <input type="checkbox" name="enable_entity_memory" {% if enable_entity_memory %}checked{% endif %}>
-                    Enable entity memory
-                </label>
-            </div>
-            <div class="form-group checkbox-group">
-                <label>
-                    <input type="checkbox" name="enable_workflow_memory" {% if enable_workflow_memory %}checked{% endif %}>
-                    Enable workflow memory
-                </label>
-            </div>
-            <div class="form-group checkbox-group">
-                <label>
-                    <input type="checkbox" name="continual_learning" {% if continual_learning %}checked{% endif %}>
-                    Enable continual learning (promote repeated successful workflows into learned skills)
-                </label>
-            </div>
-            <div class="form-group checkbox-group">
-                <label>
-                    <input type="checkbox" name="learning_control_plane" {% if learning_control_plane %}checked{% endif %}>
-                    Enable the learning control plane (bounded evidence, compilation, and reversible forgetting)
-                </label>
-                <p class="form-hint">Continual learning enables this automatically unless you explicitly turn it off.</p>
-            </div>
-            {% set fg = forgetting if forgetting is defined and forgetting else {} %}
-            <details class="form-group" id="forgetting-overrides">
-                <summary>Forgetting (per-agent overrides)</summary>
-                <p class="form-hint">Memories are ranked by recency since last use, importance and relevance (Generative Agents). Blank fields inherit the global defaults from Settings → Forgetting mechanism.</p>
-                <div class="form-grid">
-                    <label>Recency decay per hour<input type="number" step="0.0001" min="0.5" max="1" name="forgetting_scoring_recency_decay_per_hour" value="{{ fg.get('scoring_recency_decay_per_hour', '') }}" placeholder="0.995"></label>
-                    <label>Recency anchor
-                        <select name="forgetting_scoring_recency_anchor">
-                            <option value="" {% if not fg.get('scoring_recency_anchor') %}selected{% endif %}>Inherit</option>
-                            <option value="last_accessed" {% if fg.get('scoring_recency_anchor') == 'last_accessed' %}selected{% endif %}>Last access (paper)</option>
-                            <option value="created" {% if fg.get('scoring_recency_anchor') == 'created' %}selected{% endif %}>Creation time</option>
-                        </select>
-                    </label>
-                    <label>Weight: recency<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_recency" value="{{ fg.get('scoring_alpha_recency', '') }}" placeholder="1"></label>
-                    <label>Weight: importance<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_importance" value="{{ fg.get('scoring_alpha_importance', '') }}" placeholder="1"></label>
-                    <label>Weight: relevance<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_relevance" value="{{ fg.get('scoring_alpha_relevance', '') }}" placeholder="1"></label>
-                    <label>Suppression planner
-                        <select name="forgetting_retention_enabled">
-                            <option value="" {% if not fg.get('retention_enabled') %}selected{% endif %}>Inherit</option>
-                            <option value="on" {% if fg.get('retention_enabled') == 'on' %}selected{% endif %}>Enabled</option>
-                            <option value="off" {% if fg.get('retention_enabled') == 'off' %}selected{% endif %}>Disabled</option>
-                        </select>
-                    </label>
-                    <label>Minimum retention score<input type="number" step="0.01" min="0" max="1" name="forgetting_retention_min_retention" value="{{ fg.get('retention_min_retention', '') }}" placeholder="0.15"></label>
-                    <label>Grace period (days)<input type="number" step="1" min="0" name="forgetting_retention_grace_days" value="{{ fg.get('retention_grace_days', '') }}" placeholder="30"></label>
-                </div>
-                <p class="form-hint">Suppression only ever hides a memory from retrieval after an approved dry run on the learning control-plane page; nothing is deleted and every suppression can be restored.</p>
-            </details>
-            <details class="form-group" id="memory-upkeep" {% if sealed_conversations|default(false) or memory_consolidation|default(false) or entity_scope|default('memory') != 'memory' %}open{% endif %}>
-                <summary>Conversation privacy and memory upkeep</summary>
-                <label class="checkbox-group">
-                    <input type="checkbox" id="sealed_conversations" name="sealed_conversations" value="on" {% if sealed_conversations|default(false) %}checked{% endif %} onchange="syncEntityScope()">
-                    Seal each conversation
-                </label>
-                <p class="form-hint">Nothing a user says in one conversation reaches another: recall, entity facts and cached answers stay in their conversation, and the shared persona can't be changed from one. Knowledge bases stay shared.</p>
-                <label for="entity_scope">Entity facts</label>
-                <select id="entity_scope" name="entity_scope">
-                    <option value="memory" {% if entity_scope|default('memory') == 'memory' %}selected{% endif %}>Shared by the conversations of a memory (default)</option>
-                    <option value="thread" {% if entity_scope|default('memory') == 'thread' %}selected{% endif %}>Kept to each conversation</option>
-                    <option value="disabled" {% if entity_scope|default('memory') == 'disabled' %}selected{% endif %}>Not recalled automatically (the entity tools still work)</option>
-                </select>
-                <p class="form-hint">Where the facts the agent stores about people and things live. A sealed conversation keeps them to itself.</p>
-                <label class="checkbox-group">
-                    <input type="checkbox" name="memory_consolidation" value="on" {% if memory_consolidation|default(false) %}checked{% endif %}>
-                    Consolidate memory in the background
-                </label>
-                <div class="form-grid">
-                    <label>Every this many turns<input type="number" min="1" step="1" name="consolidation_every_n_turns" value="{{ consolidation_every_n_turns|default(20) }}"></label>
-                    <label class="checkbox-group" style="align-self:end">
-                        <input type="checkbox" name="consolidation_auto_apply" value="on" {% if consolidation_auto_apply|default(true) %}checked{% endif %}>
-                        Apply changes automatically
-                    </label>
-                </div>
-                <p class="form-hint">Merges duplicate entities and summaries, retires facts stored twice or replaced by newer ones, and adds facts the user stated that were never saved. Nothing is deleted; every change can be undone with <code>memorizz learning consolidation-restore</code>.</p>
-            </details>
-            <div class="form-group">
-                <label for="skill_injection_role">Authority for newly learned skills</label>
-                <select id="skill_injection_role" name="skill_injection_role"
-                    onchange="syncSkillAuthorityReview()">
-                    <option value="user" {% if skill_injection_role == 'user' %}selected{% endif %}>
-                        User context (default)
-                    </option>
-                    <option value="developer" {% if skill_injection_role == 'developer' %}selected{% endif %}>
-                        Developer instructions (review required)
-                    </option>
-                </select>
-                <p class="form-hint">
-                    User authority treats a retrieved skill as optional task context.
-                    Developer authority gives an activated skill application-instruction
-                    priority below system policy. OpenAI receives a developer message;
-                    Anthropic receives the same reviewed instructions in its top-level
-                    system parameter.
-                </p>
-            </div>
-            <div class="form-group checkbox-group">
-                <label>
-                    <input id="continual_learning_require_shadow" type="checkbox"
-                        name="continual_learning_require_shadow"
-                        {% if continual_learning_require_shadow %}checked{% endif %}>
-                    Require shadow review before activation
-                </label>
-                <p class="form-hint">
-                    Required for developer authority so generated skills cannot gain
-                    application-level authority without an explicit activation review.
-                    Existing skills keep the authority stored on their own record.
-                </p>
-            </div>
-            <div class="form-group checkbox-group">
-                <label>
-                    <input id="continual_learning_shadow_evaluation" type="checkbox"
-                        name="continual_learning_shadow_evaluation"
-                        {% if continual_learning_shadow_evaluation %}checked{% endif %}>
-                    Passively evaluate shadow skills on new workflows
-                </label>
-                <p class="form-hint">
-                    Runs deterministic comparisons in a background queue after
-                    the response is stored. Shadow skills are not injected, and
-                    no LLM judge or tool is called by this evaluator. Semantic
-                    retrieval may use the configured embedding provider.
-                    Readiness remains advisory; activation is always explicit.
-                </p>
+        <p class="form-hint" data-template-connections hidden>Saving also attaches <span data-template-connection-list></span> over MCP; you then sign in to each one on MCP connections. Changes such as drafts or Notion edits wait for your approval.</p>
+        <div data-template-google hidden>
+            <p class="form-hint">Gmail and Google Calendar are Google Developer Previews and need a Google OAuth client (Web application) with the redirect URI <code data-callback-url>/api/mcp/oauth/callback</code>. Add it now or later with Edit on MCP connections. <a href="https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server" target="_blank" rel="noopener noreferrer">Google setup guide</a>.</p>
+            <div class="form-grid">
+                <div class="form-group"><label for="google_client_id">Google OAuth client ID (optional)</label><input id="google_client_id" name="google_client_id" autocomplete="off"></div>
+                <div class="form-group"><label for="google_client_secret">Google OAuth client secret (optional)</label><input id="google_client_secret" name="google_client_secret" type="password" autocomplete="new-password"><small class="form-hint">Encrypted at rest; never stored in the agent record.</small></div>
             </div>
         </div>
-    </section>
+    </div>
+    {% endif %}
+    <!-- Identity -->
+    <details class="panel agent-form-section builder-section" id="section-identity" open>
+        {{ section_summary('identity', 'Identity', 'What the agent is called and the instruction it always follows.') }}
+        <div class="section-body">
+            <div class="form-group">
+                <label for="agent_name">Agent name</label>
+                <input id="agent_name" name="agent_name" type="text" value="{{ agent_name }}" placeholder="e.g. Support agent" autocomplete="off">
+            </div>
+            <div class="form-group">
+                <label for="instruction">System instruction</label>
+                <textarea id="instruction" name="instruction" rows="8" spellcheck="true">{{ instruction }}</textarea>
+                <p class="form-hint">Sent with every request, ahead of memory and the conversation. Keep it to the agent's job, rules and tone.</p>
+            </div>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="application_mode">Application mode</label>
+                    <select id="application_mode" name="application_mode">
+                        <option value="assistant" {% if application_mode == 'assistant' %}selected{% endif %}>Assistant</option>
+                        <option value="workflow" {% if application_mode == 'workflow' %}selected{% endif %}>Workflow</option>
+                        <option value="deep_research" {% if application_mode == 'deep_research' %}selected{% endif %}>Deep research</option>
+                    </select>
+                    <p class="form-hint">Sets the default memory types. Assistant keeps conversations, a persona and entity facts; Workflow keeps tool workflows; Deep research keeps a shared research memory.</p>
+                </div>
+            </div>
+        </div>
+    </details>
 
     <!-- LLM Configuration — collapsible -->
-    <details class="panel agent-form-section" open>
-        <summary>LLM configuration</summary>
+    <details class="panel agent-form-section builder-section" id="section-model" open>
+        {{ section_summary('model', 'Model', 'The model that answers, and an optional cheaper background model for summaries, compaction and consolidation.') }}
         <div class="section-body">
             <div class="form-grid">
                 <div class="form-group">
@@ -509,8 +398,8 @@
     </script>
 
     <!-- Persona — collapsible -->
-    <details class="panel agent-form-section" {% if persona_name %}open{% endif %}>
-        <summary>Persona</summary>
+    <details class="panel agent-form-section builder-section" id="section-persona" {% if persona_name %}open{% endif %}>
+        {{ section_summary('persona', 'Persona', 'The name, role, goals and background the agent speaks from. Optional.') }}
         <div class="section-body">
             <input id="persona_id" name="persona_id" type="hidden" value="{{ persona_id|default('', true) }}">
             <div class="form-grid">
@@ -657,22 +546,304 @@
         </div>
     </details>
 
-    <!-- Memory — collapsible -->
-    <details class="panel agent-form-section" {% if memory_ids_raw %}open{% endif %}>
-        <summary>Memory</summary>
+    <!-- Memory -->
+    <details class="panel agent-form-section builder-section" id="section-memory" {% if memory_ids_raw or sealed_conversations|default(false) or memory_consolidation|default(false) %}open{% endif %}>
+        {{ section_summary('memory', 'Memory', 'What the agent remembers, who can see it, and how it is kept tidy.') }}
         <div class="section-body">
             <div class="form-group">
-                <label for="memory_ids">Memory IDs</label>
-                <input id="memory_ids" name="memory_ids" type="text" value="{{ memory_ids_raw }}">
-                <p class="form-hint">Comma or newline separated memory IDs.</p>
+                <label for="memory_ids">Memory IDs <span class="optional">optional</span></label>
+                <input id="memory_ids" name="memory_ids" type="text" value="{{ memory_ids_raw }}" autocomplete="off" spellcheck="false">
+                <p class="form-hint">Comma or newline separated. Blank gives the agent a memory of its own when it first runs; share an ID to let agents share a memory.</p>
+            </div>
+            <div class="form-grid">
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="enable_entity_memory" {% if enable_entity_memory %}checked{% endif %}>
+                    Enable entity memory
+                </label>
+                <p class="form-hint">Facts about people, places and things, recalled when relevant.</p>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="enable_workflow_memory" {% if enable_workflow_memory %}checked{% endif %}>
+                    Enable workflow memory
+                </label>
+                <p class="form-hint">Records multi-step tool workflows so the agent can reuse them.</p>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="semantic_cache" {% if semantic_cache %}checked{% endif %}>
+                    Enable semantic cache
+                </label>
+                <p class="form-hint">Reuses an earlier answer to a near-identical question.</p>
+            </div>
+            </div>
+            <details class="builder-subsection" id="memory-upkeep" {% if sealed_conversations|default(false) or memory_consolidation|default(false) or entity_scope|default('memory') != 'memory' %}open{% endif %}>
+                <summary>Conversation privacy and memory upkeep<span class="builder-subsection-desc">Sealed conversations, where entity facts live, background consolidation</span></summary>
+                <div class="section-body">
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="sealed_conversations" name="sealed_conversations" value="on" {% if sealed_conversations|default(false) %}checked{% endif %} onchange="syncEntityScope()">
+                            Seal each conversation
+                        </label>
+                        <p class="form-hint">Nothing a user says in one conversation reaches another: recall, entity facts and cached answers stay in their conversation, and the shared persona can't be changed from one. Knowledge bases stay shared.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="entity_scope">Entity facts</label>
+                        <select id="entity_scope" name="entity_scope">
+                            <option value="memory" {% if entity_scope|default('memory') == 'memory' %}selected{% endif %}>Shared by the conversations of a memory (default)</option>
+                            <option value="thread" {% if entity_scope|default('memory') == 'thread' %}selected{% endif %}>Kept to each conversation</option>
+                            <option value="disabled" {% if entity_scope|default('memory') == 'disabled' %}selected{% endif %}>Not recalled automatically (the entity tools still work)</option>
+                        </select>
+                        <p class="form-hint">Where the facts the agent stores about people and things live. A sealed conversation keeps them to itself.</p>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" name="memory_consolidation" value="on" {% if memory_consolidation|default(false) %}checked{% endif %}>
+                            Consolidate memory in the background
+                        </label>
+                        <p class="form-hint">Merges duplicate entities and summaries, retires facts stored twice or replaced by newer ones, and adds facts the user stated that were never saved. Nothing is deleted; every change can be undone with <code>memorizz learning consolidation-restore</code>.</p>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="consolidation_every_n_turns">Every this many turns</label>
+                            <input id="consolidation_every_n_turns" type="number" min="1" step="1" name="consolidation_every_n_turns" value="{{ consolidation_every_n_turns|default(20) }}">
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" name="consolidation_auto_apply" value="on" {% if consolidation_auto_apply|default(true) %}checked{% endif %}>
+                                Apply changes automatically
+                            </label>
+                            <p class="form-hint">Off leaves each plan waiting for review on the learning control plane.</p>
+                        </div>
+                    </div>
+                </div>
+            </details>
+            {% set fg = forgetting if forgetting is defined and forgetting else {} %}
+            <details class="builder-subsection" id="forgetting-overrides">
+                <summary>Forgetting (per-agent overrides)<span class="builder-subsection-desc">How memories are ranked and when unused ones are hidden</span></summary>
+                <div class="section-body">
+                <p class="form-hint">Memories are ranked by recency since last use, importance and relevance (Generative Agents). Blank fields inherit the global defaults from Settings → Forgetting mechanism.</p>
+                <div class="form-grid">
+                    <label>Recency decay per hour<input type="number" step="0.0001" min="0.5" max="1" name="forgetting_scoring_recency_decay_per_hour" value="{{ fg.get('scoring_recency_decay_per_hour', '') }}" placeholder="0.995"></label>
+                    <label>Recency anchor
+                        <select name="forgetting_scoring_recency_anchor">
+                            <option value="" {% if not fg.get('scoring_recency_anchor') %}selected{% endif %}>Inherit</option>
+                            <option value="last_accessed" {% if fg.get('scoring_recency_anchor') == 'last_accessed' %}selected{% endif %}>Last access (paper)</option>
+                            <option value="created" {% if fg.get('scoring_recency_anchor') == 'created' %}selected{% endif %}>Creation time</option>
+                        </select>
+                    </label>
+                    <label>Weight: recency<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_recency" value="{{ fg.get('scoring_alpha_recency', '') }}" placeholder="1"></label>
+                    <label>Weight: importance<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_importance" value="{{ fg.get('scoring_alpha_importance', '') }}" placeholder="1"></label>
+                    <label>Weight: relevance<input type="number" step="0.1" min="0" name="forgetting_scoring_alpha_relevance" value="{{ fg.get('scoring_alpha_relevance', '') }}" placeholder="1"></label>
+                    <label>Suppression planner
+                        <select name="forgetting_retention_enabled">
+                            <option value="" {% if not fg.get('retention_enabled') %}selected{% endif %}>Inherit</option>
+                            <option value="on" {% if fg.get('retention_enabled') == 'on' %}selected{% endif %}>Enabled</option>
+                            <option value="off" {% if fg.get('retention_enabled') == 'off' %}selected{% endif %}>Disabled</option>
+                        </select>
+                    </label>
+                    <label>Minimum retention score<input type="number" step="0.01" min="0" max="1" name="forgetting_retention_min_retention" value="{{ fg.get('retention_min_retention', '') }}" placeholder="0.15"></label>
+                    <label>Grace period (days)<input type="number" step="1" min="0" name="forgetting_retention_grace_days" value="{{ fg.get('retention_grace_days', '') }}" placeholder="30"></label>
+                </div>
+                <p class="form-hint">Suppression only ever hides a memory from retrieval after an approved dry run on the learning control-plane page; nothing is deleted and every suppression can be restored.</p>
+                </div>
+            </details>
+        </div>
+    </details>
+
+    <!-- Learning -->
+    <details class="panel agent-form-section builder-section" id="section-learning" {% if continual_learning or learning_control_plane %}open{% endif %}>
+        {{ section_summary('learning', 'Learning', 'Turn repeated successful work into skills, under review.') }}
+        <div class="section-body">
+            <div class="form-grid">
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="continual_learning" {% if continual_learning %}checked{% endif %}>
+                    Enable continual learning (promote repeated successful workflows into learned skills)
+                </label>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="learning_control_plane" {% if learning_control_plane %}checked{% endif %}>
+                    Enable the learning control plane (bounded evidence, compilation, and reversible forgetting)
+                </label>
+                <p class="form-hint">Continual learning enables this automatically unless you explicitly turn it off.</p>
+            </div>
+            <div class="form-group">
+                <label for="skill_injection_role">Authority for newly learned skills</label>
+                <select id="skill_injection_role" name="skill_injection_role"
+                    onchange="syncSkillAuthorityReview()">
+                    <option value="user" {% if skill_injection_role == 'user' %}selected{% endif %}>
+                        User context (default)
+                    </option>
+                    <option value="developer" {% if skill_injection_role == 'developer' %}selected{% endif %}>
+                        Developer instructions (review required)
+                    </option>
+                </select>
+                <p class="form-hint">
+                    User authority treats a retrieved skill as optional task context.
+                    Developer authority gives an activated skill application-instruction
+                    priority below system policy. OpenAI receives a developer message;
+                    Anthropic receives the same reviewed instructions in its top-level
+                    system parameter.
+                </p>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input id="continual_learning_require_shadow" type="checkbox"
+                        name="continual_learning_require_shadow"
+                        {% if continual_learning_require_shadow %}checked{% endif %}>
+                    Require shadow review before activation
+                </label>
+                <p class="form-hint">
+                    Required for developer authority so generated skills cannot gain
+                    application-level authority without an explicit activation review.
+                    Existing skills keep the authority stored on their own record.
+                </p>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input id="continual_learning_shadow_evaluation" type="checkbox"
+                        name="continual_learning_shadow_evaluation"
+                        {% if continual_learning_shadow_evaluation %}checked{% endif %}>
+                    Passively evaluate shadow skills on new workflows
+                </label>
+                <p class="form-hint">
+                    Runs deterministic comparisons in a background queue after
+                    the response is stored. Shadow skills are not injected, and
+                    no LLM judge or tool is called by this evaluator. Semantic
+                    retrieval may use the configured embedding provider.
+                    Readiness remains advisory; activation is always explicit.
+                </p>
+            </div>
             </div>
         </div>
     </details>
 
-    <!-- Meta-harness — collapsible -->
-    <details class="panel agent-form-section" {% if meta_harness_mode %}open{% endif %}>
-        <summary>Agent harness runtime</summary>
+    <!-- Tools and integrations -->
+    <details class="panel agent-form-section builder-section" id="section-tools" {% if internet_provider or sandbox_provider or browser_control_provider or skills_marketplace_provider %}open{% endif %}>
+        {{ section_summary('tools', 'Tools & integrations', 'Web search, code execution, browser control, skills and connected services.') }}
         <div class="section-body">
+            <div class="form-grid">
+            <div class="form-group">
+                <label for="tool_access">Tool access</label>
+                <select id="tool_access" name="tool_access">
+                    <option value="private" {% if tool_access == 'private' %}selected{% endif %}>Private</option>
+                    <option value="public" {% if tool_access == 'public' %}selected{% endif %}>Public</option>
+                    <option value="global" {% if tool_access == 'global' %}selected{% endif %}>Global</option>
+                </select>
+            </div>
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="tool_cache" {% if tool_cache %}checked{% endif %}>
+                    Enable tool call cache
+                </label>
+                <small class="form-hint">Reuse results of repeated calls to tools marked cacheable, and MCP tools their server marks read-only and idempotent. Results stay fresh for 5 minutes.</small>
+            </div>
+            <div class="form-group">
+                <label for="internet_provider">Internet provider</label>
+                <select id="internet_provider" name="internet_provider">
+                    <option value="" {% if not internet_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="tavily" {% if internet_provider == 'tavily' %}selected{% endif %}>Tavily (Search + extract)</option>
+                    <option value="firecrawl" {% if internet_provider == 'firecrawl' %}selected{% endif %}>Firecrawl (Search + crawl)</option>
+                    <option value="offline" {% if internet_provider == 'offline' %}selected{% endif %}>Offline (placeholder provider)</option>
+                </select>
+                <p class="form-hint">When enabled, the agent gets `internet_search` and `open_web_page` tools. Configure API keys in Settings.</p>
+            </div>
+            <div class="form-group">
+                <label for="sandbox_provider">Sandbox provider</label>
+                <select id="sandbox_provider" name="sandbox_provider">
+                    <option value="" {% if not sandbox_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="e2b" {% if sandbox_provider == 'e2b' %}selected{% endif %}>E2B (Cloud — Firecracker microVMs)</option>
+                    <option value="daytona" {% if sandbox_provider == 'daytona' %}selected{% endif %}>Daytona (Cloud — Full dev environments)</option>
+                    <option value="graalpy" {% if sandbox_provider == 'graalpy' %}selected{% endif %}>GraalPy (Local — No cloud required)</option>
+                </select>
+                <p class="form-hint">Enable code execution in a secure sandbox. Requires the corresponding API key in Settings (E2B, Daytona) or GraalPy installed locally.</p>
+            </div>
+            <div class="form-group">
+                <label for="browser_control_provider">Browser control provider</label>
+                <select id="browser_control_provider" name="browser_control_provider">
+                    <option value="" {% if not browser_control_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="browseruse" {% if browser_control_provider == 'browseruse' %}selected{% endif %}>Browser Use (isolated tool)</option>
+                </select>
+                <p class="form-hint">Adds the <code>browser_control</code> tool. Every model-initiated task is treated as side-effecting and pauses for durable operator approval. Runtime, model, domain allowlist, headless mode, step limit, and timeout are configured with the <code>MEMORIZZ_BROWSER_USE_*</code> settings.</p>
+            </div>
+            <div class="form-group">
+                <label for="skills_marketplace_provider">Marketplace provider</label>
+                <select id="skills_marketplace_provider" name="skills_marketplace_provider">
+                    <option value="" {% if not skills_marketplace_provider %}selected{% endif %}>None (disabled)</option>
+                    <option value="skillsmp" {% if skills_marketplace_provider == 'skillsmp' %}selected{% endif %}>SkillsMP (skillsmp.com)</option>
+                    <option value="vercel" {% if skills_marketplace_provider == 'vercel' %}selected{% endif %}>Vercel Agent Skills (skills.sh)</option>
+                </select>
+                <p class="form-hint" id="skills-marketplace-hint"></p>
+                <script>
+                    (function() {
+                        var select = document.getElementById('skills_marketplace_provider');
+                        var hint = document.getElementById('skills-marketplace-hint');
+                        var HINTS = {
+                            vercel: 'Agent gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code> to search skills.sh and read skills from GitHub. No token needed; a <code>GITHUB_TOKEN</code> only raises GitHub rate limits.',
+                            skillsmp: 'Agent gets the <code>skills_marketplace_search</code> tool. Configure <code>SKILLSMP_API_KEY</code> in Settings.',
+                            '': 'When enabled, the agent can search a marketplace for skills itself. To pin specific skills instead, attach them on the <a href="/vercel-skills">Skills</a> page.'
+                        };
+                        function renderHint() { hint.innerHTML = HINTS[select.value] || HINTS['']; }
+                        select.addEventListener('change', renderHint);
+                        renderHint();
+                    })();
+                </script>
+            </div>
+            </div>
+            <p class="form-hint">MCP servers such as Notion, Gmail, Google Calendar and GitHub are attached on <a href="/mcp{% if agent_id %}?agent_id={{ agent_id|urlencode }}{% endif %}">MCP connections</a>{% if not is_edit %} once the agent is saved{% endif %}. Every change they make waits for approval.</p>
+            {% if agent_tools %}
+            <details class="builder-subsection">
+                <summary>Registered tools <span class="summary-count">{{ agent_tools|length }}</span></summary>
+                <div class="section-body">
+            <div class="config-tools-list">
+                {% for tool in agent_tools %}
+                <div class="config-tool-item">
+                    <span class="config-tool-name">{{ tool.name }}</span>
+                    {% if tool.description %}
+                    <span class="config-tool-desc">{{ tool.description }}</span>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <p class="form-hint">Tools are registered programmatically via the Python SDK. This list is read-only.</p>
+                </div>
+            </details>
+            {% endif %}
+        </div>
+    </details>
+
+    <!-- Runtime and orchestration -->
+    <details class="panel agent-form-section builder-section" id="section-runtime" {% if meta_harness_mode or delegate_ids or self_aware %}open{% endif %}>
+        {{ section_summary('runtime', 'Runtime & orchestration', 'Tool-call limits, coding harnesses, delegates and access to a codebase.') }}
+        <div class="section-body">
+            <div class="form-grid">
+            <div class="form-group">
+                <label for="max_steps">Max tool iterations</label>
+                <div class="form-group checkbox-group" style="margin-bottom: 8px;">
+                    <label>
+                        <input type="checkbox" id="continuous_mode" value="1"
+                            {% if max_steps == 0 %}checked{% endif %}
+                            onchange="toggleContinuousMode(this)">
+                        Continuous mode (unlimited)
+                    </label>
+                </div>
+                <input id="max_steps" name="max_steps" type="number" min="1"
+                    value="{{ max_steps if max_steps != 0 else 20 }}"
+                    {% if max_steps == 0 %}disabled{% endif %}>
+                <p class="form-hint">Maximum tool-calling rounds per run (default: 20).</p>
+                <p id="continuous-warning" class="form-hint"
+                    style="color: var(--accent-warning); display: {% if max_steps == 0 %}block{% else %}none{% endif %};">
+                    Continuous mode may consume a very large number of tokens.
+                    The agent will keep running tool loops until the task is complete.
+                </p>
+            </div>
+            </div>
+            <details class="builder-subsection" id="harness-settings" {% if meta_harness_mode %}open{% endif %}>
+                <summary>Agent harness runtime<span class="builder-subsection-desc">Codex, Claude Code and other coding agents</span></summary>
+                <div class="section-body">
             <div class="form-grid">
                 <div class="form-group">
                     <label for="meta_harness_mode">Mode</label>
@@ -709,13 +880,11 @@
             </div>
             <p class="form-hint">MemoRizz remains the memory, approval, observability, and verification control plane. Runtime mode routes the complete turn externally; delegate mode gives the native MemAgent bounded harness tools. Risky run envelopes require host approval.</p>
             <p class="form-hint"><a href="/harnesses">Open the Agent Harnesses console</a> to probe adapters and inspect durable runs.</p>
-        </div>
-    </details>
-
-    <!-- Delegates — collapsible -->
-    <details class="panel agent-form-section agent-delegates" {% if delegate_ids %}open{% endif %}>
-        <summary>Delegates{% if delegate_ids %} <span class="summary-count">{{ delegate_ids|length }}</span>{% endif %}</summary>
-        <div class="section-body">
+                </div>
+            </details>
+            <details class="builder-subsection agent-delegates" id="delegates-settings" {% if delegate_ids %}open{% endif %}>
+                <summary>Delegates{% if delegate_ids %} <span class="summary-count">{{ delegate_ids|length }}</span>{% endif %}<span class="builder-subsection-desc">Other agents this one hands work to</span></summary>
+                <div class="section-body">
             <input type="hidden" name="delegation_form" value="1">
             <p class="form-hint">Delegates are other saved agents this agent hands parts of a request to. The agent's model splits each request among them, each delegate works on its part as a subagent, and the agent combines their results. In harness runs each delegate shows as a subagent in the trace. Every delegate makes its own model calls, so delegated requests cost more.</p>
             <fieldset class="delegate-list" id="delegate-list">
@@ -785,111 +954,11 @@
             {% if delegation_has_plan %}
             <p class="form-hint">This agent follows a fixed plan set in code. The plan is kept as it is; these settings choose which agents it can use and how their results are combined.</p>
             {% endif %}
-        </div>
-    </details>
-
-    <!-- Sandbox — collapsible -->
-    <details class="panel agent-form-section" {% if sandbox_provider %}open{% endif %}>
-        <summary>Sandbox</summary>
-        <div class="section-body">
-            <div class="form-group">
-                <label for="sandbox_provider">Sandbox provider</label>
-                <select id="sandbox_provider" name="sandbox_provider">
-                    <option value="" {% if not sandbox_provider %}selected{% endif %}>None (disabled)</option>
-                    <option value="e2b" {% if sandbox_provider == 'e2b' %}selected{% endif %}>E2B (Cloud — Firecracker microVMs)</option>
-                    <option value="daytona" {% if sandbox_provider == 'daytona' %}selected{% endif %}>Daytona (Cloud — Full dev environments)</option>
-                    <option value="graalpy" {% if sandbox_provider == 'graalpy' %}selected{% endif %}>GraalPy (Local — No cloud required)</option>
-                </select>
-                <p class="form-hint">Enable code execution in a secure sandbox. Requires the corresponding API key in Settings (E2B, Daytona) or GraalPy installed locally.</p>
-            </div>
-        </div>
-    </details>
-
-    <!-- Browser Control — collapsible -->
-    <details class="panel agent-form-section" {% if browser_control_provider %}open{% endif %}>
-        <summary>Browser control</summary>
-        <div class="section-body">
-            <div class="form-group">
-                <label for="browser_control_provider">Browser control provider</label>
-                <select id="browser_control_provider" name="browser_control_provider">
-                    <option value="" {% if not browser_control_provider %}selected{% endif %}>None (disabled)</option>
-                    <option value="browseruse" {% if browser_control_provider == 'browseruse' %}selected{% endif %}>Browser Use (isolated tool)</option>
-                </select>
-                <p class="form-hint">Adds the <code>browser_control</code> tool. Every model-initiated task is treated as side-effecting and pauses for durable operator approval. Runtime, model, domain allowlist, headless mode, step limit, and timeout are configured with the <code>MEMORIZZ_BROWSER_USE_*</code> settings.</p>
-            </div>
-        </div>
-    </details>
-
-    <!-- Internet Access — collapsible -->
-    <details class="panel agent-form-section" {% if internet_provider %}open{% endif %}>
-        <summary>Internet access</summary>
-        <div class="section-body">
-            <div class="form-group">
-                <label for="internet_provider">Internet provider</label>
-                <select id="internet_provider" name="internet_provider">
-                    <option value="" {% if not internet_provider %}selected{% endif %}>None (disabled)</option>
-                    <option value="tavily" {% if internet_provider == 'tavily' %}selected{% endif %}>Tavily (Search + extract)</option>
-                    <option value="firecrawl" {% if internet_provider == 'firecrawl' %}selected{% endif %}>Firecrawl (Search + crawl)</option>
-                    <option value="offline" {% if internet_provider == 'offline' %}selected{% endif %}>Offline (placeholder provider)</option>
-                </select>
-                <p class="form-hint">When enabled, the agent gets `internet_search` and `open_web_page` tools. Configure API keys in Settings.</p>
-            </div>
-        </div>
-    </details>
-
-    <!-- Automations — collapsible -->
-    <details class="panel agent-form-section" {% if default_timezone or not automations_enabled %}open{% endif %}>
-        <summary>Automations</summary>
-        <div class="section-body">
-            <div class="form-grid">
-                <div class="form-group checkbox-group">
-                    <label>
-                        <input type="checkbox" name="automations_enabled" value="1" {% if automations_enabled %}checked{% endif %}>
-                        Enable automations tools
-                    </label>
-                    <p class="form-hint">When enabled (and Oracle is connected), the agent can create durable scheduled jobs from chat.</p>
                 </div>
-                <div class="form-group">
-                    <label for="default_timezone">Default timezone</label>
-                    <input id="default_timezone" name="default_timezone" type="text" value="{{ default_timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
-                    <p class="form-hint">IANA timezone name used when timezone is omitted for automations.</p>
-                </div>
-            </div>
-        </div>
-    </details>
-
-    <!-- WhatsApp Chat — collapsible -->
-    <details class="panel agent-form-section" {% if whatsapp_enabled %}open{% endif %}>
-        <summary>WhatsApp chat</summary>
-        <div class="section-body">
-            <div class="form-grid">
-                <div class="form-group checkbox-group">
-                    <label>
-                        <input type="checkbox" name="whatsapp_enabled" value="1" {% if whatsapp_enabled %}checked{% endif %}>
-                        Enable WhatsApp chat for this agent
-                    </label>
-                    <p class="form-hint">When enabled, this agent can be set as the active WhatsApp communicator. Users can then chat with this agent via WhatsApp.</p>
-                </div>
-                <div class="form-group">
-                    <label for="whatsapp_welcome_message">Welcome message <span class="optional">optional</span></label>
-                    <textarea
-                        id="whatsapp_welcome_message"
-                        name="whatsapp_welcome_message"
-                        rows="3"
-                        placeholder="Hi! I'm your AI assistant. How can I help you today?">{{ whatsapp_welcome_message }}</textarea>
-                    <p class="form-hint">This message will be sent when a user first contacts the agent via WhatsApp (feature coming soon).</p>
-                </div>
-            </div>
-        </div>
-    </details>
-
-    <!-- Self-Awareness — collapsible -->
-    <details
-        class="panel agent-form-section"
-        {% if self_aware or self_aware_root_paths or self_aware_allow_writes or self_aware_allow_deletes %}open{% endif %}
-    >
-        <summary>Self-awareness</summary>
-        <div class="section-body">
+            </details>
+            <details class="builder-subsection" id="self-aware-settings" {% if self_aware or self_aware_root_paths %}open{% endif %}>
+                <summary>Codebase access<span class="builder-subsection-desc">Read files and run allowlisted commands</span></summary>
+                <div class="section-body">
             <div class="form-grid">
                 <div class="form-group checkbox-group">
                     <label>
@@ -918,64 +987,111 @@
                     <p class="form-hint">Deletes require writes and remain guarded by root and wildcard protections.</p>
                 </div>
             </div>
-        </div>
-    </details>
-
-    <!-- Skills Marketplace — collapsible -->
-    <details class="panel agent-form-section" {% if skills_marketplace_provider %}open{% endif %}>
-        <summary>Skills marketplace</summary>
-        <div class="section-body">
-            <div class="form-group">
-                <label for="skills_marketplace_provider">Marketplace provider</label>
-                <select id="skills_marketplace_provider" name="skills_marketplace_provider">
-                    <option value="" {% if not skills_marketplace_provider %}selected{% endif %}>None (disabled)</option>
-                    <option value="skillsmp" {% if skills_marketplace_provider == 'skillsmp' %}selected{% endif %}>SkillsMP (skillsmp.com)</option>
-                    <option value="vercel" {% if skills_marketplace_provider == 'vercel' %}selected{% endif %}>Vercel Agent Skills (skills.sh)</option>
-                </select>
-                <p class="form-hint" id="skills-marketplace-hint"></p>
-                <script>
-                    (function() {
-                        var select = document.getElementById('skills_marketplace_provider');
-                        var hint = document.getElementById('skills-marketplace-hint');
-                        var HINTS = {
-                            vercel: 'Agent gets <code>vercel_skills_search</code> and <code>vercel_skill_fetch</code> to search skills.sh and read skills from GitHub. No token needed; a <code>GITHUB_TOKEN</code> only raises GitHub rate limits.',
-                            skillsmp: 'Agent gets the <code>skills_marketplace_search</code> tool. Configure <code>SKILLSMP_API_KEY</code> in Settings.',
-                            '': 'When enabled, the agent can search a marketplace for skills itself. To pin specific skills instead, attach them on the <a href="/vercel-skills">Skills</a> page.'
-                        };
-                        function renderHint() { hint.innerHTML = HINTS[select.value] || HINTS['']; }
-                        select.addEventListener('change', renderHint);
-                        renderHint();
-                    })();
-                </script>
-            </div>
-        </div>
-    </details>
-
-    <!-- Tools — collapsible, read-only -->
-    {% if agent_tools %}
-    <details class="panel agent-form-section">
-        <summary>Tools ({{ agent_tools|length }})</summary>
-        <div class="section-body">
-            <div class="config-tools-list">
-                {% for tool in agent_tools %}
-                <div class="config-tool-item">
-                    <span class="config-tool-name">{{ tool.name }}</span>
-                    {% if tool.description %}
-                    <span class="config-tool-desc">{{ tool.description }}</span>
-                    {% endif %}
                 </div>
-                {% endfor %}
-            </div>
-            <p class="form-hint">Tools are registered programmatically via the Python SDK. This list is read-only.</p>
+            </details>
         </div>
     </details>
-    {% endif %}
 
-    <div class="form-actions">
+    <!-- Automations and channels -->
+    <details class="panel agent-form-section builder-section" id="section-channels" {% if whatsapp_enabled or default_timezone or not automations_enabled %}open{% endif %}>
+        {{ section_summary('channels', 'Automations & channels', 'Scheduled jobs and the channels people can reach the agent on.') }}
+        <div class="section-body">
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="automations_enabled" value="1" {% if automations_enabled %}checked{% endif %}>
+                        Enable automations tools
+                    </label>
+                    <p class="form-hint">When enabled (and Oracle is connected), the agent can create durable scheduled jobs from chat.</p>
+                </div>
+                <div class="form-group">
+                    <label for="default_timezone">Default timezone</label>
+                    <input id="default_timezone" name="default_timezone" type="text" value="{{ default_timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
+                    <p class="form-hint">IANA timezone name used when timezone is omitted for automations.</p>
+                </div>
+            </div>
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" name="whatsapp_enabled" value="1" {% if whatsapp_enabled %}checked{% endif %}>
+                        Enable WhatsApp chat for this agent
+                    </label>
+                    <p class="form-hint">When enabled, this agent can be set as the active WhatsApp communicator. Users can then chat with this agent via WhatsApp.</p>
+                </div>
+                <div class="form-group">
+                    <label for="whatsapp_welcome_message">Welcome message <span class="optional">optional</span></label>
+                    <textarea
+                        id="whatsapp_welcome_message"
+                        name="whatsapp_welcome_message"
+                        rows="3"
+                        placeholder="Hi! I'm your AI assistant. How can I help you today?">{{ whatsapp_welcome_message }}</textarea>
+                    <p class="form-hint">This message will be sent when a user first contacts the agent via WhatsApp (feature coming soon).</p>
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <div class="form-actions builder-actions">
         <button type="submit" class="btn btn-primary">Save agent</button>
+        <button type="button" class="btn" id="save-template-toggle" aria-expanded="false" aria-controls="save-template-panel">Save as template</button>
         <a href="{% if is_edit %}/agents/{{ agent_id }}/playground{% else %}/agents{% endif %}" class="btn">Cancel</a>
     </div>
+    <section class="panel save-template-panel" id="save-template-panel" aria-labelledby="save-template-title" hidden>
+        <h2 class="panel-title" id="save-template-title">Save as a template</h2>
+        <p class="form-hint">Keeps the instructions, persona, model, and the memory, tool and runtime settings above, to start new agents from. Connections made from the Notion, Gmail and Google Calendar presets carry over without their sign-ins. Memory IDs, delegates, file paths, WhatsApp, other MCP servers and any key or token in the LLM config are left out.{% if is_edit %} This agent isn't changed.{% endif %} Saving under an existing template name replaces that template.</p>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="template_title">Template name</label>
+                <input id="template_title" name="template_title" maxlength="80" autocomplete="off" placeholder="e.g. Weekly planner">
+            </div>
+            <div class="form-group">
+                <label for="template_summary">Description <span class="optional">optional</span></label>
+                <input id="template_summary" name="template_summary" maxlength="240" autocomplete="off" placeholder="What agents made from it are for">
+            </div>
+        </div>
+        <div class="save-template-actions">
+            <button type="button" class="btn btn-primary" id="save-template-submit">Save template</button>
+            <span class="form-hint" id="save-template-status" role="status" aria-live="polite"></span>
+        </div>
+    </section>
 </form>
+</div>
+<aside class="agent-builder-aside" aria-label="Agent overview">
+    <nav class="panel builder-nav" aria-label="Form sections">
+        <p class="builder-aside-title">Sections</p>
+        <ol>
+            {% for key, title in [('identity', 'Identity'), ('model', 'Model'), ('persona', 'Persona'), ('memory', 'Memory'), ('learning', 'Learning'), ('tools', 'Tools & integrations'), ('runtime', 'Runtime & orchestration'), ('channels', 'Automations & channels')] %}
+            <li><a href="#section-{{ key }}" data-nav="{{ key }}"><span>{{ title }}</span><span class="builder-nav-status" data-nav-status="{{ key }}"></span></a></li>
+            {% endfor %}
+        </ol>
+    </nav>
+    <section class="panel builder-summary" aria-labelledby="builder-summary-title">
+        <p class="builder-aside-title" id="builder-summary-title">Configuration</p>
+        <dl class="builder-summary-list" id="builder-summary"></dl>
+    </section>
+    <section class="panel builder-code" aria-labelledby="builder-code-title">
+        <div class="builder-code-head">
+            <p class="builder-aside-title" id="builder-code-title">Python SDK</p>
+            <span class="builder-code-buttons">
+                <button type="button" class="btn btn-sm" id="builder-code-expand" aria-haspopup="dialog">Expand</button>
+                <button type="button" class="btn btn-sm" id="builder-code-copy">Copy</button>
+            </span>
+        </div>
+        <pre class="builder-code-block" tabindex="0"><code id="builder-code"></code></pre>
+        <p class="form-hint">The same agent in code. API keys come from the environment, never from here.</p>
+    </section>
+    <dialog class="builder-code-dialog" id="builder-code-dialog" aria-labelledby="builder-code-dialog-title">
+        <div class="builder-code-head">
+            <p class="builder-aside-title" id="builder-code-dialog-title">Python SDK</p>
+            <span class="builder-code-buttons">
+                <button type="button" class="btn btn-sm" id="builder-code-dialog-copy">Copy</button>
+                <button type="button" class="btn btn-sm" id="builder-code-dialog-close">Close</button>
+            </span>
+        </div>
+        <pre class="builder-code-block" tabindex="0"><code id="builder-code-full"></code></pre>
+    </dialog>
+</aside>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -1000,6 +1116,17 @@ function syncBackgroundModel(providerChanged) {
     }
     const name = nameInput.value.trim();
     hidden.value = provider && name ? provider + ':' + name : '';
+}
+
+// Show the hidden "provider:model" value in the background model picker.
+function loadBackgroundModel() {
+    const background = (document.getElementById('background_model').value || '').trim();
+    const split = background.indexOf(':');
+    const knownProviders = Array.from(document.getElementById('background_provider').options).map(function(o) { return o.value; });
+    const head = split > 0 ? background.slice(0, split) : '';
+    document.getElementById('background_provider').value = !background ? '' : (knownProviders.includes(head) ? head : (document.getElementById('llm_provider').value || ''));
+    document.getElementById('background_model_name').value = !background ? '' : (knownProviders.includes(head) ? background.slice(split + 1) : background);
+    syncBackgroundModel(false);
 }
 
 // A sealed conversation keeps its entity facts to itself.
@@ -1116,16 +1243,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     syncAgentModelOptions();
     syncEntityScope();
-    const background = (document.getElementById('background_model').value || '').trim();
-    const split = background.indexOf(':');
-    const knownProviders = Array.from(document.getElementById('background_provider').options).map(function(o) { return o.value; });
-    if (background) {
-        const head = split > 0 ? background.slice(0, split) : '';
-        const provider = knownProviders.includes(head) ? head : (document.getElementById('llm_provider').value || '');
-        document.getElementById('background_provider').value = provider;
-        document.getElementById('background_model_name').value = knownProviders.includes(head) ? background.slice(split + 1) : background;
-    }
-    syncBackgroundModel(false);
+    loadBackgroundModel();
 
     // Continuous mode: on form submit, send max_steps=0
     var agentForm = document.querySelector('.agent-form');
@@ -1303,4 +1421,9 @@ function syncSkillAuthorityReview() {
         .catch(() => {});
 })();
 </script>
+<script>
+    window.AGENT_BUILDER = {{ builder_context|default({}, true)|tojson }};
+</script>
+<script src="/static/js/agent-templates.js?v=2"></script>
+<script src="/static/js/agent-builder.js?v=4"></script>
 {% endblock %}

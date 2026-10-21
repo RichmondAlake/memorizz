@@ -1513,33 +1513,492 @@ body.theme-light .form-group select {
     gap: var(--spacing-md);
 }
 
-details.agent-template {
+.agent-templates {
     margin-bottom: var(--spacing-lg);
 }
 
-details.agent-template > summary {
-    flex-wrap: wrap;
+.agent-template-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: var(--spacing-md);
+    margin: var(--spacing-md) 0;
 }
 
-.agent-template-meta {
+.agent-template-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    min-width: 0;
+    padding: var(--spacing-md);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+
+.agent-template-card.is-selected {
+    border-color: var(--accent-primary);
+    box-shadow: inset 0 0 0 1px var(--accent-primary);
+}
+
+.agent-template-card-head {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+    color: var(--text-muted);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.agent-template-yours {
+    color: var(--accent-primary);
+}
+
+.agent-template-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.agent-template-summary {
+    display: -webkit-box;
+    margin: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+}
+
+.agent-template-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.agent-template-chips li {
+    padding: 2px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.agent-template-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    margin-top: auto;
+    padding-top: 4px;
+}
+
+.agent-template-actions form {
+    margin: 0;
+}
+
+.agent-template-banner {
+    display: grid;
+    gap: var(--spacing-sm);
+    border-color: var(--accent-primary);
+}
+
+.agent-template-banner-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+}
+
+.agent-template-banner p {
+    margin: 0;
+}
+
+.agent-template-banner-head > p {
+    flex: 1 1 360px;
+}
+
+.agent-template-banner [data-template-google]:not([hidden]) {
+    display: grid;
+    gap: var(--spacing-md);
+}
+
+.agent-template-banner code {
+    overflow-wrap: anywhere;
+}
+
+.save-template-panel {
+    display: grid;
+    gap: var(--spacing-md);
+}
+
+.save-template-panel .panel-title {
+    margin: 0;
+}
+
+.save-template-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-md);
+}
+
+#save-template-status.is-bad {
+    color: var(--accent-danger);
+}
+
+.agent-template-banner[hidden],
+.save-template-panel[hidden],
+.agent-template-banner [hidden] {
+    display: none;
+}
+
+/* Agent builder: the form beside a sticky overview (sections, configuration,
+   the same agent as code). One column on narrower screens. */
+.agent-builder {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
+    gap: var(--spacing-lg);
+    align-items: start;
+}
+
+.agent-builder-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.agent-builder-aside {
+    position: sticky;
+    top: var(--spacing-md);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--spacing-md);
+    min-width: 0;
+    max-height: calc(100vh - 2 * var(--spacing-md));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.agent-builder-aside > .panel {
+    min-width: 0;
+    margin: 0;
+}
+
+.builder-aside-title {
+    margin: 0 0 var(--spacing-sm);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.builder-nav ol {
+    display: grid;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.builder-nav a {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 13px;
+    text-decoration: none;
+}
+
+.builder-nav a:hover,
+.builder-nav a.is-active {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.builder-nav a.is-active {
+    box-shadow: inset 2px 0 0 var(--accent-primary);
+}
+
+.builder-nav-status {
+    max-width: 55%;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.builder-summary-list {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px 12px;
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.4;
+}
+
+.builder-summary-list dt {
+    color: var(--text-muted);
+}
+
+.builder-summary-list dd {
+    margin: 0;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.builder-summary-list .builder-summary-group {
+    grid-column: 1 / -1;
+    margin-top: var(--spacing-sm);
+    padding-top: var(--spacing-sm);
+    border-top: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.builder-summary-list .builder-summary-group:first-child {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+}
+
+.builder-code-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-sm);
+}
+
+.builder-code-head .builder-aside-title {
+    margin: 0;
+}
+
+.builder-code-block {
+    max-height: 380px;
+    margin: 0 0 var(--spacing-sm);
+    padding: 10px 12px;
+    overflow: auto;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--console-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    white-space: pre;
+}
+
+.builder-code-buttons {
+    display: flex;
+    gap: 6px;
+}
+
+/* The wide code view. */
+.builder-code-dialog {
+    position: fixed;
+    inset: 0;
+    width: min(980px, 92vw);
+    height: fit-content;
+    max-height: 88vh;
+    margin: auto;
+    padding: var(--spacing-md);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-card);
+    color: var(--text-primary);
+}
+
+.builder-code-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+}
+
+.builder-code-dialog .builder-code-block {
+    max-height: calc(88vh - 96px);
+    margin: 0;
+    font-size: 12.5px;
+}
+
+.builder-code-block code {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: inherit;
+}
+
+/* Section headers: title, one line on what it is for, and its status. */
+details.builder-section > summary {
+    align-items: flex-start;
+}
+
+details.builder-section > summary::before {
+    margin-top: 8px;
+}
+
+.builder-section-heading {
+    display: grid;
+    flex: 1;
+    gap: 2px;
+    min-width: 0;
+}
+
+.builder-section-title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.builder-section-desc {
+    color: var(--text-muted);
+    font-size: 12.5px;
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+.builder-section-status {
+    flex: none;
+    max-width: 42%;
+    margin-left: auto;
+    padding: 2px 10px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.builder-section-status:empty {
+    display: none;
+}
+
+.agent-form .builder-section > .section-body > :is(.form-group, .form-grid, details, .form-hint) + :is(.form-group, .form-grid, details, .form-hint) {
+    margin-top: 16px;
+}
+
+/* A group inside a section, such as Delegates under Runtime. */
+.builder-subsection {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+
+.builder-subsection > summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    padding: 12px 14px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    list-style: none;
+}
+
+.builder-subsection > summary::-webkit-details-marker {
+    display: none;
+}
+
+.builder-subsection > summary::before {
+    content: "";
+    flex: none;
+    align-self: center;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--text-muted);
+    border-bottom: 1.5px solid var(--text-muted);
+    transform: rotate(-45deg);
+    transition: transform 120ms ease;
+}
+
+.builder-subsection[open] > summary::before {
+    transform: rotate(45deg);
+}
+
+.builder-subsection-desc {
     color: var(--text-muted);
     font-size: 12px;
     font-weight: 400;
 }
 
-.agent-template-form {
+.builder-subsection > .section-body {
+    padding: 0 14px 14px;
+}
+
+.builder-subsection > .section-body > :is(.form-group, .form-grid, .form-hint, fieldset) + :is(.form-group, .form-grid, .form-hint, fieldset) {
+    margin-top: 12px;
+}
+
+/* Inside a subsection the harness delegate picker takes two columns. */
+.builder-subsection .harness-delegate-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.builder-subsection .harness-delegate-row .btn {
+    justify-self: start;
+}
+
+.builder-subsection > .section-body > .form-grid label {
     display: grid;
-    gap: var(--spacing-md);
-    margin-top: var(--spacing-md);
-    justify-items: start;
+    gap: 6px;
 }
 
-.agent-template-form > .form-grid {
-    width: 100%;
+.builder-subsection > .section-body > .form-grid label.checkbox-group,
+.builder-subsection > .section-body > .form-grid .checkbox-group label {
+    display: flex;
 }
 
-.agent-template-form code {
-    overflow-wrap: anywhere;
+/* Save stays in reach however long the form is. */
+.agent-form > .builder-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    margin: 0;
+    padding: 12px 0;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-primary);
+}
+
+@media (max-width: 1180px) {
+    .agent-builder {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .agent-builder-aside {
+        position: static;
+        max-height: none;
+        overflow: visible;
+    }
+
+    .builder-nav {
+        display: none;
+    }
+}
+
+@media (max-width: 640px) {
+    details.builder-section > summary {
+        flex-wrap: wrap;
+    }
+
+    .builder-section-status {
+        max-width: 100%;
+        margin-left: 22px;
+    }
 }
 
 .checkbox-group {
@@ -5008,14 +5467,7 @@ body.theme-light .connect-btn {
 .pg-cache-note { margin: 8px 0 0; font-size: 12px; line-height: 1.45; color: var(--text-secondary); overflow-wrap: anywhere; }
 .pg-cache-last { color: var(--text-primary); }
 
-/* Agent form: the privacy and upkeep group spans the whole row when open,
-   so its select and inputs keep their width. */
-.agent-form details#memory-upkeep[open] {
-  grid-column: 1 / -1;
-  display: grid;
-  gap: 6px;
-  max-width: 720px;
-}
+/* Agent form: the privacy and upkeep group's select keeps its width. */
 .agent-form details#memory-upkeep select {
   width: 100%;
 }

@@ -43,8 +43,12 @@ The Memorizz local UI gives you a browser-based workflow for connecting to your 
   mechanism** section (importance rater, recency decay and weights, suppression
   thresholds, reflection). Each agent's form has a *Forgetting (per-agent
   overrides)* group for the same values.
+- Create agents from templates (productivity, personal finance, research,
+  customer support, writing, study coach) or from your own, and see the
+  configuration and its Python SDK equivalent as you edit (see
+  [Creating agents](#creating-agents)).
 - Set the agent's background model (summaries, compaction and consolidation)
-  under *LLM configuration*. Under *Conversation privacy and memory upkeep*
+  under *Model*. Under *Memory → Conversation privacy and memory upkeep*
   you can seal conversations, choose where entity facts live, and turn on
   background consolidation.
 - Consolidate an agent's memory from *Continual learning → Control plane*:
@@ -134,7 +138,7 @@ Once connected, the sidebar is your main navigation.
 |---|---|---|
 | Dashboard | `/dashboard` | High-level provider connection details and memory counts. |
 | Agents | `/agents` | Browse agents, sort, quick-chat, and jump into edit/playground. |
-| Create Agent | `/agents/new` | Build a new agent with mode, persona, tool/memory options, and provider config. |
+| Create Agent | `/agents/new` | Start from a template or a blank form; set identity, model, persona, memory, learning, tools and runtime, with a live summary and the Python SDK code. `?template=<key>` opens it filled in. |
 | Playground | `/playground` and `/agents/{id}/playground` | Interactive chat, thread switching, token/context stats, and per-agent runtime config. |
 | MCP Connections | `/mcp` | Configure/test MCP servers, authorize OAuth, inspect capabilities, and invoke governed tools. |
 | Automations | `/automations` | Create schedules, inspect runs, and manage worker-backed agent jobs. |
@@ -182,6 +186,44 @@ files; keep them out of version control and review warnings about project
 8. Open `Agent Harnesses` to inspect local adapter readiness or launch a
    bounded repository task. Direct edits pause until a host operator approves
    the exact envelope.
+
+## Creating agents
+
+**Agents → Create agent** starts with a row of templates. **Use template**
+fills in the form below it: name, instruction, persona, and the settings that
+template needs. Nothing is saved until you select **Save agent**, so review
+and change anything first. **Start blank** clears it again.
+
+| Template | What it sets up |
+|---|---|
+| Personal productivity assistant | Gmail, Google Calendar and Notion over MCP; drafts but never sends. |
+| Personal finance assistant | Budgets, bills and savings goals with the arithmetic shown; background consolidation keeps figures current. Gives general information, not investment advice, and never stores card or account numbers. |
+| Research assistant | Web search with citations when a Tavily or Firecrawl key is set; tool-result cache. |
+| Customer support agent | Answers from the knowledge base; every conversation sealed, so one customer's details never reach another; no automations. |
+| Writing partner | Drafts and edits in your voice and learns your style. |
+| Study coach | Explains, quizzes and brings back what you got wrong. |
+
+A template with MCP connections attaches them when you save the agent, then
+opens MCP Connections so you can sign in to each one.
+
+**Save as template**, at the bottom of the create and edit forms, keeps the
+form's settings as a template of your own: instructions, persona, model, and
+the memory, tool and runtime settings. Connections made from the Notion, Gmail
+and Google Calendar presets carry over without their sign-ins. Memory IDs,
+delegates, file paths, WhatsApp, other MCP servers and any key or token in the
+advanced LLM config are left out. Your templates are JSON files in
+`~/.memorizz/agent-templates/` (or `$MEMORIZZ_HOME/agent-templates/`),
+readable only by you, and show on the create page marked *Yours*, with
+**Delete**. Saving under an existing name replaces that template.
+
+The form is grouped into Identity, Model, Persona, Memory, Learning, Tools &
+integrations, Runtime & orchestration, and Automations & channels; each
+section's header shows what is set in it. Beside the form, an overview lists
+the sections, summarises the configuration (models, memory types, whether
+conversations are sealed, consolidation, integrations, limits), and shows the
+same agent as Python SDK code. Select **Expand** to read it full width, or
+**Copy**. API keys never appear in it; the code reads them from the
+environment.
 
 ## Agent Harnesses in the UI
 

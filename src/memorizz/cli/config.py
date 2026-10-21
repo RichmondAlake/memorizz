@@ -20,6 +20,7 @@ from .._env_io import (
     resolve_env_file,
     update_env_file,
 )
+from ..llms.model_catalog import DEFAULT_LLM_MODEL_BY_PROVIDER as _DEFAULT_MODELS
 
 __all__ = [
     "apply_env_updates",
@@ -52,10 +53,11 @@ DEFAULT_OLLAMA_LLM = "llama3.1"
 #: Default Ollama embedding model for the fully-local stack (dim 768).
 DEFAULT_OLLAMA_EMBED_MODEL = "nomic-embed-text"
 
-#: Default cloud models, matching the README quickstart / library docstrings.
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
-DEFAULT_AZURE_MODEL = "gpt-4o"
+#: Default cloud models: the same as the local UI's, from one list
+#: (llms.model_catalog). Azure takes a deployment name.
+DEFAULT_OPENAI_MODEL = _DEFAULT_MODELS["openai"]  # gpt-6.1-sol
+DEFAULT_ANTHROPIC_MODEL = _DEFAULT_MODELS["anthropic"]  # claude-opus-5-5
+DEFAULT_AZURE_MODEL = _DEFAULT_MODELS["azure"]  # gpt-5
 
 #: Default Ollama daemon host (also overridable via OLLAMA_HOST).
 OLLAMA_DEFAULT_HOST = "http://localhost:11434"

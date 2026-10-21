@@ -1,5 +1,10 @@
 /* In-page confirmations and notices (static/js/page-dialogs.js). */
 .mz-dialog {
+    /* Centered: the page's margin reset removes the browser's own. */
+    position: fixed;
+    inset: 0;
+    height: fit-content;
+    margin: auto;
     max-width: min(460px, calc(100vw - 32px));
     padding: 20px;
     color: var(--text-primary);

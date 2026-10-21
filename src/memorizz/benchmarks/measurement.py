@@ -135,6 +135,8 @@ def token_price(provider: str, model: str, override: dict | None = None) -> dict
             "claude-sonnet-4-5": (3, 0.3, 15),
             "claude-sonnet-4-6": (3, 0.3, 15),
             "claude-sonnet-5": (2, 0.2, 10),
+            "claude-sonnet-5-5": (2, 0.1, 10),
+            "claude-haiku-5-5": (0.1, 0.01, 0.5),
             "claude-opus-4-5": (5, 0.5, 25),
             "claude-opus-4-6": (5, 0.5, 25),
             "claude-opus-4-7": (5, 0.5, 25),
@@ -147,7 +149,7 @@ def token_price(provider: str, model: str, override: dict | None = None) -> dict
         for base in sorted(rates, key=len, reverse=True):
             if model == base or re.fullmatch(re.escape(base) + r"-\d{8}", model):
                 i, c, o = rates[base]
-                return {
+                price = {
                     "input": i,
                     "cached_input": c,
                     "output": o,
@@ -157,6 +159,17 @@ def token_price(provider: str, model: str, override: dict | None = None) -> dict
                     "as_of": "2026-09-24",
                     "scope": "standard global direct API; short context",
                 }
+                if base in {"claude-sonnet-5-5", "claude-haiku-5-5"}:
+                    price["as_of"] = "2026-10-21"
+                if base == "claude-haiku-5-5":
+                    # A prompt over 100,000 tokens pays five times every rate.
+                    price.update(
+                        long_context_threshold=100_000,
+                        long_input_multiplier=5,
+                        long_output_multiplier=5,
+                        scope="standard global direct API; priced by prompt length",
+                    )
+                return price
     return None
 
 
@@ -207,7 +220,7 @@ def usage_cost(provider: str, usage: dict, price: dict | None) -> float | None:
             d(inputs - cached - write) * d(price["input"]) * d(im)
             + d(cached) * d(price["cached_input"]) * d(im)
             + d(write - one_hour) * d(price.get("cache_write") or 0) * d(im)
-            + d(one_hour) * d(price.get("cache_write_1h", 0))
+            + d(one_hour) * d(price.get("cache_write_1h", 0)) * d(im)
             + d(outputs) * d(price["output"]) * d(om)
         )
         / d(1_000_000)

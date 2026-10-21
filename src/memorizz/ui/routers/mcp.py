@@ -96,9 +96,9 @@ async def _manager_call(function, *args, **kwargs):
 def _created_template(key: Optional[str]):
     if not key:
         return None
-    from ...memagent.templates import TEMPLATES
+    from ..agent_templates import find_template
 
-    return TEMPLATES.get(key)
+    return find_template(key)
 
 
 @router.get("/mcp", response_class=HTMLResponse)

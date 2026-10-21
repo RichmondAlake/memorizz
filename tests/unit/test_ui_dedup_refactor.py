@@ -90,6 +90,10 @@ def rendered(monkeypatch):
         "_build_agent_nav_items",
         lambda active_agent_id: ["nav", active_agent_id],
     )
+    monkeypatch.setattr(agents_crud, "_template_cards", lambda: ["template"])
+    monkeypatch.setattr(
+        agents_crud, "_builder_context", lambda agent_id: {"agent_id": agent_id}
+    )
     with patch.dict(
         state._state,
         {"provider_type": "filesystem", "connection_info": {"root_path": "/r"}},
@@ -108,6 +112,8 @@ def test_create_form_context_has_no_agent_nav(rendered):
         "request": "req",
         "provider_type": "filesystem",
         "connection_info": {"root_path": "/r"},
+        "agent_templates": ["template"],
+        "builder_context": {"agent_id": None},
         "active_page": "agents",
         "form_title": "Create Agent",
         "form_action": "/agents/new",

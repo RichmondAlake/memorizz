@@ -112,16 +112,17 @@ same API.
 
 ## Personal productivity assistant
 
-**Agents → Create agent → Start from a template: Personal productivity
-assistant** creates an agent with instructions, a persona and entity memory, and
-attaches Gmail, Google Calendar and Notion. It opens MCP Connections so you can
-sign in to each one. The assistant drafts but never sends mail (Gmail's MCP
+On **Agents → Create agent**, **Use template** on *Personal productivity
+assistant* fills in the form with instructions, a persona and entity memory.
+Saving the agent attaches Gmail, Google Calendar and Notion and opens MCP
+Connections so you can sign in to each one. The assistant drafts but never sends mail (Gmail's MCP
 server has no send tool), reads your calendar, keeps Notion notes and tasks up
 to date, and treats email and page content as information, never as
 instructions. Drafts, labels and Notion edits wait for your approval.
 
 Gmail and Google Calendar need one Google OAuth client (see below); enter its ID
-and secret in the template form or later with **Edit**. In code:
+and secret in the template's banner on the create form, or later with **Edit**.
+In code:
 
 ```python
 from memorizz.memagent.templates import PRODUCTIVITY_ASSISTANT, template_mcp_servers

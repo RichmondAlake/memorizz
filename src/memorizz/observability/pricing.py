@@ -260,15 +260,25 @@ def _anthropic_cards():
         "claude-opus-4-7": (5, 0.5, 25),
         "claude-opus-4-6": (5, 0.5, 25),
         "claude-opus-4-5": (5, 0.5, 25),
-        "claude-sonnet-5-5": (2, 0.2, 10),
+        "claude-sonnet-5-5": (2, 0.1, 10),
         "claude-sonnet-5": (2, 0.2, 10),
         "claude-sonnet-4-6": (3, 0.3, 15),
         "claude-sonnet-4-5": (3, 0.3, 15),
+        "claude-haiku-5-5": (0.1, 0.01, 0.5),
         "claude-haiku-4-5": (1, 0.1, 5),
     }
     # These have a separate over-200K schedule; leave it unpriced, not guessed.
     short_context = {"claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"}
+    # Haiku 5.5 bills a request whose prompt (cache reads and writes included)
+    # is over 100,000 tokens at five times every rate.
+    long_prompt = {"claude-haiku-5-5": 100_000}
     for model, (inputs, cached, outputs) in rates.items():
+        as_of = (
+            "2026-10-21"
+            if model in long_prompt or model == "claude-sonnet-5-5"
+            else "2026-09-28"
+        )
+        multiplier = Decimal(5) if model in long_prompt else Decimal(1)
         yield RateCard(
             provider="anthropic",
             model=model,
@@ -277,9 +287,12 @@ def _anthropic_cards():
             output_per_million=outputs,
             cache_write_per_million=Decimal(str(inputs)) * Decimal("1.25"),
             source_url="https://platform.claude.com/docs/en/about-claude/pricing",
-            as_of="2026-09-28",
-            version="anthropic-standard-2026-09-28",
+            as_of=as_of,
+            version=f"anthropic-standard-{as_of}",
             max_input_tokens=200_000 if model in short_context else None,
+            long_context_threshold=long_prompt.get(model),
+            long_input_multiplier=multiplier,
+            long_output_multiplier=multiplier,
         )
 
 
