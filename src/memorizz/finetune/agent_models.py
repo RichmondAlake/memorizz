@@ -94,6 +94,24 @@ def choice(
     return _cached(("choice", id(provider), agent_id, job), load)
 
 
+def record_setting(provider: Any, agent_id: Optional[str], name: str) -> Any:
+    """A setting saved on the agent's own record (``reranker``,
+    ``memory_routing``), or None."""
+    if not agent_id or provider is None:
+        return None
+
+    def load():
+        try:
+            record = provider.retrieve_memagent(agent_id)
+        except Exception:
+            return None
+        if isinstance(record, dict):
+            return record.get(name)
+        return getattr(record, name, None)
+
+    return _cached(("record", id(provider), agent_id, name), load)
+
+
 def resolve(
     provider: Any,
     job: str,
@@ -107,4 +125,12 @@ def resolve(
     return choice(provider, agent, job) if agent else None
 
 
-__all__ = ["JOBS", "agent_for_memory", "choice", "forget", "resolve", "setting_key"]
+__all__ = [
+    "JOBS",
+    "agent_for_memory",
+    "choice",
+    "forget",
+    "record_setting",
+    "resolve",
+    "setting_key",
+]

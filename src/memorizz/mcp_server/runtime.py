@@ -78,6 +78,20 @@ class MemorizzServerError(Exception):
         super().__init__(message)
 
 
+def _reranked(query: str, rows: List[Dict[str, Any]], rerank) -> List[Dict[str, Any]]:
+    """Rows ordered by ``rerank`` scores (unchanged when it fails)."""
+    if len(rows) < 2:
+        return rows
+    try:
+        values = rerank([_row_text(row) for row in rows])
+    except Exception as exc:
+        logger.warning("Reranker failed; keeping retrieval order: %s", exc)
+        return rows
+    for row, value in zip(rows, values):
+        row["rerank_score"] = round(float(value), 4)
+    return sorted(rows, key=lambda row: -row["rerank_score"])
+
+
 def _row_text(row: Dict[str, Any]) -> str:
     content = row.get("content") if isinstance(row, dict) else None
     if isinstance(content, dict):
@@ -1983,27 +1997,19 @@ class MemorizzRuntime:
                     rows = [row for row in rows or [] if not _is_superseded(row)]
                 rerank = None
                 try:
-                    from ..finetune.reranking import rerank_for
+                    from ..reranking import reranker_for
 
-                    rerank = rerank_for(
+                    rerank = reranker_for(
                         text, provider=self.provider, memory_id=memory_id
                     )
                 except ImportError:
                     pass
                 if rerank is not None:
-                    # A fine-tuned reranker (the store's, or that of the
-                    # agent owning this memory) reorders this tenant's
+                    # The reranker of the agent owning this memory (hosted or
+                    # fine-tuned), else the store's, reorders this tenant's
                     # candidates before the result is cut to the limit.
-                    from ..finetune.reranking import rerank_rows
-
                     rows = self._tenant_rows(rows, identity, len(rows or []) or 1)
-                    rows = rerank_rows(
-                        text,
-                        list(rows),
-                        _row_text,
-                        provider=self.provider,
-                        memory_id=memory_id,
-                    )
+                    rows = _reranked(text, list(rows), rerank)
                 values = self._tenant_rows(rows, identity, resolved_limit)
         mode = "semantic"
         if not embedder.get("ready") or semantic_failed:
@@ -2312,8 +2318,24 @@ class MemorizzRuntime:
         this tool writes."""
         from ..finetune import routing as memory_routing
 
+        threshold = None
         try:
-            answer = memory_routing.route(self.provider, text, memory_id=memory_id)
+            own = self._agent_router(memory_id)
+            if own is not None:
+                config, owner, generate = own
+                threshold = config.min_confidence
+                from ..memagent.memory_routing import route
+
+                answer = route(
+                    text,
+                    config,
+                    provider=self.provider,
+                    agent_id=owner,
+                    memory_id=memory_id,
+                    generate=generate,
+                )
+            else:
+                answer = memory_routing.route(self.provider, text, memory_id=memory_id)
         except Exception as exc:
             logger.warning(
                 "Memory routing failed (%s); using the default store",
@@ -2321,8 +2343,39 @@ class MemorizzRuntime:
             )
             answer = None
         return memory_routing.place(
-            answer, {t.value for t in _WRITABLE_MEMORY_TYPES}, default="knowledge_base"
+            answer,
+            {t.value for t in _WRITABLE_MEMORY_TYPES},
+            default="knowledge_base",
+            threshold=threshold,
         )
+
+    def _agent_router(self, memory_id: Optional[str]):
+        """The router of the agent owning ``memory_id``, when that agent
+        routes its own memory: (config, agent id, text generator), or None."""
+        if not memory_id:
+            return None
+        from ..finetune import agent_models
+        from ..memagent.memory_routing import MemoryRoutingConfig
+
+        owner = agent_models.agent_for_memory(self.provider, memory_id)
+        if not owner:
+            return None
+        config = MemoryRoutingConfig.from_value(
+            agent_models.record_setting(self.provider, owner, "memory_routing")
+        )
+        if not config.enabled:
+            return None
+        generate = None
+        if config.router in {"llm", "auto"}:
+            from ..learning.consolidation import model_for_agent, text_generator
+
+            try:
+                generate = text_generator(
+                    model_for_agent(self.provider.retrieve_memagent(owner))
+                )
+            except Exception:
+                generate = None
+        return config, owner, generate
 
     def forget(
         self,

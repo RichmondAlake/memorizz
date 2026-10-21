@@ -79,6 +79,8 @@ _LAZY = {
     "OutcomeEvidence": (".learning", "OutcomeEvidence"),
     "ForgettingReport": (".learning", "ForgettingReport"),
     "ConsolidationConfig": (".learning", "ConsolidationConfig"),
+    "MemoryRoutingConfig": (".memagent.memory_routing", "MemoryRoutingConfig"),
+    "RerankerConfig": (".reranking", "RerankerConfig"),
     "ConsolidationPlan": (".learning", "ConsolidationPlan"),
     "SemanticCacheInspection": (
         ".short_term_memory.semantic_cache",
@@ -228,6 +230,8 @@ __all__ = [
     "OutcomeEvidence",
     "ForgettingReport",
     "ConsolidationConfig",
+    "MemoryRoutingConfig",
+    "RerankerConfig",
     "ConsolidationPlan",
     "SemanticCacheInspection",
     "governed_tool",

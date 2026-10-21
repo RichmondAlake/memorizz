@@ -124,7 +124,7 @@
 
     <!-- LLM Configuration — collapsible -->
     <details class="panel agent-form-section builder-section" id="section-model" open>
-        {{ section_summary('model', 'Model', 'The model that answers, and an optional cheaper background model for summaries, compaction and consolidation.') }}
+        {{ section_summary('model', 'Model', 'The model that answers, and the models behind memory: background upkeep, reranking and routing.') }}
         <div class="section-body">
             <div class="form-grid">
                 <div class="form-group">
@@ -174,28 +174,67 @@
                 <textarea id="llm_config_json" name="llm_config_json" rows="4">{{ llm_config_json }}</textarea>
                 <p class="form-hint">Optional provider-specific fields (e.g. azure_endpoint, api_version, ollama host, HuggingFace settings, temperature, base_url for local-openai).</p>
             </div>
-            <div class="form-grid" id="background-model">
-                <div class="form-group">
-                    <label for="background_provider">Background model</label>
-                    <select id="background_provider" onchange="syncBackgroundModel(true)">
-                        <option value="">Same as the chat model</option>
-                        <option value="openai">OpenAI</option>
-                        <option value="anthropic">Anthropic</option>
-                        <option value="azure">Azure OpenAI</option>
-                        <option value="ollama">Ollama (Local)</option>
-                        <option value="huggingface">HuggingFace</option>
-                        <option value="mlx">MLX (Apple Silicon)</option>
-                        <option value="local-openai">Local OpenAI-compatible</option>
-                    </select>
+            {% set memory_models = builder_context.memory_models if builder_context is defined and builder_context and builder_context.memory_models else {} %}
+            <details class="builder-subsection" id="memory-models" {% if background_model|default('') or reranker|default('') or memory_routing|default('') %}open{% endif %}>
+                <summary>Memory models<span class="builder-subsection-desc">The background model, the reranker and the memory router</span></summary>
+                <div class="section-body">
+                    <input type="hidden" name="memory_models_form" value="1">
+                <div class="form-grid" id="background-model">
+                    <div class="form-group">
+                        <label for="background_provider">Background model</label>
+                        <select id="background_provider" onchange="syncBackgroundModel(true)">
+                            <option value="">Same as the chat model</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="anthropic">Anthropic</option>
+                            <option value="azure">Azure OpenAI</option>
+                            <option value="ollama">Ollama (Local)</option>
+                            <option value="huggingface">HuggingFace</option>
+                            <option value="mlx">MLX (Apple Silicon)</option>
+                            <option value="local-openai">Local OpenAI-compatible</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="background_model_group">
+                        <label for="background_model_name">Background model name</label>
+                        <input id="background_model_name" type="text" list="background_model_options" autocomplete="off" oninput="syncBackgroundModel(false)" placeholder="e.g. qwen2.5:7b">
+                        <datalist id="background_model_options"></datalist>
+                    </div>
                 </div>
-                <div class="form-group" id="background_model_group">
-                    <label for="background_model_name">Background model name</label>
-                    <input id="background_model_name" type="text" list="background_model_options" autocomplete="off" oninput="syncBackgroundModel(false)" placeholder="e.g. qwen2.5:7b">
-                    <datalist id="background_model_options"></datalist>
+                <input type="hidden" id="background_model" name="background_model" value="{{ background_model|default('') }}">
+                <p class="form-hint">Summaries, context compaction, reflection, skill distillation and memory consolidation run on this model; replies keep the chat model. A smaller, cheaper model is usually enough.</p>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="reranker">Reranker</label>
+                            <select id="reranker" name="reranker">
+                                {% for group in memory_models.get('reranker', []) %}
+                                {% if group.label %}<optgroup label="{{ group.label }}">{% endif %}
+                                {% for option in group.options %}
+                                <option value="{{ option.value }}" {% if option.value == (reranker|default('')) %}selected{% endif %}>{{ option.label }}</option>
+                                {% endfor %}
+                                {% if group.label %}</optgroup>{% endif %}
+                                {% endfor %}
+                            </select>
+                            <p class="form-hint">Reorders what the agent recalls before the model sees it. A hosted reranker adds one request to each turn that recalls memories; if it fails, recall keeps its own order.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="memory_routing">Memory routing</label>
+                            <select id="memory_routing" name="memory_routing">
+                                {% for group in memory_models.get('memory_routing', []) %}
+                                {% if group.label %}<optgroup label="{{ group.label }}">{% endif %}
+                                {% for option in group.options %}
+                                <option value="{{ option.value }}" {% if option.value == (memory_routing|default('')) %}selected{% endif %}>{{ option.label }}</option>
+                                {% endfor %}
+                                {% if group.label %}</optgroup>{% endif %}
+                                {% endfor %}
+                            </select>
+                            <label class="checkbox-group memory-routing-capture">
+                                <input type="checkbox" name="memory_routing_capture" value="on" {% if memory_routing_capture|default(true) %}checked{% endif %}>
+                                Route what the user says after each turn
+                            </label>
+                            <p class="form-hint">Files each memory in the store it belongs in: facts about people and things in entity memory, policies and reference facts in the knowledge base, nothing for small talk. Runs after the reply, so turns are not slower, and adds a <code>remember</code> tool for facts the agent finds itself.</p>
+                        </div>
+                    </div>
                 </div>
-            </div>
-            <input type="hidden" id="background_model" name="background_model" value="{{ background_model|default('') }}">
-            <p class="form-hint">Summaries, context compaction, reflection, skill distillation and memory consolidation run on this model; replies keep the chat model. A smaller, cheaper model is usually enough.</p>
+            </details>
         </div>
     </details>
     <script>
@@ -1424,6 +1463,6 @@ function syncSkillAuthorityReview() {
 <script>
     window.AGENT_BUILDER = {{ builder_context|default({}, true)|tojson }};
 </script>
-<script src="/static/js/agent-templates.js?v=2"></script>
-<script src="/static/js/agent-builder.js?v=4"></script>
+<script src="/static/js/agent-templates.js?v=3"></script>
+<script src="/static/js/agent-builder.js?v=5"></script>
 {% endblock %}

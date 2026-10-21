@@ -430,6 +430,34 @@ Reply {"same_fact": [], "same_entity": []} when there is nothing.
 Entities:
 """
 
+
+def known_facts(
+    records: Any,
+) -> Tuple[Dict[Tuple[str, str], Tuple[str, Mapping[str, Any]]], set, List[str]]:
+    """What entity memory already holds, as the fact checks read it: the
+    value per (entity, attribute), the values on their own, and prompt lines."""
+    known: Dict[Tuple[str, str], Tuple[str, Mapping[str, Any]]] = {}
+    for record in records or []:
+        for attribute in record.get("attributes") or []:
+            if isinstance(attribute, dict) and attribute.get("name"):
+                known[
+                    (
+                        _normalized(record.get("name")),
+                        str(attribute["name"]).casefold(),
+                    )
+                ] = (str(attribute.get("value") or ""), record)
+    known_values = {
+        _normalized(value)
+        for value, _record in known.values()
+        if len(_normalized(value)) >= 4
+    } | {(name, _normalized(value)) for (_entity, name), (value, _r) in known.items()}
+    known_lines = [
+        f"- {entity}.{name} = {value[:120]}"
+        for (entity, name), (value, _record) in list(known.items())[:80]
+    ] or ["(nothing yet)"]
+    return known, known_values, known_lines
+
+
 _EXTRACT_PROMPT = """You maintain an assistant's long-term memory about the user.
 Below are the messages the user wrote in one conversation, one per line.
 List durable facts they state about themselves or about people, projects and things in
@@ -970,27 +998,7 @@ class MemoryConsolidator:
         except Exception as exc:
             warnings.append(f"fact extraction skipped: {type(exc).__name__}")
             return []
-        known: Dict[Tuple[str, str], Tuple[str, Mapping[str, Any]]] = {}
-        for record in records:
-            for attribute in record.get("attributes") or []:
-                if isinstance(attribute, dict) and attribute.get("name"):
-                    known[
-                        (
-                            _normalized(record.get("name")),
-                            str(attribute["name"]).casefold(),
-                        )
-                    ] = (str(attribute.get("value") or ""), record)
-        known_values = {
-            _normalized(value)
-            for value, _record in known.values()
-            if len(_normalized(value)) >= 4
-        } | {
-            (name, _normalized(value)) for (_entity, name), (value, _r) in known.items()
-        }
-        known_lines = [
-            f"- {entity}.{name} = {value[:120]}"
-            for (entity, name), (value, _record) in list(known.items())[:80]
-        ] or ["(nothing yet)"]
+        known, known_values, known_lines = known_facts(records)
         ops: List[ConsolidationOp] = []
         seen: set = set()
         for thread_id in thread_ids[: self.config.max_threads]:

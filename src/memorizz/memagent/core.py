@@ -154,14 +154,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _memory_reranker(query: str, agent_id: Any = None, provider: Any = None):
-    """The fine-tuned reranker for this agent's recall, bound to this query:
-    the agent's own choice, else the store's (MEMORIZZ_RERANKER_MODEL);
-    None without one."""
+def _memory_reranker(
+    query: str, agent_id: Any = None, provider: Any = None, config: Any = None
+):
+    """The reranker for this agent's recall, bound to this query: its own
+    (``reranker=``: hosted, fine-tuned or off), else the store's (the agent's
+    choice on the fine-tuning page, else MEMORIZZ_RERANKER_MODEL); None
+    without one."""
     try:
-        from ..finetune.reranking import rerank_for
+        from ..reranking import reranker_for
 
-        return rerank_for(query, provider=provider, agent_id=agent_id)
+        return reranker_for(query, config=config, provider=provider, agent_id=agent_id)
     except Exception as exc:  # optional dependency; never break recall
         logger.warning("Memory reranker unavailable: %s", exc)
         return None
@@ -218,6 +221,7 @@ _MEMORY_BOOKKEEPING_TOOLS = frozenset(
         "context_window_stats_tool",
         "retrieve_tool_log_entry",
         "list_recent_tool_logs",
+        "remember",
     }
 )
 
@@ -377,6 +381,10 @@ class _UpkeepState:
         # since that conversation last reflected.
         self.reflection: Dict[str, float] = {}
         self.reflection_lock = threading.Lock()
+        # Memory routing: user messages waiting to be routed, per
+        # (memory_id, user_id), and the keys being drained now.
+        self.routing: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
+        self.routing_draining: Set[Tuple[Any, ...]] = set()
 
 
 _UPKEEP_STATES: "weakref.WeakKeyDictionary[Any, Dict[str, _UpkeepState]]" = (
@@ -524,6 +532,8 @@ class MemAgent:
         background_model: Optional[Any] = None,
         background_llm_config: Optional[Dict[str, Any]] = None,
         memory_consolidation: Optional[Union[bool, Dict[str, Any]]] = None,
+        memory_routing: Optional[Union[bool, str, Dict[str, Any]]] = None,
+        reranker: Optional[Union[str, Dict[str, Any]]] = None,
     ):
         """Initialize the MemAgent with configuration."""
         # Eager creation: no first-use race between concurrent runs.
@@ -852,6 +862,13 @@ class MemAgent:
         from ..learning.consolidation import ConsolidationConfig
 
         self.memory_consolidation = ConsolidationConfig.from_value(memory_consolidation)
+        from ..reranking import RerankerConfig
+        from .memory_routing import MemoryRoutingConfig
+
+        # Where the agent files what it remembers; off unless asked for.
+        self.memory_routing = MemoryRoutingConfig.from_value(memory_routing)
+        # The agent's own reranker; None follows the store's.
+        self.reranker = RerankerConfig.from_value(reranker)
         self._retrieval_scoring_cache: Optional[Tuple[Any, RetrievalScoring]] = None
         self._internet_access_failure_count = 0
         self._internet_access_disabled_reason: Optional[str] = None
@@ -946,6 +963,7 @@ class MemAgent:
         self._register_context_monitor_tools()
         self._register_knowledge_base_tools()
         self._register_semantic_layer_tools()
+        self._register_memory_routing_tools()
 
         provider_to_attach = internet_access_provider
         if (
@@ -6342,6 +6360,7 @@ class MemAgent:
         self._record_interaction(query, response, memory_id, thread_id, user_id=user_id)
         self._schedule_background_compaction(response)
         self._note_turn_for_consolidation(memory_id, user_id, thread_id)
+        self._note_turn_for_routing(query, memory_id, user_id, thread_id)
 
     def run(
         self,
@@ -9929,6 +9948,7 @@ class MemAgent:
                             query,
                             agent_id=getattr(self, "agent_id", None),
                             provider=getattr(self, "memory_provider", None),
+                            config=getattr(self, "reranker", None),
                         ),
                     )
                     if selected:
@@ -10189,8 +10209,12 @@ class MemAgent:
                 "Entity memory usage:\n"
                 "- Facts about known entities relevant to the current query are provided with the user's message when available.\n"
                 "- Before answering, call 'entity_memory_lookup' when the user references known people or when recalling prior facts might help.\n"
-                "- After the user shares stable personal info (name, preferences, background, ongoing projects, likes/dislikes), call 'entity_memory_upsert' with the attribute/value pair so it persists.\n"
-                "- Only store verifiable statements; skip speculative or time-sensitive details.\n"
+                + (
+                    "- Facts the user shares about themselves and others are saved automatically after each turn; call 'entity_memory_upsert' only when the user asks you to correct or change a stored fact.\n"
+                    if self.memory_routing.enabled and self.memory_routing.capture_turns
+                    else "- After the user shares stable personal info (name, preferences, background, ongoing projects, likes/dislikes), call 'entity_memory_upsert' with the attribute/value pair so it persists.\n"
+                )
+                + "- Only store verifiable statements; skip speculative or time-sensitive details.\n"
                 "- Always keep JSON fields descriptive (e.g., attribute 'favorite_hobby', value 'hiking in the mountains')."
             )
 
@@ -12130,6 +12154,391 @@ class MemAgent:
                 state["threads"].update(threads)
                 state["since"] = since
 
+    # -- memory routing ---------------------------------------------------------
+
+    def with_memory_routing(
+        self, router: Any = "auto", *, enabled: bool = True, **settings: Any
+    ):
+        """Route the agent's own memory writes to the store each belongs in.
+
+        ``router`` is ``"auto"`` (a fine-tuned router if there is one, else
+        OpenAI Decisions with an OpenAI key, else the background model),
+        ``"openai_decisions"``, ``"llm"`` or ``"finetuned"``; settings are
+        those of :class:`MemoryRoutingConfig` (``model``, ``run_id``,
+        ``capture_turns``, ``min_confidence``). Returns the agent.
+        """
+        from .memory_routing import MemoryRoutingConfig
+
+        if router is False or not enabled:
+            config = MemoryRoutingConfig()
+        else:
+            base = MemoryRoutingConfig.from_value(
+                True if router in (None, True) else router
+            )
+            config = MemoryRoutingConfig.from_value(
+                {**base.to_dict(), **settings, "enabled": True}
+            )
+        self.memory_routing = config
+        self._register_memory_routing_tools()
+        return self
+
+    def with_reranker(self, reranker: Any):
+        """Rerank what the agent recalls: ``"voyage"``, ``"cohere"``,
+        ``"openai_decisions"`` (optionally ``"voyage:rerank-2.5-lite"``),
+        ``"finetuned:<run id>"``, ``"off"``, or None to follow the store.
+        Returns the agent."""
+        from ..reranking import RerankerConfig
+
+        self.reranker = RerankerConfig.from_value(reranker)
+        return self
+
+    def _register_memory_routing_tools(self) -> None:
+        """The ``remember`` tool, while memory routing is on."""
+        if not self.tool_manager or not self.memory_provider:
+            return
+        registered = "remember" in (self.tool_manager.list_tools() or [])
+        if not self.memory_routing.enabled:
+            if registered:
+                self.tool_manager.remove_tool("remember")
+            return
+        if registered:
+            return
+
+        def remember(text: str) -> Dict[str, Any]:
+            """Save something worth keeping beyond this conversation.
+
+            Use it for facts you found or worked out (from a tool, a document
+            or a calculation) that the user will want later. What the user
+            tells you is saved automatically; do not repeat it here. The
+            memory is filed where it belongs: the knowledge base, the facts
+            about a person or thing, or working notes.
+
+            Parameters:
+                text: the memory, as one self-contained statement.
+            """
+            return self.remember(
+                text,
+                memory_id=self._current_memory_id
+                or (self.memory_ids[0] if self.memory_ids else None),
+                user_id=self._current_user_id,
+                source="tool",
+            )
+
+        remember.__name__ = "remember"
+        self.tool_manager.add_tool(remember)
+
+    def _route_memory(
+        self, text: str, memory_id: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        from ..learning.consolidation import text_generator
+        from .memory_routing import route
+
+        model = self.background_model
+        label = "background"
+        try:
+            config = model.get_config() if model is not None else None
+            if isinstance(config, dict) and config.get("model"):
+                label = str(config["model"])
+        except Exception:
+            pass
+        return route(
+            text,
+            self.memory_routing,
+            provider=self.memory_provider,
+            agent_id=self.agent_id,
+            memory_id=memory_id,
+            generate=text_generator(model),
+            model_label=label,
+        )
+
+    def remember(
+        self,
+        text: str,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        source: str = "api",
+    ) -> Dict[str, Any]:
+        """Keep ``text``, filed in the store the memory router picks.
+
+        A durable fact or policy goes to the knowledge base, facts about the
+        user or a named person or thing to entity memory, working notes to
+        short-term memory; nothing is kept when the router judges it not
+        worth keeping. When the router is unsure or names a store the agent
+        does not file directly, the text goes to the knowledge base. Uses the
+        agent's router (``memory_routing``), or the automatic one when routing
+        is off. Returns a receipt: ``stored``, ``memory_type``, the ids
+        written and the router's answer with its ``reason``.
+        """
+        from .memory_routing import MemoryRoutingConfig
+
+        if self.memory_routing.enabled:
+            config = self.memory_routing
+        else:
+            config = MemoryRoutingConfig(enabled=True, capture_turns=False)
+        memory_id = (
+            memory_id
+            or self._current_memory_id
+            or (self.memory_ids[0] if self.memory_ids else None)
+        )
+        if memory_id is None:
+            memory_id = self._create_memory_id()
+        return self._file_routed(
+            text,
+            config=config,
+            memory_id=memory_id,
+            user_id=user_id,
+            thread_id=thread_id or self._current_thread_id,
+            entity_memory_id=self._entity_memory_id(memory_id),
+            sealed=self._active_retrieval_policy().is_sealed,
+            fallback="knowledge_base",
+            source=source,
+        )
+
+    def _create_memory_id(self) -> str:
+        memory_id = str(uuid.uuid4())
+        self.memory_ids = [*(self.memory_ids or []), memory_id]
+        return memory_id
+
+    def _file_routed(
+        self,
+        text: str,
+        *,
+        config: Any,
+        memory_id: str,
+        user_id: Optional[str],
+        thread_id: Optional[str],
+        entity_memory_id: Optional[str],
+        sealed: bool,
+        fallback: Optional[str],
+        source: str,
+    ) -> Dict[str, Any]:
+        """Route ``text`` and write it to the store it belongs in."""
+        from ..learning.consolidation import text_generator
+        from ..long_term.semantic.entity_memory import EntityMemory
+        from ..memory_history import memory_change_context
+        from .memory_routing import (
+            ENTITY_MEMORY,
+            KNOWLEDGE_BASE,
+            REMEMBERED_NAMESPACE,
+            SHORT_TERM_MEMORY,
+            clean_text,
+            extract_facts,
+            file_entity_facts,
+            place,
+        )
+
+        body = clean_text(text)
+        if not body:
+            return {"stored": False, "memory_type": None, "reason": "Nothing to keep."}
+        if self.memory_provider is None:
+            raise ValueError("Remembering needs a memory provider")
+        allowed = []
+        if self._entity_memory_enabled and entity_memory_id:
+            allowed.append(ENTITY_MEMORY)
+        if not sealed:
+            # A sealed conversation keeps its words out of shared stores.
+            allowed += [KNOWLEDGE_BASE, SHORT_TERM_MEMORY]
+        if fallback not in allowed:
+            fallback = None
+        try:
+            answer = self._route_memory(body, memory_id)
+        except Exception as exc:
+            logger.warning("Memory routing failed: %s", exc)
+            answer = None
+        placement = place(answer, config, allowed=tuple(allowed), fallback=fallback)
+        target = placement.get("memory_type")
+        receipt: Dict[str, Any] = {
+            "stored": False,
+            "memory_type": target,
+            "memory_id": memory_id,
+            **{key: value for key, value in placement.items() if key != "memory_type"},
+        }
+        if sealed and placement.get("routed_to") in {KNOWLEDGE_BASE, SHORT_TERM_MEMORY}:
+            receipt[
+                "reason"
+            ] = "This conversation is sealed, so nothing from it goes to shared memory."
+        if target is None:
+            return receipt
+        routing_meta = {
+            key: placement[key]
+            for key in ("routed_to", "confidence", "router", "run_id", "applied")
+            if key in placement
+        }
+        with memory_change_context(
+            actor=f"agent:{self.agent_id}",
+            source=f"memory_routing:{source}",
+            agent_id=self.agent_id,
+            label=f"Remembered ({target})",
+        ):
+            if target == ENTITY_MEMORY:
+                entities = EntityMemory(self.memory_provider)
+                generate = text_generator(self.background_model)
+                facts = []
+                if generate is not None:
+                    try:
+                        records = entities.list_entities(
+                            memory_id=entity_memory_id, user_id=user_id
+                        )
+                        facts = extract_facts(
+                            body,
+                            generate,
+                            records,
+                            source=(
+                                "what the user wrote"
+                                if source == "turn"
+                                else "a note to remember"
+                            ),
+                            thread_id=str(thread_id or ""),
+                        )
+                    except Exception as exc:
+                        logger.warning("Entity fact extraction failed: %s", exc)
+                if facts:
+                    receipt["facts"] = file_entity_facts(
+                        entities,
+                        facts,
+                        memory_id=entity_memory_id,
+                        user_id=user_id,
+                        routing=placement,
+                    )
+                    receipt.update(stored=True, memory_id=entity_memory_id)
+                    return receipt
+                if fallback is None:
+                    receipt["memory_type"] = None
+                    receipt["reason"] = (
+                        "Routed to entity memory, but no new fact rested on the "
+                        "words given; nothing was filed."
+                    )
+                    return receipt
+                target = fallback
+                receipt["memory_type"] = target
+                receipt["reason"] = (
+                    "Routed to entity memory, but no new fact rested on the words "
+                    f"given; kept in {target}."
+                )
+            metadata = {
+                "memory_id": memory_id,
+                "agent_id": self.agent_id,
+                "source": f"memory_routing:{source}",
+                "routing": routing_meta,
+            }
+            if thread_id:
+                metadata["thread_id"] = str(thread_id)
+            if target == KNOWLEDGE_BASE:
+                from ..long_term.semantic.knowledge_base import KnowledgeBase
+
+                knowledge_base_id = KnowledgeBase(
+                    self.memory_provider
+                ).ingest_knowledge(
+                    body,
+                    REMEMBERED_NAMESPACE,
+                    chunking_strategy="none",
+                    user_id=user_id,
+                    metadata=metadata,
+                    embeddings="optional",
+                )
+                receipt.update(stored=True, knowledge_base_id=knowledge_base_id)
+            elif target == SHORT_TERM_MEMORY:
+                from ..embeddings import get_embedding
+
+                document = {
+                    **metadata,
+                    "content": body,
+                    "text": body,
+                    "user_id": user_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                try:
+                    document["embedding"] = list(get_embedding(body))
+                except Exception:
+                    pass
+                record_id = self.memory_provider.store(
+                    document,
+                    memory_store_type=MemoryType.SHORT_TERM_MEMORY,
+                    memory_id=memory_id,
+                )
+                receipt.update(stored=True, record_id=str(record_id))
+        return receipt
+
+    def _note_turn_for_routing(
+        self,
+        query: str,
+        memory_id: Optional[str],
+        user_id: Optional[str],
+        thread_id: Optional[str],
+    ) -> None:
+        """Queue the user's message to be routed off the turn."""
+        config = self.memory_routing
+        if (
+            not config.enabled
+            or not config.capture_turns
+            or self.memory_provider is None
+            or not memory_id
+            or not str(query or "").strip()
+            or delegated_execution.get()
+        ):
+            return
+        key = (memory_id, user_id)
+        item = {
+            "text": str(query),
+            "memory_id": memory_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "entity_memory_id": self._entity_memory_id(memory_id),
+            "sealed": self._active_retrieval_policy().is_sealed,
+        }
+        upkeep = self._upkeep()
+        with upkeep.lock:
+            upkeep.routing.setdefault(key, []).append(item)
+            if key in upkeep.routing_draining:
+                return  # the running drain picks it up
+            upkeep.routing_draining.add(key)
+
+        def _drain() -> None:
+            while True:
+                with upkeep.lock:
+                    queue = upkeep.routing.get(key) or []
+                    if not queue:
+                        upkeep.routing.pop(key, None)
+                        upkeep.routing_draining.discard(key)
+                        return
+                    current = queue.pop(0)
+                try:
+                    receipt = self._file_routed(
+                        current["text"],
+                        config=self.memory_routing,
+                        memory_id=current["memory_id"],
+                        user_id=current["user_id"],
+                        thread_id=current["thread_id"],
+                        entity_memory_id=current["entity_memory_id"],
+                        sealed=current["sealed"],
+                        fallback=None,
+                        source="turn",
+                    )
+                    logger.info(
+                        "Memory routing of a turn in %s: %s",
+                        current["memory_id"],
+                        receipt.get("reason"),
+                    )
+                except Exception as exc:
+                    logger.warning("Memory routing of a turn failed: %s", exc)
+
+        # The draining flag keeps one drain per key; each drain has its own
+        # future, so one finishing never refuses the next.
+        with upkeep.lock:
+            for done in [
+                name
+                for name, future in upkeep.futures.items()
+                if name[0] == "routing" and future.done()
+            ]:
+                upkeep.futures.pop(done, None)
+        if not self._submit_upkeep(
+            ("routing",) + key + (uuid.uuid4().hex,), _drain, label="memory routing"
+        ):
+            with upkeep.lock:
+                upkeep.routing_draining.discard(key)
+
     def describe_memory(self) -> Dict[str, Any]:
         """What this agent remembers and how it recalls it.
 
@@ -12170,6 +12579,10 @@ class MemAgent:
                 if self.memory_consolidation.enabled
                 else None
             ),
+            "memory_routing": (
+                self.memory_routing.to_dict() if self.memory_routing.enabled else None
+            ),
+            "reranker": self.reranker.to_dict() if self.reranker else None,
         }
 
     def _background_executor(self) -> ThreadPoolExecutor:

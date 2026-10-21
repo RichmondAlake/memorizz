@@ -25,6 +25,9 @@ This page covers the stable, high-value Python surface. Import public types from
         - wait_for_memory_upkeep
         - describe_memory
         - with_memory_consolidation
+        - with_memory_routing
+        - with_reranker
+        - remember
         - plan_memory_consolidation
         - apply_memory_consolidation
         - restore_memory_consolidation
@@ -179,6 +182,8 @@ authenticated runtime reads never adopt them automatically.
         - with_retrieval_policy
         - with_background_model
         - with_memory_consolidation
+        - with_memory_routing
+        - with_reranker
         - with_context_policy
         - with_tool_result_policy
         - with_approval_store
@@ -292,6 +297,16 @@ adapter security matrix and complete SDK, CLI, UI, and MCP workflows.
       show_root_heading: true
 
 ::: memorizz.learning.consolidation.ConsolidationConfig
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.memagent.memory_routing.MemoryRoutingConfig
+    options:
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.reranking.RerankerConfig
     options:
       show_source: false
       show_root_heading: true

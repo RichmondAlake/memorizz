@@ -822,7 +822,206 @@ def _memory_upkeep_form_values(agent: Any) -> Dict[str, Any]:
         "memory_consolidation": consolidation.enabled,
         "consolidation_every_n_turns": consolidation.every_n_turns,
         "consolidation_auto_apply": consolidation.auto_apply,
+        **_memory_model_form_values(agent),
     }
+
+
+def _memory_model_form_values(agent: Any) -> Dict[str, Any]:
+    """The reranker and memory-routing selects, as the form writes them."""
+    from ...memagent.memory_routing import MemoryRoutingConfig
+    from ...reranking import RerankerConfig
+
+    try:
+        reranker = RerankerConfig.from_value(getattr(agent, "reranker", None))
+    except (TypeError, ValueError):
+        reranker = None
+    try:
+        routing = MemoryRoutingConfig.from_value(getattr(agent, "memory_routing", None))
+    except (TypeError, ValueError):
+        routing = MemoryRoutingConfig()
+    return {
+        "reranker": _reranker_form_value(reranker),
+        "memory_routing": _memory_routing_form_value(routing),
+        "memory_routing_capture": routing.capture_turns,
+    }
+
+
+def _reranker_form_value(reranker: Any) -> str:
+    if reranker is None:
+        return ""
+    if reranker.provider == "off":
+        return "off"
+    if reranker.provider == "finetuned":
+        return f"finetuned:{reranker.run_id}"
+    return f"{reranker.provider}:{reranker.model_name}"
+
+
+def _memory_routing_form_value(routing: Any) -> str:
+    if not routing.enabled:
+        return ""
+    if routing.router == "openai_decisions":
+        from ...memagent.memory_routing import DEFAULT_DECISIONS_MODEL
+
+        return f"openai_decisions:{routing.model or DEFAULT_DECISIONS_MODEL}"
+    if routing.router == "finetuned" and routing.run_id:
+        return f"finetuned:{routing.run_id}"
+    return routing.router
+
+
+def _reranker_value(value: Optional[str], existing: Any = None) -> Any:
+    """The reranker to save: None follows the store."""
+    from ...reranking import RerankerConfig
+
+    if value is None:  # an older form without the select keeps what it had
+        return existing
+    try:
+        config = RerankerConfig.from_value(_to_text(value).strip() or None)
+    except (TypeError, ValueError):
+        return existing
+    return config.to_dict() if config else None
+
+
+def _memory_routing_value(
+    value: Optional[str], capture: Optional[str], existing: Any = None
+) -> Any:
+    """The memory-routing setting to save: None is off."""
+    from ...memagent.memory_routing import MemoryRoutingConfig
+
+    if value is None:
+        return existing
+    try:
+        config = MemoryRoutingConfig.from_value(_to_text(value).strip() or None)
+    except (TypeError, ValueError):
+        return existing
+    if not config.enabled:
+        return None
+    kept = existing if isinstance(existing, dict) else {}
+    return MemoryRoutingConfig.from_value(
+        {
+            **config.to_dict(),
+            "min_confidence": kept.get("min_confidence", config.min_confidence),
+            "capture_turns": _parse_bool(capture),
+        }
+    ).to_dict()
+
+
+def _memory_model_choices(
+    agent_id: Optional[str], reranker: str = "", memory_routing: str = ""
+) -> Dict[str, Any]:
+    """Options for the reranker and memory-routing selects: hosted models
+    (marked when their key is missing), runs fine-tuned in this store, and
+    the agent's current value even when it is none of those."""
+    from ...memagent.memory_routing import DEFAULT_DECISIONS_MODEL
+    from ...reranking import PROVIDERS, available
+
+    keys = available()
+    runs: List[Dict[str, Any]] = []
+    store_reranker = None
+    own: Dict[str, Any] = {}
+    provider = _state.get("provider")
+    if provider is not None:
+        try:
+            from ...finetune import FineTuning
+            from ...finetune import agent_models as per_agent
+
+            service = FineTuning(provider)
+            runs = [run for run in service.runs() if run.get("status") == "succeeded"]
+            if agent_id:
+                own = {
+                    job: per_agent.choice(provider, agent_id, job)
+                    for job in per_agent.JOBS
+                }
+        except Exception:
+            runs = []
+    store_path = os.environ.get("MEMORIZZ_RERANKER_MODEL", "").strip()
+    if store_path:
+        store_reranker = Path(store_path).name or store_path
+
+    def run_label(run: Dict[str, Any]) -> str:
+        return f"{run.get('label') or run.get('run_id')} ({_to_text(run.get('run_id'))[:8]})"
+
+    def needs_key(name: str) -> str:
+        return "" if keys.get(name) else f" (needs {PROVIDERS[name]['env']})"
+
+    own_reranker = own.get("reranking") or {}
+    follow = (
+        f"Follow the store (fine-tuning page: {own_reranker.get('label') or own_reranker.get('run_id')})"
+        if own_reranker.get("mode") == "run"
+        else "Follow the store (fine-tuning page: off)"
+        if own_reranker.get("mode") == "off"
+        else f"Follow the store ({store_reranker})"
+        if store_reranker
+        else "Follow the store (none set)"
+    )
+    reranker_groups = [
+        {
+            "label": None,
+            "options": [
+                {"value": "", "label": follow},
+                {"value": "off", "label": "Off"},
+            ],
+        },
+        {
+            "label": "Hosted",
+            "options": [
+                {
+                    "value": f"{name}:{model}",
+                    "label": f"{spec['title']} · {model}{needs_key(name)}",
+                }
+                for name, spec in PROVIDERS.items()
+                for model in spec["models"]
+            ],
+        },
+    ]
+    tuned = [
+        {"value": f"finetuned:{run['run_id']}", "label": run_label(run)}
+        for run in runs
+        if run.get("job") == "reranking"
+    ]
+    if tuned:
+        reranker_groups.append({"label": "Fine-tuned in this store", "options": tuned})
+
+    routing_groups = [
+        {
+            "label": None,
+            "options": [
+                {"value": "", "label": "Off"},
+                {
+                    "value": "auto",
+                    "label": "Automatic (a fine-tuned router, else OpenAI Decisions, else the background model)",
+                },
+            ],
+        },
+        {
+            "label": "Routers",
+            "options": [
+                {
+                    "value": f"openai_decisions:{DEFAULT_DECISIONS_MODEL}",
+                    "label": f"OpenAI Decisions · {DEFAULT_DECISIONS_MODEL}{needs_key('openai_decisions')}",
+                },
+                {"value": "llm", "label": "The background model"},
+                {"value": "finetuned", "label": "The store's fine-tuned router"},
+            ],
+        },
+    ]
+    tuned = [
+        {"value": f"finetuned:{run['run_id']}", "label": run_label(run)}
+        for run in runs
+        if run.get("job") == "memory_routing"
+    ]
+    if tuned:
+        routing_groups.append({"label": "Fine-tuned in this store", "options": tuned})
+
+    for groups, current in (
+        (reranker_groups, reranker),
+        (routing_groups, memory_routing),
+    ):
+        values = {option["value"] for group in groups for option in group["options"]}
+        if current and current not in values:
+            groups.append(
+                {"label": "Current", "options": [{"value": current, "label": current}]}
+            )
+    return {"reranker": reranker_groups, "memory_routing": routing_groups}
 
 
 _BACKGROUND_PROVIDERS = (
@@ -999,7 +1198,7 @@ def _render_agent_form(
         context["active_agent_id"] = agent_id
     else:
         context["agent_templates"] = _template_cards()
-    context["builder_context"] = _builder_context(agent_id)
+    context["builder_context"] = _builder_context(agent_id, form_data)
     context.update(
         {
             "active_page": "agents",
@@ -1225,12 +1424,15 @@ async def agent_create_page(
     )
 
 
-def _builder_context(agent_id: Optional[str]) -> Dict[str, Any]:
+def _builder_context(
+    agent_id: Optional[str], form_data: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """What the form's overview and code view need: the store this UI is
     connected to (no secrets) and each mode's default memory types."""
     from ...enums import ApplicationMode
     from ..helpers import _default_memory_types_for_mode
 
+    form_data = form_data or {}
     info = _state.get("connection_info") or {}
     provider_type = _to_text(_state.get("provider_type")).strip().lower()
     store: Dict[str, Any] = {"type": provider_type}
@@ -1255,6 +1457,9 @@ def _builder_context(agent_id: Optional[str]) -> Dict[str, Any]:
     return {
         "agent_id": agent_id or "",
         "store": store,
+        "memory_models": _memory_model_choices(
+            agent_id, form_data.get("reranker", ""), form_data.get("memory_routing", "")
+        ),
         "mcp_servers": mcp_servers,
         "mode_memory_types": {
             mode.value: _default_memory_types_for_mode(mode.value)
@@ -1517,6 +1722,10 @@ async def agent_create_submit(
     template_key: str = Form(""),
     google_client_id: str = Form(""),
     google_client_secret: str = Form(""),
+    reranker: Optional[str] = Form(None),
+    memory_routing: Optional[str] = Form(None),
+    memory_routing_capture: Optional[str] = Form(None),
+    memory_models_form: str = Form(""),
 ):
     """Create a new agent using the configured memory provider.
 
@@ -1562,6 +1771,10 @@ async def agent_create_submit(
     memory_consolidation_value = _memory_consolidation_value(
         memory_consolidation, consolidation_every_n_turns, consolidation_auto_apply
     )
+    if memory_models_form:  # an empty select posts nothing: it means none
+        reranker, memory_routing = reranker or "", memory_routing or ""
+    reranker_value = _reranker_value(reranker)
+    memory_routing_value = _memory_routing_value(memory_routing, memory_routing_capture)
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
     )
@@ -1695,6 +1908,11 @@ async def agent_create_submit(
         "default_timezone": default_timezone,
         "agent_tools": [],
         "template_key": _to_text(template_key).strip(),
+        "reranker": _to_text(reranker).strip(),
+        "memory_routing": _to_text(memory_routing).strip(),
+        "memory_routing_capture": _parse_bool(memory_routing_capture)
+        if memory_routing is not None
+        else True,
         **delegation_form_ctx,
     }
 
@@ -1783,6 +2001,8 @@ async def agent_create_submit(
         retrieval_policy=retrieval_policy_value,
         background_llm_config=background_llm_config_value,
         memory_consolidation=memory_consolidation_value,
+        memory_routing=memory_routing_value,
+        reranker=reranker_value,
         automations_enabled=automations_enabled_value,
         default_timezone=default_timezone_value,
         whatsapp_enabled=whatsapp_enabled_value,
@@ -1900,6 +2120,10 @@ async def agent_edit_submit(
     delegation_max_workers: str = Form(""),
     delegation_consolidation: str = Form("model"),
     delegation_root_fallback: Optional[str] = Form(None),
+    reranker: Optional[str] = Form(None),
+    memory_routing: Optional[str] = Form(None),
+    memory_routing_capture: Optional[str] = Form(None),
+    memory_models_form: str = Form(""),
 ):
     """Update an existing agent."""
     if not _state["provider"]:
@@ -1957,6 +2181,14 @@ async def agent_edit_submit(
         consolidation_every_n_turns,
         consolidation_auto_apply,
         getattr(existing, "memory_consolidation", None),
+    )
+    if memory_models_form:  # an empty select posts nothing: it means none
+        reranker, memory_routing = reranker or "", memory_routing or ""
+    reranker_value = _reranker_value(reranker, getattr(existing, "reranker", None))
+    memory_routing_value = _memory_routing_value(
+        memory_routing,
+        memory_routing_capture,
+        getattr(existing, "memory_routing", None),
     )
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
@@ -2251,6 +2483,8 @@ async def agent_edit_submit(
             "retrieval_policy": retrieval_policy_value,
             "background_llm_config": background_llm_config_value,
             "memory_consolidation": memory_consolidation_value,
+            "memory_routing": memory_routing_value,
+            "reranker": reranker_value,
             "automations_enabled": automations_enabled_value,
             "default_timezone": default_timezone_value,
             "whatsapp_enabled": whatsapp_enabled_value,

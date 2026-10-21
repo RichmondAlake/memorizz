@@ -4444,6 +4444,14 @@ document.querySelectorAll('.pg-message-text[data-md-raw]').forEach(function(el) 
             + row('Background model', background
                 ? escapeHtml([background.provider, background.model].filter(Boolean).join('/'))
                 : 'The chat model' + (chat.model ? ' (' + escapeHtml([chat.provider, chat.model].filter(Boolean).join('/')) + ')' : ''))
+            + row('Memory routing', data.memory_routing
+                ? escapeHtml(({auto: 'Automatic', openai_decisions: 'OpenAI Decisions', llm: 'The background model', finetuned: 'Fine-tuned router'})[data.memory_routing.router] || data.memory_routing.router)
+                    + (data.memory_routing.model ? ' · ' + escapeHtml(data.memory_routing.model) : '')
+                    + (data.memory_routing.capture_turns ? ', after each turn' : ', on request')
+                : 'Off')
+            + row('Reranker', data.reranker
+                ? escapeHtml(data.reranker.provider === 'off' ? 'Off' : [data.reranker.provider.replace(/_/g, ' '), data.reranker.model || data.reranker.run_id].filter(Boolean).join(' · '))
+                : 'Follows the store')
             + row('Consolidation', schedule
                 ? 'Every ' + schedule.every_n_turns + ' turns' + (schedule.every_hours ? ' or ' + Math.round(schedule.every_hours) + ' h' : '') + ', ' + (schedule.auto_apply ? 'applied automatically' : 'waits for review')
                     + (data.pending_consolidations ? ' · <a href="' + lcp + '">' + data.pending_consolidations + ' waiting</a>' : '')

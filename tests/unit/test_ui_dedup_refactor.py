@@ -92,7 +92,9 @@ def rendered(monkeypatch):
     )
     monkeypatch.setattr(agents_crud, "_template_cards", lambda: ["template"])
     monkeypatch.setattr(
-        agents_crud, "_builder_context", lambda agent_id: {"agent_id": agent_id}
+        agents_crud,
+        "_builder_context",
+        lambda agent_id, form_data=None: {"agent_id": agent_id},
     )
     with patch.dict(
         state._state,

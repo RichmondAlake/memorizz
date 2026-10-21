@@ -814,6 +814,8 @@ def dedupe_and_select(
         if reranked is not None:
             for cand, value in zip(kept, reranked):
                 cand["_raw_relevance"] = value
+                if cand.get("_decision") is not None:
+                    cand["_decision"]["rerank_score"] = round(value, 4)
         score_candidates(kept, scoring=resolved_scoring, now=now)
 
         selected: List[Dict[str, Any]] = []
@@ -849,6 +851,8 @@ def dedupe_and_select(
         if reranked is not None:
             for cand, value in zip(kept, reranked):
                 cand["_raw_relevance"] = value
+                if cand.get("_decision") is not None:
+                    cand["_decision"]["rerank_score"] = round(value, 4)
         score_candidates(kept, scoring=resolved_scoring, now=now)
         ranked = sorted(kept, key=lambda c: (-c["_relevance"], c["id"]))
         selected = ranked[:max_items]

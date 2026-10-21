@@ -340,6 +340,11 @@ ft.swap_impact("embedding")                             # what a swap would touc
 An agent's recall uses its reranker; MCP writes and searches in a memory an
 agent owns use that agent's choices. Choices are read with a 30-second cache.
 
+A reranker or router set on the agent itself (`reranker=`, `memory_routing=`,
+or *Model → Memory models* on its form; see
+[Memory routing and reranking](memory-routing.md)) comes first; an agent that
+follows the store uses the choice made here.
+
 - **Routing.** With a router swapped in, a write that asks for
   `memory_type="auto"` is filed where the router says. The MCP tool writes
   the knowledge base and short-term memory; when the router says a memory is

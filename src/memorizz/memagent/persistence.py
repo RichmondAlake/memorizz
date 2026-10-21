@@ -180,6 +180,17 @@ def save_agent(agent):
                 if agent.memory_consolidation.enabled
                 else None
             ),
+            memory_routing=(
+                agent.memory_routing.to_dict()
+                if getattr(agent, "memory_routing", None) is not None
+                and agent.memory_routing.enabled
+                else None
+            ),
+            reranker=(
+                agent.reranker.to_dict()
+                if getattr(agent, "reranker", None) is not None
+                else None
+            ),
             delegation_config=normalize_delegation_config(
                 agent.delegation_config, for_persistence=True
             ),
@@ -701,6 +712,8 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
         "context_window_tokens": _saved_context_cap(saved_memagent, llm_config),
         "background_llm_config": _dict_or_none(field("background_llm_config")),
         "memory_consolidation": _dict_or_none(field("memory_consolidation")),
+        "memory_routing": _dict_or_none(field("memory_routing")),
+        "reranker": _dict_or_none(field("reranker")),
         "tools": field("tools"),
         "persona": field("persona"),
         "name": field("name"),
@@ -1019,6 +1032,15 @@ def _refresh_background(agent, background_llm_config, consolidation) -> None:
     agent.memory_consolidation = ConsolidationConfig.from_value(consolidation)
 
 
+def _refresh_memory_models(agent, memory_routing, reranker) -> None:
+    from ..reranking import RerankerConfig
+    from .memory_routing import MemoryRoutingConfig
+
+    agent.memory_routing = MemoryRoutingConfig.from_value(memory_routing)
+    agent.reranker = RerankerConfig.from_value(reranker)
+    agent._register_memory_routing_tools()
+
+
 def _refresh_persona(agent, persona) -> None:
     # set_persona registers the persona evolution tools (update_persona,
     # read_persona) when a persona is added here, not just via __init__.
@@ -1311,6 +1333,7 @@ def _keep_until_reload(agent, *fields: str) -> None:
 _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
     (("llm_config", "context_window_tokens"), _refresh_model),
     (("background_llm_config", "memory_consolidation"), _refresh_background),
+    (("memory_routing", "reranker"), _refresh_memory_models),
     (("tools",), _code_owned),
     (("persona",), _refresh_persona),
     (

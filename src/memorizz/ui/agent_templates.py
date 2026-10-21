@@ -45,6 +45,8 @@ TEXT_FIELDS = (
     "llm_model",
     "llm_config_json",
     "background_model",
+    "reranker",
+    "memory_routing",
     "persona_name",
     "persona_role",
     "persona_goals",
@@ -72,6 +74,7 @@ CHECKBOX_FIELDS = (
     "continual_learning_require_shadow",
     "continual_learning_shadow_evaluation",
     "automations_enabled",
+    "memory_routing_capture",
 )
 
 _SECRET_KEY = re.compile(

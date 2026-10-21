@@ -47,8 +47,10 @@ The Memorizz local UI gives you a browser-based workflow for connecting to your 
   customer support, writing, study coach) or from your own, and see the
   configuration and its Python SDK equivalent as you edit (see
   [Creating agents](#creating-agents)).
-- Set the agent's background model (summaries, compaction and consolidation)
-  under *Model*. Under *Memory → Conversation privacy and memory upkeep*
+- Set the agent's background model (summaries, compaction and consolidation),
+  its reranker (Voyage, Cohere, OpenAI Decisions or a fine-tuned one) and its
+  memory router under *Model → Memory models* (see
+  [Memory routing and reranking](../guides/memory-routing.md)). Under *Memory → Conversation privacy and memory upkeep*
   you can seal conversations, choose where entity facts live, and turn on
   background consolidation.
 - Consolidate an agent's memory from *Continual learning → Control plane*:

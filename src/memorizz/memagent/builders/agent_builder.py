@@ -66,6 +66,8 @@ class MemAgentBuilder:
         self._retrieval_policy = None
         self._background_model: Any = None
         self._memory_consolidation: Any = None
+        self._memory_routing: Any = None
+        self._reranker: Any = None
         self._approval_store = None
         self._delegation_config = None
         self._semantic_layer = None
@@ -520,6 +522,44 @@ class MemAgentBuilder:
         self._memory_consolidation = {**settings, "enabled": enabled}
         return self
 
+    def with_memory_routing(
+        self, router: Any = "auto", **settings: Any
+    ) -> "MemAgentBuilder":
+        """File what the agent remembers in the store each memory belongs in.
+
+        ``router`` is ``"auto"`` (a fine-tuned router if there is one, else
+        OpenAI Decisions with an OpenAI key, else the background model),
+        ``"openai_decisions"``, ``"llm"`` or ``"finetuned"``. Settings are
+        those of ``MemoryRoutingConfig``: ``model``, ``run_id``,
+        ``capture_turns`` (route each user message after its turn, default
+        True) and ``min_confidence`` (0.5). Pass ``router=False`` to turn it off.
+        """
+        if router is False:
+            self._memory_routing = None
+            return self
+        name = "auto" if router in (None, True) else router
+        self._memory_routing = (
+            {**name, **settings}
+            if isinstance(name, dict)
+            else {"router": name, **settings}
+        )
+        if isinstance(name, str) and ":" in name:
+            from ..memory_routing import MemoryRoutingConfig
+
+            self._memory_routing = {
+                **MemoryRoutingConfig.from_value(name).to_dict(),
+                **settings,
+            }
+        return self
+
+    def with_reranker(self, reranker: Any) -> "MemAgentBuilder":
+        """Rerank what the agent recalls: ``"voyage"``, ``"cohere"``,
+        ``"openai_decisions"`` (or ``"voyage:rerank-2.5-lite"``),
+        ``"finetuned:<run id>"`` or ``"off"``. Without it the agent follows
+        the store's reranker, if any."""
+        self._reranker = reranker
+        return self
+
     def with_embedding_provider(
         self, provider: str, config: Dict[str, Any] = None
     ) -> "MemAgentBuilder":
@@ -653,6 +693,8 @@ class MemAgentBuilder:
                     else None
                 ),
                 memory_consolidation=self._memory_consolidation,
+                memory_routing=self._memory_routing,
+                reranker=self._reranker,
             )
             agent.environment_reports = {
                 key: dict(value) if isinstance(value, dict) else value

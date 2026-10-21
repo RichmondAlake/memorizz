@@ -46,6 +46,10 @@ class MemAgentModel(BaseModel):
     completion_policy: Optional[Dict[str, Any]] = None
     retrieval_policy: Optional[Dict[str, Any]] = None
     memory_consolidation: Optional[Dict[str, Any]] = None
+    # Memory routing of the agent's own writes (MemoryRoutingConfig); None = off.
+    memory_routing: Optional[Dict[str, Any]] = None
+    # The agent's own reranker (RerankerConfig); None follows the store's.
+    reranker: Optional[Dict[str, Any]] = None
     delegation_config: Optional[Dict[str, Any]] = None
     skill_retrieval: bool = False
     skill_retrieval_config: Optional[Dict[str, Any]] = None

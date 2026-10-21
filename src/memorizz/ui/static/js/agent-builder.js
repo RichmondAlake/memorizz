@@ -75,6 +75,11 @@
             automations: checked('automations_enabled'),
             timezone: value('default_timezone'),
             whatsapp: checked('whatsapp_enabled'),
+            reranker: value('reranker'),
+            rerankerLabel: optionLabel('reranker'),
+            routing: value('memory_routing'),
+            routingLabel: optionLabel('memory_routing'),
+            routingCapture: checked('memory_routing_capture'),
             mcp: mcpConnections(),
         };
     }
@@ -122,6 +127,7 @@
             config.skills && 'Skills',
         ].filter(Boolean);
         const memory = [
+            config.routing && 'Routed',
             config.entity && 'Entity',
             config.workflow && 'Workflow',
             config.sealed ? 'Sealed' : (config.entityScope !== 'memory' ? 'Facts per conversation' : ''),
@@ -135,7 +141,7 @@
         ].filter(Boolean);
         return {
             identity: config.name || 'Unnamed',
-            model: config.model || 'No model',
+            model: [config.model || 'No model', config.reranker && config.reranker !== 'off' && 'reranked'].filter(Boolean).join(' · '),
             persona: config.persona.name || config.persona.role || 'None',
             memory: memory.join(' · ') || 'Conversation only',
             learning: [config.continual && 'Skills', config.controlPlane && 'Control plane'].filter(Boolean).join(' · ') || 'Off',
@@ -153,6 +159,8 @@
             ['group', 'Model'],
             ['Chat model', config.model ? (PROVIDERS[config.provider] || config.provider) + ' · ' + config.model : 'Not set'],
             ['Background', config.background ? (PROVIDERS[config.background.provider] || config.background.provider) + ' · ' + config.background.model : 'Same as chat model'],
+            ['Reranker', config.reranker === 'off' ? 'Off' : (config.rerankerLabel || 'Follows the store')],
+            ['Memory routing', config.routing ? config.routingLabel + (config.routingCapture ? ', after each turn' : ', on request') : 'Off'],
             ['group', 'Memory & data'],
             ['Memory types', types.map(words).join(', ')],
             ['Memory', config.memoryIds.length ? config.memoryIds.join(', ') : 'Its own, created on first run'],
@@ -253,6 +261,14 @@
             imports.add('RetrievalPolicy');
             arg('retrieval_policy', 'RetrievalPolicy(entity_scope=' + py(config.entityScope) + ')');
         }
+        if (config.routing) {
+            const [router, detail] = config.routing.split(/:(.*)/s);
+            const routing = {router: router};
+            if (detail) routing[router === 'finetuned' ? 'run_id' : 'model'] = detail;
+            if (!config.routingCapture) routing.capture_turns = false;
+            arg('memory_routing', Object.keys(routing).length === 1 ? py(router) : py(routing));
+        }
+        if (config.reranker) arg('reranker', py(config.reranker));
         if (config.consolidation) arg('memory_consolidation', py({every_n_turns: config.consolidation.turns, auto_apply: config.consolidation.autoApply}));
         if (config.continual) arg('continual_learning', 'True');
         if (config.controlPlane) arg('learning_control_plane', 'True');
