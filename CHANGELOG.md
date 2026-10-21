@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.17.6 — 2026-10-21
+
+### Added
+
+- Memory routing for an agent's own writes: `memory_routing=` on `MemAgent`,
+  `with_memory_routing()` on the agent and the builder, and saved with the
+  agent.
+  - **After each turn,** off the reply path, the user's message is routed:
+    facts about the user or a named person or thing go to entity memory
+    (extracted by the background model, each resting on the user's words),
+    policies and reference facts to the knowledge base, nothing for small
+    talk. A message that is a request and states a fact is filed for the
+    fact. The chat model is told facts are saved for it, so it stops calling
+    `entity_memory_upsert` for them.
+  - **`agent.remember(text)`** files one memory where it belongs and returns
+    a receipt, and the model gets a `remember` tool for facts it finds.
+  - **Routers:** `"openai_decisions"` (OpenAI's Decisions API with
+    `gpt-6-luna`; no training, about $0.00005 a memory), `"llm"` (the
+    background model), `"finetuned"`, or `"auto"` (a fine-tuned router, else
+    Decisions with an OpenAI key, else the background model).
+  - A sealed conversation never writes to shared stores; its facts stay in
+    its own entity scope.
+- An agent's own reranker: `reranker=` / `with_reranker()` with Voyage
+  (`rerank-2.5`, `rerank-2.5-lite`), Cohere (`rerank-v3.5`), OpenAI
+  Decisions (`gpt-6-luna`), a fine-tuned run, or `"off"`. Without one the
+  agent follows the store's reranker as before. Hosted rerankers were only
+  available in benchmarks.
+- MCP searches and `memory_type="auto"` writes in a memory an agent owns use
+  that agent's reranker and router.
+- The agent form's *Model* section has a *Memory models* group: the
+  background model, the reranker and memory routing, with the hosted and
+  fine-tuned options this store has. The Playground's *How this agent
+  remembers*, the form's summary and its Python code show both.
+- Each reranked candidate's score is in the memory selection trace
+  (`rerank_score`).
+
 ## 0.17.5 — 2026-10-21
 
 ### Added
