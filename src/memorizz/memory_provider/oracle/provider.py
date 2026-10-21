@@ -1279,6 +1279,8 @@ class OracleProvider(
         - MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER
         - MEMORIZZ_DEFAULT_EMBEDDING_MODEL
         - MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS
+        - MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL / _API_KEY (``openai`` only: an
+          OpenAI-compatible server)
         """
         provider = os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", "").strip().lower()
         if not provider:
@@ -1308,7 +1310,12 @@ class OracleProvider(
                 resolved["dimensions"] = dims
 
         if provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            from ...embeddings import openai_endpoint_settings
+
+            # An OpenAI-compatible server gets its own key, never OpenAI's.
+            endpoint = openai_endpoint_settings(os.environ)
+            resolved.update(endpoint)
+            api_key = "" if endpoint else os.getenv("OPENAI_API_KEY", "").strip()
             if api_key:
                 resolved["api_key"] = api_key
         elif provider == "azure":

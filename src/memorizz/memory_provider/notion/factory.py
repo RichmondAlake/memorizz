@@ -47,6 +47,10 @@ def create_notion_provider_from_env(
             defaults["model"] = model
         if dimensions:
             defaults["dimensions"] = int(dimensions)
+        if embedding_provider.strip().lower() == "openai":
+            from ...embeddings import openai_endpoint_settings
+
+            defaults.update(openai_endpoint_settings(os.environ))
         embedding_config = {**defaults, **(embedding_config or {})}
     semantic = None
     if backend == "filesystem":

@@ -18,7 +18,6 @@
 {% set page_info = memory_pages.get(memory_type, (memory_type_display|capitalize, None)) %}
 
 {% block title %}{{ page_info[0] }} - Memorizz{% endblock %}
-{% block body_attrs %} data-sidebar-scope="memory" data-sidebar-default="collapsed"{% endblock %}
 
 {% block content %}
 {#- Tabs switch memory types without the sidebar, which starts collapsed here. -#}

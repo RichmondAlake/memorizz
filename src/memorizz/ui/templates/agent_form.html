@@ -36,38 +36,40 @@
 {% endif %}
 
 {% if not is_edit and agent_templates %}
-<section class="panel agent-templates" id="agent-templates" aria-labelledby="agent-templates-title">
-    <div class="panel-header">
-        <h2 class="panel-title" id="agent-templates-title">Start from a template</h2>
-        <span class="panel-meta">Fills in the form below. Review it, then save the agent.</span>
-    </div>
+<details class="panel agent-templates" id="agent-templates" open>
+    <summary>
+        <span class="builder-section-heading">
+            <span class="builder-section-title">Start from a template</span>
+            <span class="builder-section-desc">Fills in the form below for you to review. Make your own with <strong>Save as template</strong> at the bottom.</span>
+        </span>
+        <span class="builder-section-status">{{ agent_templates|length }} templates</span>
+    </summary>
     <div class="agent-template-grid">
         {% for template in agent_templates %}
         <article class="agent-template-card" data-template-card="{{ template.key }}">
             <div class="agent-template-card-head">
-                <span class="agent-template-category">{{ template.category }}</span>
-                {% if not template.builtin %}<span class="agent-template-yours">Yours</span>{% endif %}
+                {% if template.builtin %}<span class="agent-template-category">{{ template.category }}</span>{% else %}<span class="agent-template-category agent-template-yours">Yours</span>{% endif %}
+                <span class="agent-template-actions">
+                    {% if not template.builtin %}
+                    <form method="post" action="/agents/templates/{{ template.key|urlencode }}/delete" data-delete-template="{{ template.title }}">
+                        <button type="submit" class="agent-template-delete" aria-label="Delete the {{ template.title }} template">Delete</button>
+                    </form>
+                    {% endif %}
+                    <button type="button" class="btn btn-sm agent-template-use" data-use-template="{{ template.key }}" aria-pressed="false" aria-describedby="agent-template-title-{{ loop.index }}">Use template</button>
+                </span>
             </div>
-            <h3 class="agent-template-title">{{ template.title }}</h3>
+            <h3 class="agent-template-title" id="agent-template-title-{{ loop.index }}">{{ template.title }}</h3>
             {% if template.summary %}<p class="agent-template-summary" title="{{ template.summary }}">{{ template.summary }}</p>{% endif %}
-            {% if template.chips %}
+            {% if template.chips or template.warning %}
             <ul class="agent-template-chips">
                 {% for chip in template.chips %}<li>{{ chip }}</li>{% endfor %}
+                {% if template.warning %}<li class="is-warning" title="{{ template.warning.detail }}">{{ template.warning.label }}</li>{% endif %}
             </ul>
             {% endif %}
-            <div class="agent-template-actions">
-                <button type="button" class="btn btn-sm btn-primary" data-use-template="{{ template.key }}" aria-pressed="false">Use template</button>
-                {% if not template.builtin %}
-                <form method="post" action="/agents/templates/{{ template.key|urlencode }}/delete" data-delete-template="{{ template.title }}">
-                    <button type="submit" class="btn btn-sm">Delete</button>
-                </form>
-                {% endif %}
-            </div>
         </article>
         {% endfor %}
     </div>
-    <p class="form-hint">Make your own: set up the form, then use <strong>Save as template</strong> at the bottom. An agent's edit page has it too.</p>
-</section>
+</details>
 <script>
     window.AGENT_FORM_TEMPLATES = {{ agent_templates|tojson }};
     window.AGENT_FORM_APPLY_TEMPLATE = {{ (apply_template|default(''))|tojson }};
@@ -169,11 +171,6 @@
                 </label>
                 <p class="form-hint">When on, Gemma 4 / DeepSeek-R1 / Qwen3-thinking emit a separate reasoning trace before the final answer (shown in the playground's trace timeline). Off by default for snappier replies — thinking can take 30–60 s before any visible content on CPU-only setups.</p>
             </div>
-            <div class="form-group">
-                <label for="llm_config_json">Advanced LLM config (JSON)</label>
-                <textarea id="llm_config_json" name="llm_config_json" rows="4">{{ llm_config_json }}</textarea>
-                <p class="form-hint">Optional provider-specific fields (e.g. azure_endpoint, api_version, ollama host, HuggingFace settings, temperature, base_url for local-openai).</p>
-            </div>
             {% set memory_models = builder_context.memory_models if builder_context is defined and builder_context and builder_context.memory_models else {} %}
             <details class="builder-subsection" id="memory-models" {% if background_model|default('') or reranker|default('') or memory_routing|default('') %}open{% endif %}>
                 <summary>Memory models<span class="builder-subsection-desc">The background model, the reranker and the memory router</span></summary>
@@ -226,12 +223,24 @@
                                 {% if group.label %}</optgroup>{% endif %}
                                 {% endfor %}
                             </select>
-                            <label class="checkbox-group memory-routing-capture">
+                            <!-- Shown only while a router is chosen; hidden, not
+                                 disabled, so a template keeps the setting. -->
+                            <label class="checkbox-group memory-routing-capture" id="memory-routing-capture" {% if not memory_routing|default('') %}hidden{% endif %}>
                                 <input type="checkbox" name="memory_routing_capture" value="on" {% if memory_routing_capture|default(true) %}checked{% endif %}>
                                 Route what the user says after each turn
                             </label>
                             <p class="form-hint">Files each memory in the store it belongs in: facts about people and things in entity memory, policies and reference facts in the knowledge base, nothing for small talk. Runs after the reply, so turns are not slower, and adds a <code>remember</code> tool for facts the agent finds itself.</p>
                         </div>
+                    </div>
+                </div>
+            </details>
+            <details class="builder-subsection" id="advanced-llm" {% if llm_config_json and llm_config_json|trim not in ('', '{}') %}open{% endif %}>
+                <summary>Advanced provider settings<span class="builder-subsection-desc">Provider-specific fields as JSON</span></summary>
+                <div class="section-body">
+                    <div class="form-group">
+                        <label for="llm_config_json">LLM config (JSON)</label>
+                        <textarea id="llm_config_json" name="llm_config_json" rows="4" spellcheck="false">{{ llm_config_json }}</textarea>
+                        <p class="form-hint">Optional: <code>azure_endpoint</code>, <code>api_version</code>, an Ollama host, HuggingFace settings, <code>temperature</code>, or <code>base_url</code> for a local server.</p>
                     </div>
                 </div>
             </details>
@@ -1463,6 +1472,6 @@ function syncSkillAuthorityReview() {
 <script>
     window.AGENT_BUILDER = {{ builder_context|default({}, true)|tojson }};
 </script>
-<script src="/static/js/agent-templates.js?v=3"></script>
-<script src="/static/js/agent-builder.js?v=5"></script>
+<script src="/static/js/agent-templates.js?v=4"></script>
+<script src="/static/js/agent-builder.js?v=6"></script>
 {% endblock %}

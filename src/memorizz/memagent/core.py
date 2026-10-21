@@ -6005,7 +6005,49 @@ class MemAgent:
         )
         self._current_parent_span_id = self._current_root_trace_id
 
+    # Sent once, with that request only, after a reply with no text and no
+    # tool call (small local models do this now and then). Never stored.
+    EMPTY_REPLY_NUDGE = "Your last reply was empty. Answer the user's last message now."
+
+    def _with_empty_reply_nudge(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        return [*messages, {"role": "developer", "content": self.EMPTY_REPLY_NUDGE}]
+
     def _generate_with_trace(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        tools: Optional[List[Dict[str, Any]]],
+        iteration: int,
+        stage: str,
+    ) -> Any:
+        """One model request; an empty reply is asked again once, nudged.
+
+        Each attempt is traced as its own model call."""
+        try:
+            return self._generate_once_with_trace(
+                messages, tools=tools, iteration=iteration, stage=stage
+            )
+        except ProviderStreamError as exc:
+            if exc.code != "empty_response":
+                raise
+        session = session_for(self)
+        if session is not None:
+            session.emit(
+                "status",
+                stage="provider_retry",
+                attempt=1,
+                error_code="ProviderStreamError",
+            )
+        return self._generate_once_with_trace(
+            self._with_empty_reply_nudge(messages),
+            tools=tools,
+            iteration=iteration,
+            stage=stage,
+        )
+
+    def _generate_once_with_trace(
         self,
         messages: List[Dict[str, Any]],
         *,
@@ -6052,28 +6094,33 @@ class MemAgent:
         Events pass through as they arrive, so streaming latency and progress
         are unchanged. A retry happens only before any public answer text and
         before a terminal event (so no tool runs twice); an empty reply is
-        re-sent once. A ``stream_reset``
+        asked again once, with ``make_stream(nudge=True)`` (see
+        ``EMPTY_REPLY_NUDGE``). A ``stream_reset``
         event tells the caller to discard what it buffered from the failed
         attempt. Each attempt is traced as its own model call.
         """
         from ..llms.streaming import ProviderStreamError, is_transient_stream_error
 
+        nudge = False
         for attempt in range(self.TRANSIENT_STREAM_RETRIES + 1):
             delivered = terminal = False
-            stream = make_stream()
+            stream = make_stream(nudge=True) if nudge else make_stream()
             try:
                 for event in stream:
                     kind = event.get("type")
-                    delivered = delivered or (public and kind == "content")
+                    # An empty delta shows the caller nothing.
+                    delivered = delivered or (
+                        public and kind == "content" and bool(event.get("content"))
+                    )
                     terminal = terminal or kind in {"done", "tool_calls"}
                     yield event
             except Exception as exc:
                 # Local models occasionally end a reply with no text and no
-                # tool call; one fresh request usually answers.
+                # tool call; asked again once, they usually answer.
                 empty_once = (
                     isinstance(exc, ProviderStreamError)
                     and exc.code == "empty_response"
-                    and attempt == 0
+                    and not nudge
                 )
                 if (
                     delivered
@@ -6090,7 +6137,10 @@ class MemAgent:
                         attempt=attempt + 1,
                         error_code=type(exc).__name__[:80],
                     )
-                time.sleep(min(4.0, 0.5 * 2**attempt))
+                if empty_once:
+                    nudge = True
+                else:
+                    time.sleep(min(4.0, 0.5 * 2**attempt))
                 yield {"type": "stream_reset"}
                 continue
             finally:
@@ -9301,8 +9351,12 @@ class MemAgent:
                 # answer tool-free: calls made in it are never run (below).
                 phase_tools = tools
                 provider = self._stream_with_transient_retry(
-                    lambda: self._generate_stream_with_trace(
-                        request_messages,
+                    lambda nudge=False: self._generate_stream_with_trace(
+                        (
+                            self._with_empty_reply_nudge(request_messages)
+                            if nudge
+                            else request_messages
+                        ),
                         tools=phase_tools,
                         iteration=iteration + 1,
                         stage="agent_stream",
@@ -9553,8 +9607,12 @@ class MemAgent:
                 iteration_had_tool_calls = False
                 request_messages = messages
                 for event in self._stream_with_transient_retry(
-                    lambda: self._generate_stream_with_trace(
-                        request_messages,
+                    lambda nudge=False: self._generate_stream_with_trace(
+                        (
+                            self._with_empty_reply_nudge(request_messages)
+                            if nudge
+                            else request_messages
+                        ),
                         tools=tools,
                         iteration=iteration + 1,
                         stage="agent_stream",

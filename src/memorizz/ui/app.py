@@ -195,6 +195,19 @@ SETTINGS_SECTIONS = [
                 "hint": "Optional output dimensions; must match the selected model and vector index/schema. Changing dimensions may require a new index and sync.",
             },
             {
+                "env": "MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL",
+                "label": "Embedding server URL",
+                "field_type": "text",
+                "placeholder": "http://localhost:11434/v1",
+                "hint": "With the OpenAI provider: an OpenAI-compatible server such as Ollama, vLLM or LM Studio. Any model name works there.",
+            },
+            {
+                "env": "MEMORIZZ_DEFAULT_EMBEDDING_API_KEY",
+                "label": "Embedding server API key",
+                "placeholder": "Only if the server needs one",
+                "hint": "Sent only to the embedding server URL above. The OpenAI key is never sent to it.",
+            },
+            {
                 "env": "MEMORIZZ_ORACLE_IN_DATABASE_EMBEDDING",
                 "label": "Oracle embedding mode",
                 "hint": "Use Oracle's ONNX model, or use the external embedding provider configured above.",

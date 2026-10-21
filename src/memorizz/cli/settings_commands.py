@@ -29,6 +29,7 @@ PUBLIC_SETTINGS = {
     "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER",
     "MEMORIZZ_DEFAULT_EMBEDDING_MODEL",
     "MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS",
+    "MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL",
     "MEMORIZZ_NOTION_DATA_SOURCE_ID",
     "MEMORIZZ_NOTION_SEMANTIC_BACKEND",
     "MEMORIZZ_NOTION_VECTOR_PATH",
@@ -149,6 +150,13 @@ def validate_setting(key: str, value: str) -> str:
         if not value.isascii() or not value.isdigit() or int(value) < 1:
             raise ValueError(
                 "Embedding dimensions must be a positive integer, or blank for the model default."
+            )
+    elif key == "MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL" and value:
+        value = value.strip()
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError(
+                "Use the server's http(s) URL, such as http://localhost:11434/v1, or blank for OpenAI."
             )
     return value
 

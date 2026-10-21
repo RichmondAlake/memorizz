@@ -191,10 +191,11 @@ files; keep them out of version control and review warnings about project
 
 ## Creating agents
 
-**Agents → Create agent** starts with a row of templates. **Use template**
+**Agents → Create agent** starts with the templates. **Use template**
 fills in the form below it: name, instruction, persona, and the settings that
-template needs. Nothing is saved until you select **Save agent**, so review
-and change anything first. **Start blank** clears it again.
+template needs; the templates fold away and a banner names the one in use.
+Nothing is saved until you select **Save agent**, so review and change
+anything first. **Start blank** clears it again.
 
 | Template | What it sets up |
 |---|---|

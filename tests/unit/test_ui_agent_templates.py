@@ -118,7 +118,8 @@ def test_the_create_page_offers_every_template_and_the_overview(ui):
     assert cards["productivity"]["needs_google_client"] is True
     # No key for a search provider: the template leaves web search off.
     assert cards["research"]["values"]["internet_provider"] == ""
-    assert any("Tavily or Firecrawl key" in chip for chip in cards["research"]["chips"])
+    assert "Tavily or Firecrawl key" in cards["research"]["warning"]["detail"]
+    assert cards["research"]["warning"]["label"] == "Needs a web search key"
     assert (
         "not a licensed financial adviser" in cards["finance"]["values"]["instruction"]
     )
@@ -205,7 +206,8 @@ def test_saving_the_form_as_a_template_keeps_settings_but_no_secrets(ui):
     }
     mine = cards["my-ops-helper"]
     assert mine["builtin"] is False and mine["title"] == "Ops helper"
-    assert "openai · gpt-6.1-sol" in mine["chips"]
+    assert "OpenAI · gpt-6.1-sol" in mine["chips"]
+    assert mine["summary"] == "Runbooks and incidents"
 
     # An agent made from it gets the template's connections too.
     created = client.post("/agents/new", data=_form(template_key="my-ops-helper"))
@@ -261,6 +263,29 @@ def test_saving_under_the_same_name_replaces_the_template(tmp_path, monkeypatch)
     with pytest.raises(ValueError):
         agent_templates.save_user_template("  ", {})
     assert agent_templates.delete_user_template("finance") is False
+
+
+def test_a_saved_template_without_a_description_still_has_one(tmp_path, monkeypatch):
+    from memorizz.ui.agent_templates import template_cards
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    agent_templates.save_user_template(
+        "Exec", {"instruction": "Keep my week on track. Be brief."}
+    )
+    agent_templates.save_user_template(
+        "Plain", {"instruction": "You are a helpful assistant."}
+    )
+    agent_templates.save_user_template(
+        "Analyst", {"persona_role": "market analyst", "instruction": "x"}
+    )
+    cards = {card["title"]: card for card in template_cards() if not card["builtin"]}
+    assert cards["Exec"]["summary"] == "Keep my week on track."
+    assert cards["Plain"]["summary"] == "Your saved agent settings."
+    assert cards["Analyst"]["summary"] == "Market analyst"
+    # Built-in summaries fit a card without being cut off.
+    assert all(
+        len(card["summary"]) <= 70 for card in template_cards() if card["builtin"]
+    )
 
 
 def test_values_from_form_reads_unchecked_boxes_as_off():

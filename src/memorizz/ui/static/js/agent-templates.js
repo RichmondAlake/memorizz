@@ -153,6 +153,9 @@
             button.textContent = selected ? 'In use' : 'Use template';
             button.closest('[data-template-card]')?.classList.toggle('is-selected', selected);
         });
+        // The gallery folds away while a template is in use; the banner says which.
+        const gallery = document.getElementById('agent-templates');
+        if (gallery) gallery.open = !template;
         if (!banner) return;
         banner.hidden = !template;
         if (!template) return;

@@ -119,6 +119,7 @@
     // --- Section status -----------------------------------------------------
 
     function statuses(config) {
+        const types = memoryTypes(config).types.length;
         const tools = [
             (config.mcp.saved.length || config.mcp.pending.length) && 'MCP',
             config.internet && 'Web search',
@@ -127,14 +128,13 @@
             config.skills && 'Skills',
         ].filter(Boolean);
         const memory = [
+            types + ' type' + (types === 1 ? '' : 's'),
             config.routing && 'Routed',
-            config.entity && 'Entity',
-            config.workflow && 'Workflow',
             config.sealed ? 'Sealed' : (config.entityScope !== 'memory' ? 'Facts per conversation' : ''),
-            config.consolidation && 'Consolidation',
+            config.consolidation && 'Consolidated',
         ].filter(Boolean);
         const runtime = [
-            config.maxSteps === 0 ? 'Unlimited steps' : config.maxSteps + ' steps',
+            config.maxSteps === 0 ? 'Unlimited tool rounds' : config.maxSteps + ' tool rounds',
             config.harnessMode && (config.harnessMode === 'runtime' ? 'Harness runtime' : 'Harness tools'),
             config.delegates.length && config.delegates.length + ' delegate' + (config.delegates.length === 1 ? '' : 's'),
             config.selfAware && 'Codebase',
@@ -143,11 +143,11 @@
             identity: config.name || 'Unnamed',
             model: [config.model || 'No model', config.reranker && config.reranker !== 'off' && 'reranked'].filter(Boolean).join(' · '),
             persona: config.persona.name || config.persona.role || 'None',
-            memory: memory.join(' · ') || 'Conversation only',
+            memory: memory.join(' · '),
             learning: [config.continual && 'Skills', config.controlPlane && 'Control plane'].filter(Boolean).join(' · ') || 'Off',
             tools: tools.join(' · ') || 'None',
             runtime: runtime.join(' · '),
-            channels: [config.automations ? 'Automations' : '', config.whatsapp ? 'WhatsApp' : ''].filter(Boolean).join(' · ') || 'Off',
+            channels: [config.automations && 'Automations on', config.whatsapp && 'WhatsApp'].filter(Boolean).join(' · ') || 'Off',
         };
     }
 
@@ -399,6 +399,9 @@
                     el.title = status[key];
                 });
             });
+            // "After each turn" only means something with a router chosen.
+            const capture = document.getElementById('memory-routing-capture');
+            if (capture) capture.hidden = !config.routing;
             renderSummary(config);
             renderCode(config);
         });

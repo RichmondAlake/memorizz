@@ -666,33 +666,82 @@
             </details>
             <p class="pg-panel-intro">What this agent has stored for the current conversation.</p>
                     <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Toolbox</summary>
-                        <div id="context-toolbox-container">
-                        {% if toolbox_memory %}
-                        <div class="context-toolbox-list">
-                            {% for item in toolbox_memory %}
-                            <div class="context-toolbox-item">
-                                <div class="context-toolbox-header">
-                                    <span class="context-toolbox-name">{{ item.name }}</span>
-                                    <span class="context-toolbox-type">{{ item.tool_type }}</span>
+                        <summary class="context-block-title">Entities</summary>
+                        <div id="context-entity-container">
+                        {% if entity_memory %}
+                        <div class="context-entity-list">
+                            {% for item in entity_memory %}
+                            <div class="context-entity-item">
+                                <div class="context-entity-header">
+                                    <span class="context-entity-name">{{ item.name }}</span>
+                                    {% if item.entity_type %}
+                                    <span class="context-entity-type">{{ item.entity_type }}</span>
+                                    {% endif %}
                                 </div>
                                 {% if item.timestamp %}
-                                <div class="context-toolbox-time">{{ item.timestamp }}</div>
+                                <div class="context-entity-time">{{ item.timestamp }}</div>
                                 {% endif %}
-                                {% if item.description %}
-                                <div class="context-toolbox-description">{{ item.description }}</div>
-                                {% endif %}
-                                {% if item.signature %}
-                                <code class="context-toolbox-signature">{{ item.signature }}</code>
-                                {% endif %}
-                                {% if item.value_preview %}
-                                <pre class="context-toolbox-value">{{ item.value_preview }}</pre>
+                                {% if item.attributes_preview %}
+                                <div class="context-entity-attributes">{{ item.attributes_preview }}</div>
                                 {% endif %}
                             </div>
                             {% endfor %}
                         </div>
                         {% else %}
-                        <div class="context-log-empty">No toolbox memory found for this thread.</div>
+                        <div class="context-log-empty">No entity memory found for this thread.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Knowledge base</summary>
+                        <div id="context-knowledge-base-container">
+                        {% if knowledge_base_memory %}
+                        <div class="context-summary-list">
+                            {% for item in knowledge_base_memory %}
+                            <div class="context-summary-item">
+                                <div class="context-summary-header">
+                                    <span class="context-summary-type">{{ item.namespace or 'knowledge' }}</span>
+                                    {% if item.timestamp %}
+                                    <span class="context-summary-time">{{ item.timestamp }}</span>
+                                    {% endif %}
+                                </div>
+                                {% if item.content_preview %}
+                                <div class="context-summary-content">{{ item.content_preview }}</div>
+                                {% endif %}
+                                {% if item.content_length %}
+                                <div class="context-toolbox-time">{{ item.content_length }} chars · id {{ item.knowledge_base_id[:8] }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No knowledge base entries attached to this agent.</div>
+                        {% endif %}
+                        </div>
+                    </details>
+
+                    <details class="context-block context-block-collapsible" open>
+                        <summary class="context-block-title">Summaries</summary>
+                        <div id="context-summary-container">
+                        {% if summary_memory %}
+                        <div class="context-summary-list">
+                            {% for item in summary_memory %}
+                            <div class="context-summary-item">
+                                <div class="context-summary-header">
+                                    <span class="context-summary-type">{{ item.summary_type }}</span>
+                                    {% if item.timestamp %}
+                                    <span class="context-summary-time">{{ item.timestamp }}</span>
+                                    {% endif %}
+                                </div>
+                                {% if item.content %}
+                                <div class="context-summary-content">{{ item.content }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="context-log-empty">No summary memory found for this thread.</div>
                         {% endif %}
                         </div>
                     </details>
@@ -768,83 +817,34 @@
                         </div>
                     </details>
 
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Entities</summary>
-                        <div id="context-entity-container">
-                        {% if entity_memory %}
-                        <div class="context-entity-list">
-                            {% for item in entity_memory %}
-                            <div class="context-entity-item">
-                                <div class="context-entity-header">
-                                    <span class="context-entity-name">{{ item.name }}</span>
-                                    {% if item.entity_type %}
-                                    <span class="context-entity-type">{{ item.entity_type }}</span>
-                                    {% endif %}
+                    <details class="context-block context-block-collapsible">
+                        <summary class="context-block-title">Toolbox <span class="context-block-hint">tools the agent can call</span></summary>
+                        <div id="context-toolbox-container">
+                        {% if toolbox_memory %}
+                        <div class="context-toolbox-list">
+                            {% for item in toolbox_memory %}
+                            <div class="context-toolbox-item">
+                                <div class="context-toolbox-header">
+                                    <span class="context-toolbox-name">{{ item.name }}</span>
+                                    <span class="context-toolbox-type">{{ item.tool_type }}</span>
                                 </div>
                                 {% if item.timestamp %}
-                                <div class="context-entity-time">{{ item.timestamp }}</div>
+                                <div class="context-toolbox-time">{{ item.timestamp }}</div>
                                 {% endif %}
-                                {% if item.attributes_preview %}
-                                <div class="context-entity-attributes">{{ item.attributes_preview }}</div>
+                                {% if item.description %}
+                                <div class="context-toolbox-description">{{ item.description }}</div>
                                 {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No entity memory found for this thread.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Summaries</summary>
-                        <div id="context-summary-container">
-                        {% if summary_memory %}
-                        <div class="context-summary-list">
-                            {% for item in summary_memory %}
-                            <div class="context-summary-item">
-                                <div class="context-summary-header">
-                                    <span class="context-summary-type">{{ item.summary_type }}</span>
-                                    {% if item.timestamp %}
-                                    <span class="context-summary-time">{{ item.timestamp }}</span>
-                                    {% endif %}
-                                </div>
-                                {% if item.content %}
-                                <div class="context-summary-content">{{ item.content }}</div>
+                                {% if item.signature %}
+                                <code class="context-toolbox-signature">{{ item.signature }}</code>
+                                {% endif %}
+                                {% if item.value_preview %}
+                                <details class="context-toolbox-schema"><summary>Parameters</summary><pre class="context-toolbox-value">{{ item.value_preview }}</pre></details>
                                 {% endif %}
                             </div>
                             {% endfor %}
                         </div>
                         {% else %}
-                        <div class="context-log-empty">No summary memory found for this thread.</div>
-                        {% endif %}
-                        </div>
-                    </details>
-
-                    <details class="context-block context-block-collapsible" open>
-                        <summary class="context-block-title">Knowledge base</summary>
-                        <div id="context-knowledge-base-container">
-                        {% if knowledge_base_memory %}
-                        <div class="context-summary-list">
-                            {% for item in knowledge_base_memory %}
-                            <div class="context-summary-item">
-                                <div class="context-summary-header">
-                                    <span class="context-summary-type">{{ item.namespace or 'knowledge' }}</span>
-                                    {% if item.timestamp %}
-                                    <span class="context-summary-time">{{ item.timestamp }}</span>
-                                    {% endif %}
-                                </div>
-                                {% if item.content_preview %}
-                                <div class="context-summary-content">{{ item.content_preview }}</div>
-                                {% endif %}
-                                {% if item.content_length %}
-                                <div class="context-toolbox-time">{{ item.content_length }} chars · id {{ item.knowledge_base_id[:8] }}</div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <div class="context-log-empty">No knowledge base entries attached to this agent.</div>
+                        <div class="context-log-empty">No toolbox memory found for this thread.</div>
                         {% endif %}
                         </div>
                     </details>
@@ -2192,6 +2192,28 @@ function renderContextConversation(messages) {
     container.innerHTML = `<div class="context-log">${rows}</div>`;
 }
 
+// Readable times in the Memory tab; the stored value stays in the title.
+(function () {
+    const panel = document.getElementById('pg-panel-memory');
+    if (!panel || typeof Intl === 'undefined') return;
+    const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+    const EPOCH = /^\d{10}(\.\d+)?$/;  // Unix seconds, as summaries keep them
+    const format = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'});
+    function tidy() {
+        panel.querySelectorAll('.context-entity-time, .context-toolbox-time, .context-workflow-time, .context-summary-time').forEach(function (el) {
+            const raw = el.textContent.trim();
+            if (!ISO.test(raw) && !EPOCH.test(raw)) return;
+            const date = EPOCH.test(raw) ? new Date(parseFloat(raw) * 1000) : new Date(raw);
+            if (Number.isNaN(date.getTime())) return;
+            el.title = raw;
+            el.textContent = format.format(date);
+        });
+    }
+    tidy();
+    // The panels re-render as the conversation changes.
+    new MutationObserver(tidy).observe(panel, {childList: true, subtree: true});
+})();
+
 function renderContextToolbox(entries) {
     const container = document.getElementById('context-toolbox-container');
     if (!container) return;
@@ -2217,7 +2239,7 @@ function renderContextToolbox(entries) {
                 ${timestamp ? `<div class="context-toolbox-time">${escapeHtml(timestamp)}</div>` : ''}
                 ${description ? `<div class="context-toolbox-description">${escapeHtml(description)}</div>` : ''}
                 ${signature ? `<code class="context-toolbox-signature">${escapeHtml(signature)}</code>` : ''}
-                ${valuePreview ? `<pre class="context-toolbox-value">${escapeHtml(valuePreview)}</pre>` : ''}
+                ${valuePreview ? `<details class="context-toolbox-schema"><summary>Parameters</summary><pre class="context-toolbox-value">${escapeHtml(valuePreview)}</pre></details>` : ''}
             </div>
         `;
     }).join('');

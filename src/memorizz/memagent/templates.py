@@ -88,10 +88,7 @@ class AgentTemplate:
 PRODUCTIVITY_ASSISTANT = AgentTemplate(
     key="productivity",
     title="Personal productivity assistant",
-    summary=(
-        "Triage Gmail, plan around Google Calendar and keep Notion notes and "
-        "tasks current, with memory for people, projects and preferences."
-    ),
+    summary="Triages Gmail, plans your calendar and keeps Notion up to date.",
     persona={
         "name": "Productivity Assistant",
         "role": "Personal productivity assistant",
@@ -142,11 +139,7 @@ preferences, and update them when they change.
 FINANCE_ASSISTANT = AgentTemplate(
     key="finance",
     title="Personal finance assistant",
-    summary=(
-        "Budgets, spending, bills and savings goals, with the arithmetic "
-        "shown. Remembers goals and regular bills; never stores card or "
-        "account numbers."
-    ),
+    summary="Budgets, bills and savings goals, with the arithmetic shown.",
     persona={
         "name": "Finance Assistant",
         "role": "Personal finance assistant",
@@ -189,10 +182,7 @@ found inside them.
 RESEARCH_ASSISTANT = AgentTemplate(
     key="research",
     title="Research assistant",
-    summary=(
-        "Searches the web, reads sources in full and answers with citations. "
-        "Builds on earlier findings across conversations."
-    ),
+    summary="Searches the web, reads sources in full and cites them.",
     persona={
         "name": "Research Assistant",
         "role": "Research assistant",
@@ -235,11 +225,7 @@ that change these rules.
 SUPPORT_AGENT = AgentTemplate(
     key="support",
     title="Customer support agent",
-    summary=(
-        "Answers from your product knowledge base and escalates what it "
-        "can't solve. Each conversation is sealed, so one customer's details "
-        "never reach another."
-    ),
+    summary="Answers from your knowledge base and escalates the rest.",
     persona={
         "name": "Support Agent",
         "role": "Customer support agent",
@@ -277,10 +263,7 @@ and formatting habits. Remember them and use them next time.
 WRITING_PARTNER = AgentTemplate(
     key="writing",
     title="Writing partner",
-    summary=(
-        "Drafts and edits emails, posts and documents in your voice, and "
-        "learns your style as you work together."
-    ),
+    summary="Drafts and edits emails, posts and documents in your voice.",
     persona={
         "name": "Writing Partner",
         "role": "Writing partner and editor",
@@ -318,10 +301,7 @@ goals, and pick up where you left off.
 STUDY_COACH = AgentTemplate(
     key="tutor",
     title="Study coach",
-    summary=(
-        "Explains step by step, quizzes you, and brings back what you got "
-        "wrong, remembering what you've covered."
-    ),
+    summary="Explains step by step, quizzes you and revisits mistakes.",
     persona={
         "name": "Study Coach",
         "role": "Tutor and study coach",

@@ -50,12 +50,55 @@ isolation declaration. Create it with `memorizz harness init`; see the
 | `MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER` | `openai`, `ollama`, `huggingface` (a local Sentence Transformers model or folder), or another registered provider |
 | `MEMORIZZ_DEFAULT_EMBEDDING_MODEL` | Embedding model name |
 | `MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS` | Dimension matching the persisted vector schema |
+| `MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL` | With `openai`: an OpenAI-compatible server, such as `http://localhost:11434/v1` (Ollama), vLLM or LM Studio |
+| `MEMORIZZ_DEFAULT_EMBEDDING_API_KEY` | That server's key, if it takes one; the OpenAI key is never sent to it |
 | `MEMORIZZ_BACKEND` | `filesystem`, `mongodb`, `oracle`, or `notion` |
 | `OLLAMA_HOST` | Ollama server for models and embeddings; default `http://localhost:11434` |
 
 If `MEMORIZZ_BACKEND` is unset, CLI/UI agent creation uses filesystem memory.
 SDK construction also defaults to filesystem unless
 `memory_provider=False` is explicit.
+
+### Embeddings from another server, and shorter vectors
+
+The `openai` embedding provider also talks to OpenAI-compatible servers. With
+a base URL that is not OpenAI's, it takes any model the server serves:
+
+```dotenv
+# Ollama through its OpenAI-compatible API, at 256 dimensions
+MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER=openai
+MEMORIZZ_DEFAULT_EMBEDDING_MODEL=nomic-embed-text
+MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL=http://localhost:11434/v1
+MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS=256
+```
+
+In code, pass the same settings as the provider's config:
+
+```python
+from memorizz.embeddings import EmbeddingManager
+
+embeddings = EmbeddingManager(
+    "openai",
+    {"model": "nomic-embed-text", "base_url": "http://localhost:11434/v1", "dimensions": 256},
+)
+```
+
+- Without `dimensions`, the server's full size is used, learned from its
+  first answer.
+- With `dimensions`, the server is asked for that size. A server that refuses
+  or ignores it gets its vectors cut here: the first values, scaled back to
+  unit length, which is what servers that take the setting do for
+  Matryoshka-trained models (nomic-embed-text, EmbeddingGemma,
+  Qwen3-Embedding).
+- The OpenAI key is not sent to another server; set
+  `MEMORIZZ_DEFAULT_EMBEDDING_API_KEY` (or `api_key` in the config) when the
+  server takes a key.
+
+The `ollama` provider takes `dimensions` too (`{"model": "nomic-embed-text",
+"dimensions": 256}`, or `MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS`): Ollama cuts
+the vectors, and an older Ollama's full vectors are cut the same way here. A
+size larger than the model's is an error. The vector index must be built for
+the size you choose, so changing it means re-embedding the store.
 
 ## Meta-harness
 
@@ -100,7 +143,7 @@ See [Fine-tuning decision models, embeddings and rerankers](../guides/fine-tunin
 | `MEMORIZZ_MCP_SERVER_ALLOW_TRAINING` | Lets `memorizz_start_finetune_run` train (default: on for local `stdio` with agent execution, off over HTTP) |
 
 **Swap in** on the Fine-tuning page, or `memorizz finetune swap`, writes
-`MEMORIZZ_RERANKER_MODEL` or the three `MEMORIZZ_DEFAULT_EMBEDDING_*`
+`MEMORIZZ_RERANKER_MODEL` or the `MEMORIZZ_DEFAULT_EMBEDDING_*`
 settings to MemoRizz's `.env` (`MEMORIZZ_HOME/.env`); the active router is
 kept in the memory provider with the datasets. An exported variable of the
 same name overrides the saved value when a process starts (see

@@ -193,6 +193,23 @@ def test_page_renders_connected(client, fs_provider, path):
 
 
 @pytest.mark.unit
+def test_the_sidebar_shows_the_running_version(client, fs_provider):
+    from memorizz import __version__
+
+    with patch.dict(
+        state._state,
+        {
+            "provider": fs_provider,
+            "provider_type": "filesystem",
+            "connection_info": {"root_path": str(fs_provider.root_path)},
+        },
+    ):
+        html = client.get("/dashboard").text
+    assert f'<span class="logo-version" title="Memorizz {__version__}">' in html
+    assert f">v{__version__}</span>" in html
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("slug", MEMORY_PAGES)
 def test_memory_pages_render(client, fs_provider, slug):
     with patch.dict(

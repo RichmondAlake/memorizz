@@ -19,6 +19,8 @@ from typing import Any, Dict, Iterator, Optional
 
 from fastapi.templating import Jinja2Templates
 
+from .. import __version__
+
 # Paths
 UI_DIR = Path(__file__).parent
 TEMPLATES_DIR = UI_DIR / "templates"
@@ -129,6 +131,9 @@ class CompatibleJinja2Templates(Jinja2Templates):
 
 # Shared Jinja2 template engine for all HTML routes.
 templates = CompatibleJinja2Templates(directory=str(TEMPLATES_DIR))
+
+# The running version, shown under the name in the sidebar.
+templates.env.globals["memorizz_version"] = __version__
 
 
 __all__ = [

@@ -262,8 +262,35 @@ class EmbeddingManager:
             "provider": self.provider_type.value,
             "model": self.get_default_model(),
             "dimensions": self.get_dimensions(),
-            "config": self.config,
+            # Logged when a store starts; keys stay out of it.
+            "config": {
+                key: value
+                for key, value in self.config.items()
+                if key not in _SECRET_CONFIG_KEYS
+            },
         }
+
+
+_SECRET_CONFIG_KEYS = frozenset({"api_key", "apiKey", "token", "password"})
+
+
+def shorten_embedding(vector: List[float], size: int) -> List[float]:
+    """The first ``size`` values of ``vector``, scaled back to unit length.
+
+    Matryoshka-trained models (OpenAI's text-embedding-3, nomic-embed-text,
+    EmbeddingGemma, Qwen3-Embedding) keep most of their quality when cut
+    this way; it is what their servers do when asked for fewer dimensions.
+    """
+    if len(vector) < size:
+        raise ValueError(
+            f"The model returned {len(vector)} dimensions, fewer than the "
+            f"{size} configured; set dimensions to at most {len(vector)}."
+        )
+    if len(vector) == size:
+        return list(vector)
+    head = [float(value) for value in vector[:size]]
+    norm = sum(value * value for value in head) ** 0.5
+    return [value / norm for value in head] if norm else head
 
 
 def embed_as_query(embed: Callable[..., List[float]], text: str) -> List[float]:
@@ -358,7 +385,8 @@ def get_embedding_manager() -> EmbeddingManager:
 
 def embedding_settings_from_env() -> tuple:
     """``(provider, config)`` from the MEMORIZZ_DEFAULT_EMBEDDING_* settings
-    (``("", {})`` when no provider is set)."""
+    (``("", {})`` when no provider is set). ``openai`` with
+    MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL talks to an OpenAI-compatible server."""
     import os
 
     return embedding_settings_from(os.environ)
@@ -386,7 +414,23 @@ def embedding_settings_from(values: Dict[str, str]) -> tuple:
             # Matryoshka-trained models (EmbeddingGemma, Qwen3-Embedding)
             # keep their quality when cut to a smaller size.
             config["truncate_dim"] = int(dimensions)
+    if name == "openai":
+        config.update(openai_endpoint_settings(values))
     return name, config
+
+
+def openai_endpoint_settings(values: Dict[str, str]) -> Dict[str, str]:
+    """``base_url`` and ``api_key`` for an OpenAI-compatible embedding server
+    (Ollama's ``/v1``, vLLM, LM Studio) from MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL
+    and MEMORIZZ_DEFAULT_EMBEDDING_API_KEY; empty without a base URL."""
+    base_url = str(values.get("MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL", "") or "").strip()
+    if not base_url:
+        return {}
+    settings = {"base_url": base_url}
+    api_key = str(values.get("MEMORIZZ_DEFAULT_EMBEDDING_API_KEY", "") or "").strip()
+    if api_key:
+        settings["api_key"] = api_key
+    return settings
 
 
 def _default_embedding_manager() -> EmbeddingManager:

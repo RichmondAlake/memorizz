@@ -83,6 +83,18 @@ _SECRET_KEY = re.compile(
 
 _INTERNET_TITLES = {"tavily": "Tavily", "firecrawl": "Firecrawl"}
 
+_PROVIDER_TITLES = {
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "azure": "Azure OpenAI",
+    "ollama": "Ollama",
+    "huggingface": "HuggingFace",
+    "mlx": "MLX",
+    "local-openai": "Local OpenAI-compatible",
+}
+
+_DEFAULT_INSTRUCTION = "you are a helpful assistant."
+
 
 def _without_secrets(value: Any) -> Any:
     if isinstance(value, dict):
@@ -151,11 +163,27 @@ def _available_internet_provider(preferences: List[str]) -> Optional[str]:
     return None
 
 
+def _describe(template: AgentTemplate) -> str:
+    """A line for a saved template without a description: its persona's
+    role, else the first sentence of its instruction."""
+    role = " ".join(str(template.persona.get("role") or "").split())
+    if role:
+        return role[:1].upper() + role[1:]
+    instruction = " ".join(str(template.instruction or "").split())
+    if not instruction or instruction.lower() == _DEFAULT_INSTRUCTION:
+        return "Your saved agent settings."
+    sentence = re.split(r"(?<=[.!?])\s", instruction, maxsplit=1)[0]
+    if len(sentence) <= 120:
+        return sentence
+    return sentence[:120].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
 def _card(template: AgentTemplate) -> Dict[str, Any]:
     from ..mcp import catalog
 
     values = template.form_values()
     chips: List[str] = []
+    warning: Optional[Dict[str, str]] = None
     connections = []
     needs_google_client = False
     for key in template.mcp_presets:
@@ -167,11 +195,13 @@ def _card(template: AgentTemplate) -> Dict[str, Any]:
     if isinstance(internet, (list, tuple)):
         chosen = _available_internet_provider([str(name) for name in internet])
         values["internet_provider"] = chosen or ""
-        chips.append(
-            f"Web search ({_INTERNET_TITLES.get(chosen, chosen)})"
-            if chosen
-            else "Web search needs a Tavily or Firecrawl key in Settings"
-        )
+        if chosen:
+            chips.append(f"Web search ({_INTERNET_TITLES.get(chosen, chosen)})")
+        else:
+            warning = {
+                "label": "Needs a web search key",
+                "detail": "Web search needs a Tavily or Firecrawl key in Settings",
+            }
     elif internet:
         chips.append(f"Web search ({_INTERNET_TITLES.get(internet, internet)})")
     if values.get("sealed_conversations"):
@@ -179,20 +209,25 @@ def _card(template: AgentTemplate) -> Dict[str, Any]:
     if values.get("memory_consolidation"):
         chips.append("Memory consolidation")
     if not template.builtin and values.get("llm_model"):
+        provider = str(values.get("llm_provider") or "")
         chips.append(
             " · ".join(
                 part
-                for part in (values.get("llm_provider"), values.get("llm_model"))
+                for part in (
+                    _PROVIDER_TITLES.get(provider, provider),
+                    values.get("llm_model"),
+                )
                 if part
             )
         )
     return {
         "key": template.key,
         "title": template.title,
-        "summary": template.summary,
+        "summary": template.summary or _describe(template),
         "category": template.category,
         "builtin": template.builtin,
         "chips": chips,
+        "warning": warning,
         "connections": connections,
         "needs_google_client": needs_google_client,
         "persona_name": template.persona.get("name", ""),

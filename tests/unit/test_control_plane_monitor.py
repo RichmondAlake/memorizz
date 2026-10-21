@@ -333,7 +333,8 @@ def test_page_shows_events_compile_state_and_keeps_actions(seeded):
         ).text
     finally:
         patcher.stop()
-    assert 'data-sidebar-scope="learning"' in html
+    # List pages follow the app-wide navigation preference.
+    assert "data-sidebar-scope" not in html
     assert 'aria-label="Continual learning views"' in html
     for tab in ("/memory/workflows", "/memory/skills", "/persona-evolution"):
         assert f'href="{tab}"' in html

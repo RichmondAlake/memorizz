@@ -6,7 +6,7 @@ import logging
 import os
 from typing import Any, Dict, List
 
-from .. import BaseEmbeddingProvider
+from .. import BaseEmbeddingProvider, shorten_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,10 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
             - base_url: str (default: the OLLAMA_HOST environment variable,
               then "http://localhost:11434", as for the Ollama LLM provider)
             - timeout: int (default: 30)
+            - dimensions: int (optional) – shorter vectors. Ollama cuts them
+              and scales them back to unit length (Matryoshka models such as
+              nomic-embed-text keep most of their quality); an older Ollama's
+              full vectors are cut here the same way.
         """
         super().__init__(config)
 
@@ -46,8 +50,13 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
         )
         self.timeout = self.config.get("timeout", 30)
 
+        configured = self.config.get("dimensions")
+        self.requested_dimensions = int(configured) if configured else None
+
         # Determine dimensions - use known value or probe the model
-        self.dimensions = self.MODEL_DIMENSIONS.get(self.model, 768)  # Default fallback
+        self.dimensions = self.requested_dimensions or self.MODEL_DIMENSIONS.get(
+            self.model, 768
+        )  # Default fallback
 
         # Initialize the embeddings client
         self._init_client()
@@ -79,11 +88,33 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
 
     def _embed_one(self, text: str) -> List[float]:
         """Embed a single string via the native client (attr- or dict-style resp)."""
+        if self.requested_dimensions:
+            return self._embed_shortened(text, self.requested_dimensions)
         resp = self.client.embeddings(model=self.model, prompt=text)
         vector = getattr(resp, "embedding", None)
         if vector is None and isinstance(resp, dict):
             vector = resp.get("embedding")
         return list(vector or [])
+
+    def _embed_shortened(self, text: str, size: int) -> List[float]:
+        """``size`` dimensions from ``/api/embed``, cut here if Ollama did not."""
+        try:
+            try:
+                resp = self.client.embed(model=self.model, input=text, dimensions=size)
+            except TypeError:
+                # An ollama package without ``dimensions``.
+                resp = self.client.embed(model=self.model, input=text)
+        except Exception as exc:
+            if "exceeds" in str(exc):
+                raise ValueError(
+                    f"Ollama cannot shorten {self.model} to {size} dimensions: {exc}"
+                ) from exc
+            raise
+        vectors = getattr(resp, "embeddings", None)
+        if vectors is None and isinstance(resp, dict):
+            vectors = resp.get("embeddings")
+        vector = list(vectors[0]) if vectors else []
+        return shorten_embedding(vector, size) if vector else vector
 
     def _probe_dimensions(self):
         """Probe the actual dimensions of the model by generating a test embedding."""
@@ -100,6 +131,9 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
                     )
                     self.dimensions = actual_dimensions
                 self._dimensions_probed = True
+        except ValueError:
+            # A size the model cannot give: say so rather than guess.
+            raise
         except Exception as e:
             logger.warning(f"Could not probe dimensions for {self.model}: {str(e)}")
             # Keep the assumed dimensions

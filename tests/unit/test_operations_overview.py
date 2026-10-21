@@ -281,7 +281,7 @@ def test_agents_page_is_a_fleet_monitor(client):
         response = client.get("/agents?window=24h")
     assert response.status_code == 200
     html = response.text
-    assert 'data-sidebar-scope="agents"' in html
+    assert "data-sidebar-scope" not in html
     assert "Fleet Agent" in html
     assert 'data-health-label="degraded"' in html, "a failed tool degrades health"
     assert 'data-runs="1"' in html

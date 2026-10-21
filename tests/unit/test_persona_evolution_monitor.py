@@ -146,7 +146,7 @@ def test_rendered_page_puts_each_entry_in_one_detail_pane(monkeypatch, tmp_path)
         "/persona-evolution?user_id=account-1",
         headers={"Authorization": "Bearer persona-monitor-token"},
     ).text
-    assert 'data-sidebar-scope="learning"' in html and 'id="pe-table"' in html
+    assert "data-sidebar-scope" not in html and 'id="pe-table"' in html
     assert html.count('class="fleet-detail pe-detail"') == 5
     # The browser suite relies on these being unique on the page.
     assert html.count("Suggested adaptation · not applied") == 1

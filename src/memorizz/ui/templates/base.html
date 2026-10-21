@@ -26,7 +26,7 @@
                 + '<line x1="12" y1="15" x2="12" y2="3"></line></svg>';
         }
     </script>
-    <link rel="stylesheet" href="/static/css/styles.css?v=41">
+    <link rel="stylesheet" href="/static/css/styles.css?v=45">
     {% block head %}{% endblock %}
     <link rel="stylesheet" href="/static/css/console.css?v=28">
 </head>
@@ -52,7 +52,10 @@
                             <path d="M12 3v18"/>
                         </svg>
                     </span>
-                    <span class="logo-text">Memorizz</span>
+                    <span class="logo-name">
+                        <span class="logo-text">Memorizz</span>
+                        {% if memorizz_version %}<span class="logo-version" title="Memorizz {{ memorizz_version }}">v{{ memorizz_version }}</span>{% endif %}
+                    </span>
                 </a>
                 <button
                     type="button"

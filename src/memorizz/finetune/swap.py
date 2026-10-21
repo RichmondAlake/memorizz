@@ -26,6 +26,7 @@ EMBEDDING_ENV = (
     "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER",
     "MEMORIZZ_DEFAULT_EMBEDDING_MODEL",
     "MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS",
+    "MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL",
 )
 
 # Stores whose rows carry an ``embedding`` that search compares against.

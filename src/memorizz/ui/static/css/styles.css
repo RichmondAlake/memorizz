@@ -551,7 +551,7 @@ body.sidebar-collapsed .main-content {
     max-width: calc(100vw - var(--sidebar-width-collapsed));
 }
 
-body.sidebar-collapsed .logo-text,
+body.sidebar-collapsed .logo-name,
 body.sidebar-collapsed .nav-item span:not(.nav-icon),
 body.sidebar-collapsed .nav-caret,
 body.sidebar-collapsed .nav-dropdown-content,
@@ -567,9 +567,25 @@ body.sidebar-collapsed .sidebar-header {
     position: relative;
 }
 
+/* Folded, the logo and the expand button share one spot: the button shows
+   on hover or keyboard focus. */
 body.sidebar-collapsed .sidebar-toggle-btn {
     position: absolute;
-    right: 8px;
+    inset: 0;
+    width: 32px;
+    margin: auto;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+
+body.sidebar-collapsed .sidebar-header:hover .sidebar-toggle-btn,
+body.sidebar-collapsed .sidebar-toggle-btn:focus-visible {
+    opacity: 1;
+}
+
+body.sidebar-collapsed .sidebar-header:hover .logo,
+body.sidebar-collapsed .sidebar-header:has(.sidebar-toggle-btn:focus-visible) .logo {
+    opacity: 0;
 }
 
 body.sidebar-collapsed .logo {
@@ -1513,26 +1529,41 @@ body.theme-light .form-group select {
     gap: var(--spacing-md);
 }
 
+/* The template gallery: compact cards above the form. It folds away once a
+   template is in use. */
 .agent-templates {
     margin-bottom: var(--spacing-lg);
 }
 
+details.agent-templates > summary {
+    align-items: flex-start;
+}
+
+details.agent-templates > summary::before {
+    margin-top: 8px;
+}
+
 .agent-template-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-    gap: var(--spacing-md);
-    margin: var(--spacing-md) 0;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 10px;
+    margin-top: var(--spacing-md);
 }
 
 .agent-template-card {
     display: flex;
     flex-direction: column;
-    gap: var(--spacing-sm);
+    gap: 4px;
     min-width: 0;
-    padding: var(--spacing-md);
+    padding: 12px 14px;
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     background: var(--bg-secondary);
+    transition: border-color 0.15s ease;
+}
+
+.agent-template-card:hover {
+    border-color: var(--border-glow);
 }
 
 .agent-template-card.is-selected {
@@ -1542,12 +1573,21 @@ body.theme-light .form-group select {
 
 .agent-template-card-head {
     display: flex;
+    align-items: center;
     justify-content: space-between;
     gap: var(--spacing-sm);
+    min-height: 26px;
+}
+
+.agent-template-category {
+    min-width: 0;
+    overflow: hidden;
     color: var(--text-muted);
     font-size: 11px;
     letter-spacing: 0.04em;
+    text-overflow: ellipsis;
     text-transform: uppercase;
+    white-space: nowrap;
 }
 
 .agent-template-yours {
@@ -1556,8 +1596,9 @@ body.theme-light .form-group select {
 
 .agent-template-title {
     margin: 0;
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
+    line-height: 1.35;
 }
 
 .agent-template-summary {
@@ -1565,40 +1606,73 @@ body.theme-light .form-group select {
     margin: 0;
     overflow: hidden;
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: 12.5px;
     line-height: 1.45;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
+    -webkit-line-clamp: 2;
 }
 
 .agent-template-chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    margin: 0;
+    gap: 4px;
+    margin: 4px 0 0;
     padding: 0;
     list-style: none;
 }
 
 .agent-template-chips li {
-    padding: 2px 8px;
+    padding: 1px 7px;
     border: 1px solid var(--border-color);
     border-radius: 999px;
     background: var(--bg-tertiary);
     color: var(--text-secondary);
     font-size: 11px;
+    white-space: nowrap;
+}
+
+.agent-template-chips li.is-warning {
+    border-color: color-mix(in srgb, var(--accent-warning) 45%, transparent);
+    background: color-mix(in srgb, var(--accent-warning) 10%, transparent);
+    color: var(--accent-warning);
+    cursor: help;
 }
 
 .agent-template-actions {
     display: flex;
+    flex: none;
     align-items: center;
-    gap: var(--spacing-sm);
-    margin-top: auto;
-    padding-top: 4px;
+    gap: 6px;
 }
 
 .agent-template-actions form {
     margin: 0;
+}
+
+.agent-template-use {
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
+}
+
+.agent-template-use[aria-pressed="true"] {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+
+.agent-template-delete {
+    padding: 0.2rem 0.3rem;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+
+.agent-template-delete:hover,
+.agent-template-delete:focus-visible {
+    color: var(--accent-danger);
+    text-decoration: underline;
 }
 
 .agent-template-banner {
@@ -1961,6 +2035,10 @@ details.builder-section > summary::before {
 .builder-subsection > .section-body > .form-grid label.checkbox-group,
 .builder-subsection > .section-body > .form-grid .checkbox-group label {
     display: flex;
+}
+
+.builder-subsection > .section-body > .form-grid label.checkbox-group[hidden] {
+    display: none;
 }
 
 /* Save stays in reach however long the form is. */
@@ -3825,6 +3903,27 @@ body.theme-light .pg-dropzone {
     overflow-wrap: anywhere;
 }
 
+.playground-context-panel .context-block-hint {
+    margin-right: auto;
+    margin-left: 6px;
+    font-size: 10.5px;
+    letter-spacing: 0;
+    text-transform: none;
+    opacity: 0.85;
+}
+
+/* A tool's parameter schema stays folded until asked for. */
+.playground-context-panel .context-toolbox-schema > summary {
+    width: fit-content;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    cursor: pointer;
+}
+
+.playground-context-panel .context-toolbox-schema[open] > summary {
+    margin-bottom: 4px;
+}
+
 .playground-context-panel .context-toolbox-value {
     margin: 0;
     border-radius: 6px;
@@ -4585,6 +4684,23 @@ body.theme-light .sidebar {
     font-size: 17px;
     font-weight: 650;
     letter-spacing: -0.03em;
+}
+
+/* The name, with the running version under it. */
+.logo-name {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    line-height: 1.15;
+}
+
+.logo-version {
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0;
 }
 
 .logo-icon {

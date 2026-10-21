@@ -458,8 +458,8 @@ class TestPages:
     @pytest.mark.unit
     def test_workflows_page_is_a_monitor(self, client):
         page = client.get("/memory/workflows").text
-        assert 'data-sidebar-scope="learning"' in page
-        assert 'data-sidebar-default="collapsed"' in page
+        # List pages follow the app-wide navigation preference.
+        assert "data-sidebar-scope" not in page
         assert "/static/css/pages/learning.css" in page
         assert 'aria-label="Continual learning views"' in page
         assert 'href="/persona-evolution"' in page
@@ -474,7 +474,7 @@ class TestPages:
     @pytest.mark.unit
     def test_skills_page_is_a_monitor(self, client):
         page = client.get("/memory/skills").text
-        assert 'data-sidebar-scope="learning"' in page
+        assert "data-sidebar-scope" not in page
         assert 'id="lw-skill-table"' in page
         assert 'data-monitor-tag="active"' in page
         assert 'action="/continual-learning/skills/skill-1/demote"' in page

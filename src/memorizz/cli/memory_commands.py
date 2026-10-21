@@ -244,6 +244,15 @@ def _embedding_settings():
         choices,
         current_provider if current_provider in choices else "ollama",
     )
+    base_url = ""
+    if provider == "openai":
+        base_url = _ordinary(
+            "MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL",
+            "OpenAI-compatible server URL (blank = OpenAI)",
+            os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL", "")
+            if provider == current_provider
+            else "",
+        )
     defaults = {"ollama": "nomic-embed-text", "openai": "text-embedding-3-small"}
     old_model = os.getenv("MEMORIZZ_DEFAULT_EMBEDDING_MODEL", "")
     model = typer.prompt(
@@ -265,12 +274,18 @@ def _embedding_settings():
         "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER": provider,
         "MEMORIZZ_DEFAULT_EMBEDDING_MODEL": model,
         "MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS": dimensions,
+        "MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL": base_url,
     }
     key = {
         "openai": "OPENAI_API_KEY",
         "azure": "AZURE_OPENAI_API_KEY",
         "voyageai": "VOYAGE_API_KEY",
     }.get(provider)
+    if base_url:
+        # Another server's key, if it takes one; the OpenAI key is not sent.
+        key = "MEMORIZZ_DEFAULT_EMBEDDING_API_KEY"
+        if not typer.confirm("Does the server need an API key?", default=False):
+            key = None
     if key:
         updates[key] = _secret(key)
     if provider == "azure":
