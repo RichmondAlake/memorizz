@@ -225,6 +225,23 @@
                     color: #888;
                     font-size: 0.78rem;
                 }
+                .local-dbs {
+                    margin: 0 0 1rem;
+                }
+                .local-db-state.is-running {
+                    color: #4ade80;
+                }
+                .local-db-state.is-stopped {
+                    color: #fbbf24;
+                }
+                .local-db-hint {
+                    flex-basis: 100%;
+                    color: #888;
+                    font-size: 0.75rem;
+                }
+                .local-db-hint code {
+                    color: #ccc;
+                }
 
                 /* Phase checklist */
                 .docker-phase-list {
@@ -320,21 +337,22 @@
                         <option value="filesystem" {% if provider_type == 'filesystem' %}selected{% endif %}>FileSystem</option>
                         <option value="notion" {% if provider_type == 'notion' %}selected{% endif %}>Notion + separate semantic provider</option>
                     </select>
-                    {% if local_stores %}
-                    <div class="local-stores" role="group" aria-label="Stores found on this computer">
-                        <span class="local-stores-label">FileSystem stores on this computer</span>
-                        {% for store in local_stores %}
-                        <button type="button" class="local-store" data-path="{{ store.display }}" title="{{ store.path }}">
-                            <span class="local-store-path">{{ store.display }}</span>
-                            <span class="local-store-meta">{% if store.agents %}{{ store.agents }} agent{{ 's' if store.agents != 1 }}{% elif store.exists %}empty{% else %}not created yet{% endif %}{% if store.default %} · the CLI's store{% endif %}</span>
-                        </button>
-                        {% endfor %}
-                    </div>
-                    {% endif %}
                 </div>
 
                 <!-- Oracle Fields -->
                 <div id="oracle-fields" class="provider-fields">
+                    {% if local_databases.oracle %}
+                    <div class="local-stores local-dbs" role="group" aria-label="Oracle databases on this computer">
+                        <span class="local-stores-label">Oracle databases on this computer</span>
+                        {% for db in local_databases.oracle %}
+                        <button type="button" class="local-store local-db" data-provider="oracle" data-dsn="{{ db.dsn }}"{% if db.user %} data-user="{{ db.user }}"{% endif %} title="{% if db.source == 'docker' %}Docker container {{ db.label }} ({{ db.image }}) · {{ db.status }}{% else %}From the environment{% endif %}">
+                            <span class="local-store-path">{{ db.dsn }}</span>
+                            <span class="local-store-meta">{% if db.source == 'docker' %}{{ db.label }} · <span class="local-db-state is-{{ db.state }}">{{ db.state }}</span>{% else %}{{ db.label }}{% if db.user %} · {{ db.user }}{% endif %}{% endif %}{% if db.current %} · connected{% endif %}</span>
+                            {% if db.hint %}<span class="local-db-hint">Start it first: <code>{{ db.hint }}</code></span>{% endif %}
+                        </button>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
                     <div class="form-group">
                         <label for="oracle_user">Username</label>
                         <input type="text" name="oracle_user" id="oracle_user" value="{{ env_oracle_user }}" placeholder="memorizz_user">
@@ -369,6 +387,18 @@
 
                 <!-- MongoDB Fields -->
                 <div id="mongodb-fields" class="provider-fields" style="display: none;">
+                    {% if local_databases.mongodb %}
+                    <div class="local-stores local-dbs" role="group" aria-label="MongoDB databases on this computer">
+                        <span class="local-stores-label">MongoDB databases on this computer</span>
+                        {% for db in local_databases.mongodb %}
+                        <button type="button" class="local-store local-db" data-provider="mongodb" data-uri="{{ db.uri }}" title="{% if db.source == 'docker' %}Docker container {{ db.label }} ({{ db.image }}) · {{ db.status }}{% else %}The URI in MONGODB_URI, read by the server{% endif %}">
+                            <span class="local-store-path">{{ db.display or db.uri }}</span>
+                            <span class="local-store-meta">{% if db.source == 'docker' %}{{ db.label }} · <span class="local-db-state is-{{ db.state }}">{{ db.state }}</span>{% else %}{{ db.label }}{% endif %}</span>
+                            {% if db.hint %}<span class="local-db-hint">Start it first: <code>{{ db.hint }}</code></span>{% endif %}
+                        </button>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
                     <div class="form-group">
                         <label for="mongodb_uri">Connection URI</label>
                         <input type="password" name="mongodb_uri" id="mongodb_uri" value="" autocomplete="off" placeholder="{% if has_env_mongodb_uri %}Configured via MONGODB_URI{% else %}mongodb://localhost:27017{% endif %}">
@@ -386,6 +416,17 @@
                         <label for="filesystem_path">Storage Path</label>
                         <input type="text" name="filesystem_path" id="filesystem_path" placeholder="{{ default_filesystem_path }}" value="{{ env_filesystem_path or '' }}">
                     </div>
+                    {% if local_stores %}
+                    <div class="local-stores" role="group" aria-label="Stores found on this computer">
+                        <span class="local-stores-label">FileSystem stores on this computer</span>
+                        {% for store in local_stores %}
+                        <button type="button" class="local-store" data-path="{{ store.display }}" title="{{ store.path }}">
+                            <span class="local-store-path">{{ store.display }}</span>
+                            <span class="local-store-meta">{% if store.agents %}{{ store.agents }} agent{{ 's' if store.agents != 1 }}{% elif store.exists %}empty{% else %}not created yet{% endif %}{% if store.default %} · the CLI's store{% endif %}</span>
+                        </button>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
                 </div>
 
                 <div id="notion-fields" class="provider-fields" style="display: none;">
@@ -444,24 +485,37 @@
         // Initialize on page load
         toggleProviderFields();
 
-        // A store found on this computer fills the FileSystem path.
+        // A store found on this computer fills the FileSystem path; a database
+        // fills the Oracle DSN (and user, when the environment names one) or
+        // the MongoDB URI.
+        const LOCAL_FIELDS = {filesystem: ['path', 'filesystem_path'], oracle: ['dsn', 'oracle_dsn'], mongodb: ['uri', 'mongodb_uri']};
         function markLocalStore() {
-            const filesystem = document.getElementById('provider_type').value === 'filesystem';
-            const value = document.getElementById('filesystem_path').value.trim();
+            const provider = document.getElementById('provider_type').value;
             document.querySelectorAll('.local-store').forEach(function(button) {
-                button.classList.toggle('is-selected', filesystem && button.dataset.path === value);
+                const kind = button.dataset.provider || 'filesystem';
+                const [key, field] = LOCAL_FIELDS[kind];
+                const value = document.getElementById(field).value.trim();
+                button.classList.toggle('is-selected', provider === kind && button.dataset[key] === value);
             });
         }
         document.getElementById('provider_type').addEventListener('change', markLocalStore);
         document.querySelectorAll('.local-store').forEach(function(button) {
             button.addEventListener('click', function() {
-                document.getElementById('filesystem_path').value = button.dataset.path;
-                document.getElementById('provider_type').value = 'filesystem';
+                const kind = button.dataset.provider || 'filesystem';
+                const [key, field] = LOCAL_FIELDS[kind];
+                document.getElementById(field).value = button.dataset[key];
+                if (kind === 'oracle' && button.dataset.user) {
+                    document.getElementById('oracle_user').value = button.dataset.user;
+                }
+                document.getElementById('provider_type').value = kind;
                 toggleProviderFields();
                 markLocalStore();
             });
         });
-        document.getElementById('filesystem_path').addEventListener('input', markLocalStore);
+        ['filesystem_path', 'oracle_dsn', 'mongodb_uri'].forEach(function(id) {
+            document.getElementById(id).addEventListener('input', markLocalStore);
+        });
+        markLocalStore();
 
         function setupPasswordToggles() {
             document.querySelectorAll('.password-toggle').forEach(btn => {

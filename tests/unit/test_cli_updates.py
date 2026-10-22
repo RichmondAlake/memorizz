@@ -2,6 +2,7 @@
 
 import json
 import shlex
+import sys
 from io import StringIO
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -415,3 +416,50 @@ def test_status_bar_shows_the_update_pill():
     session.update_notice = {"latest": "0.17.0", "command": "uv tool upgrade memorizz"}
     text = to_plain_text(ui.toolbar(session))
     assert "⬆ 0.17.0 available · /update" in text
+
+
+RECEIPT = """[tool]
+requirements = [{ name = "memorizz", extras = ["mcp", "ui", "desktop", "oracle"], specifier = "==0.17.11" }]
+python = "3.12"
+entrypoints = [
+    { name = "memorizz", install-path = "/x/bin/memorizz", from = "memorizz" },
+]
+"""
+
+
+def _uv_prefix(tmp_path, monkeypatch, receipt):
+    prefix = tmp_path / "uv-tool"
+    prefix.mkdir()
+    (prefix / "uv-receipt.toml").write_text(receipt)
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    monkeypatch.delenv("MEMORIZZ_INSTALL_METHOD", raising=False)
+
+
+def test_a_pinned_uv_install_upgrades_with_the_same_extras(tmp_path, monkeypatch):
+    # `uv tool upgrade` stays inside "==0.17.11", so it would change nothing.
+    _uv_prefix(tmp_path, monkeypatch, RECEIPT)
+    assert shlex.split(updates.upgrade_command("0.17.12")) == [
+        "uv",
+        "tool",
+        "install",
+        "--force",
+        "--python",
+        "3.12",
+        "memorizz[mcp,ui,desktop,oracle]==0.17.12",
+    ]
+
+
+def test_an_unpinned_uv_install_keeps_uv_tool_upgrade(tmp_path, monkeypatch):
+    _uv_prefix(
+        tmp_path,
+        monkeypatch,
+        RECEIPT.replace(', specifier = "==0.17.11"', ""),
+    )
+    assert updates.upgrade_command("0.17.12") == "uv tool upgrade memorizz"
+
+
+def test_the_receipt_reads_the_same_without_tomllib(tmp_path, monkeypatch):
+    _uv_prefix(tmp_path, monkeypatch, RECEIPT)
+    with_toml = updates.upgrade_command("0.17.12")
+    monkeypatch.setitem(sys.modules, "tomllib", None)  # as on Python 3.10
+    assert updates.upgrade_command("0.17.12") == with_toml

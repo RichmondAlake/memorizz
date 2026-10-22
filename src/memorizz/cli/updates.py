@@ -106,15 +106,71 @@ def _fetch_latest_version() -> str | None:
     return str(version)
 
 
-def upgrade_command() -> str:
-    """Use the owning installer, including the npm wrapper's pinned runtime."""
+def _uv_requirement(receipt: Path) -> dict:
+    """The memorizz requirement a uv tool receipt records: its extras, its
+    version specifier and the tool's Python. Empty when unreadable."""
+    try:
+        text = receipt.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        tomllib = None
+    if tomllib is not None:
+        try:
+            tool = tomllib.loads(text).get("tool") or {}
+        except ValueError:
+            return {}
+        requirement = next(
+            (
+                item
+                for item in tool.get("requirements") or []
+                if isinstance(item, dict) and item.get("name") == "memorizz"
+            ),
+            {},
+        )
+        return {**requirement, "python": tool.get("python")}
+    import re
+
+    line = re.search(r'\{[^}]*name = "memorizz"[^}]*\}', text)
+    if not line:
+        return {}
+    extras = re.search(r"extras = \[([^\]]*)\]", line.group(0))
+    specifier = re.search(r'specifier = "([^"]*)"', line.group(0))
+    python = re.search(r'^python = "([^"]*)"', text, re.M)
+    return {
+        "extras": re.findall(r'"([^"]+)"', extras.group(1)) if extras else [],
+        "specifier": specifier.group(1) if specifier else "",
+        "python": python.group(1) if python else None,
+    }
+
+
+def upgrade_command(latest: str | None = None) -> str:
+    """Use the owning installer, including the npm wrapper's pinned runtime.
+
+    A uv tool install keeps its extras. ``uv tool upgrade`` stays inside the
+    version range the tool was installed with, so for an install pinned to a
+    version it would do nothing; that one is reinstalled with the same extras
+    and Python at ``latest``."""
     if os.environ.get("MEMORIZZ_INSTALL_METHOD") == "npm":
         return "npm install -g memorizz@latest"
     prefix = Path(sys.prefix).resolve()
     if "Cellar" in prefix.parts and "memorizz" in prefix.parts:
         return "brew upgrade memorizz"
     if (prefix / "uv-receipt.toml").is_file():
-        return "uv tool upgrade memorizz"
+        requirement = _uv_requirement(prefix / "uv-receipt.toml")
+        if not requirement.get("specifier"):
+            return "uv tool upgrade memorizz"
+        extras = ",".join(requirement.get("extras") or [])
+        args = ["uv", "tool", "install", "--force"]
+        if requirement.get("python"):
+            args += ["--python", str(requirement["python"])]
+        args.append(
+            f"memorizz{f'[{extras}]' if extras else ''}"
+            + (f"=={latest}" if latest else "")
+        )
+        return shlex.join(args)
     if (prefix / "pipx_metadata.json").is_file():
         return "pipx upgrade memorizz"
     args = [sys.executable, "-m", "pip", "install", "--upgrade", "memorizz"]
@@ -141,7 +197,7 @@ def known_update(current_version: str = __version__) -> dict | None:
     except InvalidVersion:
         return None
     latest = _newer(_read_cache().get("latest_version"), installed)
-    return {"latest": latest, "command": upgrade_command()} if latest else None
+    return {"latest": latest, "command": upgrade_command(latest)} if latest else None
 
 
 def latest_update(
@@ -171,7 +227,7 @@ def latest_update(
         else:
             _write_cache(latest)
     newer = _newer(latest, installed)
-    return {"latest": newer, "command": upgrade_command()} if newer else None
+    return {"latest": newer, "command": upgrade_command(newer)} if newer else None
 
 
 def check_for_update(

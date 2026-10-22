@@ -36,6 +36,15 @@ Other providers are extras: `memorizz[anthropic]`, `memorizz[mongodb]`,
 `memorizz[all]`. The npm bootstrapper installs the MCP extra because it ships
 the complete CLI surface.
 
+**Upgrading keeps your extras.** `uv tool upgrade memorizz` upgrades a uv
+install with the extras it has. It stays inside the version range you
+installed with, though, so an install pinned to a version (`memorizz==0.17.11`)
+doesn't move. For that install, the update notice and `/update` show a
+reinstall with the same extras and Python, such as
+`uv tool install --force --python 3.12 'memorizz[ui,oracle]==0.17.12'`.
+Reinstalling by hand with fewer extras removes the ones left out, `oracle`
+included.
+
 !!! note "Homebrew & npm"
     A Homebrew tap (`brew install RichmondAlake/memorizz/memorizz`) and an npm
     bootstrapper (`npm i -g memorizz`, which installs the real tool via `uv`) are

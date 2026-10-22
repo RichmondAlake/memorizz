@@ -1199,6 +1199,7 @@ def create_app(
     ) -> Dict[str, Any]:
         """The connect page's fields, pre-filled from the environment and
         from the FileSystem stores found on this computer."""
+        from .local_databases import detect_local_databases
         from .local_stores import detect_local_stores
 
         startup = _state.get("startup_connect") or {}
@@ -1272,6 +1273,9 @@ def create_app(
             if default_store
             else "~/.memorizz/memory",
             "local_stores": stores,
+            "local_databases": detect_local_databases(
+                current=_state.get("connection_info") if connected else None
+            ),
             "has_env_notion_token": bool(os.environ.get("NOTION_TOKEN")),
             "env_notion_semantic_backend": fields.get("notion_semantic_backend")
             or os.environ.get("MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"),
