@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.17.9 — 2026-10-22
+
+### Added
+
+- **Rate cards** (Usage & cost → Rate cards) prices a model the built-in
+  catalog doesn't cover, such as a local Ollama model. You can mark it free,
+  and the Overview and Usage pages use the price straight away. Cards are
+  saved in `~/.memorizz/rate_cards.json`. Only an unscoped admin can change
+  them, and every change is audited. An app given `usage_pricing` in code
+  keeps its own prices.
+- The Overview and Agents pages offer 90 days and a custom start and end.
+- **Monthly budget** on the Usage page: known spend this month against a
+  budget, with a month-end projection. The Overview flags it once spend
+  passes the alert percent (80% by default). Only an unscoped admin can set
+  it, and changes are audited.
+- Usage exports as CSV by day, agent, model or run, as well as JSON.
+
+### Changed
+
+- The Usage page, now **Usage & cost**, leads with known spend, tokens,
+  calls, spend per run, latency p95 and prompt-cache reuse. Each figure
+  shows its change from the period before. It opens on 30 days, with the
+  same range picker as the Overview plus All. Next come the budget, usage
+  over time (tokens, spend or calls, with tooltips and click-to-zoom), and
+  sortable by-agent and by-model tables showing agent names. The runs that
+  cost the most come after those, then memory, the prompt cache and the
+  method notes.
+  - Agent and model filters are menus, and the timezone and read limit moved
+    under **More**.
+  - Latencies read as "820 ms", "5.5 s" or "1m 15s", and memory types by
+    name.
+  - Unpriced calls link to Rate cards. `/traces/usage.json` keeps covering
+    all recorded usage unless given a window.
+- Each **Needs attention** item links to where it can be fixed: the failed
+  run's trace, the agent's tool, memory, persona or model settings, or Rate
+  cards for a model without a price. Repeated tool calls, retry limits and
+  spent tool budgets are explained in plain words.
+- Bars in **Runs over time** show their period, runs, failures, tokens and
+  spend on hover or focus. Clicking one opens that period, or its run when it
+  holds a single one.
+
+### Fixed
+
+- The Usage page took about two minutes to load on a filesystem store of a
+  few thousand records, because trace reads re-read every document for each
+  record. They now take up to 1,000 records per read, so the same store
+  loads in under a second.
+- A rate card whose cached-input price equals its input price now prices
+  calls that don't report cached tokens, as Ollama's don't, instead of
+  leaving them unpriced.
+
 ## 0.17.8 — 2026-10-22
 
 ### Changed
