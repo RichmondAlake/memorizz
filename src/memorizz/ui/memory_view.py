@@ -75,6 +75,28 @@ def _when(record: Dict[str, Any]) -> tuple[str, Optional[datetime]]:
     return "", None
 
 
+#: Notes for an entity whose vector does not cover it (metadata.embedding_status).
+VECTOR_NOTES = {
+    "partial": (
+        "partial vector",
+        "Too long to embed whole: the vector covers the name, type and newest facts.",
+    ),
+    "missing": ("no vector", "Not embedded: search by meaning will not find it."),
+}
+
+
+def vector_note(record: Dict[str, Any]) -> Dict[str, str]:
+    """The short note and its explanation for an entity whose vector is
+    partial or missing; empty strings otherwise."""
+    metadata = record.get("metadata")
+    status = metadata.get("embedding_status") if isinstance(metadata, dict) else None
+    label, title = VECTOR_NOTES.get(str(status or ""), ("", ""))
+    reason = metadata.get("embedding_reason") if label else None
+    if reason:
+        title = f"{title} ({str(reason).replace('_', ' ')})"
+    return {"label": label, "title": title}
+
+
 def shape_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """One row: identity, preview, time, and the remaining fields for the pane."""
     record_id = str(record.get("_id") or record.get("id") or "")
@@ -114,6 +136,7 @@ def shape_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "recorded_at": recorded_at,
         "fields": fields,
         "size": len(body),
+        "vector_note": vector_note(record),
     }
 
 

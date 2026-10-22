@@ -52,6 +52,7 @@ isolation declaration. Create it with `memorizz harness init`; see the
 | `MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS` | Dimension matching the persisted vector schema |
 | `MEMORIZZ_DEFAULT_EMBEDDING_BASE_URL` | With `openai`: an OpenAI-compatible server, such as `http://localhost:11434/v1` (Ollama), vLLM or LM Studio |
 | `MEMORIZZ_DEFAULT_EMBEDDING_API_KEY` | That server's key, if it takes one; the OpenAI key is never sent to it |
+| `MEMORIZZ_ENTITY_EMBEDDING_MAX_TOKENS` | The embedding model's input limit for entity vectors. Default: known from the model (8,191 for OpenAI). A longer entity gets a vector of its name, type and newest facts |
 | `MEMORIZZ_BACKEND` | `filesystem`, `mongodb`, `oracle`, or `notion` |
 | `OLLAMA_HOST` | Ollama server for models and embeddings; default `http://localhost:11434` |
 
@@ -226,7 +227,8 @@ multi-instance deployments. Losing that key makes stored tokens unrecoverable.
 | `MEMORIZZ_UI_SESSION_SECRET` | Stable session-signing secret |
 | `MEMORIZZ_UI_SESSION_SECONDS` | Session lifetime, bounded to 5 minutes–24 hours |
 | `MEMORIZZ_UI_COOKIE_SECURE` | Marks the session cookie secure behind HTTPS |
-| `MEMORIZZ_UI_READ_ONLY` | Blocks provider mutations and unsafe HTTP methods |
+| `MEMORIZZ_UI_READ_ONLY` | Blocks provider mutations and unsafe HTTP methods; the UI shows a Read-only badge and turns off controls that change data |
+| `MEMORIZZ_UI_AUTO_CONNECT` | `false` stops `memorizz ui` connecting at startup to the store `MEMORIZZ_BACKEND` names |
 | `MEMORIZZ_UI_TRACE_CONTENT_MODE` | `full`, `redacted`, or `metadata` |
 | `MEMORIZZ_UI_AUDIT_LOG` | Trace-view audit JSONL path |
 

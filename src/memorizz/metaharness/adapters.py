@@ -409,7 +409,7 @@ def _cancellable(cancel_event: Any) -> Iterator[threading.Event]:
         # Cancel requests from another process arrive on cancel_event only.
         while not finished.is_set():
             if cancel_event.is_set():
-                token.cancel()
+                token.cancel("cancel_requested")
                 return
             finished.wait(0.2)
 
@@ -540,6 +540,8 @@ class NativeMemAgentHarness(AgentHarness):
                         thread_id=task.thread_id,
                         user_id=task.user_id,
                         context=context,
+                        # The task's run labels, from the turn that started it.
+                        trace_tags=task.metadata.get("trace_tags") or None,
                         tool_context={
                             "_memorizz_harness_native": True,
                             "workspace": str(workspace),

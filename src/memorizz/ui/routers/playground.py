@@ -454,12 +454,18 @@ def _serialize_entity_memory_item(document: Dict[str, Any]) -> Dict[str, str]:
     if len(attributes_preview) > 260:
         attributes_preview = f"{attributes_preview[:257]}..."
 
+    from ..memory_view import vector_note
+
+    note = vector_note(document)
     return {
         "id": entity_identifier,
         "name": entity_name or "unnamed_entity",
         "entity_type": entity_type,
         "timestamp": timestamp,
         "attributes_preview": attributes_preview,
+        # "partial vector" / "no vector" when search by meaning may miss it.
+        "vector_note": note["label"],
+        "vector_note_title": note["title"],
         "memory_id": _to_text(
             document.get("memory_id") or document.get("memoryId")
         ).strip(),

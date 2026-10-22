@@ -15,7 +15,7 @@
 {% set favorite_count = agents|selectattr('is_favorite')|list|length %}
 {% call page_header('Agents', 'Fleet health for every agent in this memory provider. Select an agent to inspect it or send a quick message.', 'Agents') %}
     {{ range_picker('/agents', window, windows, span, {'sort_by': sort_by, 'load': 1} if loaded else {'sort_by': sort_by}) }}
-    <a href="/agents/new" class="btn btn-primary">Create agent</a>
+    <a href="/agents/new" class="btn btn-primary" data-mutates>Create agent</a>
 {% endcall %}
 
 {% if agents %}
@@ -250,7 +250,7 @@
                     <div class="inline-chat-placeholder">Send a message to start chatting&hellip;</div>
                     {% endif %}
                 </div>
-                <form class="inline-chat-form" onsubmit="return sendInlineChat(event, '{{ agent_id_value }}')">
+                <form class="inline-chat-form" data-mutates onsubmit="return sendInlineChat(event, '{{ agent_id_value }}')">
                     <input type="text" class="inline-chat-input" id="input-{{ agent_id_value }}" placeholder="Ask {{ agent_display_name }} something…" autocomplete="off" aria-label="Message {{ agent_display_name }}">
                     <button type="submit" class="inline-chat-send" id="send-{{ agent_id_value }}" aria-label="Send">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>

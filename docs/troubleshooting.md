@@ -97,6 +97,10 @@ ollama pull nomic-embed-text
 For OpenAI embeddings, set `OPENAI_API_KEY` and configure the model/dimensions.
 Never change dimensions against existing vector columns without a migration.
 
+The local UI checks this when it connects. If the store's vectors differ from
+the configured embedder, the dashboard and the connect page say so, and name
+the settings to change.
+
 ## A saved agent is not visible
 
 The SDK, CLI, UI, and MCP server must use the same memory provider and
@@ -147,9 +151,16 @@ fail closed.
 ## UI returns 401 or blocks writes
 
 When `MEMORIZZ_UI_AUTH_TOKEN` is set, sign in with that token or supply it as a
-Bearer credential. `MEMORIZZ_UI_READ_ONLY=true` intentionally blocks agent
-creation, approvals, and provider mutations. See
+Bearer credential. `MEMORIZZ_UI_READ_ONLY=true` (or `memorizz ui --read-only`)
+intentionally blocks agent creation, approvals, and provider mutations. The
+header then shows a **Read-only** badge and those controls are turned off. See
 [observability and trace inspection](observability-ui.md).
+
+## A provider driver is missing
+
+The error names the extra to install, for example
+`Oracle needs the oracle extra: pip install 'memorizz[oracle]'`. Run
+`memorizz doctor` to see which optional extras are installed.
 
 ## Oracle connection, vector, or index errors
 

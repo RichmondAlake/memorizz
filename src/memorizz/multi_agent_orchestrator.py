@@ -479,7 +479,7 @@ class MultiAgentOrchestrator:
     def _stopped(self) -> bool:
         if self._deadline is not None and time.monotonic() >= self._deadline:
             self._cancel_reason = "deadline_exceeded"
-            self.cancellation.cancel()
+            self.cancellation.cancel("deadline_exceeded")
         if self.cancellation.cancelled:
             self._cancel_reason = self._cancel_reason or "cancelled"
         return self._cancel_reason is not None

@@ -802,9 +802,21 @@ developer/system-equivalent instruction channel.
 ```bash
 memorizz ui                         # http://127.0.0.1:8765
 memorizz ui --host 0.0.0.0 --port 9000
+memorizz ui --backend oracle --dsn localhost:1521/FREEPDB1 --user MEMORIZZ --read-only
 ```
 
-See the [Local UI Guide](local-ui.md) for details.
+The UI connects at startup to the store the flags name, else to the one the
+environment names (`MEMORIZZ_BACKEND` and that provider's variables). The
+Oracle password comes from `ORACLE_PASSWORD`, or you are asked for it. It is
+never a flag. `--read-only` refuses every change. `--no-connect` starts on the
+connect page. See the [Local UI Guide](local-ui.md) for details.
+
+## Check the install
+
+```bash
+memorizz doctor          # optional extras: installed or not, and how to add one
+memorizz doctor --json
+```
 
 ## Command reference
 
@@ -812,7 +824,8 @@ See the [Local UI Guide](local-ui.md) for details.
 memorizz                 # launch the interactive REPL (default)
 memorizz chat [--code] [--browser-control] [--provider P] [--model M]
 memorizz run [--code] [--browser-control] "<prompt>"  # one-shot
-memorizz ui [--host H] [--port N]
+memorizz ui [--host H] [--port N] [--backend B ...] [--read-only] [--no-connect]
+memorizz doctor [--json]
 memorizz init [--local]
 memorizz mcp serve [--transport stdio|streamable-http]
 memorizz config

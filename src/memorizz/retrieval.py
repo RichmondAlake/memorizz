@@ -30,6 +30,15 @@ def _scope(value: Any, *, allowed: set[str], label: str) -> str:
     return normalized
 
 
+def _char_limit(value: Any, *, label: str) -> Optional[int]:
+    """A positive character count, or None for "no limit"."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or int(value) < 1:
+        raise ValueError(f"{label} must be a positive integer or None")
+    return int(value)
+
+
 def _namespaces(value: Optional[Iterable[Any]]) -> Tuple[str, ...]:
     if value is None:
         return ()
@@ -99,6 +108,12 @@ class RetrievalPolicy:
     facts a thread writes, and the facts it recalls, inside that thread, and
     ``"disabled"`` stops recalling them automatically (the entity tools still
     work).
+
+    ``max_chars_per_item`` cuts each recalled item to that many characters
+    (600 by default; None keeps items whole). ``max_recall_chars`` caps the
+    recalled text of a turn as a whole (None, the default, sets no total
+    cap). The most relevant items get their share first, so raising the
+    per-item cap with a total cap cannot flood the prompt.
     """
 
     conversation_scope: str = "memory"
@@ -114,6 +129,8 @@ class RetrievalPolicy:
     # None means "inherit the global MEMORIZZ_* settings".
     scoring: Optional[Dict[str, Any]] = None
     retention: Optional[Dict[str, Any]] = None
+    max_chars_per_item: Optional[int] = 600
+    max_recall_chars: Optional[int] = None
 
     def __post_init__(self) -> None:
         for name in ("scoring", "retention"):
@@ -165,6 +182,8 @@ class RetrievalPolicy:
         object.__setattr__(
             self, "dedupe_parent_sources", bool(self.dedupe_parent_sources)
         )
+        for name in ("max_chars_per_item", "max_recall_chars"):
+            object.__setattr__(self, name, _char_limit(getattr(self, name), label=name))
 
     @classmethod
     def disabled(cls) -> "RetrievalPolicy":
@@ -258,4 +277,9 @@ class RetrievalPolicy:
             result["scoring"] = dict(self.scoring)
         if self.retention:
             result["retention"] = dict(self.retention)
+        # Saved as null when the per-item cap is off.
+        if self.max_chars_per_item != 600:
+            result["max_chars_per_item"] = self.max_chars_per_item
+        if self.max_recall_chars is not None:
+            result["max_recall_chars"] = self.max_recall_chars
         return result

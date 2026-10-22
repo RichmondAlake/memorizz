@@ -7,7 +7,7 @@
 {% from '_ui.html' import page_header, empty_state %}
 {% set l = launcher %}
 {% call page_header('Playground', 'Choose an agent to open an interactive session with its memory, tools and trace timeline.', 'Agents') %}
-    <a class="btn" href="/agents/new">Create agent</a>
+    <a class="btn" href="/agents/new" data-mutates>Create agent</a>
 {% endcall %}
 
 {% if l.agents %}

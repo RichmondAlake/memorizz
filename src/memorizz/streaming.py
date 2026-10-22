@@ -56,6 +56,9 @@ class CancellationToken:
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._callbacks = set()
+        # Why the run was stopped, a short code a trace may record (never a
+        # message): the first reason given wins.
+        self.reason = ""
 
     @property
     def cancelled(self):
@@ -65,7 +68,9 @@ class CancellationToken:
         if self.cancelled:
             raise StreamCancelled()
 
-    def cancel(self):
+    def cancel(self, reason: str = ""):
+        if reason and not self.reason:
+            self.reason = reason
         self._event.set()
         with self._lock:
             callbacks = tuple(self._callbacks)
@@ -213,7 +218,9 @@ class EventStream:
 
     def close(self):
         self.closed.set()
-        self.cancellation.cancel()
+        # The reader stopped reading before the run finished: the Stop button,
+        # a closed tab or a dropped connection.
+        self.cancellation.cancel("reader_closed")
         if threading.current_thread() is not self.worker:
             self.worker.join(timeout=2)
 

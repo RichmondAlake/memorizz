@@ -34,9 +34,11 @@ This page covers the stable, high-value Python surface. Import public types from
         - pending_memory_consolidations
         - observability_summary
         - get_trace_context
+        - trace_url
         - build_personalization_context
         - last_memory_context_evidence
         - last_tool_outcomes
+        - last_turn_limits
         - record_feedback
         - record_task_outcome
         - has_automations
@@ -112,6 +114,9 @@ With continual learning on, recall arrives as one evidence pack: its items are
 counted in `source_counts["evidence_items"]`, by source in
 `evidence_source_counts`, and referenced in `evidence_refs`.
 `learning_control_plane.explain_last_retrieval()` explains each choice.
+For retrieval evaluation, `agent.last_memory_context_evidence(include_ids=True)`
+also returns the plain record ids behind those references (see
+[retrieved record ids](../guides/context-efficiency.md#retrieved-record-ids-for-evaluation)).
 
 ### Canonical user entities and duplicate cleanup
 
@@ -351,10 +356,13 @@ adapter security matrix and complete SDK, CLI, UI, and MCP workflows.
         - store_memagent
         - delete_memagent
         - list_memagents
+        - delete_scope
         - close
 
 See the [custom provider contract](../memory-providers/custom.md) before
 implementing this interface, particularly the three-state `user_id` filter.
+[Delete a scope](../memory-providers/scoped-cleanup.md) describes what
+`delete_scope` removes, and keeps with `keep_traces=True`, on each provider.
 
 ## Memory evaluation
 

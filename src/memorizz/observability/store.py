@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import time
 import uuid
 from collections import Counter
@@ -40,6 +41,71 @@ def _record_id(prefix: str, *parts: Any) -> str:
         "|".join(str(part or "") for part in parts).encode("utf-8")
     ).hexdigest()[:28]
     return f"{prefix}-{digest}"
+
+
+OUTCOME_STATUSES = ("success", "failure", "partial", "unknown")
+# A grader's verdict and the outcome status it records.
+VERDICTS = {
+    "pass": "success",
+    "fail": "failure",
+    "partial": "partial",
+    "unknown": "unknown",
+}
+_VERDICT_BY_STATUS = {status: verdict for verdict, status in VERDICTS.items()}
+_OUTCOME_LABEL = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.:@+/-]*(?: [A-Za-z0-9_.:@+/-]+)*\Z"
+)
+
+
+def resolve_outcome_status(status: Any = None, verdict: Any = None) -> str:
+    """The outcome status from a ``status`` and/or a grader ``verdict``.
+
+    A verdict is ``pass``, ``fail``, ``partial`` or ``unknown`` (a status word
+    is accepted too). Raises ``ValueError`` when neither is given, either is
+    unknown, or they disagree.
+    """
+    resolved = None
+    if status is not None:
+        resolved = str(status).strip().lower()
+        if resolved not in OUTCOME_STATUSES:
+            raise ValueError("status must be success, failure, partial, or unknown")
+    if verdict is not None:
+        word = str(verdict).strip().lower()
+        from_verdict = VERDICTS.get(word) or (
+            word if word in OUTCOME_STATUSES else None
+        )
+        if from_verdict is None:
+            raise ValueError("verdict must be pass, fail, partial, or unknown")
+        if resolved is not None and resolved != from_verdict:
+            raise ValueError(f"status {resolved!r} and verdict {word!r} disagree")
+        resolved = from_verdict
+    if resolved is None:
+        raise ValueError("An outcome needs a status or a verdict")
+    return resolved
+
+
+def verdict_for(status: Any) -> str:
+    """The verdict word for an outcome status: pass, fail, partial or unknown."""
+    return _VERDICT_BY_STATUS.get(str(status or "").strip().lower(), "unknown")
+
+
+def outcome_label(value: Any, field: str, maximum: int = 80) -> Optional[str]:
+    """Validate a short, content-free label such as a grader or reason code."""
+    from .privacy import validate_opaque
+
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value) > maximum
+        or not _OUTCOME_LABEL.match(value)
+    ):
+        raise ValueError(
+            f"{field} must be a label of 1-{maximum} letters, digits, "
+            "'_', '.', ':', '@', '+', '/', '-' or single inner spaces"
+        )
+    validate_opaque(value)
+    return value
 
 
 class ObservabilityStore:
@@ -176,6 +242,7 @@ class ObservabilityStore:
             "schema_versions",
             "resource_ref_hashes",
             "coverage_profiles",
+            "trace_tags",
         ):
             if key in value:
                 document[key] = value[key]
@@ -224,27 +291,42 @@ class ObservabilityStore:
         if not normalized_events:
             raise ValueError("events must contain at least one trace event")
         root_trace_id = context["root_trace_id"]
-        return self._put(
-            {
-                "record_id": _record_id(
-                    "obs-trace",
-                    context.get("application_id"),
-                    context.get("agent_id"),
-                    context.get("user_id"),
-                    context.get("thread_id"),
-                    root_trace_id,
-                    context.get("turn_id"),
-                ),
-                "record_type": _TRACE_BUNDLE,
-                "type": "trace_bundle",
-                "version": 2,
-                "role": "tool",
-                **context,
-                "trace_memory_id": context.get("memory_id"),
-                "events": normalized_events,
-                **self._bundle_summary(normalized_events),
-            }
+        payload = {
+            "record_id": _record_id(
+                "obs-trace",
+                context.get("application_id"),
+                context.get("agent_id"),
+                context.get("user_id"),
+                context.get("thread_id"),
+                root_trace_id,
+                context.get("turn_id"),
+            ),
+            "record_type": _TRACE_BUNDLE,
+            "type": "trace_bundle",
+            "version": 2,
+            "role": "tool",
+            **context,
+            "trace_memory_id": context.get("memory_id"),
+            "events": normalized_events,
+            **self._bundle_summary(normalized_events),
+        }
+        # A runtime bundle holds one turn: its tags, from the turn's start or
+        # result event, label the whole bundle.
+        tags = next(
+            (
+                event["trace_tags"]
+                for event in normalized_events
+                if isinstance(event.get("trace_tags"), dict) and event["trace_tags"]
+            ),
+            None,
         )
+        if tags:
+            from .tags import stored_trace_tags
+
+            tags = stored_trace_tags(tags)
+            if tags:
+                payload["trace_tags"] = tags
+        return self._put(payload)
 
     @staticmethod
     def _bundle_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -684,14 +766,24 @@ class ObservabilityStore:
         score: Optional[float] = None,
         metrics: Optional[Dict[str, Any]] = None,
         external_id: Optional[str] = None,
+        grader: Optional[str] = None,
+        reason_code: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Join an outcome to a turn's trace.
+
+        ``grader`` names who judged it (such as ``llm-judge``) and
+        ``reason_code`` says why (such as ``wrong_answer``); both are short
+        content-free labels.
+        """
         context = self._validate_trace_context(trace_context)
-        resolved_status = str(status or "").strip().lower()
-        if resolved_status not in {"success", "failure", "partial", "unknown"}:
-            raise ValueError("status must be success, failure, partial, or unknown")
+        resolved_status = resolve_outcome_status(status)
         numeric_score = None if score is None else float(score)
         if numeric_score is not None and not math.isfinite(numeric_score):
             raise ValueError("score must be finite")
+        labels = {
+            "grader": outcome_label(grader, "grader"),
+            "reason_code": outcome_label(reason_code, "reason_code"),
+        }
         record_id = _record_id(
             "obs-outcome",
             external_id or uuid.uuid4(),
@@ -707,6 +799,7 @@ class ObservabilityStore:
                 "source": str(source or "application")[:80],
                 "score": numeric_score,
                 "metrics": dict(metrics or {}),
+                **{key: value for key, value in labels.items() if value},
             }
         )
 
@@ -765,4 +858,11 @@ class ObservabilityStore:
         }
 
 
-__all__ = ["ObservabilityStore"]
+__all__ = [
+    "OUTCOME_STATUSES",
+    "VERDICTS",
+    "ObservabilityStore",
+    "outcome_label",
+    "resolve_outcome_status",
+    "verdict_for",
+]

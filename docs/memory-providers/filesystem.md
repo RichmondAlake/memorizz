@@ -79,6 +79,6 @@ Each JSON file contains the raw document plus MemoRizz metadata (`_id`, `memory_
 
 - **Embeddings optional**: If you only need deterministic lookups (ID/name filters), skip embedding configuration and the provider will stick to metadata filtering/keyword search.
 - **Backups**: Because everything is plain JSON, standard tools (`tar`, `rsync`, cloud sync) can back up or relocate memory stores easily.
-- **Cleanup**: Call `delete_memagent(..., cascade=True)` to remove all memories tied to an agent (the provider deletes the related JSON files).
+- **Cleanup**: Call `delete_memagent(..., cascade=True)` to remove all memories tied to an agent (the provider deletes the related JSON files). To delete one memory, user or set of agents, call `delete_scope(...)`; `keep_traces=True` keeps their trace records. See [Delete a scope](scoped-cleanup.md).
 
 For in-depth details, see `src/memorizz/memory_provider/filesystem/provider.py`.

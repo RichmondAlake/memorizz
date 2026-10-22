@@ -11,7 +11,7 @@
 {% call page_header('Overview', 'Runs, failures, run time, tokens and spend across every agent on this platform.', 'Home') %}
     {{ range_picker('/dashboard', window, windows, span, keep) }}
     <a class="btn" href="/traces">Observability</a>
-    <a class="btn btn-primary" href="/agents/new">Create agent</a>
+    <a class="btn btn-primary" href="/agents/new" data-mutates>Create agent</a>
 {% endcall %}
 
 <p class="ov-status" role="status">
@@ -22,6 +22,13 @@
     {% if coverage.truncated and coverage.oldest and coverage.oldest > span.start %}<span class="ov-status-warn" title="The overview reads the newest {{ coverage.records }} trace records only.">Runs before {{ coverage.oldest.strftime('%b %d %H:%M') }} UTC aren't loaded</span>{% elif coverage.truncated %}<span title="The overview reads the newest trace records only.">Newest {{ coverage.records }} trace records</span>{% endif %}
     <a href="/dashboard?{{ range_query(span) }}{% if loaded %}&amp;load=1{% endif %}">Refresh</a>
 </p>
+
+{% if schema_note %}<p class="warning-message" role="status" id="schema-note">{{ schema_note }}</p>{% endif %}
+{% if embedding_check and embedding_check.status == 'mismatch' %}
+<p class="warning-message" role="alert" id="embedding-check">{{ embedding_check.message }}</p>
+{% elif embedding_check and embedding_check.status == 'adopted' %}
+<p class="form-note" role="status" id="embedding-check">{{ embedding_check.message }}</p>
+{% endif %}
 
 {% if provider_type == 'notion' %}
 <p class="form-note" role="status">Notion counts cover this local repair journal, not a verified workspace total. Run <code>memorizz notion sync</code> to discover external changes; memory reads still check Notion.</p>

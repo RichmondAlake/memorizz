@@ -3,7 +3,7 @@
 {% block title %}MCP connections - Memorizz{% endblock %}
 {% block head %}<link rel="stylesheet" href="/static/css/pages/mcp.css?v=5">
 <link rel="stylesheet" href="/static/css/catalog.css?v=4">
-<script src="/static/js/catalog.js?v=2" defer></script>{% endblock %}
+<script src="/static/js/catalog.js?v=3" defer></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state %}
@@ -20,7 +20,7 @@
         </select>
     </div>
     {% endif %}
-    {% if selected_agent_id %}<button class="btn btn-primary" type="button" onclick="openMcpDialog()">Add connection</button>{% endif %}
+    {% if selected_agent_id %}<button class="btn btn-primary" type="button" onclick="openMcpDialog()" data-mutates>Add connection</button>{% endif %}
 {% endcall %}
 
 {% if created_template %}
@@ -42,7 +42,7 @@
 {% macro editor_panel() %}
 <details class="panel mcp-editor" id="mcp-modal">
     <summary><span id="mcp-dialog-title">Add MCP connection</span><span class="mcp-editor-meta">{% if servers %}Add a server, or edit one from its detail pane{% else %}Streamable HTTP, SSE or stdio{% endif %}</span></summary>
-    <form id="mcp-form" class="mcp-dialog">
+    <form id="mcp-form" class="mcp-dialog" data-mutates>
         <div class="mcp-toolbar">
             <span>Start from</span>
             {% for preset in presets %}<button class="btn btn-sm" type="button" onclick="applyMcpPreset('{{ preset.key }}')">{{ preset.title }}</button>
@@ -166,7 +166,7 @@ memorizz mcp serve --transport streamable-http --host 0.0.0.0 --public-url https
         <button type="button" class="segmented-item" data-monitor-tag="unchecked" aria-pressed="false">Not checked <span>{{ t.unchecked }}</span></button>
         {% if t.disabled %}<button type="button" class="segmented-item" data-monitor-tag="disabled" aria-pressed="false">Disabled <span>{{ t.disabled }}</span></button>{% endif %}
     </div>
-    <button type="button" class="btn btn-sm" id="mcp-test-all">Test all</button>
+    <button type="button" class="btn btn-sm" id="mcp-test-all" data-mutates>Test all</button>
     <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>t</kbd> test</span><span><kbd>↵</kbd> tools</span><span><kbd>e</kbd> edit</span></p>
 </div>
 <p class="mcp-live" id="mcp-live" role="status" aria-live="polite"></p>
@@ -235,14 +235,14 @@ memorizz mcp serve --transport streamable-http --host 0.0.0.0 --public-url https
             </header>
             <p class="mcp-endpoint mono" title="{{ row.endpoint }}">{{ row.endpoint or 'No endpoint' }}</p>
             <div class="fleet-detail-actions">
-                {% if row.client_preset %}<button type="button" class="btn btn-sm btn-primary" data-mcp-action="client" data-server="{{ row.name }}">Add OAuth client</button>{% endif %}
-                {% if row.auth_type == 'oauth' %}<button type="button" class="btn btn-sm{% if row.state == 'needs_auth' and not row.client_preset %} btn-primary{% endif %}" data-mcp-action="authorize" data-server="{{ row.name }}">Authorize</button>{% endif %}
-                <button type="button" class="btn btn-sm{% if row.state != 'needs_auth' %} btn-primary{% endif %}" data-mcp-action="test" data-server="{{ row.name }}">Test</button>
+                {% if row.client_preset %}<button type="button" class="btn btn-sm btn-primary" data-mcp-action="client" data-mutates data-server="{{ row.name }}">Add OAuth client</button>{% endif %}
+                {% if row.auth_type == 'oauth' %}<button type="button" class="btn btn-sm{% if row.state == 'needs_auth' and not row.client_preset %} btn-primary{% endif %}" data-mcp-action="authorize" data-mutates data-server="{{ row.name }}">Authorize</button>{% endif %}
+                <button type="button" class="btn btn-sm{% if row.state != 'needs_auth' %} btn-primary{% endif %}" data-mcp-action="test" data-server="{{ row.name }}" data-mutates>Test</button>
                 <button type="button" class="btn btn-sm" data-mcp-action="tools" data-server="{{ row.name }}">Tools</button>
                 <button type="button" class="btn btn-sm" data-mcp-action="resources" data-server="{{ row.name }}">Resources</button>
                 <button type="button" class="btn btn-sm" data-mcp-action="prompts" data-server="{{ row.name }}">Prompts</button>
-                <button type="button" class="btn btn-sm" data-mcp-action="edit" data-server="{{ row.name }}">Edit</button>
-                <button type="button" class="btn btn-sm" data-mcp-action="disconnect" data-server="{{ row.name }}">Disconnect</button>
+                <button type="button" class="btn btn-sm" data-mcp-action="edit" data-server="{{ row.name }}" data-mutates>Edit</button>
+                <button type="button" class="btn btn-sm" data-mcp-action="disconnect" data-mutates data-server="{{ row.name }}">Disconnect</button>
                 <button type="button" class="btn btn-sm btn-danger" data-mcp-action="remove" data-server="{{ row.name }}">Remove</button>
             </div>
 
@@ -288,7 +288,7 @@ memorizz mcp serve --transport streamable-http --host 0.0.0.0 --public-url https
                 {% for tool in row.tools %}
                 <li>
                     <div><code>{{ tool.name }}</code>{% if tool.description %}<p>{{ tool.description }}</p>{% endif %}</div>
-                    <button type="button" class="btn btn-sm" data-mcp-call="{{ tool.name }}" data-server="{{ row.name }}">Call</button>
+                    <button type="button" class="btn btn-sm" data-mcp-call="{{ tool.name }}" data-server="{{ row.name }}" data-mutates>Call</button>
                 </li>
                 {% else %}
                 <li class="mcp-tools-empty">Not listed yet. Select Tools or Test to fetch what this server exposes.</li>

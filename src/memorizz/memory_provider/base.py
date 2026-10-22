@@ -254,6 +254,98 @@ def observability_cursor_after(item: Dict[str, Any]) -> str:
     )
 
 
+# --- delete_scope ----------------------------------------------------------
+
+# Shared-memory records written by observability start with this record type:
+# trace bundles, outcomes and grader verdicts, feedback, recommendations,
+# experiments and context snapshots. delete_scope(keep_traces=True) keeps them.
+TRACE_RECORD_PREFIX = "observability_"
+
+# The store each delete_scope sweep covers, with its memory, user and agent
+# fields; None where the store has no such field. Oracle's tables match.
+DELETE_SCOPE_FIELDS: Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]] = {
+    "conversation_memory": ("memory_id", "user_id", "agent_id"),
+    "semantic_cache": ("memory_id", "user_id", "agent_id"),
+    "workflow_memory": ("memory_id", "user_id", "agent_id"),
+    "tool_log": ("memory_id", "user_id", "agent_id"),
+    "skillbox": (None, "user_id", "agent_id"),
+    "summaries": ("memory_id", "user_id", "agent_id"),
+    "entity_memory": ("memory_id", "user_id", "agent_id"),
+    "knowledge_base": ("memory_id", "user_id", "agent_id"),
+    "short_term_memory": ("memory_id", "user_id", "agent_id"),
+    "toolbox": ("memory_id", "user_id", "agent_id"),
+    "personas": ("memory_id", None, "agent_id"),
+    "shared_memory": ("memory_id", None, "owner_agent_id"),
+}
+
+
+def is_trace_record(row: Any, memory_type: Any) -> bool:
+    """Whether a stored row is trace data that ``keep_traces`` keeps.
+
+    Trace data is an observability record in shared memory, or a legacy trace
+    bundle saved as a ``tool`` row in conversation memory.
+    """
+    if not isinstance(row, dict):
+        return False
+    store = str(getattr(memory_type, "value", memory_type) or "")
+    if store == "shared_memory":
+        record_type = row.get("record_type")
+        if not record_type:
+            from ..observability.normalization import read_payload
+
+            record_type = (read_payload(row) or {}).get("record_type")
+        return str(record_type or "").startswith(TRACE_RECORD_PREFIX)
+    if store == "conversation_memory":
+        from ..conversation_history import is_trace_bundle_entry
+
+        return is_trace_bundle_entry(row)
+    return False
+
+
+def delete_scope_matches(
+    row: Dict[str, Any],
+    memory_type: Any,
+    *,
+    memory_id: Optional[str] = None,
+    user_id: Any = _UNSET,
+    agent_ids: Iterable[str] = (),
+) -> bool:
+    """Whether ``row`` is inside a delete_scope boundary.
+
+    Every given scope part the store has a field for must match; ``user_id``
+    None matches rows without a user. An observability record in shared memory
+    is scoped by the turn it traced: its trace memory, user and agent.
+    """
+    store = str(getattr(memory_type, "value", memory_type) or "")
+    fields = DELETE_SCOPE_FIELDS.get(store)
+    if fields is None:
+        return False
+    agents = set(agent_ids or ())
+    if store == "shared_memory" and is_trace_record(row, store):
+        from ..observability.normalization import read_payload
+
+        payload = read_payload(row) or {}
+        values = (
+            row.get("trace_memory_id")
+            or payload.get("trace_memory_id")
+            or payload.get("memory_id"),
+            row.get("user_id", payload.get("user_id")),
+            row.get("agent_id") or payload.get("agent_id") or row.get("owner_agent_id"),
+        )
+        present = (True, True, True)
+    else:
+        values = tuple(row.get(field) if field else None for field in fields)
+        present = tuple(bool(field) for field in fields)
+    checks = []
+    if memory_id is not None and present[0]:
+        checks.append(values[0] == memory_id)
+    if user_id is not _UNSET and present[1]:
+        checks.append(values[1] == user_id)
+    if agents and present[2]:
+        checks.append(values[2] is not None and str(values[2]) in agents)
+    return bool(checks) and all(checks)
+
+
 class MemoryProvider(ABC):
     """Abstract base class for memory providers."""
 
@@ -886,6 +978,10 @@ class MemoryProvider(ABC):
         if selected_path not in {"bundles", "index"}:
             raise ValueError("read_path must be bundles or index")
         if selected_path == "index":
+            if filters.get("tags"):
+                raise ValueError(
+                    "Tag filters read trace bundles; the span index holds no tags"
+                )
             index = self.get_observability_index()
             if index is None:
                 raise NotImplementedError("Provider has no native observability index")
@@ -1264,3 +1360,142 @@ class MemoryProvider(ABC):
             record_id = row.get("_id") or row.get("id")
             if record_id is not None:
                 self.delete_by_id(str(record_id), memory_type)
+
+    def delete_scope(
+        self,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Any = _UNSET,
+        agent_ids: Optional[List[str]] = None,
+        keep_traces: bool = False,
+    ) -> Dict[str, Any]:
+        """Delete every package-owned row inside one exact scope.
+
+        Give at least one of ``memory_id``, ``user_id`` (``None`` selects rows
+        without a user) and ``agent_ids``; a row is deleted when every given
+        part its store records matches. ``agent_ids`` also deletes those
+        agents' records and automation jobs, and ``memory_id`` drops the
+        memory from every agent's memory list. ``keep_traces=True`` keeps
+        trace records: observability records in shared memory (trace
+        bundles, outcomes, verdicts, feedback) and legacy trace bundles in
+        conversation memory. Returns per-store ``counts`` and
+        ``total_deleted``.
+
+        This portable sweep (filesystem, Notion, custom providers) reads each
+        store and deletes store by store, so a failure part-way leaves the
+        earlier stores deleted; run it again to finish. Oracle deletes in one
+        transaction and MongoDB with native filters.
+        """
+        agents = self._delete_scope_agents(memory_id, user_id, agent_ids)
+        from ..enums.memory_type import MemoryType
+
+        counts: Dict[str, int] = {}
+        if agents:
+            counts.update(self._delete_scope_automations(agents))
+        for memory_type in MemoryType:
+            if memory_type.value not in DELETE_SCOPE_FIELDS:
+                continue
+            try:
+                rows = list(self.list_all(memory_type) or [])
+            except NotImplementedError:
+                continue
+            doomed = [
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and not (keep_traces and is_trace_record(row, memory_type))
+                and delete_scope_matches(
+                    row,
+                    memory_type,
+                    memory_id=memory_id,
+                    user_id=user_id,
+                    agent_ids=agents,
+                )
+            ]
+            counts[memory_type.value] = (
+                self._delete_scope_rows(memory_type, doomed) if doomed else 0
+            )
+        if memory_id is not None:
+            counts["agent_memories"] = self._delete_scope_memory_links(memory_id)
+        if agents:
+            counts["agents"] = sum(
+                1 for agent_id in agents if self.delete_memagent(agent_id)
+            )
+        return self._delete_scope_report(
+            memory_id, user_id, agents, keep_traces, counts
+        )
+
+    @staticmethod
+    def _delete_scope_agents(
+        memory_id: Optional[str], user_id: Any, agent_ids: Optional[List[str]]
+    ) -> List[str]:
+        """The scope's agent ids, sorted; raises when the scope is empty."""
+        agents = sorted(
+            {str(value).strip() for value in (agent_ids or []) if str(value).strip()}
+        )
+        if memory_id is None and user_id is _UNSET and not agents:
+            raise ValueError(
+                "delete_scope requires memory_id, user_id, or at least one agent_id"
+            )
+        return agents
+
+    @staticmethod
+    def _delete_scope_report(
+        memory_id: Optional[str],
+        user_id: Any,
+        agents: List[str],
+        keep_traces: bool,
+        counts: Dict[str, int],
+    ) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "scope": {
+                "memory_id": memory_id,
+                "user_id": None if user_id is _UNSET else user_id,
+                "user_id_supplied": user_id is not _UNSET,
+                "agent_ids": agents,
+                "keep_traces": bool(keep_traces),
+            },
+            "counts": counts,
+            "total_deleted": sum(counts.values()),
+        }
+
+    def _delete_scope_rows(self, memory_type, rows: List[Dict[str, Any]]) -> int:
+        """Delete ``rows`` of one store; returns how many went."""
+        deleted = 0
+        for row in rows:
+            record_id = row.get("_id") or row.get("id")
+            if record_id is not None and self.delete_by_id(str(record_id), memory_type):
+                deleted += 1
+        return deleted
+
+    def _delete_scope_memory_links(self, memory_id: str) -> int:
+        """Drop ``memory_id`` from every agent that lists it; returns how many."""
+        updated = 0
+        for record in self.list_memagents() or []:
+            if isinstance(record, dict):
+                agent_id = record.get("agent_id") or record.get("_id")
+                memory_ids = list(record.get("memory_ids") or [])
+            else:
+                agent_id = getattr(record, "agent_id", None)
+                memory_ids = list(getattr(record, "memory_ids", None) or [])
+            if agent_id is None or memory_id not in memory_ids:
+                continue
+            remaining = [value for value in memory_ids if value != memory_id]
+            if self.update_memagent_memory_ids(str(agent_id), remaining):
+                updated += 1
+        return updated
+
+    def _delete_scope_automations(self, agents: List[str]) -> Dict[str, int]:
+        """Delete the agents' automation jobs with their runs and deliveries."""
+        from ..automation.store.factory import get_automation_store
+
+        store = get_automation_store(self)
+        if store is None:
+            return {}
+        deleted = 0
+        for agent_id in agents:
+            for job in store.list_jobs(agent_id=agent_id):
+                if store.delete_job(job.job_id):
+                    deleted += 1
+        return {"automation_jobs": deleted}

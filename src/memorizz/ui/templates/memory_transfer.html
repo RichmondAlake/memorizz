@@ -26,7 +26,7 @@
     <h2 id="import-heading">Import memory</h2>
     <p>Validate the format and inspect planned changes before restoring records.</p>
     {% if read_only %}<p class="form-note">Import is disabled while this portal is read-only.</p>{% endif %}
-    <form id="memory-import-form" data-read-only="{{ 'true' if read_only else 'false' }}">
+    <form id="memory-import-form" data-read-only="{{ 'true' if read_only else 'false' }}" data-mutates>
         <label class="form-group">Archive file<input type="file" id="memory-archive-file" accept=".json,application/json" required {% if read_only %}disabled{% endif %}></label>
         <label class="form-group">Record identities<select name="id_strategy"><option value="preserve">Preserve IDs · restore the original graph</option><option value="new">New IDs · create an independent copy</option></select></label>
         <label class="form-group">Existing records<select name="conflict"><option value="error">Stop if any records already exist</option><option value="skip">Skip existing records</option><option value="replace">Replace matching records</option></select></label>

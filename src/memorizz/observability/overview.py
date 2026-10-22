@@ -49,8 +49,8 @@ TOOL_REASONS = {
     "duplicate_tool_call": "the model repeated a call that had already "
     "succeeded this turn, so the repeat was skipped",
     "tool_retry_limit": "the same call kept failing until its retry limit",
-    "tool_budget_exhausted": "the turn had used all of its tool calls, so the "
-    "rest were not run",
+    "tool_budget_exhausted": "the turn had used all of its tool calls "
+    "(ContextPolicy.max_tool_invocations_per_turn), so the rest were not run",
     "unreported": "the tool failed without a reason code",
 }
 PROVIDER_ERRORS = {
@@ -326,6 +326,94 @@ def _group(runs, key) -> Dict[str, List[Dict]]:
     return groups
 
 
+_VERDICT_WORDS = {
+    "success": "pass",
+    "failure": "fail",
+    "partial": "partial",
+    "unknown": "unknown",
+}
+
+
+def _verdict_time(row: Dict[str, Any]) -> Optional[datetime]:
+    return _when(row.get("updated_at") or row.get("created_at") or row.get("timestamp"))
+
+
+def _grade_runs(
+    runs: List[Dict[str, Any]],
+    verdicts: Iterable[Dict[str, Any]],
+    start: datetime,
+    end: datetime,
+) -> List[Dict[str, Any]]:
+    """Join recorded outcomes and grader verdicts to the window's runs.
+
+    A turn's grade is the newest verdict of each grader (or source): it fails
+    when any of them is a failure. A verdict whose run is not in the loaded
+    events still counts when it was recorded inside the window; its record
+    names the turn to link. Returns one entry per graded turn, each with its
+    run (``verdicts`` and ``grade`` set on it), the grade and when it ran.
+    """
+    by_turn: Dict[str, List[Dict[str, Any]]] = {}
+    for row in verdicts or ():
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "").lower() not in _VERDICT_WORDS:
+            continue
+        key = str(row.get("turn_id") or row.get("root_trace_id") or "")
+        if key:
+            by_turn.setdefault(key, []).append(row)
+    runs_by_key = {run["key"]: run for run in runs}
+    runs_by_root = {run["root_trace_id"]: run for run in runs if run["root_trace_id"]}
+    graded = []
+    for key, rows in by_turn.items():
+        rows.sort(
+            key=lambda row: _verdict_time(row)
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            latest[str(row.get("grader") or row.get("source") or "")] = row
+        final = list(latest.values())
+        recorded = _verdict_time(final[-1])
+        run = runs_by_key.get(key) or runs_by_root.get(
+            str(final[-1].get("root_trace_id") or "")
+        )
+        if run is None:
+            if recorded is None or not start <= recorded <= end:
+                continue
+            run = {
+                field: str(final[-1].get(field) or "")
+                for field in ("agent_id", "thread_id", "root_trace_id", "turn_id")
+            }
+            run["started_at"] = None
+        statuses = {str(row.get("status") or "").lower() for row in final}
+        grade = next(
+            (s for s in ("failure", "partial", "success") if s in statuses),
+            "unknown",
+        )
+        run["grade"] = _VERDICT_WORDS[grade]
+        run["verdicts"] = [
+            {
+                "verdict": _VERDICT_WORDS[str(row.get("status")).lower()],
+                "grader": str(row.get("grader") or row.get("source") or ""),
+                "reason_code": str(row.get("reason_code") or ""),
+                "score": row.get("score"),
+                "verified": row.get("verified") is True,
+            }
+            for row in final
+        ]
+        graded.append(
+            {
+                "run": run,
+                "grade": grade,
+                "at": run.get("started_at") or recorded,
+                "failing": [
+                    row for row in final if str(row.get("status")).lower() == "failure"
+                ],
+            }
+        )
+    return graded
+
+
 def build_operations_overview(
     events: Iterable[Dict[str, Any]],
     *,
@@ -334,12 +422,15 @@ def build_operations_overview(
     recent_limit: int = 12,
     price: Optional[Callable[[Dict[str, Any]], Optional[Decimal]]] = None,
     span: Optional[Dict[str, Any]] = None,
+    verdicts: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Summarize runs that started inside ``window`` (a key of ``WINDOWS``),
     or inside ``span`` from ``resolve_window`` when given.
 
     ``price`` returns a model result's cost or None when it cannot be priced;
-    by default only a recorded ``cost_usd`` counts.
+    by default only a recorded ``cost_usd`` counts. ``verdicts`` are recorded
+    task outcomes (``record_task_outcome``); turns that failed grading become
+    a ``graded_failures`` attention item linked to the newest one.
     """
     price = price or _recorded_cost
     now = now or datetime.now(timezone.utc)
@@ -362,6 +453,8 @@ def build_operations_overview(
 
     finished = [run for run in runs if run["status"] in {"success", "failed"}]
     failed = [run for run in runs if run["status"] == "failed"]
+    graded = _grade_runs(runs, verdicts or (), start, end)
+    graded_failures = [item for item in graded if item["grade"] == "failure"]
     durations = [
         run["duration_ms"] for run in finished if run["duration_ms"] is not None
     ]
@@ -393,6 +486,8 @@ def build_operations_overview(
         "tool_calls": sum(run["tool_calls"] for run in runs),
         "tool_failures": sum(run["tool_failures"] for run in runs),
         "runs_with_tool_failures": sum(bool(run["tool_failures"]) for run in runs),
+        "graded_runs": len(graded),
+        "graded_failures": len(graded_failures),
     }
 
     agents = []
@@ -486,6 +581,38 @@ def build_operations_overview(
                 "detail": detail,
                 "run": failed[0],
                 "count": len(failed),
+            }
+        )
+    if graded_failures:
+        newest = max(
+            graded_failures,
+            key=lambda item: item["at"] or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        count = len(graded_failures)
+        reasons = Counter(
+            str(row.get("reason_code") or "unreported")
+            for item in graded_failures
+            for row in item["failing"]
+        )
+        graders = sorted(
+            {
+                str(row.get("grader") or row.get("source") or "unnamed grader")
+                for item in graded_failures
+                for row in item["failing"]
+            }
+        )
+        reason, times = reasons.most_common(1)[0]
+        attention.append(
+            {
+                "severity": "error",
+                "kind": "graded_failures",
+                "title": f"{count} turn{'s' if count != 1 else ''} failed grading",
+                "detail": f"Most common reason: {reason} ({times} of "
+                f"{sum(reasons.values())} failing verdicts). Graded by "
+                f"{', '.join(graders)}.",
+                "run": newest["run"],
+                "count": count,
+                "agent_id": newest["run"].get("agent_id") or "",
             }
         )
     for row in tools:

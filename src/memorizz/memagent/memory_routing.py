@@ -26,6 +26,13 @@ With ``capture_turns`` (the default) every user message is routed after its
 turn, on the memory upkeep worker, so the chat model no longer spends tool
 calls on bookkeeping. ``MemAgent.remember(text)`` and the ``remember`` tool
 route one memory on demand.
+
+Entity capture works without routing: when entity memory is on and the agent
+has its own background model, that model reads each user message after the
+turn and files the entity facts it states (``entity_capture``, on by default
+in that case; ``with_entity_memory(True, capture=False)`` turns it off). No
+router is asked, and facts the chat model wrote with ``entity_memory_upsert``
+in the same turn are not written again.
 """
 
 from __future__ import annotations
@@ -56,6 +63,15 @@ def _truthy(value: Any) -> bool:
     return bool(value)
 
 
+def _capture_setting(value: Any) -> Optional[bool]:
+    """``entity_capture``: None (or ``"auto"``) decides by the agent."""
+    if value is None or (
+        isinstance(value, str) and value.strip().lower() in {"", "auto"}
+    ):
+        return None
+    return _truthy(value)
+
+
 @dataclass(frozen=True)
 class MemoryRoutingConfig:
     """How an agent routes its own memory writes. Off by default."""
@@ -71,6 +87,11 @@ class MemoryRoutingConfig:
     #: Below this confidence nothing is filed (``remember`` keeps it in the
     #: knowledge base instead).
     min_confidence: float = 0.5
+    #: Extract entity facts from each user message with the background model
+    #: even when routing is off. None (the default) does it when entity memory
+    #: is on and the agent has its own background model; False never; True
+    #: also on the chat model when there is no background model.
+    entity_capture: Optional[bool] = None
     extra: Dict[str, Any] = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:
@@ -78,6 +99,9 @@ class MemoryRoutingConfig:
             raise ValueError(
                 f"Unknown memory router {self.router!r}; use one of {', '.join(ROUTERS)}"
             )
+        object.__setattr__(
+            self, "entity_capture", _capture_setting(self.entity_capture)
+        )
         try:
             confidence = float(self.min_confidence)
         except (TypeError, ValueError) as exc:
@@ -110,7 +134,8 @@ class MemoryRoutingConfig:
             raise TypeError("memory_routing must be a bool, a router name or a mapping")
         known = {item.name for item in fields(cls)} - {"extra"}
         data = {key: value[key] for key in value if key in known}
-        data.setdefault("enabled", True)
+        # {"entity_capture": False} sets capture alone; routing stays off.
+        data.setdefault("enabled", set(data) != {"entity_capture"})
         data["enabled"] = _truthy(data["enabled"])
         if "capture_turns" in data:
             data["capture_turns"] = _truthy(data["capture_turns"])
@@ -127,7 +152,14 @@ class MemoryRoutingConfig:
             out["model"] = self.model
         if self.run_id:
             out["run_id"] = self.run_id
+        if self.entity_capture is not None:
+            out["entity_capture"] = self.entity_capture
         return out
+
+    @property
+    def worth_saving(self) -> bool:
+        """Routing is on, or entity capture was set by hand."""
+        return self.enabled or self.entity_capture is not None
 
     @property
     def label(self) -> str:
@@ -455,37 +487,100 @@ def file_entity_facts(
     memory_id: str,
     user_id: Optional[str],
     routing: Mapping[str, Any],
+    source: str = "memory_routing",
 ) -> List[Dict[str, Any]]:
-    """Upsert extracted facts; returns what was stored."""
-    stored = []
+    """Upsert extracted facts, one write per entity; returns what was stored.
+
+    A fact whose entity's vector no longer covers all of it (its text is past
+    the embedding model's input limit) carries ``embedding_status``.
+    """
+    confidence = round(min(0.9, float(routing.get("confidence") or 0.7)), 2)
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for fact in facts:
-        entity_id = entities.upsert_entity(
-            entity_id=fact.get("entity_id") or None,
-            name=fact["entity"],
-            entity_type=fact.get("entity_type"),
-            attributes=[
-                {
-                    "name": fact["attribute"],
-                    "value": fact["value"],
-                    "confidence": round(
-                        min(0.9, float(routing.get("confidence") or 0.7)), 2
-                    ),
-                    "source": "memory_routing",
-                }
-            ],
+        key = (
+            str(fact.get("entity_id") or ""),
+            " ".join(str(fact["entity"]).casefold().split()),
+        )
+        groups.setdefault(key, []).append(fact)
+    stored = []
+    for group in groups.values():
+        first = group[0]
+        attributes = [
+            {
+                "name": fact["attribute"],
+                "value": fact["value"],
+                "confidence": confidence,
+                "source": source,
+            }
+            for fact in group
+        ]
+        upsert = getattr(entities, "upsert_entity_with_report", None)
+        arguments = dict(
+            entity_id=first.get("entity_id") or None,
+            name=first["entity"],
+            entity_type=next(
+                (fact["entity_type"] for fact in group if fact.get("entity_type")),
+                None,
+            ),
+            attributes=attributes,
             memory_id=memory_id,
             user_id=user_id,
         )
-        stored.append(
-            {
-                "entity_id": entity_id,
-                "entity": fact["entity"],
-                "attribute": fact["attribute"],
-                "value": fact["value"],
-                **({"replaces": fact["replaces"]} if fact.get("replaces") else {}),
-            }
+        if callable(upsert):
+            result = upsert(**arguments)
+            entity_id, embedding = result["entity_id"], result.get("embedding") or {}
+        else:
+            entity_id, embedding = entities.upsert_entity(**arguments), {}
+        note = (
+            {"embedding_status": embedding["status"]}
+            if embedding.get("status") in {"partial", "missing"}
+            else {}
         )
+        for fact in group:
+            stored.append(
+                {
+                    "entity_id": entity_id,
+                    "entity": fact["entity"],
+                    "attribute": fact["attribute"],
+                    "value": fact["value"],
+                    **({"replaces": fact["replaces"]} if fact.get("replaces") else {}),
+                    **note,
+                }
+            )
     return stored
+
+
+def without_tool_writes(
+    facts: List[Dict[str, Any]], written: List[Mapping[str, Any]]
+) -> List[Dict[str, Any]]:
+    """``facts`` less those the chat model wrote itself this turn.
+
+    ``written`` holds the turn's ``entity_memory_upsert`` calls (``entity_id``,
+    ``name`` and attribute ``names``). A fact on the same entity and attribute
+    is left to the chat model's write. Values already stored under another
+    attribute name are skipped by :func:`extract_facts` itself.
+    """
+    if not written:
+        return list(facts)
+
+    def _name(value: Any) -> str:
+        return " ".join(str(value or "").casefold().split())
+
+    by_id, by_name = set(), set()
+    for write in written:
+        for attribute in write.get("names") or ():
+            attribute = str(attribute).casefold()
+            if write.get("entity_id"):
+                by_id.add((str(write["entity_id"]), attribute))
+            if write.get("name"):
+                by_name.add((_name(write["name"]), attribute))
+    return [
+        fact
+        for fact in facts
+        if (str(fact.get("entity_id") or ""), str(fact["attribute"]).casefold())
+        not in by_id
+        and (_name(fact["entity"]), str(fact["attribute"]).casefold()) not in by_name
+    ]
 
 
 _SPACE = re.compile(r"\s+")
@@ -495,6 +590,72 @@ def clean_text(text: Any, limit: int = 4000) -> str:
     return _SPACE.sub(" ", str(text or "")).strip()[:limit]
 
 
+# A long message is read for entity facts in parts of this size, one
+# background-model call each, and at most this many parts.
+CAPTURE_PART_CHARS = 4000
+CAPTURE_MAX_PARTS = 8
+
+
+def text_parts(
+    text: Any, limit: int = CAPTURE_PART_CHARS, max_parts: int = CAPTURE_MAX_PARTS
+) -> Tuple[List[str], int]:
+    """``text`` in parts of at most ``limit`` characters, cut at a line break,
+    else a sentence end, else a space, so a fact stays in one part. Returns
+    the parts and how many characters past ``max_parts`` parts went unread."""
+    rest = str(text or "").strip()
+    parts: List[str] = []
+    while rest and len(parts) < max_parts:
+        if len(rest) <= limit:
+            parts.append(rest)
+            rest = ""
+            break
+        window, cut = rest[:limit], limit
+        for separator in ("\n", ". ", "; ", " "):
+            index = window.rfind(separator)
+            if index > limit // 2:
+                cut = index + len(separator)
+                break
+        parts.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    return [part for part in parts if part], len(rest)
+
+
+def extract_facts_in_parts(
+    text: str,
+    generate: Callable[[str], str],
+    records: List[Mapping[str, Any]],
+    *,
+    source: str = "what the user wrote",
+    thread_id: str = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """``extract_facts`` over a message of any length, part by part (see
+    ``text_parts``). A later part's value for an entity's attribute replaces
+    an earlier one, as a later line of the message would. Returns the facts
+    and ``{"parts": n, "unread_chars": n}``."""
+    from ..learning.consolidation import _normalized
+
+    parts, unread = text_parts(text)
+    found: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for part in parts:
+        for fact in extract_facts(
+            clean_text(part, limit=CAPTURE_PART_CHARS),
+            generate,
+            records,
+            source=source,
+            thread_id=thread_id,
+        ):
+            key = (_normalized(fact["entity"]), str(fact["attribute"]).casefold())
+            found.pop(key, None)
+            found[key] = fact
+    if unread:
+        logger.warning(
+            "Entity capture read %d part(s) of a message and left %d characters unread",
+            len(parts),
+            unread,
+        )
+    return list(found.values()), {"parts": len(parts), "unread_chars": unread}
+
+
 __all__ = [
     "DEFAULT_DECISIONS_MODEL",
     "FILED_STORES",
@@ -502,7 +663,9 @@ __all__ = [
     "REMEMBERED_NAMESPACE",
     "ROUTERS",
     "extract_facts",
+    "extract_facts_in_parts",
     "file_entity_facts",
     "place",
     "route",
+    "without_tool_writes",
 ]

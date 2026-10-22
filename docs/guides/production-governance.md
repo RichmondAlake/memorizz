@@ -360,6 +360,10 @@ counts = provider.delete_scope(
 )
 ```
 
+Add `keep_traces=True` to delete the memories but keep the scope's trace
+records. [Delete a scope](../memory-providers/scoped-cleanup.md) lists what each
+provider removes and keeps.
+
 ## Sandboxes and delegation
 
 E2B uses one bounded `Sandbox.create(...)` session, so write → execute → read is

@@ -331,6 +331,15 @@ class HarnessTask:
             self.output_schema = json.loads(encoded_schema)
         self.context = dict(self.context or {})
         self.metadata = dict(self.metadata or {})
+        # Run labels: given here, else those of the agent turn that started
+        # this task, so its trace carries the same tags.
+        from ..observability.tags import inherited_trace_tags, normalize_trace_tags
+
+        tags = inherited_trace_tags(
+            normalize_trace_tags(self.metadata.get("trace_tags") or {})
+        )
+        if tags:
+            self.metadata["trace_tags"] = tags
 
     @property
     def writes_workspace(self) -> bool:

@@ -626,6 +626,10 @@ let _localModelActionInFlight = false;
 async function handleLocalModelAction(button, action, provider, model, refresh) {
     if (_localModelActionInFlight) return;
     if (!action || !provider || !model) return;
+    if (window.MemorizzReadOnly && window.MemorizzReadOnly.active) {
+        window.MemorizzReadOnly.notify();
+        return;
+    }
 
     if (action === 'delete' && !window.confirm('Remove ' + model + ' from local cache?')) return;
     if (action === 'pull') {
@@ -852,4 +856,157 @@ if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => initRowExpanders());
 } else {
     initRowExpanders();
+}
+
+/*
+ * Read-only mode. The server refuses every change while the UI is read-only
+ * (MEMORIZZ_UI_READ_ONLY or `memorizz ui --read-only`); this turns the
+ * controls that would make one off up front, with a tooltip saying why:
+ *
+ *   - forms that POST (except the sign-in, connect and trace-reveal steps,
+ *     which the server still accepts): their submit buttons;
+ *   - anything marked data-mutates (JS-driven sends, launches, saves);
+ *   - destructive buttons (.btn-danger, .hx-btn-delete, .is-danger).
+ *
+ * GET forms (filters, search) keep working. Content rendered later (tables,
+ * dialogs) is covered by a MutationObserver. Page scripts can ask
+ * window.MemorizzReadOnly.active before sending a change.
+ */
+function initReadOnlyGuard() {
+    const body = document.body;
+    const active = Boolean(body && body.dataset.readOnly === "true");
+    const tooltip = (body && body.dataset.readOnlyTooltip) || "The UI is read-only. Changes are turned off.";
+    let toastTimer = null;
+
+    function notify() {
+        let toast = document.getElementById("ro-toast");
+        if (!toast) {
+            toast = document.createElement("div");
+            toast.id = "ro-toast";
+            toast.className = "ro-toast";
+            toast.setAttribute("role", "status");
+            document.body.appendChild(toast);
+        }
+        toast.textContent = tooltip;
+        toast.hidden = false;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { toast.hidden = true; }, 2600);
+    }
+
+    window.MemorizzReadOnly = { active, tooltip, notify };
+    if (!active) return;
+
+    const allowed = new Set((body.dataset.readOnlyAllow || "").split(/\s+/).filter(Boolean));
+    const ACTIONS = "[data-mutates], .btn-danger, .hx-btn-delete, .is-danger";
+
+    // A change sent by a page script whose control isn't marked: stop it here
+    // with the note, as the server would refuse it, rather than after a round
+    // trip that reads as a failure.
+    const send = window.fetch.bind(window);
+    window.fetch = (resource, init) => {
+        const method = String((init && init.method) || (resource && resource.method) || "GET").toUpperCase();
+        if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+            let url = null;
+            try {
+                url = new URL(typeof resource === "string" ? resource : resource.url, window.location.href);
+            } catch (_) {
+                url = null;
+            }
+            if (url && url.origin === window.location.origin && !allowed.has(url.pathname)) {
+                notify();
+                return Promise.resolve(new Response(JSON.stringify({ detail: tooltip }), {
+                    status: 403,
+                    headers: { "Content-Type": "application/json" },
+                }));
+            }
+        }
+        return send(resource, init);
+    };
+    const SUBMITS = 'button:not([type]), button[type="submit"], input[type="submit"], input[type="image"]';
+
+    function isWriteForm(form) {
+        if (!(form instanceof HTMLFormElement)) return false;
+        if (form.matches("[data-mutates]")) return true;
+        if ((form.getAttribute("method") || "get").toLowerCase() !== "post") return false;
+        let path = "";
+        try {
+            path = new URL(form.getAttribute("action") || window.location.href, window.location.href).pathname;
+        } catch (_) {
+            return true;
+        }
+        return !allowed.has(path);
+    }
+
+    function block(element) {
+        if (element.classList.contains("ro-blocked")) return;
+        element.classList.add("ro-blocked");
+        element.setAttribute("aria-disabled", "true");
+        element.setAttribute("title", tooltip);
+        if (element instanceof HTMLTextAreaElement || (element instanceof HTMLInputElement && !/^(submit|image|button)$/i.test(element.type))) {
+            element.readOnly = true;
+        } else if (element instanceof HTMLSelectElement) {
+            element.disabled = true;
+        }
+    }
+
+    function scan(root) {
+        const scope = root && root.querySelectorAll ? root : document;
+        const forms = scope instanceof HTMLFormElement ? [scope] : scope.querySelectorAll("form");
+        forms.forEach((form) => {
+            if (!isWriteForm(form)) return;
+            form.querySelectorAll(SUBMITS).forEach(block);
+            if (form.id) {
+                document.querySelectorAll(`[form="${CSS.escape(form.id)}"]`).forEach((control) => {
+                    if (control.matches(SUBMITS)) block(control);
+                });
+            }
+        });
+        scope.querySelectorAll(ACTIONS).forEach((element) => {
+            if (element instanceof HTMLFormElement) return;
+            // A confirmation dialog only opens from a control that is already off.
+            if (!element.matches("[data-mutates]") && element.closest("dialog")) return;
+            block(element);
+        });
+    }
+
+    function stop(event) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        notify();
+    }
+
+    document.addEventListener("click", (event) => {
+        if (event.target instanceof Element && event.target.closest(".ro-blocked")) stop(event);
+    }, true);
+    document.addEventListener("submit", (event) => {
+        if (isWriteForm(event.target)) stop(event);
+    }, true);
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const target = event.target instanceof Element ? event.target.closest(".ro-blocked") : null;
+        if (!target) return;
+        // Typing a space in a read-only text box is harmless; Enter would send.
+        if (event.key === " " && (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement)) return;
+        stop(event);
+    }, true);
+    // Dropping files adds them to a knowledge base.
+    document.addEventListener("drop", (event) => {
+        if (event.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files")) stop(event);
+    }, true);
+
+    scan(document);
+    let pending = false;
+    new MutationObserver(() => {
+        if (pending) return;
+        pending = true;
+        requestAnimationFrame(() => {
+            pending = false;
+            scan(document);
+        });
+    }).observe(body, { childList: true, subtree: true });
+}
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initReadOnlyGuard);
+} else {
+    initReadOnlyGuard();
 }

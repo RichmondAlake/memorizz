@@ -1181,11 +1181,39 @@ body.theme-light #trace-timeline {
     box-shadow: 0 0 0 1px var(--accent-primary);
 }
 
+.obs-tl-card > .obs-tl-why,
+.obs-tl-card > .obs-tl-note-line,
 .obs-tl-card > .obs-tl-section,
 .obs-tl-card > .obs-tl-contract,
 .obs-tl-card > .obs-tl-note {
     flex: 1 0 100%;
     order: 1;
+}
+
+/* Why an event failed, and what a model call or an unfinished turn did. */
+.obs-tl-why,
+.obs-tl-note-line {
+    margin: 2px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.obs-tl-why {
+    color: var(--text-primary);
+}
+
+.obs-tl-why::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin: 0 8px 1px 0;
+    background: var(--accent-danger);
+    border-radius: 50%;
+}
+
+.obs-tl-note-line {
+    color: var(--text-secondary);
 }
 
 .obs-tl-card > .obs-tl-content {

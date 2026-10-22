@@ -35,10 +35,17 @@ and the observability pages are covered in `docs/observability-ui.md`.
   records into what a page shows, without extra reads.
 - `state.py` holds the connected provider and shared services;
   `security.py` holds authentication, read-only mode and trace redaction.
+- `connection.py` connects (from the connect form, `memorizz ui` flags or the
+  environment) and describes the connection for the header on every page;
+  `embedding_check.py` compares the store's vectors with the configured
+  embedder when the UI connects.
 
 ## Security
 
 The UI binds to 127.0.0.1 by default. Before exposing it beyond one machine,
 set `MEMORIZZ_UI_AUTH_TOKEN` (or `MEMORIZZ_UI_AUTH_ACCOUNTS`). Set
-`MEMORIZZ_UI_READ_ONLY=true` to refuse every change, including harness
-launches and approvals.
+`MEMORIZZ_UI_READ_ONLY=true` (or `memorizz ui --read-only`) to refuse every
+change, including harness launches and approvals. The header then shows a
+Read-only badge, and `static/js/app.js` turns off POST forms, controls marked
+`data-mutates` and destructive buttons, with a tooltip. Mark a new JS-driven
+control that changes data with `data-mutates`.

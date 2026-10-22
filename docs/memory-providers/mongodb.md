@@ -56,6 +56,13 @@ the data now persist the same knowledge-base scope. This parity matters for
 shared MetaHarness evidence snapshots: later panel stages can reuse the first
 bounded snapshot without another MongoDB query.
 
+## Delete a scope
+
+`provider.delete_scope(memory_id=..., user_id=..., agent_ids=[...])` deletes one
+scope with a `delete_many` per collection. It is not a transaction. Pass
+`keep_traces=True` to keep the scope's trace records. See
+[Delete a scope](scoped-cleanup.md).
+
 ## When to Choose MongoDB
 
 - Prototype agents without running Oracle locally

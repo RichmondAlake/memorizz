@@ -48,11 +48,19 @@ def test_day_buckets_start_at_midnight_in_the_chosen_zone():
     assert period_start(moment, 86400, new_york) == datetime(
         2026, 10, 21, 4, tzinfo=timezone.utc
     ), "01:30 UTC is still Oct 21 in New York"
+    at = lambda stamp: {"timestamp": stamp}  # noqa: E731
     usage = aggregate_usage(
-        [_call(1, hours_ago=1), _call(2, hours_ago=1.2), _call(3, hours_ago=30)],
+        [
+            {**_call(1, hours_ago=0), **at("2026-10-22T09:10:00+00:00")},
+            {**_call(2, hours_ago=0), **at("2026-10-22T09:50:00+00:00")},
+            {**_call(3, hours_ago=0), **at("2026-10-21T05:00:00+00:00")},
+        ],
         interval_seconds=3600,
     )
-    assert [row["calls"] for row in usage["series"]] == [1, 2]
+    assert [(row["label"], row["calls"]) for row in usage["series"]] == [
+        ("2026-10-21T05:00:00+00:00", 1),
+        ("2026-10-22T09:00:00+00:00", 2),
+    ], "calls in the same clock hour share a bar"
     assert all(row["started_at"] for row in usage["interactions"])
 
 

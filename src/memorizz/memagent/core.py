@@ -72,6 +72,11 @@ from ..observability.analytics import memory_type as usage_memory_type
 from ..observability.normalization import TRACE_METADATA_FIELDS
 from ..observability.pricing import DEFAULT_PRICING
 from ..observability.prompt_cache import add_call_usage
+from ..observability.tags import (
+    current_trace_tags,
+    inherited_trace_tags,
+    normalize_trace_tags,
+)
 from ..retrieval import sealed_elsewhere
 from ..streaming import (
     HarnessProgress,
@@ -104,7 +109,7 @@ from ..tooling import (
     tool_metadata_to_openai,
 )
 from ..vercel_skills.skill_md import parse_skill_md
-from . import persistence
+from . import persistence, trace_links
 from .constants import (
     BASE_SYSTEM_PROMPT,
     CONTINUOUS_MAX_STEPS,
@@ -132,6 +137,7 @@ from .utils.context_dedup import (
     dedupe_and_select,
     filter_skill_covered_workflows,
     is_suppressed,
+    retrieved_record_entries,
 )
 from .utils.importance import ImportanceConfig, ImportanceRater
 from .utils.prompt_budget import estimate_message_tokens, estimate_tokens, fit_prompt
@@ -152,6 +158,10 @@ if TYPE_CHECKING:
     from ..short_term_memory.semantic_cache import SemanticCacheInspection
 
 logger = logging.getLogger(__name__)
+
+# What a turn that didn't finish keeps of the user's message and of the reply
+# written so far, each, in its trace (see _finish_trace_turn).
+_UNFINISHED_TURN_CHARS = 4000
 
 
 def _memory_reranker(
@@ -414,6 +424,10 @@ class MemAgent:
     _current_turn_id = _ContextLocal()
     _current_root_trace_id = _ContextLocal()
     _current_parent_span_id = _ContextLocal()
+    # Run labels (trace_tags) of the current turn, validated, and the token
+    # that restores the context's running-turn tags when it ends.
+    _current_trace_tags = _ContextLocal(dict)
+    _trace_tags_token = _ContextLocal(lambda: None)
     _last_trace_context = _ContextLocal(dict)
     _history_scope = _ContextLocal()
     _last_tool_outcomes = _ContextLocal(list)
@@ -421,6 +435,9 @@ class MemAgent:
     _last_retrieval_stats = _ContextLocal(dict)
     _last_selection_ledger = _ContextLocal(list)
     _last_memory_context_evidence = _ContextLocal(dict)
+    # Plain record ids behind the evidence refs; never traced (see
+    # last_memory_context_evidence(include_ids=True)).
+    _last_retrieved_ids = _ContextLocal(list)
     _memory_usage_chars = _ContextLocal(dict)
     _run_usage = _ContextLocal(dict)
     _rendered_persona_chars = _ContextLocal(lambda: 0)
@@ -433,6 +450,9 @@ class MemAgent:
     _turn_had_side_effects = _ContextLocal(lambda: False)
     _turn_had_nondeterministic_tools = _ContextLocal(lambda: False)
     _turn_cache_domains = _ContextLocal(set)
+    # This turn's entity_memory_upsert calls, so the background capture of
+    # the user's message does not write the same facts again.
+    _turn_entity_tool_writes = _ContextLocal(list)
     _cache_bypass_reason = _ContextLocal()
     # Set when the turn's answer is a failure message (provider error,
     # exhausted loop); run/run_stream then neither cache nor record it.
@@ -3778,16 +3798,29 @@ class MemAgent:
             self._unregister_mcp_tools()
         return self
 
-    def with_entity_memory(self, enabled: bool = True):
+    def with_entity_memory(self, enabled: bool = True, *, capture: Any = "keep"):
         """
         Enable or disable entity memory support at runtime.
 
         Args:
             enabled: True to expose entity memory tools/context, False to disable.
+            capture: Background capture of entity facts from each user
+                message. ``None`` (the default setting) captures when the
+                agent has its own background model; ``False`` turns it off;
+                ``True`` captures on the chat model when there is no
+                background model. Left out, the current setting stays.
 
         Returns:
             Self for chaining.
         """
+        if capture != "keep":
+            from dataclasses import replace as replace_config
+
+            from .memory_routing import _capture_setting
+
+            self.memory_routing = replace_config(
+                self.memory_routing, entity_capture=_capture_setting(capture)
+            )
         manager_ready = (
             self.entity_memory_manager and self.entity_memory_manager.is_enabled()
         )
@@ -4998,9 +5031,13 @@ class MemAgent:
         *,
         query: Optional[str] = None,
         emit_start: bool = True,
+        trace_tags: Optional[Dict[str, str]] = None,
     ) -> None:
         """Initialize an isolated trace collector and durable turn identity."""
         self._current_user_id = user_id
+        # A turn started inside another (a delegate's) keeps its parent's tags.
+        self._current_trace_tags = inherited_trace_tags(trace_tags)
+        self._trace_tags_token = current_trace_tags.set(dict(self._current_trace_tags))
         session = session_for(self)
         self._current_run_id = (
             session.identity["run_id"] if session else str(uuid.uuid4())
@@ -5015,6 +5052,7 @@ class MemAgent:
         self._stream_trace_events = []
         self._last_tool_outcomes = []
         self._last_memory_context_evidence = {}
+        self._last_retrieved_ids = []
         self._memory_usage_chars = {}
         self._run_usage = {}
         self._last_selection_ledger = []
@@ -5062,6 +5100,11 @@ class MemAgent:
                 "content": "",
                 "persona_id": reference["ref"] if reference else None,
                 "persona_version": persona.version if persona else None,
+                **(
+                    {"trace_tags": dict(self._current_trace_tags)}
+                    if self._current_trace_tags
+                    else {}
+                ),
             },
         )
 
@@ -5317,6 +5360,15 @@ class MemAgent:
             self._fingerprint(self._memory_row_identifier(row, f"summary:{index}"))
             for index, row in enumerate(summaries)
         ]
+        # Plain ids for retrieval evaluation, kept out of the traced payload.
+        self._last_retrieved_ids = retrieved_record_entries(
+            semantic,
+            semantic_refs,
+            entities,
+            entity_refs,
+            evidence_items,
+            fingerprint=self._fingerprint,
+        )
         source_counts = {
             "persona_snapshots": int(bool(persona_ref)),
             "history_messages": len(history),
@@ -5631,9 +5683,20 @@ class MemAgent:
         )
 
     def _finish_trace_turn(
-        self, status: str, *, error_code: Optional[str] = None
+        self,
+        status: str,
+        *,
+        error_code: Optional[str] = None,
+        query: Optional[str] = None,
+        partial_reply: Optional[str] = None,
     ) -> None:
-        """Close the root turn span without persisting exception messages."""
+        """Close the root turn span without persisting exception messages.
+
+        A turn that did not succeed keeps what a reader needs to see what
+        happened, since nothing else saves it: the user's message and any
+        reply text written before it stopped, as the event's content (shown
+        only through the same audited reveal as other trace content), and
+        for a cancelled turn the reason code the cancellation gave."""
         payload: Dict[str, Any] = {
             "trace_kind": "turn_result",
             "title": "Agent turn completed"
@@ -5648,8 +5711,35 @@ class MemAgent:
         }
         if error_code:
             payload["error_code"] = error_code
+        if status != "success":
+            token = current_cancellation.get()
+            if status == "cancelled" and token is not None and token.reason:
+                payload["stop_reason"] = str(token.reason)[:40]
+            reply = partial_reply or ""
+            payload["partial_reply_chars"] = len(reply)
+            unfinished = {
+                key: value[:_UNFINISHED_TURN_CHARS]
+                for key, value in (("user_message", query), ("partial_reply", reply))
+                if isinstance(value, str) and value
+            }
+            if unfinished:
+                payload["content"] = json.dumps(unfinished, ensure_ascii=False)
+        limits = self.last_turn_limits
+        if limits["tool_budget_exhausted"]:
+            payload["tool_budget_exhausted"] = True
+            payload["refused_tool_calls"] = limits["refused_tool_calls"]
+            payload["tool_call_limit"] = limits["tool_call_limit"]
+        if self._current_trace_tags:
+            payload["trace_tags"] = dict(self._current_trace_tags)
         self._emit_stream_event("trace", payload)
         self._last_trace_context = self._trace_identity_payload()
+        trace_links.remember_turn(self, self._last_trace_context)
+        token, self._trace_tags_token = self._trace_tags_token, None
+        if token is not None:
+            try:
+                current_trace_tags.reset(token)
+            except ValueError:
+                current_trace_tags.set({})  # finished in another context
         if self.learning_control_plane is not None:
             try:
                 self.learning_control_plane.complete_run(
@@ -5743,6 +5833,35 @@ class MemAgent:
         """Structured outcomes from the most recent turn, in execution order."""
         return [dict(item) for item in (self._last_tool_outcomes or [])]
 
+    @property
+    def last_turn_limits(self) -> Dict[str, Any]:
+        """Per-turn limits the most recent turn ran into.
+
+        ``tool_budget_exhausted`` is True when tool calls were refused
+        because the turn had used ``ContextPolicy.max_tool_invocations_per_turn``
+        (``tool_call_limit``). ``refused_tool_calls`` counts the calls that
+        did not run and ``refused_tools`` counts them by tool name.
+        """
+        refused: Dict[str, int] = {}
+        for item in self._last_tool_outcomes or []:
+            if (
+                isinstance(item, dict)
+                and item.get("reason_code") == "tool_budget_exhausted"
+            ):
+                name = str(item.get("tool_name") or "tool")
+                refused[name] = refused.get(name, 0) + 1
+        router = getattr(self, "semantic_tool_router", None)
+        policy = getattr(self, "context_policy", None)
+        limit = getattr(router, "max_invocations_per_turn", None) or getattr(
+            policy, "max_tool_invocations_per_turn", 0
+        )
+        return {
+            "tool_budget_exhausted": bool(refused),
+            "refused_tool_calls": sum(refused.values()),
+            "refused_tools": dict(sorted(refused.items())),
+            "tool_call_limit": int(limit or 0),
+        }
+
     def record_feedback(
         self,
         rating: float,
@@ -5771,21 +5890,66 @@ class MemAgent:
             external_id=external_id,
         )
 
+    def trace_url(
+        self,
+        base_url: str = trace_links.DEFAULT_UI_URL,
+        *,
+        turn_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """The Traces page link for the last turn's trace, or None when no
+        turn has run.
+
+        The last turn is the newest one this agent object finished, in any
+        thread or stream (``run_stream_events`` included). Pass ``turn_id`` to
+        link another of its turns. The link names the agent, thread, root
+        trace and turn, and opens at ``#trace-timeline``.
+        """
+        context = (
+            trace_links.turn_context(self, turn_id)
+            if turn_id
+            else trace_links.latest_turn(self)
+        )
+        return trace_links.trace_url(context, base_url)
+
     def record_task_outcome(
         self,
-        status: str,
+        status: Optional[str] = None,
         *,
+        verdict: Optional[str] = None,
+        turn_id: Optional[str] = None,
         verified: bool = True,
-        source: str = "application",
+        source: Optional[str] = None,
         score: Optional[float] = None,
+        grader: Optional[str] = None,
+        reason_code: Optional[str] = None,
         metrics: Optional[Dict[str, Any]] = None,
         trace_context: Optional[Dict[str, Any]] = None,
         external_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Join a business/task outcome to a concrete agent trace."""
+        """Join a task outcome, or a grader's verdict, to a turn's trace.
+
+        Give the outcome as ``status`` (success, failure, partial, unknown)
+        or as a grader ``verdict`` (pass, fail, partial, unknown). The turn
+        is ``turn_id``, ``trace_context``, or else the last turn in this
+        context. ``grader`` names who judged it and ``reason_code`` says why;
+        both are short labels. ``source`` defaults to ``"grader"`` when a
+        grader is named, else ``"application"``. Failing verdicts appear on
+        the turn in Traces and under the Overview's Needs attention.
+        """
         if not self.memory_provider:
             raise ValueError("record_task_outcome requires a memory provider")
-        resolved_trace_context = trace_context or self.get_trace_context()
+        from ..observability.store import resolve_outcome_status
+
+        status = resolve_outcome_status(status, verdict)
+        if turn_id is not None and trace_context is not None:
+            if str(trace_context.get("turn_id") or turn_id) != str(turn_id):
+                raise ValueError("turn_id and trace_context name different turns")
+        resolved_trace_context = trace_context or (
+            trace_links.turn_context(self, turn_id)
+            if turn_id is not None
+            else self.get_trace_context()
+        )
+        source = source or ("grader" if grader else "application")
         if self.learning_control_plane is not None:
             from ..learning import OutcomeEvidence
 
@@ -5800,6 +5964,8 @@ class MemAgent:
                 outcome,
                 scope=resolved_trace_context,
                 external_id=external_id,
+                grader=grader,
+                reason_code=reason_code,
             )
         from ..observability import ObservabilityStore
 
@@ -5811,6 +5977,8 @@ class MemAgent:
             score=score,
             metrics=metrics,
             external_id=external_id,
+            grader=grader,
+            reason_code=reason_code,
         )
 
     def _model_trace_metadata(self) -> Dict[str, Any]:
@@ -6261,6 +6429,7 @@ class MemAgent:
         self._turn_had_side_effects = False
         self._turn_had_nondeterministic_tools = False
         self._turn_cache_domains = set()
+        self._turn_entity_tool_writes = []
         self._cache_bypass_reason = None
         self._interaction_error_code = None
         self._last_completion_decisions = []
@@ -6422,6 +6591,7 @@ class MemAgent:
         tool_context: Optional[Dict[str, Any]] = None,
         observability_context: Optional[Dict[str, Any]] = None,
         retrieval_policy: Any = None,
+        trace_tags: Optional[Dict[str, str]] = None,
     ) -> str:
         """
         Run the agent with the given query using the new manager architecture.
@@ -6472,10 +6642,18 @@ class MemAgent:
                 agent's policy for the call. The agent's own policy, and what
                 ``save()`` writes, stay unchanged, and other calls running at
                 the same time keep theirs.
+            trace_tags: Optional run labels for this turn's trace, such as
+                ``{"experiment": "lme-v2", "question": "q17"}``. They are
+                recorded on the turn's start and result events, never sent to
+                the model, and the Traces page filters by them. At most 16
+                string tags; see ``memorizz.observability.normalize_trace_tags``
+                for the rules. Invalid tags raise ``ValueError`` before the
+                turn runs.
 
         Returns:
             The agent's response
         """
+        trace_tags = normalize_trace_tags(trace_tags)
         if retrieval_policy is not None:
             previous_policy = self._retrieval_policy_override
             self._retrieval_policy_override = self._call_policy(retrieval_policy)
@@ -6488,6 +6666,7 @@ class MemAgent:
                     context=context,
                     tool_context=tool_context,
                     observability_context=observability_context,
+                    trace_tags=trace_tags,
                 )
             finally:
                 self._retrieval_policy_override = previous_policy
@@ -6571,7 +6750,7 @@ class MemAgent:
         try:
             # 1. Prepare IDs with per-thread state isolation.
             memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
-            self._begin_trace_turn(user_id, query=query)
+            self._begin_trace_turn(user_id, query=query, trace_tags=trace_tags)
             trace_initialized = True
             self._emit_context_provenance_trace(observability_context, context)
             cache_metadata, cached_response = self._begin_turn_cache_lookup(
@@ -6652,6 +6831,7 @@ class MemAgent:
                 self._finish_trace_turn(
                     turn_status,
                     error_code=turn_error_code,
+                    query=query,
                 )
                 self._record_stream_trace_bundle(
                     memory_id,
@@ -7374,9 +7554,15 @@ class MemAgent:
     def run_stream_events(
         self, query, *, delivery_mode=None, cancellation=None, queue_size=64, **kwargs
     ):
-        """Return a closeable, ordered v1 event stream (no private reasoning)."""
+        """Return a closeable, ordered v1 event stream (no private reasoning).
+
+        Accepts ``run()``'s keyword arguments, including ``trace_tags``.
+        """
         from ..streaming import agent_event_stream
 
+        if kwargs.get("trace_tags") is not None:
+            # Invalid tags fail here, before a worker starts the turn.
+            kwargs["trace_tags"] = normalize_trace_tags(kwargs["trace_tags"])
         return agent_event_stream(
             self,
             query,
@@ -7404,6 +7590,7 @@ class MemAgent:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         observability_context: Optional[Dict[str, Any]] = None,
         retrieval_policy: Any = None,
+        trace_tags: Optional[Dict[str, str]] = None,
     ) -> Generator[str, None, None]:
         """
         Run the agent with streaming output, yielding text chunks as they arrive.
@@ -7434,6 +7621,9 @@ class MemAgent:
                 ``run()``; the same strict persistence allowlist applies.
             retrieval_policy: Optional policy for this stream only. See
                 ``run()``.
+            trace_tags: Optional run labels for this turn's trace. See
+                ``run()``; ``run_stream_events(..., trace_tags=...)`` passes
+                them here.
 
         Yields:
             str: Partial text chunks of the agent's response
@@ -7441,6 +7631,7 @@ class MemAgent:
         .. deprecated:: 0.13
             Use :meth:`run_stream_events`. This method will be removed in 0.14.
         """
+        trace_tags = normalize_trace_tags(trace_tags)
         if retrieval_policy is not None:
             previous_policy = self._retrieval_policy_override
             self._retrieval_policy_override = self._call_policy(retrieval_policy)
@@ -7455,6 +7646,7 @@ class MemAgent:
                     raise_on_provider_error=raise_on_provider_error,
                     event_callback=event_callback,
                     observability_context=observability_context,
+                    trace_tags=trace_tags,
                 )
             finally:
                 self._retrieval_policy_override = previous_policy
@@ -7483,6 +7675,7 @@ class MemAgent:
                 context=context,
                 tool_context=tool_context,
                 observability_context=observability_context,
+                trace_tags=trace_tags,
             )
             return
 
@@ -7517,6 +7710,7 @@ class MemAgent:
                 context=context,
                 tool_context=tool_context,
                 observability_context=observability_context,
+                trace_tags=trace_tags,
             )
             return
 
@@ -7531,12 +7725,15 @@ class MemAgent:
         trace_finished = False
         turn_status = "error"
         turn_error_code: Optional[str] = None
+        full_response = ""
         session = session_for(self)
         try:
             check_cancelled()
             # 1. Prepare IDs with per-thread state isolation.
             memory_id, thread_id = self._resolve_execution_state(memory_id, thread_id)
-            self._begin_trace_turn(user_id, query=query, emit_start=False)
+            self._begin_trace_turn(
+                user_id, query=query, emit_start=False, trace_tags=trace_tags
+            )
             trace_initialized = True
             # M3: the lifecycle event is emitted after ID resolution so every
             # callback receives the same durable identity as persisted spans.
@@ -7699,6 +7896,8 @@ class MemAgent:
                     self._finish_trace_turn(
                         turn_status,
                         error_code=turn_error_code,
+                        query=query,
+                        partial_reply=full_response,
                     )
                 self._record_stream_trace_bundle(
                     memory_id,
@@ -7912,6 +8111,9 @@ class MemAgent:
                 if value is None or not isinstance(value, (str, int, float, bool)):
                     continue
                 entry[field] = value[:240] if isinstance(value, str) else value
+            # Run labels were validated when the turn began.
+            if isinstance(event.get("trace_tags"), dict) and event["trace_tags"]:
+                entry["trace_tags"] = dict(event["trace_tags"])
             normalized.append(entry)
 
         return [item for item in normalized if item.get("title") or item.get("content")]
@@ -8075,13 +8277,22 @@ class MemAgent:
             tools = router.schemas_for_turn(
                 query, user_id=user_id, cache_scope=self.agent_id or "anon"
             )
-            return tools or None
-        tools = [
-            schema
-            for metadata in (self.tool_manager.get_tool_metadata() or [])
-            if (schema := tool_metadata_to_openai(metadata)) is not None
-        ]
-        tools.sort(key=lambda item: str(item["function"]["name"]))
+        else:
+            tools = [
+                schema
+                for metadata in (self.tool_manager.get_tool_metadata() or [])
+                if (schema := tool_metadata_to_openai(metadata)) is not None
+            ]
+            tools.sort(key=lambda item: str(item["function"]["name"]))
+
+        # Nothing to look up for a user with no entities: leave the lookup
+        # out (the upsert stays), so the model does not spend a call on it.
+        def _is_lookup(item: Dict[str, Any]) -> bool:
+            return (item.get("function") or {}).get("name") == "entity_memory_lookup"
+
+        if any(_is_lookup(item) for item in tools or []):
+            if not self._entity_lookup_offered():
+                tools = [item for item in tools if not _is_lookup(item)]
         return tools or None
 
     def _set_provider_cache_scope(self) -> None:
@@ -8718,6 +8929,8 @@ class MemAgent:
         logical_arguments = arguments
         routed_warnings: List[str] = []
         routed_call_hash: Optional[str] = None
+        # Calls this turn has left after this one (None when not budgeted).
+        tool_calls_left: Optional[int] = None
         error_message: Optional[str] = None
         result: Any = None
         tool_outcome: Optional[ToolOutcome] = None
@@ -8923,6 +9136,7 @@ class MemAgent:
                         error_message = str(prepared.get("error") or "Routing failed")
                     else:
                         routed_call_hash = str(prepared["call_hash"])
+                        tool_calls_left = prepared.get("remaining")
 
                 if result is None:
                     check_cancelled()
@@ -9114,12 +9328,19 @@ class MemAgent:
         else:
             compact_result = result_str
 
+        # Near the end of the turn's tool budget the model is told how many
+        # calls are left. Only this newest message changes (cache-safe).
+        budget_note = (
+            router.budget_note(tool_calls_left)
+            if router is not None and hasattr(router, "budget_note")
+            else ""
+        )
         messages.append(
             {
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "name": tool_name,
-                "content": compact_result,
+                "content": compact_result + budget_note,
             }
         )
 
@@ -9999,6 +10220,8 @@ class MemAgent:
                         history_texts=history_texts,
                         query_embedding=query_embedding,
                         max_items=policy.max_items,
+                        max_chars_per_item=getattr(policy, "max_chars_per_item", 600),
+                        max_total_chars=getattr(policy, "max_recall_chars", None),
                         dedupe_parent_sources=policy.dedupe_parent_sources,
                         selection_ledger=self._last_selection_ledger,
                         scoring=self._retrieval_scoring(),
@@ -10266,10 +10489,16 @@ class MemAgent:
             prompt_parts.append(
                 "Entity memory usage:\n"
                 "- Facts about known entities relevant to the current query are provided with the user's message when available.\n"
-                "- Before answering, call 'entity_memory_lookup' when the user references known people or when recalling prior facts might help.\n"
+                + (
+                    # Not offered while this user has no entities (the
+                    # lookup tool is left out of the turn's tools too).
+                    "- Before answering, call 'entity_memory_lookup' when the user references known people or when recalling prior facts might help.\n"
+                    if self._entity_lookup_offered()
+                    else "- Nothing is stored about this user's entities yet, so there is nothing to look up.\n"
+                )
                 + (
                     "- Facts the user shares about themselves and others are saved automatically after each turn; call 'entity_memory_upsert' only when the user asks you to correct or change a stored fact.\n"
-                    if self.memory_routing.enabled and self.memory_routing.capture_turns
+                    if self._turn_capture_mode()
                     else "- After the user shares stable personal info (name, preferences, background, ongoing projects, likes/dislikes), call 'entity_memory_upsert' with the attribute/value pair so it persists.\n"
                 )
                 + "- Only store verifiable statements; skip speculative or time-sensitive details.\n"
@@ -10793,22 +11022,34 @@ class MemAgent:
             if resolved_memory_id is None:
                 raise ValueError("A memory_id is required to store entity information.")
 
-            new_entity_id = self.entity_memory_manager.upsert_entity_from_tool(
+            normalized_attributes = _normalize_attributes(attributes)
+            stored = self.entity_memory_manager.upsert_entity_from_tool(
                 entity_id=entity_id,
                 name=name,
                 entity_type=entity_type,
-                attributes=_normalize_attributes(attributes),
+                attributes=normalized_attributes,
                 relations=_normalize_relations(relations),
                 metadata=_normalize_json_field(metadata, dict),
                 memory_id=resolved_memory_id,
                 user_id=self._current_user_id,
+                report=True,
+            )
+            if not isinstance(stored, dict):  # a manager without reports
+                stored = {"entity_id": stored}
+            new_entity_id = stored["entity_id"]
+            self._turn_entity_tool_writes.append(
+                {
+                    "entity_id": new_entity_id,
+                    "name": name,
+                    "names": [item["name"] for item in normalized_attributes or []],
+                }
             )
             logger.info(
                 "entity_memory_upsert stored entity_id=%s (memory_id=%s)",
                 new_entity_id,
                 resolved_memory_id,
             )
-            return {
+            result = {
                 "entity_id": new_entity_id,
                 "storage": {
                     "memory_id_bound": resolved_memory_id is not None,
@@ -10816,6 +11057,12 @@ class MemAgent:
                     "scope_override_rejected": False,
                 },
             }
+            embedding = stored.get("embedding") or {}
+            if embedding.get("status") in {"partial", "missing"}:
+                # Search by meaning may miss what the vector leaves out; a
+                # lookup by name or id still finds every fact.
+                result["embedding"] = embedding
+            return result
 
         entity_memory_lookup.__name__ = "entity_memory_lookup"
         entity_memory_upsert.__name__ = "entity_memory_upsert"
@@ -12227,14 +12474,21 @@ class MemAgent:
         """
         from .memory_routing import MemoryRoutingConfig
 
+        # Entity capture is its own switch: routing on or off keeps it.
+        capture = settings.pop("entity_capture", self.memory_routing.entity_capture)
         if router is False or not enabled:
-            config = MemoryRoutingConfig()
+            config = MemoryRoutingConfig(entity_capture=capture)
         else:
             base = MemoryRoutingConfig.from_value(
                 True if router in (None, True) else router
             )
             config = MemoryRoutingConfig.from_value(
-                {**base.to_dict(), **settings, "enabled": True}
+                {
+                    **base.to_dict(),
+                    **settings,
+                    "enabled": True,
+                    "entity_capture": capture,
+                }
             )
         self.memory_routing = config
         self._register_memory_routing_tools()
@@ -12371,8 +12625,10 @@ class MemAgent:
         sealed: bool,
         fallback: Optional[str],
         source: str,
+        skip: Iterable[Dict[str, Any]] = (),
     ) -> Dict[str, Any]:
-        """Route ``text`` and write it to the store it belongs in."""
+        """Route ``text`` and write it to the store it belongs in. ``skip``
+        holds the turn's own ``entity_memory_upsert`` calls, not redone."""
         from ..learning.consolidation import text_generator
         from ..long_term.semantic.entity_memory import EntityMemory
         from ..memory_history import memory_change_context
@@ -12382,9 +12638,10 @@ class MemAgent:
             REMEMBERED_NAMESPACE,
             SHORT_TERM_MEMORY,
             clean_text,
-            extract_facts,
+            extract_facts_in_parts,
             file_entity_facts,
             place,
+            without_tool_writes,
         )
 
         body = clean_text(text)
@@ -12439,8 +12696,8 @@ class MemAgent:
                         records = entities.list_entities(
                             memory_id=entity_memory_id, user_id=user_id
                         )
-                        facts = extract_facts(
-                            body,
+                        facts, read = extract_facts_in_parts(
+                            str(text or ""),
                             generate,
                             records,
                             source=(
@@ -12450,6 +12707,8 @@ class MemAgent:
                             ),
                             thread_id=str(thread_id or ""),
                         )
+                        receipt.update(read)
+                        facts = without_tool_writes(facts, list(skip))
                     except Exception as exc:
                         logger.warning("Entity fact extraction failed: %s", exc)
                 if facts:
@@ -12526,11 +12785,13 @@ class MemAgent:
         user_id: Optional[str],
         thread_id: Optional[str],
     ) -> None:
-        """Queue the user's message to be routed off the turn."""
-        config = self.memory_routing
+        """Queue the user's message to be routed off the turn (or, with entity
+        capture, to have its entity facts filed)."""
+        mode = self._turn_capture_mode()
+        tool_writes = list(self._turn_entity_tool_writes or [])
+        self._turn_entity_tool_writes = []
         if (
-            not config.enabled
-            or not config.capture_turns
+            not mode
             or self.memory_provider is None
             or not memory_id
             or not str(query or "").strip()
@@ -12545,6 +12806,8 @@ class MemAgent:
             "thread_id": thread_id,
             "entity_memory_id": self._entity_memory_id(memory_id),
             "sealed": self._active_retrieval_policy().is_sealed,
+            "mode": mode,
+            "tool_writes": tool_writes,
         }
         upkeep = self._upkeep()
         with upkeep.lock:
@@ -12563,17 +12826,21 @@ class MemAgent:
                         return
                     current = queue.pop(0)
                 try:
-                    receipt = self._file_routed(
-                        current["text"],
-                        config=self.memory_routing,
-                        memory_id=current["memory_id"],
-                        user_id=current["user_id"],
-                        thread_id=current["thread_id"],
-                        entity_memory_id=current["entity_memory_id"],
-                        sealed=current["sealed"],
-                        fallback=None,
-                        source="turn",
-                    )
+                    if current.get("mode") == "entities":
+                        receipt = self._capture_turn_entities(current)
+                    else:
+                        receipt = self._file_routed(
+                            current["text"],
+                            config=self.memory_routing,
+                            memory_id=current["memory_id"],
+                            user_id=current["user_id"],
+                            thread_id=current["thread_id"],
+                            entity_memory_id=current["entity_memory_id"],
+                            sealed=current["sealed"],
+                            fallback=None,
+                            source="turn",
+                            skip=current.get("tool_writes") or (),
+                        )
                     logger.info(
                         "Memory routing of a turn in %s: %s",
                         current["memory_id"],
@@ -12596,6 +12863,118 @@ class MemAgent:
         ):
             with upkeep.lock:
                 upkeep.routing_draining.discard(key)
+
+    def _turn_capture_mode(self) -> Optional[str]:
+        """How the user's message is kept after its turn: ``"route"`` (memory
+        routing files it), ``"entities"`` (entity capture: the background
+        model files the entity facts it states) or None.
+
+        Entity capture is on by default when entity memory is on and the agent
+        has its own background model, so entity writes do not depend on the
+        chat model choosing to call ``entity_memory_upsert``. Turn it off with
+        ``with_entity_memory(True, capture=False)``.
+        """
+        config = self.memory_routing
+        if config.enabled and config.capture_turns:
+            return "route"
+        manager = self.entity_memory_manager
+        if (
+            config.entity_capture is False
+            or self.memory_provider is None
+            or not self._entity_memory_enabled
+            or not (manager and manager.is_enabled())
+        ):
+            return None
+        if config.entity_capture is None:
+            # Routing set up with turn capture off keeps turns uncaptured.
+            if config.enabled or self.__dict__.get("_background_model") is None:
+                return None
+        elif self.background_model is None:
+            return None
+        return "entities"
+
+    def _capture_turn_entities(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Entity capture of one user message: facts extracted by the
+        background model, each resting on words copied from the message and
+        not already stored, less those the chat model wrote this turn."""
+        from ..learning.consolidation import text_generator
+        from ..long_term.semantic.entity_memory import EntityMemory
+        from ..memory_history import memory_change_context
+        from .memory_routing import (
+            clean_text,
+            extract_facts_in_parts,
+            file_entity_facts,
+            without_tool_writes,
+        )
+
+        entity_memory_id = item.get("entity_memory_id")
+        user_id = item.get("user_id")
+        receipt: Dict[str, Any] = {
+            "stored": False,
+            "memory_type": None,
+            "memory_id": entity_memory_id,
+            "source": "entity_capture",
+        }
+        body = clean_text(item.get("text"))
+        generate = text_generator(self.background_model)
+        if not body or not entity_memory_id or generate is None:
+            receipt["reason"] = "Nothing to capture."
+            return receipt
+        entities = EntityMemory(self.memory_provider)
+        # The whole message, in parts: a long list of facts isn't cut short.
+        facts, read = extract_facts_in_parts(
+            str(item.get("text") or ""),
+            generate,
+            entities.list_entities(memory_id=entity_memory_id, user_id=user_id),
+            source="what the user wrote",
+            thread_id=str(item.get("thread_id") or ""),
+        )
+        receipt.update(read)
+        facts = without_tool_writes(facts, list(item.get("tool_writes") or []))
+        if not facts:
+            receipt["reason"] = "No new entity fact rested on the user's words."
+            return receipt
+        with memory_change_context(
+            actor=f"agent:{self.agent_id}",
+            source="entity_capture:turn",
+            agent_id=self.agent_id,
+            label="Remembered (entity_memory)",
+        ):
+            receipt["facts"] = file_entity_facts(
+                entities,
+                facts,
+                memory_id=entity_memory_id,
+                user_id=user_id,
+                routing={"confidence": 0.8},
+                source="entity_capture",
+            )
+        receipt.update(
+            stored=True,
+            memory_type="entity_memory",
+            reason=f"Captured {len(receipt['facts'])} entity fact(s).",
+        )
+        return receipt
+
+    def _entity_lookup_offered(self) -> bool:
+        """Whether this turn offers ``entity_memory_lookup``: not while the
+        turn's memory/user scope holds no entities. The check is one bounded
+        query per scope, cached briefly (``EntityMemory.has_entities``); an
+        entity written here makes the lookup available on the next turn."""
+        manager = self.entity_memory_manager
+        if not (self._entity_memory_enabled and manager and manager.is_enabled()):
+            return True
+        memory_id = self._entity_memory_id(
+            self._current_memory_id or (self.memory_ids[0] if self.memory_ids else None)
+        )
+        if memory_id is None:
+            return True
+        try:
+            return bool(
+                manager.has_entities(memory_id=memory_id, user_id=self._current_user_id)
+            )
+        except Exception as exc:
+            logger.debug("Entity presence check failed: %s", exc)
+            return True
 
     def describe_memory(self) -> Dict[str, Any]:
         """What this agent remembers and how it recalls it.
@@ -12640,6 +13019,8 @@ class MemAgent:
             "memory_routing": (
                 self.memory_routing.to_dict() if self.memory_routing.enabled else None
             ),
+            # The background model files each user message's entity facts.
+            "entity_capture": self._turn_capture_mode() == "entities",
             "reranker": self.reranker.to_dict() if self.reranker else None,
         }
 
@@ -13582,9 +13963,24 @@ class MemAgent:
             **dict(self._last_retrieval_stats),
         }
 
-    def last_memory_context_evidence(self) -> Dict[str, Any]:
-        """Return the content-free memory supply snapshot for the latest turn."""
-        return dict(self._last_memory_context_evidence or {})
+    def last_memory_context_evidence(
+        self, *, include_ids: bool = False
+    ) -> Dict[str, Any]:
+        """Return the content-free memory supply snapshot for the latest turn.
+
+        ``include_ids=True`` adds ``retrieved``: one entry per recalled
+        record with its ``ref`` fingerprint, ``memory_type``, plain
+        ``record_id``, ``thread_id`` and ``score``, for retrieval evaluation.
+        The ids are held apart from the snapshot, so traces, the UI and the
+        default return value never carry them; only code that holds this
+        agent can ask for them, and only for its own execution context.
+        """
+        evidence = dict(self._last_memory_context_evidence or {})
+        if include_ids:
+            evidence["retrieved"] = [
+                dict(item) for item in (self._last_retrieved_ids or [])
+            ]
+        return evidence
 
     def last_usage_analytics(self, *, timezone_name: str = "UTC") -> Dict[str, Any]:
         """Content-free usage for this execution context's latest recorded turn.
@@ -13909,8 +14305,9 @@ class MemAgent:
 
         ``cleanup_scope`` is forwarded to a provider's ``delete_scope`` before
         connections are closed. It must contain an exact ``memory_id``,
-        ``user_id``, and/or ``agent_ids`` boundary; providers retain their own
-        fail-closed validation.
+        ``user_id``, and/or ``agent_ids`` boundary, and may set
+        ``keep_traces=True`` to keep the scope's trace records; providers
+        retain their own fail-closed validation.
         """
         report: Dict[str, Any] = {
             "ok": True,

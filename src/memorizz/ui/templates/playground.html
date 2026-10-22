@@ -10,7 +10,7 @@
 <script src="/static/js/memory-evolution.js?v=8" defer></script>
 <script src="/static/js/context-history.js?v=2" defer></script>
 <link rel="stylesheet" href="/static/css/catalog.css?v=4">
-<script src="/static/js/catalog.js?v=2" defer></script>
+<script src="/static/js/catalog.js?v=3" defer></script>
 <!-- marked.js for markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
 <script src="/static/js/safe-markdown.js?v=2"></script>
@@ -263,7 +263,7 @@
         <header class="pg-topbar">
             <button type="button" class="pg-icon-btn" id="pg-rail-toggle" onclick="togglePlaygroundRail()" aria-controls="pg-rail" aria-expanded="true" title="Show or hide conversations"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9 4.5v15"/></svg></button>
             <div class="pg-topbar-title">
-                <h1><button type="button" class="pg-agent-name" id="pg-agent-name" onclick="pgStartAgentRename()" title="Rename this agent"><span class="pg-agent-name-text">{{ agent_title }}</span><span class="sr-only"> (rename)</span><svg class="pg-agent-name-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></h1>
+                <h1><button type="button" class="pg-agent-name" id="pg-agent-name" data-mutates onclick="pgStartAgentRename()" title="Rename this agent"><span class="pg-agent-name-text">{{ agent_title }}</span><span class="sr-only"> (rename)</span><svg class="pg-agent-name-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></h1>
                 <button type="button" class="pg-model-chip" onclick="openInspectorTab('settings')" title="{{ llm_provider }} / {{ llm_model }} · change the model in Settings">{{ llm_model }}</button>
             </div>
             <div class="pg-topbar-actions">
@@ -300,9 +300,9 @@
             <div class="pg-composer" id="playground-composer">
                 <div id="pg-kb-chips" class="pg-kb-chips" style="display:none;"></div>
                 <label for="pg-query" class="sr-only">Message</label>
-                <textarea id="pg-query" rows="1" placeholder="Message {{ agent_title }}…" autofocus></textarea>
+                <textarea id="pg-query" data-mutates rows="1" placeholder="Message {{ agent_title }}…" autofocus></textarea>
                 <div class="composer-row">
-                    <button type="button" id="pg-attach-btn" class="pg-icon-btn" onclick="document.getElementById('pg-kb-file-input').click()" title="Add files to the knowledge base">
+                    <button type="button" id="pg-attach-btn" data-mutates class="pg-icon-btn" onclick="document.getElementById('pg-kb-file-input').click()" title="Add files to the knowledge base">
                         <span id="pg-attach-icon"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.4 8.4a1.7 1.7 0 0 1-2.4-2.4l7.6-7.6"/></svg></span>
                         <span id="pg-attach-label" class="sr-only">Attach files</span>
                     </button>
@@ -315,7 +315,7 @@
                     {% if harness_delegates %}<button type="button" class="pg-meter pg-hx-chip" id="pg-hx-chip" onclick="openInspectorTab('overview'); document.getElementById('pg-hx')?.scrollIntoView({block: 'nearest'})" title="What this agent's harness delegates may use · change it in the inspector">Delegates · fresh folder · no web</button>{% endif %}
                     <span class="composer-spacer"></span>
                     <button type="button" id="pg-stop-btn" class="pg-send pg-stop" onclick="stopStreaming()" style="display:none;" aria-label="Stop generating" title="Stop generating (Esc)"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg></button>
-                    <button type="button" id="pg-send-btn" class="pg-send" onclick="sendMessage()" aria-label="Send message" title="Send (Enter)">
+                    <button type="button" id="pg-send-btn" data-mutates class="pg-send" onclick="sendMessage()" aria-label="Send message" title="Send (Enter)">
                         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5.5 11.5L12 5l6.5 6.5"/></svg>
                         <span id="pg-send-text" class="sr-only">Send</span>
                         <span id="pg-send-spinner" class="spinner" style="display:none;"></span>
@@ -371,7 +371,7 @@
                 <p class="token-measured" id="token-measured" hidden></p>
                 <p class="token-model-note" id="token-model-note"{% if not token_stats.model_context_tokens or token_stats.model_context_tokens <= token_stats.context_window_tokens %} hidden{% endif %}><code id="token-model-name">{{ token_stats.model_name or '' }}</code> supports up to <span id="token-model-max">{{ "{:,}".format(token_stats.model_context_tokens|default(0)|int) }}</span> tokens. <button type="button" onclick="pgEditContextWindow()">Change the window</button></p>
                 <div class="token-actions">
-                    <button type="button" class="compact-btn" id="compact-context-btn" onclick="compactContextWindow()" title="Summarize and compact the context window to free up tokens">
+                    <button type="button" class="compact-btn" id="compact-context-btn" data-mutates onclick="compactContextWindow()" title="Summarize and compact the context window to free up tokens">
                         <span>Compact context</span>
                     </button>
                     <label class="auto-compact-control" for="auto-compact-at">Auto-compact at
@@ -424,7 +424,7 @@
                     </dl>
                     <button type="button" class="btn btn-sm" id="pg-hx-clear">Stop using this access</button>
                 </div>
-                <form class="pg-hx-form" id="pg-hx-form" novalidate>
+                <form class="pg-hx-form" id="pg-hx-form" data-mutates novalidate>
                     <div class="config-field">
                         <label for="pg-hx-workspace">Folder</label>
                         <input id="pg-hx-workspace" type="text" placeholder="Blank: a fresh folder for this conversation" autocomplete="off" spellcheck="false">
@@ -676,6 +676,9 @@
                                     <span class="context-entity-name">{{ item.name }}</span>
                                     {% if item.entity_type %}
                                     <span class="context-entity-type">{{ item.entity_type }}</span>
+                                    {% endif %}
+                                    {% if item.vector_note %}
+                                    <span class="context-entity-type context-entity-note" title="{{ item.vector_note_title }}">{{ item.vector_note }}</span>
                                     {% endif %}
                                 </div>
                                 {% if item.timestamp %}
@@ -2347,11 +2350,14 @@ function renderContextEntities(entries) {
         const entityType = entry && entry.entity_type ? String(entry.entity_type) : '';
         const timestamp = entry && entry.timestamp ? String(entry.timestamp) : '';
         const attributesPreview = entry && entry.attributes_preview ? String(entry.attributes_preview) : '';
+        const vectorNote = entry && entry.vector_note ? String(entry.vector_note) : '';
+        const vectorTitle = entry && entry.vector_note_title ? String(entry.vector_note_title) : '';
         return `
             <div class="context-entity-item">
                 <div class="context-entity-header">
                     <span class="context-entity-name">${escapeHtml(name)}</span>
                     ${entityType ? `<span class="context-entity-type">${escapeHtml(entityType)}</span>` : ''}
+                    ${vectorNote ? `<span class="context-entity-type context-entity-note" title="${escapeHtml(vectorTitle)}">${escapeHtml(vectorNote)}</span>` : ''}
                 </div>
                 ${timestamp ? `<div class="context-entity-time">${escapeHtml(timestamp)}</div>` : ''}
                 ${attributesPreview ? `<div class="context-entity-attributes">${escapeHtml(attributesPreview)}</div>` : ''}

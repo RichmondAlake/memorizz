@@ -6,8 +6,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
+import time
 import uuid
+import weakref
 from typing import (
     Any,
     Dict,
@@ -54,6 +58,140 @@ _PROFILE_QUERY_TERMS = frozenset(
     }
 )
 _IDENTITY_KEY_RE = re.compile(r"[^a-z0-9_.:-]+")
+
+# -- vectors for large entities ----------------------------------------------
+
+#: Where a record says its vector does not cover all of it. Absent when it
+#: does. ``embedding_status`` is ``"partial"`` or ``"missing"``.
+_EMBEDDING_STATUS_KEYS = (
+    "embedding_status",
+    "embedding_reason",
+    "embedding_attributes_covered",
+)
+#: Token estimate: one token per three characters. English runs nearer four,
+#: so this overcounts, which is the safe side of an input limit.
+_CHARS_PER_TOKEN = 3
+#: Share of the model's input limit an entity's text may use.
+_EMBEDDING_BUDGET_SHARE = 0.9
+#: Input limits in tokens, by the start of the embedding model's name.
+_MODEL_INPUT_TOKENS = (
+    ("text-embedding-", 8191),
+    ("voyage-2", 4000),
+    ("voyage-large-2", 16000),
+    ("voyage-code-2", 16000),
+    ("voyage-", 32000),
+    ("nomic-embed", 8192),
+    ("bge-m3", 8192),
+    ("mxbai-embed", 512),
+    ("all-minilm", 256),
+    ("snowflake-arctic-embed", 512),
+    ("embeddinggemma", 2048),
+    ("google/embeddinggemma", 2048),
+    ("qwen3-embedding", 32000),
+    ("qwen/qwen3-embedding", 32000),
+)
+#: Input limits by embedding provider when the model is not listed above.
+_PROVIDER_INPUT_TOKENS = {
+    "openai": 8191,
+    "azure": 8191,
+    "voyageai": 32000,
+    "ollama": 2048,
+    "huggingface": 512,
+}
+_DEFAULT_INPUT_TOKENS = 8191
+_LENGTH_ERROR_RE = re.compile(
+    r"context.length|maximum (context|input|sequence)|max(imum)?[ _]tokens"
+    r"|too many tokens|too long|token limit|input length|exceeds? .{0,40}tokens"
+    r"|reduce (the )?(length|input|prompt)",
+    re.IGNORECASE,
+)
+
+
+def _estimate_tokens(text: str) -> int:
+    return -(-len(text or "") // _CHARS_PER_TOKEN)
+
+
+def _is_length_error(exc: BaseException) -> bool:
+    """Whether an embedding error says the input was too long."""
+    code = str(getattr(exc, "code", "") or "")
+    if code in {"context_length_exceeded", "string_above_max_length"}:
+        return True
+    return bool(_LENGTH_ERROR_RE.search(str(exc) or ""))
+
+
+def _active_embedding_model() -> Tuple[str, str]:
+    """The global embedder's provider and model, without creating one."""
+    from .... import embeddings as embeddings_module
+
+    manager = getattr(embeddings_module, "_global_embedding_manager", None)
+    if manager is not None:
+        provider = str(getattr(getattr(manager, "provider_type", None), "value", ""))
+        model = str((getattr(manager, "config", None) or {}).get("model") or "")
+        if not model:
+            try:
+                model = str(manager.get_default_model() or "")
+            except Exception:
+                model = ""
+        return provider, model
+    try:
+        provider, config = embeddings_module.embedding_settings_from_env()
+    except Exception:
+        return "", ""
+    return str(provider or ""), str((config or {}).get("model") or "")
+
+
+def embedding_input_tokens() -> int:
+    """The input limit, in tokens, of the model that embeds entities.
+
+    ``MEMORIZZ_ENTITY_EMBEDDING_MAX_TOKENS`` overrides it; otherwise it comes
+    from the configured embedding model, and 8,191 (OpenAI's) when unknown.
+    """
+    raw = str(os.environ.get("MEMORIZZ_ENTITY_EMBEDDING_MAX_TOKENS") or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    provider, model = _active_embedding_model()
+    name = model.casefold()
+    for prefix, tokens in _MODEL_INPUT_TOKENS:
+        if name.startswith(prefix):
+            return tokens
+    return _PROVIDER_INPUT_TOKENS.get(provider.casefold(), _DEFAULT_INPUT_TOKENS)
+
+
+# -- does a scope hold any entity? -------------------------------------------
+
+#: How long a scope's "no entities" answer is trusted. A write through
+#: EntityMemory in this process clears it at once; this bounds how long a
+#: write from another process (the UI, the MCP server) goes unseen.
+EMPTY_SCOPE_TTL_SECONDS = 30.0
+#: How long a scope's "has entities" answer is trusted.
+FOUND_SCOPE_TTL_SECONDS = 300.0
+_PRESENCE_PROBE_ROWS = 20
+# provider -> {(memory_id, user_id): (found, when)}
+_PRESENCE: "weakref.WeakKeyDictionary[Any, Dict[Tuple[Any, Any], Tuple[bool, float]]]" = (
+    weakref.WeakKeyDictionary()
+)
+_PRESENCE_LOCK = threading.Lock()
+
+
+def _presence_get(provider: Any, scope: Tuple[Any, Any]) -> Optional[bool]:
+    with _PRESENCE_LOCK:
+        try:
+            entry = (_PRESENCE.get(provider) or {}).get(scope)
+        except TypeError:  # a provider that cannot be weakly referenced
+            return None
+    if entry is None:
+        return None
+    found, at = entry
+    ttl = FOUND_SCOPE_TTL_SECONDS if found else EMPTY_SCOPE_TTL_SECONDS
+    return found if time.monotonic() - at < ttl else None
+
+
+def _presence_set(provider: Any, scope: Tuple[Any, Any], found: bool) -> None:
+    with _PRESENCE_LOCK:
+        try:
+            _PRESENCE.setdefault(provider, {})[scope] = (bool(found), time.monotonic())
+        except TypeError:
+            pass
 
 
 class EntityAttributeInput(BaseModel):
@@ -134,10 +272,21 @@ class EntityMemoryRecord(BaseModel):
 class EntityMemory:
     """High-level helper for storing and retrieving structured entity facts."""
 
-    def __init__(self, memory_provider: MemoryProvider):
+    def __init__(
+        self,
+        memory_provider: MemoryProvider,
+        *,
+        max_embedding_tokens: Optional[int] = None,
+    ):
+        """``max_embedding_tokens`` caps the text an entity's vector is made
+        from; by default it follows the embedding model's input limit (see
+        :func:`embedding_input_tokens`)."""
         if memory_provider is None:
             raise ValueError("EntityMemory requires a MemoryProvider instance")
         self.memory_provider = memory_provider
+        self._max_embedding_tokens = (
+            int(max_embedding_tokens) if max_embedding_tokens else None
+        )
 
     # ----------------------------------------------------------------------
     # Public API
@@ -159,6 +308,42 @@ class EntityMemory:
         Create or update an entity record.
 
         Returns the entity_id used to store the record (generated when absent).
+        :meth:`upsert_entity_with_report` also says how much of the record its
+        vector covers.
+        """
+        return self.upsert_entity_with_report(
+            entity_id=entity_id,
+            name=name,
+            entity_type=entity_type,
+            attributes=attributes,
+            relations=relations,
+            metadata=metadata,
+            identity_key=identity_key,
+            memory_id=memory_id,
+            user_id=user_id,
+        )["entity_id"]
+
+    def upsert_entity_with_report(
+        self,
+        *,
+        entity_id: Optional[str] = None,
+        name: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        attributes: Optional[Sequence[Union[EntityAttribute, Dict[str, Any]]]] = None,
+        relations: Optional[Sequence[Union[EntityRelation, Dict[str, Any]]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        identity_key: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """:meth:`upsert_entity`, returning ``entity_id``, ``unchanged`` (no new
+        information, nothing written) and ``embedding``: the vector's
+        ``status`` (``full``, ``partial``, ``missing`` or ``provider`` when the
+        store embeds), its ``reason`` code and how many attributes it covers.
+
+        An entity whose text is past the embedding model's input limit gets a
+        vector of its name, type and newest attributes; the record notes it
+        in ``metadata.embedding_status``. See :func:`embedding_input_tokens`.
         """
         now = self._timestamp()
         normalized_identity = self._normalize_identity_key(identity_key)
@@ -242,22 +427,16 @@ class EntityMemory:
         if existing and self._stable_snapshot(record) == self._stable_snapshot(
             existing
         ):
-            return record["entity_id"]
+            _presence_set(self.memory_provider, (memory_id, user_id), True)
+            return {
+                "entity_id": record["entity_id"],
+                "unchanged": True,
+                "embedding": self.embedding_report(existing),
+            }
 
-        embedding_payload = self._build_embedding_text(record)
-        from ....memory_provider.base import provider_manages_embeddings
-
-        if embedding_payload and not provider_manages_embeddings(self.memory_provider):
-            try:
-                record["embedding"] = get_embedding(embedding_payload)
-            except Exception as exc:
-                # Without an embedder the fact is still worth keeping: lookups
-                # by name and the exact scoped fallback still find it.
-                logger.warning(
-                    "Storing entity %s without an embedding (%s)",
-                    record["entity_id"],
-                    type(exc).__name__,
-                )
+        # Without an embedder the fact is still worth keeping: lookups by name
+        # and the exact scoped fallback still find it.
+        report = self._embed_record(record)
 
         if existing and existing.get("_id") is not None:
             record["_id"] = existing["_id"]
@@ -279,8 +458,13 @@ class EntityMemory:
             data=record,
             memory_store_type=MemoryType.ENTITY_MEMORY,
         )
+        _presence_set(self.memory_provider, (memory_id, user_id), True)
         # Mongo returns _id for updates; we prefer our stable entity_id
-        return record["entity_id"]
+        return {
+            "entity_id": record["entity_id"],
+            "unchanged": False,
+            "embedding": report,
+        }
 
     def record_attribute(
         self,
@@ -323,10 +507,59 @@ class EntityMemory:
         memory_id: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Return the stored record for a specific entity_id."""
+        """Return the stored record for a specific entity_id.
+
+        ``metadata.embedding_status`` is ``"partial"`` when the record's vector
+        covers only its name, type and newest attributes (its text was past
+        the embedding model's input limit) and ``"missing"`` when it has no
+        vector; ``metadata.embedding_reason`` says why. Neither is there when
+        the vector covers the whole record. :meth:`embedding_report` reads them.
+        """
         return self._fetch_one(
             {"entity_id": entity_id}, memory_id=memory_id, user_id=user_id
         )
+
+    def has_entities(
+        self,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> bool:
+        """Whether this memory/user scope holds any live entity.
+
+        One bounded query, remembered per scope for a short while: a "no"
+        for :data:`EMPTY_SCOPE_TTL_SECONDS`, a "yes" for
+        :data:`FOUND_SCOPE_TTL_SECONDS`. A write through ``EntityMemory`` in
+        this process turns the answer to "yes" at once. When the store cannot
+        tell, the answer is "yes".
+        """
+        scope = (memory_id, user_id)
+        cached = _presence_get(self.memory_provider, scope)
+        if cached is not None:
+            return cached
+        try:
+            rows = self._ensure_list(
+                self.memory_provider.retrieve_by_query(
+                    {},
+                    memory_type=MemoryType.ENTITY_MEMORY,
+                    limit=_PRESENCE_PROBE_ROWS,
+                    memory_id=memory_id,
+                    user_id=user_id,
+                )
+            )
+        except Exception as exc:
+            logger.debug("Entity presence check failed (%s)", type(exc).__name__)
+            return True
+        found = (
+            any(
+                self._record_in_scope(row, memory_id=memory_id, user_id=user_id)
+                and not self._is_superseded(row)
+                for row in rows
+            )
+            or len(rows) >= _PRESENCE_PROBE_ROWS
+        )  # a full page of others: unsure
+        _presence_set(self.memory_provider, scope, found)
+        return found
 
     def get_entity_by_name(
         self,
@@ -684,20 +917,194 @@ class EntityMemory:
         """Store a changed record over its row, with a fresh embedding."""
         payload = dict(record)
         payload.pop("score", None)
-        embedding_text = self._build_embedding_text(payload)
-        from ....memory_provider.base import provider_manages_embeddings
-
-        if embedding_text and not provider_manages_embeddings(self.memory_provider):
-            try:
-                payload["embedding"] = get_embedding(embedding_text)
-            except Exception as exc:
-                logger.warning(
-                    "Storing entity %s without an embedding (%s)",
-                    payload.get("entity_id"),
-                    type(exc).__name__,
-                )
+        self._embed_record(payload)
         self.memory_provider.store(
             data=payload, memory_store_type=MemoryType.ENTITY_MEMORY
+        )
+
+    # -- vectors ---------------------------------------------------------------
+
+    def _embedding_budget(self) -> int:
+        """Tokens an entity's embedding text may use."""
+        limit = self._max_embedding_tokens or embedding_input_tokens()
+        return max(16, int(limit * _EMBEDDING_BUDGET_SHARE))
+
+    @staticmethod
+    def _bounded_embedding_text(
+        record: Dict[str, Any], budget_tokens: int
+    ) -> Tuple[str, int]:
+        """The entity's name, type and newest attributes, in ``budget_tokens``.
+
+        Attributes go newest first (by ``updated_at``, then confidence), and
+        relations follow while room is left. Returns the text and how many
+        attributes it holds.
+        """
+        budget = max(1, int(budget_tokens)) * _CHARS_PER_TOKEN
+        lines: List[str] = []
+        if record.get("name"):
+            lines.append(f"Name: {record['name']}")
+        if record.get("entity_type"):
+            lines.append(f"Type: {record['entity_type']}")
+        used = sum(len(line) + 1 for line in lines)
+
+        def _rank(item: Tuple[int, Dict[str, Any]]) -> Tuple[str, float, int]:
+            index, attribute = item
+            try:
+                confidence = float(attribute.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            when = attribute.get("updated_at") or attribute.get("created_at") or ""
+            # Facts written together share a timestamp; the later one is newer.
+            return str(when), confidence, index
+
+        attributes = [
+            item for item in record.get("attributes") or [] if isinstance(item, dict)
+        ]
+        covered = 0
+        ranked = sorted(enumerate(attributes), key=_rank, reverse=True)
+        for _index, attribute in ranked:
+            line = f"{attribute.get('name')}: {attribute.get('value')}"
+            room = budget - used - 1
+            if len(line) > room:
+                if covered or room < 32:
+                    continue
+                line = line[:room]  # one huge fact: keep its start
+            lines.append(line)
+            used += len(line) + 1
+            covered += 1
+        for relation in record.get("relations") or []:
+            if not isinstance(relation, dict):
+                continue
+            line = f"Relation ({relation.get('relation_type')})->{relation.get('entity_id')}"
+            if used + len(line) + 1 <= budget:
+                lines.append(line)
+                used += len(line) + 1
+        return "\n".join(lines)[:budget], covered
+
+    def _embed_record(
+        self, record: Dict[str, Any], *, strict: bool = False
+    ) -> Dict[str, Any]:
+        """Embed ``record`` in place and note in its metadata what the vector
+        leaves out. Returns the report :meth:`upsert_entity_with_report` gives.
+        ``strict`` raises an embedding error other than a too-long input.
+        """
+        from ....memory_provider.base import provider_manages_embeddings
+
+        metadata = {
+            key: value
+            for key, value in (record.get("metadata") or {}).items()
+            if key not in _EMBEDDING_STATUS_KEYS
+        }
+        total = self._attribute_count(record)
+        text = self._build_embedding_text({**record, "metadata": metadata})
+        covered: Optional[int] = total
+        if provider_manages_embeddings(self.memory_provider):
+            status, reason = "provider", None
+        elif not text:
+            status, reason, covered = "missing", "nothing_to_embed", 0
+        else:
+            status, reason, covered = self._embed_within_limit(
+                record, text, total, strict=strict
+            )
+        if status in {"partial", "missing"}:
+            metadata["embedding_status"] = status
+            metadata["embedding_reason"] = reason
+            if covered is not None:
+                metadata["embedding_attributes_covered"] = covered
+        if metadata or "metadata" in record:
+            record["metadata"] = metadata
+        return self._embedding_summary(status, reason, covered, total)
+
+    def _embed_within_limit(
+        self, record: Dict[str, Any], text: str, total: int, *, strict: bool = False
+    ) -> Tuple[str, Optional[str], Optional[int]]:
+        """Embed ``text``, or a bounded version of it when it is past the
+        model's input limit (estimated, or as the provider's length error
+        says). A failed embed keeps the previous vector when there is one.
+        Returns the status, its reason and how many attributes are covered.
+        """
+        budget = self._embedding_budget()
+        reason: Optional[str] = None
+        covered = total
+        if _estimate_tokens(text) > budget:
+            text, covered = self._bounded_embedding_text(record, budget)
+            reason = "over_token_limit"
+        for attempt in range(3):
+            try:
+                record["embedding"] = get_embedding(text)
+            except Exception as exc:
+                if attempt < 2 and _is_length_error(exc):
+                    # The provider counts tokens its own way: halve and retry.
+                    budget = max(16, min(budget, _estimate_tokens(text)) // 2)
+                    text, covered = self._bounded_embedding_text(record, budget)
+                    reason = "provider_length_error"
+                    continue
+                if strict and not _is_length_error(exc):
+                    raise
+                kept = record.get("embedding") is not None
+                logger.warning(
+                    "Storing entity %s %s (%s)",
+                    record.get("entity_id"),
+                    "with its previous embedding" if kept else "without an embedding",
+                    type(exc).__name__,
+                )
+                if kept:
+                    return "partial", "previous_vector_kept", None
+                record.pop("embedding", None)
+                return (
+                    "missing",
+                    "over_token_limit" if _is_length_error(exc) else "embedding_failed",
+                    0,
+                )
+            break
+        if reason:
+            logger.info(
+                "Entity %s is past the embedding input limit; its vector covers "
+                "its name and %s of %s attributes",
+                record.get("entity_id"),
+                covered,
+                total,
+            )
+            return "partial", reason, covered
+        return "full", None, total
+
+    @staticmethod
+    def _attribute_count(record: Dict[str, Any]) -> int:
+        return sum(
+            1 for item in record.get("attributes") or [] if isinstance(item, dict)
+        )
+
+    @staticmethod
+    def _embedding_summary(
+        status: str, reason: Optional[str], covered: Optional[int], total: int
+    ) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "status": status,
+            "reason": reason,
+            "attributes_total": total,
+        }
+        if covered is not None:
+            summary["attributes_covered"] = covered
+        return summary
+
+    @classmethod
+    def embedding_report(cls, record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """What a stored record's vector covers, read from its metadata:
+        ``status`` is ``partial`` or ``missing`` when ``metadata.embedding_status``
+        says so, else ``full``."""
+        record = record or {}
+        metadata = record.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        total = cls._attribute_count(record)
+        status = str(metadata.get("embedding_status") or "")
+        if status not in {"partial", "missing"}:
+            return cls._embedding_summary("full", None, total, total)
+        covered = metadata.get("embedding_attributes_covered")
+        return cls._embedding_summary(
+            status,
+            metadata.get("embedding_reason"),
+            covered if isinstance(covered, int) else None,
+            total,
         )
 
     def migrate_legacy_scope(self, *, memory_id: str, user_id: str) -> int:
@@ -799,6 +1206,7 @@ class EntityMemory:
 
         diagnostics["semantic_match_count"] = len(semantic_results)
         if semantic_results:
+            _presence_set(self.memory_provider, (memory_id, user_id), True)
             matches = semantic_results[:safe_limit]
             diagnostics["match_count"] = len(matches)
             return matches, diagnostics
@@ -1075,11 +1483,9 @@ class EntityMemory:
         if not self._record_in_scope(canonical, memory_id=memory_id, user_id=user_id):
             raise ValueError("Canonical entity escaped the requested scope")
         canonical_payload = dict(canonical)
-        embedding_text = self._build_embedding_text(canonical_payload)
-        from ....memory_provider.base import provider_manages_embeddings
-
-        if embedding_text and not provider_manages_embeddings(self.memory_provider):
-            canonical_payload["embedding"] = get_embedding(embedding_text)
+        # An embedder outage still stops the merge, so duplicates are kept;
+        # a merged record past the input limit gets a bounded vector.
+        self._embed_record(canonical_payload, strict=True)
         self.memory_provider.store(
             data=canonical_payload,
             memory_store_type=MemoryType.ENTITY_MEMORY,
@@ -1174,6 +1580,7 @@ class EntityMemory:
         the same strict client-side scope check.
         """
         safe_limit = max(1, min(int(limit), 500))
+        scoped_query = False
         try:
             rows = self.memory_provider.retrieve_by_query(
                 {},
@@ -1182,6 +1589,7 @@ class EntityMemory:
                 memory_id=memory_id,
                 user_id=user_id,
             )
+            scoped_query = True
         except TypeError:
             try:
                 rows = self.memory_provider.retrieve_by_query(
@@ -1204,7 +1612,8 @@ class EntityMemory:
             rows = self.list_entities(memory_id=memory_id, user_id=user_id)
 
         candidates: List[Dict[str, Any]] = []
-        for row in self._ensure_list(rows):
+        rows = self._ensure_list(rows)
+        for row in rows:
             if not self._record_in_scope(row, memory_id=memory_id, user_id=user_id):
                 continue
             if self._is_superseded(row):
@@ -1212,6 +1621,11 @@ class EntityMemory:
             candidates.append(row)
             if len(candidates) >= safe_limit:
                 break
+        # The per-turn recall already answers has_entities for this scope.
+        if candidates:
+            _presence_set(self.memory_provider, (memory_id, user_id), True)
+        elif scoped_query and not rows:
+            _presence_set(self.memory_provider, (memory_id, user_id), False)
         return candidates
 
     @staticmethod
@@ -1462,6 +1876,7 @@ class EntityMemory:
                 f"{key}: {value}"
                 for key, value in record["metadata"].items()
                 if key not in {"retired_attributes", "merge_undo"}
+                and key not in _EMBEDDING_STATUS_KEYS
             ]
             lines.extend(metadata_parts)
         return "\n".join(lines)

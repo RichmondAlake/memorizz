@@ -123,7 +123,8 @@ Consider provider-native implementations for:
 - scoped observability pages and cursors;
 - domain/version semantic-cache invalidation;
 - pre-filtered toolbox and Skillbox retrieval;
-- transactional scope cleanup with per-store counts;
+- transactional scope cleanup with per-store counts (the inherited
+  `delete_scope` sweeps store by store; see [Delete a scope](scoped-cleanup.md));
 - `preflight()` reporting schema, permissions, vector dimensions, indexes, and
   exact-search fallback state.
 

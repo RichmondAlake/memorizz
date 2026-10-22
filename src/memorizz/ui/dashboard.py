@@ -28,7 +28,11 @@ from .helpers import (
 from .observability_view import format_age
 from .security import audit_trace_view
 from .state import _state
-from .trace_access import require_trace_permission, scoped_trace_filters
+from .trace_access import (
+    current_principal,
+    require_trace_permission,
+    scoped_trace_filters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,8 @@ DEFERRED_PROVIDERS = {"notion"}
 # Bounded read: the newest trace records, as the Observability pages load them.
 TRACE_RECORD_LIMIT = 1000
 TRACE_EVENT_LIMIT = 20000
+# The newest recorded outcomes and grader verdicts the overview joins to runs.
+VERDICT_RECORD_LIMIT = 1000
 
 
 def _agent_names() -> Dict[str, str]:
@@ -169,6 +175,14 @@ def link_attention(
             if trace and item.get("count", 1) > 1:
                 trace["label"] = "Open the newest failed run"
             actions = [trace]
+        elif kind == "graded_failures":
+            if trace:
+                trace["label"] = (
+                    "Open the newest failing turn"
+                    if item.get("count", 1) > 1
+                    else "Open the failing turn"
+                )
+            actions = [trace]
         elif kind == "tool" and item.get("reason") in _TOOL_SETUP_REASONS:
             actions = [settings(agent_id, *_tool_settings(item["tool"])), trace]
         elif kind == "tool":
@@ -199,6 +213,34 @@ def link_attention(
             ]
         item["actions"] = [action for action in actions if action]
     return items
+
+
+def load_verdicts(limit: int = VERDICT_RECORD_LIMIT) -> List[Dict[str, Any]]:
+    """The newest recorded outcomes and grader verdicts, as stored payloads.
+
+    A bounded read of ``record_task_outcome`` records. Scoped (restricted)
+    viewers get none, as on the Traces page. Never raises.
+    """
+    from ..enums.memory_type import MemoryType
+    from ..observability.normalization import read_payload
+
+    provider = _state.get("provider")
+    query = getattr(provider, "query_observability_records", None)
+    if not callable(query) or current_principal.get().restricted:
+        return []
+    try:
+        page = query(
+            MemoryType.SHARED_MEMORY, record_type="observability_outcome", limit=limit
+        )
+    except Exception:
+        logger.warning("Recorded outcomes could not be read", exc_info=True)
+        return []
+    rows = []
+    for row in page.get("items") or []:
+        payload = read_payload(row) if isinstance(row, dict) else None
+        if payload and payload.get("record_type") == "observability_outcome":
+            rows.append(payload)
+    return rows
 
 
 def load_run_health(
@@ -266,6 +308,7 @@ def load_run_health(
         price=price,
         span=span,
         recent_limit=50 if span["key"] == "custom" else 12,
+        verdicts=load_verdicts(),
     )
     window_start, window_end = overview["window_start"], overview["window_end"]
     result["events"] = [

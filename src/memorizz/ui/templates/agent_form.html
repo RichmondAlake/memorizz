@@ -964,7 +964,7 @@
                         <label for="harness_delegate_name">Name <span class="optional">optional</span></label>
                         <input id="harness_delegate_name" placeholder="Codex delegate" maxlength="80" autocomplete="off">
                     </div>
-                    <button type="button" class="btn btn-sm" id="harness_delegate_add">Add delegate</button>
+                    <button type="button" class="btn btn-sm" id="harness_delegate_add" data-mutates>Add delegate</button>
                 </div>
                 <p class="form-hint harness-delegate-status" id="harness_delegate_status" aria-live="polite"></p>
                 <p class="form-hint">A harness delegate runs its part on that harness, with the harness's own tools and sandbox. On Agent Harnesses it works in that run's workspace; in the playground it uses the workspace set on the delegate (its agent harness settings), or else the folder the UI runs in. Agent delegates run on their own models with MemoRizz's tools. Mixing both works well: send code and file work to a harness, research and writing to an agent.</p>
@@ -1081,7 +1081,7 @@
 
     <div class="form-actions builder-actions">
         <button type="submit" class="btn btn-primary">Save agent</button>
-        <button type="button" class="btn" id="save-template-toggle" aria-expanded="false" aria-controls="save-template-panel">Save as template</button>
+        <button type="button" class="btn" id="save-template-toggle" aria-expanded="false" aria-controls="save-template-panel" data-mutates>Save as template</button>
         <a href="{% if is_edit %}/agents/{{ agent_id }}/playground{% else %}/agents{% endif %}" class="btn">Cancel</a>
     </div>
     <section class="panel save-template-panel" id="save-template-panel" aria-labelledby="save-template-title" hidden>
@@ -1098,7 +1098,7 @@
             </div>
         </div>
         <div class="save-template-actions">
-            <button type="button" class="btn btn-primary" id="save-template-submit">Save template</button>
+            <button type="button" class="btn btn-primary" id="save-template-submit" data-mutates>Save template</button>
             <span class="form-hint" id="save-template-status" role="status" aria-live="polite"></span>
         </div>
     </section>

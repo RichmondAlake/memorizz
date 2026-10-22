@@ -248,7 +248,16 @@ def detect_memory_provider(llm_config: Dict[str, Any], warnings: List[str]) -> A
     recorded so other MemoRizz processes can see this one uses it."""
     import sys
 
-    provider = _detect_memory_provider(llm_config, warnings)
+    try:
+        provider = _detect_memory_provider(llm_config, warnings)
+    except ImportError as exc:
+        # A missing driver becomes an instruction: which extra to install.
+        from ..extras import missing_extra_message
+
+        hint = missing_extra_message(exc, with_ui=False)
+        if not hint:
+            raise
+        raise type(exc)(hint, name=getattr(exc, "name", None)) from exc
     if provider is not None:
         from ..finetune import clients
 

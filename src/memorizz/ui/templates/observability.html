@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Observability &amp; Monitoring - Memorizz{% endblock %}
-{% block head %}<script src="/static/js/observability.js?v=4" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=3"><link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8"><script src="/static/js/memory-evolution.js?v=8" defer></script>{% endblock %}
+{% block head %}<script src="/static/js/observability.js?v=4" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=2"><link rel="stylesheet" href="/static/css/pages/observability.css?v=4"><link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8"><script src="/static/js/memory-evolution.js?v=8" defer></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, observability_tabs, empty_state %}
@@ -57,7 +57,7 @@
         <form class="fleet-search obs-nav-search" method="get" action="/traces" role="search">
             {% if selected_agent_id %}
             <input type="hidden" name="agent_id" value="{{ selected_agent_id }}">
-            {% for key, value in selection_urls.params.items() %}{% if key != 'agent_id' %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
+            {% for key, value in selection_urls.params.items() %}{% if key not in ['agent_id', 'tag'] %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
             {% endif %}
             <kbd aria-hidden="true">/</kbd>
             <input
@@ -72,9 +72,22 @@
                 aria-label="Filter agents and threads. Press Enter to search trace, source and artifact IDs."
                 autocomplete="off"
             >
+            <input
+                type="search"
+                id="trace-tag-filter"
+                name="tag"
+                class="traces-search-input obs-tag-filter"
+                value="{{ tag_filter }}"
+                maxlength="2400"
+                placeholder="Tag key=value"
+                title="Show only turns tagged with every key=value; separate several with commas"
+                aria-label="Filter by run tag, such as experiment=lme-v2"
+                autocomplete="off"
+            >
             <button type="submit" class="btn btn-sm">Search</button>
         </form>
         {% if agent_query %}<a class="obs-clear" href="{{ selection_urls.traces }}">Clear search</a>{% endif %}
+        {% if tag_filter %}<span class="meta-tag trace-tag trace-run-tag">Tagged {{ tag_filter }}</span><a class="obs-clear" href="{{ clear_tag_url }}">Clear tag</a>{% endif %}
         {% if agent_rows %}
         <div class="segmented" role="group" aria-label="Show agents">
             <button type="button" class="segmented-item" data-nav-tag="" aria-pressed="true">All <span>{{ navigator_counts.all }}</span></button>
@@ -210,6 +223,12 @@
     <div class="summary-item">
         <span class="summary-label">Latest</span>
         <span class="summary-value">{{ trace_summary.latest_timestamp }}</span>
+    </div>
+    {% endif %}
+    {% if trace_tag_pairs %}
+    <div class="summary-item">
+        <span class="summary-label">Run tags</span>
+        <span class="summary-value">{% for key, value in trace_tag_pairs %}<a class="meta-tag trace-tag trace-run-tag" href="/traces?{{ {'tag': key ~ '=' ~ value}|urlencode }}" title="Show turns tagged {{ key }}={{ value }}">{{ key }}={{ value }}</a>{% endfor %}</span>
     </div>
     {% endif %}
 </div>
@@ -498,8 +517,12 @@
                         {% if event.kind == 'memory_context' %}<span class="meta-tag trace-tag {% if event.memory_degraded %}trace-tag--warning{% else %}trace-tag--ok{% endif %}">{{ event.memory_supplied_count|default(0) }} supplied · {{ event.memory_candidate_count|default(0) }} candidates</span>{% endif %}
                         {% if event.kind == 'memory_reference' %}<span class="meta-tag trace-tag trace-tag--ok">{{ event.memory_referenced_count|default(0) }} explicitly referenced</span>{% endif %}
                         {% if event.duration_ms is defined and event.duration_ms is not none %}<span class="meta-tag trace-tag trace-tag--duration">{{ ms(event.duration_ms) }}</span>{% endif %}
+                        {% for key, value in row.tags %}<a class="meta-tag trace-tag trace-run-tag" href="/traces?{{ {'tag': key ~ '=' ~ value}|urlencode }}" title="Show turns tagged {{ key }}={{ value }}">{{ key }}={{ value }}</a>{% endfor %}
+                        {% for verdict in row.verdicts %}<span class="meta-tag trace-tag trace-verdict {% if verdict.verdict == 'pass' %}trace-tag--ok{% elif verdict.verdict == 'fail' %}trace-tag--critical{% elif verdict.verdict == 'partial' %}trace-tag--warning{% else %}trace-tag--muted{% endif %}" title="{{ 'Verified' if verdict.verified else 'Unverified' }} outcome{% if verdict.recorded_at %} · recorded {{ verdict.recorded_at }}{% endif %}">Verdict: {{ verdict.verdict }}{% if verdict.grader %} · {{ verdict.grader }}{% endif %}{% if verdict.reason_code %} · {{ verdict.reason_code|replace('_', ' ') }}{% endif %}{% if verdict.score is not none %} · score {{ verdict.score }}{% endif %}{% if not verdict.verified %} · unverified{% endif %}</span>{% endfor %}
                     </div>
                 </header>
+                {% if row.why %}<p class="obs-tl-why" role="note">{{ row.why }}</p>{% endif %}
+                {% if row.note %}<p class="obs-tl-note-line">{{ row.note.strip() }}</p>{% endif %}
                 {% if event.input_refs or event.output_refs %}
                 <details class="obs-tl-section" {% if event.status in ['error', 'partial'] %}open{% endif %}>
                     <summary>Memory lineage and artifact provenance</summary>

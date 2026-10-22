@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ...observability import ObservabilityStore, analyze_trace_events
@@ -38,6 +38,12 @@ from ...observability.normalization import (
     select_trace_events,
 )
 from ...observability.pricing import DEFAULT_PRICING
+from ...observability.tags import (
+    format_tag_filter,
+    parse_tag_filter,
+    select_tagged_turns,
+    tag_pairs,
+)
 from .. import observability_view
 from ..analytics import usage_charts
 from ..helpers import (
@@ -87,8 +93,12 @@ def _selection_window(
     task_id=None,
     limit=500,
     event_limit=1000,
+    tags=None,
 ):
-    """One authorized identity/snapshot contract for every combined trace view."""
+    """One authorized identity/snapshot contract for every combined trace view.
+
+    ``tags`` keeps the turns tagged with every ``key=value`` it holds.
+    """
     if selected_agent is None and agent_id and not current_principal.get().restricted:
         try:
             selected_agent = next(
@@ -116,6 +126,7 @@ def _selection_window(
         memory_ids=memories,
         thread_id=thread_id,
         limit=max(1, min(limit, 1000)),
+        bundles=bool(tags),
     )
     events = normalize_trace_snapshot(
         snapshot,
@@ -142,7 +153,17 @@ def _selection_window(
         )
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid trace selection") from None
+    if tags:
+        events = select_tagged_turns(events, tags)
     return snapshot, events
+
+
+def _tag_filter(values) -> Dict[str, str]:
+    """The ``tag`` query parameters as one ``key=value`` filter; 400 if malformed."""
+    try:
+        return parse_tag_filter(values or [])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 def _selection_urls(request, **selection):
@@ -153,6 +174,9 @@ def _selection_urls(request, **selection):
             if k in request.query_params
         }
     )
+    tags = _tag_filter(request.query_params.getlist("tag"))
+    if tags:
+        selection["tag"] = format_tag_filter(tags)
     params = {k: v for k, v in selection.items() if v is not None and v != ""}
     params.update(scoped_trace_filters())
     return {
@@ -288,10 +312,16 @@ async def traces_page(
     run_id: Optional[str] = None,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
+    tag: Optional[List[str]] = Query(None),
 ):
-    """Show traces dashboard with searchable agent table and per-agent timeline."""
+    """Show traces dashboard with searchable agent table and per-agent timeline.
+
+    ``tag`` (``key=value``, repeatable or comma-separated) narrows the
+    navigator and the timeline to turns carrying every given tag.
+    """
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
+    tag_filter = _tag_filter(tag)
 
     agents: List[Any] = []
     try:
@@ -302,7 +332,9 @@ async def traces_page(
             status_code=503, detail="Trace agent associations are unavailable"
         ) from None
 
-    conversation_docs, tool_log_docs, trace_query_metadata = _load_trace_snapshot()
+    conversation_docs, tool_log_docs, trace_query_metadata = _load_trace_snapshot(
+        bundles=bool(tag_filter)
+    )
     agents = _discover_runtime_trace_agents(
         agents,
         conversation_docs=conversation_docs,
@@ -311,7 +343,8 @@ async def traces_page(
     indexed_summaries = None
     from ...observability.index import read_path
 
-    if read_path() == "index":
+    # The span index holds no tags: a tag filter reads the trace bundles.
+    if read_path() == "index" and not tag_filter:
         try:
             native = _state["provider"].get_observability_index()
             indexed_summaries = native.summaries(limit=1000, **scoped_trace_filters())
@@ -337,7 +370,10 @@ async def traces_page(
 
     agent_query = _to_text(q).strip()
     trace_metrics = _build_agent_trace_metrics(
-        agents, conversation_docs=conversation_docs, tool_log_docs=tool_log_docs
+        agents,
+        conversation_docs=conversation_docs,
+        tool_log_docs=tool_log_docs,
+        tags=tag_filter,
     )
     if indexed_summaries is not None:
         for agent in agents:
@@ -378,7 +414,10 @@ async def traces_page(
         runtime_tool_names = agent.get("_runtime_tool_names") or []
         tool_counts[_extract_agent_identifier(agent)] = len(runtime_tool_names)
     thread_rows_by_agent = _build_agent_thread_rows(
-        agents, conversation_docs=conversation_docs, tool_log_docs=tool_log_docs
+        agents,
+        conversation_docs=conversation_docs,
+        tool_log_docs=tool_log_docs,
+        tags=tag_filter,
     )
     if indexed_summaries is not None:
         for agent in agents:
@@ -416,6 +455,10 @@ async def traces_page(
         if agent_query
         else agent_rows
     )
+    if tag_filter:
+        # Only agents with a tagged turn in the loaded window.
+        agent_rows = [row for row in agent_rows if row["event_count"]]
+        all_agent_rows = [row for row in all_agent_rows if row["event_count"]]
     navigator_rows = observability_view.navigator_rows(agent_rows, now=now)
     all_navigator_rows = (
         observability_view.navigator_rows(all_agent_rows, now=now)
@@ -433,6 +476,7 @@ async def traces_page(
         "outcomes": [],
     }
     persisted_recommendations: Dict[str, Dict[str, Any]] = {}
+    turn_outcomes: List[Dict[str, Any]] = []
     selected_thread_row: Optional[Dict[str, Any]] = None
     error = None
 
@@ -471,6 +515,7 @@ async def traces_page(
                 root_trace_id=root_trace_id,
                 turn_id=turn_id,
                 task_id=task_id,
+                tags=tag_filter,
             )
             trace_query_metadata = selected_snapshot.query_metadata
             if event_id and not any(
@@ -501,7 +546,7 @@ async def traces_page(
                 or bool(
                     not selected_thread_id
                     and not selected_thread_memory_id
-                    and not (root_trace_id or turn_id or task_id)
+                    and not (root_trace_id or turn_id or task_id or tag_filter)
                     and agent_event_count > len(trace_events)
                 )
             )
@@ -519,11 +564,18 @@ async def traces_page(
                     if _to_text(event.get("root_trace_id")).strip()
                 }
                 observability_store = ObservabilityStore(_state["provider"])
-                trace_signals = observability_store.list_signals(
+                # Every recorded outcome shows on its turn; the analysis
+                # counts only verified ones.
+                all_signals = observability_store.list_signals(
                     root_trace_ids=root_trace_ids,
                     agent_id=(None if source_is_virtual else selected_agent_id),
-                    verified_only=True,
+                    verified_only=False,
                 )
+                turn_outcomes = all_signals["outcomes"]
+                trace_signals = {
+                    kind: [row for row in rows if row.get("verified") is True]
+                    for kind, rows in all_signals.items()
+                }
                 persisted_recommendations = {
                     _to_text((row.get("insight") or {}).get("id")): row
                     for row in observability_store.list_recommendations(
@@ -684,7 +736,18 @@ async def traces_page(
                 agent_label=_timeline_agent_label(selected_agent),
                 content_event_ids=content_event_ids,
                 previews_indexed=_previews_indexed(),
+                outcomes=turn_outcomes,
             ),
+            "tag_filter": format_tag_filter(tag_filter),
+            "clear_tag_url": "/traces?"
+            + urlencode(
+                [
+                    (key, value)
+                    for key, value in request.query_params.multi_items()
+                    if key != "tag"
+                ]
+            ),
+            "trace_tag_pairs": tag_pairs(trace_events),
             "trace_waterfall": build_causal_waterfall(display_trace_events),
             "trace_inspectors": build_lineage_inspectors(display_trace_events),
             "trace_permissions": {
@@ -1113,11 +1176,13 @@ async def trace_events_page(
     success: Optional[bool] = None,
     limit: int = 250,
     cursor: Optional[str] = None,
+    tag: Optional[List[str]] = Query(None),
 ):
     """Return one cursor page for trace explorers and external local tooling."""
     provider = _state.get("provider")
     if not provider:
         raise HTTPException(status_code=503, detail="No memory provider connected")
+    tag_filter = _tag_filter(tag)
     from ...enums.memory_type import MemoryType
 
     if view not in {"events", "bundles"}:
@@ -1152,6 +1217,7 @@ async def trace_events_page(
             root_trace_id=root_trace_id,
             turn_id=turn_id,
             limit=500,
+            tags=tag_filter,
         )
         audit_trace_view(
             request,
@@ -1220,6 +1286,7 @@ async def trace_events_page(
         "statuses": [status] if status else None,
         "start_time": start_time,
         "end_time": end_time,
+        "tags": tag_filter or None,
     }
     if view == "bundles" and any(value is not None for value in event_filters.values()):
         raise HTTPException(status_code=400, detail="Event filters require view=events")
@@ -1227,6 +1294,12 @@ async def trace_events_page(
         kwargs.update(
             {key: value for key, value in event_filters.items() if value is not None}
         )
+        if (
+            tag_filter
+            and memory_type == MemoryType.SHARED_MEMORY
+            and callable(getattr(provider, "query_trace_events", None))
+        ):
+            kwargs["read_path"] = "bundles"  # the span index holds no tags
     try:
         page = (
             (
@@ -1527,8 +1600,13 @@ def _load_trace_snapshot(
     memory_ids: Optional[List[str]] = None,
     thread_id: Optional[str] = None,
     limit: int = 750,
+    bundles: bool = False,
 ) -> TraceSnapshot:
-    """Load bounded trace pages and surface their query/freshness metadata."""
+    """Load bounded trace pages and surface their query/freshness metadata.
+
+    ``bundles`` reads trace bundles even on the index read path; tag filters
+    need them, since the span index holds no tags.
+    """
     provider = _state.get("provider")
     if not provider:
         return TraceSnapshot(
@@ -1540,7 +1618,11 @@ def _load_trace_snapshot(
     def _page(memory_type: MemoryType) -> Dict[str, Any]:
         from ...observability.index import indexed_bundle_rows, read_path
 
-        if memory_type == MemoryType.SHARED_MEMORY and read_path() == "index":
+        if (
+            memory_type == MemoryType.SHARED_MEMORY
+            and read_path() == "index"
+            and not bundles
+        ):
             page = provider.query_trace_events(
                 agent_ids=agent_ids,
                 memory_ids=memory_ids,
@@ -1833,6 +1915,7 @@ def _build_agent_thread_rows(
     *,
     conversation_docs: Optional[List[Dict[str, Any]]] = None,
     tool_log_docs: Optional[List[Dict[str, Any]]] = None,
+    tags: Optional[Dict[str, str]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Derive thread counts from the same normalized window as the timeline."""
     result = {}
@@ -1843,6 +1926,8 @@ def _build_agent_thread_rows(
             conversation_docs=conversation_docs,
             tool_log_docs=tool_log_docs or [],
         )
+        if tags:
+            events = select_tagged_turns(events, tags)
         rows = {}
         for event in events:
             memory_id = event.get("memory_id") or "—"
@@ -1875,6 +1960,7 @@ def _build_agent_trace_metrics(
     *,
     conversation_docs: Optional[List[Dict[str, Any]]] = None,
     tool_log_docs: Optional[List[Dict[str, Any]]] = None,
+    tags: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Count child events separately from their storage envelopes."""
     metrics = {}
@@ -1885,6 +1971,8 @@ def _build_agent_trace_metrics(
             conversation_docs=conversation_docs,
             tool_log_docs=tool_log_docs or [],
         )
+        if tags:
+            events = select_tagged_turns(events, tags)
         metrics[_extract_agent_identifier(agent)] = {
             "event_count": len(events),
             "bundle_count": events.coverage.get("bundle_count", 0),

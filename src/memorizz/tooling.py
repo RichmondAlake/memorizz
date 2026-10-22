@@ -1050,15 +1050,29 @@ class SemanticToolRouter:
             "warnings": warnings,
         }
 
+    # Calls that leave this many (or fewer) of the turn's budget carry a
+    # short note, so the model can batch what is left or say what it could
+    # not do.
+    BUDGET_NOTE_AT = 2
+
     def prepare_invocation(
         self, tool_name: str, arguments: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        """Reserve one bounded invocation without executing the callable."""
-        if self._invocation_count >= self.max_invocations_per_turn:
+        """Reserve one bounded invocation without executing the callable.
+
+        A reserved call reports ``remaining``: the calls this turn still has.
+        """
+        limit = self.max_invocations_per_turn
+        if self._invocation_count >= limit:
             return {
                 "ok": False,
                 "error_code": "tool_budget_exhausted",
-                "error": "The per-turn routed tool invocation budget was exhausted",
+                "error": (
+                    f"This turn has already made its {limit} tool calls "
+                    "(max_tool_invocations_per_turn), so this call did not run. "
+                    "Tell the user what is still to do."
+                ),
+                "tool_call_limit": limit,
             }
         name = str(tool_name)
         values = dict(arguments)
@@ -1081,7 +1095,34 @@ class SemanticToolRouter:
             }
         self._call_attempts[call_hash] = attempts + 1
         self._invocation_count += 1
-        return {"ok": True, "call_hash": call_hash}
+        return {
+            "ok": True,
+            "call_hash": call_hash,
+            "remaining": max(0, limit - self._invocation_count),
+        }
+
+    def budget_note(self, remaining: Optional[int]) -> str:
+        """Text added to a tool result when the turn's budget is nearly spent.
+
+        Empty until ``remaining`` drops to :attr:`BUDGET_NOTE_AT`. The note
+        rides on the newest tool message only, so the cached prompt prefix
+        does not change.
+        """
+        if remaining is None or remaining > self.BUDGET_NOTE_AT:
+            return ""
+        limit = self.max_invocations_per_turn
+        if remaining <= 0:
+            return (
+                f"\n\n[Tool budget] That was the last of this turn's {limit} "
+                "tool calls. More calls will not run; tell the user what is "
+                "still to do."
+            )
+        calls = "call" if remaining == 1 else "calls"
+        return (
+            f"\n\n[Tool budget] {remaining} tool {calls} left this turn (limit "
+            f"{limit}). Combine the remaining work into fewer calls, or tell "
+            "the user what is still to do."
+        )
 
     def record_invocation(self, call_hash: str, *, success: bool) -> None:
         """Record completion for duplicate-call protection."""

@@ -93,6 +93,7 @@ def test_upsert_persists_current_user_scope(mock_memory_provider):
         metadata=None,
         memory_id="primary-user-a",
         user_id="user-a",
+        report=True,
     )
 
 

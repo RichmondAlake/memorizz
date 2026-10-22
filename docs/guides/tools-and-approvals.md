@@ -224,6 +224,41 @@ for outcome in agent.last_tool_outcomes:
     print(outcome["tool_name"], outcome["status"], outcome.get("reason_code"))
 ```
 
+## The per-turn tool-call limit
+
+A turn runs at most `ContextPolicy.max_tool_invocations_per_turn` tool calls
+(20 by default). Calls past the limit do not run. A message with 25 facts to
+save, for example, saves 20 and leaves 5.
+
+The turn reports this in three places:
+
+- `agent.last_turn_limits` after the turn:
+
+    ```python
+    agent.run("remember these 25 facts")
+    limits = agent.last_turn_limits
+    # {"tool_budget_exhausted": True, "refused_tool_calls": 5,
+    #  "refused_tools": {"save_fact": 5}, "tool_call_limit": 20}
+    ```
+
+- each refused call in `agent.last_tool_outcomes`, with
+  `reason_code="tool_budget_exhausted"`;
+- the turn's `turn_result` trace event, with `tool_budget_exhausted=true`,
+  `refused_tool_calls` and `tool_call_limit`. The Overview's *Needs
+  attention* list names the cause for the tool whose calls were refused.
+
+The model is told too. The results of a turn's last three allowed calls
+carry a short note with the calls left, so the model can combine the
+remaining work into fewer calls. A refused call tells the model it did not run, so the model can
+say what is still to do. The note is added to the newest tool result only,
+so the cached prompt prefix does not change.
+
+To allow more calls, raise the limit:
+
+```python
+agent = MemAgent(..., context_policy=ContextPolicy(max_tool_invocations_per_turn=40))
+```
+
 ## Choose the right execution boundary
 
 | Need | Capability | Boundary |

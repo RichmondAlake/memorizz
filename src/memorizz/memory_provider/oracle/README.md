@@ -58,3 +58,6 @@ and creates the indexes used by exact thread and namespace retrieval in 0.5.2.
 one exact scope, deletes related package-owned records transactionally, and
 returns per-table counts. It is intended for test/course lifecycle cleanup,
 tenant erasure, and controlled agent teardown—not broad unscoped deletion.
+`keep_traces=True` keeps the scope's observability records (trace bundles,
+outcomes, verdicts) and legacy conversation trace bundles; see
+`docs/memory-providers/scoped-cleanup.md`.

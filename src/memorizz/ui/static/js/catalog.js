@@ -200,6 +200,7 @@
         const status = node('p', 'catalog-form-status');
         status.setAttribute('role', 'status');
         const submit = button(context.agentName ? `Attach to ${context.agentName}` : 'Attach', 'btn btn-primary btn-sm');
+        submit.dataset.mutates = '';
         const actions = node('div', 'catalog-actions');
         actions.append(submit, status);
         form.appendChild(actions);
@@ -239,6 +240,7 @@
         const status = node('p', 'catalog-form-status');
         status.setAttribute('role', 'status');
         const submit = button(context.agentName ? `Attach to ${context.agentName}` : 'Attach', 'btn btn-primary btn-sm');
+        submit.dataset.mutates = '';
         const actions = node('div', 'catalog-actions');
         actions.append(submit, link('Setup guide', preset.docs), status);
         form.appendChild(actions);
@@ -361,6 +363,7 @@
         const title = node('div', 'catalog-item-title');
         title.append(node('strong', '', skill.skill_name || skill.name), node('span', 'catalog-meta mono', skill.repo));
         const pick = button(context.agentName ? `Attach to ${context.agentName}` : 'Attach');
+        pick.dataset.mutates = '';
         const status = node('p', 'catalog-form-status');
         status.setAttribute('role', 'status');
         pick.addEventListener('click', async () => {

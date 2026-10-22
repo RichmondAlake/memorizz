@@ -43,6 +43,12 @@ entity_store.record_attribute(
 matches = entity_store.search_entities("user who likes the drone", memory_id="tenant-123")
 ```
 
+An entity whose text is past the embedding model's input limit gets a vector of its
+name, type and newest attributes. `upsert_entity_with_report` returns what the vector
+covers, and the record's `metadata.embedding_status` is `partial` or `missing` when it
+does not cover everything. `has_entities(memory_id=..., user_id=...)` says whether a
+scope holds any entity, from one cached query.
+
 The module intentionally mirrors the layout of other long-term memory components (such
 as the knowledge base and persona modules) so it can be attached to `MemAgent`
 instances or used standalone.

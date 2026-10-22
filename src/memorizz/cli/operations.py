@@ -151,18 +151,124 @@ def teardown_oracle(mode: Optional[str] = None, force: bool = False):
         return False
 
 
-def run_local(host: str = "127.0.0.1", port: int = 8765):
-    """Run the Memorizz local web UI."""
+def ui_startup_from_flags(
+    backend: Optional[str] = None,
+    *,
+    user: Optional[str] = None,
+    dsn: Optional[str] = None,
+    schema: Optional[str] = None,
+    password_env: str = "ORACLE_PASSWORD",
+    uri_env: str = "MONGODB_URI",
+    db: Optional[str] = None,
+    path: Optional[str] = None,
+    data_source_id: Optional[str] = None,
+    environ=None,
+    prompt=None,
+) -> Optional[dict]:
+    """What ``memorizz ui`` connects to at startup from its flags.
+
+    The backend is ``--backend``, or the one the other flags imply. Secrets
+    never come from a flag: the Oracle password from the variable
+    ``--password-env`` names (ORACLE_PASSWORD), the MongoDB URI from
+    ``--uri-env`` (MONGODB_URI), the Notion token from NOTION_TOKEN; when
+    the variable is unset and this is a terminal, they are asked for without
+    echo. Returns None when no flag names a store.
+    """
+    env = os.environ if environ is None else environ
+    backend = (backend or "").strip().lower() or None
+    if backend is None:
+        if user or dsn or schema:
+            backend = "oracle"
+        elif db:
+            backend = "mongodb"
+        elif path:
+            backend = "filesystem"
+        elif data_source_id:
+            backend = "notion"
+        else:
+            return None
+    if backend not in {"oracle", "mongodb", "filesystem", "notion"}:
+        raise ValueError(
+            f"Unknown --backend {backend!r}: use oracle, mongodb, filesystem or notion."
+        )
+
+    def secret(variable: str, label: str) -> str:
+        value = str(env.get(variable, "") or "").strip()
+        if value:
+            return value
+        import sys
+
+        if prompt is not None:
+            return str(prompt(label) or "")
+        if sys.stdin is not None and sys.stdin.isatty():
+            import getpass
+
+            return getpass.getpass(f"{label}: ")
+        return ""
+
+    params: dict = {}
+    if backend == "oracle":
+        user = user or str(env.get("ORACLE_USER", "") or "").strip()
+        dsn = dsn or str(env.get("ORACLE_DSN", "") or "").strip()
+        params = {
+            "oracle_user": user,
+            "oracle_dsn": dsn,
+            "oracle_schema": schema or str(env.get("ORACLE_SCHEMA", "") or "").strip(),
+            "oracle_password": secret(
+                password_env, f"Oracle password for {user or 'the user'}"
+            ),
+        }
+    elif backend == "mongodb":
+        params = {
+            "mongodb_uri": secret(uri_env, "MongoDB connection URI"),
+            "mongodb_db_name": db or str(env.get("MONGODB_DB_NAME", "") or "").strip(),
+        }
+    elif backend == "filesystem":
+        from .._env_io import memory_root
+
+        root = path or str(env.get("MEMORIZZ_MEMORY_ROOT", "") or "").strip()
+        params = {"filesystem_path": root or str(memory_root())}
+    elif backend == "notion":
+        params = {
+            "notion_data_source_id": data_source_id
+            or str(env.get("MEMORIZZ_NOTION_DATA_SOURCE_ID", "") or "").strip(),
+            "notion_token": secret("NOTION_TOKEN", "Notion integration token"),
+        }
+    return {
+        "provider_type": backend,
+        "source": "command line",
+        "params": {key: value for key, value in params.items() if value},
+    }
+
+
+def run_local(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    startup_connect="env",
+    read_only: bool = False,
+):
+    """Run the Memorizz local web UI.
+
+    ``startup_connect`` is ``"env"`` (connect to the store the environment
+    names), a dict from ``ui_startup_from_flags``, or None (start on the
+    connect page). ``read_only`` refuses every change, as
+    MEMORIZZ_UI_READ_ONLY=true does.
+    """
+    if read_only:
+        os.environ["MEMORIZZ_UI_READ_ONLY"] = "true"
     try:
         from memorizz.ui import run_server
-
-        run_server(host=host, port=port)
-        return True
     except ImportError as e:
+        from ..extras import missing_extra_message
+
         print(f"✗ Failed to import UI module: {e}")
-        print("\nPlease ensure memorizz[ui] is installed:")
-        print("  pip install memorizz[ui]")
+        print("\n" + (missing_extra_message(e) or "The UI needs the ui extra:"))
+        if not missing_extra_message(e):
+            print("  pip install 'memorizz[ui]'")
         return False
+    try:
+        run_server(host=host, port=port, startup_connect=startup_connect)
+        return True
     except Exception as e:
         print(f"✗ Failed to start UI server: {e}")
         return False

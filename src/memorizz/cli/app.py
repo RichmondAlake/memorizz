@@ -177,15 +177,92 @@ def run(
     )
 
 
-@app.command(help="Launch the local web UI (requires the optional UI dependencies).")
+@app.command(
+    help=(
+        "Launch the local web UI (requires the optional UI dependencies). It "
+        "connects at startup to the store named by --backend and its flags, "
+        "else by MEMORIZZ_BACKEND and that provider's own variables."
+    )
+)
 def ui(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8765, "--port"),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Connect at startup: oracle, mongodb, filesystem or notion.",
+    ),
+    user: Optional[str] = typer.Option(None, "--user", help="Oracle user."),
+    dsn: Optional[str] = typer.Option(
+        None, "--dsn", help="Oracle DSN, such as host:1521/FREEPDB1."
+    ),
+    schema: Optional[str] = typer.Option(
+        None, "--schema", help="Oracle schema (default: the user)."
+    ),
+    password_env: str = typer.Option(
+        "ORACLE_PASSWORD",
+        "--password-env",
+        help="Variable holding the Oracle password; asked for when unset.",
+    ),
+    uri_env: str = typer.Option(
+        "MONGODB_URI",
+        "--uri-env",
+        help="Variable holding the MongoDB URI; asked for when unset.",
+    ),
+    db: Optional[str] = typer.Option(
+        None, "--db", help="MongoDB database (default: memorizz)."
+    ),
+    path: Optional[str] = typer.Option(
+        None, "--path", help="FileSystem store folder (default: the CLI's store)."
+    ),
+    data_source_id: Optional[str] = typer.Option(
+        None, "--data-source-id", help="Notion memory data source ID."
+    ),
+    read_only: bool = typer.Option(
+        False,
+        "--read-only",
+        help="Refuse every change, as MEMORIZZ_UI_READ_ONLY=true does.",
+    ),
+    no_connect: bool = typer.Option(
+        False,
+        "--no-connect",
+        help="Start on the connect page even when the environment names a store.",
+    ),
 ):
-    from .operations import run_local
+    from .operations import run_local, ui_startup_from_flags
 
-    ok = run_local(host=host, port=port)
+    cfg.load_layered_env()
+    try:
+        startup = ui_startup_from_flags(
+            backend,
+            user=user,
+            dsn=dsn,
+            schema=schema,
+            password_env=password_env,
+            uri_env=uri_env,
+            db=db,
+            path=path,
+            data_source_id=data_source_id,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--backend")
+    if no_connect:
+        startup = None
+    elif startup is None:
+        startup = "env"
+    ok = run_local(host=host, port=port, startup_connect=startup, read_only=read_only)
     raise typer.Exit(0 if ok else 1)
+
+
+@app.command(
+    help="Check this install: which optional extras are installed, and how to add one."
+)
+def doctor(
+    raw_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+):
+    from .doctor import print_doctor
+
+    raise typer.Exit(print_doctor(raw_json=raw_json))
 
 
 @app.command(help="Set up ~/.memorizz (API keys or the local Ollama stack).")

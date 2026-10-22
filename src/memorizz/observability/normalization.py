@@ -16,6 +16,7 @@ from .analytics import MEMORY_FIELDS
 from .models import IDENTITY_FIELDS, ResourceRef, SelectionDecision, TraceEventV3
 from .pricing import PRICING_FIELDS
 from .references import source_ids
+from .tags import stored_trace_tags, tags_match
 
 _USER_UNSET = object()
 
@@ -108,6 +109,14 @@ TRACE_METADATA_FIELDS = (
         "writing_sample_count",
         "cache_enabled",
         "cache_bypass_reason",
+        # turn_result: tool calls refused by the per-turn budget.
+        "tool_budget_exhausted",
+        "refused_tool_calls",
+        "tool_call_limit",
+        # turn_result: why a cancelled turn stopped, and how much reply text
+        # was written before a turn that didn't finish stopped.
+        "stop_reason",
+        "partial_reply_chars",
     )
     + PRICING_FIELDS
     + MEMORY_FIELDS
@@ -130,6 +139,8 @@ LEGACY_FIELDS = frozenset(TRACE_METADATA_FIELDS) | frozenset(
         "selection_ledger",
         "input_refs",
         "output_refs",
+        # A turn's run labels; a bundle's tags are copied onto its events.
+        "trace_tags",
     ]
 )
 
@@ -478,6 +489,8 @@ def normalize_trace_snapshot(
                 # key and trace_memory_id as the associated memory. Preserve
                 # row_identity's canonical association through child filtering.
                 event = {**identity, **child} if bundle else {**child, **identity}
+                if bundle and "trace_tags" not in child and payload.get("trace_tags"):
+                    event["trace_tags"] = payload["trace_tags"]
                 event_identity = {key: event.get(key) for key in IDENTITY_FIELDS}
                 if not in_scope(event_identity):
                     continue
@@ -643,6 +656,16 @@ def normalize_trace_snapshot(
                             errors.append(
                                 {"code": "invalid_task_id", "record_id": row_id}
                             )
+                    if "trace_tags" in event:
+                        tags = stored_trace_tags(event["trace_tags"])
+                        if tags:
+                            event["trace_tags"] = tags
+                        else:
+                            event.pop("trace_tags", None)
+                            if tags is None:
+                                errors.append(
+                                    {"code": "invalid_trace_tags", "record_id": row_id}
+                                )
                     if "grounding_source_ids" in event:
                         try:
                             event["grounding_source_ids"] = source_ids(
@@ -759,6 +782,7 @@ def query_trace_events(provider, memory_type, *, limit=250, cursor=None, **filte
             "start_time",
             "end_time",
             "query",
+            "tags",
         )
         if key in filters
     }
@@ -828,6 +852,10 @@ def query_trace_events(provider, memory_type, *, limit=250, cursor=None, **filte
         if (
             event_filters.get("statuses")
             and event.get("status") not in event_filters["statuses"]
+        ):
+            return False
+        if event_filters.get("tags") and not tags_match(
+            event.get("trace_tags"), event_filters["tags"]
         ):
             return False
         if event_filters.get("tool_name") and event_filters["tool_name"] not in (

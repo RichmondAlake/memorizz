@@ -27,7 +27,7 @@
 {% endcall %}
 
 {% if not ui_read_only %}
-<form class="hx-quick" id="hx-quick" autocomplete="off" novalidate>
+<form class="hx-quick" id="hx-quick" autocomplete="off" data-mutates novalidate>
     <label class="visually-hidden" for="hx-quick-task">Task</label>
     <textarea id="hx-quick-task" name="task" rows="1" placeholder="Ask a harness to do something, e.g. “Find why the tests fail in my project” or “What is MongoDB’s stock price today?”"></textarea>
     <div class="hx-quick-row">
@@ -108,7 +108,7 @@
 <script type="application/json" id="hx-launch-data">{{ {'harnesses': hx_harnesses, 'agents': hx_agents, 'default_agent': default_memagent}|tojson }}</script>
 <details class="panel harness-launch-panel hx-launch" id="harness-launch">
     <summary><span id="harness-launch-title">More launch options</span><span class="hx-launch-meta">Staged plans across harnesses, side-by-side comparisons, answer evaluation, limits and policies. Edits, web access, secrets and governed writes need approval first.</span></summary>
-    <form id="harness-run-form" class="harness-run-form" data-mode="single" novalidate>
+    <form id="harness-run-form" class="harness-run-form" data-mode="single" data-mutates novalidate>
         <div class="segmented hx-mode" role="radiogroup" aria-label="Launch mode">
             <button type="button" class="segmented-item" role="radio" data-mode-choice="single" aria-checked="true">Single run</button>
             <button type="button" class="segmented-item" role="radio" data-mode-choice="plan" aria-checked="false">Staged plan</button>

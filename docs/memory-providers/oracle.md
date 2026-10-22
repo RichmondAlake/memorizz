@@ -151,6 +151,7 @@ provider = OracleProvider(
 | `selected_vector_indexes` | `[]` | Memory types indexed under `selected` policy |
 | `pool_min` / `pool_max` | `1` / `5` | Connection-pool bounds |
 | `pool_wait_timeout` | `60` | Seconds to wait for a free connection before raising DPY-4005; `None` waits for good |
+| `read_only` | `False` | Make no schema changes: no tables, columns, indexes or in-database model are created. `provider.missing_tables` lists what the schema lacks |
 
 `lazy_vector_indexes` remains a compatibility argument; use `index_policy` in
 new code.
@@ -306,6 +307,12 @@ At least one exact scope is required. Conversations, caches, workflows,
 tool logs, skills, summaries/links, shared memory, automations, and selected
 agent records are deleted in one transaction, with per-table counts. A failure
 rolls the transaction back.
+
+Trace records in `shared_memory` (trace bundles, outcomes and grader verdicts)
+are scoped by the memory, user and agent in their JSON. Pass
+`keep_traces=True` to delete the memories and keep those records, so the runs
+stay on the Traces page. [Delete a scope](scoped-cleanup.md) lists exactly what
+goes and what stays.
 
 ## Operations
 

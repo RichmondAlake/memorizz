@@ -183,7 +183,7 @@ def save_agent(agent):
             memory_routing=(
                 agent.memory_routing.to_dict()
                 if getattr(agent, "memory_routing", None) is not None
-                and agent.memory_routing.enabled
+                and agent.memory_routing.worth_saving
                 else None
             ),
             reranker=(

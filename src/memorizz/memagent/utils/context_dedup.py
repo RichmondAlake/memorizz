@@ -19,7 +19,11 @@ into the context window. The pipeline is the standard assembly-time stack:
    against diversity; near-identical survivors score ~zero marginal
    relevance, making this an implicit second dedup stage. Relevance blends
    cosine-to-query with a recency decay when timestamps are available.
-5. Stable ordering — selected items are emitted oldest-first, ordered by
+5. Character budget — each item is cut to ``max_chars_per_item`` and, when
+   ``max_total_chars`` is set, the selected items share that total in
+   relevance order (the best item is served first; an item with too little
+   room left is dropped).
+6. Stable ordering — selected items are emitted oldest-first, ordered by
    (timestamp, id) rather than relevance score, so the rendered block is
    deterministic across turns (re-ranking retrieved chunks between turns is
    a documented prompt-cache killer).
@@ -55,6 +59,13 @@ DEFAULT_MMR_LAMBDA = 0.5
 
 # Blend weight of recency into MMR relevance when timestamps exist.
 DEFAULT_RECENCY_WEIGHT = 0.25
+
+# Characters of text kept per recalled item unless the caller says otherwise.
+DEFAULT_MAX_CHARS_PER_ITEM = 600
+
+# Under a total budget, an item that does not fit whole is cut to the room
+# left only when at least this much room is left; a smaller stub is dropped.
+_MIN_BUDGET_SLICE_CHARS = 120
 
 # Exponential recency decay per hour since the memory was written
 # (Generative-Agents style scoring, adapted from per-game-hour to wall-clock).
@@ -461,6 +472,38 @@ def _candidate_id(row: Any) -> str:
     return ""
 
 
+def _candidate_origin(row: Any) -> Dict[str, str]:
+    """The stored record's own id and thread, for retrieval evaluation.
+
+    Kept apart from ``id`` (which prefers a parent source) so that the
+    identifiers and fingerprints built from selected items do not change.
+    """
+    if not isinstance(row, dict):
+        return {}
+    origin: Dict[str, str] = {}
+    for key in ("_id", "id"):
+        value = row.get(key)
+        if value:
+            origin["record_id"] = str(value)
+            break
+    content = row.get("content") if isinstance(row.get("content"), dict) else {}
+    thread = (
+        row.get("thread_id")
+        or row.get("conversation_id")
+        or content.get("thread_id")
+        or content.get("conversation_id")
+    )
+    if thread:
+        origin["thread_id"] = str(thread)
+    return origin
+
+
+def _clip(text: str, limit: Optional[int]) -> str:
+    if limit and limit > 0 and len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
 def _candidate_score(row: Any) -> float:
     """Provider similarity score (vector-search rank), 0.0 when absent."""
     if not isinstance(row, dict):
@@ -588,6 +631,95 @@ def filter_skill_covered_workflows(
     return kept
 
 
+# Retrieval source labels -> the memory type of the store holding the record.
+_SOURCE_MEMORY_TYPES = {
+    "episodic": MemoryType.CONVERSATION_MEMORY.value,
+    "conversation": MemoryType.CONVERSATION_MEMORY.value,
+    "knowledge_base": MemoryType.KNOWLEDGE_BASE.value,
+    "entity": MemoryType.ENTITY_MEMORY.value,
+    "summaries": MemoryType.SUMMARIES.value,
+    "workflow": MemoryType.WORKFLOW_MEMORY.value,
+}
+
+
+def _row_record_id(row: Dict[str, Any]) -> Optional[str]:
+    for key in ("_id", "id"):
+        if row.get(key):
+            return str(row[key])
+    return None
+
+
+def retrieved_record_entries(
+    semantic: Iterable[Dict[str, Any]],
+    semantic_refs: Sequence[Dict[str, Any]],
+    entities: Iterable[Dict[str, Any]],
+    entity_refs: Sequence[Dict[str, Any]],
+    evidence_items: Iterable[Any],
+    *,
+    fingerprint: Callable[[Any], str],
+) -> List[Dict[str, Any]]:
+    """The stored records behind a turn's evidence refs, with plain ids.
+
+    ``semantic`` and ``entities`` pair up with ``semantic_refs`` and
+    ``entity_refs`` by position. Each entry keeps the ``ref`` fingerprint
+    it explains, plus ``memory_type``, ``record_id``, ``thread_id`` and
+    ``score``. This is for retrieval evaluation by the agent's own caller;
+    it must never be written to traces.
+    """
+    entries: List[Dict[str, Any]] = []
+    for row, ref in zip(semantic, semantic_refs):
+        origin = row.get("origin") if isinstance(row.get("origin"), dict) else {}
+        scoring = row.get("scoring") if isinstance(row.get("scoring"), dict) else {}
+        source = str(row.get("source") or "memory")
+        entry = {
+            "ref": ref["ref"],
+            "source": source,
+            "memory_type": _SOURCE_MEMORY_TYPES.get(source)
+            or str(row.get("memory_type") or source),
+            "record_id": origin.get("record_id") or _row_record_id(row),
+            "thread_id": origin.get("thread_id")
+            or row.get("thread_id")
+            or row.get("conversation_id"),
+            "score": row["score"]
+            if row.get("score") is not None
+            else scoring.get("score"),
+        }
+        source_id = row.get("parent_source_id") or row.get("source_id")
+        if source_id:
+            entry["source_id"] = str(source_id)
+        if row.get("truncated"):
+            entry["truncated"] = True
+        entries.append(entry)
+    for profile, ref in zip(entities, entity_refs):
+        entries.append(
+            {
+                "ref": ref["ref"],
+                "source": "entity",
+                "memory_type": MemoryType.ENTITY_MEMORY.value,
+                "record_id": (
+                    str(profile["entity_id"])
+                    if profile.get("entity_id")
+                    else _row_record_id(profile)
+                ),
+                "thread_id": profile.get("thread_id"),
+                "score": profile.get("score"),
+            }
+        )
+    for item in evidence_items:
+        metadata = getattr(item, "metadata", None) or {}
+        entries.append(
+            {
+                "ref": fingerprint(f"{item.source_type}:{item.source_id}"),
+                "source": "evidence_pack",
+                "memory_type": str(item.source_type),
+                "record_id": str(item.source_id or "") or None,
+                "thread_id": metadata.get("thread_id"),
+                "score": getattr(item, "relevance", None),
+            }
+        )
+    return entries
+
+
 def dedupe_and_select(
     candidates: Iterable[Tuple[str, Any]],
     *,
@@ -598,7 +730,8 @@ def dedupe_and_select(
     recency_weight: float = DEFAULT_RECENCY_WEIGHT,
     scoring: Optional[RetrievalScoring] = None,
     max_items: int = 5,
-    max_chars_per_item: int = 600,
+    max_chars_per_item: Optional[int] = DEFAULT_MAX_CHARS_PER_ITEM,
+    max_total_chars: Optional[int] = None,
     dedupe_parent_sources: bool = False,
     selection_ledger: Optional[List[Dict[str, Any]]] = None,
     rerank: Optional[Callable[[List[str]], List[float]]] = None,
@@ -618,8 +751,14 @@ def dedupe_and_select(
         Embedding of the user query; enables MMR relevance ranking.
     max_items : int
         Hard cap on selected memories (post-dedup).
-    max_chars_per_item : int
+    max_chars_per_item : int or None
         Rendered text is truncated to this many characters per memory.
+        None (or 0) keeps each memory whole.
+    max_total_chars : int or None
+        Total characters of text across the selected memories. They are
+        served in selection (relevance) order; one that no longer fits is
+        cut to the room left, or dropped when less than a short slice is
+        left. None (the default) sets no total budget.
     scoring : RetrievalScoring, optional
         Recency/importance/relevance weights and decay (see
         :class:`RetrievalScoring`). Defaults to the ``MEMORIZZ_*`` environment
@@ -640,7 +779,9 @@ def dedupe_and_select(
     list of dict
         Selected candidates as ``{"source", "text", "id", "timestamp"}``
         plus any workflow provenance required for prompt-time suppression,
-        ordered oldest-first with deterministic tie-breaks.
+        ordered oldest-first with deterministic tie-breaks. ``origin`` holds
+        the stored record's own ``record_id`` and ``thread_id`` when the row
+        has them, and ``truncated`` is True when the text was cut.
     """
     history_fingerprints = set()
     history_normalized: List[str] = []
@@ -713,6 +854,7 @@ def dedupe_and_select(
             "importance": _candidate_importance(row),
             "id": _candidate_id(row),
             "score": _candidate_score(row),
+            "_origin": _candidate_origin(row),
             **_candidate_provenance(row),
         }
 
@@ -857,6 +999,22 @@ def dedupe_and_select(
         ranked = sorted(kept, key=lambda c: (-c["_relevance"], c["id"]))
         selected = ranked[:max_items]
 
+    # 5. Character budget, served in selection order so the most relevant
+    # memory gets its text first.
+    remaining = max_total_chars if max_total_chars and max_total_chars > 0 else None
+    within_budget: List[Dict[str, Any]] = []
+    for cand in selected:
+        text = _clip(cand["text"], max_chars_per_item)
+        if remaining is not None and len(text) > remaining:
+            if within_budget and remaining < _MIN_BUDGET_SLICE_CHARS:
+                continue
+            text = _clip(text, remaining)
+        if remaining is not None:
+            remaining -= len(text)
+        cand["_rendered_text"] = text
+        within_budget.append(cand)
+    selected = within_budget
+
     for candidate in kept:
         mark(candidate, "budget_exceeded")
     for candidate in selected:
@@ -866,20 +1024,22 @@ def dedupe_and_select(
             selected=True,
         )
 
-    # 5. Deterministic, chronology-preserving render order.
+    # 6. Deterministic, chronology-preserving render order.
     selected.sort(key=lambda c: (c["timestamp"] or 0.0, c["id"], c["normalized"]))
 
     results: List[Dict[str, Any]] = []
     for cand in selected:
-        text = cand["text"]
-        if max_chars_per_item and len(text) > max_chars_per_item:
-            text = text[: max_chars_per_item - 1] + "…"
+        text = cand["_rendered_text"]
         result = {
             "source": cand["source"],
             "text": text,
             "id": cand["id"],
             "timestamp": cand["timestamp"],
         }
+        if text != cand["text"]:
+            result["truncated"] = True
+        if cand.get("_origin"):
+            result["origin"] = dict(cand["_origin"])
         if cand.get("_scoring") is not None:
             result["scoring"] = dict(cand["_scoring"])
         if cand.get("last_accessed") is not None:

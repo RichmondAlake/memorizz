@@ -57,6 +57,55 @@ The `EntityMemory` helper owns structured entity operations; there is no
 mutable `agent.memory.entity_memory` façade. Always supply the same user and
 memory scope for entity writes and reads.
 
+### Large entities and their vectors
+
+Each entity is embedded as one text: its name, type, attributes and
+relations. Embedding models have an input limit (8,191 tokens for OpenAI's).
+An entity past it still gets a vector, made from its name, type and newest
+attributes, up to about 90% of the limit. Tokens are estimated at three
+characters each. When the provider still rejects the text as too long, it is
+halved and sent again.
+
+The record says when its vector does not cover all of it:
+
+```python
+report = entities.upsert_entity_with_report(name="Ines", attributes=facts,
+                                            memory_id="m1", user_id="u1")
+report["embedding"]
+# {'status': 'partial', 'reason': 'over_token_limit',
+#  'attributes_covered': 41, 'attributes_total': 160}
+
+record = entities.get_entity(report["entity_id"], memory_id="m1", user_id="u1")
+record["metadata"]["embedding_status"]   # "partial"
+EntityMemory.embedding_report(record)    # the same summary, from the record
+```
+
+- `partial`: the vector covers the name, type and newest facts. The reason is
+  `over_token_limit`, `provider_length_error`, or `previous_vector_kept` (a
+  re-embed failed and the old vector stays).
+- `missing`: there is no vector (`embedding_failed`).
+
+The keys go away when a later write embeds the whole record. Every fact is
+still stored: lookups by name or id, and the exact fallback search, find it.
+The agent's `entity_memory_upsert` tool result carries `embedding` when the
+vector is partial or missing, and the memory pages show *partial vector* or
+*no vector* next to the entity. Set the limit with
+`EntityMemory(provider, max_embedding_tokens=...)` or
+`MEMORIZZ_ENTITY_EMBEDDING_MAX_TOKENS`.
+
+### Entity memory in an agent
+
+- With a background model set, the agent files the entity facts of each user
+  message after the turn, without waiting for the chat model to call
+  `entity_memory_upsert`. See
+  [entity capture](../guides/memory-routing.md#entity-capture-without-routing).
+- `entity_memory_lookup` is offered only when the user's memory and user scope
+  holds an entity. Until then the model gets `entity_memory_upsert` alone, and
+  its prompt says there is nothing to look up yet. The check is one small query
+  per scope, cached for 30 seconds while the scope is empty and five minutes
+  once it is not. A write through `EntityMemory` in the same process makes the
+  lookup available on the next turn.
+
 ### Chunking strategies
 
 `ingest_knowledge` accepts a `chunking_strategy` argument:

@@ -171,3 +171,114 @@ def test_a_vector_id_held_by_an_unrelated_row_is_refused():
     statements = [c.args[0].split()[0] for c in cursor.execute.call_args_list]
     assert statements == ["UPDATE", "INSERT", "UPDATE"]
     assert not connection.commit.called
+
+
+class _RecordingCursor:
+    """Answers the catalog reads a provider makes at startup; records all SQL."""
+
+    def __init__(self, statements, tables):
+        self.statements, self.tables, self._rows = statements, tables, []
+        self.description = None
+
+    def execute(self, sql, params=None):
+        self.statements.append(" ".join(str(sql).split()))
+        self._rows = (
+            [(name,) for name in self.tables] if "FROM all_tables" in sql else []
+        )
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _RecordingConnection:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.outputtypehandler = None
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        pass
+
+    def ping(self):
+        pass
+
+    def is_healthy(self):
+        return True
+
+    def close(self):
+        pass
+
+
+@pytest.mark.unit
+def test_a_read_only_connection_changes_no_schema(monkeypatch):
+    statements = []
+    cursor = _RecordingCursor(statements, tables=["AGENTS", "CONVERSATION_MEMORY"])
+
+    class _FakePool:
+        def acquire(self):
+            return _RecordingConnection(cursor)
+
+        def close(self, force=False):
+            pass
+
+    monkeypatch.setattr(oracledb, "create_pool", lambda **kwargs: _FakePool())
+    monkeypatch.setattr(
+        OracleProvider,
+        "_create_memory_stores",
+        lambda self: pytest.fail("a read-only connection must not create tables"),
+    )
+    config = OracleConfig(
+        user="reader",
+        password="p",
+        dsn="d",
+        in_database_embedding=False,
+        index_policy="eager",
+        read_only=True,
+    )
+    provider = OracleProvider(config)
+    assert "agents" not in provider.missing_tables
+    assert {"entity_memory", "knowledge_base"} <= set(provider.missing_tables)
+    from memorizz.enums import MemoryType
+
+    provider._ensure_vector_index(MemoryType.KNOWLEDGE_BASE)
+    ddl = [s for s in statements if s.split()[0].upper() in {"CREATE", "ALTER", "DROP"}]
+    assert ddl == [], ddl
+
+
+@pytest.mark.unit
+def test_a_read_only_connection_never_installs_the_in_database_model(monkeypatch):
+    captured = {}
+
+    class _Embedder:
+        def __init__(self, pool, **options):
+            captured.update(options)
+
+        def ensure_model(self):
+            captured["ensured"] = True
+
+        def get_default_model(self):
+            return "ALL_MINILM_L12_V2"
+
+        def get_dimensions(self):
+            return 384
+
+    monkeypatch.setattr(
+        "memorizz.memory_provider.oracle.embedding.OracleInDatabaseEmbeddingProvider",
+        _Embedder,
+    )
+    monkeypatch.setattr(
+        "memorizz.embeddings.set_global_embedding_manager", lambda p: None
+    )
+    provider = OracleProvider.__new__(OracleProvider)
+    provider.pool = object()
+    config = OracleConfig(user="u", password="p", dsn="d", read_only=True)
+    provider._setup_embedding_provider(config)
+    assert captured["install_if_missing"] is False

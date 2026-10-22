@@ -897,14 +897,19 @@ def _memory_routing_value(
         config = MemoryRoutingConfig.from_value(_to_text(value).strip() or None)
     except (TypeError, ValueError):
         return existing
-    if not config.enabled:
-        return None
     kept = existing if isinstance(existing, dict) else {}
+    # Entity capture is set in code, not on the form: keep what is saved.
+    entity_capture = kept.get("entity_capture")
+    if not config.enabled:
+        if entity_capture is None:
+            return None
+        return MemoryRoutingConfig(entity_capture=entity_capture).to_dict()
     return MemoryRoutingConfig.from_value(
         {
             **config.to_dict(),
             "min_confidence": kept.get("min_confidence", config.min_confidence),
             "capture_turns": _parse_bool(capture),
+            "entity_capture": entity_capture,
         }
     ).to_dict()
 

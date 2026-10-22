@@ -4,7 +4,7 @@
     an optional (href, label) pair, `nav` rendered tabs (page_tabs or an area
     macro below). Wrap it in {% call %} to add actions on the right:
         {% call page_header('Agents', 'Create and run agents.', 'Build') %}
-            <a class="btn btn-primary" href="/agents/new">Create agent</a>
+            <a class="btn btn-primary" href="/agents/new" data-mutates>Create agent</a>
         {% endcall %}
     page_tabs: sibling views of one area, as (href, label, key[, element_id]). -#}
 

@@ -2130,6 +2130,17 @@ kbd {
 .mem-role--system,
 .mem-role--developer { color: var(--accent-warning); }
 
+/* An entity whose vector covers only part of it, or none of it. */
+.mem-vector-note,
+.playground-context-panel .context-entity-note {
+    color: var(--accent-warning);
+    white-space: nowrap;
+}
+
+.mem-vector-detail {
+    margin: 4px 0 0;
+}
+
 .mem-body-head {
     display: flex;
     align-items: center;
@@ -2289,5 +2300,198 @@ kbd {
     .ov-runs .ov-col-tools,
     .ov-runs .ov-col-cache {
         display: none;
+    }
+}
+
+/* ---------- Connection header and read-only mode ----------
+   Every page shows the store the UI is connected to (linking to the connect
+   page) and, when the UI is read-only, a badge. Phones show the same chips
+   in the top bar instead of above the content. */
+
+.ui-context {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ui-context--bar {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    margin: -16px 0 16px;
+}
+
+.ui-context--mobile {
+    display: none;
+}
+
+.ui-conn,
+.ui-ro-badge,
+.ui-conn-warn {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+.ui-conn {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+}
+
+.ui-conn:hover {
+    color: var(--text-primary);
+    border-color: var(--accent-primary);
+}
+
+.ui-conn-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent-secondary);
+}
+
+.ui-conn--off .ui-conn-dot {
+    background: var(--text-muted);
+}
+
+.ui-conn-provider {
+    flex: none;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.ui-conn-target {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 11.5px;
+}
+
+.ui-ro-badge {
+    font-weight: 600;
+    color: var(--accent-warning);
+    background: color-mix(in srgb, var(--accent-warning) 12%, transparent);
+    border-color: color-mix(in srgb, var(--accent-warning) 50%, transparent);
+}
+
+.ui-conn-warn {
+    font-weight: 600;
+    color: var(--accent-danger);
+    background: color-mix(in srgb, var(--accent-danger) 10%, transparent);
+    border-color: color-mix(in srgb, var(--accent-danger) 45%, transparent);
+}
+
+.ui-conn-warn > span[aria-hidden="true"] {
+    display: inline-grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    color: var(--bg-primary);
+    background: var(--accent-danger);
+    font-size: 10px;
+}
+
+/* The playground is a full-height workspace: the bar sits on top of it and
+   the workspace takes the rest of the window. */
+body.page-playground {
+    --pg-h: calc(100vh - 45px);
+}
+
+@media (min-width: 769px) {
+    body.page-playground .main-content {
+        height: 100vh;
+    }
+}
+
+body.page-playground .ui-context--bar {
+    height: 45px;
+    margin: 0;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Controls that would change data, while the UI is read-only. */
+body[data-read-only="true"] .ro-blocked,
+body[data-read-only="true"] [data-mutates]:not(form) {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+body[data-read-only="true"] .ro-blocked:hover {
+    transform: none;
+}
+
+body[data-read-only="true"] textarea.ro-blocked,
+body[data-read-only="true"] input.ro-blocked {
+    opacity: 0.7;
+}
+
+/* The embedding warning names long variables; let them wrap on phones. */
+#embedding-check {
+    overflow-wrap: anywhere;
+}
+
+.ro-toast {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 200;
+    max-width: min(360px, calc(100vw - 32px));
+    padding: 10px 14px;
+    color: var(--text-primary);
+    font-size: 13px;
+    background: var(--bg-secondary);
+    border: 1px solid color-mix(in srgb, var(--accent-warning) 55%, var(--border-color));
+    border-radius: 10px;
+    box-shadow: var(--shadow-md, 0 12px 30px rgb(0 0 0 / 0.35));
+}
+
+@media (max-width: 768px) {
+    .ui-context--bar {
+        display: none;
+    }
+
+    .ui-context--mobile {
+        display: flex;
+        flex: 1 1 auto;
+        justify-content: flex-end;
+        overflow: hidden;
+    }
+
+    .ui-conn--compact .ui-conn-target {
+        max-width: 34vw;
+    }
+
+    body.page-playground {
+        --pg-h: calc(100dvh - var(--mobile-topbar-height, 0px));
+    }
+}
+
+@media (max-width: 420px) {
+    /* The provider stays; the full target is in the tooltip and on /connect. */
+    .ui-conn--compact .ui-conn-target {
+        display: none;
+    }
+
+    .ui-conn-warn-text {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
     }
 }

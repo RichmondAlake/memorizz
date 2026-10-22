@@ -89,9 +89,20 @@
             <div class="success-message">Read-only inspection mode is enabled. Database mutations, settings changes, and recommendation decisions are blocked.</div>
             {% endif %}
 
+            {% if current_connection %}
+            <div class="connect-current" role="status">
+                <span>Connected to <strong>{{ current_connection.label or (current_connection.provider_type|title) }}</strong> <span class="connect-current-target" title="{{ current_connection.title }}">{{ current_connection.target }}</span>.</span>
+                <a href="/dashboard">Open the dashboard</a>
+            </div>
+            {% if embedding_check and embedding_check.message %}
+            <div class="{{ 'error-message' if embedding_check.status == 'mismatch' else 'success-message' }}" id="embedding-check">{{ embedding_check.message }}</div>
+            {% endif %}
+            {% if schema_note %}<div class="warning-message" id="schema-note">{{ schema_note }}</div>{% endif %}
+            {% endif %}
+
             {% if error %}
             <div class="error-message" id="connect-error">
-                <span>⚠️</span> {{ error }}
+                <span>⚠️</span> {% if startup_failed %}Could not connect at startup. {% endif %}{{ error }}
             </div>
             {% endif %}
 
@@ -140,6 +151,36 @@
 
             <style>
                 @keyframes docker-spin { to { transform: rotate(360deg); } }
+
+                /* The store this UI is connected to now */
+                .connect-current {
+                    display: flex;
+                    flex-wrap: wrap;
+                    align-items: baseline;
+                    justify-content: space-between;
+                    gap: 0.35rem 1rem;
+                    margin-bottom: 1rem;
+                    padding: 0.75rem 1rem;
+                    font-size: 0.85rem;
+                    color: var(--text-secondary, #aaa);
+                    border: 1px solid rgba(0, 217, 255, 0.25);
+                    border-radius: 8px;
+                }
+
+                .connect-current-target {
+                    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+                    overflow-wrap: anywhere;
+                }
+
+                .connect-current a {
+                    color: #00d9ff;
+                }
+
+                #embedding-check {
+                    margin-bottom: 1rem;
+                    line-height: 1.5;
+                    overflow-wrap: anywhere;
+                }
 
                 /* FileSystem stores found on this computer */
                 .local-stores {

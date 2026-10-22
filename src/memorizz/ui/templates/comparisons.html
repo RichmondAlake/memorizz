@@ -10,7 +10,7 @@
     {% for label in ['Dataset', 'Questions', 'Answer models', 'Rerankers', 'Planned answers', 'Spend threshold'] %}<div role="listitem"><span>{{ label }}</span><strong>—</strong></div>{% endfor %}
 </div>
 <section id="saved-configuration" class="compare-panel" hidden><h2>Run configuration</h2><p class="muted">These are the settings used for this run. Duplicate the configuration to make changes and run again.</p><div id="saved-configuration-summary" class="review-summary"></div><details><summary>Full configuration</summary><pre id="saved-configuration-json"></pre></details></section>
-<form id="comparison-form" novalidate>
+<form id="comparison-form" data-mutates novalidate>
 <nav class="setup-steps" aria-label="Comparison setup"><button type="button" data-step="0" aria-current="step"><span>1</span>Dataset</button><button type="button" data-step="1"><span>2</span>Models</button><button type="button" data-step="2"><span>3</span>Review &amp; run</button></nav>
 <section class="compare-panel setup-panel" data-panel="0">
 <div class="setup-heading"><span class="step-number">01</span><div><h2>Define the comparison</h2><p class="muted">Choose what changes and the questions you will use to measure it.</p></div></div>
@@ -57,7 +57,7 @@
 <div class="setup-footer"><a href="/evalground">Cancel</a><span id="setup-position">Step 1 of 3</span><button id="setup-back" type="button" class="btn btn-secondary" hidden>Back</button><button id="setup-next" type="button" class="btn btn-primary">Continue to models →</button></div>
 </form>
 <section id="experiment-results" class="compare-panel" hidden>
-<div class="compare-actions result-heading"><h2 id="result-name">Results</h2><span id="result-status" class="badge"></span><button id="stop-comparison" class="btn btn-secondary" type="button">Stop run</button><button id="reuse-config" class="btn btn-secondary" type="button">Duplicate configuration</button><a id="export-json">Export JSON</a><a id="export-csv">Export CSV</a></div>
+<div class="compare-actions result-heading"><h2 id="result-name">Results</h2><span id="result-status" class="badge"></span><button id="stop-comparison" class="btn btn-secondary" type="button" data-mutates>Stop run</button><button id="reuse-config" class="btn btn-secondary" type="button">Duplicate configuration</button><a id="export-json">Export JSON</a><a id="export-csv">Export CSV</a></div>
 <p id="result-progress" role="status"></p><p id="result-error" role="alert"></p>
 <nav class="result-tabs" aria-label="Result views"><button type="button" data-result-tab="overview" aria-current="page">Overview</button><button type="button" data-result-tab="evidence">Evidence</button><button type="button" data-result-tab="measurements">Calls &amp; measurements</button></nav>
 <div id="result-overview" data-result-panel="overview">

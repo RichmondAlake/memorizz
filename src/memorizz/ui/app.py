@@ -26,10 +26,20 @@ from .._env_io import apply_env_updates as _shared_apply_env_updates
 from .._env_io import env_override_warnings
 from .._env_io import load_layered_env as _load_layered_env
 from .._env_io import resolve_env_file as _resolve_env_file
-from .._env_io import (
-    resolve_oracle_in_database_embedding_from_env as _resolve_oracle_embedding_mode,
-)
 from .._env_io import validate_env_updates
+from .connection import (
+    CONNECT_FIELDS,
+    PROVIDER_LABELS,
+    READ_ONLY_ALLOWED_POSTS,
+    SECRET_FIELDS,
+    connect_at_startup,
+    connect_provider,
+    connection_target,
+    disconnect_provider,
+    format_connect_error,
+    mask_uri,
+    resolve_startup_connection,
+)
 from .helpers import (
     DEFAULT_LLM_MODEL_BY_PROVIDER,
     DEFAULT_LLM_PROVIDER,
@@ -67,7 +77,7 @@ from .routers.playground import router as playground_router
 from .routers.traces import router as traces_router
 from .routers.vercel_skills import router as vercel_skills_router
 from .routers.whatsapp import router as whatsapp_router
-from .security import ReadOnlyProviderProxy, UIAccessController, ui_read_only
+from .security import UIAccessController, ui_read_only
 from .state import STATIC_DIR, _state, close_meta_harness, templates
 
 logger = logging.getLogger(__name__)
@@ -816,6 +826,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to start WhatsApp worker: {e}", exc_info=True)
 
+    startup = getattr(app.state, "startup_connect", None)
+    if startup and _state.get("provider") is None:
+        from starlette.concurrency import run_in_threadpool
+
+        error = await run_in_threadpool(
+            connect_at_startup,
+            startup,
+            read_only=bool(getattr(app.state, "read_only_mode", False)),
+            port=getattr(app.state, "port", None),
+        )
+        if getattr(app.state, "announce_startup", False):
+            _announce_startup_connection(error)
+
     yield
 
     # Stop WhatsApp worker on shutdown
@@ -856,11 +879,21 @@ def create_app(
     usage_pricing=None,
     persona_evolution=None,
     persona_evolution_actions=False,
+    startup_connect=None,
 ) -> FastAPI:
-    """Create and configure the FastAPI application."""
+    """Create and configure the FastAPI application.
+
+    ``startup_connect`` connects when the app starts: ``"env"`` for the store
+    the environment names (see ``resolve_startup_connection``), or
+    ``{"provider_type": ..., "params": {...}}`` as ``memorizz ui`` builds
+    from its flags. It uses the connect form's code path; a failure leaves
+    the UI disconnected with the reason on the connect page.
+    """
     # Load layered env (~/.memorizz/.env, then $CWD/.env) so the UI sees the
     # same keys the CLI configured. override=False keeps real env vars winning.
     _load_layered_env()
+    if startup_connect == "env":
+        startup_connect = resolve_startup_connection()
     app = FastAPI(
         title="Memorizz Local UI",
         description="Web interface for exploring Memorizz memory providers",
@@ -887,7 +920,11 @@ def create_app(
     app.state.persona_evolution_actions = bool(
         persona_evolution and persona_evolution_actions
     )
+    # The page's read-only guard lets through what the middleware accepts.
+    _state["persona_evolution_actions"] = app.state.persona_evolution_actions
     read_only_mode = ui_read_only()
+    app.state.read_only_mode = read_only_mode
+    app.state.startup_connect = startup_connect
 
     from fastapi.exception_handlers import request_validation_exception_handler
     from fastapi.exceptions import RequestValidationError
@@ -974,14 +1011,8 @@ def create_app(
         if (
             read_only_mode
             and request.method.upper() not in _SAFE_METHODS
-            and path
-            not in {
-                "/login",
-                "/connect",
-                "/traces/account/resolve",
-                "/traces/reveal",
-                *_SIGNATURE_AUTHENTICATED_PATHS,
-            }
+            and path not in READ_ONLY_ALLOWED_POSTS
+            and path not in _SIGNATURE_AUTHENTICATED_PATHS
             and not (
                 path == "/persona-evolution/action"
                 and app.state.persona_evolution_actions
@@ -1161,12 +1192,37 @@ def create_app(
         return RedirectResponse(url="/connect", status_code=302)
 
     def _connect_context(
-        request: Request, provider_type: Optional[str], error: Optional[str]
+        request: Request,
+        provider_type: Optional[str],
+        error: Optional[str],
+        fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """The connect page's fields, pre-filled from the environment and
         from the FileSystem stores found on this computer."""
         from .local_stores import detect_local_stores
 
+        startup = _state.get("startup_connect") or {}
+        if error is None and startup.get("error"):
+            # Connecting at startup failed: say why, and keep what it tried.
+            error = startup["error"]
+            provider_type = provider_type or startup.get("provider_type")
+            fields = {**(startup.get("fields") or {}), **(fields or {})}
+        connected = _state.get("provider") is not None and _state.get("provider_type")
+        if connected and not fields and error is None:
+            # Start from the current connection's non-secret details.
+            info = _state.get("connection_info") or {}
+            fields = {
+                "oracle": {
+                    "oracle_user": info.get("user"),
+                    "oracle_dsn": info.get("dsn"),
+                    "oracle_schema": info.get("schema"),
+                },
+                "mongodb": {"mongodb_db_name": info.get("db_name")},
+                "filesystem": {"filesystem_path": info.get("path")},
+                "notion": {"notion_data_source_id": info.get("data_source_id")},
+            }.get(str(_state.get("provider_type")), {})
+            provider_type = provider_type or _state.get("provider_type")
+        fields = fields or {}
         env_mongodb_uri = os.environ.get("MONGODB_URI", "")
         stores = detect_local_stores()
         default_store = next((store for store in stores if store["default"]), None)
@@ -1185,31 +1241,52 @@ def create_app(
                 provider_type = "filesystem"
             else:
                 provider_type = "oracle"
+        current_target, current_title = (
+            connection_target(
+                _state.get("provider_type"), _state.get("connection_info") or {}
+            )
+            if connected
+            else ("", "")
+        )
         return {
             "request": request,
             "error": error,
             "provider_type": provider_type,
             # Pre-fill from env vars so users don't have to re-type
-            "env_oracle_user": os.environ.get("ORACLE_USER", ""),
+            "env_oracle_user": fields.get("oracle_user")
+            or os.environ.get("ORACLE_USER", ""),
             "has_env_oracle_password": bool(os.environ.get("ORACLE_PASSWORD", "")),
-            "env_oracle_dsn": os.environ.get("ORACLE_DSN", ""),
-            "env_oracle_schema": os.environ.get("ORACLE_SCHEMA", ""),
+            "env_oracle_dsn": fields.get("oracle_dsn")
+            or os.environ.get("ORACLE_DSN", ""),
+            "env_oracle_schema": fields.get("oracle_schema")
+            or os.environ.get("ORACLE_SCHEMA", ""),
             "has_env_mongodb_uri": bool(env_mongodb_uri),
-            "env_mongodb_db_name": os.environ.get("MONGODB_DB_NAME", ""),
-            "env_notion_data_source_id": os.environ.get(
-                "MEMORIZZ_NOTION_DATA_SOURCE_ID", ""
-            ),
-            "env_filesystem_path": os.environ.get("MEMORIZZ_MEMORY_ROOT", "")
+            "env_mongodb_db_name": fields.get("mongodb_db_name")
+            or os.environ.get("MONGODB_DB_NAME", ""),
+            "env_notion_data_source_id": fields.get("notion_data_source_id")
+            or os.environ.get("MEMORIZZ_NOTION_DATA_SOURCE_ID", ""),
+            "env_filesystem_path": fields.get("filesystem_path")
+            or os.environ.get("MEMORIZZ_MEMORY_ROOT", "")
             or (default_store["display"] if default_store else ""),
             "default_filesystem_path": default_store["display"]
             if default_store
             else "~/.memorizz/memory",
             "local_stores": stores,
             "has_env_notion_token": bool(os.environ.get("NOTION_TOKEN")),
-            "env_notion_semantic_backend": os.environ.get(
-                "MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"
-            ),
+            "env_notion_semantic_backend": fields.get("notion_semantic_backend")
+            or os.environ.get("MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"),
             "ui_read_only": read_only_mode,
+            "current_connection": {
+                "provider_type": _state.get("provider_type"),
+                "label": PROVIDER_LABELS.get(str(_state.get("provider_type")), ""),
+                "target": current_target,
+                "title": current_title,
+            }
+            if connected
+            else None,
+            "embedding_check": _state.get("embedding_check") if connected else None,
+            "schema_note": _state.get("schema_note") if connected else None,
+            "startup_failed": bool(startup.get("error")),
         }
 
     @app.get("/connect", response_class=HTMLResponse)
@@ -1220,169 +1297,39 @@ def create_app(
         )
 
     @app.post("/connect", response_class=HTMLResponse)
-    async def connect_submit(
-        request: Request,
-        provider_type: str = Form(...),
-        # Oracle fields
-        oracle_user: Optional[str] = Form(None),
-        oracle_password: Optional[str] = Form(None),
-        oracle_dsn: Optional[str] = Form(None),
-        oracle_schema: Optional[str] = Form(None),
-        # MongoDB fields
-        mongodb_uri: Optional[str] = Form(None),
-        mongodb_db_name: Optional[str] = Form(None),
-        # FileSystem fields
-        filesystem_path: Optional[str] = Form(None),
-        # Notion records and independently selected semantic storage
-        notion_token: Optional[str] = Form(None),
-        notion_data_source_id: Optional[str] = Form(None),
-        notion_semantic_backend: Optional[str] = Form(None),
-    ):
+    async def connect_submit(request: Request, provider_type: str = Form(...)):
         """Handle connection form submission."""
-        error = None
+        from starlette.concurrency import run_in_threadpool
+
+        form = await request.form()
+        params = {key: form.get(key) for key in CONNECT_FIELDS}
         try:
-            provider = None
-
-            if provider_type == "oracle":
-                resolved_oracle_password = oracle_password or os.environ.get(
-                    "ORACLE_PASSWORD", ""
-                )
-                if not all([oracle_user, resolved_oracle_password, oracle_dsn]):
-                    raise ValueError("Oracle requires user, password, and DSN")
-                from ..memory_provider.oracle import OracleConfig, OracleProvider
-
-                config = OracleConfig(
-                    user=oracle_user,
-                    password=resolved_oracle_password,
-                    dsn=oracle_dsn,
-                    schema=oracle_schema or oracle_user,
-                    lazy_vector_indexes=True,
-                    in_database_embedding=_resolve_oracle_embedding_mode(),
-                )
-                provider = OracleProvider(config)
-                if config.in_database_embedding:
-                    embedding_description = "Oracle in-database"
-                elif config.embedding_provider:
-                    dimensions = config.embedding_config.get("dimensions")
-                    embedding_description = str(config.embedding_provider)
-                    if dimensions:
-                        embedding_description += f" ({dimensions} dimensions)"
-                else:
-                    embedding_description = "Disabled"
-                _state["connection_info"] = {
-                    "user": oracle_user,
-                    "dsn": oracle_dsn,
-                    "schema": oracle_schema or oracle_user,
-                    "embedding": embedding_description,
-                }
-                _state["provider_secrets"] = {
-                    "oracle_user": oracle_user,
-                    "oracle_password": resolved_oracle_password,
-                    "oracle_dsn": oracle_dsn,
-                    "oracle_schema": oracle_schema or oracle_user,
-                }
-
-            elif provider_type == "mongodb":
-                resolved_mongodb_uri = mongodb_uri or os.environ.get("MONGODB_URI", "")
-                if not resolved_mongodb_uri:
-                    raise ValueError("MongoDB requires a URI")
-                from ..memory_provider.mongodb import MongoDBConfig, MongoDBProvider
-
-                config = MongoDBConfig(
-                    uri=resolved_mongodb_uri,
-                    db_name=mongodb_db_name or "memorizz",
-                    lazy_vector_indexes=True,
-                    read_only=read_only_mode,
-                )
-                provider = MongoDBProvider(config)
-                _state["connection_info"] = {
-                    "uri": _mask_uri(resolved_mongodb_uri),
-                    "db_name": mongodb_db_name or "memorizz",
-                }
-                _state["provider_secrets"] = {}
-
-            elif provider_type == "filesystem":
-                if not filesystem_path:
-                    raise ValueError("FileSystem requires a path")
-                from ..memory_provider.filesystem import (
-                    FileSystemConfig,
-                    FileSystemProvider,
-                )
-
-                config = FileSystemConfig(root_path=filesystem_path)
-                provider = FileSystemProvider(config)
-                _state["connection_info"] = {"path": filesystem_path}
-                _state["provider_secrets"] = {}
-
-            elif provider_type == "notion":
-                from starlette.concurrency import run_in_threadpool
-
-                from ..memory_provider.notion.factory import (
-                    create_notion_provider_from_env,
-                )
-
-                provider = await run_in_threadpool(
-                    create_notion_provider_from_env,
-                    token=notion_token,
-                    data_source_id=notion_data_source_id,
-                    semantic_backend=notion_semantic_backend,
-                    read_only=read_only_mode,
-                )
-                _state["connection_info"] = {
-                    "data_source_id": provider.config.data_source_id,
-                    "semantic_backend": notion_semantic_backend
-                    or os.getenv("MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"),
-                }
-                _state["provider_secrets"] = {}
-
-            else:
-                raise ValueError(f"Unknown provider type: {provider_type}")
-
-            if read_only_mode:
-                provider = ReadOnlyProviderProxy(provider)
-                _state["connection_info"]["access"] = "read-only"
-
-            # Close existing provider if any
-            if _state["provider"]:
-                close_meta_harness()
-                try:
-                    _state["provider"].close()
-                except Exception:
-                    pass
-
-            _state["provider"] = provider
-            _state["provider_type"] = provider_type
-            _state["read_only"] = read_only_mode
-            logger.info(f"Connected to {provider_type} provider")
-            # Other MemoRizz processes can then see this UI uses the store.
-            from ..finetune import clients
-
-            clients.register("ui", provider, port=request.url.port)
-
+            # Same path as connecting at startup: validation, the read-only
+            # proxy and the client record are identical.
+            await run_in_threadpool(
+                connect_provider,
+                provider_type,
+                params,
+                read_only=read_only_mode,
+                port=request.url.port,
+            )
             return RedirectResponse(url="/dashboard", status_code=302)
-
         except Exception as e:
-            logger.error(f"Connection failed: {e}")
-            error = _format_connect_error(provider_type, e)
-            context = _connect_context(request, provider_type, error)
-            if filesystem_path:
-                context["env_filesystem_path"] = filesystem_path
+            error = format_connect_error(provider_type, e)
+            logger.error("Connection failed: %s", error)
+            # Keep what was typed, except the secrets.
+            fields = {
+                key: value
+                for key, value in params.items()
+                if value and key not in SECRET_FIELDS
+            }
+            context = _connect_context(request, provider_type, error, fields)
             return templates.TemplateResponse("connect.html", context)
 
     @app.get("/disconnect")
     async def disconnect():
         """Disconnect from the current provider."""
-        close_meta_harness()
-        if _state["provider"]:
-            try:
-                _state["provider"].close()
-            except Exception:
-                pass
-        _state["provider"] = None
-        _state["provider_type"] = None
-        _state["connection_info"] = {}
-        _state["provider_secrets"] = {}
-        _state["read_only"] = False
+        disconnect_provider()
         return RedirectResponse(url="/connect", status_code=302)
 
     @app.get("/dashboard", response_class=HTMLResponse)
@@ -1417,6 +1364,8 @@ def create_app(
                 "request": request,
                 "provider_type": _state["provider_type"],
                 "connection_info": _state["connection_info"],
+                "embedding_check": _state.get("embedding_check") or {},
+                "schema_note": _state.get("schema_note"),
                 "stats": stats,
                 "active_page": "dashboard",
                 **context,
@@ -2317,55 +2266,25 @@ def create_app(
 # -----------------------------------------------------------------------------
 
 
-def _mask_uri(uri: str) -> str:
-    """Mask sensitive parts of a connection URI."""
-    if "@" in uri:
-        # Hide credentials
-        parts = uri.split("@")
-        return f"***@{parts[-1]}"
-    return uri
+# Kept for imports from earlier releases; the logic lives in ui.connection.
+_mask_uri = mask_uri
+_format_connect_error = format_connect_error
 
 
-def _format_connect_error(provider_type: str, exc: Exception) -> str:
-    """Return a user-facing connection error message."""
-    message = str(exc).strip()
-    if provider_type == "oracle":
-        return _format_oracle_connect_error(message)
-    return message or "Connection failed."
+def _announce_startup_connection(error: Optional[str]) -> None:
+    """One line in the terminal saying what the UI connected to at startup."""
+    if error:
+        print(f"   Not connected: {error}")
+        print("   Open the UI to connect from the form.\n", flush=True)
+        return
+    from .connection import connection_header
 
-
-def _format_oracle_connect_error(message: str) -> str:
-    """Map common Oracle connection failures to helpful messages."""
-    lowered = message.lower()
-    if "oracledb package is required" in lowered or "pip install oracledb" in lowered:
-        return (
-            "Oracle driver (oracledb) is not installed. "
-            "Install with: pip install memorizz[oracle] (or pip install oracledb)."
-        )
-    if "dpi-1047" in lowered or "oracle client library" in lowered:
-        return (
-            "Oracle client libraries are missing. Install Oracle Instant Client or "
-            f"configure python-oracledb to use thin mode. Details: {message}"
-        )
-    connection_markers = (
-        "ora-12541",
-        "ora-12514",
-        "ora-12170",
-        "ora-12545",
-        "ora-12543",
-        "no listener",
-        "connection refused",
-        "econnrefused",
-        "timed out",
-        "dpy-6005",
-    )
-    if any(marker in lowered for marker in connection_markers):
-        return (
-            "Cannot reach Oracle at the DSN. Ensure the database is running and "
-            "the host/port/service are correct. If using Docker, start the "
-            f"container and confirm port 1521 is mapped. Details: {message}"
-        )
-    return message or "Oracle connection failed."
+    header = connection_header()
+    access = ", read-only" if header["read_only"] else ""
+    print(f"   Connected to {header['label']} {header['target']}{access}\n", flush=True)
+    warning = header.get("embedding_warning")
+    if warning:
+        print(f"   Warning: {warning}\n", flush=True)
 
 
 def _build_settings_sections() -> List[Dict[str, Any]]:
@@ -2488,12 +2407,21 @@ def _get_memory_stats() -> Dict[str, int]:
     return stats
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765):
-    """Run the Memorizz UI server."""
+def run_server(host: str = "127.0.0.1", port: int = 8765, startup_connect="env"):
+    """Run the Memorizz UI server.
+
+    ``startup_connect`` is what to connect to before the first page loads:
+    ``"env"`` (the default) for the store the environment names, a dict from
+    ``memorizz ui`` flags, or None to start on the connect page.
+    """
     import uvicorn
 
-    app = create_app()
+    app = create_app(startup_connect=startup_connect)
+    app.state.port = port
+    app.state.announce_startup = True
     print("\n🧠 Memorizz Local UI")
     print(f"   Running at: http://{host}:{port}")
-    print("   Press Ctrl+C to stop\n")
+    if app.state.read_only_mode:
+        print("   Read-only: changes are turned off")
+    print("   Press Ctrl+C to stop\n", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="info")

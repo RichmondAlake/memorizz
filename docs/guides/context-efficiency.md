@@ -209,7 +209,12 @@ window:
    calls).
 4. **MMR selection** — maximal marginal relevance (relevance blended with
    recency decay) picks a small, diverse subset.
-5. **Stable ordering** — selected memories render oldest-first with
+5. **Character budget** — each memory is cut to
+   `RetrievalPolicy.max_chars_per_item` characters (600 by default). With
+   `max_recall_chars` set, the selected memories share that total, and the
+   most relevant memory gets its text first. See
+   [how much text each memory keeps](#how-much-text-each-memory-keeps).
+6. **Stable ordering** — selected memories render oldest-first with
    deterministic tie-breaks, so the block doesn't reshuffle between turns.
 
 Write-path guards complement it: identical consecutive `(query, response)`
@@ -261,6 +266,31 @@ A string works too:
 
 The learning control plane's evidence pack follows the same policy.
 
+### How much text each memory keeps
+
+Each recalled memory is cut to 600 characters by default. Long assistant
+answers can lose the detail a later question asks about. Two fields change
+this:
+
+| Field | What it does | Default |
+|---|---|---|
+| `max_chars_per_item` | Characters kept per recalled memory. `None` keeps each memory whole. | `600` |
+| `max_recall_chars` | Characters of recalled text per turn, across all memories. `None` sets no total cap. | `None` |
+
+When you raise or remove the per-item cap, set a total cap too, so a few
+long memories cannot flood the prompt:
+
+```python
+policy = RetrievalPolicy(max_chars_per_item=None, max_recall_chars=8000)
+```
+
+Under a total cap the most relevant memory gets its text first. A memory
+that does not fit whole is cut to the room left, or left out when little
+room is left. The block still renders oldest-first, so it stays
+prompt-cache friendly. A cut memory has `truncated: True` in
+`agent.last_retrieval_evidence()["items"]`. Both fields are saved with the
+agent, and the defaults keep existing agents as they were.
+
 ### A policy for one call
 
 `run()`, `run_stream()` and `run_stream_events()` take `retrieval_policy=`
@@ -286,6 +316,35 @@ and the playground shows it per turn under *Memory supplied*, for example
 `semantic_source_counts` splits it into `knowledge_base` and `conversation`.
 `evidence_source_counts` does the same for evidence-pack items.
 
+### Retrieved record ids for evaluation
+
+`semantic_refs`, `entity_refs` and `evidence_refs` hold SHA-256 fingerprints,
+not record ids. A retrieval evaluation (for example recall@k against
+LongMemEval's answer sessions) needs the plain ids. Ask for them:
+
+```python
+agent.run(question, memory_id=memory_id, thread_id=thread_id)
+evidence = agent.last_memory_context_evidence(include_ids=True)
+for item in evidence["retrieved"]:
+    print(item["memory_type"], item["record_id"], item["thread_id"], item["score"])
+```
+
+Each `retrieved` entry has:
+
+- `ref`: the fingerprint it explains, so it joins to `semantic_refs`,
+  `entity_refs` or `evidence_refs`;
+- `memory_type`: for example `conversation_memory` or `knowledge_base`;
+- `record_id`: the stored record's id;
+- `thread_id`: the conversation the record came from (`None` for knowledge
+  base chunks);
+- `score`: the selection score;
+- `source_id` and `truncated` when they apply.
+
+The ids are opt-in. Without `include_ids=True` the method returns what it
+always did. They never go into traces, the UI or the default snapshot, and
+each concurrent call on a shared agent sees only its own turn's ids. Only
+code that holds the agent object can read them.
+
 `agent.describe_memory()` returns:
 
 - the agent's active memory types;
@@ -300,6 +359,14 @@ conversation_memory, knowledge_base, …; entity facts on, shared across
 threads; memory tools: entity_memory_lookup, …". Assistant mode turns entity
 memory on. `with_entity_memory(False)`, or `memory_types` without
 `entity_memory`, turns it off.
+
+While a user has no entities, `entity_memory_lookup` is left out of the turn's
+tools and the prompt does not ask for it. In an evaluation, an unneeded lookup
+roughly doubled a turn's input tokens and added about ten seconds. The check
+is one small scoped query, cached per memory and user. The per-turn entity
+recall usually answers it first, so it rarely costs a query of its own.
+`entity_memory_upsert` is always offered, and the lookup comes back on the
+turn after the first entity is written.
 
 Semantic response caching is session-scoped by default. Its fingerprint also
 includes per-request context, so the same query on a different page or quoted

@@ -79,6 +79,11 @@ If you also want all optional integrations (Oracle, MongoDB, sandbox, docs, etc.
 pip install "memorizz[all]"
 ```
 
+`memorizz doctor` lists the optional extras and whether each is installed. A
+store whose driver is missing names the extra to add, for example
+`Oracle needs the oracle extra: pip install 'memorizz[oracle]'`. With a uv tool
+install, add the UI too: `uv tool install --force 'memorizz[ui,oracle]'`.
+
 ## 2. Start The UI
 
 ```bash
@@ -93,9 +98,42 @@ Optional host/port overrides:
 memorizz ui --host 0.0.0.0 --port 9000
 ```
 
+### Connect at startup
+
+The UI connects before the first page loads when you name a store:
+
+```bash
+# Oracle, read-only. The password comes from ORACLE_PASSWORD, or you are asked.
+memorizz ui --backend oracle --dsn localhost:1521/FREEPDB1 --user MEMORIZZ --read-only
+
+# MongoDB. The URI comes from MONGODB_URI, or you are asked.
+memorizz ui --backend mongodb --db memorizz
+
+# A FileSystem store
+memorizz ui --backend filesystem --path ~/.memorizz/memory
+```
+
+Passwords, URIs and tokens are never flags. `--password-env NAME` reads the
+Oracle password from another variable, and `--uri-env NAME` the MongoDB URI.
+
+Without flags, the UI connects to the store the environment names:
+`MEMORIZZ_BACKEND` plus that provider's own variables (`ORACLE_USER`,
+`ORACLE_PASSWORD`, `ORACLE_DSN`; `MONGODB_URI`; `MEMORIZZ_MEMORY_ROOT` or the
+CLI's store; `MEMORIZZ_NOTION_DATA_SOURCE_ID` and `NOTION_TOKEN`). Without
+`MEMORIZZ_BACKEND`, a complete Oracle login, then `MONGODB_URI`, then
+`MEMORIZZ_MEMORY_ROOT`, is used.
+`--no-connect` or `MEMORIZZ_UI_AUTO_CONNECT=false` starts on the connect page
+instead. Connecting at startup uses the same code as the connect form. If it
+fails, the UI still starts and the connect page shows why.
+
 ## 3. Connect To A Memory Provider
 
-On first load, the UI opens the `/connect` page.
+When the UI is not connected, it opens the `/connect` page.
+
+The header on every page shows the connection: the provider and a short target
+such as `user@host:1521/FREEPDB1` (Oracle), `host/database` (MongoDB) or the
+store's folder (FileSystem). It never shows a password, token or URI
+credentials. Select it to open the connect page.
 
 ### Oracle
 
@@ -131,6 +169,34 @@ export MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER=openai
 export MEMORIZZ_DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
 export MEMORIZZ_DEFAULT_EMBEDDING_DIMENSIONS=384  # example; use preflight value
 ```
+
+### Embedding check
+
+When the UI connects, it compares the store's vectors with the embedding model
+it is set up to search with. It reads the declared size of Oracle's VECTOR
+columns, MongoDB's vector index sizes (or one stored embedding per collection),
+or one stored embedding per FileSystem store. It also reads the embedding
+settings saved with the store's agents, when there are any.
+
+- If the store records one model, its vectors have that size, and the model
+  can run here (OpenAI, Ollama or Voyage AI, with its key set), the UI searches
+  with it for this session.
+- Otherwise the dashboard and the connect page say what differs, for example:
+  *This store holds 256-dimension vectors from openai text-embedding-3-small;
+  the UI is configured for ollama nomic-embed-text (768). Searches will not
+  match until you …*. The header shows **Embeddings differ**.
+
+The check reads only. It never re-embeds anything.
+
+### Read-only mode
+
+`memorizz ui --read-only` or `MEMORIZZ_UI_READ_ONLY=true` makes the UI refuse
+every change. Every page shows a **Read-only** badge in the header. Buttons and
+forms that would change data (create agent, save, send, run, approve, delete,
+rate cards, budgets) are turned off, with a tooltip saying the UI is
+read-only. Filters and search still work. The server refuses changes either
+way. A read-only UI does not load Oracle's in-database embedding model into
+the database.
 
 ## 4. Navigation Map
 
@@ -385,6 +451,9 @@ redacted or metadata-only trace content, and audit logging. See
 - Oracle: verify DSN/user/password and Oracle client requirements.
 - MongoDB: verify URI and DB permissions.
 - Filesystem: verify the path is writable.
+- A missing driver names its extra, for example
+  `pip install 'memorizz[oracle]'`. Run `memorizz doctor` to see every extra.
+- If the UI did not connect at startup, the connect page says why.
 
 ### Port In Use
 

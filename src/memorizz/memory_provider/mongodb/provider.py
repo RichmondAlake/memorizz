@@ -19,7 +19,10 @@ from ...embeddings import embed_as_query, get_embedding
 from ...enums.memory_type import MemoryType
 from ...memagent import MemAgentModel
 from ..base import (
+    _UNSET,
     AGENT_WIDE_STORES,
+    DELETE_SCOPE_FIELDS,
+    TRACE_RECORD_PREFIX,
     FilteredSkillboxSearchMixin,
     GlobalEmbeddingFallbackMixin,
     MemoryProvider,
@@ -108,6 +111,70 @@ def _mongo_id_predicate(record_id: Any) -> Dict[str, Any]:
     if not isinstance(record_id, ObjectId) and ObjectId.is_valid(record_id):
         candidates.append(ObjectId(record_id))
     return {"_id": {"$in": candidates}}
+
+
+# A legacy trace bundle in conversation memory: a tool row holding the
+# JSON of a trace bundle.
+_LEGACY_TRACE_BUNDLE = {
+    "role": "tool",
+    "content": {"$regex": r'"type"\s*:\s*"trace_bundle"'},
+}
+
+
+def _delete_scope_filter(
+    store: str,
+    memory_id: Optional[str],
+    user_id: Any,
+    agents: List[str],
+    keep_traces: bool,
+) -> Optional[Dict[str, Any]]:
+    """The delete_scope filter for one collection, or None when out of scope.
+
+    Mirrors ``memory_provider.base.delete_scope_matches``: each given scope
+    part the collection records must match, ``user_id`` None matches documents
+    without a user, and observability records are scoped by the turn they
+    traced (``trace_memory_id``, ``user_id``, ``agent_id``).
+    """
+
+    def user_clause(field: str) -> Dict[str, Any]:
+        return {field: {"$in": [None]}} if user_id is None else {field: user_id}
+
+    memory_field, user_field, agent_field = DELETE_SCOPE_FIELDS[store]
+    plain: List[Dict[str, Any]] = []
+    if memory_id is not None and memory_field:
+        plain.append({memory_field: memory_id})
+    if user_id is not _UNSET and user_field:
+        plain.append(user_clause(user_field))
+    if agents and agent_field:
+        plain.append({agent_field: {"$in": agents}})
+    branches: List[Dict[str, Any]] = []
+    if store == "shared_memory":
+        trace_type = {"$regex": f"^{TRACE_RECORD_PREFIX}"}
+        if plain:
+            branches.append({"$and": [{"record_type": {"$not": trace_type}}, *plain]})
+        if not keep_traces:
+            traced: List[Dict[str, Any]] = [{"record_type": trace_type}]
+            if memory_id is not None:
+                traced.append({"trace_memory_id": memory_id})
+            if user_id is not _UNSET:
+                traced.append(user_clause("user_id"))
+            if agents:
+                traced.append(
+                    {
+                        "$or": [
+                            {"agent_id": {"$in": agents}},
+                            {"owner_agent_id": {"$in": agents}},
+                        ]
+                    }
+                )
+            branches.append({"$and": traced})
+    elif plain:
+        if keep_traces and store == "conversation_memory":
+            plain.append({"$nor": [_LEGACY_TRACE_BUNDLE]})
+        branches.append({"$and": plain})
+    if not branches:
+        return None
+    return branches[0] if len(branches) == 1 else {"$or": branches}
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -3212,6 +3279,46 @@ class MongoDBProvider(
         if collection is None:
             return
         collection.delete_many({"memory_id": memory_id})
+
+    def delete_scope(
+        self,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Any = _UNSET,
+        agent_ids: Optional[List[str]] = None,
+        keep_traces: bool = False,
+    ) -> Dict[str, Any]:
+        """Delete every package-owned document inside one exact scope.
+
+        Same scope rules and result as ``MemoryProvider.delete_scope``, with
+        one ``delete_many`` per collection. Collections are deleted one after
+        another, not in a transaction.
+        """
+        agents = self._delete_scope_agents(memory_id, user_id, agent_ids)
+        counts: Dict[str, int] = {}
+        if agents:
+            counts.update(self._delete_scope_automations(agents))
+        for store in DELETE_SCOPE_FIELDS:
+            mongo_filter = _delete_scope_filter(
+                store, memory_id, user_id, agents, keep_traces
+            )
+            if mongo_filter is None:
+                continue
+            result = self.db[store].delete_many(mongo_filter)
+            counts[store] = int(result.deleted_count or 0)
+        if memory_id is not None:
+            result = self.memagent_collection.update_many(
+                {"memory_ids": memory_id}, {"$pull": {"memory_ids": memory_id}}
+            )
+            counts["agent_memories"] = int(result.modified_count or 0)
+        if agents:
+            result = self.memagent_collection.delete_many(
+                {"$or": [self._memagent_id_query(agent_id) for agent_id in agents]}
+            )
+            counts["agents"] = int(result.deleted_count or 0)
+        return self._delete_scope_report(
+            memory_id, user_id, agents, keep_traces, counts
+        )
 
     def _setup_vector_search_index(
         self,

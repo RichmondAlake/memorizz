@@ -54,6 +54,56 @@ response = agent.run(
 `context` is model-visible for this turn. `observability_context` is not sent
 to the model and is sanitized before persistence.
 
+## Label runs with tags
+
+Pass `trace_tags` to label a turn, for example with its experiment and
+question. The labels go on the turn's trace, never to the model.
+
+```python
+answer = agent.run(
+    question,
+    memory_id="lme-v2-q17",
+    trace_tags={"experiment": "lme-v2", "question": "q17"},
+)
+print(agent.trace_url())
+# http://127.0.0.1:8765/traces?agent_id=...&thread_id=...&root_trace_id=...&turn_id=...#trace-timeline
+```
+
+`run_stream_events`, `arun_stream_events` and `run_stream` take the same
+argument. Work a tagged turn starts carries its tags too:
+
+- **Delegates:** a delegate agent's turn keeps the parent turn's tags, with its
+  own tags added.
+- **Harness tasks:** a harness task created during the turn keeps them in
+  `task.metadata["trace_tags"]`, and its trace is tagged with them.
+
+Pass `HarnessTask(..., metadata={"trace_tags": {...}})` to tag a harness run
+started on its own.
+
+The tags are stored on the turn's `turn_start` and `turn_result` events and on
+its trace bundle. The Traces page copies them onto every event of the turn.
+They are checked before the turn runs, and a bad tag raises an error:
+
+- at most 16 tags, as a dict of strings;
+- a key is 1–64 letters, digits, `_`, `.`, `:` or `-`, starting with a letter
+  or digit;
+- a value is 1–128 letters, digits, `_`, `.`, `:`, `@`, `+`, `/` or `-`, with
+  single spaces allowed between words;
+- no email address, URL or credential in a key or a value.
+
+On **Traces**, the navigator's tag box takes `key=value`. Separate several tags
+with commas; a turn must carry all of them. It narrows the navigator to agents
+and threads with a matching turn, and the timeline to those turns. A turn's
+messages and tool logs stay with it. Click a tag on a turn to list every agent
+and thread with that tag. The span index holds no tags, so a tag filter reads
+the trace bundles. The JSON export takes the same filter:
+`/traces/events.json?store=all&tag=experiment=lme-v2`.
+
+`agent.trace_url(base_url="http://127.0.0.1:8765")` returns the link to the
+last turn's trace, opened at its timeline, or `None` when no turn has run. The
+last turn is the newest one the agent object finished, streamed turns
+included. Pass `turn_id=` for another of its turns.
+
 ## Join verified outcomes to a turn
 
 ```python
@@ -79,6 +129,65 @@ agent.record_task_outcome(
 Comments are hashed unless `include_comment=True` is explicit. “Verified”
 should mean that a trusted application or operator observed the outcome—not
 that the model described its own response as successful.
+
+### Record a grader's verdict
+
+An evaluation grades turns after they run. Pass the turn's id and the
+verdict:
+
+```python
+turn_id = agent.get_trace_context()["turn_id"]
+answer_is_right = grade(answer)
+
+agent.record_task_outcome(
+    turn_id=turn_id,
+    verdict="pass" if answer_is_right else "fail",
+    score=1.0 if answer_is_right else 0.0,
+    grader="llm-judge",
+    reason_code=None if answer_is_right else "wrong_answer",
+)
+```
+
+- `verdict` is `pass`, `fail`, `partial` or `unknown`. It records the outcome
+  status `success`, `failure`, `partial` or `unknown`. You can pass `status`
+  instead, as before; if you pass both, they must agree.
+- `turn_id` finds the turn among the agent's recent turns, then in its stored
+  traces. A turn it can't find raises `ValueError`. Without `turn_id` or
+  `trace_context`, the verdict joins the last turn in this context.
+- `grader` names who judged the turn and `reason_code` says why. Each is a
+  label of up to 80 letters, digits, `_`, `.`, `:`, `@`, `+`, `/` or `-`.
+- `source` defaults to `grader` when you name a grader.
+- `verified` defaults to `True`. Record an unchecked verdict with
+  `verified=False`; it still shows on the turn, but Trace Insights count only
+  verified outcomes.
+
+Each verdict shows on its turn's result in the Traces timeline, such as
+**Verdict: fail · llm-judge · wrong answer · score 0.0**. A turn whose newest
+verdict from any grader is a failure appears under **Needs attention** on the
+Overview, linked to the newest such turn. Re-grading a turn with the same
+grader replaces that grader's verdict there. Needs attention reads the newest
+1,000 recorded outcomes, verified or not. Tenant-scoped UI accounts don't see
+them, as on the Traces page.
+
+## Keep traces when you delete memories
+
+An evaluation often deletes each run's memories with `delete_scope`. Pass
+`keep_traces=True` to keep the runs' trace bundles, verdicts and feedback, so
+the runs stay on Traces:
+
+```python
+provider.delete_scope(
+    memory_id="lme-v2-q17",
+    user_id="grader",
+    agent_ids=[agent.agent_id],
+    keep_traces=True,
+)
+```
+
+The runs' message text goes with the conversation memory. A deleted agent's
+runs appear under **Unregistered runtime traces**; its `trace_url()` links and
+tag filters still open them. [Delete a scope](memory-providers/scoped-cleanup.md)
+lists what each provider deletes and keeps.
 
 ## Get a content-free summary
 
@@ -133,6 +242,13 @@ message** or **Reveal content** fetches one event, and **Reveal all content**
 fetches every event the filter shows. Each fetch is a separate audited request.
 **Details** lists the event's identifiers and its normalized metadata JSON.
 
+A failed event says why on its card. A cancelled run says why it stopped:
+the reply stopped being read (the Stop button, a closed tab or a dropped
+connection), it ran past its time limit, or a cancel was requested. A turn
+that failed or was stopped also says what it did first, and its **Reveal
+content** shows the user's message and any reply written before it stopped.
+Each model result says whether it wrote text or asked for tools.
+
 Accepted recommendations create draft experiments. They do not edit a live
 prompt, policy, tool, or learned skill automatically.
 
@@ -143,8 +259,15 @@ Click it to open that period, or the run itself when it holds one. Each
 **Needs attention** item links to where it can be fixed:
 
 - **A failed run** links to its trace.
+- **Turns that failed grading** link to the newest failing turn's trace. They
+  come from `record_task_outcome` verdicts; the item names the most common
+  reason code and the graders.
 - **A tool the agent doesn't have** links to the agent's tool, memory or
   persona settings.
+- **A tool whose calls were refused at the per-turn limit** says so
+  (`tool_budget_exhausted`). The turn's `turn_result` event counts the
+  refused calls. See
+  [the per-turn tool-call limit](guides/tools-and-approvals.md#the-per-turn-tool-call-limit).
 - **A provider error** links to the run and the agent's model settings.
 - **A model without a price** links to **Rate cards**.
 
@@ -220,7 +343,9 @@ absent from a partial candidate window is **not** labelled resolved. Unknown
 traces return a bounded-window not-found error rather than an empty success.
 
 The normalized event export also accepts `root_trace_id`, `run_id`, `turn_id`,
-`resource_ref`, `event_kind`, `status`, `start_time`, and `end_time`. Time filters
+`resource_ref`, `event_kind`, `status`, `tag`, `start_time`, and `end_time`.
+`tag` (`key=value`) selects trace events; it reads trace bundles, not the span
+index. Time filters
 apply to child-event timestamps, not bundle write time. These filters require
 `view=events`; raw bundles do not silently ignore them. Queries remain bounded
 compatibility reads, not an indexed global incident directory.
@@ -475,6 +600,10 @@ export MEMORIZZ_UI_TRACE_CONTENT_MODE="redacted"
 export MEMORIZZ_UI_AUDIT_LOG="$HOME/.memorizz/audit/trace_views.jsonl"
 memorizz ui --host 127.0.0.1 --port 8765
 ```
+
+The UI connects to that store at startup, read-only. Every page shows the
+connection and a **Read-only** badge in its header, and controls that would
+change data are turned off.
 
 Content modes:
 

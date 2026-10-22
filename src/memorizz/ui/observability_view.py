@@ -264,19 +264,174 @@ def timeline_error(event: Mapping[str, Any]) -> bool:
     )
 
 
+# Why a run was cancelled, by the reason code its cancellation gave.
+STOP_REASONS = {
+    "reader_closed": "the reply stopped being read (the Stop button, a closed "
+    "tab or a dropped connection)",
+    "deadline_exceeded": "it ran past its time limit",
+    "cancel_requested": "a cancel was requested",
+}
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count:,} {noun}{'' if count == 1 else 's'}"
+
+
+def _names(names: List[str]) -> str:
+    unique = list(dict.fromkeys(names))
+    if len(unique) <= 2:
+        return " and ".join(unique)
+    return ", ".join(unique[:-1]) + " and " + unique[-1]
+
+
+def _tool_name(event: Mapping[str, Any]) -> str:
+    name = event.get("logical_tool_name") or event.get("tool_name")
+    if not name:
+        title = str(event.get("title") or "")
+        name = title.split(":", 1)[1].strip() if ":" in title else ""
+    return str(name or "a tool")
+
+
+def explain_error(event: Mapping[str, Any]) -> str:
+    """One plain sentence on why an event failed, from its codes only."""
+    from ..observability.overview import explain_provider_error, explain_tool_reason
+
+    status = str(event.get("status") or "")
+    code = str(event.get("error_code") or "")
+    if status == "cancelled" or code == "cancelled":
+        reason = STOP_REASONS.get(str(event.get("stop_reason") or ""))
+        return "The run was stopped before it finished" + (
+            f" because {reason}." if reason else "."
+        )
+    if code == "approval_required" or status == "approval_required":
+        return "The run is waiting for an approval."
+    kind = str(event.get("kind") or "")
+    if kind.startswith("tool"):
+        reason = event.get("outcome_reason_code") or code
+        if reason:
+            return "The tool call failed: " + explain_tool_reason(str(reason)) + "."
+        outcome = str(event.get("outcome") or "")
+        return (
+            f"The tool call failed ({outcome.replace('_', ' ') or 'no reason given'})."
+        )
+    if code:
+        return "Failed: " + explain_provider_error(code) + "."
+    return f"Ended with status {status.replace('_', ' ')}." if status else ""
+
+
+def _turn_story(rows: List[Dict[str, Any]], result: Mapping[str, Any]) -> str:
+    """What a turn that didn't finish had done before it stopped."""
+    turn = result.get("turn_id")
+    events = [row["event"] for row in rows if row["event"].get("turn_id") == turn]
+    replies = [e for e in events if e.get("kind") == "model_result"]
+    written = sum(int(e.get("response_chars") or 0) for e in replies)
+    tools = [_tool_name(e) for e in events if e.get("kind") == "tool_call"]
+    parts = []
+    if replies:
+        parts.append(
+            _plural(len(replies), "model call")
+            + (
+                f" wrote {written:,} characters of reply"
+                if written
+                else " wrote no reply text"
+            )
+        )
+    if tools:
+        parts.append(f"it called {_names(tools)}")
+    partial = int(result.get("partial_reply_chars") or 0)
+    story = ("Before it stopped, " + "; ".join(parts) + ".") if parts else ""
+    if partial:
+        story += f" {partial:,} characters of reply had been sent."
+    return story.strip()
+
+
+def _model_note(event: Mapping[str, Any], earlier: List[Mapping[str, Any]]) -> str:
+    """What a model call produced: reply text, a tool request, or nothing.
+
+    The tools a call asked for run before its result is recorded, so they are
+    the tool calls since the model call it closes."""
+    chars = event.get("response_chars")
+    if chars is None:
+        return ""
+    tools = []
+    for before in reversed(earlier):
+        if before.get("kind") in ("model_call", "model_result", "turn_start"):
+            break
+        if before.get("kind") == "tool_call":
+            tools.insert(0, _tool_name(before))
+    asked = f"asked for {_names(tools)}" if tools else ""
+    if int(chars):
+        return f"Wrote {int(chars):,} characters of reply" + (
+            f" and {asked}." if asked else "."
+        )
+    return f"Wrote no text; {asked}." if asked else "Wrote no reply text."
+
+
+def turn_verdicts(outcomes: Iterable[Mapping[str, Any]]) -> Dict[str, List[Dict]]:
+    """Recorded outcomes and grader verdicts per turn (turn id, else root
+    trace id), oldest first, ready to show as chips."""
+    from ..observability.store import verdict_for
+
+    by_turn: Dict[str, List[Dict[str, Any]]] = {}
+    for row in outcomes or ():
+        if not isinstance(row, Mapping):
+            continue
+        key = str(row.get("turn_id") or row.get("root_trace_id") or "")
+        if not key:
+            continue
+        status = str(row.get("status") or "").lower()
+        by_turn.setdefault(key, []).append(
+            {
+                "verdict": verdict_for(status),
+                "status": status,
+                "grader": str(row.get("grader") or row.get("source") or ""),
+                "reason_code": str(row.get("reason_code") or ""),
+                "score": _number(row.get("score")),
+                "verified": row.get("verified") is True,
+                "recorded_at": str(
+                    row.get("updated_at") or row.get("created_at") or ""
+                ),
+            }
+        )
+    for rows in by_turn.values():
+        rows.sort(key=lambda row: row["recorded_at"])
+    return by_turn
+
+
+def _attach_verdicts(rows: List[Dict[str, Any]], outcomes) -> None:
+    """Put each turn's verdicts on its result row (else its start, else its
+    last event)."""
+    verdicts = turn_verdicts(outcomes)
+    if not verdicts:
+        return
+    anchors: Dict[str, tuple] = {}
+    for index, row in enumerate(rows):
+        event = row["event"]
+        kind = event.get("kind")
+        rank = 2 if kind == "turn_result" else 1 if kind == "turn_start" else 0
+        for value in (event.get("turn_id"), event.get("root_trace_id")):
+            key = str(value or "")
+            if key in verdicts and rank >= anchors.get(key, (0, -1))[1]:
+                anchors[key] = (index, rank)
+    for key, (index, _rank) in anchors.items():
+        rows[index]["verdicts"].extend(verdicts[key])
+
+
 def trace_timeline(
     events: Iterable[Mapping[str, Any]],
     *,
     agent_label: str = "Agent",
     content_event_ids: Iterable[Any] = (),
     previews_indexed: bool = False,
+    outcomes: Iterable[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     """Rows for the Trace Timeline: who acted, a readable title, the group
     the filter uses, and the time split into date and clock.
 
     A message is "Message" from the user and "Reply" from the agent. An event
     offers a reveal only when it has content to show: its own, or a preview
-    in the provider's span index.
+    in the provider's span index. A turn's start shows its run tags, and its
+    result shows the outcomes and grader verdicts recorded for it.
     """
     singular = {key: label for key, _plural, label in TIMELINE_GROUPS}
     with_content = set(content_event_ids)
@@ -314,8 +469,24 @@ def trace_timeline(
                 "error": error,
                 "has_content": previews_indexed
                 or event.get("event_id") in with_content,
+                "why": explain_error(event) if error else "",
+                "note": "",
+                "tags": sorted((event.get("trace_tags") or {}).items())
+                if event.get("kind") == "turn_start"
+                and isinstance(event.get("trace_tags"), Mapping)
+                else [],
+                "verdicts": [],
             }
         )
+    _attach_verdicts(rows, outcomes)
+    for index, row in enumerate(rows):
+        event = row["event"]
+        if event.get("kind") == "model_result" and not row["error"]:
+            row["note"] = _model_note(event, [r["event"] for r in rows[:index]])
+        elif event.get("kind") == "turn_result" and row["error"]:
+            row["note"] = _turn_story(rows, event)
+            if row["has_content"]:
+                row["note"] += " Reveal content shows the message and any reply."
     filters = [
         {"key": key, "label": plural, "count": counts[key]}
         for key, plural, _label in TIMELINE_GROUPS

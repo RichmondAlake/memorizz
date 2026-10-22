@@ -496,6 +496,13 @@ def _conversation_fields(ts_kind: str, thread_column: str = "thread_id") -> tupl
 # Columns later migrations added to conversation rows.
 _CONVERSATION_SCOPE_COLUMNS = ("user_id", "summary_id")
 
+# delete_scope(keep_traces=True) spares legacy trace bundles: tool rows in
+# conversation memory holding a trace bundle's JSON.
+_KEEP_LEGACY_TRACE_BUNDLES_SQL = (
+    "(role <> 'tool' OR COALESCE(JSON_VALUE(content, '$.type' "
+    "RETURNING VARCHAR2(64) NULL ON ERROR), ' ') <> 'trace_bundle')"
+)
+
 # retrieve_by_id(SHARED_MEMORY): ``content`` stays the exact serialized
 # snapshot (compare-and-swap compares whitespace and key order), and the
 # optional keys are only emitted when present.
@@ -1037,6 +1044,7 @@ class OracleConfig:
         pool_increment: int = 1,
         vector_search_mode: str = "exact",
         pool_wait_timeout: Optional[float] = 60.0,
+        read_only: bool = False,
     ):
         """
         Initialize the Oracle provider with configuration settings.
@@ -1081,6 +1089,11 @@ class OracleConfig:
         pool_wait_timeout : float, optional
             Seconds to wait for a connection when all ``pool_max`` are in use
             before raising DPY-4005 (default: 60). None waits for good.
+        read_only : bool
+            Make no schema changes (default: False): no tables, columns or
+            indexes are created, vector indexes included, and the in-database
+            embedding model is never installed. Missing tables are listed in
+            ``OracleProvider.missing_tables`` instead of being created.
         """
         self.user = user
         self.password = password
@@ -1121,6 +1134,7 @@ class OracleConfig:
         self.pool_max = pool_max
         self.pool_increment = pool_increment
         self.pool_wait_timeout = pool_wait_timeout
+        self.read_only = bool(read_only)
 
 
 class OracleProvider(
@@ -1270,11 +1284,25 @@ class OracleProvider(
         self._vector_indexes_unavailable = set()
         self._vector_index_diagnostic_emitted = False
 
+        # Tables the bundled schema expects that this schema lacks; only a
+        # read-only connection leaves them missing.
+        self.missing_tables: List[str] = []
+
         # Process embedding provider configuration
         self._embedding_provider = self._setup_embedding_provider(config)
 
-        # Create all memory store tables
-        self._create_memory_stores()
+        # Create all memory store tables, or, read-only, list the missing ones.
+        if config.read_only:
+            self.missing_tables = self._find_missing_tables()
+            if self.missing_tables:
+                logger.warning(
+                    "Read-only Oracle connection: %d table(s) are missing and "
+                    "won't be created: %s",
+                    len(self.missing_tables),
+                    ", ".join(self.missing_tables),
+                )
+        else:
+            self._create_memory_stores()
 
         from .archive import load_extensions
 
@@ -1289,7 +1317,9 @@ class OracleProvider(
         # Indexes are optional accelerators: exact VECTOR_DISTANCE search is
         # always available when a compatible VECTOR column exists.
         eager_types: Optional[List[MemoryType]] = None
-        if config.index_policy == "eager":
+        if config.read_only:
+            pass  # A read-only connection creates no indexes.
+        elif config.index_policy == "eager":
             eager_types = list(MemoryType)
         elif config.index_policy == "selected":
             eager_types = list(config.selected_vector_indexes)
@@ -1308,10 +1338,11 @@ class OracleProvider(
                 in_database_embedding_options,
             )
 
-            provider = OracleInDatabaseEmbeddingProvider(
-                self.pool,
-                **in_database_embedding_options(config.embedding_config),
-            )
+            options = in_database_embedding_options(config.embedding_config)
+            if config.read_only:
+                # Loading the ONNX model writes to the database.
+                options["install_if_missing"] = False
+            provider = OracleInDatabaseEmbeddingProvider(self.pool, **options)
             provider.ensure_model()
             set_global_embedding_manager(provider)
             logger.info(
@@ -1780,6 +1811,32 @@ class OracleProvider(
 
         cache[table_key] = columns
         return column_key in columns
+
+    def _find_missing_tables(self) -> List[str]:
+        """Tables ``schema_relational.sql`` creates that the schema lacks."""
+        from pathlib import Path
+
+        from .setup import parse_sql_file
+
+        schema_path = Path(__file__).parent / "schema_relational.sql"
+        expected = []
+        for statement in parse_sql_file(schema_path, embedding_dim=1):
+            match = re.match(r"^\s*CREATE\s+TABLE\s+(\w+)", statement, re.I)
+            if match:
+                expected.append(match.group(1).upper())
+        owner = str(self.config.schema or self.config.user).strip().upper()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT table_name FROM all_tables WHERE owner = :owner",
+                    {"owner": owner},
+                )
+                present = {row[0] for row in cursor.fetchall()}
+        except Exception as exc:
+            logger.warning("Could not list the schema's tables: %s", exc)
+            return []
+        return [name.lower() for name in expected if name not in present]
 
     def _create_memory_stores(self) -> None:
         """Create all memory store tables from the bundled relational schema.
@@ -2398,6 +2455,10 @@ class OracleProvider(
         index_key = index_name
 
         if index_key in self._vector_indexes_created:
+            return
+        if getattr(getattr(self, "config", None), "read_only", False):
+            # Exact VECTOR_DISTANCE search needs no index.
+            self._vector_indexes_created.add(index_key)
             return
 
         with self._get_connection() as conn:
@@ -6852,8 +6913,15 @@ class OracleProvider(
         memory_id: Optional[str] = None,
         user_id: Any = _UNSET,
         agent_ids: Optional[List[str]] = None,
+        keep_traces: bool = False,
     ) -> Dict[str, Any]:
-        """Transactionally delete all package-owned data in an exact scope."""
+        """Transactionally delete all package-owned data in an exact scope.
+
+        Observability records in shared memory are scoped by the turn they
+        traced (the memory, user and agent in their JSON). ``keep_traces=True``
+        keeps them, and legacy trace bundles in conversation memory, while the
+        scope's memories go.
+        """
         normalized_agents = sorted(
             {str(value).strip() for value in (agent_ids or []) if str(value).strip()}
         )
@@ -6944,11 +7012,27 @@ class OracleProvider(
                             binds.append(f":{key}")
                             params[key] = agent_id
                         predicates.append(f"{agent_col} IN ({', '.join(binds)})")
-                    if not predicates:
+                    if table == "shared_memory":
+                        where = self._delete_scope_shared_where(
+                            predicates,
+                            params,
+                            memory_id=memory_id,
+                            user_id=user_id,
+                            agents=normalized_agents,
+                            keep_traces=keep_traces,
+                        )
+                    else:
+                        if (
+                            predicates
+                            and keep_traces
+                            and table == "conversation_memory"
+                        ):
+                            predicates.append(_KEEP_LEGACY_TRACE_BUNDLES_SQL)
+                        where = " AND ".join(predicates)
+                    if not where:
                         continue
                     cursor.execute(
-                        f"DELETE FROM {self._qualified_table(table)} "
-                        f"WHERE {' AND '.join(predicates)}",
+                        f"DELETE FROM {self._qualified_table(table)} WHERE {where}",
                         params,
                     )
                     counts[table] = max(int(cursor.rowcount or 0), 0)
@@ -6985,10 +7069,65 @@ class OracleProvider(
                 "user_id": None if user_id is _UNSET else user_id,
                 "user_id_supplied": user_id is not _UNSET,
                 "agent_ids": normalized_agents,
+                "keep_traces": bool(keep_traces),
             },
             "counts": counts,
             "total_deleted": sum(counts.values()),
         }
+
+    def _delete_scope_shared_where(
+        self,
+        predicates: List[str],
+        params: Dict[str, Any],
+        *,
+        memory_id: Optional[str],
+        user_id: Any,
+        agents: List[str],
+        keep_traces: bool,
+    ) -> str:
+        """delete_scope's shared_memory predicate.
+
+        Ordinary shared memory keeps the column scope (``memory_id``,
+        ``owner_agent_id``). Observability records are matched by the memory,
+        user and agent in their JSON, and are left alone with ``keep_traces``.
+        Every bind it adds is used in the returned SQL.
+        """
+        jv = self._observability_json_value
+        trace_type = f"{jv('record_type')} LIKE 'observability\\_%' ESCAPE '\\'"
+        branches: List[str] = []
+        if predicates:
+            ordinary = [
+                f"COALESCE({jv('record_type')}, ' ') "
+                "NOT LIKE 'observability\\_%' ESCAPE '\\'",
+                *predicates,
+            ]
+            branches.append("(" + " AND ".join(ordinary) + ")")
+        if not keep_traces:
+            traced = [trace_type]
+            if memory_id is not None:
+                traced.append(
+                    f"COALESCE({jv('trace_memory_id')}, {jv('memory_id')}) "
+                    "= :scope_memory_id"
+                )
+                params["scope_memory_id"] = memory_id
+            if user_id is not _UNSET:
+                if user_id is None:
+                    traced.append(f"{jv('user_id')} IS NULL")
+                else:
+                    traced.append(f"{jv('user_id')} = :scope_user_id")
+                    params["scope_user_id"] = user_id
+            if agents:
+                binds = []
+                for index, agent_id in enumerate(agents):
+                    key = f"scope_agent_{index}"
+                    binds.append(f":{key}")
+                    params[key] = agent_id
+                traced.append(
+                    f"COALESCE({jv('agent_id')}, owner_agent_id) "
+                    f"IN ({', '.join(binds)})"
+                )
+            branches.append("(" + " AND ".join(traced) + ")")
+        return " OR ".join(branches)
 
     def close(self) -> None:
         """Close the connection pool."""

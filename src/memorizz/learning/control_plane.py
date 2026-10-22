@@ -320,6 +320,8 @@ class LearningControlPlane:
         *,
         scope: Mapping[str, Any],
         external_id: Optional[str] = None,
+        grader: Optional[str] = None,
+        reason_code: Optional[str] = None,
     ) -> Dict[str, Any]:
         resolved = self._scope(scope)
         root_trace_id = (
@@ -343,8 +345,13 @@ class LearningControlPlane:
             score=outcome.score,
             metrics=outcome.metrics,
             external_id=external_id,
+            grader=grader,
+            reason_code=reason_code,
         )
         outcome_payload = outcome.to_dict()
+        for key in ("grader", "reason_code"):
+            if observability_record.get(key):
+                outcome_payload[key] = observability_record[key]
         # The immutable event timestamp is authoritative. Excluding the
         # convenience timestamp inside the value keeps external-id retries
         # idempotent.

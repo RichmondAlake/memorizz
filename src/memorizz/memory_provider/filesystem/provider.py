@@ -1880,6 +1880,31 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         epoch = to_epoch(value, naive="local")
         return time.time() if epoch is None else epoch
 
+    def _delete_scope_rows(self, memory_type, rows) -> int:
+        """Delete one store's delete_scope rows with a single index write."""
+        memory_type = self._normalize_memory_type(memory_type)
+        ids = {
+            str(row.get("_id") or row.get("id"))
+            for row in rows
+            if row.get("_id") or row.get("id")
+        }
+        if not ids:
+            return 0
+        self._refresh_index_from_disk(memory_type)
+        deleted = 0
+        with self._locks[memory_type]:
+            metadata = self._indexes[memory_type]
+            for doc_id in ids:
+                file_path = self._document_path(memory_type, doc_id)
+                existed = doc_id in metadata or file_path.exists()
+                if file_path.exists():
+                    file_path.unlink()
+                metadata.pop(doc_id, None)
+                deleted += int(existed)
+            self._save_index(memory_type)
+            self._mark_vector_index_dirty(memory_type)
+        return deleted
+
     def _delete_memory_units_by_memory_id(
         self, memory_id: str, memory_type: MemoryType
     ) -> None:

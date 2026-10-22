@@ -1665,6 +1665,10 @@ class MetaHarness:
             "input_tokens": result.usage.get("input_tokens"),
             "output_tokens": result.usage.get("output_tokens"),
         }
+        tags = task.metadata.get("trace_tags")
+        if events and isinstance(tags, dict) and tags:
+            # The bundle takes its labels from its events; see record_trace_bundle.
+            events[0] = {**events[0], "trace_tags": dict(tags)}
         try:
             store = ObservabilityStore(self.memory_provider)
             if events:

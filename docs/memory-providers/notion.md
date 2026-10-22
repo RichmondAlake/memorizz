@@ -292,6 +292,8 @@ Deletion archives the exact Notion page and removes only its owned vector.
 Archived pages are recoverable through Notion; stores will not silently
 resurrect an archived ID. `delete_all` resolves the bounded target set before
 starting. Bulk writes/deletes are not transactions and can partially succeed.
+`delete_scope(...)` uses the portable sweep, one request per page; see
+[Delete a scope](scoped-cleanup.md).
 `index_status()` reports the **local repair journal**, not proof that every
 Notion page has been discovered or is currently accessible.
 

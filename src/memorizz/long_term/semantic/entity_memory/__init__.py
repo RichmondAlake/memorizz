@@ -11,6 +11,7 @@ from .entity_memory import (
     EntityMemoryRecord,
     EntityRelation,
     EntityRelationInput,
+    embedding_input_tokens,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "EntityAttributeInput",
     "EntityRelation",
     "EntityRelationInput",
+    "embedding_input_tokens",
 ]

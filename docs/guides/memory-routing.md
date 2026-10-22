@@ -69,6 +69,7 @@ agent.remember("Company policy: expense reports are due by the 5th.")
 
 Every routed write is recorded in the memory history journal with the source
 `memory_routing:turn`, `memory_routing:tool` or `memory_routing:api`.
+Entity capture (below) records `entity_capture:turn`.
 
 ### Routers
 
@@ -93,6 +94,44 @@ agent.with_memory_routing(False)   # off
 
 Entity facts are extracted by the background model; set one with
 `with_background_model()` to keep that off the chat model.
+
+### Entity capture without routing
+
+An agent with entity memory and its own background model captures entity
+facts even with routing off. After each turn, the background model reads the
+user's message and files the facts it states about the user and named people
+or things. No router is asked. The same guards apply: each fact rests on a
+phrase copied from the message, and values already stored are skipped.
+
+So entity writes no longer depend on the chat model choosing to call
+`entity_memory_upsert`. A bare list such as *"Numbered facts: 1. … 2. …"*
+is captured like any other message. The chat model's prompt says facts are
+saved for it, as it does with routing.
+
+A long message is read in parts of up to 4,000 characters, cut at a line or
+sentence end, one background-model call each, up to 8 parts (32,000
+characters). When two parts give the same entity and attribute, the later one
+wins, as a later line of the message would. Anything past 8 parts is left
+unread, and the capture result's `unread_chars` says how much.
+
+When the chat model does call `entity_memory_upsert` in the same turn, its
+write stands: capture skips the same entity and attribute, and values the
+chat model already stored. Routing's turn capture does the same.
+
+This is a change from earlier releases, where facts were only kept when the
+chat model called the tool. It costs one background-model call per user
+message. Turn it off with:
+
+```python
+agent.with_entity_memory(True, capture=False)
+# or MemAgent(..., memory_routing={"entity_capture": False})
+```
+
+`capture=True` captures on the chat model when there is no background
+model. With routing on and `capture_turns=True`, routing files the facts, so
+entity capture does not run as well. With `capture_turns=False`, entity capture
+stays off unless you set `capture=True`. The setting is saved with the agent.
+`agent.describe_memory()["entity_capture"]` says whether it runs.
 
 ### How much code it saves
 

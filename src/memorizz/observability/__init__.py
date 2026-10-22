@@ -25,6 +25,7 @@ from .pipeline import pipeline_health
 from .pricing import DEFAULT_PRICING, PricingRegistry, RateCard
 from .recorder import ObservabilityRecorder
 from .store import ObservabilityStore
+from .tags import normalize_trace_tags, parse_tag_filter
 from .trace_analysis import analyze_trace_events
 from .usage_query import query_usage
 
@@ -53,4 +54,6 @@ __all__ = [
     "ObservabilityMaintenance",
     "build_lineage_inspectors",
     "pipeline_health",
+    "normalize_trace_tags",
+    "parse_tag_filter",
 ]

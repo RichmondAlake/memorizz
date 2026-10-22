@@ -33,6 +33,11 @@ _state: Dict[str, Any] = {
     "connection_info": {},
     "provider_secrets": {},
     "read_only": False,
+    # What check_store_embeddings found at the last connect.
+    "embedding_check": None,
+    "schema_note": None,
+    # Why connecting at startup failed (shown on the connect page), if it did.
+    "startup_connect": None,
     "whatsapp_worker_thread": None,
     "whatsapp_worker_stop_event": None,
     "meta_harness": None,
@@ -134,6 +139,16 @@ templates = CompatibleJinja2Templates(directory=str(TEMPLATES_DIR))
 
 # The running version, shown under the name in the sidebar.
 templates.env.globals["memorizz_version"] = __version__
+
+
+def _connection_header() -> Dict[str, Any]:
+    """The connection and read-only state the header on every page shows."""
+    from .connection import connection_header
+
+    return connection_header()
+
+
+templates.env.globals["ui_connection"] = _connection_header
 
 
 __all__ = [

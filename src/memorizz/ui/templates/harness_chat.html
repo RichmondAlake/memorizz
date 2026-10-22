@@ -24,7 +24,7 @@
         <p class="hxc-origin">Started from run {{ id_chip(first_run.run_id, 8) }} · {{ turns|length }} turn{{ '' if turns|length == 1 else 's' }} so far</p>
         <ol class="hxc-turns" id="hxc-turns" aria-live="polite"></ol>
         {% if not ui_read_only %}
-        <form class="hxc-composer" id="hxc-composer" autocomplete="off">
+        <form class="hxc-composer" id="hxc-composer" autocomplete="off" data-mutates>
             <label class="visually-hidden" for="hxc-message">Message</label>
             <textarea id="hxc-message" rows="2" placeholder="Ask a follow-up, e.g. “Now add tests for that” (⌘↵ to send)"></textarea>
             <div class="hxc-composer-row">
@@ -39,7 +39,7 @@
     <aside class="hxc-setup panel" aria-labelledby="hxc-setup-title">
         <h2 class="hxc-setup-title" id="hxc-setup-title">Setup</h2>
         <p class="hx-muted hxc-setup-note">Carried over from the latest run. Changes apply to your next message.</p>
-        <form id="hxc-setup-form" class="hxc-setup-form">
+        <form id="hxc-setup-form" class="hxc-setup-form" data-mutates>
             <label>Harness
                 <select name="harness" id="hxc-harness">
                     {% for item in harnesses %}<option value="{{ item.name }}"{% if item.name == setup.harness %} selected{% endif %}{% if not item.ready %} disabled{% endif %}>{{ item.name }}{% if not item.ready %} · not ready{% endif %}</option>{% endfor %}

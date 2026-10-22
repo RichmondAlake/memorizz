@@ -106,7 +106,7 @@
                         data-search="{{ (row.name ~ ' ' ~ row.preview ~ ' ' ~ row.id ~ ' ' ~ row.memory_id ~ ' ' ~ row.agent_id)|lower }}"
                         tabindex="-1">
                         <td class="mem-col-time mono" {% if row.recorded %}title="{{ row.recorded }}"{% endif %}>{% if row.recorded %}<span class="mem-time-full">{{ row.recorded }}</span><span class="mem-time-short">{{ row.recorded[5:16] }}</span>{% else %}—{% endif %}</td>
-                        {% if view.show_name %}<td class="mem-col-name">{{ row.name or '—' }}</td>{% endif %}
+                        {% if view.show_name %}<td class="mem-col-name">{{ row.name or '—' }}{% if row.vector_note.label %} <span class="mem-role mem-vector-note" title="{{ row.vector_note.title }}">{{ row.vector_note.label }}</span>{% endif %}</td>{% endif %}
                         <td class="mem-preview">{{ row.preview or '—' }}</td>
                         {% if view.show_role %}<td class="mem-col-role">{% if row.role %}<span class="mem-role mem-role--{{ row.role }}">{{ row.role }}</span>{% else %}—{% endif %}</td>{% endif %}
                         {% if view.show_memory %}<td class="mem-col-memory mono" title="{{ row.memory_id }}">{{ row.memory_id[:14] or '—' }}</td>{% endif %}
@@ -127,6 +127,7 @@
                 <div>
                     <h2>{{ row.name or (row.role|capitalize if row.role else 'Record') }}</h2>
                     <p class="fleet-detail-sub">{% if row.id %}{{ id_chip(row.id) }}{% endif %}{% if row.recorded %} <span class="mono">{{ row.recorded }}</span>{% endif %}</p>
+                    {% if row.vector_note.label %}<p class="form-note mem-vector-detail"><span class="mem-role mem-vector-note">{{ row.vector_note.label }}</span> {{ row.vector_note.title }}</p>{% endif %}
                 </div>
                 {% if row.role %}<span class="mem-role mem-role--{{ row.role }}">{{ row.role }}</span>{% endif %}
             </header>

@@ -169,13 +169,18 @@ class EntityMemoryManager:
         memory_id: str,
         user_id: Optional[str] = None,
         identity_key: Optional[str] = None,
-    ) -> str:
+        report: bool = False,
+    ) -> Any:
         """Persist entity updates triggered via the built-in tool.
 
         ``identity_key`` is host authority (for example
         ``"authenticated_user"``), added by the application around the tool
         call; the model-visible tool never accepts it. With it, updates land on
         the one canonical record for that identity.
+
+        Returns the entity_id, or with ``report=True`` the dict of
+        :meth:`EntityMemory.upsert_entity_with_report` (``entity_id`` and what
+        the vector covers).
         """
         if not self.is_enabled():
             raise RuntimeError("Entity memory is not enabled for this provider.")
@@ -194,7 +199,7 @@ class EntityMemoryManager:
                 raise ValueError("entity_id was not found in the active entity scope.")
             entity_id = None
 
-        return self._entity_memory.upsert_entity(
+        result = self._entity_memory.upsert_entity_with_report(
             entity_id=entity_id,
             name=name,
             entity_type=entity_type,
@@ -205,6 +210,16 @@ class EntityMemoryManager:
             memory_id=memory_id,
             user_id=user_id,
         )
+        return result if report else result["entity_id"]
+
+    def has_entities(
+        self, *, memory_id: Optional[str], user_id: Optional[str] = None
+    ) -> bool:
+        """Whether the scope holds any entity (cached briefly per scope).
+        True when entity memory is off or the store cannot tell."""
+        if not self.is_enabled():
+            return True
+        return self._entity_memory.has_entities(memory_id=memory_id, user_id=user_id)
 
     def summarize_for_prompt(self, profiles: List[Dict[str, Any]]) -> str:
         """Format entity profiles for inclusion in the system prompt."""
