@@ -598,6 +598,9 @@ async def traces_page(
             error = str(exc)
 
     content_mode = trace_content_mode()
+    content_event_ids = {
+        event.get("event_id") for event in trace_events if event.get("content")
+    }
     # Payloads are fetched only after an explicit, permission-gated reveal.
     display_trace_events = redact_trace_events(trace_events, mode="metadata")
     for event in display_trace_events:
@@ -676,6 +679,12 @@ async def traces_page(
             "selected_thread_memory_id": selected_thread_memory_id,
             "selected_thread_row": selected_thread_row,
             "trace_events": display_trace_events,
+            "trace_timeline": observability_view.trace_timeline(
+                display_trace_events,
+                agent_label=_timeline_agent_label(selected_agent),
+                content_event_ids=content_event_ids,
+                previews_indexed=_previews_indexed(),
+            ),
             "trace_waterfall": build_causal_waterfall(display_trace_events),
             "trace_inspectors": build_lineage_inspectors(display_trace_events),
             "trace_permissions": {
@@ -707,6 +716,29 @@ async def traces_page(
             "error": error,
         },
     )
+
+
+def _timeline_agent_label(agent: Any) -> str:
+    """Who a timeline's replies are from: the coding agent, or the agent's
+    name. A virtual source's name describes the source, not an agent."""
+    coding = _coding_agent_of_source(agent)
+    if coding:
+        return _CODING_AGENTS[coding]
+    if agent is None or (
+        isinstance(agent, dict) and agent.get("_is_virtual_trace_source")
+    ):
+        return "Agent"
+    return _extract_agent_persona_name(agent)
+
+
+def _previews_indexed() -> bool:
+    """Whether the provider's span index can supply content previews."""
+    provider = _state.get("provider")
+    try:
+        index = provider.get_observability_index() if provider else None
+        return bool(index is not None and index.ready())
+    except Exception:
+        return False
 
 
 def _inspection_context(request, **values):
@@ -1270,12 +1302,13 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def _analysis_for_selection(
+def _selection_events(
     agent_id: str,
     *,
     thread_id: Optional[str] = None,
     thread_memory_id: Optional[str] = None,
-) -> tuple[Dict[str, Any], List[Dict[str, Any]], Any]:
+) -> tuple[TraceEvents, Any, Any]:
+    """The events a trace source's timeline shows, with their content."""
     provider = _state.get("provider")
     if not provider:
         raise HTTPException(status_code=503, detail="No memory provider connected")
@@ -1317,6 +1350,18 @@ def _analysis_for_selection(
         conversation_docs=conversations,
         tool_log_docs=tools,
         query_metadata=query_metadata,
+    )
+    return events, selected_agent, provider
+
+
+def _analysis_for_selection(
+    agent_id: str,
+    *,
+    thread_id: Optional[str] = None,
+    thread_memory_id: Optional[str] = None,
+) -> tuple[Dict[str, Any], List[Dict[str, Any]], Any]:
+    events, selected_agent, provider = _selection_events(
+        agent_id, thread_id=thread_id, thread_memory_id=thread_memory_id
     )
     source_is_virtual = bool(
         isinstance(selected_agent, dict)

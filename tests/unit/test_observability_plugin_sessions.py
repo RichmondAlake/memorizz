@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import quote
@@ -119,6 +120,58 @@ def test_a_session_without_a_run_says_how_to_add_it(console):
     assert "No run was recorded for it" in page.text
     assert "memorizz plugin import-session" in page.text
     assert "/harnesses?run=" not in page.text
+
+
+def _reveal_buttons(html: str) -> list[dict[str, str]]:
+    return [
+        dict(re.findall(r'data-([a-z-]+)="([^"]*)"', tag))
+        for tag in re.findall(r"<button[^>]*data-reveal-event=[^>]*>", html)
+    ]
+
+
+def _reveal_body(button: dict[str, str]) -> dict[str, str]:
+    """The request the page's script sends for a reveal button."""
+    body = {
+        "event_id": button["reveal-event"],
+        "agent_id": button["agent-id"],
+        "source_id": button["source-id"],
+        "thread_memory_id": MEMORY,
+    }
+    for key, field in (("root_trace_id", "root-id"), ("thread_id", "thread-id")):
+        if button[field]:
+            body[key] = button[field]
+    return body
+
+
+def test_a_plugin_turn_reveals_its_content(console):
+    """Plugin turns have no root trace, so the trace store doesn't hold them;
+    a reveal reads them from the source and thread the timeline showed."""
+    client, _tmp, _store = console
+    page = client.get(_thread("claude-code", "claude-session-1"))
+    buttons = _reveal_buttons(page.text)
+    assert [button["root-id"] for button in buttons] == ["", ""]
+    assert "Show message" in page.text and "Reply" in page.text
+    revealed = []
+    for button in buttons:
+        response = client.post("/traces/reveal", json=_reveal_body(button))
+        assert response.status_code == 200, response.text
+        revealed.append(response.json()["content"])
+    assert revealed == ["Why int() and not round()?", "Points are per whole dollar."]
+
+
+def test_a_reveal_stays_inside_the_source_it_names(console):
+    client, _tmp, _store = console
+    codex = _reveal_buttons(client.get(_thread("codex", "codex-session-1")).text)[0]
+    body = _reveal_body(codex)
+    # The Codex turn, asked for through the Claude Code source and thread.
+    body.update(
+        source_id="__memorizz_plugin_claude-code__",
+        thread_id="claude-code-claude-session-1",
+    )
+    assert client.post("/traces/reveal", json=body).status_code == 404
+    # A reveal without a root trace or a source has nowhere to look.
+    del body["source_id"]
+    assert client.post("/traces/reveal", json=body).status_code == 404
 
 
 @pytest.fixture

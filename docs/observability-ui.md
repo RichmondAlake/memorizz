@@ -125,6 +125,14 @@ separately from clean primary-provider success. Provider errors count as tool
 failures. This prevents a green completion state from hiding an offline or
 unavailable primary provider.
 
+The timeline is one rail, oldest event first. Each event shows its time, who
+acted (the user, the agent, the model, a tool, memory or the run), a title and
+its badges. Above the rail, filters narrow it to messages, model calls, tools,
+memory, run events or errors. Content stays hidden until you reveal it. **Show
+message** or **Reveal content** fetches one event, and **Reveal all content**
+fetches every event the filter shows. Each fetch is a separate audited request.
+**Details** lists the event's identifiers and its normalized metadata JSON.
+
 Accepted recommendations create draft experiments. They do not edit a live
 prompt, policy, tool, or learned skill automatically.
 

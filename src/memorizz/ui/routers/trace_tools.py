@@ -30,7 +30,9 @@ router = APIRouter(tags=["trace-tools"])
 class TraceSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", str_max_length=240)
     agent_id: str = Field(min_length=1)
-    root_trace_id: str = Field(min_length=1)
+    # Conversation turns saved without a run (a coding-agent plugin's turns,
+    # older MemAgent turns) have no root trace; a reveal still names its event.
+    root_trace_id: str | None = Field(default=None, min_length=1)
     thread_id: str | None = None
     user_id: str | None = None
     application_id: str | None = None
@@ -39,6 +41,9 @@ class TraceSelection(BaseModel):
     task_id: str | None = None
     thread_memory_id: str | None = None
     run_id: str | None = None
+    # The trace source whose timeline showed the event, for a reveal of a
+    # turn the trace store doesn't hold.
+    source_id: str | None = None
     start_time: str | None = None
     end_time: str | None = None
 
@@ -53,6 +58,7 @@ class TraceSelection(BaseModel):
         "task_id",
         "thread_memory_id",
         "run_id",
+        "source_id",
     )(validate_opaque)
 
     @model_validator(mode="after")
@@ -63,7 +69,8 @@ class TraceSelection(BaseModel):
     def filters(self):
         return scoped_trace_filters(
             self.model_dump(
-                exclude_none=True, exclude={"event_id", "task_id", "thread_memory_id"}
+                exclude_none=True,
+                exclude={"event_id", "task_id", "thread_memory_id", "source_id"},
             )
         )
 
@@ -183,7 +190,13 @@ def _collect(selection):
                 evidence,
                 **selection.model_dump(
                     exclude_none=True,
-                    exclude={"agent_id", "user_id", "application_id", "event_id"},
+                    exclude={
+                        "agent_id",
+                        "user_id",
+                        "application_id",
+                        "event_id",
+                        "source_id",
+                    },
                 ),
             )
             if not evidence:
@@ -428,6 +441,22 @@ async def lookup_artifact(request: Request, resource_type: str, ref: str):
     return JSONResponse(safe)
 
 
+def _timeline_rows(selection):
+    """The events the selected source's timeline shows. Turns saved without
+    a run, such as a coding-agent plugin's or an older MemAgent's, aren't in
+    the trace store, so a reveal reads them where the timeline did."""
+    if not selection.source_id:
+        raise HTTPException(status_code=404, detail="Event not found")
+    from .traces import _selection_events
+
+    events, _agent, _provider = _selection_events(
+        selection.source_id,
+        thread_id=selection.thread_id,
+        thread_memory_id=selection.thread_memory_id,
+    )
+    return [event for event in events if event.get("agent_id") == selection.agent_id]
+
+
 @router.post("/traces/reveal")
 async def reveal_event(request: Request, selection: TraceSelection):
     require_trace_permission("trace.reveal")
@@ -437,7 +466,15 @@ async def reveal_event(request: Request, selection: TraceSelection):
             status_code=403, detail="Content reveal is disabled or no event is selected"
         )
     _audit_required(request, "trace_reveal_requested")
-    rows = _collect(selection)
+    rows = None
+    if selection.root_trace_id:
+        try:
+            rows = _collect(selection)
+        except HTTPException as exc:
+            if exc.status_code != 404 or not selection.source_id:
+                raise
+    if rows is None:
+        rows = _timeline_rows(selection)
     matches = [row for row in rows if row.get("event_id") == selection.event_id]
     if not matches:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -482,6 +519,8 @@ async def _replay(request, selection, *, persist):
         raise HTTPException(
             status_code=501, detail="Host resource authorizer is not configured"
         )
+    if not selection.root_trace_id:
+        raise HTTPException(status_code=422, detail="Choose a root trace to replay")
     _audit_required(
         request, "replay_draft_requested" if persist else "replay_plan_requested"
     )

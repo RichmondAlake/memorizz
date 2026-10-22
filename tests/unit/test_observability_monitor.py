@@ -19,6 +19,7 @@ from memorizz.ui.observability_view import (
     navigator_rows,
     navigator_tape,
     relative_age,
+    trace_timeline,
     usage_tape,
 )
 
@@ -401,3 +402,62 @@ def test_usage_page_renders_the_tape_with_grouped_figures(tmp_path, monkeypatch)
     assert "<span>Calls</span><strong>3</strong>" in html
     assert "<span>Tokens</span><strong" in html and ">13,200</strong>" in html
     assert "/static/css/pages/observability.css" in html
+
+
+def test_the_timeline_groups_events_by_kind_not_by_role():
+    # A runtime span's role is "tool" whatever it records.
+    events = [
+        {"event_id": "u", "kind": "conversation", "role": "user", "content": "Hi"},
+        {"event_id": "a", "kind": "conversation", "role": "assistant"},
+        {"event_id": "t", "kind": "turn_start", "role": "tool", "status": "started"},
+        {"event_id": "r", "kind": "memory_retrieval", "role": "tool"},
+        {"event_id": "c", "kind": "cache_decision", "role": "tool"}
+        | {"status": "disabled", "cache_decision": "disabled"},
+        {"event_id": "x", "kind": "tool_result", "role": "tool", "outcome": "error"},
+    ]
+    for event in events:
+        event.update(thread_id="thread-1", memory_id="memory-1")
+        event["timestamp"] = "2026-10-21T13:20:28.789916+00:00"
+
+    timeline = trace_timeline(
+        events, agent_label="Claude Code", content_event_ids={"u", "x"}
+    )
+    rows = {row["event"]["event_id"]: row for row in timeline["rows"]}
+    assert [rows[key]["group"] for key in "utrcx"] == [
+        "message",
+        "run",
+        "memory",
+        "model",
+        "tool",
+    ]
+    assert (rows["u"]["actor_label"], rows["u"]["title"]) == ("User", "Message")
+    assert (rows["a"]["actor_label"], rows["a"]["title"]) == ("Claude Code", "Reply")
+    assert rows["t"]["title"] == "Turn Start" and rows["t"]["status"] == ""
+    # The cache chip already says "disabled".
+    assert rows["c"]["status"] == ""
+    assert rows["x"]["error"] and not rows["r"]["error"]
+    assert [key for key, row in rows.items() if row["has_content"]] == ["u", "x"]
+    assert (rows["u"]["date"], rows["u"]["clock"]) == ("2026-10-21", "13:20:28")
+    assert [(f["key"], f["count"]) for f in timeline["filters"]] == [
+        ("message", 2),
+        ("model", 1),
+        ("tool", 1),
+        ("memory", 1),
+        ("run", 1),
+        ("errors", 1),
+    ]
+    assert timeline["thread_id"] == "thread-1"
+    assert timeline["memory_id"] == "memory-1"
+    assert timeline["revealable"] == 2
+
+
+def test_a_timeline_of_messages_only_needs_no_filter():
+    events = [
+        {"event_id": "u", "kind": "conversation", "role": "user", "thread_id": "a"},
+        {"event_id": "v", "kind": "conversation", "role": "user", "thread_id": "b"},
+    ]
+    timeline = trace_timeline(events, previews_indexed=True)
+    assert timeline["filters"] == []
+    # Two threads: the page doesn't name one for all of them.
+    assert timeline["thread_id"] == ""
+    assert all(row["has_content"] for row in timeline["rows"])

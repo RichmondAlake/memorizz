@@ -2478,12 +2478,6 @@ details.builder-section > summary::before {
     padding-block: var(--spacing-lg);
 }
 
-.trace-timeline {
-    max-height: 70vh;
-    overflow-y: auto;
-    padding-right: var(--spacing-sm);
-}
-
 .trace-meta {
     display: flex;
     gap: var(--spacing-sm);
@@ -5314,10 +5308,6 @@ body.theme-light .connect-btn {
 .trace-learning-bridge {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-}
-
-.trace-timeline {
-    scrollbar-color: #2b3038 transparent;
 }
 
 .conversation-messages {

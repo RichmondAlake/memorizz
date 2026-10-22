@@ -89,17 +89,117 @@
             await search();
         } catch (error) { status.textContent = error.message; }
     });
-    document.querySelectorAll('[data-reveal-event]').forEach(button => button.addEventListener('click', async () => {
+    function showContent(output, content) {
+        let text = content || 'Nothing was captured for this event.';
+        let json = false;
+        if (content && /^[[{]/.test(content.trim())) {
+            try { text = JSON.stringify(JSON.parse(content), null, 2); json = true; } catch (error) { /* plain text */ }
+        }
+        output.textContent = text;
+        output.classList.toggle('is-json', json);
+        output.classList.toggle('is-note', !content);
+    }
+    function setRevealed(button, open) {
+        button.nextElementSibling.hidden = !open;
+        button.setAttribute('aria-expanded', String(open));
+        const label = button.querySelector('span');
+        if (label) label.textContent = open ? 'Hide' : button.dataset.label;
+    }
+    // Each reveal is its own audited request; a second click only folds it.
+    async function reveal(button) {
         const output = button.nextElementSibling;
+        if (button.dataset.loaded) { setRevealed(button, output.hidden); return; }
+        button.setAttribute('aria-busy', 'true');
         try {
-            const body = {...selectionBody(), event_id: button.dataset.revealEvent, agent_id: button.dataset.agentId, root_trace_id: button.dataset.rootId};
-            for (const [key, field] of [['thread_id', 'threadId'], ['turn_id', 'turnId'], ['run_id', 'runId']]) {
+            const body = {...selectionBody(), event_id: button.dataset.revealEvent, agent_id: button.dataset.agentId};
+            for (const [key, field] of [['root_trace_id', 'rootId'], ['source_id', 'sourceId'], ['thread_id', 'threadId'], ['turn_id', 'turnId'], ['run_id', 'runId']]) {
                 if (button.dataset[field]) body[key] = button.dataset[field];
             }
             const result = await request('/traces/reveal', body);
-            output.textContent = result.content || 'No preview captured';
-            output.hidden = false;
-        } catch (error) { output.textContent = error.message; output.hidden = false; }
+            showContent(output, result.content);
+            button.dataset.loaded = 'true';
+        } catch (error) {
+            output.textContent = error.message;
+            output.classList.remove('is-json');
+            output.classList.add('is-note');
+        } finally { button.removeAttribute('aria-busy'); }
+        setRevealed(button, true);
+    }
+    document.querySelectorAll('[data-reveal-event]').forEach(button => button.addEventListener('click', () => reveal(button)));
+    document.getElementById('trace-reveal-all')?.addEventListener('click', async event => {
+        const all = event.currentTarget;
+        const buttons = [...document.querySelectorAll('.obs-tl-event:not([hidden]) [data-reveal-event]')];
+        if (all.dataset.shown) {
+            buttons.filter(button => button.dataset.loaded).forEach(button => setRevealed(button, false));
+            delete all.dataset.shown;
+            all.textContent = 'Reveal all content';
+            return;
+        }
+        const queue = buttons.filter(button => !button.dataset.loaded || button.nextElementSibling.hidden);
+        all.disabled = true;
+        const worker = async () => { while (queue.length) await reveal(queue.shift()); };
+        await Promise.all(Array.from({length: Math.min(4, queue.length)}, worker));
+        all.disabled = false;
+        all.dataset.shown = 'true';
+        all.textContent = 'Hide all content';
+    });
+    const timelineEvents = [...document.querySelectorAll('.obs-tl-event')];
+    function markRailEnds() {
+        const visible = timelineEvents.filter(row => !row.hidden);
+        timelineEvents.forEach(row => row.classList.remove('is-first', 'is-last'));
+        visible[0]?.classList.add('is-first');
+        visible[visible.length - 1]?.classList.add('is-last');
+        // A date shows where the day changes, not on every event.
+        let day = null;
+        for (const row of visible) {
+            const date = row.querySelector('[data-tl-date]');
+            if (!date) continue;
+            date.hidden = date.dataset.tlDay === day;
+            day = date.dataset.tlDay;
+        }
+    }
+    document.querySelectorAll('[data-tl-filter]').forEach(button => button.addEventListener('click', () => {
+        const key = button.dataset.tlFilter;
+        document.querySelectorAll('[data-tl-filter]').forEach(other => other.setAttribute('aria-pressed', String(other === button)));
+        timelineEvents.forEach(row => {
+            row.hidden = key !== 'all' && (key === 'errors' ? row.dataset.tlError !== 'true' : row.dataset.tlGroup !== key);
+        });
+        markRailEnds();
+    }));
+    const clock = new Intl.DateTimeFormat(undefined, {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    const day = new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric'});
+    const full = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'medium'});
+    const stamp = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'});
+    const parsed = node => { const date = new Date(node.getAttribute('datetime')); return Number.isNaN(date.getTime()) ? null : date; };
+    document.querySelectorAll('time[data-tl-clock]').forEach(node => {
+        const date = parsed(node);
+        if (!date) return;
+        node.textContent = clock.format(date);
+        node.title = full.format(date);
+        const label = node.parentElement.querySelector('[data-tl-date]');
+        if (label) { label.textContent = day.format(date); label.dataset.tlDay = date.toDateString(); }
+    });
+    // The summary's range names the day once when it starts and ends on it.
+    const range = [...document.querySelectorAll('time[data-tl-stamp]')].map(node => [node, parsed(node)]);
+    range.forEach(([node, date]) => { if (date) node.textContent = stamp.format(date); });
+    if (range.length === 2 && range[0][1] && range[1][1] && range[0][1].toDateString() === range[1][1].toDateString()) {
+        const minutes = new Intl.DateTimeFormat(undefined, {hour: '2-digit', minute: '2-digit'});
+        const [start, end] = [minutes.format(range[0][1]), minutes.format(range[1][1])];
+        if (start === end) { range[1][0].previousSibling.remove(); range[1][0].remove(); } else { range[1][0].textContent = end; }
+    }
+    markRailEnds();
+    document.querySelectorAll('[data-tl-details]').forEach(button => button.addEventListener('click', () => {
+        const panel = document.getElementById(button.getAttribute('aria-controls'));
+        panel.hidden = !panel.hidden;
+        button.setAttribute('aria-expanded', String(!panel.hidden));
+    }));
+    document.querySelectorAll('[data-tl-copy]').forEach(button => button.addEventListener('click', async () => {
+        const json = button.closest('.obs-tl-raw').querySelector('.obs-tl-json');
+        try {
+            await navigator.clipboard.writeText(json.textContent);
+            button.textContent = 'Copied';
+        } catch (error) { button.textContent = 'Copy failed'; }
+        setTimeout(() => { button.textContent = 'Copy JSON'; }, 1500);
     }));
     const category = document.getElementById('trace-category');
     document.querySelectorAll('[data-artifact-ref]').forEach(button => button.addEventListener('click', async () => {

@@ -169,7 +169,7 @@ def test_oracle_native_vector_sql_binds_scope_and_has_no_unscoped_fallback():
         "ns", "source", [0, 1], metadata={}, scope={"user_id": None}
     )
     assert identifier == row["id"]
-    assert "MERGE INTO" in cursor.execute.call_args.args[0]
+    assert cursor.execute.call_args.args[0].lstrip().startswith("UPDATE")
     assert provider.delete_vector("ns", "source")
     assert "namespace = :namespace" in cursor.execute.call_args.args[0]
     cursor.execute.side_effect = RuntimeError("missing vector column")

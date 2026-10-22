@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 
 {% block title %}Observability &amp; Monitoring - Memorizz{% endblock %}
-{% block head %}<script src="/static/js/observability.js?v=3" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=2"><link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8"><script src="/static/js/memory-evolution.js?v=8" defer></script>{% endblock %}
+{% block head %}<script src="/static/js/observability.js?v=4" defer></script><link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=3"><link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8"><script src="/static/js/memory-evolution.js?v=8" defer></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, observability_tabs, empty_state %}
-{% from '_fmt.html' import tape, count %}
+{% from '_fmt.html' import tape, count, usd, usd_exact, ms %}
 {% call page_header('Observability', 'Follow context lineage, grounding, cache routing, tool execution and verified outcomes by agent and thread.', 'Operations', nav=observability_tabs('traces', selection_urls)) %}<a class="btn" href="/traces/memory-evolution?{{ request.query_params }}">Memory evolution</a>{% endcall %}
 
 {% if selected_agent_id %}
@@ -424,7 +424,25 @@
 </div>
 {% endif %}
 <div class="detail-section observability-section" id="trace-timeline">
-    <h2>Trace Timeline</h2>
+    {% set can_reveal = trace_permissions and trace_permissions['trace.reveal'] and trace_content_mode != 'metadata' %}
+    {% set timeline = trace_timeline or {} %}
+    <div class="obs-tl-head">
+        <div class="obs-tl-heading">
+            <h2>Trace Timeline</h2>
+            {% if timeline.rows %}<p class="obs-tl-summary">{{ count(timeline.rows|length) }} event{{ '' if timeline.rows|length == 1 else 's' }}{% if timeline.first %} · <time data-tl-stamp datetime="{{ timeline.first }}">{{ timeline.first[:16]|replace('T', ' ') }}</time>{% if timeline.last and timeline.last != timeline.first %} – <time data-tl-stamp datetime="{{ timeline.last }}">{{ timeline.last[:16]|replace('T', ' ') }}</time>{% endif %}{% endif %}</p>{% endif %}
+        </div>
+        {% if timeline.rows %}
+        <div class="obs-tl-tools">
+            {% if timeline.filters %}
+            <div class="obs-tl-filter" role="group" aria-label="Show events">
+                <button type="button" data-tl-filter="all" aria-pressed="true">All <span>{{ timeline.rows|length }}</span></button>
+                {% for filter in timeline.filters %}<button type="button" data-tl-filter="{{ filter.key }}" aria-pressed="false"{% if filter.key == 'errors' %} class="is-errors"{% endif %}>{{ filter.label }} <span>{{ filter.count }}</span></button>{% endfor %}
+            </div>
+            {% endif %}
+            {% if can_reveal and timeline.revealable %}<button class="btn btn-sm" type="button" id="trace-reveal-all">Reveal all content</button>{% endif %}
+        </div>
+        {% endif %}
+    </div>
     {% if coding_agent_label %}
     <div class="obs-plugin-session" role="note">
         {% if plugin_session %}
@@ -436,83 +454,88 @@
         {% endif %}
     </div>
     {% endif %}
-    {% if trace_events %}
-    <div class="trace-timeline">
-        <div class="conversation-messages">
-            {% for event in trace_events %}
-            <div id="{{ event.anchor }}" class="message {{ event.role or 'system' }} {% if event.event_id == selected_event_id %}trace-selected-event{% endif %}" {% if event.event_id == selected_event_id %}data-selected-event="true" tabindex="-1"{% endif %}>
-                <div class="message-avatar">
-                    {% if event.role == 'user' %}U{% elif event.role == 'assistant' %}A{% elif event.role == 'tool' %}T{% else %}S{% endif %}
-                </div>
-                <div class="message-bubble">
-                    <div class="message-meta">
-                        <span class="message-role">{{ event.title or event.role|default('Event')|title }}</span>
-                        <div class="trace-meta">
-                            {% if event.kind %}<span class="meta-tag trace-tag trace-tag--kind">{{ event.kind|replace('_', ' ')|title }}</span>{% endif %}
-                            {% if event.outcome %}
-                            <span class="meta-tag trace-tag {% if event.outcome == 'success' %}trace-tag--ok{% elif event.outcome == 'empty' %}trace-tag--muted{% elif event.outcome in ['fallback', 'degraded'] %}trace-tag--warning{% else %}trace-tag--critical{% endif %}">
-                                {% if event.outcome == 'success' %}Completed{% elif event.outcome == 'empty' %}Completed · no results{% elif event.outcome == 'fallback' %}Completed via fallback{% elif event.outcome == 'degraded' %}Completed with limitations{% elif event.outcome == 'provider_error' %}Provider error{% else %}Failed{% endif %}
-                            </span>
-                            {% endif %}
-                            {% if event.tool_provider %}<span class="meta-tag trace-tag">Provider {{ event.tool_provider }}</span>{% endif %}
-                            {% if event.model or event.response_model %}<span class="meta-tag trace-tag">{{ event.provider or 'Provider unknown' }} · Requested: {{ event.model or 'unknown' }}</span>{% endif %}
-                            {% if event.response_model %}<span class="meta-tag trace-tag">Returned: {{ event.response_model }}</span>{% elif event.kind == 'model_result' %}<span class="meta-tag trace-tag trace-tag--muted">Returned: unknown</span>{% endif %}
-                            {% if event.persona_version is defined and event.persona_version is not none %}<span class="meta-tag trace-tag" title="{{ event.persona_id or '' }}">Persona v{{ event.persona_version }}</span>{% endif %}
-                            {% if event.input_tokens is defined %}<span class="meta-tag trace-tag">{{ event.input_tokens }} input tokens · {{ event.output_tokens|default('unknown') }} output tokens</span>{% endif %}
-                            {% if event.cached_tokens is defined %}<span class="meta-tag trace-tag">Cache read: {{ event.cached_tokens }} tokens</span>{% endif %}
-                            {% if event.cache_write_tokens is defined %}<span class="meta-tag trace-tag">Cache write: {{ event.cache_write_tokens }} tokens</span>{% endif %}
-                            {% if event.prompt_cache_enabled is defined and event.prompt_cache_enabled == false %}<span class="meta-tag trace-tag trace-tag--warning">Prompt cache disabled</span>{% endif %}
-                            {% if event.finish_reason %}<span class="meta-tag trace-tag">Finish: {{ event.finish_reason }}</span>{% endif %}
-                            {% if event.max_output_tokens is defined %}<span class="meta-tag trace-tag">Output limit: {{ event.max_output_tokens }}</span>{% endif %}
-                            {% if event.response_chars is defined %}<span class="meta-tag trace-tag">{{ event.response_chars }} characters · {{ event.response_bytes }} bytes</span>{% endif %}
-                            {% if event.duration_ms is defined %}<span class="meta-tag trace-tag">{{ event.duration_ms }} ms</span>{% endif %}
-                            {% if event.status %}<span class="meta-tag trace-tag {% if event.status in ['error', 'partial'] %}trace-tag--warning{% endif %}">{{ event.status }}</span>{% endif %}
-                            {% if event.outcome_reason_code %}<span class="meta-tag trace-tag trace-tag--muted">Reason {{ event.outcome_reason_code|replace('_', ' ') }}</span>{% endif %}
-                            {% if event.canonical_page_type %}<span class="meta-tag trace-tag">Page {{ event.canonical_page_type }} · {{ event.canonical_page_id|default('—')|truncate(12) }}</span>{% endif %}
-                            {% if event.thread_binding_status %}<span class="meta-tag trace-tag {% if event.thread_binding_status in ['matched', 'bound', 'verified'] %}trace-tag--ok{% else %}trace-tag--warning{% endif %}">Binding {{ event.thread_binding_status|replace('_', ' ') }}</span>{% endif %}
-                            {% if event.ownership_verified is defined and event.ownership_verified is not none %}<span class="meta-tag trace-tag {% if event.ownership_verified %}trace-tag--ok{% else %}trace-tag--critical{% endif %}">Ownership {% if event.ownership_verified %}verified{% else %}unverified{% endif %}</span>{% endif %}
-                            {% if event.grounding_status %}<span class="meta-tag trace-tag {% if event.grounding_status == 'ready' %}trace-tag--ok{% else %}trace-tag--critical{% endif %}">Grounding {{ event.grounding_status|replace('_', ' ') }}{% if event.grounding_source %} · {{ event.grounding_source|replace('_', ' ') }}{% endif %}</span>{% endif %}
-                            {% if event.cache_decision %}<span class="meta-tag trace-tag {% if event.cache_decision == 'hit' %}trace-tag--ok{% elif event.cache_decision in ['bypassed', 'rejected'] %}trace-tag--warning{% else %}trace-tag--muted{% endif %}">Cache {{ event.cache_decision }}</span>{% endif %}
-                            {% if event.kind == 'memory_context' %}<span class="meta-tag trace-tag {% if event.memory_degraded %}trace-tag--warning{% else %}trace-tag--ok{% endif %}">{{ event.memory_supplied_count|default(0) }} supplied · {{ event.memory_candidate_count|default(0) }} candidates</span>{% endif %}
-                            {% if event.kind == 'memory_reference' %}<span class="meta-tag trace-tag trace-tag--ok">{{ event.memory_referenced_count|default(0) }} explicitly referenced</span>{% endif %}
-                            {% if event.canonical_title_fingerprint or event.client_title_fingerprint %}<span class="meta-tag trace-tag trace-tag--fingerprint">Content fp {{ (event.canonical_title_fingerprint or event.client_title_fingerprint)|truncate(14) }}</span>{% endif %}
-                            {% if event.request_context_fingerprint %}<span class="meta-tag trace-tag trace-tag--fingerprint">Context fp {{ event.request_context_fingerprint|truncate(14) }}</span>{% endif %}
-                            {% if event.trace_id %}<span class="meta-tag trace-tag trace-tag--id">Trace {{ event.trace_id|truncate(14) }}</span>{% endif %}
-                            {% if event.run_id %}<span class="meta-tag trace-tag trace-tag--id">Run {{ event.run_id|truncate(12) }}</span>{% endif %}
-                            {% if event.span_id %}<span class="meta-tag trace-tag trace-tag--id">Span {{ event.span_id|truncate(12) }}</span>{% endif %}
-                            <span class="meta-tag trace-tag trace-tag--id">Memory {{ event.memory_id|truncate(12) }}</span>
-                            <span class="meta-tag trace-tag trace-tag--id">Thread {{ event.thread_id|default('—')|truncate(12) }}</span>
-                            <span class="message-time">{{ event.timestamp }}</span>
-                        </div>
+    {% if timeline.rows %}
+    {% if timeline.thread_id or timeline.memory_id %}
+    <dl class="obs-tl-context">
+        {% if timeline.thread_id %}<div><dt>Thread</dt><dd><code>{{ timeline.thread_id }}</code></dd></div>{% endif %}
+        {% if timeline.memory_id %}<div><dt>Memory</dt><dd><code>{{ timeline.memory_id }}</code></dd></div>{% endif %}
+    </dl>
+    {% endif %}
+    <ol class="obs-tl">
+        {% for row in timeline.rows %}{% set event = row.event %}
+        <li id="{{ event.anchor }}" class="obs-tl-event{% if event.event_id == selected_event_id %} trace-selected-event{% endif %}" data-tl-group="{{ row.group }}" data-tl-actor="{{ row.actor }}"{% if row.error %} data-tl-error="true"{% endif %}{% if event.event_id == selected_event_id %} data-selected-event="true" tabindex="-1"{% endif %}>
+            <div class="obs-tl-time">{% if row.timestamp %}<time data-tl-clock datetime="{{ row.timestamp }}" title="{{ row.timestamp }}">{{ row.clock }}</time><small data-tl-date="{{ row.date }}">{{ row.date }}</small>{% endif %}</div>
+            <div class="obs-tl-rail" aria-hidden="true"><span class="obs-tl-dot"></span></div>
+            <article class="obs-tl-card" aria-labelledby="{{ event.anchor }}-title">
+                <header class="obs-tl-card-head">
+                    <span class="obs-tl-actor">{{ row.actor_label }}</span>
+                    <h3 class="obs-tl-title" id="{{ event.anchor }}-title">{{ row.title }}</h3>
+                    <div class="obs-tl-chips trace-meta">
+                        {% if event.outcome %}
+                        <span class="meta-tag trace-tag {% if event.outcome == 'success' %}trace-tag--ok{% elif event.outcome == 'empty' %}trace-tag--muted{% elif event.outcome in ['fallback', 'degraded'] %}trace-tag--warning{% else %}trace-tag--critical{% endif %}">
+                            {% if event.outcome == 'success' %}Completed{% elif event.outcome == 'empty' %}Completed · no results{% elif event.outcome == 'fallback' %}Completed via fallback{% elif event.outcome == 'degraded' %}Completed with limitations{% elif event.outcome == 'provider_error' %}Provider error{% else %}Failed{% endif %}
+                        </span>
+                        {% endif %}
+                        {% if row.status %}<span class="meta-tag trace-tag {% if row.status in ['error', 'partial'] %}trace-tag--critical{% else %}trace-tag--muted{% endif %}">{{ row.status|replace('_', ' ')|capitalize }}</span>{% endif %}
+                        {% if event.tool_provider %}<span class="meta-tag trace-tag">Provider {{ event.tool_provider }}</span>{% endif %}
+                        {% if event.model or event.response_model %}<span class="meta-tag trace-tag">{{ event.provider or 'Provider unknown' }} · Requested: {{ event.model or 'unknown' }}</span>{% endif %}
+                        {% if event.response_model %}<span class="meta-tag trace-tag">Returned: {{ event.response_model }}</span>{% elif event.kind == 'model_result' %}<span class="meta-tag trace-tag trace-tag--muted">Returned: unknown</span>{% endif %}
+                        {% if event.persona_version is defined and event.persona_version is not none %}<span class="meta-tag trace-tag" title="{{ event.persona_id or '' }}">Persona v{{ event.persona_version }}</span>{% endif %}
+                        {% if event.input_tokens is defined %}<span class="meta-tag trace-tag" title="Input and output tokens">{{ count(event.get('input_tokens'), 'unknown') }} in · {{ count(event.get('output_tokens'), 'unknown') }} out</span>{% endif %}
+                        {% if event.cached_tokens %}<span class="meta-tag trace-tag trace-tag--ok">Cache read {{ count(event.cached_tokens) }}</span>{% endif %}
+                        {% if event.cache_write_tokens %}<span class="meta-tag trace-tag">Cache write {{ count(event.cache_write_tokens) }}</span>{% endif %}
+                        {% if event.prompt_cache_enabled is defined and event.prompt_cache_enabled == false %}<span class="meta-tag trace-tag trace-tag--warning">Prompt cache disabled</span>{% endif %}
+                        {% if event.cost_usd %}<span class="meta-tag trace-tag" title="{{ usd_exact(event.cost_usd) }}{% if event.cost_reason %} · {{ event.cost_reason }}{% endif %}">{{ usd(event.cost_usd) }}</span>{% endif %}
+                        {% if event.finish_reason %}<span class="meta-tag trace-tag">Finish: {{ event.finish_reason }}</span>{% endif %}
+                        {% if event.max_output_tokens is defined %}<span class="meta-tag trace-tag">Output limit: {{ count(event.max_output_tokens) }}</span>{% endif %}
+                        {% if event.response_chars is defined %}<span class="meta-tag trace-tag">{{ count(event.response_chars) }} characters · {{ count(event.get('response_bytes')) }} bytes</span>{% endif %}
+                        {% if event.outcome_reason_code %}<span class="meta-tag trace-tag trace-tag--muted">Reason {{ event.outcome_reason_code|replace('_', ' ') }}</span>{% endif %}
+                        {% if event.canonical_page_type %}<span class="meta-tag trace-tag">Page {{ event.canonical_page_type }} · {{ event.canonical_page_id|default('—')|truncate(12) }}</span>{% endif %}
+                        {% if event.thread_binding_status %}<span class="meta-tag trace-tag {% if event.thread_binding_status in ['matched', 'bound', 'verified'] %}trace-tag--ok{% else %}trace-tag--warning{% endif %}">Binding {{ event.thread_binding_status|replace('_', ' ') }}</span>{% endif %}
+                        {% if event.ownership_verified is defined and event.ownership_verified is not none %}<span class="meta-tag trace-tag {% if event.ownership_verified %}trace-tag--ok{% else %}trace-tag--critical{% endif %}">Ownership {% if event.ownership_verified %}verified{% else %}unverified{% endif %}</span>{% endif %}
+                        {% if event.grounding_status %}<span class="meta-tag trace-tag {% if event.grounding_status == 'ready' %}trace-tag--ok{% else %}trace-tag--critical{% endif %}">Grounding {{ event.grounding_status|replace('_', ' ') }}{% if event.grounding_source %} · {{ event.grounding_source|replace('_', ' ') }}{% endif %}</span>{% endif %}
+                        {% if event.cache_decision %}<span class="meta-tag trace-tag {% if event.cache_decision == 'hit' %}trace-tag--ok{% elif event.cache_decision in ['bypassed', 'rejected'] %}trace-tag--warning{% else %}trace-tag--muted{% endif %}">Cache {{ event.cache_decision }}</span>{% endif %}
+                        {% if event.kind == 'memory_context' %}<span class="meta-tag trace-tag {% if event.memory_degraded %}trace-tag--warning{% else %}trace-tag--ok{% endif %}">{{ event.memory_supplied_count|default(0) }} supplied · {{ event.memory_candidate_count|default(0) }} candidates</span>{% endif %}
+                        {% if event.kind == 'memory_reference' %}<span class="meta-tag trace-tag trace-tag--ok">{{ event.memory_referenced_count|default(0) }} explicitly referenced</span>{% endif %}
+                        {% if event.duration_ms is defined and event.duration_ms is not none %}<span class="meta-tag trace-tag trace-tag--duration">{{ ms(event.duration_ms) }}</span>{% endif %}
                     </div>
-                    {% if event.input_refs or event.output_refs %}
-                    <details {% if event.status in ['error', 'partial'] %}open{% endif %}>
-                        <summary>Memory lineage and artifact provenance</summary>
-                        <p>Producer span: <code>{{ event.parent_span_id or 'Not observed' }}</code></p>
-                        <table>
-                            <thead><tr><th>Direction</th><th>Resource</th><th>Reference</th><th>Role</th><th>Version</th><th>Provenance</th></tr></thead>
-                            <tbody>
-                            {% for ref in event.input_refs or [] %}<tr><td>Input</td><td>{{ ref.resource_type }}</td><td><code>{{ ref.ref }}</code></td><td>{{ ref.role or 'Unspecified' }}</td><td>{{ ref.version or 'Unknown' }}</td><td>{{ ref.provenance_status }}</td></tr>{% endfor %}
-                            {% for ref in event.output_refs or [] %}<tr><td>Output</td><td>{{ ref.resource_type }}</td><td><code>{{ ref.ref }}</code></td><td>{{ ref.role or 'Unspecified' }}</td><td>{{ ref.version or 'Unknown' }}</td><td>{{ ref.provenance_status }}</td></tr>{% endfor %}
-                            </tbody>
-                        </table>
-                        {% if event.kind == 'artifact_persisted' %}<p>Persistence verified: {{ event.persistence_verified }} · Sources: {{ event.input_refs|length }} · Task: {{ event.task_id or 'Unspecified' }}</p>{% endif %}
-                    </details>
-                    {% endif %}
-                    {% if event.kind in ['output_contract', 'ui_delivery'] %}
-                    <div class="message-text">
-                        <strong>Output contract: {{ event.contract_name }}</strong>
-                        {% if event.kind == 'output_contract' %}<p>Opening marker: {{ event.opening_marker_found }} · Closing marker: {{ event.closing_marker_found }} · Parser: {{ event.parser_status }} · Recovery: {{ event.recovery_status or ('used' if event.recovery_used else 'not used') }} · Nodes: {{ event.nodes|default('unknown') }} · Edges: {{ event.edges|default('unknown') }}</p>{% endif %}
-                        {% if event.kind == 'ui_delivery' %}<p>Emitted: {{ event.emitted }} · Browser acknowledged: {{ event.acknowledged|default('unknown', true) }}</p>{% endif %}
-                    </div>
-                    {% endif %}
-                    {% if trace_permissions and trace_permissions['trace.reveal'] and trace_content_mode != 'metadata' %}<button class="btn btn-sm" type="button" data-reveal-event="{{ event.event_id }}" data-agent-id="{{ event.agent_id }}" data-root-id="{{ event.root_trace_id }}" data-thread-id="{{ event.thread_id or '' }}" data-turn-id="{{ event.turn_id or '' }}" data-run-id="{{ event.run_id or '' }}">Reveal trace content</button><pre class="message-text" hidden></pre>{% endif %}
-                    <details><summary>Normalized metadata JSON</summary><pre class="message-text">{{ event|tojson(indent=2) }}</pre></details>
+                </header>
+                {% if event.input_refs or event.output_refs %}
+                <details class="obs-tl-section" {% if event.status in ['error', 'partial'] %}open{% endif %}>
+                    <summary>Memory lineage and artifact provenance</summary>
+                    <p>Producer span: <code>{{ event.parent_span_id or 'Not observed' }}</code></p>
+                    <div class="obs-tl-table"><table>
+                        <thead><tr><th>Direction</th><th>Resource</th><th>Reference</th><th>Role</th><th>Version</th><th>Provenance</th></tr></thead>
+                        <tbody>
+                        {% for ref in event.input_refs or [] %}<tr><td>Input</td><td>{{ ref.resource_type }}</td><td><code>{{ ref.ref }}</code></td><td>{{ ref.role or 'Unspecified' }}</td><td>{{ ref.version or 'Unknown' }}</td><td>{{ ref.provenance_status }}</td></tr>{% endfor %}
+                        {% for ref in event.output_refs or [] %}<tr><td>Output</td><td>{{ ref.resource_type }}</td><td><code>{{ ref.ref }}</code></td><td>{{ ref.role or 'Unspecified' }}</td><td>{{ ref.version or 'Unknown' }}</td><td>{{ ref.provenance_status }}</td></tr>{% endfor %}
+                        </tbody>
+                    </table></div>
+                    {% if event.kind == 'artifact_persisted' %}<p>Persistence verified: {{ event.persistence_verified }} · Sources: {{ event.input_refs|length }} · Task: {{ event.task_id or 'Unspecified' }}</p>{% endif %}
+                </details>
+                {% endif %}
+                {% if event.kind in ['output_contract', 'ui_delivery'] %}
+                <div class="obs-tl-contract">
+                    <strong>Output contract: {{ event.contract_name }}</strong>
+                    {% if event.kind == 'output_contract' %}<p>Opening marker: {{ event.opening_marker_found }} · Closing marker: {{ event.closing_marker_found }} · Parser: {{ event.parser_status }} · Recovery: {{ event.recovery_status or ('used' if event.recovery_used else 'not used') }} · Nodes: {{ event.nodes|default('unknown') }} · Edges: {{ event.edges|default('unknown') }}</p>{% endif %}
+                    {% if event.kind == 'ui_delivery' %}<p>Emitted: {{ event.emitted }} · Browser acknowledged: {{ event.acknowledged|default('unknown', true) }}</p>{% endif %}
                 </div>
-            </div>
-            {% endfor %}
-        </div>
-    </div>
+                {% endif %}
+                {% if can_reveal and row.has_content %}<button class="obs-tl-action obs-tl-reveal" type="button" aria-expanded="false" data-reveal-event="{{ event.event_id }}" data-agent-id="{{ event.agent_id }}" data-source-id="{{ selected_agent_id or '' }}" data-root-id="{{ event.root_trace_id or '' }}" data-thread-id="{{ event.thread_id or '' }}" data-turn-id="{{ event.turn_id or '' }}" data-run-id="{{ event.run_id or '' }}" data-label="{{ 'Show message' if row.group == 'message' else 'Reveal content' }}"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>{{ 'Show message' if row.group == 'message' else 'Reveal content' }}</span></button><pre class="obs-tl-content" hidden></pre>
+                {% elif row.group == 'message' and not can_reveal %}<p class="obs-tl-note">Message content isn't shown in metadata-only mode.</p>{% endif %}
+                <button class="obs-tl-action obs-tl-more" type="button" aria-expanded="false" aria-controls="{{ event.anchor }}-details" data-tl-details>Details</button>
+                <div class="obs-tl-raw" id="{{ event.anchor }}-details" hidden>
+                    <dl class="obs-tl-ids">
+                        <dt>Event</dt><dd>{{ event.event_id }}</dd>
+                        {% for label, key in [('Kind', 'kind'), ('Trace', 'trace_id'), ('Root trace', 'root_trace_id'), ('Turn', 'turn_id'), ('Run', 'run_id'), ('Span', 'span_id'), ('Parent span', 'parent_span_id'), ('Thread', 'thread_id'), ('Memory', 'memory_id'), ('Content fingerprint', 'canonical_title_fingerprint'), ('Client fingerprint', 'client_title_fingerprint'), ('Context fingerprint', 'request_context_fingerprint')] %}{% if event[key] %}<dt>{{ label }}</dt><dd>{{ event[key] }}</dd>{% endif %}{% endfor %}
+                    </dl>
+                    <div class="obs-tl-json-head"><span>Normalized metadata</span><button class="obs-tl-copy" type="button" data-tl-copy>Copy JSON</button></div>
+                    <pre class="obs-tl-json">{{ event|tojson(indent=2) }}</pre>
+                </div>
+            </article>
+        </li>
+        {% endfor %}
+    </ol>
     {% else %}
     <div class="empty-pane">
         <div class="empty-icon">TRACE</div>

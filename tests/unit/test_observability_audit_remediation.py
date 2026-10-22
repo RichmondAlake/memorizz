@@ -522,6 +522,17 @@ def test_replay_preserves_turn_task_run_and_memory(audit_ui, persist):
     assert draft["replay_policy"]["execution_enabled"] is False
 
 
+def test_a_replay_still_needs_a_root_trace(audit_ui):
+    client, provider, *_ = audit_ui
+    _selection_bundle(provider)
+    response = client.post(
+        "/traces/replays",
+        json={"agent_id": "saved-agent", "thread_id": "selection-thread"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Choose a root trace to replay"
+
+
 def test_reveal_requires_unambiguous_event_and_preserves_turn(audit_ui, monkeypatch):
     client, provider, *_ = audit_ui
     monkeypatch.setenv("MEMORIZZ_UI_TRACE_CONTENT_MODE", "redacted")

@@ -150,6 +150,7 @@ provider = OracleProvider(
 | `index_policy` | `lazy` | `none`, `lazy`, `selected`, or `eager` |
 | `selected_vector_indexes` | `[]` | Memory types indexed under `selected` policy |
 | `pool_min` / `pool_max` | `1` / `5` | Connection-pool bounds |
+| `pool_wait_timeout` | `60` | Seconds to wait for a free connection before raising DPY-4005; `None` waits for good |
 
 `lazy_vector_indexes` remains a compatibility argument; use `index_policy` in
 new code.
@@ -353,6 +354,12 @@ automatic-segment-space tablespace, because VECTOR columns can't live in
 
 **ORA-51962:** inspect `VECTOR_MEMORY_SIZE`, switch to `none`/`lazy`, or have an
 authorized DBA increase vector memory and restart the database.
+
+**DPY-4005 (timed out waiting for the connection pool):** every connection in
+the pool stayed in use for `pool_wait_timeout` seconds. Raise `pool_max` for
+more concurrent work. A connection whose session breaks (ORA-031xx, DPY-4011)
+leaves the pool rather than holding a slot, so the pool can't run out because
+of broken sessions.
 
 **Missing summary/cache fields:** apply migration 004, then restart the
 provider and rerun preflight/tests.

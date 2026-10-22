@@ -241,6 +241,92 @@ def _lobs_as_values(cursor: Any, metadata: Any) -> Any:
     return None
 
 
+# A session can't be trusted after one of these: ORA-031xx are network and
+# protocol (TTC) errors, and the others mean the server has ended it.
+_SESSION_ERROR_CODES = re.compile(
+    r"ORA-031\d\d|ORA-00028|ORA-01012|ORA-02396|DPY-1001|DPY-4011"
+)
+
+
+def _breaks_session(exc: Optional[BaseException]) -> bool:
+    if not isinstance(exc, oracledb.Error) or not exc.args:
+        return False
+    code = getattr(exc.args[0], "full_code", None) or str(exc)
+    return bool(_SESSION_ERROR_CODES.match(code))
+
+
+class _PooledConnection:
+    """A pooled connection that leaves the pool when its session breaks.
+
+    Closing a connection whose session the server ended rolls back over the
+    dead socket: ``close()`` raises DPY-4011 and the pool goes on counting
+    the connection as busy, so after ``pool_max`` such errors every acquire
+    waits for good. ``pool.drop()`` of it instead ends the pool's background
+    thread in python-oracledb 26. So a connection that saw a session error is
+    pinged first: a dead one is then closed without a round trip, and a live
+    one is dropped, since the server ends a session that keeps sending
+    malformed packets (ORA-03138)."""
+
+    __slots__ = ("_pool", "_connection")
+
+    def __init__(self, pool: Any, connection: Any):
+        object.__setattr__(self, "_pool", pool)
+        object.__setattr__(self, "_connection", connection)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._connection, name, value)
+
+    def __enter__(self) -> "_PooledConnection":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            self._release(suspect=_breaks_session(exc))
+        except oracledb.Error:
+            if exc is None:
+                raise
+            # The error that ended the block is the one worth raising.
+            logger.warning("Could not return an Oracle connection to the pool")
+
+    def close(self) -> None:
+        self._release(suspect=False)
+
+    def _release(self, *, suspect: bool) -> None:
+        connection = self._connection
+        if connection is None:
+            return
+        object.__setattr__(self, "_connection", None)
+        if suspect:
+            try:
+                connection.ping()
+            except oracledb.Error:
+                pass  # ended: close() below skips the round trip
+            if connection.is_healthy():
+                self._pool.drop(connection)
+                return
+        connection.close()
+
+
+class _GuardedPool:
+    """The provider's connection pool; ``acquire()`` returns a
+    ``_PooledConnection``, so callers outside the provider that share the
+    pool are guarded too."""
+
+    __slots__ = ("_pool",)
+
+    def __init__(self, pool: Any):
+        self._pool = pool
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    def acquire(self, *args: Any, **kwargs: Any) -> _PooledConnection:
+        return _PooledConnection(self._pool, self._pool.acquire(*args, **kwargs))
+
+
 _TS_CREATED = _c("created_at", kind="ts")
 _TS_UPDATED = _c("updated_at", kind="ts")
 _EMB_FULL = _c("embedding", kind="vector")
@@ -950,6 +1036,7 @@ class OracleConfig:
         pool_max: int = 5,
         pool_increment: int = 1,
         vector_search_mode: str = "exact",
+        pool_wait_timeout: Optional[float] = 60.0,
     ):
         """
         Initialize the Oracle provider with configuration settings.
@@ -991,6 +1078,9 @@ class OracleConfig:
             Maximum number of connections in the pool (default: 5)
         pool_increment : int
             Number of connections to add when pool is exhausted (default: 1)
+        pool_wait_timeout : float, optional
+            Seconds to wait for a connection when all ``pool_max`` are in use
+            before raising DPY-4005 (default: 60). None waits for good.
         """
         self.user = user
         self.password = password
@@ -1030,6 +1120,7 @@ class OracleConfig:
         self.pool_min = pool_min
         self.pool_max = pool_max
         self.pool_increment = pool_increment
+        self.pool_wait_timeout = pool_wait_timeout
 
 
 class OracleProvider(
@@ -1149,15 +1240,25 @@ class OracleProvider(
         # has not been run yet — see ``_table_has_column``.
         self._table_columns_cache: Dict[str, set] = {}
 
-        # Initialize connection pool
+        # Initialize connection pool. A pool that runs out raises after
+        # ``pool_wait_timeout`` instead of leaving the caller waiting for good.
+        wait_options: Dict[str, Any] = {}
+        if config.pool_wait_timeout is not None:
+            wait_options = {
+                "getmode": oracledb.POOL_GETMODE_TIMEDWAIT,
+                "wait_timeout": int(config.pool_wait_timeout * 1000),
+            }
         try:
-            self.pool = oracledb.create_pool(
-                user=config.user,
-                password=config.password,
-                dsn=config.dsn,
-                min=config.pool_min,
-                max=config.pool_max,
-                increment=config.pool_increment,
+            self.pool = _GuardedPool(
+                oracledb.create_pool(
+                    user=config.user,
+                    password=config.password,
+                    dsn=config.dsn,
+                    min=config.pool_min,
+                    max=config.pool_max,
+                    increment=config.pool_increment,
+                    **wait_options,
+                )
             )
             logger.info("Oracle connection pool created successfully")
         except Exception as e:
@@ -4172,43 +4273,38 @@ class OracleProvider(
         include_user_id = self._memory_type_has_column(
             MemoryType.ENTITY_MEMORY, "user_id"
         )
+        columns = [
+            "name",
+            "entity_type",
+            "attributes",
+            "relations",
+            "metadata",
+            "memory_id",
+            "agent_id",
+        ]
         if include_user_id:
             params["user_id"] = data.get("user_id")
-
-        user_id_update = (
-            ",\n                user_id = :user_id" if include_user_id else ""
-        )
-        user_id_insert_col = ", user_id" if include_user_id else ""
-        user_id_insert_val = ", :user_id" if include_user_id else ""
+            columns.append("user_id")
         retention_binds = self._existing_retention_binds(MemoryType.ENTITY_MEMORY, data)
         params.update(retention_binds)
-        for column in retention_binds:
-            user_id_update += f",\n                {column} = :{column}"
-            user_id_insert_col += f", {column}"
-            user_id_insert_val += f", :{column}"
+        columns += [*retention_binds, "embedding"]
 
-        merge_sql = f"""
-            MERGE INTO {table_name} tgt
-            USING (SELECT :entity_id AS entity_id FROM dual) src
-            ON (tgt.entity_id = src.entity_id)
-            WHEN MATCHED THEN UPDATE SET
-                name = :name,
-                entity_type = :entity_type,
-                attributes = :attributes,
-                relations = :relations,
-                metadata = :metadata,
-                memory_id = :memory_id,
-                agent_id = :agent_id{user_id_update},
-                embedding = :embedding,
+        # An UPDATE or an INSERT, not one MERGE: a MERGE whose UPDATE branch
+        # sets a CLOB from a bind over about 8 KB fails with ORA-03146 in
+        # python-oracledb thin, with CLOB input sizes too once the embedding
+        # is bound, and the server ends a session after a few such errors.
+        update_sql = f"""
+            UPDATE {table_name} SET
+                {", ".join(f"{column} = :{column}" for column in columns)},
                 updated_at = {UTC_NOW_SQL}
-            WHEN NOT MATCHED THEN INSERT (
-                id, entity_id, name, entity_type, attributes,
-                relations, metadata, memory_id, agent_id{user_id_insert_col},
-                embedding, created_at, updated_at
+            WHERE entity_id = :entity_id
+        """
+        insert_sql = f"""
+            INSERT INTO {table_name} (
+                id, entity_id, {", ".join(columns)}, created_at, updated_at
             ) VALUES (
-                :id, :entity_id, :name, :entity_type, :attributes,
-                :relations, :metadata, :memory_id, :agent_id{user_id_insert_val},
-                :embedding, {UTC_NOW_SQL}, {UTC_NOW_SQL}
+                :id, :entity_id, {", ".join(f":{column}" for column in columns)},
+                {UTC_NOW_SQL}, {UTC_NOW_SQL}
             )
         """
 
@@ -4240,37 +4336,45 @@ class OracleProvider(
                     )
                 return scope
 
-            _read_and_validate_scope()
+            exists = _read_and_validate_scope() is not None
 
-            def _execute_merge() -> None:
+            def _write(insert: bool) -> None:
+                sql = insert_sql if insert else update_sql
+
+                def binds() -> Dict[str, Any]:
+                    if insert:
+                        return params
+                    return {key: value for key, value in params.items() if key != "id"}
+
                 try:
-                    cursor.execute(merge_sql, params)
-                except Exception as merge_exc:
+                    cursor.execute(sql, binds())
+                except Exception as write_exc:
                     if params.get(
                         "embedding"
                     ) is not None and self._is_embedding_dimension_mismatch_error(
-                        str(merge_exc)
+                        str(write_exc)
                     ):
                         params["embedding"] = None
                         self._handle_embedding_dimension_mismatch(
-                            "Entity memory", merge_exc
+                            "Entity memory", write_exc
                         )
-                        cursor.execute(merge_sql, params)
+                        cursor.execute(sql, binds())
                         return
                     raise
 
             try:
-                _execute_merge()
+                _write(insert=not exists)
             except Exception as exc:
-                if "ORA-00001" not in str(exc).upper():
+                if exists or "ORA-00001" not in str(exc).upper():
                     raise
                 # A concurrent request may have inserted the same canonical
-                # entity after our initial SELECT. Retry only after the winning
-                # row is visible and its exact tenant ownership is validated.
-                # A collision in another scope raises PermissionError above.
+                # entity after our initial SELECT. Update it only after the
+                # winning row is visible and its exact tenant ownership is
+                # validated. A collision in another scope raises PermissionError
+                # above.
                 if not _read_and_validate_scope():
                     raise
-                _execute_merge()
+                _write(insert=False)
             conn.commit()
 
         return entity_id
@@ -7078,27 +7182,46 @@ class OracleProvider(
             "metadata": json.dumps(row["metadata"], ensure_ascii=False),
             "embedding": self._prepare_vector_value(row["embedding"]),
         }
+        # An UPDATE, then an INSERT, not one MERGE: see _store_entity_memory.
+        update_sql = f"""
+            UPDATE {table} SET
+                embedding = :embedding, metadata = :metadata,
+                updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP)
+            WHERE id = :id AND namespace = :namespace
+              AND JSON_VALUE(metadata, '$.format') = :format
+        """
+        update_params = {
+            key: params[key]
+            for key in ("id", "namespace", "format", "metadata", "embedding")
+        }
         with self._get_connection() as connection:
             cursor = connection.cursor()
-            self._set_vector_input_size(cursor, "embedding")
-            cursor.execute(
-                f"""
-                MERGE INTO {table} target
-                USING (SELECT :id AS id FROM dual) source
-                ON (target.id = source.id)
-                WHEN MATCHED THEN UPDATE SET
-                    target.embedding = :embedding, target.metadata = :metadata,
-                    target.updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP)
-                    WHERE target.namespace = :namespace
-                      AND JSON_VALUE(target.metadata, '$.format') = :format
-                WHEN NOT MATCHED THEN INSERT
-                    (id, memory_id, namespace, source_id, content, memory_type, metadata, embedding)
-                    VALUES (:id, :memory_id, :namespace, :source_id, :format, :format, :metadata, :embedding)
-            """,
-                params,
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("Vector identity collides with an unrelated document")
+
+            def _update() -> bool:
+                self._set_vector_input_size(cursor, "embedding")
+                cursor.execute(update_sql, update_params)
+                return cursor.rowcount == 1
+
+            if not _update():
+                try:
+                    self._set_vector_input_size(cursor, "embedding")
+                    cursor.execute(
+                        f"""
+                        INSERT INTO {table}
+                            (id, memory_id, namespace, source_id, content, memory_type, metadata, embedding)
+                        VALUES (:id, :memory_id, :namespace, :source_id, :format, :format, :metadata, :embedding)
+                    """,
+                        params,
+                    )
+                except Exception as exc:
+                    if "ORA-00001" not in str(exc).upper():
+                        raise
+                    # The id was taken after the UPDATE, by this vector written
+                    # concurrently or by an unrelated document.
+                    if not _update():
+                        raise ValueError(
+                            "Vector identity collides with an unrelated document"
+                        ) from exc
             connection.commit()
         return row["id"]
 

@@ -357,7 +357,10 @@ def test_oracle_entity_upsert_allows_existing_owner_scope():
 
     assert entity_id == "entity-shared-id"
     assert len(cursor.calls) == 2
-    assert "MERGE INTO MEMORIZZ.entity_memory" in cursor.calls[1][0]
+    update_sql, update_params = cursor.calls[1]
+    assert update_sql.startswith("UPDATE MEMORIZZ.entity_memory SET")
+    assert update_sql.endswith("WHERE entity_id = :entity_id")
+    assert "id" not in update_params and update_params["user_id"] == "user-a"
     assert connection.commits == 1
 
 
@@ -367,14 +370,11 @@ def test_oracle_entity_upsert_recovers_same_scope_concurrent_insert():
         def __init__(self):
             super().__init__()
             self._scopes = iter([None, ("shared-memory", "user-a")])
-            self._merge_count = 0
 
         def execute(self, sql, params=None):
             super().execute(sql, params)
-            if "MERGE INTO" in str(sql).upper():
-                self._merge_count += 1
-                if self._merge_count == 1:
-                    raise RuntimeError("ORA-00001: unique constraint violated")
+            if str(sql).lstrip().upper().startswith("INSERT INTO"):
+                raise RuntimeError("ORA-00001: unique constraint violated")
 
         def fetchone(self):
             return next(self._scopes)
@@ -394,8 +394,9 @@ def test_oracle_entity_upsert_recovers_same_scope_concurrent_insert():
     )
 
     assert entity_id == "entity-shared-id"
+    statements = [sql.split()[0] for sql, _params in cursor.calls]
+    assert statements == ["SELECT", "INSERT", "SELECT", "UPDATE"]
     assert ["FOR UPDATE" in sql for sql, _params in cursor.calls].count(True) == 2
-    assert ["MERGE INTO" in sql for sql, _params in cursor.calls].count(True) == 2
     assert connection.commits == 1
 
 

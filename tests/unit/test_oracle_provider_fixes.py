@@ -1074,11 +1074,12 @@ def test_summary_conversation_and_entity_inserts_carry_forgetting_columns():
             "suppressed_by": "plan-y",
         }
     )
-    merge_sql, merge_params = next(c for c in cursor.calls if c[0].startswith("MERGE"))
-    assert "importance = :importance" in merge_sql
-    assert "retention_meta = :retention_meta" in merge_sql
-    assert ", importance, retention_meta, embedding" in merge_sql
-    assert json.loads(merge_params["retention_meta"]) == {"suppressed_by": "plan-y"}
+    insert_sql, insert_params = next(
+        c for c in cursor.calls if c[0].startswith("INSERT INTO")
+    )
+    assert ", importance, retention_meta, embedding, created_at" in insert_sql
+    assert ":importance, :retention_meta, :embedding," in insert_sql
+    assert json.loads(insert_params["retention_meta"]) == {"suppressed_by": "plan-y"}
 
 
 @pytest.mark.unit

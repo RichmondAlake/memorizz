@@ -214,6 +214,129 @@ def navigator_tape(
     ]
 
 
+# ---------- Traces: timeline ----------
+
+# Filter order, with the label each group's events are shown under.
+TIMELINE_GROUPS = (
+    ("message", "Messages", "Message"),
+    ("model", "Model", "Model"),
+    ("tool", "Tools", "Tool"),
+    ("memory", "Memory", "Memory"),
+    ("output", "Output", "Output"),
+    ("run", "Run", "Run"),
+)
+# Statuses that only restate a normal event, so the timeline doesn't chip them.
+_ROUTINE_STATUSES = {
+    "",
+    "success",
+    "ok",
+    "completed",
+    "recorded",
+    "started",
+    "measured",
+}
+_HANDLED_OUTCOMES = {"success", "empty", "fallback", "degraded"}
+
+
+def timeline_group(event: Mapping[str, Any]) -> str:
+    """The kind decides; a runtime span's role is "tool" whatever it records."""
+    kind = str(event.get("kind") or "")
+    role = event.get("role")
+    if kind == "conversation" or (not kind and role in ("user", "assistant")):
+        return "message"
+    if kind.startswith(("model", "cache", "prompt")):
+        return "model"
+    if kind.startswith("tool") or (not kind and role == "tool"):
+        return "tool"
+    if kind.startswith(("memory", "context")):
+        return "memory"
+    if kind.startswith("artifact") or kind in ("ui_delivery", "output_contract"):
+        return "output"
+    return "run"
+
+
+def timeline_error(event: Mapping[str, Any]) -> bool:
+    outcome = event.get("outcome")
+    return bool(
+        str(event.get("status") or "") in ("error", "partial")
+        or event.get("error_code")
+        or (outcome and outcome not in _HANDLED_OUTCOMES)
+    )
+
+
+def trace_timeline(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    agent_label: str = "Agent",
+    content_event_ids: Iterable[Any] = (),
+    previews_indexed: bool = False,
+) -> Dict[str, Any]:
+    """Rows for the Trace Timeline: who acted, a readable title, the group
+    the filter uses, and the time split into date and clock.
+
+    A message is "Message" from the user and "Reply" from the agent. An event
+    offers a reveal only when it has content to show: its own, or a preview
+    in the provider's span index.
+    """
+    singular = {key: label for key, _plural, label in TIMELINE_GROUPS}
+    with_content = set(content_event_ids)
+    rows: List[Dict[str, Any]] = []
+    counts = {key: 0 for key, _plural, _label in TIMELINE_GROUPS}
+    errors = 0
+    for event in events:
+        group = timeline_group(event)
+        if group == "message":
+            actor = "user" if event.get("role") == "user" else "agent"
+            actor_label = "User" if actor == "user" else agent_label
+            title = "Message" if actor == "user" else "Reply"
+        else:
+            actor, actor_label = group, singular[group]
+            kind = str(event.get("kind") or "").replace("_", " ").title()
+            title = str(event.get("title") or kind or "Event")
+        stamp = str(event.get("timestamp") or "")
+        status = str(event.get("status") or "")
+        if status == event.get("cache_decision"):
+            status = ""  # The cache chip already says it.
+        error = timeline_error(event)
+        counts[group] += 1
+        errors += error
+        rows.append(
+            {
+                "event": event,
+                "group": group,
+                "actor": actor,
+                "actor_label": actor_label,
+                "title": title,
+                "timestamp": stamp,
+                "date": stamp[:10],
+                "clock": stamp[11:19],
+                "status": "" if status in _ROUTINE_STATUSES else status,
+                "error": error,
+                "has_content": previews_indexed
+                or event.get("event_id") in with_content,
+            }
+        )
+    filters = [
+        {"key": key, "label": plural, "count": counts[key]}
+        for key, plural, _label in TIMELINE_GROUPS
+        if counts[key]
+    ]
+    if errors:
+        filters.append({"key": "errors", "label": "Errors", "count": errors})
+    threads = {str(row["event"].get("thread_id") or "") for row in rows} - {""}
+    memories = {str(row["event"].get("memory_id") or "") for row in rows} - {""}
+    return {
+        "rows": rows,
+        # A filter earns its place when there is more than one thing to pick.
+        "filters": filters if len(filters) > 1 else [],
+        "thread_id": next(iter(threads)) if len(threads) == 1 else "",
+        "memory_id": next(iter(memories)) if len(memories) == 1 else "",
+        "first": rows[0]["timestamp"] if rows else "",
+        "last": rows[-1]["timestamp"] if rows else "",
+        "revealable": sum(1 for row in rows if row["has_content"]),
+    }
+
+
 # ---------- Usage and cost ----------
 
 
