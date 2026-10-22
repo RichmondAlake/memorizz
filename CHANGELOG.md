@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.17.12 — 2026-10-22
+
+### Added
+
+- The connect page lists the Oracle and MongoDB databases on this computer:
+  Docker containers found by the port they publish (1521, 27017), running or
+  stopped, and the addresses in `ORACLE_DSN` and `MONGODB_URI`. Click one to
+  fill in its address. A stopped one shows the `docker start` command, and
+  the current connection is marked. Container environments, which hold
+  passwords, are never read. Each provider's list shows only under that
+  provider.
+
+### Fixed
+
+- The update notice told uv users to run `uv tool upgrade memorizz`, which
+  stays inside the version range the tool was installed with: an install
+  pinned to a version (`memorizz[...]==0.17.11`) didn't move. A pinned
+  install now gets a reinstall with the same extras and Python at the new
+  version, read from uv's receipt. An unpinned one keeps
+  `uv tool upgrade memorizz`.
+
 ## 0.17.11 — 2026-10-22
 
 ### Added
