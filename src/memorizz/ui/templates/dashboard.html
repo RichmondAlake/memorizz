@@ -1,15 +1,15 @@
 {% extends "base.html" %}
 {% from '_ui.html' import page_header, empty_state %}
-{% from '_run_health.html' import runs_chart, attention_panel, recent_runs with context %}
+{% from '_run_health.html' import range_picker, runs_chart, attention_panel, recent_runs with context %}
 
 {% block title %}Overview - Memorizz{% endblock %}
 
 {% block content %}
-{% set window_labels = {'24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days'} %}
+{% set window_labels = {'24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days'} %}
+{% set window_label = window_labels.get(window) or fmt_range(span) %}
+{% set keep = {'load': 1} if loaded else {} %}
 {% call page_header('Overview', 'Runs, failures, run time, tokens and spend across every agent on this platform.', 'Home') %}
-    <nav class="segmented" aria-label="Time range">
-        {% for key in windows %}<a class="segmented-item" href="/dashboard?window={{ key }}{% if loaded %}&load=1{% endif %}"{% if key == window %} aria-current="page"{% endif %}>{{ key }}</a>{% endfor %}
-    </nav>
+    {{ range_picker('/dashboard', window, windows, span, keep) }}
     <a class="btn" href="/traces">Observability</a>
     <a class="btn btn-primary" href="/agents/new">Create agent</a>
 {% endcall %}
@@ -17,10 +17,10 @@
 <p class="ov-status" role="status">
     <span class="connection-live-dot" aria-hidden="true"></span>
     <span>{{ provider_type|title }} provider connected</span>
-    <span>{{ window_labels[window] }}</span>
+    <span>{{ window_label }}</span>
     <span>Updated {{ generated_at.strftime('%H:%M') }} UTC</span>
-    {% if coverage.truncated %}<span title="The overview reads the newest trace records only.">Newest {{ coverage.records }} trace records</span>{% endif %}
-    <a href="/dashboard?window={{ window }}{% if loaded %}&load=1{% endif %}">Refresh</a>
+    {% if coverage.truncated and coverage.oldest and coverage.oldest > span.start %}<span class="ov-status-warn" title="The overview reads the newest {{ coverage.records }} trace records only.">Runs before {{ coverage.oldest.strftime('%b %d %H:%M') }} UTC aren't loaded</span>{% elif coverage.truncated %}<span title="The overview reads the newest trace records only.">Newest {{ coverage.records }} trace records</span>{% endif %}
+    <a href="/dashboard?{{ range_query(span) }}{% if loaded %}&amp;load=1{% endif %}">Refresh</a>
 </p>
 
 {% if provider_type == 'notion' %}
@@ -29,7 +29,7 @@
 
 {% if deferred %}
 {% call empty_state('Run health is loaded on request', 'This provider reads traces through a remote API, so the overview does not scan it on every visit.') %}
-    <a class="btn" href="/dashboard?window={{ window }}&load=1">Load run health</a>
+    <a class="btn" href="/dashboard?{{ range_query(span) }}&amp;load=1">Load run health</a>
 {% endcall %}
 {% elif trace_error %}
 {{ empty_state('Run health is unavailable', trace_error) }}
@@ -79,7 +79,7 @@
     </div>
 
     <div class="ov-grid ov-grid--activity">
-        {{ runs_chart(overview, window, window_labels[window]|lower) }}
+        {{ runs_chart(overview, window, window_label|lower, zoom='/dashboard?' ~ ('load=1&' if loaded else '')) }}
         {{ attention_panel(overview.attention) }}
     </div>
 

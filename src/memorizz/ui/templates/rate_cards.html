@@ -1,0 +1,78 @@
+{% extends 'base.html' %}
+{% block title %}Rate cards - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/observability.css?v=3">{% endblock %}
+{% block content %}
+{% from '_ui.html' import page_header, observability_tabs, empty_state %}
+{{ page_header('Rate cards', 'Prices used to calculate spend. A provider invoice may differ.', back=('/traces/usage', 'Usage & cost'), nav=observability_tabs('usage')) }}
+{% if notice %}<div class="success-message" role="status">{{ notice }}</div>{% endif %}
+{% if error %}<p class="error-message" role="alert">{{ error }}</p>{% endif %}
+{% if locked %}<p class="form-note">{{ locked }}</p>{% else %}
+<section class="panel" id="rate-card-form" aria-labelledby="rate-card-form-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="rate-card-form-title">Add a rate card</h2>
+            <p class="panel-description">USD per 1M tokens. A card replaces a built-in price for the same provider, model and tier. Calls that already recorded a charge keep it.</p>
+        </div>
+    </div>
+    <form method="post" action="/traces/usage/rates" class="form-grid">
+        <div class="form-group"><label for="rate-provider">Provider</label><input id="rate-provider" name="provider" value="{{ form.provider }}" maxlength="240" placeholder="ollama" required></div>
+        <div class="form-group"><label for="rate-model">Model</label><input id="rate-model" name="model" value="{{ form.model }}" maxlength="240" placeholder="gemma4:latest" required></div>
+        <div class="form-group"><label for="rate-tier">Service tier</label><input id="rate-tier" name="service_tier" value="{{ form.service_tier }}" maxlength="240"></div>
+        <div class="form-group"><label for="rate-input">Input $/1M</label><input id="rate-input" name="input_per_million" value="{{ form.input_per_million }}" inputmode="decimal" placeholder="2.50" data-rate-paid></div>
+        <div class="form-group"><label for="rate-cached">Cached input $/1M <span class="optional">(defaults to input)</span></label><input id="rate-cached" name="cached_input_per_million" value="{{ form.cached_input_per_million }}" inputmode="decimal" data-rate-paid></div>
+        <div class="form-group"><label for="rate-output">Output $/1M</label><input id="rate-output" name="output_per_million" value="{{ form.output_per_million }}" inputmode="decimal" placeholder="10" data-rate-paid></div>
+        <div class="form-group"><label for="rate-source">Price source</label><input id="rate-source" name="source_url" type="url" value="{{ form.source_url }}" maxlength="240" placeholder="https://provider.example/pricing" data-rate-paid><span class="form-hint">A public HTTPS page that lists this price. Not needed for a local model.</span></div>
+        <div class="form-group"><div class="checkbox-group"><label><input type="checkbox" id="rate-local" name="local" value="1" {% if form.local %}checked{% endif %}> Local model, no charge</label></div><span class="form-hint">Prices every call at $0, as for Ollama.</span></div>
+        <div class="form-actions"><button class="btn btn-primary" type="submit">Save rate card</button></div>
+    </form>
+</section>
+<script>
+    (function () {
+        const local = document.getElementById('rate-local');
+        const sync = () => document.querySelectorAll('[data-rate-paid]').forEach((input) => { input.disabled = local.checked; });
+        local.addEventListener('change', sync);
+        sync();
+    })();
+</script>
+{% endif %}
+{% if unpriced %}
+<section class="panel" aria-labelledby="rate-unpriced-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="rate-unpriced-title">Models without a price</h2>
+            <p class="panel-description">Seen in recent traces. Spend leaves out these calls until a rate card prices them.</p>
+        </div>
+    </div>
+    <div class="table-scroll"><table class="data-table">
+        <thead><tr><th scope="col">Provider</th><th scope="col">Model</th><th scope="col">Tier</th><th scope="col" class="num">Calls</th>{% if not locked %}<th scope="col"><span class="sr-only">Action</span></th>{% endif %}</tr></thead>
+        <tbody>
+        {% for row in unpriced %}<tr><td>{{ row.provider }}</td><td class="mono">{{ row.model }}</td><td>{{ row.service_tier }}</td><td class="num">{{ '{:,}'.format(row.calls) }}</td>{% if not locked %}<td><a class="btn btn-sm" href="{{ row.url }}">Set price</a></td>{% endif %}</tr>{% endfor %}
+        </tbody>
+    </table></div>
+</section>
+{% endif %}
+<section class="panel" aria-labelledby="rate-saved-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="rate-saved-title">Custom rate cards</h2>
+            <p class="panel-description">Built-in OpenAI and Anthropic list prices apply to every other model.</p>
+        </div>
+    </div>
+    {% if cards %}
+    <div class="table-scroll"><table class="data-table">
+        <thead><tr><th scope="col">Provider</th><th scope="col">Model</th><th scope="col">Tier</th><th scope="col" class="num">Input $/1M</th><th scope="col" class="num">Cached input $/1M</th><th scope="col" class="num">Output $/1M</th><th scope="col">As of</th>{% if not locked %}<th scope="col"><span class="sr-only">Remove</span></th>{% endif %}</tr></thead>
+        <tbody>
+        {% for card in cards %}<tr>
+            <td>{{ card.provider }}</td><td class="mono">{{ card.model }}</td><td>{{ card.service_tier }}</td>
+            <td class="num">${{ card.input_per_million }}</td><td class="num">${{ card.cached_input_per_million }}</td><td class="num">${{ card.output_per_million }}</td>
+            <td class="mono" title="{{ card.version }} · {{ card.source_url }}">{{ card.as_of }}</td>
+            {% if not locked %}<td><form method="post" action="/traces/usage/rates/remove" class="cl-inline-form">
+                <input type="hidden" name="provider" value="{{ card.provider }}"><input type="hidden" name="model" value="{{ card.model }}"><input type="hidden" name="service_tier" value="{{ card.service_tier }}">
+                <button class="btn btn-sm btn-danger" type="submit" aria-label="Remove the {{ card.provider }} {{ card.model }} rate card">Remove</button>
+            </form></td>{% endif %}
+        </tr>{% endfor %}
+        </tbody>
+    </table></div>
+    {% else %}{{ empty_state('No custom rate cards yet', 'Add one above to price a model the built-in catalog does not cover.' if not locked else None) }}{% endif %}
+</section>
+{% endblock %}

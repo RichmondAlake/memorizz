@@ -21,8 +21,16 @@ WINDOWS = {
     "24h": (timedelta(hours=24), timedelta(hours=1)),
     "7d": (timedelta(days=7), timedelta(hours=6)),
     "30d": (timedelta(days=30), timedelta(days=1)),
+    "90d": (timedelta(days=90), timedelta(days=1)),
 }
 DEFAULT_WINDOW = "7d"
+# A custom range takes the smallest of these buckets that keeps its chart at
+# 60 bars or fewer, and covers a year at most.
+CUSTOM_BUCKETS = tuple(
+    timedelta(minutes=minutes)
+    for minutes in (5, 15, 60, 180, 360, 720, 1440, 2880, 10080)
+)
+MAX_CUSTOM_SPAN = timedelta(days=366)
 # A run without a result this long after its last event is reported incomplete.
 RUNNING_GRACE = timedelta(minutes=10)
 _OK_STATUSES = {"success", "completed", "ok"}
@@ -38,6 +46,11 @@ TOOL_REASONS = {
     "arguments or no callable; newer versions report which)",
     "tool_log_not_found": "the referenced tool log does not exist",
     "approval_required": "waiting for approval",
+    "duplicate_tool_call": "the model repeated a call that had already "
+    "succeeded this turn, so the repeat was skipped",
+    "tool_retry_limit": "the same call kept failing until its retry limit",
+    "tool_budget_exhausted": "the turn had used all of its tool calls, so the "
+    "rest were not run",
     "unreported": "the tool failed without a reason code",
 }
 PROVIDER_ERRORS = {
@@ -63,6 +76,52 @@ def explain_provider_error(code: str) -> str:
 def _when(value: Any) -> Optional[datetime]:
     text = timestamp(value)
     return datetime.fromisoformat(text) if text else None
+
+
+def resolve_window(
+    window: str,
+    *,
+    start: Any = None,
+    end: Any = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """The span a window covers: a key of ``WINDOWS``, or ``custom`` from
+    ``start`` to ``end`` (now when empty; naive times are UTC). An unusable
+    custom range falls back to the default window and says why in ``error``."""
+    now = now or datetime.now(timezone.utc)
+    error = ""
+    if window == "custom":
+        begin, finish = _when(start), (_when(end) if end else now)
+        if begin is None or finish is None:
+            error = "Choose a start and an end for a custom range."
+        elif begin >= min(finish, now):
+            error = "A custom range has to start before it ends, and before now."
+        elif min(finish, now) - begin > MAX_CUSTOM_SPAN:
+            error = "A custom range can cover a year at most."
+        else:
+            finish = min(finish, now)
+            bucket = next(
+                (size for size in CUSTOM_BUCKETS if (finish - begin) / size <= 60),
+                CUSTOM_BUCKETS[-1],
+            )
+            return {
+                "key": "custom",
+                "start": begin,
+                "end": finish,
+                "bucket": bucket,
+                "error": "",
+            }
+        window = DEFAULT_WINDOW
+    if window not in WINDOWS:
+        window = DEFAULT_WINDOW
+    span, bucket = WINDOWS[window]
+    return {
+        "key": window,
+        "start": now - span,
+        "end": now,
+        "bucket": bucket,
+        "error": error,
+    }
 
 
 def _decimal(value: Any) -> Optional[Decimal]:
@@ -164,7 +223,16 @@ def _summarize_run(
             cost, reason = priced if isinstance(priced, tuple) else (priced, "")
             if cost is None:
                 run["unpriced_calls"] += 1
-                run["unpriced"].append((label, reason or "no price recorded"))
+                # The provider, model and tier a rate card would be keyed by.
+                run["unpriced"].append(
+                    (
+                        label,
+                        reason or "no price recorded",
+                        str(event.get("provider") or ""),
+                        str(event.get("model") or ""),
+                        str(event.get("service_tier") or "default"),
+                    )
+                )
             else:
                 run["cost_usd"] += cost
             if label and label not in run["models"]:
@@ -215,10 +283,14 @@ def _bucket_series(runs, start: datetime, end: datetime, size: timedelta) -> Lis
     buckets = [
         {
             "start": start + size * index,
+            "end": start + size * (index + 1),
             "runs": 0,
+            "succeeded": 0,
             "failed": 0,
             "tokens": 0,
             "cost_usd": Decimal(0),
+            # A bucket holding one run links straight to it.
+            "run": None,
         }
         for index in range(count)
     ]
@@ -227,9 +299,11 @@ def _bucket_series(runs, start: datetime, end: datetime, size: timedelta) -> Lis
         if 0 <= index < count:
             bucket = buckets[index]
             bucket["runs"] += 1
+            bucket["succeeded"] += int(run["status"] == "success")
             bucket["failed"] += int(run["status"] == "failed")
             bucket["tokens"] += run["input_tokens"] + run["output_tokens"]
             bucket["cost_usd"] += run["cost_usd"]
+            bucket["run"] = run if bucket["runs"] == 1 else None
     return buckets
 
 
@@ -259,18 +333,19 @@ def build_operations_overview(
     now: Optional[datetime] = None,
     recent_limit: int = 12,
     price: Optional[Callable[[Dict[str, Any]], Optional[Decimal]]] = None,
+    span: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Summarize runs that started inside ``window`` (a key of ``WINDOWS``).
+    """Summarize runs that started inside ``window`` (a key of ``WINDOWS``),
+    or inside ``span`` from ``resolve_window`` when given.
 
     ``price`` returns a model result's cost or None when it cannot be priced;
     by default only a recorded ``cost_usd`` counts.
     """
     price = price or _recorded_cost
-    if window not in WINDOWS:
-        window = DEFAULT_WINDOW
-    span, bucket_size = WINDOWS[window]
     now = now or datetime.now(timezone.utc)
-    start = now - span
+    span = span or resolve_window(window, now=now)
+    window, start, end = span["key"], span["start"], span["end"]
+    bucket_size = span["bucket"]
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for event in events:
@@ -281,7 +356,7 @@ def build_operations_overview(
         for run in (
             _summarize_run(key, rows, now, price) for key, rows in grouped.items()
         )
-        if run["started_at"] and start <= run["started_at"] <= now
+        if run["started_at"] and start <= run["started_at"] <= end
     ]
     runs.sort(key=lambda run: run["started_at"], reverse=True)
 
@@ -350,7 +425,7 @@ def build_operations_overview(
             "models": models,
             "series": [
                 {"runs": b["runs"], "failed": b["failed"]}
-                for b in _bucket_series(rows, start, now, bucket_size)
+                for b in _bucket_series(rows, start, end, bucket_size)
             ],
             "recent": rows[:5],
         }
@@ -359,6 +434,8 @@ def build_operations_overview(
     agents.sort(key=lambda row: (-row["runs"], row["agent_id"]))
 
     tool_rows: Dict[str, Dict[str, Any]] = {}
+    # Per failing tool, its newest failed run and the agents whose calls failed.
+    tool_failures: Dict[str, Dict[str, Any]] = {}
     for run in runs:
         for call in run["tools"]:
             row = tool_rows.setdefault(
@@ -369,6 +446,10 @@ def build_operations_overview(
             if call["failed"]:
                 row["failures"] += 1
                 row["reasons"][call["reason_code"] or "unreported"] += 1
+                seen = tool_failures.setdefault(
+                    call["name"], {"run": run, "agents": Counter()}
+                )
+                seen["agents"][run["agent_id"]] += 1
     tools = []
     for row in tool_rows.values():
         reasons = row.pop("reasons")
@@ -395,56 +476,74 @@ def build_operations_overview(
                 f"(in {count} of {len(failed)} failed run"
                 f"{'s' if len(failed) != 1 else ''}). {detail}"
             )
+        # Each item names what a fix starts from: the newest run it happened
+        # in, the agent, or the model a rate card would price.
         attention.append(
             {
                 "severity": "error",
+                "kind": "failed_runs",
                 "title": f"{len(failed)} failed run{'s' if len(failed) != 1 else ''}",
                 "detail": detail,
+                "run": failed[0],
+                "count": len(failed),
             }
         )
     for row in tools:
         if not row["failures"]:
             continue
+        seen = tool_failures[row["name"]]
         attention.append(
             {
                 "severity": "warning",
+                "kind": "tool",
                 "title": f"{row['name']} failed {row['failures']} of {row['calls']} calls",
                 "detail": "Most often " + explain_tool_reason(row["top_reason"]),
                 "tool": row["name"],
+                "reason": row["top_reason"],
+                "run": seen["run"],
+                "agent_id": seen["agents"].most_common(1)[0][0],
             }
         )
     if provider_errors:
         codes = Counter(error["code"] for error in provider_errors)
         models = Counter(error["model"] or "unknown model" for error in provider_errors)
         mid = sum(error["mid_response"] for error in provider_errors)
+        newest = next(run for run in runs if run["provider_errors"])
         attention.append(
             {
                 "severity": "error",
+                "kind": "provider_errors",
                 "title": f"{len(provider_errors)} provider call error"
                 + ("s" if len(provider_errors) != 1 else ""),
                 "detail": ", ".join(f"{code} ×{n}" for code, n in codes.most_common(3))
                 + f"; {len(provider_errors) - mid} before any output, {mid} mid-response;"
                 + f" mostly {models.most_common(1)[0][0]}",
+                "run": newest,
+                "agent_id": newest["agent_id"],
             }
         )
     unpriced = Counter(item for run in runs for item in run["unpriced"])
-    for (model, reason), count in unpriced.most_common(2):
+    for (label, reason, provider, model, tier), count in unpriced.most_common(2):
         attention.append(
             {
                 "severity": "info",
-                "title": f"{count} {model or 'model'} call{'s' if count != 1 else ''}"
+                "kind": "unpriced",
+                "title": f"{count} {label or 'model'} call{'s' if count != 1 else ''}"
                 " without a price",
                 "detail": f"{reason}. Spend excludes these calls.",
+                "provider": provider,
+                "model": model,
+                "service_tier": tier,
             }
         )
 
     return {
         "window": window,
         "window_start": start,
-        "window_end": now,
+        "window_end": end,
         "bucket_seconds": int(bucket_size.total_seconds()),
         "totals": totals,
-        "series": _bucket_series(runs, start, now, bucket_size),
+        "series": _bucket_series(runs, start, end, bucket_size),
         "recent": runs[: max(0, recent_limit)],
         "agents": agents,
         "tools": tools,

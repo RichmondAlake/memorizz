@@ -875,6 +875,8 @@ def _duplicate_agent_notes(copies: Dict[str, int]) -> List[Dict[str, str]]:
     return [
         {
             "severity": "warning",
+            "kind": "duplicate_agent",
+            "agent_id": agent_id,
             "title": f"{agent_id} is stored {count} times",
             "detail": "Duplicate agent records share this ID and may disagree on "
             "configuration; loading by ID returns whichever the store finds first. "

@@ -231,6 +231,29 @@ def _expiry_epoch(value: Any) -> Optional[float]:
     return None
 
 
+def _observability_sort_key(item: Dict[str, Any]) -> tuple:
+    """Newest first, then by id: the order of the compatibility observability
+    query, which its cursors name a position in."""
+    identifier = str(item.get("_id") or item.get("id") or item.get("memory_id") or "")
+    if not identifier:
+        identifier = hashlib.sha256(
+            json.dumps(item, sort_keys=True, default=str).encode()
+        ).hexdigest()
+    return (str(item.get("timestamp") or ""), identifier)
+
+
+def observability_cursor_after(item: Dict[str, Any]) -> str:
+    """A cursor that continues the compatibility observability query after
+    ``item``, one of the rows it returned."""
+    return (
+        base64.urlsafe_b64encode(
+            json.dumps({"v": 2, "last": _observability_sort_key(item)}).encode()
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+
+
 class MemoryProvider(ABC):
     """Abstract base class for memory providers."""
 
@@ -810,16 +833,7 @@ class MemoryProvider(ABC):
                     result_row[key] = filter_row[key]
             filtered.append(result_row)
 
-        def sort_key(item):
-            identifier = str(
-                item.get("_id") or item.get("id") or item.get("memory_id") or ""
-            )
-            if not identifier:
-                identifier = hashlib.sha256(
-                    json.dumps(item, sort_keys=True, default=str).encode()
-                ).hexdigest()
-            return (str(item.get("timestamp") or ""), identifier)
-
+        sort_key = _observability_sort_key
         filtered.sort(key=sort_key, reverse=True)
         offset = 0
         if cursor:
@@ -845,13 +859,7 @@ class MemoryProvider(ABC):
         has_more = next_offset < len(filtered)
         next_cursor = None
         if has_more:
-            next_cursor = (
-                base64.urlsafe_b64encode(
-                    json.dumps({"v": 2, "last": sort_key(page[-1])}).encode()
-                )
-                .decode("ascii")
-                .rstrip("=")
-            )
+            next_cursor = observability_cursor_after(page[-1])
         return {
             "items": page,
             "next_cursor": next_cursor,

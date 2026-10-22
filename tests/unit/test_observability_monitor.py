@@ -377,7 +377,7 @@ def _usage_event(index, **updates):
 
 
 @pytest.mark.unit
-def test_usage_page_renders_the_tape_with_grouped_figures(tmp_path, monkeypatch):
+def test_usage_page_leads_with_its_figures(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from memorizz.ui import state
@@ -397,10 +397,16 @@ def test_usage_page_renders_the_tape_with_grouped_figures(tmp_path, monkeypatch)
         client = TestClient(create_app())
         response = client.get("/traces/usage")
     assert response.status_code == 200, response.text
-    html = response.text
-    assert html.count('class="fleet-tape obs-tape usage-kpis"') == 1
-    assert "<span>Calls</span><strong>3</strong>" in html
-    assert "<span>Tokens</span><strong" in html and ">13,200</strong>" in html
+    html = " ".join(response.text.split())
+    assert html.count('class="kpi-strip usage-figures"') == 1
+    assert (
+        '<span class="kpi-label">Model calls</span> <strong class="kpi-value">3</strong>'
+        in html
+    )
+    assert (
+        '<span class="kpi-label">Tokens</span> <strong class="kpi-value">13.2k</strong>'
+        in html
+    )
     assert "/static/css/pages/observability.css" in html
 
 

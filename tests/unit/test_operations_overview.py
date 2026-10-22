@@ -364,3 +364,149 @@ def test_a_retried_provider_error_counts_its_failed_run_once():
     )
     assert "(in 1 of 1 failed run)" in failed["detail"]
     assert "2 of 1" not in failed["detail"]
+
+
+@pytest.mark.unit
+def test_windows_include_90_days_and_a_custom_range():
+    from memorizz.observability.overview import resolve_window
+
+    ninety = resolve_window("90d", now=NOW)
+    assert (ninety["key"], NOW - ninety["start"]) == ("90d", timedelta(days=90))
+
+    custom = resolve_window(
+        "custom", start="2026-09-27T06:00", end="2026-09-27T18:00", now=NOW
+    )
+    assert custom["key"] == "custom" and not custom["error"]
+    assert custom["start"] == datetime(2026, 9, 27, 6, tzinfo=timezone.utc)
+    assert custom["bucket"] == timedelta(minutes=15), "12 hours in 48 bars"
+
+    future = resolve_window("custom", start="2026-09-28", end="2026-12-01", now=NOW)
+    assert future["end"] == NOW, "a range ends at now at the latest"
+
+    for start, end in (
+        ("", ""),
+        ("2026-09-28T13:00", ""),
+        ("2026-09-27", "2026-09-26"),
+        ("2024-01-01", "2026-09-01"),
+    ):
+        fallback = resolve_window("custom", start=start, end=end, now=NOW)
+        assert fallback["key"] == "7d" and fallback["error"], (start, end)
+
+
+@pytest.mark.unit
+def test_a_custom_range_counts_only_its_runs_and_each_bar_knows_its_span():
+    from memorizz.observability.overview import resolve_window
+
+    events = [
+        *_run("t1", "a1", minutes_ago=30),
+        *_run("t2", "a1", minutes_ago=180, status="error"),
+        *_run("t3", "a1", minutes_ago=190),
+    ]
+    span = resolve_window("custom", start=_at(240), end=_at(120), now=NOW)
+    overview = build_operations_overview(events, now=NOW, span=span)
+    assert overview["totals"]["runs"] == 2, "the run 30 minutes ago is after the end"
+    busy = [bucket for bucket in overview["series"] if bucket["runs"]]
+    assert all(b["end"] - b["start"] == span["bucket"] for b in overview["series"])
+    assert [(b["runs"], b["run"]["key"]) for b in busy] == [
+        (1, "t3"),
+        (1, "t2"),
+    ], "a lone run is kept for a direct link"
+
+
+@pytest.mark.unit
+def test_attention_items_link_to_where_each_is_fixed():
+    from memorizz.ui.dashboard import link_attention
+
+    events = [
+        *_run(
+            "t1",
+            "a1",
+            minutes_ago=5,
+            status="error",
+            tools=[
+                ("lookup_order", "error", "unknown_tool"),
+                ("entity_memory_upsert", "error", "unknown_tool"),
+            ],
+        ),
+        *_run("t2", "plugin", minutes_ago=6, tools=[("save", "error", "unreported")]),
+        {
+            "trace_kind": "model_result",
+            "turn_id": "t1",
+            "agent_id": "a1",
+            "status": "error",
+            "provider": "openai",
+            "model": "gpt-6.1-sol",
+            "error_code": "ReadTimeout",
+            "timestamp": _at(5),
+        },
+        {
+            "trace_kind": "model_result",
+            "turn_id": "t2",
+            "agent_id": "plugin",
+            "status": "success",
+            "provider": "ollama",
+            "model": "gemma4:latest",
+            "input_tokens": 10,
+            "timestamp": _at(6),
+        },
+    ]
+    overview = build_operations_overview(events, window="24h", now=NOW)
+    items = {
+        item["kind"]: item
+        for item in link_attention(overview["attention"], editable_agent_ids={"a1"})
+    }
+    links = {kind: [a["href"] for a in item["actions"]] for kind, item in items.items()}
+    assert links["failed_runs"] == ["/traces?agent_id=a1&turn_id=t1#trace-timeline"]
+    tools = {
+        i["tool"]: i["actions"]
+        for i in overview["attention"]
+        if i.get("kind") == "tool"
+    }
+    assert [a["href"] for a in tools["lookup_order"]] == [
+        "/agents/a1/edit#section-tools",
+        "/traces?agent_id=a1&turn_id=t1#trace-timeline",
+    ], "a missing tool is fixed in the agent's tool settings"
+    assert tools["entity_memory_upsert"][0] == {
+        "label": "Fix the agent's memory settings",
+        "href": "/agents/a1/edit#section-memory",
+    }, "entity memory tools come from the memory settings"
+    assert [a["href"] for a in tools["save"]] == [
+        "/traces?agent_id=plugin&turn_id=t2#trace-timeline"
+    ], "an agent that isn't saved here has no settings to link"
+    assert links["provider_errors"] == [
+        "/traces?agent_id=a1&turn_id=t1#trace-timeline",
+        "/agents/a1/edit#section-model",
+    ]
+    assert links["unpriced"] == [
+        "/traces/usage/rates?provider=ollama&model=gemma4%3Alatest"
+        "&service_tier=default"
+    ]
+
+
+@pytest.mark.unit
+def test_dashboard_offers_90_days_a_custom_range_and_bars_that_open_runs(client):
+    events = _Events(
+        _run("t1", "a1", minutes_ago=0, tools=[("lookup_order", "error", "x")])
+    )
+    for event in events:
+        event["timestamp"] = datetime.now(timezone.utc).isoformat()
+    with patch(
+        "memorizz.ui.routers.traces._selection_window", return_value=(None, events)
+    ):
+        ninety = client.get("/dashboard?window=90d").text
+        custom = client.get(
+            "/dashboard?window=custom&start=2026-01-01T00:00&end=2026-01-02T00:00"
+        ).text
+        broken = client.get("/dashboard?window=custom&start=nope").text
+    assert 'aria-current="page">90d<' in ninety
+    assert 'name="start"' in ninety and 'type="datetime-local"' in ninety
+    assert (
+        'class="ov-bar ov-bar--end" href="/traces?agent_id=a1&amp;turn_id=t1#trace-timeline"'
+        in (ninety)
+    ), "a bar with one run opens it"
+    assert "Click to open this run" in ninety
+    assert "Open the run" in ninety, "the failing tool links to its run"
+    assert "Jan 01 – Jan 02, 2026" in custom
+    assert "No runs in this window" in custom
+    assert "Choose a start and an end" in broken
+    assert 'aria-current="page">7d<' in broken

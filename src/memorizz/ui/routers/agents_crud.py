@@ -668,10 +668,14 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
     }
 
 
-def _with_duplicate_notes(overview, agent_copies: Dict[str, int]):
-    """List duplicate-record notes first: they change how every figure reads."""
+def _with_duplicate_notes(overview, agent_copies: Dict[str, int], agent_ids=()):
+    """List duplicate-record notes first: they change how every figure reads.
+    Each item gets the links to where it can be fixed."""
     if overview:
+        from ..dashboard import link_attention
+
         overview["attention"][:0] = _duplicate_agent_notes(agent_copies)
+        link_attention(overview["attention"], agent_ids)
     return overview
 
 
@@ -1213,7 +1217,13 @@ def _render_agent_form(
 
 
 @router.get("/agents", response_class=HTMLResponse)
-async def agents_list(request: Request, window: str = "7d", load: bool = False):
+async def agents_list(
+    request: Request,
+    window: str = "7d",
+    load: bool = False,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
     """Fleet monitor: every agent with its run health, plus a quick chat."""
     if not _state["provider"]:
         return RedirectResponse(url="/connect", status_code=302)
@@ -1225,7 +1235,6 @@ async def agents_list(request: Request, window: str = "7d", load: bool = False):
     from ...observability.overview import WINDOWS
     from .. import dashboard as dash
 
-    window = window if window in WINDOWS else "7d"
     now = datetime.now(timezone.utc)
     health = await run_in_threadpool(
         dash.load_run_health,
@@ -1234,6 +1243,8 @@ async def agents_list(request: Request, window: str = "7d", load: bool = False):
         now=now,
         action="agents_fleet",
         load=load,
+        start=start,
+        end=end,
     )
 
     sort_by = _normalize_agent_sort_option(request.query_params.get("sort_by"))
@@ -1280,12 +1291,18 @@ async def agents_list(request: Request, window: str = "7d", load: bool = False):
             "fleet": {
                 row["agent_id"]: row for row in _fleet_rows(agents, health["overview"])
             },
-            "fleet_overview": _with_duplicate_notes(health["overview"], agent_copies),
+            "fleet_overview": _with_duplicate_notes(
+                health["overview"],
+                agent_copies,
+                [_to_text(getattr(agent, "agent_id", "")).strip() for agent in agents],
+            ),
             "agent_copies": agent_copies,
             "fleet_error": health["error"],
             "fleet_deferred": health["deferred"],
-            "window": window,
+            "window": health["span"]["key"],
             "windows": list(WINDOWS),
+            "span": health["span"],
+            "coverage": health["coverage"],
             "loaded": load,
             "generated_at": now,
             **dash.template_helpers(),

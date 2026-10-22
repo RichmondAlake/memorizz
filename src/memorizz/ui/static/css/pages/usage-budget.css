@@ -1,0 +1,107 @@
+/* The monthly budget panel on the Usage page (_usage_budget.html). Colors
+   come from the theme tokens, so the light theme needs no overrides. */
+
+.usage-budget-figures {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    margin: 0 0 12px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+}
+
+.usage-budget-figures strong {
+    color: var(--text-primary);
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+.usage-budget-figures .pill {
+    align-self: center;
+}
+
+.usage-budget-bar {
+    height: 8px;
+    overflow: hidden;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+}
+
+.usage-budget-bar > span {
+    display: block;
+    height: 100%;
+    background: var(--accent-primary);
+    border-radius: inherit;
+}
+
+.usage-budget--warning .usage-budget-bar > span {
+    background: var(--accent-warning);
+}
+
+.usage-budget--over .usage-budget-bar > span {
+    background: var(--accent-danger);
+}
+
+.usage-budget-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    margin: 10px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.usage-budget-note {
+    margin: 10px 0 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.usage-budget-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+    margin: 12px 0 0;
+}
+
+.usage-budget-form .form-group {
+    flex: 1 1 160px;
+    max-width: 220px;
+}
+
+.usage-budget-form .form-group input {
+    width: 100%;
+    min-height: var(--console-control-height);
+}
+
+.usage-budget-edit {
+    margin: 16px 0 0;
+}
+
+.usage-budget-edit > summary {
+    width: fit-content;
+    color: var(--accent-primary);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.usage-budget-clear {
+    margin: 12px 0 0;
+}
+
+@media (max-width: 480px) {
+    .usage-budget-form .form-group {
+        flex-basis: 100%;
+        max-width: none;
+    }
+
+    .usage-budget-form .btn {
+        width: 100%;
+    }
+}

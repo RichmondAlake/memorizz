@@ -136,6 +136,18 @@ fetches every event the filter shows. Each fetch is a separate audited request.
 Accepted recommendations create draft experiments. They do not edit a live
 prompt, policy, tool, or learned skill automatically.
 
+The **Overview** and **Agents** pages summarize runs over the last 24 hours,
+7, 30 or 90 days, or a **Custom** start and end in UTC. Hover over or focus a
+bar in **Runs over time** to see its period, runs, failures, tokens and spend.
+Click it to open that period, or the run itself when it holds one. Each
+**Needs attention** item links to where it can be fixed:
+
+- **A failed run** links to its trace.
+- **A tool the agent doesn't have** links to the agent's tool, memory or
+  persona settings.
+- **A provider error** links to the run and the agent's model settings.
+- **A model without a price** links to **Rate cards**.
+
 Codex and Claude Code sessions saved by the MemoRizz plugin appear as
 **Codex sessions** and **Claude Code sessions**, one thread per session. Their
 timeline holds the saved turns, and **Open its run** goes to the session's full

@@ -27,6 +27,8 @@ PRICING_FIELDS = (
     "service_tier",
     "cache_write_tokens",
 )
+# Why a call has no price when no card matches its provider, model and tier.
+NO_RATE_CARD = "No rate card for this provider, model and service tier"
 
 
 def token_count(value):
@@ -138,10 +140,14 @@ class PricingRegistry:
             base = re.sub(r"-\d{4}-\d{2}-\d{2}$|-\d{8}$", "", model)
             card = self.cards.get((provider, base, tier))
         if card is None:
-            return unknown("No rate card for this provider, model and service tier")
+            return unknown(NO_RATE_CARD)
         inputs = token_count(usage.get("input_tokens"))
         outputs = token_count(usage.get("output_tokens"))
         cached = token_count(usage.get("cached_tokens"))
+        if cached is None and card.cached_input_per_million == card.input_per_million:
+            # Cached input costs what other input costs, so an unreported split
+            # (Ollama reports none) can't change the charge.
+            cached = 0
         if inputs is None or outputs is None or cached is None:
             return unknown("Input, output or cached-token usage was not reported")
         writes = token_count(usage.get("cache_write_tokens"))

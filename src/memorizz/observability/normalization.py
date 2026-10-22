@@ -890,7 +890,11 @@ def query_trace_events(provider, memory_type, *, limit=250, cursor=None, **filte
     # positions stay exact per row, so resuming never skips or repeats a
     # record even when new records land between pages. Others: one per call.
     row_cursor = getattr(provider, "observability_row_cursor", None)
-    batch = 50 if callable(row_cursor) else 1
+    batch = (
+        int(getattr(provider, "observability_batch_size", 50))
+        if callable(row_cursor)
+        else 1
+    )
     while len(events) < limit and scanned < 1000:
         page_cursor = position.get("cursor")
         page = provider.query_observability_records(

@@ -14,6 +14,7 @@ def query_usage(
     pricing=DEFAULT_PRICING,
     timezone_name="UTC",
     model=None,
+    interval_seconds=None,
 ):
     """Read recorded trace events, preferring the provider's native event index.
 
@@ -72,6 +73,7 @@ def query_usage(
         timezone_name=timezone_name,
         max_events=max_events,
         model=model,
+        interval_seconds=interval_seconds,
         coverage={
             "scope": "bounded_recorded_events",
             "stores": stores,

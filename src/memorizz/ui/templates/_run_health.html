@@ -2,7 +2,29 @@
     Import "with context" so the formatting helpers are visible. -#}
 {% from '_ui.html' import empty_state %}
 
-{% macro runs_chart(overview, window, window_label, title='Runs over time', prefix='ov') -%}
+{#- The time range: preset windows, or a custom start and end in UTC.
+    ``keep`` holds the page's other query parameters. -#}
+{% macro range_picker(base, window, windows, span, keep={}, labels={}) -%}
+{% set kept = keep|urlencode %}
+<nav class="segmented range-picker" aria-label="Time range">
+    {% for key in windows %}<a class="segmented-item" href="{{ base }}?window={{ key }}{% if kept %}&amp;{{ kept }}{% endif %}"{% if key == window %} aria-current="page"{% endif %}>{{ labels.get(key, key) }}</a>{% endfor %}
+    <details class="range-custom"{% if span.error %} open{% endif %}>
+        <summary class="segmented-item"{% if window == 'custom' %} aria-current="page"{% endif %} title="Choose a start and an end">{% if window == 'custom' %}{{ fmt_range(span) }}{% else %}Custom{% endif %}</summary>
+        <form class="range-custom-form" method="get" action="{{ base }}">
+            <input type="hidden" name="window" value="custom">
+            {% for key, value in keep.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+            <label>From <small>UTC</small><input type="datetime-local" name="start" value="{{ span.start.strftime('%Y-%m-%dT%H:%M') }}" required></label>
+            <label>To <small>UTC</small><input type="datetime-local" name="end" value="{{ span.end.strftime('%Y-%m-%dT%H:%M') }}"></label>
+            {% if span.error %}<p class="range-custom-error" role="alert">{{ span.error }} Showing the last 7 days.</p>{% endif %}
+            <button class="btn btn-primary" type="submit">Apply</button>
+        </form>
+    </details>
+</nav>
+{%- endmacro %}
+
+{#- ``zoom`` is the page's URL up to its query, e.g. "/dashboard?load=1&":
+    a bar opens that page for its own time span, or a lone run's trace. -#}
+{% macro runs_chart(overview, window, window_label, title='Runs over time', prefix='ov', zoom='') -%}
 {% set t = overview.totals %}
 {% set series = overview.series %}
 <section class="panel ov-activity" aria-labelledby="{{ prefix }}-activity-title">
@@ -12,22 +34,41 @@
     </div>
     {% if t.runs %}
     {% set peak = [series|map(attribute='runs')|max, 1]|max %}
-    {% set time_format = '%H:%M' if window == '24h' else ('%b %d %H:%M' if window == '7d' else '%b %d') %}
-    <div class="ov-chart" role="img" aria-label="{{ t.runs }} runs in the {{ window_label }}, {{ t.failed }} failed">
+    {% set span_seconds = (overview.window_end - overview.window_start).total_seconds() %}
+    {% set time_format = '%H:%M' if span_seconds <= 86400 else ('%b %d %H:%M' if overview.bucket_seconds < 86400 else '%b %d') %}
+    {% set bucket_format = '%b %d %H:%M' if overview.bucket_seconds < 86400 else '%b %d' %}
+    <div class="ov-chart" role="group" aria-label="{{ t.runs }} runs in the {{ window_label }}, {{ t.failed }} failed. Each bar is one period; open one to see its runs.">
         <div class="ov-chart-axis" aria-hidden="true"><span>{{ peak }}</span><span>0</span></div>
         <div class="ov-bars">
             {% for bucket in series %}
-            <div class="ov-bar" title="{{ bucket.start.strftime(time_format) }} UTC · {{ bucket.runs }} run{{ '' if bucket.runs == 1 else 's' }}{% if bucket.failed %} · {{ bucket.failed }} failed{% endif %}">
-                <span class="ov-bar-fill" style="height: {{ (100 * bucket.runs / peak)|round(1) }}%">
+            {% set ends = [bucket.end, overview.window_end]|min %}
+            {% set when = bucket.start.strftime(bucket_format) ~ ' – ' ~ ('now' if ends >= overview.window_end else ends.strftime('%H:%M' if bucket.start.date() == ends.date() and overview.bucket_seconds < 86400 else bucket_format)) ~ ' UTC' %}
+            {% set summary = bucket.runs ~ ' run' ~ ('' if bucket.runs == 1 else 's') ~ (' · ' ~ bucket.failed ~ ' failed' if bucket.failed else '') %}
+            {% set edge = ' ov-bar--start' if loop.index0 < series|length * 0.2 else (' ov-bar--end' if loop.index0 >= series|length * 0.8 else '') %}
+            {% if bucket.runs %}
+            {% set href = bucket.trace_url if bucket.trace_url else zoom ~ 'window=custom&start=' ~ bucket.start.strftime('%Y-%m-%dT%H:%M') ~ '&end=' ~ ends.strftime('%Y-%m-%dT%H:%M:%S') %}
+            {% set fill = (100 * bucket.runs / peak)|round(1) %}
+            <a class="ov-bar{{ edge }}" href="{{ href }}" style="--fill: {{ fill }}%" aria-label="{{ when }}: {{ summary }}. {{ 'Open the run' if bucket.trace_url else 'See these runs' }}.">
+                <span class="ov-bar-fill" style="height: {{ fill }}%">
                     {% if bucket.failed %}<span class="ov-bar-failed" style="height: {{ (100 * bucket.failed / bucket.runs)|round(1) }}%"></span>{% endif %}
                 </span>
-            </div>
+                <span class="ov-tip" aria-hidden="true">
+                    <strong>{{ when }}</strong>
+                    {% set unfinished = bucket.runs - bucket.succeeded - bucket.failed %}
+                    <span>{{ bucket.runs }} run{{ '' if bucket.runs == 1 else 's' }}: {{ bucket.succeeded }} succeeded{% if bucket.failed %} · <b class="ov-failed">{{ bucket.failed }} failed</b>{% endif %}{% if unfinished %} · {{ unfinished }} without a result{% endif %}</span>
+                    <span>{% if bucket.tokens %}{{ fmt_compact(bucket.tokens) }} tokens · {{ fmt_usd(bucket.cost_usd) }}{% else %}No token usage recorded{% endif %}</span>
+                    <em>{{ 'Click to open this run' if bucket.trace_url else 'Click to see these ' ~ bucket.runs ~ ' runs' }}</em>
+                </span>
+            </a>
+            {% else %}
+            <span class="ov-bar ov-bar--empty{{ edge }}"><span class="ov-tip" aria-hidden="true"><strong>{{ when }}</strong><span>No runs</span></span></span>
+            {% endif %}
             {% endfor %}
         </div>
         <div class="ov-chart-labels" aria-hidden="true">
             <span>{{ series[0].start.strftime(time_format) }}</span>
             <span>{{ series[series|length // 2].start.strftime(time_format) }}</span>
-            <span>Now</span>
+            <span>{{ 'Now' if generated_at is not defined or (generated_at - overview.window_end).total_seconds() < 60 else overview.window_end.strftime(time_format) }}</span>
         </div>
     </div>
     {% else %}
@@ -45,9 +86,11 @@
     {% if items %}
     <ul class="ov-attention">
         {% for item in items[:limit] %}
+        {% set actions = item.actions if item.actions is defined else ([{'label': 'Open', 'href': item.href}] if item.href else []) %}
         <li class="ov-attention-item ov-attention-item--{{ item.severity }}">
-            <span class="ov-attention-title">{% if item.href %}<a href="{{ item.href }}">{{ item.title }}</a>{% else %}{{ item.title }}{% endif %}</span>
+            <span class="ov-attention-title">{% if actions %}<a href="{{ actions[0].href }}">{{ item.title }}</a>{% else %}{{ item.title }}{% endif %}</span>
             <span class="ov-attention-detail">{{ item.detail }}</span>
+            {% if actions %}<span class="ov-attention-actions">{% for action in actions %}<a href="{{ action.href }}"{% if loop.first %} class="is-primary"{% endif %}>{{ action.label }}</a>{% endfor %}</span>{% endif %}
         </li>
         {% endfor %}
     </ul>

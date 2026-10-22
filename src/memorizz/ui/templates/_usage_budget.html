@@ -1,0 +1,53 @@
+{#- The monthly budget panel on the Usage page. Built-in Jinja only.
+
+    budget_panel(status, can_edit=False, notice='', error='')
+      status    usage_budget.budget_status(...), or None when no budget is set
+      can_edit  used only when status is None; otherwise status.can_edit
+      notice, error   from usage_budget.budget_messages(request.query_params);
+                a notice code ('saved', 'cleared') is shown as its text. -#}
+
+{% macro _money(value) -%}{{ '${:,.2f}'.format(value) }}{%- endmacro %}
+
+{% macro _budget_form(monthly_usd='', alert_percent=80) -%}
+<form method="post" action="/traces/usage/budget" class="usage-budget-form">
+    <div class="form-group"><label for="budget-amount">Monthly budget (USD)</label><input id="budget-amount" name="monthly_usd" value="{{ monthly_usd }}" inputmode="decimal" placeholder="500" maxlength="40" required></div>
+    <div class="form-group"><label for="budget-alert">Alert at %</label><input id="budget-alert" name="alert_percent" type="number" min="1" max="100" step="1" value="{{ alert_percent }}" required></div>
+    <button class="btn btn-primary" type="submit">Save</button>
+</form>
+{%- endmacro %}
+
+{% macro budget_panel(status, can_edit=False, notice='', error='') -%}
+{% set editable = status.can_edit if status else can_edit %}
+{% set notice = {'saved': 'Budget saved.', 'cleared': 'Budget removed.'}.get(notice, notice) %}
+<section class="panel usage-budget{% if status %} usage-budget--{{ status.state }}{% endif %}" id="budget" aria-labelledby="budget-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="budget-title">{{ 'This month' if status else 'Monthly budget' }}</h2>
+            <p class="panel-description">{% if status %}Known spend since {{ status.month_start.strftime('%b') }} {{ status.month_start.day }}, UTC. The Overview flags it at {{ status.alert_percent }}% of the budget.{% elif editable %}Set a monthly budget to get an alert before spend runs over.{% else %}No monthly budget is set.{% endif %}</p>
+        </div>
+    </div>
+    {% if notice %}<p class="success-message" role="status">{{ notice }}</p>{% endif %}
+    {% if error %}<p class="error-message" role="alert">{{ error }}</p>{% endif %}
+    {% if status and status.state == 'unknown' %}
+    <p class="usage-budget-note">Spend can't be read right now, so the budget can't be checked. Try again in a few minutes.</p>
+    {% elif status %}
+    {% set shown = status.percent|round(0, 'floor')|int %}
+    <p class="usage-budget-figures"><strong>{{ _money(status.spend) }}</strong> <span>of {{ _money(status.budget) }}</span> <span class="pill pill--{{ {'ok': 'info', 'warning': 'warning', 'over': 'danger'}[status.state] }}">{{ shown }}%{% if status.state == 'over' %} · over budget{% endif %}</span></p>
+    <div class="usage-budget-bar" role="progressbar" aria-label="Known spend against this month's budget" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ [shown, 100]|min }}" aria-valuetext="{{ shown }}% of the budget"><span style="width: {{ [status.percent, 100]|min }}%"></span></div>
+    <p class="usage-budget-meta">
+        <span>{% if status.projected is not none %}On pace for {{ _money(status.projected) }} by month end{% else %}A month-end projection shows after the first day{% endif %}</span>
+        <span>{{ '{:,}'.format(status.calls) }} call{{ 's' if status.calls != 1 else '' }} this month</span>
+    </p>
+    {% if status.unpriced_calls %}<p class="usage-budget-note">{% if status.unpriced_calls == 1 %}1 call has no price and isn't counted.{% else %}{{ '{:,}'.format(status.unpriced_calls) }} calls have no price and aren't counted.{% endif %} <a href="/traces/usage/rates">Set prices</a></p>{% endif %}
+    {% endif %}
+    {% if status and editable %}
+    <details class="usage-budget-edit"{% if error %} open{% endif %}>
+        <summary>Edit budget</summary>
+        {{ _budget_form(status.budget, status.alert_percent) }}
+        <form method="post" action="/traces/usage/budget/clear" class="usage-budget-clear">
+            <button class="btn btn-sm btn-danger" type="submit">Remove budget</button>
+        </form>
+    </details>
+    {% elif editable %}{{ _budget_form() }}{% endif %}
+</section>
+{%- endmacro %}

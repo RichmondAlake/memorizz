@@ -1010,6 +1010,14 @@ a.kpi:hover .kpi-label {
     grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
 }
 
+/* A long attention list scrolls, so the chart beside it keeps its height. */
+.ov-grid--activity .ov-attention {
+    max-height: 340px;
+    padding-right: 4px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
 .ov-grid--three {
     grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr);
 }
@@ -1088,15 +1096,131 @@ a.kpi:hover .kpi-label {
 }
 
 .ov-bar {
+    position: relative;
     display: flex;
     flex: 1 1 0;
     align-items: flex-end;
     min-width: 2px;
     height: 100%;
+    border-radius: 3px 3px 0 0;
+    text-decoration: none;
 }
 
-.ov-bar:hover .ov-bar-fill {
+.ov-bar:hover .ov-bar-fill,
+.ov-bar:focus-visible .ov-bar-fill {
     filter: brightness(1.25);
+    opacity: 1;
+}
+
+a.ov-bar:hover,
+a.ov-bar:focus-visible {
+    background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
+}
+
+a.ov-bar:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 1px;
+}
+
+/* One period's figures, shown above its bar on hover or keyboard focus. */
+.ov-tip {
+    position: absolute;
+    bottom: calc(var(--fill, 0%) + 8px);
+    left: 50%;
+    z-index: 5;
+    display: none;
+    gap: 3px;
+    width: max-content;
+    max-width: 240px;
+    padding: 8px 10px;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+    font-size: 12px;
+    line-height: 1.4;
+    pointer-events: none;
+    transform: translateX(-50%);
+}
+
+.ov-tip strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.ov-tip b {
+    font-weight: 500;
+}
+
+.ov-tip em {
+    color: var(--accent-primary);
+    font-style: normal;
+}
+
+.ov-bar--start .ov-tip {
+    left: 0;
+    transform: none;
+}
+
+.ov-bar--end .ov-tip {
+    right: 0;
+    left: auto;
+    transform: none;
+}
+
+.ov-bar:hover .ov-tip,
+.ov-bar:focus-visible .ov-tip {
+    display: grid;
+}
+
+/* The time range: preset windows plus a custom start and end. */
+.range-picker {
+    position: relative;
+}
+
+.range-custom > summary {
+    display: block;
+    cursor: pointer;
+    list-style: none;
+}
+
+.range-custom > summary::-webkit-details-marker {
+    display: none;
+}
+
+.range-custom-form {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 20;
+    display: grid;
+    gap: 10px;
+    width: 260px;
+    padding: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+}
+
+.range-custom-form label {
+    display: grid;
+    gap: 4px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.range-custom-form small {
+    color: var(--text-muted);
+    font-weight: 400;
+}
+
+.range-custom-error {
+    margin: 0;
+    color: var(--accent-danger);
+    font-size: 12px;
 }
 
 .ov-bar-fill {
@@ -1154,6 +1278,46 @@ a.kpi:hover .kpi-label {
     color: var(--text-muted);
     font-size: 12px;
     line-height: 1.45;
+}
+
+.ov-attention-title a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.ov-attention-title a:hover {
+    text-decoration: underline;
+}
+
+/* Where each item can be fixed; the first link is the main one. */
+.ov-attention-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-top: 2px;
+    font-size: 12px;
+}
+
+.ov-attention-actions a {
+    color: var(--text-secondary);
+    text-decoration: none;
+}
+
+.ov-attention-actions a::after {
+    content: " →";
+}
+
+.ov-attention-actions a.is-primary {
+    color: var(--accent-primary);
+    font-weight: 500;
+}
+
+.ov-attention-actions a:hover {
+    text-decoration: underline;
+}
+
+.ov-status-warn {
+    color: var(--accent-warning);
 }
 
 .ov-all-clear {

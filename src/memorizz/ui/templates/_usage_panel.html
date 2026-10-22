@@ -10,7 +10,7 @@
         {{ trend(usage_charts.daily_cost, 'Daily known charge', 'USD') }}
         {{ bars(usage_charts.agent_cost, 'Agent charges', 'USD · known portion') }}
         {{ donut(usage_charts.memory_tokens, 'Memory prompt share') }}
-        {{ bars(usage_charts.memory_latency, 'Memory retrieval latency', 'mean ms per operation') }}
+        {{ bars(usage_charts.memory_latency, 'Memory retrieval latency', 'mean per operation', kind='ms') }}
     </div>
     <div class="usage-flow" aria-label="Measurement stages"><span>Memory reads<br><small>Measured retrieval latency</small></span><span aria-hidden="true">→</span><span>Rendered prompt<br><small>Approximate memory tokens</small></span><span aria-hidden="true">→</span><span>Model result<br><small>Provider tokens × rate card</small></span></div>
     <div class="usage-tables">

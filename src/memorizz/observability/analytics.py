@@ -52,6 +52,19 @@ def memory_type(value):
     return value if value in MEMORY_TYPES else "other"
 
 
+def period_start(moment, interval_seconds, zone=timezone.utc):
+    """The start of the interval ``moment`` falls in. Intervals of whole days
+    start at midnight in ``zone``; shorter ones are UTC-aligned."""
+    days, rest = divmod(int(interval_seconds), 86400)
+    if days and not rest:
+        local = moment.astimezone(zone)
+        ordinal = local.toordinal() - local.toordinal() % days
+        start = datetime.fromordinal(ordinal)
+        return start.replace(tzinfo=zone).astimezone(timezone.utc)
+    seconds = moment.timestamp() // interval_seconds * interval_seconds
+    return datetime.fromtimestamp(seconds, timezone.utc)
+
+
 def finite_number(value):
     if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
         return None
@@ -139,18 +152,27 @@ def aggregate_usage(
     max_events=10_000,
     coverage=None,
     model=None,
+    interval_seconds=None,
 ) -> dict:
     """Aggregate a bounded iterable. ``coverage`` describes the supplied window.
 
     Deduplication uses scoped model span identities, never a parent root's cost.
     Memory tokens use rendered characters / 4 and are explicitly approximate;
     provider usage is never apportioned to memory types as if it were billing.
+    ``interval_seconds`` adds ``series``: model calls per interval (see
+    ``period_start``; a period with no calls has no row).
     """
     if type(max_events) is not int or not 1 <= max_events <= 100_000:
         raise ValueError("max_events must be between 1 and 100000")
     zone = ZoneInfo(timezone_name)
     totals = _bucket("Recorded model calls")
-    groups = {"agents": {}, "models": {}, "daily": {}, "interactions": {}}
+    groups = {
+        "agents": {},
+        "models": {},
+        "daily": {},
+        "interactions": {},
+        "series": {},
+    }
     memories, seen, prices, reasons = {}, set(), {}, {}
     cache_events = []
     scanned = duplicates = missing_timestamps = 0
@@ -244,6 +266,7 @@ def aggregate_usage(
                 :480
             ]
         )
+        moment = None
         try:
             moment = datetime.fromisoformat(
                 str(event.get("timestamp")).replace("Z", "+00:00")
@@ -252,8 +275,12 @@ def aggregate_usage(
                 moment = moment.replace(tzinfo=timezone.utc)
             day = moment.astimezone(zone).date().isoformat()
         except (ValueError, TypeError, OverflowError):
+            moment = None
             day = "Unknown date"
             missing_timestamps += 1
+        period = None
+        if interval_seconds and moment is not None:
+            period = period_start(moment, interval_seconds, zone).isoformat()
         interaction = (
             " / ".join(filter(None, (event.get("root_trace_id"), event.get("turn_id"))))
             or "Unattributed interaction"
@@ -264,7 +291,10 @@ def aggregate_usage(
             ("models", model_label, model_label),
             ("daily", day, day),
             ("interactions", scope, interaction),
+            ("series", period, period),
         ):
+            if key is None:
+                continue
             bucket = groups[group].setdefault(key, _bucket(label))
             if group == "interactions":
                 bucket.update(
@@ -273,6 +303,10 @@ def aggregate_usage(
                     root_trace_id=event.get("root_trace_id"),
                     turn_id=event.get("turn_id"),
                 )
+                # When the run started: its earliest recorded model call.
+                started = moment and moment.astimezone(timezone.utc).isoformat()
+                if started and started < (bucket.get("started_at") or "~"):
+                    bucket["started_at"] = started
             _add(bucket, event, quote)
     memory_rows = []
     for row in memories.values():

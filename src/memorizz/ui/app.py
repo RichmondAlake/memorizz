@@ -875,7 +875,14 @@ def create_app(
     app.state.trace_identity_resolver = identity_resolver
     app.state.trace_artifact_resolver = artifact_resolver
     app.state.trace_resource_authorizer = resource_authorizer
-    app.state.usage_pricing = usage_pricing
+    from .routers.rate_cards import effective_pricing
+
+    # Prices set in code are the whole catalog; otherwise the cards saved on
+    # the Rate cards page extend the built-in list prices.
+    app.state.usage_pricing_in_code = usage_pricing is not None
+    app.state.usage_pricing = (
+        usage_pricing if usage_pricing is not None else effective_pricing()
+    )
     app.state.persona_evolution = persona_evolution
     app.state.persona_evolution_actions = bool(
         persona_evolution and persona_evolution_actions
@@ -1055,6 +1062,12 @@ def create_app(
     from .routers.usage import router as usage_router
 
     app.include_router(usage_router)
+    from .routers.rate_cards import router as rate_cards_router
+
+    app.include_router(rate_cards_router)
+    from .usage_budget import router as usage_budget_router
+
+    app.include_router(usage_budget_router)
     from .routers.trace_tools import router as trace_tools_router
 
     app.include_router(trace_tools_router)
@@ -1373,7 +1386,13 @@ def create_app(
         return RedirectResponse(url="/connect", status_code=302)
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    async def dashboard(request: Request, window: str = "7d", load: bool = False):
+    async def dashboard(
+        request: Request,
+        window: str = "7d",
+        load: bool = False,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ):
         """Show live run health for the platform, then its inventory."""
         if not _state["provider"]:
             return RedirectResponse(url="/connect", status_code=302)
@@ -1389,6 +1408,8 @@ def create_app(
             window,
             automation_store=_get_automation_store_for_ui(),
             load=load,
+            start=start,
+            end=end,
         )
         return templates.TemplateResponse(
             "dashboard.html",

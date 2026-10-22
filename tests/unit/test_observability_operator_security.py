@@ -151,6 +151,16 @@ def test_usage_is_tenant_scoped_content_free_and_audited(operator_ui):
     assert 'name="root_trace_id" value="root"' in page.text
     assert 'name="turn_id" value="turn"' in page.text
     assert "trace_usage" in operator_ui["audit"].read_text()
+    # A ranged page also reads the period before; both reads keep the scope.
+    ranged = client.get(
+        "/traces/usage?window=custom&start=2026-09-01&end=2026-09-30",
+        headers=headers(operator_ui),
+    )
+    figures = " ".join(ranged.text.split())
+    assert (
+        '<span class="kpi-label">Model calls</span> <strong class="kpi-value">1</strong>'
+        in figures
+    )
 
 
 def test_tenant_scope_is_conjunctive_and_alternate_routes_are_closed(operator_ui):

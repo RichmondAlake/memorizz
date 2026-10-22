@@ -1,9 +1,9 @@
-{% from '_fmt.html' import count, usd, usd_exact %}
-{% macro bars(data, title, unit='') %}
+{% from '_fmt.html' import count, usd, usd_exact, ms %}
+{% macro bars(data, title, unit='', kind='') %}
 <figure class="usage-chart">
     <figcaption>{{ title }} <small>{{ unit }}</small></figcaption>
     {% for row in data.rows %}
-    <div class="usage-bar-row"><span title="{{ row.label }}">{{ row.label }}</span><div class="usage-bar-track" aria-hidden="true"><span style="width:{{ row.width }}%"></span></div><output>{% if unit.startswith('USD') %}{{ usd(row.value) }}{% else %}{{ '%.6g'|format(row.value) }}{% endif %}</output></div>
+    <div class="usage-bar-row"><span title="{{ row.label }}">{{ row.label }}</span><div class="usage-bar-track" aria-hidden="true"><span style="width:{{ row.width }}%"></span></div><output>{% if unit.startswith('USD') %}{{ usd(row.value) }}{% elif kind == 'ms' %}{{ ms(row.value) }}{% else %}{{ '%.6g'|format(row.value) }}{% endif %}</output></div>
     {% else %}<p class="usage-empty">No recorded measurements.</p>{% endfor %}
     {% if data.omitted %}<small>Top {{ data.rows|length }} shown; {{ data.omitted }} more in the tables.</small>{% endif %}
 </figure>
@@ -33,7 +33,7 @@
         <svg viewBox="0 0 120 120" role="img" aria-label="{{ title }}; values listed alongside">
             {% for row in data.rows %}<circle class="usage-slice usage-color-{{ loop.index0 % 10 }}" cx="60" cy="60" r="44" pathLength="100" stroke-dasharray="{{ row.share }} {{ 100 - row.share }}" stroke-dashoffset="{{ -row.offset }}"><title>{{ row.label }}: {{ row.share|round(1) }}%</title></circle>{% endfor %}
         </svg>
-        <ul>{% for row in data.rows %}<li><span class="usage-swatch usage-color-{{ loop.index0 % 10 }}"></span>{{ row.label }}: {{ count(row.value) }} ({{ row.share|round(1) }}%)</li>{% endfor %}</ul>
+        <ul>{% for row in data.rows if row.value %}<li><span class="usage-swatch usage-color-{{ loop.index0 % 10 }}"></span>{{ row.label }}: {{ count(row.value) }} ({{ row.share|round(1) }}%)</li>{% endfor %}</ul>
     </div>
     {% else %}<p class="usage-empty">No attributed memory measurements.</p>{% endif %}
 </figure>

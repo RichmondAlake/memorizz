@@ -1,14 +1,32 @@
 # Usage, cost and memory analytics
 
-Open **Observability → Usage & memory analytics** (`/traces/usage`) for daily
-token/charge trends, agent and interaction tables, memory prompt-share charts,
-and per-type retrieval latency. Selected traces also have a collapsible
-**Tokens, charges & memory** panel using exactly that trace window. Evalground
-shows recorded quality, latency and API-cost estimates alongside run history.
+Open **Observability → Usage & cost** (`/traces/usage`). The page opens on
+the last 30 days. Choose 24 hours, 7, 30 or 90 days, all recorded usage, or a
+custom start and end in UTC. From top to bottom it shows:
 
-The page supports agent, model, date and IANA timezone filters. Date inputs are
-UTC; the timezone controls daily grouping. Trace/thread/turn filters survive
-navigation and JSON export. Interaction links reopen the corresponding trace.
+- Known spend, tokens, model calls, spend per run, latency p95 and prompt-cache
+  reuse. Each figure shows its change from the same length of time just
+  before, when that period has calls.
+- The monthly budget (see [Monthly budget](#monthly-budget)).
+- Tokens, known spend or model calls over time. Hover over or focus a bar for
+  its figures, and click it to open that period.
+- Usage by agent and by model. Click a name to filter the page to it. A model
+  without a price links to its rate card.
+- Runs by spend and tokens, each linking to its trace.
+- Memory supplied to prompts and retrieval time, then the provider prompt
+  cache and how the figures are counted.
+
+Filter by agent and model. Under **More**, choose the timezone for day
+boundaries and how many events to read. Trace, thread and turn filters stay
+on as you change the range. **Export** downloads CSV by day, agent, model or
+run, or the full JSON. CSV cells that a spreadsheet would run as a formula
+start with a quote. `/traces/usage.json` and `/traces/usage.csv` cover all
+recorded usage unless given `window` (`24h`, `7d`, `30d`, `90d`, `all` or
+`custom` with `start` and `end`) or the older `start_time` and `end_time`.
+Selected traces also have a collapsible **Tokens, charges & memory** panel
+for exactly that trace window. Evalground shows recorded quality, latency and
+API-cost estimates alongside run history.
+
 Missing dates use an explicit `Unknown date` bucket; missing measurements are
 not inferred from response length.
 
@@ -140,6 +158,32 @@ tokens; output tokens include billable reasoning tokens already reported by the
 provider. Normalize provider-specific usage before quoting: some APIs report
 uncached input and cache reads/writes separately. Never double-count reasoning
 tokens or add provider totals to input/output totals.
+
+#### Rate cards page
+
+You can also price a model without code. Open **Usage & cost**, then **Rate
+cards**. A "calls without a price" item on the Overview links there with the
+provider, model and tier filled in. Enter input, cached input and output prices
+per million tokens and a public HTTPS page that lists them. For a model you run
+yourself, such as one on Ollama, tick **Local model, no charge**; the card cites
+this documentation page as its source. Cards are saved to `rate_cards.json` in
+`MEMORIZZ_HOME` (`~/.memorizz` by default) and apply at once to calls without a
+recorded charge. A card replaces a built-in
+card with the same provider, model and tier. Only an unscoped `admin` account
+can change cards. An app created with `create_app(usage_pricing=...)` shows its
+cards read-only; change them in code.
+
+#### Monthly budget
+
+Set a monthly budget in USD on the **Usage & cost** page, with an alert
+percentage (80 by default). The panel shows known spend since the first of the
+month in UTC, a progress bar and a straight-line projection to month end. When
+spend reaches the alert, the Overview lists it under **Needs attention**; past
+the budget, the item turns red. Spend counts only priced calls. The panel says
+how many calls have no price and links to **Rate cards**. The budget is saved
+to `usage_budget.json` in `MEMORIZZ_HOME`. Figures are cached for five minutes,
+and saving a budget or a rate card refreshes them. A scoped account sees spend
+for its own scope only. Only an unscoped `admin` account can change the budget.
 
 ### Host memory instrumentation
 

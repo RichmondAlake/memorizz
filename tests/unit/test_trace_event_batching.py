@@ -111,3 +111,31 @@ def test_batched_resume_survives_a_record_inserted_between_pages():
     seen = [e["event_id"] for e in first["items"] + second["items"]]
     assert len(seen) == len(set(seen)), "no event repeats"
     assert len(seen) == 18, "the older inserted bundle is read once, nothing skipped"
+
+
+@pytest.mark.unit
+def test_the_filesystem_store_reads_trace_records_in_batches(tmp_path):
+    from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
+
+    provider = FileSystemProvider(FileSystemConfig(tmp_path, use_faiss=False))
+    for i in range(30):
+        provider.store(_row(i), memory_store_type=MemoryType.CONVERSATION_MEMORY)
+
+    class _Counted:
+        """The store, counting its record queries and record-at-a-time."""
+
+        def __init__(self, batched):
+            self.queries = 0
+            if batched:
+                self.observability_row_cursor = provider.observability_row_cursor
+
+        def query_observability_records(self, *args, **kwargs):
+            self.queries += 1
+            return provider.query_observability_records(*args, **kwargs)
+
+    plain, batched = _Counted(batched=False), _Counted(batched=True)
+    expected = _page_all(plain, limit=4)
+    assert len(expected) == 90 and len(set(expected)) == 90
+    assert _page_all(batched, limit=4) == expected
+    # Each query reads every document, so one per record was quadratic.
+    assert batched.queries <= 30 < plain.queries

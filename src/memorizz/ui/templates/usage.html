@@ -1,33 +1,279 @@
 {% extends 'base.html' %}
-{% block title %}Usage &amp; memory analytics - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=1"><link rel="stylesheet" href="/static/css/pages/observability.css?v=3">{% endblock %}
+{% block title %}Usage &amp; cost - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/analytics.css?v=2"><link rel="stylesheet" href="/static/css/pages/observability.css?v=3"><link rel="stylesheet" href="/static/css/pages/usage-budget.css?v=1">{% endblock %}
 {% block content %}
-{% from '_ui.html' import page_header, observability_tabs %}
-{% from '_fmt.html' import tape %}
-{% call page_header('Usage & memory analytics', 'See where recorded tokens, charges, prompt-cache reuse and retrieval time go.', 'Operations', nav=observability_tabs('usage', {'traces': trace_url})) %}<a class="btn" href="{{ export_url }}">Export JSON</a>{% endcall %}
-{{ tape(usage_tape, 'Usage summary for the filtered window', 'usage-kpis') }}
-<form method="get" class="usage-filters obs-filters">
+{% from '_ui.html' import page_header, observability_tabs, empty_state %}
+{% from '_fmt.html' import count, usd, usd_exact, percent %}
+{% from '_run_health.html' import range_picker with context %}
+{% from '_analytics_charts.html' import donut, bars %}
+{% set window_labels = {'24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days', 'all': 'All recorded usage'} %}
+{% set window_label = window_labels.get(window) or fmt_range(span) %}
+{% set series = view.series %}
+{% set totals = usage.totals %}
+{% macro delta(entry) -%}
+{%- if entry.delta is not none -%}
+<span class="usage-delta {{ entry.delta_tone }}" title="Change from the {{ 'same length of time' if window == 'custom' else window }} before">{{ '▲' if entry.delta > 0 else ('▼' if entry.delta < 0 else '') }} {{ '%.0f'|format(entry.delta|abs) }}%</span>
+{%- elif view.compared and entry.kind != 'percent' -%}
+<span class="usage-delta" title="Nothing to compare with in the period before">new</span>
+{%- endif -%}
+{%- endmacro %}
+{% macro figure(entry) -%}
+{%- if entry.kind == 'usd' -%}{{ usd(entry.value, '—') }}
+{%- elif entry.kind == 'duration' -%}{{ fmt_duration(entry.value) }}
+{%- elif entry.kind == 'percent' -%}{{ percent(entry.value, 'Not reported') if entry.value is not none else '—' }}
+{%- else -%}{{ fmt_compact(entry.value) }}
+{%- endif -%}
+{%- endmacro %}
+
+{% call page_header('Usage & cost', 'Spend, tokens and model calls by agent, model and run, compared with the period before.', 'Operations', nav=observability_tabs('usage', {'traces': trace_url})) %}
+    {{ range_picker('/traces/usage', window, windows, span, query, {'all': 'All'}) }}
+    <details class="usage-export">
+        <summary class="btn">Export</summary>
+        <div class="usage-export-menu" role="menu">
+            <a role="menuitem" href="/traces/usage.csv?{{ export_query }}&amp;group=day">CSV by day</a>
+            <a role="menuitem" href="/traces/usage.csv?{{ export_query }}&amp;group=agent">CSV by agent</a>
+            <a role="menuitem" href="/traces/usage.csv?{{ export_query }}&amp;group=model">CSV by model</a>
+            <a role="menuitem" href="/traces/usage.csv?{{ export_query }}&amp;group=run">CSV by run</a>
+            <a role="menuitem" href="/traces/usage.json?{{ export_query }}">JSON, everything</a>
+        </div>
+    </details>
+    <a class="btn" href="/traces/usage/rates">Rate cards</a>
+{% endcall %}
+
+<form method="get" action="/traces/usage" class="usage-filterbar" aria-label="Usage filters">
     {% for key, value in preserved_filters.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
-    <label>Agent ID<input name="agent_id" value="{{ filters.agent_id or '' }}" maxlength="240" placeholder="All authorized agents"></label>
-    <label>From (UTC)<input type="datetime-local" name="start_time" value="{{ filters.start_time or '' }}"></label>
-    <label>Until (UTC)<input type="datetime-local" name="end_time" value="{{ filters.end_time or '' }}"></label>
-    <label>Model<input name="model" value="{{ filters.model or '' }}" maxlength="240" placeholder="All models"></label>
-    <label>Daily timezone<input name="timezone_name" value="{{ usage.timezone }}" maxlength="100"></label>
-    <label>Event budget<select name="max_events">{% for count in [1000, 5000, 10000] %}<option value="{{ count }}" {{ 'selected' if count == max_events else '' }}>{{ '{:,}'.format(count) }}</option>{% endfor %}</select></label>
-    <button class="btn" type="submit">Apply filters</button>
+    {% for key, value in ranged.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+    {% if metric != 'tokens' %}<input type="hidden" name="metric" value="{{ metric }}">{% endif %}
+    <label>Agent
+        <select name="agent_id" onchange="this.form.submit()">
+            <option value="">All agents</option>
+            {% for agent_value, agent_name in agent_choices %}<option value="{{ agent_value }}"{% if agent_value == query.agent_id %} selected{% endif %}>{{ agent_name }}</option>{% endfor %}
+        </select>
+    </label>
+    <label>Model
+        <select name="model" onchange="this.form.submit()">
+            <option value="">All models</option>
+            {% for name in model_choices %}<option value="{{ name }}"{% if name == query.model %} selected{% endif %}>{{ name }}</option>{% endfor %}
+        </select>
+    </label>
+    <details class="usage-more"{% if timezone_name != 'UTC' or max_events != 5000 %} open{% endif %}>
+        <summary>More</summary>
+        <label>Day boundaries
+            <select name="timezone_name" onchange="this.form.submit()">
+                {% for zone in timezones %}<option value="{{ zone }}"{% if zone == timezone_name %} selected{% endif %}>{{ zone.replace('_', ' ') }}</option>{% endfor %}
+            </select>
+        </label>
+        <label>Read at most
+            <select name="max_events" onchange="this.form.submit()">
+                {% for amount in [1000, 5000, 10000] %}<option value="{{ amount }}"{% if amount == max_events %} selected{% endif %}>{{ '{:,}'.format(amount) }} events</option>{% endfor %}
+            </select>
+        </label>
+    </details>
+    <noscript><button class="btn" type="submit">Apply</button></noscript>
+    {% if query.agent_id or query.model %}<a class="usage-clear" href="/traces/usage?{{ ranged|urlencode }}">Clear filters</a>{% endif %}
 </form>
-{% if preserved_filters %}<p class="usage-notice">Trace selection retained: {% for key, value in preserved_filters.items() %}{{ key }}={{ value }} {% endfor %}. <a href="/traces/usage">Clear trace selection</a></p>{% endif %}
-{% with usage_tape_shown = true %}{% include '_usage_panel.html' %}{% endwith %}
-{% if coding_agents %}
-<details class="usage-table usage-coding-agents" open id="coding-agent-sessions">
-    <summary>Coding-agent sessions</summary>
-    <p class="usage-notice">Codex and Claude Code sessions the MemoRizz plugin recorded, read from each agent's own session log and counted apart from the traced usage above. Cost is Claude Code's own total, or OpenAI list rates for Codex when its model has one; a ChatGPT plan isn't billed per token. <a href="/harnesses">Open them on Agent harnesses</a>.</p>
-    <div class="usage-table-scroll"><table>
-        <thead><tr><th>Agent</th><th>Model</th><th class="num">Sessions</th><th class="num">Turns</th><th class="num">Tokens in</th><th class="num">Cached</th><th class="num">Tokens out</th><th class="num">Spend</th></tr></thead>
+
+<p class="ov-status usage-status" role="status">
+    <span>{{ window_label }}</span>
+    {% if view.compared %}<span>Compared with the {{ 'same length of time' if window == 'custom' else window_label|lower|replace('last ', '') }} before</span>{% elif view.previous_empty %}<span>Nothing recorded in the {{ 'same length of time' if window == 'custom' else window_label|lower|replace('last ', '') }} before, so no change is shown</span>{% endif %}
+    <span>Updated {{ generated_at.strftime('%H:%M') }} UTC</span>
+    {% if not view.coverage.complete %}<span class="ov-status-warn" title="The read stopped at its event limit or a store answered partially. Narrow the range or read more events under More.">Partial read · {{ count(view.coverage.events) }} events</span>{% else %}<span>{{ count(view.coverage.events) }} events read</span>{% endif %}
+    {% if preserved_filters %}<span>Trace selection kept · <a href="/traces/usage">Clear</a></span>{% endif %}
+</p>
+
+<section class="kpi-strip usage-figures" aria-label="Usage for the {{ window_label|lower }}">
+    {% for entry in view.kpis %}
+    {% if entry.href %}<a class="kpi" href="{{ entry.href }}">{% else %}<div class="kpi">{% endif %}
+        <span class="kpi-label">{{ entry.label }}</span>
+        <strong class="kpi-value">{{ figure(entry) }}</strong>
+        <span class="kpi-note">{{ delta(entry) }}{{ entry.note }}{% if entry.href and entry.label == 'Known spend' %} · <span class="usage-link">Set prices</span>{% endif %}</span>
+    {% if entry.href %}</a>{% else %}</div>{% endif %}
+    {% endfor %}
+</section>
+
+{% from '_usage_budget.html' import budget_panel %}
+{{ budget_panel(budget.status, can_edit=budget.can_edit, notice=budget.notice, error=budget.error) }}
+
+<section class="panel usage-over-time" aria-labelledby="usage-time-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="usage-time-title">{{ {'tokens': 'Tokens', 'spend': 'Known spend', 'calls': 'Model calls'}[metric] }} over time</h2>
+        <nav class="segmented" aria-label="Measure">
+            {% for key, label in [('tokens', 'Tokens'), ('spend', 'Spend'), ('calls', 'Calls')] %}<a class="segmented-item" href="/traces/usage?{{ dict(query, metric=key, **ranged)|urlencode }}"{% if key == metric %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+        </nav>
+    </div>
+    {% if totals.calls %}
+    {% set bar_format = '%b %d' if series.day_buckets else '%b %d %H:%M' %}
+    <div class="ov-chart" role="group" aria-label="{{ window_label }}: one bar per {{ 'day' if series.day_buckets else 'period' }}. Open a bar to see that period.">
+        <div class="ov-chart-axis" aria-hidden="true"><span>{{ usd(series.peak) if metric == 'spend' else fmt_compact(series.peak) }}</span><span>0</span></div>
+        <div class="ov-bars">
+            {% for bar in series.bars %}
+            {% set when = bar.start.strftime(bar_format) ~ ('' if series.day_buckets else ' – ' ~ bar.end.strftime('%H:%M')) ~ (' ' ~ timezone_name.replace('_', ' ') if series.day_buckets and timezone_name != 'UTC' else ' UTC') %}
+            {% set edge = ' ov-bar--start' if loop.index0 < series.bars|length * 0.2 else (' ov-bar--end' if loop.index0 >= series.bars|length * 0.8 else '') %}
+            {% if bar.calls %}
+            <a class="ov-bar{{ edge }}" style="--fill: {{ bar.height }}%" href="/traces/usage?{{ dict(query, metric=metric, window='custom', start=bar.start.strftime('%Y-%m-%dT%H:%M:%S'), end=bar.end.strftime('%Y-%m-%dT%H:%M:%S'))|urlencode }}" aria-label="{{ when }}: {{ count(bar.calls) }} calls, {{ fmt_compact(bar.tokens) }} tokens. Open this period.">
+                <span class="ov-bar-fill" style="height: {{ bar.height }}%"></span>
+                <span class="ov-tip" aria-hidden="true">
+                    <strong>{{ when }}</strong>
+                    <span>{{ count(bar.calls) }} model call{{ '' if bar.calls == 1 else 's' }}</span>
+                    <span>{{ fmt_compact(bar.tokens) }} tokens ({{ fmt_compact(bar.input_tokens) }} in · {{ fmt_compact(bar.output_tokens) }} out)</span>
+                    <span>{% if bar.cost is not none %}{{ usd(bar.cost) }} known spend{% else %}No priced calls{% endif %}{% if bar.unpriced %} · {{ bar.unpriced }} unpriced{% endif %}</span>
+                    <em>Click to see this {{ 'day' if series.day_buckets else 'period' }}</em>
+                </span>
+            </a>
+            {% else %}
+            <span class="ov-bar ov-bar--empty{{ edge }}"><span class="ov-tip" aria-hidden="true"><strong>{{ when }}</strong><span>No model calls</span></span></span>
+            {% endif %}
+            {% endfor %}
+        </div>
+        <div class="ov-chart-labels" aria-hidden="true">
+            <span>{{ series.bars[0].start.strftime(bar_format) }}</span>
+            <span>{{ series.bars[series.bars|length // 2].start.strftime(bar_format) }}</span>
+            <span>{{ 'Now' if (generated_at - series.bars[-1].end).total_seconds() < 60 else series.bars[-1].end.strftime(bar_format) }}</span>
+        </div>
+    </div>
+    {% if series.clipped %}<p class="panel-empty">The newest {{ series.bars|length }} days are drawn; {{ series.clipped }} earlier ones are in the CSV by day.</p>{% endif %}
+    {% if metric == 'spend' and totals.unpriced_calls %}<p class="panel-empty">{{ count(totals.unpriced_calls) }} call{{ '' if totals.unpriced_calls == 1 else 's' }} without a price {{ 'is' if totals.unpriced_calls == 1 else 'are' }} left out of spend. <a href="/traces/usage/rates">Set prices</a></p>{% endif %}
+    {% else %}
+    {{ empty_state('No model calls in this window', 'Choose a longer range, or clear the agent and model filters.') }}
+    {% endif %}
+</section>
+
+<div class="usage-columns">
+    <section class="panel" aria-labelledby="usage-agents-title">
+        <div class="panel-header">
+            <h2 class="panel-title" id="usage-agents-title">By agent</h2>
+            <span class="panel-meta">{{ view.agents|length }}</span>
+        </div>
+        {% if view.agents %}
+        <div class="table-scroll"><table class="data-table usage-breakdown" data-sortable>
+            <thead><tr><th scope="col" data-sort-type="text">Agent</th><th scope="col" class="num" data-sort-type="number">Tokens</th><th scope="col" class="num" data-sort-type="number">Calls</th><th scope="col" class="num" data-sort-type="number">Spend</th><th scope="col" class="num" data-sort-type="number">p95</th></tr></thead>
+            <tbody>
+            {% for row in view.agents %}
+            <tr{% if loop.index > 8 %} class="usage-extra"{% endif %}>
+                <th scope="row" data-value="{{ row.name|lower }}">
+                    {% if row.filter_url %}<a href="{{ row.filter_url }}" title="Show only {{ row.name }}{% if row.agent_id %} ({{ row.agent_id }}){% endif %}">{{ row.name }}</a>{% else %}{{ row.name }}{% endif %}
+                    {% if not row.saved and row.agent_id %}<small class="usage-sub">Not saved in this store</small>{% endif %}
+                    <span class="usage-share" aria-hidden="true"><span style="width: {{ row.share|round(1) }}%"></span></span>
+                </th>
+                <td class="num" data-value="{{ row.total_tokens }}" title="{{ count(row.input_tokens) }} in · {{ count(row.output_tokens) }} out · {{ '%.0f'|format(row.share) }}% of tokens">{% if row.unknown_usage_calls == row.calls %}<span class="usage-muted">Not reported</span>{% else %}{{ fmt_compact(row.total_tokens) }}{% if row.unknown_usage_calls %}<small class="usage-sub">{{ row.unknown_usage_calls }} not reported</small>{% endif %}{% endif %}</td>
+                <td class="num" data-value="{{ row.calls }}">{{ count(row.calls) }}</td>
+                <td class="num" data-value="{{ row.cost or 0 }}"{% if row.cost is not none %} title="{{ usd_exact(row.cost_usd) }}"{% endif %}>{% if row.cost is not none %}{{ usd(row.cost) }}{% if row.unpriced_calls %}<small class="usage-sub">+{{ row.unpriced_calls }} unpriced</small>{% endif %}{% else %}<span class="usage-muted">No price</span>{% endif %}</td>
+                <td class="num" data-value="{{ row.p95_latency_ms or 0 }}">{{ fmt_duration(row.p95_latency_ms) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% if view.agents|length > 8 %}<button type="button" class="usage-more-rows" data-show-rows hidden>Show all {{ view.agents|length }}</button>{% endif %}
+        {% else %}<p class="panel-empty">No agent made a model call in this window.</p>{% endif %}
+    </section>
+
+    <section class="panel" aria-labelledby="usage-models-title">
+        <div class="panel-header">
+            <h2 class="panel-title" id="usage-models-title">By model</h2>
+            <span class="panel-meta">{{ view.models|length }}</span>
+        </div>
+        {% if view.models %}
+        <div class="table-scroll"><table class="data-table usage-breakdown" data-sortable>
+            <thead><tr><th scope="col" data-sort-type="text">Model</th><th scope="col" class="num" data-sort-type="number">Tokens</th><th scope="col" class="num" data-sort-type="number">Calls</th><th scope="col" class="num" data-sort-type="number">Spend</th><th scope="col" class="num" data-sort-type="number">p95</th></tr></thead>
+            <tbody>
+            {% for row in view.models %}
+            <tr{% if loop.index > 8 %} class="usage-extra"{% endif %}>
+                <th scope="row" data-value="{{ row.label|lower }}">
+                    <a href="{{ row.filter_url }}" title="Show only {{ row.label }}">{{ row.model or row.label }}</a><small class="usage-sub">{{ row.provider }}</small>
+                    <span class="usage-share" aria-hidden="true"><span style="width: {{ row.share|round(1) }}%"></span></span>
+                </th>
+                <td class="num" data-value="{{ row.total_tokens }}" title="{{ count(row.input_tokens) }} in · {{ count(row.output_tokens) }} out · {{ '%.0f'|format(row.share) }}% of tokens">{% if row.unknown_usage_calls == row.calls %}<span class="usage-muted">Not reported</span>{% else %}{{ fmt_compact(row.total_tokens) }}{% if row.unknown_usage_calls %}<small class="usage-sub">{{ row.unknown_usage_calls }} not reported</small>{% endif %}{% endif %}</td>
+                <td class="num" data-value="{{ row.calls }}">{{ count(row.calls) }}</td>
+                <td class="num" data-value="{{ row.cost or 0 }}"{% if row.cost is not none %} title="{{ usd_exact(row.cost_usd) }}"{% endif %}>{% if row.cost is not none %}{{ usd(row.cost) }}{% endif %}{% if row.price_url %}{% if row.cost is not none %}<small class="usage-sub">+{{ row.unpriced_calls }} unpriced</small>{% endif %} <a class="usage-link" href="{{ row.price_url }}">Set price</a>{% endif %}</td>
+                <td class="num" data-value="{{ row.p95_latency_ms or 0 }}">{{ fmt_duration(row.p95_latency_ms) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table></div>
+        {% if view.models|length > 8 %}<button type="button" class="usage-more-rows" data-show-rows hidden>Show all {{ view.models|length }}</button>{% endif %}
+        {% else %}<p class="panel-empty">No model calls in this window.</p>{% endif %}
+    </section>
+</div>
+
+<section class="panel" aria-labelledby="usage-runs-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="usage-runs-title">Runs by spend and tokens</h2>
+        <a class="panel-meta" href="/traces/usage.csv?{{ export_query }}&amp;group=run">{% if view.run_count > view.runs|length %}{{ view.runs|length }} of {{ count(view.run_count) }} · export all{% else %}Export CSV{% endif %}</a>
+    </div>
+    {% if view.runs %}
+    <div class="table-scroll"><table class="data-table usage-runs" data-sortable>
+        <thead><tr><th scope="col" data-sort-type="number">Started</th><th scope="col" data-sort-type="text">Agent</th><th scope="col" class="num" data-sort-type="number">Calls</th><th scope="col" class="num" data-sort-type="number">Tokens</th><th scope="col" class="num" data-sort-type="number">Spend</th><th scope="col" class="num" data-sort-type="number">p95</th><th scope="col"><span class="visually-hidden">Trace</span></th></tr></thead>
         <tbody>
-        {% for row in coding_agents %}<tr><th>{{ row.label }}</th><td class="mono">{{ row.model or '—' }}</td><td class="num">{{ '{:,}'.format(row.sessions) }}</td><td class="num">{{ '{:,}'.format(row.turns) }}</td><td class="num">{{ '{:,}'.format(row.input_tokens) }}</td><td class="num">{{ '{:,}'.format(row.cached_tokens) }}</td><td class="num">{{ '{:,}'.format(row.output_tokens) }}</td><td class="num">{% if row.priced %}${{ '{:,.4f}'.format(row.cost_usd) }}{% if row.priced < row.sessions %} <small>+ {{ row.sessions - row.priced }} unpriced</small>{% endif %}{% else %}Unpriced{% endif %}</td></tr>{% endfor %}
+        {% for row in view.runs %}
+        <tr{% if loop.index > 10 %} class="usage-extra"{% endif %}>
+            <td data-value="{{ row.started.timestamp() if row.started else 0 }}"{% if row.started %} title="{{ row.started.strftime('%Y-%m-%d %H:%M:%S') }} UTC"{% endif %}>{{ relative_time(row.started, generated_at) if row.started else '—' }}</td>
+            <td data-value="{{ row.agent_name|lower }}">{{ row.agent_name }}</td>
+            <td class="num" data-value="{{ row.calls }}">{{ count(row.calls) }}</td>
+            <td class="num" data-value="{{ row.total_tokens }}">{% if row.unknown_usage_calls == row.calls %}<span class="usage-muted">Not reported</span>{% else %}{{ fmt_compact(row.total_tokens) }}{% endif %}</td>
+            <td class="num" data-value="{{ row.cost or 0 }}">{% if row.cost is not none %}{{ usd(row.cost) }}{% else %}<span class="usage-muted">No price</span>{% endif %}</td>
+            <td class="num" data-value="{{ row.p95_latency_ms or 0 }}">{{ fmt_duration(row.p95_latency_ms) }}</td>
+            <td>{% if row.trace_url %}<a href="{{ row.trace_url }}">Trace</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
         </tbody>
     </table></div>
-</details>
+    {% if view.runs|length > 10 %}<button type="button" class="usage-more-rows" data-show-rows hidden>Show all {{ view.runs|length }}</button>{% endif %}
+    {% else %}<p class="panel-empty">No runs in this window.</p>{% endif %}
+</section>
+
+{% if coding_agents %}
+<section class="panel" aria-labelledby="usage-coding-title" id="coding-agent-sessions">
+    <div class="panel-header">
+        <h2 class="panel-title" id="usage-coding-title">Coding-agent sessions</h2>
+        <a class="panel-meta" href="/harnesses">Agent harnesses</a>
+    </div>
+    <div class="table-scroll"><table class="data-table">
+        <thead><tr><th scope="col">Agent</th><th scope="col">Model</th><th scope="col" class="num">Sessions</th><th scope="col" class="num">Turns</th><th scope="col" class="num">Tokens in</th><th scope="col" class="num">Cached</th><th scope="col" class="num">Tokens out</th><th scope="col" class="num">Spend</th></tr></thead>
+        <tbody>
+        {% for row in coding_agents %}<tr><th scope="row">{{ row.label }}</th><td class="mono">{{ row.model or '—' }}</td><td class="num">{{ count(row.sessions) }}</td><td class="num">{{ count(row.turns) }}</td><td class="num">{{ fmt_compact(row.input_tokens) }}</td><td class="num">{{ fmt_compact(row.cached_tokens) }}</td><td class="num">{{ fmt_compact(row.output_tokens) }}</td><td class="num">{% if row.priced %}{{ usd(row.cost_usd) }}{% if row.priced < row.sessions %} <small class="usage-sub">+ {{ row.sessions - row.priced }} unpriced</small>{% endif %}{% else %}<span class="usage-muted">No price</span>{% endif %}</td></tr>{% endfor %}
+        </tbody>
+    </table></div>
+    <p class="panel-empty">Codex and Claude Code sessions the MemoRizz plugin recorded, read from each agent's own session log and counted apart from the usage above. Cost is Claude Code's own total, or OpenAI list rates for Codex when its model has one; a ChatGPT plan isn't billed per token.</p>
+</section>
 {% endif %}
+
+<section class="panel usage-memory" aria-labelledby="usage-memory-title">
+    <div class="panel-header">
+        <h2 class="panel-title" id="usage-memory-title">Memory in prompts</h2>
+        <span class="panel-meta">Approximate: rendered characters ÷ 4</span>
+    </div>
+    {% if usage.memory %}
+    <div class="usage-grid">
+        {{ donut(usage_charts.memory_tokens, 'Share of memory tokens supplied') }}
+        {{ bars(usage_charts.memory_latency, 'Retrieval time', 'mean per read', kind='ms') }}
+    </div>
+    <details class="usage-memory-table">
+        <summary>Every memory type</summary>
+        <div class="table-scroll"><table class="data-table">
+            <thead><tr><th scope="col">Memory type</th><th scope="col" class="num">Approx. tokens</th><th scope="col" class="num">Times supplied</th><th scope="col" class="num">Reads</th><th scope="col" class="num">Read errors</th><th scope="col" class="num">Mean read</th><th scope="col" class="num">p95 read</th></tr></thead>
+            <tbody>
+            {% for row in usage.memory %}<tr><th scope="row">{{ memory_label(row.label) }}</th><td class="num">{{ count(row.memory_tokens_estimate) if row.supply_samples else '—' }}</td><td class="num">{{ count(row.supply_samples) }}</td><td class="num">{{ count(row.retrieval_samples) }}</td><td class="num{{ ' is-bad' if row.retrieval_errors else '' }}">{{ count(row.retrieval_errors) }}</td><td class="num">{{ fmt_duration(row.retrieval_mean_ms) }}</td><td class="num">{{ fmt_duration(row.retrieval_p95_ms) }}</td></tr>{% endfor %}
+            </tbody>
+        </table></div>
+    </details>
+    {% else %}<p class="panel-empty">No memory measurements in this window. Agents record them when they read memory for a prompt.</p>{% endif %}
+</section>
+
+{% set cache = usage.prompt_cache %}
+<details class="panel usage-cache"{% if cache.attention or cache.hit or cache.write or cache.no_reuse %} open{% endif %}>
+    <summary><h2 class="panel-title">Provider prompt cache</h2><span class="panel-meta">{% if cache.read_percent is not none %}{{ percent(cache.read_percent) }} of input read from cache{% else %}Not reported by these models{% endif %}</span></summary>
+    {% with trace_analysis = false %}{% include '_prompt_cache.html' %}{% endwith %}
+</details>
+
+<details class="panel usage-method">
+    <summary><h2 class="panel-title">How these figures are counted</h2><span class="panel-meta">{{ count(view.coverage.events) }} events · {{ 'complete' if view.coverage.complete else 'partial' }} read</span></summary>
+    <ul>
+        <li>{{ count(view.coverage.events) }} trace events read{% if view.coverage.truncated %}, stopped at the limit of {{ count(max_events) }}{% endif %}. {% if not view.coverage.complete %}The read is partial, so figures may be low. Narrow the range or read more events.{% else %}The read is complete for this window.{% endif %}</li>
+        {% if view.coverage.missing_usage %}<li>{{ count(view.coverage.missing_usage) }} model call{{ '' if view.coverage.missing_usage == 1 else 's' }} reported no token usage, so {{ 'its' if view.coverage.missing_usage == 1 else 'their' }} tokens aren't counted.</li>{% endif %}
+        {% for reason, calls in usage.unpriced_reasons.items() %}<li>{{ count(calls) }} call{{ '' if calls == 1 else 's' }} without a price: {{ reason }}. <a href="/traces/usage/rates">Rate cards</a></li>{% endfor %}
+        {% for note in usage.notes %}<li>{{ note }}</li>{% endfor %}
+        <li>Known spend applies today's rate cards to older calls unless a call recorded its own charge; it is not an invoice. Regional, batch and priority pricing, discounts and fees need matching rate cards.</li>
+        {% for price in usage.pricing %}<li>Prices: {{ price.pricing_version }} · as of {{ price.pricing_as_of }} · {{ price.pricing_source }}</li>{% endfor %}
+    </ul>
+</details>
 {% endblock %}

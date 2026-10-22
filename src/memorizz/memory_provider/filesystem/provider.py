@@ -637,6 +637,20 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
             self._mark_vector_index_dirty(memory_type)
             return True
 
+    # Each observability query reads every document of its store, so trace
+    # reads take as many rows per query as a query may return.
+    observability_batch_size = 1000
+
+    def observability_row_cursor(self, row: Dict[str, Any]) -> str:
+        """Cursor that continues ``query_observability_records`` after ``row``.
+
+        With it, trace reads take rows in batches. Without it they took one
+        row per query, and each query reads every document of the store, so a
+        store of a thousand records took a million reads (two minutes)."""
+        from ..base import observability_cursor_after
+
+        return observability_cursor_after(row)
+
     def list_all(
         self,
         memory_store_type: Union[str, MemoryType, None],

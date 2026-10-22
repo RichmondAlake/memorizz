@@ -498,8 +498,8 @@ def test_ui_empty_page_validation_and_custom_pricing(tmp_path, monkeypatch):
         client = TestClient(create_app())
         response = client.get("/traces/usage")
         assert response.status_code == 200, response.text
-        assert "Usage &amp; memory analytics" in response.text
-        assert "Unknown" in response.text
+        assert "Usage &amp; cost" in response.text
+        assert "No model calls in this window" in response.text
         assert client.get("/traces/usage.json").json()["totals"]["cost_usd"] is None
         assert client.get("/traces/usage.json?timezone_name=invalid").status_code == 400
         assert client.get("/traces/usage.json?max_events=10001").status_code == 422
@@ -523,3 +523,19 @@ def test_read_completeness_uses_normalized_metadata_not_capture_claims(
     assert (
         aggregate_usage([], coverage=metadata)["coverage"]["read_complete"] is complete
     )
+
+
+def test_an_unreported_cache_split_is_priced_when_it_cannot_change_the_charge():
+    def card(model, rate, cached):
+        return RateCard(
+            "ollama", model, rate, rate, cached, "https://ollama.com", "2026-10-22", "v"
+        )
+
+    registry = PricingRegistry([card("free", "0", "0"), card("flat", "1", "1")])
+    # Ollama reports input and output tokens but no cached tokens.
+    call = result(provider="ollama", cached_tokens=None)
+    assert registry.quote({**call, "model": "free"})["cost_usd"] == "0"
+    flat = registry.quote({**call, "model": "flat"})
+    assert Decimal(flat["cost_usd"]) == Decimal("0.0011"), "1,100 tokens at $1/1M"
+    split = PricingRegistry([card("cheap-cache", "1", "0.1")])
+    assert split.quote({**call, "model": "cheap-cache"})["cost_usd"] is None

@@ -4,24 +4,22 @@
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state, id_chip %}
-{% from '_run_health.html' import runs_chart, attention_panel, recent_runs with context %}
-{% set window_labels = {'24h': 'last 24 hours', '7d': 'last 7 days', '30d': 'last 30 days'} %}
+{% from '_run_health.html' import range_picker, runs_chart, attention_panel, recent_runs with context %}
+{% set window_labels = {'24h': 'last 24 hours', '7d': 'last 7 days', '30d': 'last 30 days', '90d': 'last 90 days'} %}
+{% set window_label = window_labels.get(window) or fmt_range(span) %}
 {% set ov = fleet_overview %}
 {% set rows = fleet.values()|list %}
 {% set active_count = rows|selectattr('stats')|list|length %}
 {% set attention_count = rows|selectattr('health', 'in', ['failing', 'degraded'])|list|length %}
 {% set idle_count = rows|selectattr('health', 'equalto', 'idle')|list|length %}
 {% set favorite_count = agents|selectattr('is_favorite')|list|length %}
-{% set query_suffix = ('&sort_by=' ~ sort_by) ~ ('&load=1' if loaded else '') %}
 {% call page_header('Agents', 'Fleet health for every agent in this memory provider. Select an agent to inspect it or send a quick message.', 'Agents') %}
-    <nav class="segmented" aria-label="Time range">
-        {% for key in windows %}<a class="segmented-item" href="/agents?window={{ key }}{{ query_suffix }}"{% if key == window %} aria-current="page"{% endif %}>{{ key }}</a>{% endfor %}
-    </nav>
+    {{ range_picker('/agents', window, windows, span, {'sort_by': sort_by, 'load': 1} if loaded else {'sort_by': sort_by}) }}
     <a href="/agents/new" class="btn btn-primary">Create agent</a>
 {% endcall %}
 
 {% if agents %}
-<div class="fleet-tape" role="list" aria-label="Fleet summary for the {{ window_labels[window] }}">
+<div class="fleet-tape" role="list" aria-label="Fleet summary for the {{ window_label }}">
     <div role="listitem"><span>Agents</span><strong>{{ agents|length }}</strong></div>
     {% if ov %}
     {% set t = ov.totals %}
@@ -34,11 +32,11 @@
     <div role="listitem"><span>From cache</span><strong>{% if t.cache_read_percent is not none %}{{ '%.0f'|format(t.cache_read_percent) }}%{% else %}—{% endif %}</strong></div>
     <div role="listitem"><span>Spend</span><strong>{{ fmt_usd(t.cost_usd) }}</strong></div>
     {% endif %}
-    <div role="listitem" class="fleet-tape-meta"><span>{{ window_labels[window]|capitalize }}</span><strong>{{ generated_at.strftime('%H:%M') }} UTC</strong></div>
+    <div role="listitem" class="fleet-tape-meta"><span>{{ window_label[:1]|upper }}{{ window_label[1:] }}</span><strong>{{ generated_at.strftime('%H:%M') }} UTC</strong></div>
 </div>
 
 {% if fleet_deferred %}
-<p class="form-note" role="status">Run health is not read automatically for this provider. <a href="/agents?window={{ window }}&sort_by={{ sort_by }}&load=1">Load run health</a></p>
+<p class="form-note" role="status">Run health is not read automatically for this provider. <a href="/agents?{{ range_query(span) }}&amp;sort_by={{ sort_by }}&amp;load=1">Load run health</a></p>
 {% elif fleet_error %}
 <p class="form-note" role="status">{{ fleet_error }} Configuration and quick chat still work.</p>
 {% endif %}
@@ -57,6 +55,7 @@
     </div>
     <form method="get" action="/agents" class="fleet-order">
         <input type="hidden" name="window" value="{{ window }}">
+        {% if window == 'custom' %}<input type="hidden" name="start" value="{{ span.start.strftime('%Y-%m-%dT%H:%M:%S') }}"><input type="hidden" name="end" value="{{ span.end.strftime('%Y-%m-%dT%H:%M:%S') }}">{% endif %}
         {% if loaded %}<input type="hidden" name="load" value="1">{% endif %}
         <label for="agent-sort">Order</label>
         <select id="agent-sort" name="sort_by" onchange="this.form.submit()">
@@ -71,7 +70,7 @@
     <div class="fleet-main">
     <div class="fleet-table-wrap">
         <table class="fleet-table" id="fleet-table">
-            <caption class="visually-hidden">Agents with run health for the {{ window_labels[window] }}. Select a row to see details.</caption>
+            <caption class="visually-hidden">Agents with run health for the {{ window_label }}. Select a row to see details.</caption>
             <thead>
                 <tr>
                     <th scope="col" class="fleet-fav"><span class="visually-hidden">Favorite</span></th>
@@ -158,7 +157,7 @@
     {% set agent_names = {} %}
     {% for agent in agents %}{% set _ = agent_names.update({agent.agent_id|string: agent.name or (agent.persona.name if agent.persona and agent.persona.name else agent.agent_id|string)}) %}{% endfor %}
     <div class="ov-grid ov-grid--activity">
-        {{ runs_chart(ov, window, window_labels[window], title='Fleet runs over time', prefix='fleet') }}
+        {{ runs_chart(ov, window, window_label, title='Fleet runs over time', prefix='fleet', zoom='/agents?sort_by=' ~ sort_by ~ ('&load=1' if loaded else '') ~ '&') }}
         {{ attention_panel(ov.attention, prefix='fleet', limit=6) }}
     </div>
     {{ recent_runs(ov.recent, agent_names, title='Recent runs across the fleet', prefix='fleet') }}
@@ -212,7 +211,7 @@
                 {% endfor %}
             </ol>
             {% else %}
-            <p class="panel-empty">No runs in the {{ window_labels[window] }}.</p>
+            <p class="panel-empty">No runs in the {{ window_label }}.</p>
             {% endif %}
 
             <h3 class="fleet-detail-title">Configuration</h3>

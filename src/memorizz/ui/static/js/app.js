@@ -754,3 +754,102 @@ document.addEventListener("click", async (event) => {
         chip.setAttribute("title", label);
     }, 1200);
 });
+
+// A link to a folded section (#section-tools) opens it, so the setting it
+// points at is in view.
+function openLinkedSection() {
+    const id = decodeURIComponent(window.location.hash.slice(1));
+    const target = id && document.getElementById(id);
+    if (!target) return;
+    const section = target.closest("details");
+    if (section && !section.open) {
+        section.open = true;
+        target.scrollIntoView({ block: "start" });
+    }
+}
+window.addEventListener("hashchange", openLinkedSection);
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", openLinkedSection);
+} else {
+    openLinkedSection();
+}
+
+// A custom time range closes when the viewer clicks elsewhere or presses Esc
+// (as does the usage export menu).
+document.addEventListener("click", (event) => {
+    document.querySelectorAll("details.range-custom[open]").forEach((picker) => {
+        if (!picker.contains(event.target)) picker.open = false;
+    });
+});
+document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    document.querySelectorAll("details.range-custom[open], details.usage-export[open]").forEach((picker) => {
+        picker.open = false;
+        picker.querySelector("summary")?.focus();
+    });
+});
+
+// Sortable tables: a table[data-sortable] header with data-sort-type sorts its
+// rows by each cell's data-value (or text), ascending then descending.
+function initSortableTables(root = document) {
+    root.querySelectorAll("table[data-sortable] th[data-sort-type]").forEach((th) => {
+        if (th.querySelector("button.sort-button")) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "sort-button";
+        button.append(...th.childNodes);
+        th.append(button);
+        th.setAttribute("aria-sort", "none");
+        button.addEventListener("click", () => {
+            const table = th.closest("table");
+            const index = [...th.parentElement.children].indexOf(th);
+            const numeric = th.dataset.sortType === "number";
+            const ascending = th.getAttribute("aria-sort") !== "ascending";
+            table.querySelectorAll("th[aria-sort]").forEach((other) => other.setAttribute("aria-sort", "none"));
+            th.setAttribute("aria-sort", ascending ? "ascending" : "descending");
+            const body = table.tBodies[0];
+            const key = (row) => {
+                const cell = row.children[index];
+                const value = cell ? (cell.dataset.value ?? cell.textContent.trim()) : "";
+                return numeric ? parseFloat(value) || 0 : value.toLowerCase();
+            };
+            const rows = [...body.rows].sort((a, b) => {
+                const x = key(a);
+                const y = key(b);
+                return (x < y ? -1 : x > y ? 1 : 0) * (ascending ? 1 : -1);
+            });
+            body.append(...rows);
+        });
+    });
+}
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => initSortableTables());
+} else {
+    initSortableTables();
+}
+
+// An open export menu closes when the viewer clicks elsewhere or presses Esc.
+document.addEventListener("click", (event) => {
+    document.querySelectorAll("details.usage-export[open]").forEach((menu) => {
+        if (!menu.contains(event.target)) menu.open = false;
+    });
+});
+
+// Long usage tables show their first rows; "Show all" opens the rest.
+function initRowExpanders(root = document) {
+    root.querySelectorAll("[data-show-rows]").forEach((button) => {
+        const table = button.parentElement.querySelector("table");
+        if (!table || !table.querySelector(".usage-extra")) return;
+        table.classList.add("is-collapsed");
+        button.hidden = false;
+        button.addEventListener("click", () => {
+            table.classList.remove("is-collapsed");
+            button.hidden = true;
+        });
+    });
+}
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => initRowExpanders());
+} else {
+    initRowExpanders();
+}

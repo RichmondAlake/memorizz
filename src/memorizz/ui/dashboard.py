@@ -9,14 +9,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
+from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import quote, urlencode
 
 from fastapi import HTTPException, Request
 
 from ..observability.analytics import _quote, aggregate_usage
 from ..observability.normalization import timestamp
-from ..observability.overview import WINDOWS, build_operations_overview
+from ..observability.overview import WINDOWS, build_operations_overview, resolve_window
 from ..observability.pricing import DEFAULT_PRICING
 from .helpers import (
     _duplicate_agent_notes,
@@ -102,29 +102,127 @@ def _automation_summary(store, now: datetime) -> Dict[str, Any]:
 
 
 def _trace_url(run: Dict[str, Any], scope: Dict[str, Any]) -> str:
-    return "/traces?" + urlencode(
-        {
-            **scope,
-            **{
-                key: run[key]
-                for key in ("agent_id", "thread_id", "root_trace_id", "turn_id")
-                if run.get(key)
-            },
-        }
+    """The run's trace, scrolled to its timeline."""
+    return (
+        "/traces?"
+        + urlencode(
+            {
+                **scope,
+                **{
+                    key: run[key]
+                    for key in ("agent_id", "thread_id", "root_trace_id", "turn_id")
+                    if run.get(key)
+                },
+            }
+        )
+        + "#trace-timeline"
     )
 
 
+# Tool failures fixed in the agent's tool settings: the tool is missing, not
+# callable, not disclosed, or called with arguments its signature refuses.
+_TOOL_SETUP_REASONS = {
+    "unknown_tool",
+    "tool_not_callable",
+    "tool_not_disclosed",
+    "invalid_tool_invocation",
+    "invalid_arguments",
+}
+# Built-in tools an agent gets from its memory or persona settings, so a
+# missing one is fixed there, not in its tool list: section, link label.
+_SETTINGS_TOOLS = {
+    "remember": ("memory", "Fix the agent's memory settings"),
+    "read_persona": ("persona", "Fix the agent's persona"),
+}
+
+
+def _tool_settings(name: str):
+    if name.startswith("entity_memory_"):
+        return _SETTINGS_TOOLS["remember"]
+    return _SETTINGS_TOOLS.get(name, ("tools", "Fix the agent's tools"))
+
+
+def link_attention(
+    items: List[Dict[str, Any]], editable_agent_ids: Iterable[str]
+) -> List[Dict[str, Any]]:
+    """Give each needs-attention item ``actions``: links to where it can be
+    fixed, the first the main one. Agent settings are linked only for agents
+    saved in this store; a plugin's or a deleted agent's runs have none."""
+    editable = set(editable_agent_ids)
+    scope = scoped_trace_filters()
+
+    def settings(agent_id: str, section: str, label: str):
+        if agent_id not in editable:
+            return None
+        return {
+            "label": label,
+            "href": f"/agents/{quote(agent_id, safe='')}/edit#section-{section}",
+        }
+
+    for item in items:
+        run, kind = item.get("run"), item.get("kind")
+        trace = (
+            {"label": "Open the run", "href": _trace_url(run, scope)} if run else None
+        )
+        agent_id = item.get("agent_id") or (run or {}).get("agent_id") or ""
+        if kind == "failed_runs":
+            if trace and item.get("count", 1) > 1:
+                trace["label"] = "Open the newest failed run"
+            actions = [trace]
+        elif kind == "tool" and item.get("reason") in _TOOL_SETUP_REASONS:
+            actions = [settings(agent_id, *_tool_settings(item["tool"])), trace]
+        elif kind == "tool":
+            actions = [trace, settings(agent_id, "tools", "Agent tools")]
+        elif kind == "provider_errors":
+            actions = [trace, settings(agent_id, "model", "Model settings")]
+        elif kind == "unpriced":
+            actions = [
+                {
+                    "label": "Set a price",
+                    "href": "/traces/usage/rates?"
+                    + urlencode(
+                        {
+                            "provider": item.get("provider") or "",
+                            "model": item.get("model") or "",
+                            "service_tier": item.get("service_tier") or "default",
+                        }
+                    ),
+                }
+            ]
+        elif kind == "duplicate_agent":
+            actions = [settings(item["agent_id"], "identity", "Open the agent")]
+        else:
+            actions = [
+                {"label": item.get("action") or "Open", "href": item["href"]}
+                if item.get("href")
+                else None
+            ]
+        item["actions"] = [action for action in actions if action]
+    return items
+
+
 def load_run_health(
-    request: Request, window: str, *, now: datetime, action: str, load: bool = False
+    request: Request,
+    window: str,
+    *,
+    now: datetime,
+    action: str,
+    load: bool = False,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Read recent traces once and summarize them; shared by overview pages.
 
-    Returns ``overview`` (or None), ``events`` inside the window, ``error``,
-    ``deferred`` and ``coverage``. Never raises for missing access or stores.
+    ``window`` is a key of ``WINDOWS`` or ``custom`` from ``start`` to ``end``.
+    Returns ``overview`` (or None), ``events`` inside the window, ``span``,
+    ``error``, ``deferred`` and ``coverage``. Never raises for missing access
+    or stores.
     """
+    span = resolve_window(window, start=start, end=end, now=now)
     result: Dict[str, Any] = {
         "overview": None,
         "events": [],
+        "span": span,
         "error": None,
         "deferred": _state.get("provider_type") in DEFERRED_PROVIDERS and not load,
         "coverage": {},
@@ -161,13 +259,22 @@ def load_run_health(
             return None, str(quote.get("cost_reason") or "No price recorded")
         return Decimal(str(cost)), ""
 
-    overview = build_operations_overview(events, window=window, now=now, price=price)
-    window_start = overview["window_start"]
+    # A custom range lists every run it holds, up to a page of them.
+    overview = build_operations_overview(
+        events,
+        now=now,
+        price=price,
+        span=span,
+        recent_limit=50 if span["key"] == "custom" else 12,
+    )
+    window_start, window_end = overview["window_start"], overview["window_end"]
     result["events"] = [
         event
         for event in events
         if timestamp(event.get("timestamp"))
-        and datetime.fromisoformat(timestamp(event.get("timestamp"))) >= window_start
+        and window_start
+        <= datetime.fromisoformat(timestamp(event.get("timestamp")))
+        <= window_end
     ]
     scope = scoped_trace_filters()
     for run in overview["recent"]:
@@ -175,12 +282,21 @@ def load_run_health(
     for agent in overview["agents"]:
         for run in agent["recent"]:
             run["trace_url"] = _trace_url(run, scope)
+    for bucket in overview["series"]:
+        if bucket["run"]:
+            bucket["trace_url"] = _trace_url(bucket["run"], scope)
     coverage = getattr(events, "coverage", {}) or {}
+    times = [
+        stamp for stamp in (timestamp(e.get("timestamp")) for e in events) if stamp
+    ]
     result["coverage"] = {
         "records": coverage.get("source_rows"),
         "truncated": bool(
             coverage.get("truncated") or coverage.get("window_truncated")
         ),
+        # The oldest event read, so a range reaching further back can say
+        # that older runs were not loaded.
+        "oldest": datetime.fromisoformat(min(times)) if times else None,
     }
     result["overview"] = overview
     audit_trace_view(
@@ -262,17 +378,30 @@ def coding_agent_sessions(
 
 
 def build_dashboard_context(
-    request: Request, window: str, *, automation_store=None, load: bool = False
+    request: Request,
+    window: str,
+    *,
+    automation_store=None,
+    load: bool = False,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Collect the overview, per-model usage, automations and agent names."""
-    window = window if window in WINDOWS else "7d"
     now = datetime.now(timezone.utc)
     health = load_run_health(
-        request, window, now=now, action="dashboard_overview", load=load
+        request,
+        window,
+        now=now,
+        action="dashboard_overview",
+        load=load,
+        start=start,
+        end=end,
     )
+    span = health["span"]
     context: Dict[str, Any] = {
-        "window": window,
+        "window": span["key"],
         "windows": list(WINDOWS),
+        "span": span,
         "generated_at": now,
         "overview": health["overview"],
         "usage": None,
@@ -282,7 +411,7 @@ def build_dashboard_context(
         "coverage": health["coverage"],
         "agent_names": {},
         "automations": {"available": False, "deferred": True},
-        "coding_agents": coding_agent_sessions(now - WINDOWS[window][0], now),
+        "coding_agents": coding_agent_sessions(span["start"], span["end"]),
     }
     if health["deferred"]:
         return context
@@ -307,6 +436,7 @@ def build_dashboard_context(
                 "detail": str(warning.get("message") or "")
                 + (f" ({warning['count']}×)" if warning.get("count", 1) > 1 else ""),
                 "href": "/traces/usage#provider-prompt-cache",
+                "action": "Open the prompt-cache report",
             }
         )
     try:
@@ -321,8 +451,15 @@ def build_dashboard_context(
                 "title": f"Automation {job['name']} failed its last run",
                 "detail": "Open the automation to see the run error.",
                 "href": f"/automations/{job['job_id']}",
+                "action": "Open the automation",
             }
         )
+    from .usage_budget import budget_attention
+
+    budget = budget_attention(request, now=now)
+    if budget:
+        overview["attention"].insert(0, budget)
+    link_attention(overview["attention"], context["agent_names"])
     return context
 
 
@@ -334,7 +471,32 @@ def template_helpers() -> Dict[str, Any]:
         "fmt_usd": format_usd,
         "relative_time": relative_time,
         "sparkline": sparkline_points,
+        "fmt_range": format_range,
+        "range_query": range_query,
     }
+
+
+def format_range(span: Dict[str, Any]) -> str:
+    """A custom range as one short label, such as "Oct 15 06:00 – 18:00 UTC"."""
+    start, end = span["start"], span["end"]
+    if start.time() == end.time() == datetime.min.time():
+        return f"{start:%b %d} – {end:%b %d, %Y}"
+    if start.date() == end.date():
+        return f"{start:%b %d %H:%M} – {end:%H:%M} UTC"
+    return f"{start:%b %d %H:%M} – {end:%b %d %H:%M} UTC"
+
+
+def range_query(span: Dict[str, Any]) -> str:
+    """The query parameters that select ``span`` again, for links on its page."""
+    if span["key"] != "custom":
+        return urlencode({"window": span["key"]})
+    return urlencode(
+        {
+            "window": "custom",
+            "start": span["start"].strftime("%Y-%m-%dT%H:%M:%S"),
+            "end": span["end"].strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+    )
 
 
 def format_duration(ms: Optional[float]) -> str:

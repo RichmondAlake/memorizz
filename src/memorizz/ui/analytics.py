@@ -35,13 +35,19 @@ def chart(rows, field, *, limit=12, rank=False):
     }
 
 
+def memory_label(value):
+    """A memory type as people say it: "knowledge_base" -> "Knowledge base"."""
+    return str(value).replace("_", " ").capitalize()
+
+
 def usage_charts(usage):
+    memory = [{**row, "label": memory_label(row["label"])} for row in usage["memory"]]
     return {
         "daily_tokens": chart(usage["daily"], "total_tokens", limit=90),
         "daily_cost": chart(usage["daily"], "cost_usd", limit=90),
         "agent_cost": chart(usage["agents"], "cost_usd", rank=True),
-        "memory_tokens": chart(usage["memory"], "memory_tokens_estimate", rank=True),
-        "memory_latency": chart(usage["memory"], "retrieval_mean_ms", rank=True),
+        "memory_tokens": chart(memory, "memory_tokens_estimate", rank=True),
+        "memory_latency": chart(memory, "retrieval_mean_ms", rank=True),
     }
 
 
