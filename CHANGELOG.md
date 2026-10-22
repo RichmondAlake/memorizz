@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.17.9 — 2026-10-22
+## 0.17.10 — 2026-10-22
+
+0.17.9 was tagged but never published (a browser test still expected the
+old Usage page); 0.17.10 is that release.
 
 ### Added
 
@@ -27,8 +30,9 @@
   sortable by-agent and by-model tables showing agent names. The runs that
   cost the most come after those, then memory, the prompt cache and the
   method notes.
-  - Agent and model filters are menus, and the timezone and read limit moved
-    under **More**.
+  - Agent and model filters are menus. The agent menu also lists agents seen
+    in the window that aren't saved in this store. The timezone and read
+    limit moved under **More**.
   - Latencies read as "820 ms", "5.5 s" or "1m 15s", and memory types by
     name.
   - Unpriced calls link to Rate cards. `/traces/usage.json` keeps covering

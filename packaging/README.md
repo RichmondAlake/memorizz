@@ -51,7 +51,7 @@ resource dependencies or build new bottles.
 
 Compare the base dependency list with the separate tap before every release.
 The 0.10.0 formula already includes `packaging` and Typer 0.27.2 (the new minimum);
-0.11.0 through 0.17.9 add no base dependencies (0.12.0 adds the optional
+0.11.0 through 0.17.10 add no base dependencies (0.12.0 adds the optional
 `rerank` extra; 0.13.0 moves the optional `terminal-bench` extra to Harbor 0.23;
 0.16.6 adds the optional `finetune` extra; 0.17.1 adds the optional macOS
 `desktop` extra).
