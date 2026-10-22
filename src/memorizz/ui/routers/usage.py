@@ -369,6 +369,17 @@ def usage_page(
         "can_edit": can_edit(),
         **budget_messages(request.query_params),
     }
+    view = usage_view.page(
+        usage,
+        previous,
+        span=span,
+        interval=span["bucket"],
+        timezone_name=timezone_name,
+        metric=metric,
+        names=names,
+        query=query,
+        now=now,
+    )
     return templates.TemplateResponse(
         "usage.html",
         {
@@ -380,26 +391,23 @@ def usage_page(
             "connection_info": _state.get("connection_info"),
             "usage": usage,
             "usage_charts": usage_charts(usage),
-            "view": usage_view.page(
-                usage,
-                previous,
-                span=span,
-                interval=span["bucket"],
-                timezone_name=timezone_name,
-                metric=metric,
-                names=names,
-                query=query,
-                now=now,
-            ),
+            "view": view,
             "span": span,
             "window": span["key"],
             "windows": [*WINDOWS, "all"],
             "metric": metric,
             "query": query,
             "ranged": ranged,
+            # Saved agents, and agents seen in the window that aren't saved
+            # here (a plugin's, or one from another store).
             "agent_choices": sorted(
                 {
-                    **{a: n for a, n in names.items()},
+                    **names,
+                    **{
+                        row["agent_id"]: row["name"]
+                        for row in view["agents"]
+                        if row["agent_id"]
+                    },
                     **({agent_id: names.get(agent_id, agent_id)} if agent_id else {}),
                 }.items(),
                 key=lambda item: item[1].lower(),

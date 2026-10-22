@@ -221,3 +221,9 @@ def test_a_bar_and_a_measure_keep_the_page_filters(page):
     assert "metric=spend&amp;window=custom&amp;start=" in html, "bars zoom in"
     broken = page.get("/traces/usage?window=custom&start=2026-13-01").text
     assert "Choose a start and an end for a custom range." in broken
+
+
+@pytest.mark.unit
+def test_the_agent_menu_lists_agents_seen_in_the_window(page):
+    html = page.get("/traces/usage").text
+    assert '<option value="a1">a1</option>' in html, "not saved here, but it ran"
