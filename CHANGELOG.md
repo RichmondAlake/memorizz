@@ -1,5 +1,107 @@
 # Changelog
 
+## 0.17.11 — 2026-10-22
+
+### Added
+
+- **The UI shows its connection and read-only mode on every page.** The
+  header names the provider and a short target with no credentials (Oracle
+  user@host:port/service, MongoDB host/database, a shortened folder) and
+  links to the connect page. With `MEMORIZZ_UI_READ_ONLY=true` or
+  `memorizz ui --read-only`, a Read-only badge shows, and buttons and forms
+  that would change data are turned off with a tooltip. A change a page
+  script sends is stopped in the browser with the same note. The server still
+  refuses every change.
+- **`OracleConfig(read_only=True)`** makes no schema changes: no tables,
+  columns or indexes, vector indexes included, and the in-database embedding
+  model is never installed. `provider.missing_tables` lists the tables the
+  schema lacks. A read-only UI connects this way and names any missing tables
+  on the dashboard and the connect page.
+- **`memorizz ui` can connect at startup.** It reads `--backend` and its
+  flags (`--dsn`, `--user`, `--schema`, `--path`, …; secrets only from
+  environment variables or a prompt), or `MEMORIZZ_BACKEND` and that
+  provider's own variables. If connecting fails, the UI starts anyway and the
+  connect page says why. `MEMORIZZ_UI_AUTO_CONNECT=false` turns it off.
+- **`memorizz doctor`** lists the optional extras that are installed and
+  checks the configured backend's driver. A missing driver now names the
+  extra to install, for example `pip install 'memorizz[oracle]'`.
+- **Embedding check at connect.** The UI compares the vector size the store
+  holds with the configured embedder. When the store records an embedder
+  that can run here, the UI searches with it; otherwise the dashboard and
+  connect page warn, naming both. Nothing is re-embedded, and a read-only UI
+  no longer loads Oracle's in-database embedding model.
+- **`delete_scope(..., keep_traces=True)`** deletes a run's memories, tool
+  logs and agent records but keeps its trace bundles, outcomes and verdicts,
+  so finished evaluation runs stay on Traces. Filesystem, MongoDB and Notion
+  now have `delete_scope` too. The memory provider docs have a new **Scoped
+  cleanup** page.
+- **Run tags.** `agent.run(..., trace_tags={"experiment": "lme-v2"})` labels
+  a turn (also on `run_stream` and the event streams). A delegate agent's
+  turn and a harness task started during a tagged turn carry its tags too.
+  The Traces page filters by `key=value` and shows a turn's tags.
+  `agent.trace_url()` returns the UI link to the last turn's trace.
+- **Grader verdicts.** `agent.record_task_outcome(turn_id=..., verdict="fail",
+  grader="llm-judge", reason_code="wrong_answer", score=0.0)` attaches a
+  verdict to a turn. It shows on the turn in Traces, and failing turns appear
+  under **Needs attention** on the Overview, linked to the newest one.
+- **Recall budget.** `RetrievalPolicy(max_chars_per_item=...)` sets how much
+  of each recalled item reaches the prompt (600 by default, `None` for whole
+  items), and `max_recall_chars` caps all recalled text in a turn, filled in
+  order of relevance. The defaults leave existing agents unchanged.
+- **The per-turn tool-call limit is reported.** When a turn hits
+  `ContextPolicy.max_tool_invocations_per_turn`, `agent.last_turn_limits`
+  says how many calls were refused and for which tools, the turn's trace
+  records it, and the Overview names the cause. The model is told when its
+  last two calls are left, and why a refused call did not run.
+- **Retrieved record ids for evaluation.**
+  `agent.last_memory_context_evidence(include_ids=True)` adds the plain
+  record ids, thread ids and scores behind the fingerprints. They are opt-in
+  and never written to traces.
+- **Entity facts are captured without the chat model's tool calls.** With
+  entity memory on and a background model set, the background model files
+  the entity facts each user message states, after the turn, even with
+  memory routing off. Facts the chat model wrote that turn aren't written
+  again. A long message is read in parts of 4,000 characters, one call each,
+  up to 8 parts. Turn it off with `with_entity_memory(True, capture=False)`.
+
+### Changed
+
+- The Trace Timeline explains failures in plain words on the card, not only
+  as a code in **Details**. A cancelled run says why it stopped: the reply
+  stopped being read (the Stop button, a closed tab or a dropped
+  connection), it ran past its time limit, or a cancel was requested. A
+  failed or cancelled turn also says what it did before it stopped, such as
+  "2 model calls wrote no reply text; it called automation_list_jobs and
+  internet_search". Each model result says whether it wrote text or asked
+  for tools.
+- **This costs an extra call per message:** agents with entity memory and
+  their own background model now make one background-model call per user
+  message for entity capture (above).
+- `entity_memory_lookup` is left out of a turn's tools and prompt while the
+  user has no entities. It comes back on the turn after the first entity is
+  written. In an evaluation an unneeded lookup roughly doubled a turn's input
+  tokens.
+- **`delete_scope` deletes more by default:** trace records are now matched
+  by the memory, user and agent of the turn they traced, on every provider.
+  On Oracle, a scope given only `memory_id` or `user_id` used to leave that
+  scope's trace bundles behind; it now deletes them unless
+  `keep_traces=True`.
+
+### Fixed
+
+- A turn that failed or was stopped left nothing to read: its message and
+  any reply written so far weren't saved anywhere. The turn result now keeps
+  the user's message and the partial reply as trace content, shown only
+  through the audited reveal, along with the stop reason and the length of
+  the partial reply. Exception messages are still never saved.
+- An entity past the embedding model's input limit was stored with no vector,
+  so search by meaning couldn't find it. It now gets a vector of its name,
+  type and newest facts. `metadata.embedding_status` says `partial` or
+  `missing`, and the memory pages and the playground show it.
+  `MEMORIZZ_ENTITY_EMBEDDING_MAX_TOKENS` sets the limit.
+- A missing database driver failed with "No module named 'oracledb'"; it now
+  says which extra to install.
+
 ## 0.17.10 — 2026-10-22
 
 0.17.9 was tagged but never published (a browser test still expected the
