@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.17.8 — 2026-10-22
+
+### Changed
+
+- The Trace Timeline is one rail instead of chat bubbles. Each event shows its
+  time (local, with the date where the day changes), who acted (user, agent,
+  model, tool, memory or run), a readable title and its badges on one row.
+  Filters narrow it to messages, model calls, tools, memory, run events or
+  errors. Thread and memory IDs appear once above the rail; an event's other
+  IDs and its metadata JSON, with a copy button, are under **Details**.
+  Content stays behind an explicit, audited reveal, now offered only on
+  events that have content. **Reveal all content** reveals every event the
+  filter shows, one audited request each.
+
+### Fixed
+
+- Revealing a turn that a Codex or Claude Code plugin saved, or an older
+  MemAgent turn, failed with "Invalid trace request". These turns have no
+  root trace, and the reveal endpoint required one. A reveal now reads such a
+  turn from the trace source and thread whose timeline showed it. Replays
+  still require a root trace and now say so.
+- On Oracle, an entity with more than about 8 KB of attributes could no
+  longer be saved (ORA-03146: invalid buffer length for TTC field), so with
+  entity memory on, a user who sent many facts eventually hit this error. The
+  MERGE that saved entities, and the one that saved vector documents, are now
+  an UPDATE or an INSERT, which python-oracledb thin binds at any size.
+- An Oracle-backed agent could hang for good in `pool.acquire()`. After a few
+  such errors the server ends the session (ORA-03138). Closing that
+  connection then failed with DPY-4011, which hid the real error, and the
+  pool went on counting the connection as busy. Once `pool_max` connections
+  were lost this way, every later call waited. A connection whose session
+  breaks now leaves the pool. The pool also waits at most `pool_wait_timeout`
+  seconds (default 60) for a free connection, then raises DPY-4005.
+
 ## 0.17.7 — 2026-10-21
 
 ### Added
