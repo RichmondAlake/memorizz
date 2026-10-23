@@ -554,6 +554,7 @@ class MemAgent:
         memory_consolidation: Optional[Union[bool, Dict[str, Any]]] = None,
         memory_routing: Optional[Union[bool, str, Dict[str, Any]]] = None,
         reranker: Optional[Union[str, Dict[str, Any]]] = None,
+        entity_policy: Optional[Union[Dict[str, Any], Any]] = None,
     ):
         """Initialize the MemAgent with configuration."""
         # Eager creation: no first-use race between concurrent runs.
@@ -887,6 +888,10 @@ class MemAgent:
 
         # Where the agent files what it remembers; off unless asked for.
         self.memory_routing = MemoryRoutingConfig.from_value(memory_routing)
+        from .entity_policy import EntityPolicy
+
+        # Which record entity facts about the user land on; see EntityPolicy.
+        self.entity_policy = EntityPolicy.from_value(entity_policy)
         # The agent's own reranker; None follows the store's.
         self.reranker = RerankerConfig.from_value(reranker)
         self._retrieval_scoring_cache: Optional[Tuple[Any, RetrievalScoring]] = None
@@ -3798,7 +3803,9 @@ class MemAgent:
             self._unregister_mcp_tools()
         return self
 
-    def with_entity_memory(self, enabled: bool = True, *, capture: Any = "keep"):
+    def with_entity_memory(
+        self, enabled: bool = True, *, capture: Any = "keep", policy: Any = "keep"
+    ):
         """
         Enable or disable entity memory support at runtime.
 
@@ -3809,10 +3816,17 @@ class MemAgent:
                 agent has its own background model; ``False`` turns it off;
                 ``True`` captures on the chat model when there is no
                 background model. Left out, the current setting stays.
+            policy: An :class:`~memorizz.memagent.entity_policy.EntityPolicy`
+                or its fields as a dict (``self_identity_key``, ``subjects``),
+                ``None`` for the default. Left out, the current one stays.
 
         Returns:
             Self for chaining.
         """
+        if policy != "keep":
+            from .entity_policy import EntityPolicy
+
+            self.entity_policy = EntityPolicy.from_value(policy)
         if capture != "keep":
             from dataclasses import replace as replace_config
 
@@ -10261,6 +10275,7 @@ class MemAgent:
                     query=query,
                     memory_id=self._entity_memory_id(memory_id),
                     user_id=user_id,
+                    **MemAgent._self_profile_read(self),
                 )
                 entity_context = entity_result.get("profiles") or []
                 if entity_context:
@@ -10500,6 +10515,11 @@ class MemAgent:
                     "- Facts the user shares about themselves and others are saved automatically after each turn; call 'entity_memory_upsert' only when the user asks you to correct or change a stored fact.\n"
                     if self._turn_capture_mode()
                     else "- After the user shares stable personal info (name, preferences, background, ongoing projects, likes/dislikes), call 'entity_memory_upsert' with the attribute/value pair so it persists.\n"
+                )
+                + (
+                    "- Entity memory here holds facts about the user only: use name 'user' for them, and never store facts about other people.\n"
+                    if self.entity_policy.self_only
+                    else ""
                 )
                 + "- Only store verifiable statements; skip speculative or time-sensitive details.\n"
                 "- Always keep JSON fields descriptive (e.g., attribute 'favorite_hobby', value 'hiking in the mountains')."
@@ -11023,15 +11043,52 @@ class MemAgent:
                 raise ValueError("A memory_id is required to store entity information.")
 
             normalized_attributes = _normalize_attributes(attributes)
+            normalized_metadata = _normalize_json_field(metadata, dict)
+            identity_key = None
+            policy = self.entity_policy
+            if policy.active:
+                from ..long_term.semantic.entity_memory import EntityMemory
+
+                self_record = policy.self_record(
+                    EntityMemory(self.memory_provider).list_entities(
+                        memory_id=resolved_memory_id, user_id=self._current_user_id
+                    )
+                )
+                if policy.refuses(
+                    name=name, metadata=normalized_metadata, self_record=self_record
+                ):
+                    from .entity_policy import SELF_ONLY_REFUSAL
+
+                    raise ValueError(SELF_ONLY_REFUSAL)
+                if policy.binds(
+                    name=name, metadata=normalized_metadata, self_record=self_record
+                ):
+                    # Host authority: the user's facts land on one record,
+                    # whatever name or id the model gave.
+                    identity_key = policy.self_identity_key
+                    entity_id = None
+                    if self_record or policy.is_self_name(name):
+                        name = None if self_record else "user"
+                    normalized_metadata = {
+                        **(normalized_metadata or {}),
+                        "is_self": True,
+                        "subject": "current_user",
+                    }
+            thread_id = str(self._current_thread_id or "")
+            if thread_id and normalized_attributes:
+                normalized_attributes = [
+                    {"thread_id": thread_id, **item} for item in normalized_attributes
+                ]
             stored = self.entity_memory_manager.upsert_entity_from_tool(
                 entity_id=entity_id,
                 name=name,
                 entity_type=entity_type,
                 attributes=normalized_attributes,
                 relations=_normalize_relations(relations),
-                metadata=_normalize_json_field(metadata, dict),
+                metadata=normalized_metadata,
                 memory_id=resolved_memory_id,
                 user_id=self._current_user_id,
+                **({"identity_key": identity_key} if identity_key else {}),
                 report=True,
             )
             if not isinstance(stored, dict):  # a manager without reports
@@ -12696,10 +12753,11 @@ class MemAgent:
                         records = entities.list_entities(
                             memory_id=entity_memory_id, user_id=user_id
                         )
+                        policy = self.entity_policy
                         facts, read = extract_facts_in_parts(
                             str(text or ""),
                             generate,
-                            records,
+                            policy.present(records) if policy.active else records,
                             source=(
                                 "what the user wrote"
                                 if source == "turn"
@@ -12718,7 +12776,10 @@ class MemAgent:
                         memory_id=entity_memory_id,
                         user_id=user_id,
                         routing=placement,
+                        policy=self.entity_policy,
+                        self_record=self.entity_policy.self_record(records),
                     )
+                if receipt.get("facts"):
                     receipt.update(stored=True, memory_id=entity_memory_id)
                     return receipt
                 if fallback is None:
@@ -12897,6 +12958,86 @@ class MemAgent:
         """Entity capture of one user message: facts extracted by the
         background model, each resting on words copied from the message and
         not already stored, less those the chat model wrote this turn."""
+        return self._capture_entities_from_text(
+            item.get("text"),
+            entity_memory_id=item.get("entity_memory_id"),
+            user_id=item.get("user_id"),
+            thread_id=item.get("thread_id"),
+            description="what the user wrote",
+            source="entity_capture",
+            change_source="entity_capture:turn",
+            tool_writes=list(item.get("tool_writes") or []),
+        )
+
+    def capture_entity_facts(
+        self,
+        text: str,
+        *,
+        user_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        source: str = "host",
+        description: str = "what the user wrote",
+        confidence: float = 0.8,
+    ) -> Dict[str, Any]:
+        """File the entity facts ``text`` states, as entity capture does after
+        a turn, for words the user wrote somewhere other than the chat: a
+        comment on a document, an edit, a form.
+
+        Runs now, on the background model (the agent's model when there is
+        none), and follows the agent's :class:`EntityPolicy`. Each fact must
+        rest on a phrase copied from ``text`` and be new. ``source`` is stored
+        on each attribute (for example ``"doc_comment:<id>"``), ``thread_id``
+        lets :meth:`EntityMemory.forget_thread` take the facts out again, and
+        ``description`` tells the extractor what ``text`` is ("a comment the
+        user left on their slide deck"). Returns a receipt with the ``facts``
+        stored; nothing is written when entity memory is off.
+        """
+        resolved = (
+            memory_id
+            or self._current_memory_id
+            or (self.memory_ids[0] if self.memory_ids else None)
+        )
+        entity_memory_id = self._entity_memory_id(resolved)
+        if not (
+            self._entity_memory_enabled
+            and self.entity_memory_manager
+            and self.entity_memory_manager.is_enabled()
+            and self.memory_provider is not None
+        ):
+            return {
+                "stored": False,
+                "memory_type": None,
+                "memory_id": entity_memory_id,
+                "source": source,
+                "reason": "Entity memory is off.",
+            }
+        return self._capture_entities_from_text(
+            text,
+            entity_memory_id=entity_memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            description=str(description or "what the user wrote")[:200],
+            source=str(source or "host")[:120],
+            change_source=f"entity_capture:{str(source or 'host')[:80]}",
+            confidence=confidence,
+            fallback_to_chat_model=True,
+        )
+
+    def _capture_entities_from_text(
+        self,
+        text: Any,
+        *,
+        entity_memory_id: Optional[str],
+        user_id: Optional[str],
+        thread_id: Optional[str],
+        description: str,
+        source: str,
+        change_source: str,
+        tool_writes: Sequence[Dict[str, Any]] = (),
+        confidence: float = 0.8,
+        fallback_to_chat_model: bool = False,
+    ) -> Dict[str, Any]:
         from ..learning.consolidation import text_generator
         from ..long_term.semantic.entity_memory import EntityMemory
         from ..memory_history import memory_change_context
@@ -12907,36 +13048,40 @@ class MemAgent:
             without_tool_writes,
         )
 
-        entity_memory_id = item.get("entity_memory_id")
-        user_id = item.get("user_id")
         receipt: Dict[str, Any] = {
             "stored": False,
             "memory_type": None,
             "memory_id": entity_memory_id,
-            "source": "entity_capture",
+            "source": source,
         }
-        body = clean_text(item.get("text"))
-        generate = text_generator(self.background_model)
+        body = clean_text(text)
+        model = self.background_model
+        if model is None and fallback_to_chat_model:
+            model = self.model
+        generate = text_generator(model)
         if not body or not entity_memory_id or generate is None:
             receipt["reason"] = "Nothing to capture."
             return receipt
         entities = EntityMemory(self.memory_provider)
-        # The whole message, in parts: a long list of facts isn't cut short.
+        records = entities.list_entities(memory_id=entity_memory_id, user_id=user_id)
+        policy = self.entity_policy
+        self_record = policy.self_record(records)
+        # The whole text, in parts: a long list of facts isn't cut short.
         facts, read = extract_facts_in_parts(
-            str(item.get("text") or ""),
+            str(text or ""),
             generate,
-            entities.list_entities(memory_id=entity_memory_id, user_id=user_id),
-            source="what the user wrote",
-            thread_id=str(item.get("thread_id") or ""),
+            policy.present(records) if policy.active else records,
+            source=description,
+            thread_id=str(thread_id or ""),
         )
         receipt.update(read)
-        facts = without_tool_writes(facts, list(item.get("tool_writes") or []))
+        facts = without_tool_writes(facts, list(tool_writes or ()))
         if not facts:
             receipt["reason"] = "No new entity fact rested on the user's words."
             return receipt
         with memory_change_context(
             actor=f"agent:{self.agent_id}",
-            source="entity_capture:turn",
+            source=change_source,
             agent_id=self.agent_id,
             label="Remembered (entity_memory)",
         ):
@@ -12945,15 +13090,31 @@ class MemAgent:
                 facts,
                 memory_id=entity_memory_id,
                 user_id=user_id,
-                routing={"confidence": 0.8},
-                source="entity_capture",
+                routing={"confidence": confidence},
+                source=source,
+                policy=policy,
+                self_record=self_record,
             )
+        if not receipt["facts"]:
+            receipt["reason"] = (
+                "The facts found were about someone else, or a value the user "
+                "pinned kept them out."
+            )
+            return receipt
         receipt.update(
             stored=True,
             memory_type="entity_memory",
             reason=f"Captured {len(receipt['facts'])} entity fact(s).",
         )
         return receipt
+
+    def _self_profile_read(self) -> Dict[str, Any]:
+        """With entity memory holding only the user (``subjects="self"``),
+        read their profile by key instead of searching by meaning."""
+        policy = getattr(self, "entity_policy", None)
+        if getattr(policy, "self_only", False) and policy.self_identity_key:
+            return {"self_identity_key": policy.self_identity_key}
+        return {}
 
     def _entity_lookup_offered(self) -> bool:
         """Whether this turn offers ``entity_memory_lookup``: not while the
@@ -13021,6 +13182,10 @@ class MemAgent:
             ),
             # The background model files each user message's entity facts.
             "entity_capture": self._turn_capture_mode() == "entities",
+            # Which record the user's facts land on; None is the default.
+            "entity_policy": (
+                self.entity_policy.to_dict() if self.entity_policy.active else None
+            ),
             "reranker": self.reranker.to_dict() if self.reranker else None,
         }
 
@@ -14058,6 +14223,7 @@ class MemAgent:
                         memory_id=resolved_memory_id,
                         limit=resolved_policy.max_entity_profiles,
                         user_id=user_id,
+                        **MemAgent._self_profile_read(self),
                     )
                 )
                 entity_profiles = list(entity_result.get("profiles") or [])

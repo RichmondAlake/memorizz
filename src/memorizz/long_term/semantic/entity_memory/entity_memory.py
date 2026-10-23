@@ -106,6 +106,12 @@ _LENGTH_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Earlier values an attribute keeps, newest first. Forgetting a conversation
+#: restores the newest value another conversation (or the user) gave.
+ATTRIBUTE_HISTORY_LIMIT = 5
+#: What a history entry keeps of the value it replaced.
+_HISTORY_FIELDS = ("value", "confidence", "source", "thread_id", "pinned", "updated_at")
+
 
 def _estimate_tokens(text: str) -> int:
     return -(-len(text or "") // _CHARS_PER_TOKEN)
@@ -236,6 +242,16 @@ class EntityAttribute(BaseModel):
     value: str
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     source: Optional[str] = None
+    #: The conversation that taught this value, so forgetting that
+    #: conversation (:meth:`EntityMemory.forget_thread`) takes it out.
+    thread_id: Optional[str] = None
+    #: Set or confirmed by the user. A write that is not pinned (the chat
+    #: model, entity capture, memory routing) never replaces a pinned value.
+    pinned: bool = False
+    #: Earlier values of this attribute, newest first, each with its
+    #: ``value``, ``confidence``, ``source``, ``thread_id`` and ``updated_at``
+    #: (at most ``ATTRIBUTE_HISTORY_LIMIT``). Prompts and vectors never read it.
+    history: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -344,6 +360,11 @@ class EntityMemory:
         An entity whose text is past the embedding model's input limit gets a
         vector of its name, type and newest attributes; the record notes it
         in ``metadata.embedding_status``. See :func:`embedding_input_tokens`.
+
+        A replaced attribute value moves to that attribute's ``history``. A
+        pinned attribute (``pinned=True``, set by the user) is only replaced
+        by another pinned write; ``kept_pinned`` names the attributes a write
+        left as they were for that reason.
         """
         now = self._timestamp()
         normalized_identity = self._normalize_identity_key(identity_key)
@@ -407,6 +428,7 @@ class EntityMemory:
         else:
             entity_id = entity_id or str(uuid.uuid4())
 
+        kept_pinned: List[str] = []
         record = self._merge_record(
             existing=existing,
             entity_id=entity_id,
@@ -418,6 +440,7 @@ class EntityMemory:
             memory_id=memory_id,
             user_id=user_id,
             timestamp=now,
+            kept_pinned=kept_pinned,
         )
 
         # Write-path dedup (NOOP guard): when the merge produced no new
@@ -432,11 +455,16 @@ class EntityMemory:
                 "entity_id": record["entity_id"],
                 "unchanged": True,
                 "embedding": self.embedding_report(existing),
+                "kept_pinned": kept_pinned,
             }
 
-        # Without an embedder the fact is still worth keeping: lookups by name
-        # and the exact scoped fallback still find it.
-        report = self._embed_record(record)
+        # A change the vector does not read (provenance, history, confidence,
+        # pinning) keeps the stored vector: no embedding call. Otherwise embed;
+        # without an embedder the fact is still worth keeping, and lookups by
+        # name and the exact scoped fallback still find it.
+        report = self._reuse_embedding(existing, record)
+        if report is None:
+            report = self._embed_record(record)
 
         if existing and existing.get("_id") is not None:
             record["_id"] = existing["_id"]
@@ -464,6 +492,7 @@ class EntityMemory:
             "entity_id": record["entity_id"],
             "unchanged": False,
             "embedding": report,
+            "kept_pinned": kept_pinned,
         }
 
     def record_attribute(
@@ -560,6 +589,29 @@ class EntityMemory:
         )  # a full page of others: unsure
         _presence_set(self.memory_provider, scope, found)
         return found
+
+    def get_by_identity_key(
+        self,
+        identity_key: str,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """The record a host identity key names (for example the user's own
+        profile), found by its deterministic id first: one keyed read, no
+        embedding call and no vector search."""
+        key = self._normalize_identity_key(identity_key)
+        if not key:
+            return None
+        record = self.get_entity(
+            self._deterministic_entity_id(key, memory_id=memory_id, user_id=user_id),
+            memory_id=memory_id,
+            user_id=user_id,
+        )
+        if record and self._stored_identity_key(record.get("metadata")) == key:
+            return record
+        # Records keyed before ids were derived from the identity.
+        return self._find_by_identity_key(key, memory_id=memory_id, user_id=user_id)
 
     def get_entity_by_name(
         self,
@@ -762,6 +814,7 @@ class EntityMemory:
         user_id: Optional[str],
         retirements: Sequence[Mapping[str, Any]],
         retired_by: str,
+        include_pinned: bool = False,
     ) -> int:
         """Take facts out of an entity without losing them.
 
@@ -769,7 +822,9 @@ class EntityMemory:
         ``reason`` and the attribute that ``kept`` its place. The attribute
         moves to ``metadata.retired_attributes``, where prompts and searches
         never read it, and :meth:`restore_consolidation` puts it back.
-        Returns how many attributes were retired.
+        A pinned attribute (the user's own) stays unless ``include_pinned``,
+        which a user's own removal passes. Returns how many attributes were
+        retired.
         """
         record = self._fetch_one_in_scope(
             {"entity_id": entity_id}, memory_id=memory_id, user_id=user_id
@@ -786,7 +841,11 @@ class EntityMemory:
         retired: List[Dict[str, Any]] = []
         for attribute in record.get("attributes") or []:
             item = wanted.get(str((attribute or {}).get("name") or "").casefold())
-            if not isinstance(attribute, dict) or item is None:
+            if (
+                not isinstance(attribute, dict)
+                or item is None
+                or (attribute.get("pinned") and not include_pinned)
+            ):
                 kept.append(attribute)
                 continue
             retired.append(
@@ -809,6 +868,178 @@ class EntityMemory:
         updated["updated_at"] = now
         self._store_rewritten(updated)
         return len(retired)
+
+    def forget_attributes(
+        self,
+        entity_id: str,
+        names: Sequence[str],
+        *,
+        memory_id: Optional[str],
+        user_id: Optional[str],
+    ) -> int:
+        """Delete attributes for good: their value, history and any retired
+        copy. For a user removing a fact about themselves; consolidation uses
+        :meth:`retire_attributes`, which can be undone. An entity left with
+        nothing is deleted. Returns how many attributes were removed.
+        """
+        record = self._fetch_one_in_scope(
+            {"entity_id": entity_id}, memory_id=memory_id, user_id=user_id
+        )
+        if not record:
+            raise ValueError("entity not found in the requested scope")
+        wanted = {str(name or "").strip().casefold() for name in names}
+        wanted.discard("")
+        attributes = [
+            item
+            for item in record.get("attributes") or []
+            if not (
+                isinstance(item, dict)
+                and str(item.get("name") or "").casefold() in wanted
+            )
+        ]
+        removed = len(record.get("attributes") or []) - len(attributes)
+        metadata = dict(record.get("metadata") or {})
+        retired = metadata.get("retired_attributes")
+        if isinstance(retired, list):
+            metadata["retired_attributes"] = [
+                item
+                for item in retired
+                if not (
+                    isinstance(item, dict)
+                    and str(item.get("name") or "").casefold() in wanted
+                )
+            ]
+        if not removed and metadata == (record.get("metadata") or {}):
+            return 0
+        if not attributes and not record.get("relations"):
+            storage_id = record.get("_id") or record.get("entity_id")
+            self.memory_provider.delete_by_id(str(storage_id), MemoryType.ENTITY_MEMORY)
+            return removed
+        updated = {
+            **record,
+            "attributes": attributes,
+            "metadata": metadata,
+            "updated_at": self._timestamp(),
+        }
+        self._store_rewritten(updated, previous=record)
+        return removed
+
+    def forget_thread(
+        self,
+        thread_id: str,
+        *,
+        memory_id: Optional[str],
+        user_id: Optional[str],
+        sources: Sequence[str] = (),
+    ) -> Dict[str, int]:
+        """Take out what one conversation taught, keeping what others did.
+
+        An attribute whose value came from ``thread_id`` (its ``thread_id``,
+        or a ``source`` listed in ``sources`` for values written before
+        attributes carried a thread) goes back to the newest earlier value
+        from somewhere else, or goes away when there is none. That thread's
+        entries leave every history and the retired facts too, as do
+        relations whose ``metadata.thread_id`` names it. An entity left with
+        no attributes and no relations is deleted. Pinned values are the
+        user's and stay unless the conversation itself pinned them.
+
+        Returns ``{"entities_changed", "entities_deleted", "attributes_removed",
+        "attributes_restored"}``.
+        """
+        thread = str(thread_id or "").strip()
+        if not thread:
+            raise ValueError("thread_id is required")
+        legacy = {str(item) for item in sources or () if str(item or "").strip()}
+
+        def _from_thread(item: Mapping[str, Any]) -> bool:
+            return str(item.get("thread_id") or "") == thread or (
+                bool(legacy) and str(item.get("source") or "") in legacy
+            )
+
+        counts = {
+            "entities_changed": 0,
+            "entities_deleted": 0,
+            "attributes_removed": 0,
+            "attributes_restored": 0,
+        }
+        for record in self.list_entities(
+            memory_id=memory_id, user_id=user_id, include_superseded=True
+        ):
+            changed = False
+            attributes: List[Dict[str, Any]] = []
+            for attribute in record.get("attributes") or []:
+                if not isinstance(attribute, dict):
+                    attributes.append(attribute)
+                    continue
+                history = [
+                    dict(item)
+                    for item in attribute.get("history") or []
+                    if isinstance(item, dict)
+                ]
+                remaining = [item for item in history if not _from_thread(item)]
+                if not _from_thread(attribute):
+                    if len(remaining) != len(history):
+                        attribute = {**attribute, "history": remaining}
+                        if not remaining:
+                            attribute.pop("history")
+                        changed = True
+                    attributes.append(attribute)
+                    continue
+                changed = True
+                if not remaining:
+                    counts["attributes_removed"] += 1
+                    continue
+                restored = {
+                    key: value
+                    for key, value in attribute.items()
+                    if key not in {*_HISTORY_FIELDS, "history"}
+                }
+                restored.update(remaining[0])
+                restored.setdefault("confidence", 0.8)
+                if remaining[1:]:
+                    restored["history"] = remaining[1:]
+                attributes.append(restored)
+                counts["attributes_restored"] += 1
+            relations = [
+                relation
+                for relation in record.get("relations") or []
+                if not (
+                    isinstance(relation, dict)
+                    and str((relation.get("metadata") or {}).get("thread_id") or "")
+                    == thread
+                )
+            ]
+            changed = changed or len(relations) != len(record.get("relations") or [])
+            metadata = dict(record.get("metadata") or {})
+            retired = metadata.get("retired_attributes")
+            if isinstance(retired, list):
+                kept_retired = [
+                    item
+                    for item in retired
+                    if not (isinstance(item, dict) and _from_thread(item))
+                ]
+                if len(kept_retired) != len(retired):
+                    metadata["retired_attributes"] = kept_retired
+                    changed = True
+            if not changed:
+                continue
+            if not attributes and not relations:
+                storage_id = record.get("_id") or record.get("entity_id")
+                if storage_id is not None and self.memory_provider.delete_by_id(
+                    str(storage_id), MemoryType.ENTITY_MEMORY
+                ):
+                    counts["entities_deleted"] += 1
+                    continue
+            updated = {
+                **record,
+                "attributes": attributes,
+                "relations": relations,
+                "metadata": metadata,
+                "updated_at": self._timestamp(),
+            }
+            self._store_rewritten(updated, previous=record)
+            counts["entities_changed"] += 1
+        return counts
 
     def restore_consolidation(
         self, plan_id: str, *, memory_id: str, user_id: Optional[str]
@@ -913,14 +1144,54 @@ class EntityMemory:
                 )
         return counts
 
-    def _store_rewritten(self, record: Dict[str, Any]) -> None:
-        """Store a changed record over its row, with a fresh embedding."""
+    def _store_rewritten(
+        self, record: Dict[str, Any], *, previous: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Store a changed record over its row, with a fresh embedding (or
+        ``previous``'s vector when the text it embeds did not change)."""
         payload = dict(record)
         payload.pop("score", None)
-        self._embed_record(payload)
+        if self._reuse_embedding(previous, payload) is None:
+            self._embed_record(payload)
         self.memory_provider.store(
             data=payload, memory_store_type=MemoryType.ENTITY_MEMORY
         )
+
+    def _reuse_embedding(
+        self, existing: Optional[Dict[str, Any]], record: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Give ``record`` ``existing``'s vector when the text it embeds is
+        unchanged and that vector is complete and the current embedder's size.
+        Returns the embedding report, or None when ``record`` needs embedding.
+        """
+        from ....memory_provider.base import provider_manages_embeddings
+
+        vector = (existing or {}).get("embedding")
+        if not vector or provider_manages_embeddings(self.memory_provider):
+            return None
+        report = self.embedding_report(existing)
+        if report.get("status") != "full":
+            return None
+
+        def _text(item: Dict[str, Any]) -> str:
+            metadata = {
+                key: value
+                for key, value in (item.get("metadata") or {}).items()
+                if key not in _EMBEDDING_STATUS_KEYS
+            }
+            return self._build_embedding_text({**item, "metadata": metadata})
+
+        if _text(existing) != _text(record):
+            return None
+        try:
+            from ....embeddings import get_embedding_dimensions
+
+            if len(vector) != int(get_embedding_dimensions()):
+                return None
+        except Exception:
+            return None
+        record["embedding"] = vector
+        return report
 
     # -- vectors ---------------------------------------------------------------
 
@@ -1766,6 +2037,7 @@ class EntityMemory:
         memory_id: Optional[str],
         timestamp: str,
         user_id: Optional[str] = None,
+        kept_pinned: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Merge dictionaries for upsert operations."""
         record = existing.copy() if existing else {}
@@ -1794,7 +2066,7 @@ class EntityMemory:
             }
 
         record_attributes = self._merge_attributes(
-            record.get("attributes", []), attributes, timestamp
+            record.get("attributes", []), attributes, timestamp, kept_pinned
         )
         record_relations = self._merge_relations(
             record.get("relations", []), relations, timestamp
@@ -1811,13 +2083,76 @@ class EntityMemory:
         existing: Iterable[Dict[str, Any]],
         updates: Optional[Sequence[Union[EntityAttribute, Dict[str, Any]]]],
         timestamp: str,
+        kept_pinned: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
+        """Apply ``updates`` by attribute name (last write wins), keeping what
+        each replaced value said in the attribute's ``history``.
+
+        A pinned value is replaced only by a pinned write; the names of the
+        attributes left alone for that reason go into ``kept_pinned``. The
+        same value said again from the same place changes nothing, so the
+        write stays a no-op; said from another conversation, the earlier
+        provenance joins the history, where forgetting either conversation
+        still leaves the fact.
+        """
         attributes = {attr["name"].lower(): attr for attr in existing if "name" in attr}
         for attr in updates or []:
             normalized = self._stamped(EntityAttribute, attr, timestamp)
             key = normalized["name"].lower()
+            previous = attributes.get(key)
+            if isinstance(previous, dict):
+                if previous.get("pinned") and not normalized.get("pinned"):
+                    if kept_pinned is not None:
+                        kept_pinned.append(previous["name"])
+                    continue
+                same_value = self._same_value(previous, normalized)
+                if same_value and all(
+                    previous.get(field) == normalized.get(field)
+                    for field in ("source", "thread_id", "pinned")
+                ):
+                    # Re-asserted verbatim. A higher confidence still counts.
+                    if float(normalized.get("confidence") or 0) > float(
+                        previous.get("confidence") or 0
+                    ):
+                        attributes[key] = {
+                            **previous,
+                            "confidence": normalized["confidence"],
+                            "updated_at": timestamp,
+                        }
+                    continue
+                history = self._attribute_history(previous)
+                normalized["created_at"] = (
+                    previous.get("created_at") if same_value else timestamp
+                ) or timestamp
+                if history:
+                    normalized["history"] = history
             attributes[key] = normalized
         return list(attributes.values())
+
+    @staticmethod
+    def _same_value(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        return " ".join(str(left.get("value") or "").casefold().split()) == " ".join(
+            str(right.get("value") or "").casefold().split()
+        )
+
+    @staticmethod
+    def _attribute_history(previous: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        """``previous``'s own history with ``previous`` itself in front."""
+        entry = {
+            field: previous.get(field)
+            for field in _HISTORY_FIELDS
+            if previous.get(field) not in (None, "", False)
+        }
+        older = [
+            dict(item)
+            for item in previous.get("history") or []
+            if isinstance(item, dict)
+        ]
+        return (
+            ([entry] + older)[:ATTRIBUTE_HISTORY_LIMIT]
+            if entry
+            else older[:ATTRIBUTE_HISTORY_LIMIT]
+        )
 
     def _merge_relations(
         self,
@@ -1854,6 +2189,16 @@ class EntityMemory:
         payload = (value if isinstance(value, model) else model(**value)).model_dump()
         payload["created_at"] = payload.get("created_at") or timestamp
         payload["updated_at"] = timestamp
+        if model is EntityAttribute:
+            # Records written before these fields existed keep their shape
+            # (and their no-op checks) until a value actually uses one.
+            for field, empty in (
+                ("thread_id", None),
+                ("pinned", False),
+                ("history", []),
+            ):
+                if payload.get(field) == empty:
+                    payload.pop(field, None)
         return payload
 
     @staticmethod

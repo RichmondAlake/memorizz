@@ -191,6 +191,12 @@ def save_agent(agent):
                 if getattr(agent, "reranker", None) is not None
                 else None
             ),
+            entity_policy=(
+                agent.entity_policy.to_dict()
+                if getattr(agent, "entity_policy", None) is not None
+                and agent.entity_policy.active
+                else None
+            ),
             delegation_config=normalize_delegation_config(
                 agent.delegation_config, for_persistence=True
             ),
@@ -714,6 +720,7 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
         "memory_consolidation": _dict_or_none(field("memory_consolidation")),
         "memory_routing": _dict_or_none(field("memory_routing")),
         "reranker": _dict_or_none(field("reranker")),
+        "entity_policy": _dict_or_none(field("entity_policy")),
         "tools": field("tools"),
         "persona": field("persona"),
         "name": field("name"),
@@ -1032,12 +1039,14 @@ def _refresh_background(agent, background_llm_config, consolidation) -> None:
     agent.memory_consolidation = ConsolidationConfig.from_value(consolidation)
 
 
-def _refresh_memory_models(agent, memory_routing, reranker) -> None:
+def _refresh_memory_models(agent, memory_routing, reranker, entity_policy) -> None:
     from ..reranking import RerankerConfig
+    from .entity_policy import EntityPolicy
     from .memory_routing import MemoryRoutingConfig
 
     agent.memory_routing = MemoryRoutingConfig.from_value(memory_routing)
     agent.reranker = RerankerConfig.from_value(reranker)
+    agent.entity_policy = EntityPolicy.from_value(entity_policy)
     agent._register_memory_routing_tools()
 
 
@@ -1333,7 +1342,7 @@ def _keep_until_reload(agent, *fields: str) -> None:
 _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
     (("llm_config", "context_window_tokens"), _refresh_model),
     (("background_llm_config", "memory_consolidation"), _refresh_background),
-    (("memory_routing", "reranker"), _refresh_memory_models),
+    (("memory_routing", "reranker", "entity_policy"), _refresh_memory_models),
     (("tools",), _code_owned),
     (("persona",), _refresh_persona),
     (

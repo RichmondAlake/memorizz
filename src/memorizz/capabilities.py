@@ -334,6 +334,60 @@ def capabilities() -> Dict[str, Any]:
                 "nested_input_schema": True,
                 "attribute_alias_normalization": True,
             },
+            "background_model": {
+                "available": True,
+                "parameter": "background_llm_config",
+                "runs": [
+                    "summaries",
+                    "compaction",
+                    "reflection",
+                    "consolidation",
+                    "entity_capture",
+                    "memory_routing",
+                ],
+            },
+            "entity_capture": {
+                "available": True,
+                "after_turn": True,
+                "switch": "with_entity_memory(capture=...)",
+                "skips_chat_model_writes": True,
+            },
+            "canonical_entity_capture": {
+                "available": True,
+                "policy": "EntityPolicy(self_identity_key, subjects)",
+                "write_paths": [
+                    "entity_memory_upsert",
+                    "entity_capture",
+                    "memory_routing",
+                    "capture_entity_facts",
+                ],
+                "subjects": ["all", "self"],
+                "self_profile_read": "by identity key, no vector search",
+            },
+            "host_entity_capture": {
+                "available": True,
+                "method": "MemAgent.capture_entity_facts",
+            },
+            "entity_attribute_provenance": {
+                "available": True,
+                "thread_id": True,
+                "history_limit": 5,
+                "forget_thread": "EntityMemory.forget_thread",
+                "forget_attributes": "EntityMemory.forget_attributes",
+            },
+            "pinned_entity_facts": {
+                "available": True,
+                "inferred_writes_never_replace": True,
+                "consolidation_never_retires": True,
+            },
+            "memory_routing": {
+                "available": True,
+                "routers": ["auto", "openai_decisions", "llm", "finetuned"],
+            },
+            "recall_budget": {
+                "available": True,
+                "fields": ["max_chars_per_item", "max_recall_chars"],
+            },
             "host_completion_policy": {
                 "available": True,
                 "stream_buffered_until_acceptance": True,

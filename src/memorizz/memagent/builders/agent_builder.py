@@ -45,6 +45,7 @@ class MemAgentBuilder:
         self._tool_cache_config = None
         self._entity_memory_enabled = None
         self._entity_capture: Any = "keep"
+        self._entity_policy: Any = "keep"
         self._internet_access_provider = None
         self._skills_marketplace_provider = None
         self._skills_marketplace_config = None
@@ -580,16 +581,18 @@ class MemAgentBuilder:
         return self
 
     def with_entity_memory(
-        self, enabled: bool = True, *, capture: Any = "keep"
+        self, enabled: bool = True, *, capture: Any = "keep", policy: Any = "keep"
     ) -> "MemAgentBuilder":
         """Explicitly enable or disable entity memory for the agent.
 
         ``capture=False`` stops the background model filing the entity facts
         of each user message (on by default when the agent has a background
-        model); see ``MemAgent.with_entity_memory``.
+        model). ``policy`` (``self_identity_key``, ``subjects``) binds the
+        user's facts to one record; see ``MemAgent.with_entity_memory``.
         """
         self._entity_memory_enabled = enabled
         self._entity_capture = capture
+        self._entity_policy = policy
         return self
 
     def with_tool_access(self, access: str) -> "MemAgentBuilder":
@@ -731,7 +734,9 @@ class MemAgentBuilder:
             if self._entity_memory_enabled is not None:
                 try:
                     agent.with_entity_memory(
-                        self._entity_memory_enabled, capture=self._entity_capture
+                        self._entity_memory_enabled,
+                        capture=self._entity_capture,
+                        policy=self._entity_policy,
                     )
                 except Exception as exc:
                     logger.warning(f"Failed to configure entity memory: {exc}")

@@ -50,6 +50,9 @@ class MemAgentModel(BaseModel):
     memory_routing: Optional[Dict[str, Any]] = None
     # The agent's own reranker (RerankerConfig); None follows the store's.
     reranker: Optional[Dict[str, Any]] = None
+    # Which record entity facts about the user land on (EntityPolicy); None
+    # is the default (records found by name).
+    entity_policy: Optional[Dict[str, Any]] = None
     delegation_config: Optional[Dict[str, Any]] = None
     skill_retrieval: bool = False
     skill_retrieval_config: Optional[Dict[str, Any]] = None

@@ -38,8 +38,39 @@ class EntityMemoryManager:
         memory_id: Optional[str],
         limit: int = 3,
         user_id: Optional[str] = None,
+        self_identity_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Return prompt profiles plus content-free retrieval diagnostics."""
+        """Return prompt profiles plus content-free retrieval diagnostics.
+
+        With ``self_identity_key`` (an agent whose entity memory holds only
+        its user, ``EntityPolicy(subjects="self")``) the one profile record is
+        read by its key: no query embedding and no vector search per turn.
+        """
+        if self_identity_key and self.is_enabled():
+            record = self._entity_memory.get_by_identity_key(
+                self_identity_key, memory_id=memory_id, user_id=user_id
+            )
+            profiles = (
+                [self._simplify_record(record)]
+                if record and record.get("entity_id") and record.get("attributes")
+                else []
+            )
+            return {
+                "profiles": profiles,
+                "retrieval": {
+                    "selector": "self_identity",
+                    "retrieval_mode": "exact",
+                    "semantic_attempted": False,
+                    "fallback_used": False,
+                    "match_count": len(profiles),
+                    "degraded": False,
+                    "degraded_reason": None,
+                    "scope": {
+                        "memory_id_bound": memory_id is not None,
+                        "user_id_bound": user_id is not None,
+                    },
+                },
+            }
         if not self.is_enabled() or not query:
             return {
                 "profiles": [],

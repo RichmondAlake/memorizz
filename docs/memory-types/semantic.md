@@ -106,6 +106,88 @@ vector is partial or missing, and the memory pages show *partial vector* or
   once it is not. A write through `EntityMemory` in the same process makes the
   lookup available on the next turn.
 
+### One record for the user
+
+Without a policy, entity writes find their record by name, so "user", "me"
+and the user's real name can become three records of one person. An
+`EntityPolicy` names the user's record by an identity key the host owns:
+
+```python
+from memorizz import EntityPolicy, MemAgent
+
+agent = MemAgent(
+    ...,
+    entity_policy=EntityPolicy(self_identity_key="authenticated_user"),
+)
+# or agent.with_entity_memory(True, policy={"self_identity_key": "authenticated_user"})
+```
+
+Every write path follows it: the `entity_memory_upsert` tool, entity capture
+after a turn, memory routing, `remember` and `capture_entity_facts`. A write
+about the user (named "user", "me", the record's own name, or a name the record
+holds such as `first_name`) lands on that one record, whatever name or entity id
+the writer gave. Fact extraction reads the record under the name "user", so
+facts it already holds are not filed again.
+
+`subjects="self"` keeps only facts about the user. Capture and routing drop
+facts about anyone else, and an `entity_memory_upsert` call about anyone else is
+refused: the model is told to store facts about the user as "user", so "my
+colleague Ben teaches physics" never becomes the user's subject. Use it for an
+application whose entity memory is a user profile. Each turn then reads the
+user's record by its key (`EntityMemory.get_by_identity_key`) rather than
+searching by meaning: no query embedding and no vector search. The policy is
+saved with the agent, and `agent.describe_memory()["entity_policy"]` shows it.
+
+### Where each fact came from
+
+Each attribute keeps the conversation that taught it (`thread_id`; the tool and
+capture fill it in) and, when its value is replaced, the earlier values in
+`history`, newest first, at most five. Prompts and vectors never read the
+history. The same value said again from the same place changes nothing, and a
+change the vector does not read (provenance, confidence, pinning) keeps the
+stored vector, so it costs no embedding call.
+
+Forget what one conversation taught, and keep what others did:
+
+```python
+EntityMemory(provider).forget_thread("thread-42", memory_id="...", user_id="...")
+# {'entities_changed': 1, 'entities_deleted': 0,
+#  'attributes_removed': 1, 'attributes_restored': 1}
+```
+
+An attribute from that conversation goes back to its newest earlier value from
+somewhere else, or goes away. The conversation's entries also leave every
+history and the retired facts. An entity left with nothing is deleted.
+`sources=[...]` also matches attributes by `source`, for values written before
+attributes carried a thread.
+
+### Pinned facts
+
+An attribute written with `pinned=True` is the user's own: something they set
+or confirmed. A write that is not pinned (the chat model, capture, routing)
+never replaces it; `upsert_entity_with_report` lists it under `kept_pinned`.
+Consolidation does not retire it. A pinned write replaces it, and
+`retire_attributes(..., include_pinned=True)` takes it out of prompts when the
+user asks, keeping a copy that can be restored; `forget_attributes(entity_id,
+names, ...)` deletes facts for good, with their history and any retired copy.
+
+### Facts from outside the chat
+
+`agent.capture_entity_facts(text, ...)` files the facts in words the user wrote
+somewhere else, such as a comment on a document or an edit, the way capture
+does after a turn. It runs at once on the background model (the agent's model
+when there is none) and follows the policy.
+
+```python
+agent.capture_entity_facts(
+    "Make every chart match: our brand green is #0E4F2F",
+    user_id="u1",
+    thread_id="deck:42",            # forget_thread("deck:42") takes it out
+    source="slide_comment:c1",      # stored on each attribute
+    description="a comment the user left on their slide deck",
+)
+```
+
 ### Chunking strategies
 
 `ingest_knowledge` accepts a `chunking_strategy` argument:

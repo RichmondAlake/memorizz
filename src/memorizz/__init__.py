@@ -80,6 +80,7 @@ _LAZY = {
     "ForgettingReport": (".learning", "ForgettingReport"),
     "ConsolidationConfig": (".learning", "ConsolidationConfig"),
     "MemoryRoutingConfig": (".memagent.memory_routing", "MemoryRoutingConfig"),
+    "EntityPolicy": (".memagent.entity_policy", "EntityPolicy"),
     "RerankerConfig": (".reranking", "RerankerConfig"),
     "ConsolidationPlan": (".learning", "ConsolidationPlan"),
     "SemanticCacheInspection": (
@@ -231,6 +232,7 @@ __all__ = [
     "ForgettingReport",
     "ConsolidationConfig",
     "MemoryRoutingConfig",
+    "EntityPolicy",
     "RerankerConfig",
     "ConsolidationPlan",
     "SemanticCacheInspection",

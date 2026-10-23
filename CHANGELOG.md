@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **One record for the user.** `EntityPolicy(self_identity_key=..., subjects=...)`
+  (`MemAgent(entity_policy=...)`, `with_entity_memory(policy=...)`, the
+  builder) puts facts about the user on one record named by a host-owned
+  identity key, on every write path: the `entity_memory_upsert` tool, entity
+  capture after a turn, memory routing, `remember` and the new
+  `capture_entity_facts`. A write naming "user", "me" or the record's own name
+  lands there, whatever name or id the writer gave, and extraction reads the
+  record as "user" so it does not file known facts again. `subjects="self"`
+  keeps only facts about the user: capture drops the rest, and a tool write
+  about someone else is refused rather than filed on the user (in a live run,
+  "my colleague Ben teaches physics" had become the user's teaching subject).
+  The policy is saved with the agent.
+- **Where each fact came from.** Entity attributes keep the conversation that
+  taught them (`thread_id`) and up to five earlier values in `history`.
+  `EntityMemory.forget_thread(thread_id, ...)` takes out what one conversation
+  taught: each of its values goes back to the newest earlier value from
+  elsewhere, or goes away, and an entity left with nothing is deleted.
+  `sources=[...]` matches older values by their `source`.
+- **Pinned facts.** An attribute written with `pinned=True` (set or confirmed
+  by the user) is never replaced by a write that is not pinned, and
+  consolidation never retires it. `upsert_entity_with_report` lists such
+  attributes under `kept_pinned`; `retire_attributes(..., include_pinned=True)`
+  removes one when the user asks.
+- `EntityMemory.forget_attributes(entity_id, names, ...)` deletes facts for
+  good, with their history and any retired copy, for a user removing what is
+  known about them. (`retire_attributes` keeps a copy so consolidation can be
+  undone.)
+- **`MemAgent.capture_entity_facts(text, ...)`** files the facts in words the
+  user wrote outside the chat (a comment, an edit), with a `source`, a
+  `thread_id` and a `description` of the text, on the background model or the
+  agent's own.
+- `capabilities()` announces `background_model`, `entity_capture`,
+  `canonical_entity_capture`, `host_entity_capture`,
+  `entity_attribute_provenance`, `pinned_entity_facts`, `memory_routing` and
+  `recall_budget`, so a host can check for them instead of probing internals.
+- `EntityPolicy` is exported from `memorizz`, and `describe_memory()` reports
+  `entity_policy`.
+
+### Changed
+
+- **One fewer embedding call and vector search per turn** for an agent whose
+  entity memory holds only its user (`EntityPolicy(subjects="self")`): the
+  user's profile is read by its identity key (`EntityMemory.get_by_identity_key`)
+  for the turn's context and for `build_personalization_context`, instead of
+  searching by meaning for a record that is always the same one.
+- An entity write that changes nothing the vector reads (provenance,
+  confidence, pinning, history) keeps the stored vector instead of making an
+  embedding call. `forget_thread` rewrites do the same when the text is
+  unchanged.
+- The same value said again from the same conversation and source is a no-op,
+  as before; said from another conversation, the earlier provenance joins the
+  history so forgetting either conversation keeps the fact.
+
 ## 0.17.12 — 2026-10-22
 
 ### Added

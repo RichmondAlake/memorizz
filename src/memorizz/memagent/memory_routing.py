@@ -488,29 +488,51 @@ def file_entity_facts(
     user_id: Optional[str],
     routing: Mapping[str, Any],
     source: str = "memory_routing",
+    policy: Any = None,
+    self_record: Optional[Mapping[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Upsert extracted facts, one write per entity; returns what was stored.
+
+    Each attribute keeps the conversation it came from (``thread_id``). With
+    an :class:`~memorizz.memagent.entity_policy.EntityPolicy` that names the
+    user's identity, facts about the user land on that one record (found by
+    the key, not by name), and with ``subjects="self"`` facts about anyone
+    else are dropped. A fact a pinned value kept out is not in the result.
 
     A fact whose entity's vector no longer covers all of it (its text is past
     the embedding model's input limit) carries ``embedding_status``.
     """
     confidence = round(min(0.9, float(routing.get("confidence") or 0.7)), 2)
+    active = bool(getattr(policy, "active", False))
     groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for fact in facts:
+        about_self = active and policy.is_self_name(fact["entity"], self_record)
+        if active and policy.self_only and not about_self:
+            continue
         key = (
-            str(fact.get("entity_id") or ""),
-            " ".join(str(fact["entity"]).casefold().split()),
+            ("self", "")
+            if about_self
+            else (
+                str(fact.get("entity_id") or ""),
+                " ".join(str(fact["entity"]).casefold().split()),
+            )
         )
         groups.setdefault(key, []).append(fact)
     stored = []
-    for group in groups.values():
+    for key, group in groups.items():
         first = group[0]
+        about_self = key == ("self", "")
         attributes = [
             {
                 "name": fact["attribute"],
                 "value": fact["value"],
                 "confidence": confidence,
                 "source": source,
+                **(
+                    {"thread_id": str(fact["thread_id"])}
+                    if fact.get("thread_id")
+                    else {}
+                ),
             }
             for fact in group
         ]
@@ -526,17 +548,30 @@ def file_entity_facts(
             memory_id=memory_id,
             user_id=user_id,
         )
+        if about_self:
+            # The key names the record; a name would only rename it.
+            arguments.update(
+                entity_id=None,
+                name=None if self_record else "user",
+                entity_type=None if self_record else "person",
+                identity_key=policy.self_identity_key,
+                metadata={"is_self": True, "subject": "current_user"},
+            )
         if callable(upsert):
             result = upsert(**arguments)
             entity_id, embedding = result["entity_id"], result.get("embedding") or {}
+            kept = {str(name).casefold() for name in result.get("kept_pinned") or ()}
         else:
             entity_id, embedding = entities.upsert_entity(**arguments), {}
+            kept = set()
         note = (
             {"embedding_status": embedding["status"]}
             if embedding.get("status") in {"partial", "missing"}
             else {}
         )
         for fact in group:
+            if str(fact["attribute"]).casefold() in kept:
+                continue
             stored.append(
                 {
                     "entity_id": entity_id,
