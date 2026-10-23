@@ -1,7 +1,8 @@
 #!/bin/sh
 # Run the MemoRizz CLI for the plugin: the one `memorizz plugin install`
 # recorded, else MEMORIZZ_BIN, else `memorizz` on PATH (or a common install
-# location), else uvx from PyPI.
+# location), else uvx from PyPI on Python 3.12: left to choose, uvx can take
+# macOS's Python 3.9 and the last memorizz that ran there, 0.0.40.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ -f "$here/memorizz-bin" ]; then
   recorded=$(head -n 1 "$here/memorizz-bin")
@@ -14,7 +15,7 @@ for candidate in "$HOME/.local/bin/memorizz" /opt/homebrew/bin/memorizz /usr/loc
 done
 for uvx in uvx "$HOME/.local/bin/uvx" /opt/homebrew/bin/uvx; do
   if command -v "$uvx" >/dev/null 2>&1 || [ -x "$uvx" ]; then
-    exec "$uvx" --quiet --from 'memorizz[mcp]' memorizz "$@"
+    exec "$uvx" --quiet --python 3.12 --from 'memorizz[mcp]' memorizz "$@"
   fi
 done
 echo "MemoRizz isn't installed. Install it with: pip install 'memorizz[mcp]' (or install uv: https://docs.astral.sh/uv/)." >&2

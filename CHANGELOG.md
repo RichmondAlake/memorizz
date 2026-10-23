@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The Codex and Claude Code plugins never started their MCP server on a Mac
+  without MemoRizz installed. With no `memorizz` to run, the plugin falls back
+  to `uvx`, and `uvx` picked macOS's Python 3.9, so it installed the last
+  release that ran there (0.0.40, which has no MCP server). The fallback now
+  asks for Python 3.12, which uv downloads when missing: from a cold start
+  the server answers in about 13 seconds.
+- A plugin installed from the GitHub marketplace never updated. Claude Code
+  updates a plugin only when its version changes, and both plugin manifests
+  had stayed at 0.14.1. They now carry the package version, and the release
+  test fails when they fall behind, so each release has to bump them.
+
+### Docs
+
+- The coding-agent plugins guide shows the one-step Claude Code install,
+  `claude plugin install memorizz --marketplace RichmondAlake/memorizz`, and
+  how a marketplace install picks up a new release.
+
 ## 0.17.15 — 2026-10-23
 
 ### Added

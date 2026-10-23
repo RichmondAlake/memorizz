@@ -64,12 +64,23 @@ You need MemoRizz with its MCP extra (`pip install 'memorizz[mcp]'`). Without a
     memorizz plugin install claude-code
     ```
 
-    Or from GitHub (or a checkout's path):
+    Or from GitHub (or a checkout's path), in one step on Claude Code 2.1.292
+    or later:
+
+    ```bash
+    claude plugin install memorizz --marketplace RichmondAlake/memorizz
+    ```
+
+    or in two:
 
     ```bash
     claude plugin marketplace add RichmondAlake/memorizz
     claude plugin install memorizz@memorizz
     ```
+
+    The plugin's version follows MemoRizz's releases:
+    `claude plugin marketplace update memorizz` and then
+    `claude plugin update memorizz@memorizz` bring in a new one.
 
     Or try it for one session: `claude --plugin-dir plugins/claude-code/memorizz`.
     Start a new session and allow the `memorizz` tools when Claude first asks.
@@ -220,7 +231,7 @@ Codex / Claude Code
 ```
 
 `scripts/memorizz.sh` runs the `memorizz` recorded at install, else
-`MEMORIZZ_BIN`, else `memorizz` on `PATH`, else `uvx --from 'memorizz[mcp]'`.
+`MEMORIZZ_BIN`, else `memorizz` on `PATH`, else `uvx --python 3.12 --from 'memorizz[mcp]'`.
 
 ## Repository layout
 

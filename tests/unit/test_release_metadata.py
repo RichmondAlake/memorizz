@@ -23,6 +23,13 @@ def test_release_versions_and_curated_changelog_agree():
     )
     npm = json.loads((ROOT / "packaging/npm/package.json").read_text())
     assert exported == version == npm["version"]
+    # Claude Code updates a marketplace plugin only when its version changes:
+    # a release that leaves it behind never reaches people who installed it.
+    for manifest in (
+        "plugins/claude-code/memorizz/.claude-plugin/plugin.json",
+        "plugins/codex/memorizz/.codex-plugin/plugin.json",
+    ):
+        assert json.loads((ROOT / manifest).read_text())["version"] == version, manifest
     assert re.search(
         rf"^## {re.escape(version)} — \d{{4}}-\d{{2}}-\d{{2}}$",
         (ROOT / "CHANGELOG.md").read_text(),

@@ -308,6 +308,40 @@ def test_the_launcher_runs_the_recorded_memorizz(tmp_path: Path):
         assert ran.stdout.strip() == "mcp serve"
 
 
+def test_without_memorizz_the_launcher_runs_it_with_uvx_on_python_312(tmp_path: Path):
+    # Left to choose, uvx took macOS's Python 3.9 and memorizz 0.0.40, which
+    # has no MCP server: a plugin installed from the marketplace never started.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uvx = bin_dir / "uvx"
+    uvx.write_text('#!/bin/sh\necho "$@"\n')
+    uvx.chmod(0o755)
+    repo = Path(__file__).resolve().parents[2]
+    for folder in ("claude-code", "codex"):
+        ran = subprocess.run(
+            [
+                "sh",
+                str(repo / "plugins" / folder / "memorizz" / "scripts" / "memorizz.sh"),
+                "mcp",
+                "serve",
+            ],
+            capture_output=True,
+            text=True,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+            timeout=10,
+        )
+        assert ran.stdout.split() == [
+            "--quiet",
+            "--python",
+            "3.12",
+            "--from",
+            "memorizz[mcp]",
+            "memorizz",
+            "mcp",
+            "serve",
+        ], folder
+
+
 def test_the_claude_code_plugin_matches_the_codex_one():
     manifest = json.loads(
         (CLAUDE_PLUGIN / ".claude-plugin" / "plugin.json").read_text()

@@ -1,6 +1,6 @@
 {
   "name": "memorizz",
-  "version": "0.14.1",
+  "version": "0.17.15",
   "description": "Durable, searchable project memory for Codex, plus your saved MemoRizz agents, through MemoRizz's MCP server.",
   "author": {
     "name": "Richmond Alake",
