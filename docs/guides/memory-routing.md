@@ -127,6 +127,27 @@ agent.with_entity_memory(True, capture=False)
 # or MemAgent(..., memory_routing={"entity_capture": False})
 ```
 
+### Off the turn, and only when worth it
+
+Capture, routing, compaction, reflection and consolidation never run on the
+user's turn: the reply returns, and the work runs on the agent's memory
+upkeep threads (`agent.wait_for_memory_upkeep()` waits for it, `close()`
+drains it). One agent usually serves every user of a server process, so there
+are up to 4 such threads (`MEMORIZZ_UPKEEP_WORKERS`, 1 to 16). Each user's
+messages are still filed in order, and each thread compacts one pass at a
+time.
+
+A message with nothing to file costs nothing: an acknowledgement or greeting
+("thanks", "ok, go on"), a single word or a bare link is skipped before any
+model call. For text the user did not write themselves, such as another
+agent's request, make the turn teach memory nothing (capture and routing are
+skipped, and the model's own `entity_memory_upsert` and `remember` calls are
+refused):
+
+```python
+agent.run(request_from_another_agent, user_id="u1", memory_capture=False)
+```
+
 `capture=True` captures on the chat model when there is no background
 model. With routing on and `capture_turns=True`, routing files the facts, so
 entity capture does not run as well. With `capture_turns=False`, entity capture

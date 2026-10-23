@@ -6,7 +6,7 @@ import logging
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ...._time import to_utc, utc_now
 from ....embeddings import get_embedding
@@ -47,6 +47,7 @@ class Workflow:
         embedding: List[float] = None,
         *,
         generate_embedding: bool = True,
+        thread_id: Optional[str] = None,
     ):
         """
         Initialize a new Workflow instance.
@@ -98,6 +99,14 @@ class Workflow:
         embedding : List[float], optional
             Pre-computed embedding. When provided (e.g. loading a stored
             document via ``from_dict``) the embedding API is not called.
+        generate_embedding : bool
+            Embed now. False defers it to :meth:`store_workflow`, when the
+            steps are known; a run that calls no tool is never stored, so it
+            never pays for an embedding.
+        thread_id : str, optional
+            The conversation the run belonged to, stored as
+            ``origin_thread_id`` (stores strip a bare ``thread_id`` from
+            workflow records) so a host can forget one conversation's runs.
         """
         self.name = name
         self.description = description
@@ -111,6 +120,7 @@ class Workflow:
         self.outcome = outcome or WorkflowOutcome.SUCCESS
         self.user_query = user_query
         self.user_id = user_id
+        self.thread_id = str(thread_id) if thread_id else None
         self.canonical_hash = canonical_hash
         self.canonical_signature = canonical_signature
         self.step_count = step_count
@@ -180,6 +190,8 @@ class Workflow:
         }
         if self.user_id is not None:
             data["user_id"] = self.user_id
+        if self.thread_id:
+            data["origin_thread_id"] = self.thread_id
         return data
 
     @classmethod
@@ -218,6 +230,7 @@ class Workflow:
             shadow_evaluations=data.get("shadow_evaluations"),
             embedding=data.get("embedding"),
             generate_embedding=False,
+            thread_id=data.get("origin_thread_id"),
         )
 
     def refresh_canonical_fields(self, force: bool = False) -> None:
@@ -253,6 +266,9 @@ class Workflow:
             The ID of the stored workflow.
         """
         self.refresh_canonical_fields()
+        if self.embedding is None:
+            # Deferred from construction: embed the run with its steps.
+            self.embedding = self._generate_embedding()
         workflow_data = self.to_dict()
         return provider.store(
             workflow_data, memory_store_type=MemoryType.WORKFLOW_MEMORY

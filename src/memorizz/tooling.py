@@ -26,6 +26,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Tuple,
     get_type_hints,
 )
 
@@ -395,8 +396,24 @@ class ContextPolicy:
     compact_at: int = 80
     # Messages kept word for word when compacting.
     keep_recent_messages: int = 6
+    # The host's own tools that every turn offers, whatever progressive
+    # disclosure selects (for example a per-turn checklist tool the host's
+    # context already describes, which the model should not have to discover).
+    always_visible_tools: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        names = self.always_visible_tools
+        if isinstance(names, str):
+            names = (names,)
+        object.__setattr__(
+            self,
+            "always_visible_tools",
+            tuple(
+                dict.fromkeys(
+                    str(name).strip() for name in names or () if str(name).strip()
+                )
+            ),
+        )
         object.__setattr__(self, "tool_top_k", max(1, min(int(self.tool_top_k), 50)))
         object.__setattr__(
             self, "sticky_tool_limit", max(0, min(int(self.sticky_tool_limit), 50))
@@ -452,6 +469,11 @@ class ContextPolicy:
             "max_tool_attempts_per_call": self.max_tool_attempts_per_call,
             "compact_at": self.compact_at,
             "keep_recent_messages": self.keep_recent_messages,
+            **(
+                {"always_visible_tools": list(self.always_visible_tools)}
+                if self.always_visible_tools
+                else {}
+            ),
         }
 
 

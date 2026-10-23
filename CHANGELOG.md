@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `run(..., memory_capture=False)` (and `run_stream`, `run_stream_events`)
+  makes one turn teach memory nothing, for text the user did not write
+  themselves, such as another agent's request: no entity capture or routing
+  after it, and the model's `entity_memory_upsert` and `remember` calls are
+  refused. (An end-to-end run found the chat model saving "lives in Lisbon"
+  from another agent's message when only capture was off.)
+- `EntityMemory.forget_sources(sources, ...)` takes out what particular
+  sources taught (a deleted comment or note), restoring earlier values the way
+  `forget_thread` does for a conversation.
+- `ContextPolicy(always_visible_tools=(...))`: host tools every turn offers
+  whatever progressive disclosure selects. Hosts no longer edit the router's
+  internal set.
+- Workflow records keep the conversation they came from as
+  `origin_thread_id` (stores strip a bare `thread_id` from workflows), so a
+  host can forget one conversation's runs.
+
+### Changed
+
+- **Memory upkeep runs on up to 4 threads** (`MEMORIZZ_UPKEEP_WORKERS`, 1 to
+  16) instead of one. A server usually shares one agent across all its users,
+  so every user's entity capture, compaction and consolidation queued behind
+  each other's background-model calls. Each user's and each thread's own work
+  still runs in order. Upkeep never runs on the turn: the reply returns while
+  it is still working.
+- **No background call for messages with nothing to file**: an
+  acknowledgement or greeting ("thanks", "ok, go on"), a single word or a bare
+  link is not sent to capture or routing.
+- **No embedding at the start of every turn**: a workflow is embedded when it
+  is stored, with its steps, instead of when the turn begins. A turn that
+  calls no tool is never stored, so it no longer pays for an embedding before
+  the model is called, and stored workflows are now found by what they did.
+
+### Fixed
+
+- Built-in memory tools carried no governance, so they counted as
+  deterministic and without side effects. With a semantic cache, a turn that
+  saved a fact (`entity_memory_upsert`, `remember`, `update_persona`,
+  `summarize_conversation`) could be cached as read-only and replayed without
+  the write, and answers read from memory (`entity_memory_lookup`, tool logs,
+  summaries) could be served stale. They now say what they do.
+- Consolidation plans were added and dropped from more than one thread
+  without a lock.
+
 ## 0.17.13 — 2026-10-23
 
 ### Added

@@ -956,6 +956,45 @@ class EntityMemory:
                 bool(legacy) and str(item.get("source") or "") in legacy
             )
 
+        return self._forget_where(
+            _from_thread, relation_thread=thread, memory_id=memory_id, user_id=user_id
+        )
+
+    def forget_sources(
+        self,
+        sources: Sequence[str],
+        *,
+        memory_id: Optional[str],
+        user_id: Optional[str],
+    ) -> Dict[str, int]:
+        """Take out what particular sources taught (``source`` on each
+        attribute, for example ``"doc_comment:<id>"`` when that comment is
+        deleted), the way :meth:`forget_thread` does for a conversation:
+        each value goes back to its newest earlier value from elsewhere, or
+        goes away. Returns the same counts."""
+        wanted = {
+            str(item).strip() for item in sources or () if str(item or "").strip()
+        }
+        if not wanted:
+            raise ValueError("at least one source is required")
+        return self._forget_where(
+            lambda item: str(item.get("source") or "") in wanted,
+            relation_thread=None,
+            memory_id=memory_id,
+            user_id=user_id,
+        )
+
+    def _forget_where(
+        self,
+        _from_thread: Any,
+        *,
+        relation_thread: Optional[str],
+        memory_id: Optional[str],
+        user_id: Optional[str],
+    ) -> Dict[str, int]:
+        """Rewrite every record in scope without the attribute values (and
+        history entries and retired copies) ``_from_thread`` matches."""
+        thread = relation_thread or ""
         counts = {
             "entities_changed": 0,
             "entities_deleted": 0,
@@ -1004,7 +1043,8 @@ class EntityMemory:
                 relation
                 for relation in record.get("relations") or []
                 if not (
-                    isinstance(relation, dict)
+                    thread
+                    and isinstance(relation, dict)
                     and str((relation.get("metadata") or {}).get("thread_id") or "")
                     == thread
                 )

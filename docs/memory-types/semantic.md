@@ -159,7 +159,8 @@ An attribute from that conversation goes back to its newest earlier value from
 somewhere else, or goes away. The conversation's entries also leave every
 history and the retired facts. An entity left with nothing is deleted.
 `sources=[...]` also matches attributes by `source`, for values written before
-attributes carried a thread.
+attributes carried a thread. `forget_sources(["doc_comment:c1"], ...)` does the
+same for particular sources alone, for example when that comment is deleted.
 
 ### Pinned facts
 

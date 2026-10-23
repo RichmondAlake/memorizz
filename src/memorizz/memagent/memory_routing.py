@@ -621,6 +621,79 @@ def without_tool_writes(
 _SPACE = re.compile(r"\s+")
 
 
+_ACKNOWLEDGEMENTS = frozenset(
+    {
+        "ok",
+        "okay",
+        "k",
+        "kk",
+        "yes",
+        "yep",
+        "yeah",
+        "no",
+        "nope",
+        "sure",
+        "thanks",
+        "thank you",
+        "thank you so much",
+        "thanks a lot",
+        "thx",
+        "ty",
+        "cool",
+        "great",
+        "nice",
+        "awesome",
+        "perfect",
+        "good",
+        "got it",
+        "sounds good",
+        "makes sense",
+        "continue",
+        "go on",
+        "go ahead",
+        "next",
+        "more",
+        "again",
+        "please continue",
+        "keep going",
+        "hi",
+        "hello",
+        "hey",
+        "bye",
+        "goodbye",
+        "lol",
+        "done",
+        "ok thanks",
+        "okay thanks",
+        "great thanks",
+        "yes please",
+        "no thanks",
+        "please",
+        "wow",
+        "hmm",
+        "why",
+        "how",
+        "what",
+    }
+)
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_WORD_RE = re.compile(r"[^\W\d_][\w'’-]*")
+
+
+def worth_capturing(text: Any) -> bool:
+    """Whether a message could state a durable fact at all.
+
+    False for an acknowledgement or greeting ("thanks", "ok, go on"), a single
+    word, or a bare link, so capture and routing make no model call for
+    them. Anything longer is left to the extractor and its guards.
+    """
+    body = _URL_RE.sub(" ", " ".join(str(text or "").split()))
+    words = _WORD_RE.findall(body.casefold())
+    if len(words) < 2:
+        return False
+    return " ".join(words) not in _ACKNOWLEDGEMENTS
+
+
 def clean_text(text: Any, limit: int = 4000) -> str:
     return _SPACE.sub(" ", str(text or "")).strip()[:limit]
 
@@ -703,4 +776,5 @@ __all__ = [
     "place",
     "route",
     "without_tool_writes",
+    "worth_capturing",
 ]

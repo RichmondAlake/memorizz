@@ -403,6 +403,23 @@ _UPKEEP_STATES: "weakref.WeakKeyDictionary[Any, Dict[str, _UpkeepState]]" = (
 _UPKEEP_STATES_LOCK = threading.Lock()
 
 
+#: What a memory write in a ``memory_capture=False`` turn tells the model.
+_NO_CAPTURE_REFUSAL = (
+    "Nothing from this turn is saved to memory: its message was not written "
+    "by the user. Answer without saving."
+)
+
+
+def _upkeep_worker_count() -> int:
+    """Threads for one agent's memory upkeep (``MEMORIZZ_UPKEEP_WORKERS``,
+    default 4, 1 to 16)."""
+    try:
+        value = int(os.getenv("MEMORIZZ_UPKEEP_WORKERS", "4"))
+    except ValueError:
+        value = 4
+    return max(1, min(value, 16))
+
+
 def _shared_upkeep(provider: Any, agent_id: Optional[str]) -> _UpkeepState:
     if provider is None or not agent_id:
         return _UpkeepState()
@@ -466,6 +483,8 @@ class MemAgent:
     _last_completion_decisions = _ContextLocal(list)
     # ``run(..., retrieval_policy=)`` for this call only; never saved.
     _retrieval_policy_override = _ContextLocal()
+    # ``run(..., memory_capture=False)`` for this call only.
+    _memory_capture_override = _ContextLocal()
     # How close this turn's request came to compact_at, for compacting the
     # thread in the background before the next turn needs it.
     _compaction_outlook = _ContextLocal()
@@ -979,6 +998,7 @@ class MemAgent:
                 "run_harness_task",
                 "get_harness_run",
                 "request_capability",
+                *self.context_policy.always_visible_tools,
             },
             max_invocations_per_turn=self.context_policy.max_tool_invocations_per_turn,
             max_attempts_per_call=self.context_policy.max_tool_attempts_per_call,
@@ -2523,10 +2543,12 @@ class MemAgent:
         if not self.tool_manager or self._context_tools_registered:
             return
 
+        @governed_tool(deterministic=False, side_effects=False, domains=("memory",))
         def context_window_stats_tool() -> Dict[str, Any]:
             """Return latest context window stats."""
             return self.get_context_window_stats() or {}
 
+        @governed_tool(deterministic=False, side_effects=False, domains=("memory",))
         def list_summary_registry_tool() -> Dict[str, Any]:
             """List all summaries for the current thread. Each entry contains
             a summary_id and short_description. Use expand_summary to
@@ -2542,6 +2564,7 @@ class MemAgent:
             )
             return {"summaries": summaries}
 
+        @governed_tool(deterministic=False, side_effects=False, domains=("memory",))
         def expand_summary(summary_id: str) -> Dict[str, Any]:
             """Expand a summary reference to its full content AND the original
             conversation messages that were compacted into it. Use this when
@@ -2606,6 +2629,12 @@ class MemAgent:
 
             return result
 
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=False,
+            domains=("memory",),
+        )
         def summarize_conversation(
             days_back: int = 1, max_memories_per_summary: int = 20
         ) -> Dict[str, Any]:
@@ -2667,6 +2696,7 @@ class MemAgent:
                 ),
             }
 
+        @governed_tool(deterministic=False, side_effects=False, domains=("memory",))
         def retrieve_tool_log_entry(tool_log_id: str) -> Dict[str, Any]:
             """Retrieve a stored tool log entry by its ID. Use this to access
             full tool output that was offloaded from the context window."""
@@ -2687,6 +2717,7 @@ class MemAgent:
                 }
             return {"ok": True, "tool_log_id": tool_log_id, "tool_log": result}
 
+        @governed_tool(deterministic=False, side_effects=False, domains=("memory",))
         def list_recent_tool_logs(limit: int = 10) -> Dict[str, Any]:
             """List recent tool execution logs for the current thread.
 
@@ -6606,6 +6637,7 @@ class MemAgent:
         observability_context: Optional[Dict[str, Any]] = None,
         retrieval_policy: Any = None,
         trace_tags: Optional[Dict[str, str]] = None,
+        memory_capture: Optional[bool] = None,
     ) -> str:
         """
         Run the agent with the given query using the new manager architecture.
@@ -6663,11 +6695,34 @@ class MemAgent:
                 string tags; see ``memorizz.observability.normalize_trace_tags``
                 for the rules. Invalid tags raise ``ValueError`` before the
                 turn runs.
+            memory_capture: ``False`` makes the turn teach memory nothing, for
+                text the user did not write themselves (another agent's
+                request, a system prompt): no entity capture or routing after
+                it, and the model's ``entity_memory_upsert`` and ``remember``
+                calls are refused with a short explanation. The turn is still
+                recorded in its conversation.
 
         Returns:
             The agent's response
         """
         trace_tags = normalize_trace_tags(trace_tags)
+        if memory_capture is not None:
+            previous_capture = self._memory_capture_override
+            self._memory_capture_override = bool(memory_capture)
+            try:
+                return self.run(
+                    query,
+                    memory_id=memory_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    context=context,
+                    tool_context=tool_context,
+                    observability_context=observability_context,
+                    retrieval_policy=retrieval_policy,
+                    trace_tags=trace_tags,
+                )
+            finally:
+                self._memory_capture_override = previous_capture
         if retrieval_policy is not None:
             previous_policy = self._retrieval_policy_override
             self._retrieval_policy_override = self._call_policy(retrieval_policy)
@@ -7605,6 +7660,7 @@ class MemAgent:
         observability_context: Optional[Dict[str, Any]] = None,
         retrieval_policy: Any = None,
         trace_tags: Optional[Dict[str, str]] = None,
+        memory_capture: Optional[bool] = None,
     ) -> Generator[str, None, None]:
         """
         Run the agent with streaming output, yielding text chunks as they arrive.
@@ -7638,6 +7694,8 @@ class MemAgent:
             trace_tags: Optional run labels for this turn's trace. See
                 ``run()``; ``run_stream_events(..., trace_tags=...)`` passes
                 them here.
+            memory_capture: ``False`` keeps this turn's message out of entity
+                capture and memory routing. See ``run()``.
 
         Yields:
             str: Partial text chunks of the agent's response
@@ -7646,6 +7704,26 @@ class MemAgent:
             Use :meth:`run_stream_events`. This method will be removed in 0.14.
         """
         trace_tags = normalize_trace_tags(trace_tags)
+        if memory_capture is not None:
+            previous_capture = self._memory_capture_override
+            self._memory_capture_override = bool(memory_capture)
+            try:
+                yield from self.run_stream(
+                    query,
+                    memory_id=memory_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    context=context,
+                    tool_context=tool_context,
+                    raise_on_provider_error=raise_on_provider_error,
+                    event_callback=event_callback,
+                    observability_context=observability_context,
+                    retrieval_policy=retrieval_policy,
+                    trace_tags=trace_tags,
+                )
+            finally:
+                self._memory_capture_override = previous_capture
+            return
         if retrieval_policy is not None:
             previous_policy = self._retrieval_policy_override
             self._retrieval_policy_override = self._call_policy(retrieval_policy)
@@ -8512,6 +8590,10 @@ class MemAgent:
             user_query=query,
             user_id=user_id,
             skills_activated=list(self._activated_skill_ids or []),
+            # Embedded when stored, with its steps: most turns call no tool
+            # and are never stored, and this runs before the model call.
+            generate_embedding=False,
+            thread_id=self._current_thread_id,
         )
         logger.debug(f"Created workflow for tracking: {workflow.workflow_id}")
         return workflow
@@ -10894,6 +10976,7 @@ class MemAgent:
         if self._entity_memory_tools_registered:
             return
 
+        @governed_tool(deterministic=False, side_effects=False, domains=("memory",))
         def entity_memory_lookup(
             entity_id: str = None,
             name: str = None,
@@ -11024,6 +11107,12 @@ class MemAgent:
                 normalized.append(item.model_dump(exclude_none=True))
             return normalized
 
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=False,
+            domains=("memory",),
+        )
         def entity_memory_upsert(
             entity_id: str = None,
             name: str = None,
@@ -11042,6 +11131,10 @@ class MemAgent:
             if resolved_memory_id is None:
                 raise ValueError("A memory_id is required to store entity information.")
 
+            if self._memory_capture_override is False:
+                # run(..., memory_capture=False): this turn's message was not
+                # written by the user, so nothing from it becomes memory.
+                raise ValueError(_NO_CAPTURE_REFUSAL)
             normalized_attributes = _normalize_attributes(attributes)
             normalized_metadata = _normalize_json_field(metadata, dict)
             identity_key = None
@@ -11075,16 +11168,29 @@ class MemAgent:
                         "subject": "current_user",
                     }
             thread_id = str(self._current_thread_id or "")
+            normalized_relations = _normalize_relations(relations)
             if thread_id and normalized_attributes:
                 normalized_attributes = [
                     {"thread_id": thread_id, **item} for item in normalized_attributes
+                ]
+            if thread_id and normalized_relations:
+                # forget_thread drops relations whose metadata names the thread.
+                normalized_relations = [
+                    {
+                        **item,
+                        "metadata": {
+                            "thread_id": thread_id,
+                            **(item.get("metadata") or {}),
+                        },
+                    }
+                    for item in normalized_relations
                 ]
             stored = self.entity_memory_manager.upsert_entity_from_tool(
                 entity_id=entity_id,
                 name=name,
                 entity_type=entity_type,
                 attributes=normalized_attributes,
-                relations=_normalize_relations(relations),
+                relations=normalized_relations,
                 metadata=normalized_metadata,
                 memory_id=resolved_memory_id,
                 user_id=self._current_user_id,
@@ -11473,6 +11579,12 @@ class MemAgent:
         if self.persona_manager is None or self.persona_manager.current_persona is None:
             return
 
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=False,
+            domains=("memory",),
+        )
         def update_persona(
             updates: Dict[str, str],
             reason: str,
@@ -11565,6 +11677,7 @@ class MemAgent:
                     )
             return result
 
+        @governed_tool(deterministic=False, side_effects=False, domains=("memory",))
         def read_persona() -> Dict[str, Any]:
             """Return your current persona state and its evolution history.
 
@@ -12211,8 +12324,13 @@ class MemAgent:
             if running is not None and not running.done():
                 return False
             if self._upkeep_worker is None:
+                # One agent usually serves every user of a server process, so
+                # one thread would queue all users' capture, compaction and
+                # consolidation behind each other. Keys keep each user's and
+                # each thread's own work in order.
                 self._upkeep_worker = ThreadPoolExecutor(
-                    max_workers=1, thread_name_prefix="memorizz-memory-upkeep"
+                    max_workers=_upkeep_worker_count(),
+                    thread_name_prefix="memorizz-memory-upkeep",
                 )
             try:
                 future = self._upkeep_worker.submit(context.run, _run)
@@ -12354,9 +12472,15 @@ class MemAgent:
         )
 
     def _keep_consolidation_plan(self, plan: Any) -> None:
-        self._consolidation_plans[plan.plan_id] = plan
-        while len(self._consolidation_plans) > 20:
-            self._consolidation_plans.pop(next(iter(self._consolidation_plans)))
+        # Upkeep workers and the caller's thread both keep and drop plans.
+        with self._upkeep_lock:
+            self._consolidation_plans[plan.plan_id] = plan
+            while len(self._consolidation_plans) > 20:
+                self._consolidation_plans.pop(next(iter(self._consolidation_plans)))
+
+    def _drop_consolidation_plan(self, plan_id: str) -> None:
+        with self._upkeep_lock:
+            self._consolidation_plans.pop(plan_id, None)
 
     def plan_memory_consolidation(
         self,
@@ -12418,7 +12542,7 @@ class MemAgent:
         result = self._consolidator().apply(
             plan, approved_by=approved_by, reason=reason
         )
-        self._consolidation_plans.pop(plan.plan_id, None)
+        self._drop_consolidation_plan(plan.plan_id)
         return result
 
     def restore_memory_consolidation(
@@ -12484,7 +12608,7 @@ class MemAgent:
             )
             if not plan.ops:
                 logger.info("Memory consolidation of %s: nothing to change", memory_id)
-                self._consolidation_plans.pop(plan.plan_id, None)
+                self._drop_consolidation_plan(plan.plan_id)
                 return
             if not self.memory_consolidation.auto_apply:
                 logger.info(
@@ -12573,6 +12697,12 @@ class MemAgent:
         if registered:
             return
 
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=False,
+            domains=("memory",),
+        )
         def remember(text: str) -> Dict[str, Any]:
             """Save something worth keeping beyond this conversation.
 
@@ -12585,6 +12715,8 @@ class MemAgent:
             Parameters:
                 text: the memory, as one self-contained statement.
             """
+            if self._memory_capture_override is False:
+                raise ValueError(_NO_CAPTURE_REFUSAL)
             return self.remember(
                 text,
                 memory_id=self._current_memory_id
@@ -12848,6 +12980,8 @@ class MemAgent:
     ) -> None:
         """Queue the user's message to be routed off the turn (or, with entity
         capture, to have its entity facts filed)."""
+        from .memory_routing import worth_capturing
+
         mode = self._turn_capture_mode()
         tool_writes = list(self._turn_entity_tool_writes or [])
         self._turn_entity_tool_writes = []
@@ -12857,7 +12991,13 @@ class MemAgent:
             or not memory_id
             or not str(query or "").strip()
             or delegated_execution.get()
+            or self._memory_capture_override is False
         ):
+            return
+        if not worth_capturing(query):
+            # "thanks", "ok", a bare link: no fact to file, so no
+            # background-model call.
+            logger.debug("Memory capture skipped a message with nothing to file")
             return
         key = (memory_id, user_id)
         item = {

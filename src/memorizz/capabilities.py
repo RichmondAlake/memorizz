@@ -374,6 +374,36 @@ def capabilities() -> Dict[str, Any]:
                 "history_limit": 5,
                 "forget_thread": "EntityMemory.forget_thread",
                 "forget_attributes": "EntityMemory.forget_attributes",
+                "forget_sources": "EntityMemory.forget_sources",
+            },
+            "memory_capture_switch": {
+                "available": True,
+                "run_argument": "memory_capture",
+                "skips_trivial_messages": True,
+            },
+            "concurrent_memory_upkeep": {
+                "available": True,
+                "env": "MEMORIZZ_UPKEEP_WORKERS",
+                "default_workers": 4,
+                "off_turn": True,
+            },
+            "governed_memory_tools": {
+                "available": True,
+                "side_effecting": [
+                    "entity_memory_upsert",
+                    "remember",
+                    "update_persona",
+                    "summarize_conversation",
+                ],
+            },
+            "always_visible_tools": {
+                "available": True,
+                "field": "ContextPolicy.always_visible_tools",
+            },
+            "workflow_thread_provenance": {
+                "available": True,
+                "field": "origin_thread_id",
+                "embedded_when_stored": True,
             },
             "pinned_entity_facts": {
                 "available": True,
