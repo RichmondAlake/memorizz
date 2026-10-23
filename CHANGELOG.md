@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`MemAgent(multi_tenant=True)`** for one agent that serves many users, as a
+  server's shared agent does. Every call names its memory (and user): a run,
+  `capture_entity_facts`, `build_personalization_context`, `remember` and the
+  other host-called methods refuse to run without one instead of falling back.
+  No user's memory is added to the agent's `memory_ids`, and `update_memory()`
+  and `delete_memory()` are refused (a user's data is deleted per user with
+  `delete_scope`). Saved with the agent; `describe_memory()` reports it.
+
+### Fixed
+
+- A shared agent added every user's memory to its own `memory_ids` on each run
+  (in memory, and on the agent record when the host called `update_memory`).
+  `memory_ids[0]`, the first user who ever chatted, then became the fallback
+  for any call without a memory, `delete_memory()` would have deleted every
+  user's conversations, and the list grew with every account. A server thread
+  reused for the next request also kept the previous request's current memory,
+  which host-called methods fell back to. Single-tenant agents keep the old
+  behaviour.
+
 ## 0.17.14 — 2026-10-23
 
 ### Added

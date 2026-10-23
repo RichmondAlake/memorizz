@@ -376,6 +376,13 @@ def capabilities() -> Dict[str, Any]:
                 "forget_attributes": "EntityMemory.forget_attributes",
                 "forget_sources": "EntityMemory.forget_sources",
             },
+            "multi_tenant_agent": {
+                "available": True,
+                "parameter": "MemAgent(multi_tenant=True)",
+                "explicit_memory_required": True,
+                "no_memory_registration": True,
+                "refuses": ["update_memory", "delete_memory"],
+            },
             "memory_capture_switch": {
                 "available": True,
                 "run_argument": "memory_capture",

@@ -210,7 +210,36 @@ endpoints accept an optional `user_id` form field that is forwarded to
 `user_id` input — exposing one on a localhost dev tool would be misleading
 theater rather than real tenancy.
 
+## One agent for every user: `multi_tenant=True`
+
+A shared agent should be told it is shared:
+
+```python
+agent = MemAgent(..., multi_tenant=True)
+agent.run(message, memory_id=f"primary_{uid}", user_id=uid, thread_id=thread)
+```
+
+- **Every call names its memory.** A run, `capture_entity_facts`,
+  `build_personalization_context`, `remember` and the other host-called
+  methods refuse to run without `memory_id` instead of falling back to the
+  agent's first memory, which on a shared agent is some other user's. Pooled
+  server threads keep the previous request's context, so the current memory
+  outside a run may also be another user's; it is never used.
+- **No user is registered on the agent.** Runs do not add memories to
+  `memory_ids`, `update_memory()` is refused, and so is `delete_memory()`, which
+  on a shared agent would delete every user's conversations. Delete one user's
+  data with the provider's `delete_scope(user_id=...)`.
+- Request state (the current user, memory, thread, persona snapshot, router
+  selection, the turn's tool writes) is per request already, so concurrent
+  users on one instance never see each other's history or facts.
+
+One shared, multi-tenant agent per model is the recommended shape for a
+server: per-user agents would rebuild tools, routers and upkeep workers for
+every user and add nothing to isolation, which lives in the data scope.
+
 ## Checklist for multi-tenant deployments
+
+- [ ] Construct the shared agent with `multi_tenant=True`.
 
 - [ ] Run the Oracle migration (if using Oracle).
 - [ ] Update Atlas vector indexes to mark `user_id` filterable (if using MongoDB).

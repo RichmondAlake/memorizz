@@ -64,6 +64,8 @@ class MemAgentModel(BaseModel):
     # Custom conversation names shown in the playground, by memory_id.
     thread_titles: Optional[Dict[str, str]] = None
     is_favorite: bool = False
+    # One agent serving many users: every call names its memory and user.
+    multi_tenant: bool = False
     internet_access_provider: Optional[str] = None
     internet_access_config: Optional[Dict[str, Any]] = None
     skills_marketplace_provider: Optional[str] = None

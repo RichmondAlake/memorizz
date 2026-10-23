@@ -403,6 +403,10 @@ _UPKEEP_STATES: "weakref.WeakKeyDictionary[Any, Dict[str, _UpkeepState]]" = (
 _UPKEEP_STATES_LOCK = threading.Lock()
 
 
+_MULTI_TENANT_MEMORY_REQUIRED = (
+    "This agent serves several users: pass memory_id (and user_id) on every call."
+)
+
 #: What a memory write in a ``memory_capture=False`` turn tells the model.
 _NO_CAPTURE_REFUSAL = (
     "Nothing from this turn is saved to memory: its message was not written "
@@ -574,10 +578,15 @@ class MemAgent:
         memory_routing: Optional[Union[bool, str, Dict[str, Any]]] = None,
         reranker: Optional[Union[str, Dict[str, Any]]] = None,
         entity_policy: Optional[Union[Dict[str, Any], Any]] = None,
+        multi_tenant: bool = False,
     ):
         """Initialize the MemAgent with configuration."""
         # Eager creation: no first-use race between concurrent runs.
         _ContextLocal.initialize(self)
+        # One agent serving many users (a server's shared agent): every call
+        # must name its memory, nothing falls back to memory_ids[0], and no
+        # user's memory is registered on the agent. See _default_memory_id.
+        self.multi_tenant = bool(multi_tenant)
         self.streaming = streaming
         self.capture_context_snapshots = capture_context_snapshots
         self.capture_memory_history = capture_memory_history
@@ -1648,7 +1657,7 @@ class MemAgent:
             approved_by=approved_by,
             reason=reason,
             scope={
-                "memory_id": memory_id or self._current_memory_id,
+                "memory_id": MemAgent._host_memory_id(self, memory_id, fallback=False),
                 "user_id": resolved_user_id,
                 "thread_id": thread_id or self._current_thread_id,
             },
@@ -1800,7 +1809,7 @@ class MemAgent:
             enabled=semantic_cache,
             config=semantic_cache_config,
             agent_id=self.agent_id,
-            memory_id=self.memory_ids[0] if self.memory_ids else None,
+            memory_id=self._default_memory_id(),
             memory_provider=memory_provider,  # ✅ Pass memory provider for persistence
         )
 
@@ -4952,6 +4961,10 @@ class MemAgent:
 
         if requested_memory_id:
             resolved_memory_id = requested_memory_id
+        elif self.multi_tenant:
+            # A pooled server thread keeps the previous request's context;
+            # never let one user's call inherit another's memory.
+            raise ValueError(_MULTI_TENANT_MEMORY_REQUIRED)
         elif self._current_memory_id:
             resolved_memory_id = self._current_memory_id
         elif self.memory_ids:
@@ -4961,7 +4974,9 @@ class MemAgent:
 
         self._current_memory_id = resolved_memory_id
 
-        register_memory = register_memory and not delegated_execution.get()
+        register_memory = (
+            register_memory and not delegated_execution.get() and not self.multi_tenant
+        )
         if (
             register_memory
             and resolved_memory_id
@@ -8585,7 +8600,7 @@ class MemAgent:
             name="Tool Execution for Query",
             description=f"Workflow tracking tool usage for: {query[:100]}",
             memory_id=self._current_memory_id
-            or (self.memory_ids[0] if self.memory_ids else str(uuid.uuid4())),
+            or (self._default_memory_id() or str(uuid.uuid4())),
             agent_id=self.agent_id,
             user_query=query,
             user_id=user_id,
@@ -10985,8 +11000,7 @@ class MemAgent:
         ) -> Dict[str, Any]:
             """Search structured entity memory by id, name, or semantic query."""
             resolved_memory_id = self._entity_memory_id(
-                self._current_memory_id
-                or (self.memory_ids[0] if self.memory_ids else None)
+                self._current_memory_id or self._default_memory_id()
             )
             result = self.entity_memory_manager.lookup_entities_with_diagnostics(
                 entity_id=entity_id,
@@ -11125,8 +11139,7 @@ class MemAgent:
             # Scope is host-owned and deliberately absent from the model-visible
             # schema. The model supplies entity facts, never tenant identifiers.
             resolved_memory_id = self._entity_memory_id(
-                self._current_memory_id
-                or (self.memory_ids[0] if self.memory_ids else None)
+                self._current_memory_id or self._default_memory_id()
             )
             if resolved_memory_id is None:
                 raise ValueError("A memory_id is required to store entity information.")
@@ -12500,11 +12513,7 @@ class MemAgent:
         never stored. Without ``thread_ids`` it reads the threads this agent
         served since the last pass. ``user_id=None`` is the anonymous scope.
         """
-        memory = (
-            memory_id
-            or self._current_memory_id
-            or (self.memory_ids[0] if self.memory_ids else None)
-        )
+        memory = MemAgent._host_memory_id(self, memory_id)
         if not memory:
             raise ValueError("memory_id is required for memory consolidation")
         if thread_ids is None:
@@ -12554,11 +12563,7 @@ class MemAgent:
         user_id: Optional[str] = None,
     ) -> Dict[str, int]:
         """Undo an applied consolidation plan in one memory and user."""
-        memory = (
-            memory_id
-            or self._current_memory_id
-            or (self.memory_ids[0] if self.memory_ids else None)
-        )
+        memory = MemAgent._host_memory_id(self, memory_id)
         if not memory:
             raise ValueError("memory_id is required")
         return self._consolidator().restore(
@@ -12719,8 +12724,7 @@ class MemAgent:
                 raise ValueError(_NO_CAPTURE_REFUSAL)
             return self.remember(
                 text,
-                memory_id=self._current_memory_id
-                or (self.memory_ids[0] if self.memory_ids else None),
+                memory_id=self._current_memory_id or self._default_memory_id(),
                 user_id=self._current_user_id,
                 source="tool",
             )
@@ -12778,11 +12782,7 @@ class MemAgent:
             config = self.memory_routing
         else:
             config = MemoryRoutingConfig(enabled=True, capture_turns=False)
-        memory_id = (
-            memory_id
-            or self._current_memory_id
-            or (self.memory_ids[0] if self.memory_ids else None)
-        )
+        memory_id = MemAgent._host_memory_id(self, memory_id)
         if memory_id is None:
             memory_id = self._create_memory_id()
         return self._file_routed(
@@ -12797,7 +12797,35 @@ class MemAgent:
             source=source,
         )
 
+    def _host_memory_id(
+        self, memory_id: Optional[str], *, fallback: bool = True
+    ) -> Optional[str]:
+        """The memory a host-called method works on: the one named, else the
+        call's current memory (and with ``fallback`` the agent's first).
+
+        A multi-tenant agent requires the host to name it: outside a run, the
+        current memory is whatever the previous request on this pooled server
+        thread left behind, which may be another user's.
+        """
+        if memory_id:
+            return memory_id
+        if getattr(self, "multi_tenant", False):
+            raise ValueError(_MULTI_TENANT_MEMORY_REQUIRED)
+        if fallback:
+            return self._current_memory_id or MemAgent._default_memory_id(self)
+        return self._current_memory_id
+
+    def _default_memory_id(self) -> Optional[str]:
+        """The memory a call without one falls back to: the agent's first
+        memory, except on a multi-tenant agent, where that would be another
+        user's and every call must name its own."""
+        if getattr(self, "multi_tenant", False) or not self.memory_ids:
+            return None
+        return self.memory_ids[0]
+
     def _create_memory_id(self) -> str:
+        if getattr(self, "multi_tenant", False):
+            raise ValueError(_MULTI_TENANT_MEMORY_REQUIRED)
         memory_id = str(uuid.uuid4())
         self.memory_ids = [*(self.memory_ids or []), memory_id]
         return memory_id
@@ -13133,11 +13161,7 @@ class MemAgent:
         user left on their slide deck"). Returns a receipt with the ``facts``
         stored; nothing is written when entity memory is off.
         """
-        resolved = (
-            memory_id
-            or self._current_memory_id
-            or (self.memory_ids[0] if self.memory_ids else None)
-        )
+        resolved = MemAgent._host_memory_id(self, memory_id)
         entity_memory_id = self._entity_memory_id(resolved)
         if not (
             self._entity_memory_enabled
@@ -13265,7 +13289,7 @@ class MemAgent:
         if not (self._entity_memory_enabled and manager and manager.is_enabled()):
             return True
         memory_id = self._entity_memory_id(
-            self._current_memory_id or (self.memory_ids[0] if self.memory_ids else None)
+            self._current_memory_id or self._default_memory_id()
         )
         if memory_id is None:
             return True
@@ -13322,6 +13346,7 @@ class MemAgent:
             ),
             # The background model files each user message's entity facts.
             "entity_capture": self._turn_capture_mode() == "entities",
+            "multi_tenant": self.multi_tenant,
             # Which record the user's facts land on; None is the default.
             "entity_policy": (
                 self.entity_policy.to_dict() if self.entity_policy.active else None
@@ -13870,7 +13895,7 @@ class MemAgent:
         if not target_memory_id:
             target_memory_id = (
                 self._current_memory_id
-                or (str(self.memory_ids[0]).strip() if self.memory_ids else "")
+                or str(self._default_memory_id() or "").strip()
                 or str(uuid.uuid4())
             )
 
@@ -14197,7 +14222,7 @@ class MemAgent:
                 self.cache_manager._initialize_cache(
                     config=cache_config,
                     agent_id=self.agent_id,
-                    memory_id=self.memory_ids[0] if self.memory_ids else None,
+                    memory_id=self._default_memory_id(),
                 )
             else:
                 # Create a new cache manager if it doesn't exist
@@ -14207,7 +14232,7 @@ class MemAgent:
                     enabled=True,
                     config=cache_config,
                     agent_id=self.agent_id,
-                    memory_id=self.memory_ids[0] if self.memory_ids else None,
+                    memory_id=self._default_memory_id(),
                     memory_provider=self.memory_provider,  # ✅ Pass memory provider
                 )
 
@@ -14241,11 +14266,7 @@ class MemAgent:
     ):
         """Load conversation history (delegated to memory manager)."""
         if self.memory_manager:
-            memory_id = (
-                memory_id
-                or self._current_memory_id
-                or (self.memory_ids[0] if self.memory_ids else None)
-            )
+            memory_id = MemAgent._host_memory_id(self, memory_id)
             if memory_id:
                 return self.memory_manager.load_conversation_history(
                     memory_id,
@@ -14328,9 +14349,7 @@ class MemAgent:
 
         resolved_policy = PersonalizationPolicy.from_value(policy)
         resolved_memory_id = str(
-            memory_id
-            or self._current_memory_id
-            or (self.memory_ids[0] if self.memory_ids else "")
+            MemAgent._host_memory_id(self, memory_id) or ""
         ).strip()
         diagnostics: Dict[str, Any] = {
             "retrieval_mode": "explicit",
@@ -14538,6 +14557,12 @@ class MemAgent:
         Returns:
             True if successful, False otherwise.
         """
+        if getattr(self, "multi_tenant", False):
+            # Every user's memory on one shared agent record grows without
+            # bound and lets one call fall back into another user's memory.
+            raise ValueError(
+                "A multi-tenant agent keeps no list of its users' memories."
+            )
         return persistence.update_memory(self, memory_ids)
 
     def delete_memory(self) -> bool:
@@ -14547,10 +14572,17 @@ class MemAgent:
         Deletes the stored conversation data for each memory_id, removes the
         agent's memory_id references from the memory provider, and clears all
         local state (memory_ids, cached memory_id, conversation cache).
+        Refused on a multi-tenant agent: its memories are its users', deleted
+        per user (``delete_scope``), never all at once.
 
         Returns:
             True if successful, False otherwise.
         """
+        if getattr(self, "multi_tenant", False):
+            raise ValueError(
+                "A multi-tenant agent's memories belong to its users; delete them "
+                "per user with delete_scope."
+            )
         try:
             # Delete the stored rows for each memory_id. Keep the ids when a
             # delete fails so the caller sees it and can retry.
@@ -14783,7 +14815,7 @@ class MemAgent:
         """
         manager = self.memory_manager or MemoryManager(self.memory_provider)
         selected_memory_ids = [memory_id] if memory_id else self.memory_ids
-        current_memory_id = memory_id or self._current_memory_id
+        current_memory_id = MemAgent._host_memory_id(self, memory_id, fallback=False)
         summary_ids = manager.generate_summaries(
             model=self.background_model,
             agent_id=self.agent_id,

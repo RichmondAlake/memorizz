@@ -214,6 +214,7 @@ def save_agent(agent):
             ),
             thread_titles=dict(getattr(agent, "thread_titles", None) or {}) or None,
             is_favorite=agent.is_favorite,
+            multi_tenant=bool(getattr(agent, "multi_tenant", False)),
             internet_access_provider=agent.get_internet_access_provider_name(),
             internet_access_config=(
                 _scrub_internet_access_config(
@@ -766,6 +767,7 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
             else _bool_or(field("learning_control_plane", False), False)
         ),
         "is_favorite": _bool_or(field("is_favorite", False), False),
+        "multi_tenant": _bool_or(field("multi_tenant", False), False),
         "embedding_provider": (
             embedding_provider if isinstance(embedding_provider, str) else None
         ),
@@ -1395,6 +1397,7 @@ _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
         _refresh_learning,
     ),
     (("is_favorite",), _set("is_favorite")),
+    (("multi_tenant",), _set("multi_tenant", bool)),
     (("embedding_provider",), _set("embedding_provider")),
     (("embedding_config",), _set("embedding_config")),
     (("knowledge_base_ids",), _set("knowledge_base_ids")),
